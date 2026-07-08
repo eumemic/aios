@@ -8,12 +8,126 @@
 
 * :func:`tokens_to_drop` — snap boundary math for the DB-level windowed
   reader (:func:`~aios.db.queries.events.read_windowed_events`).
+
+Performance (issue #1744): ``approx_tokens`` / ``approx_tokens_by_class``
+are called once per step on the full message slate, but only the tail
+changes step to step. Both are built from two memoized primitives —
+``_message_body_tokens`` (per-message body cost) and ``_extra_tokens``
+(payload-level system/tools framing overhead) — cached in
+``_BODY_CACHE`` / ``_EXTRA_CACHE`` keyed by a content digest, so repeat
+calls on an (almost) unchanged slate cost ~0 after the first warm pass.
+The call site (``loop.py``) additionally runs the pair off the event
+loop via ``asyncio.to_thread`` since ``Encoding.encode`` releases the
+GIL and is stateless (safe to call concurrently from threads).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from typing import Any
+
+# ─── memoization primitives ────────────────────────────────────────────────
+
+# A stub system message used to measure payload-level "extra" overhead
+# (tools schema + the chat-framing tokens litellm adds when a system
+# message is present) in isolation from any real message's body cost.
+_STUB_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": ""}
+
+_BODY_CACHE_MAX = 65536
+_BODY_CACHE: OrderedDict[bytes, int] = OrderedDict()
+_EXTRA_CACHE: OrderedDict[bytes, int] = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+
+
+def _payload_digest(obj: Any) -> bytes | None:
+    """Stable content digest for cache keys.
+
+    Returns ``None`` (cache-bypass sentinel) if ``obj`` can't be
+    serialized deterministically — callers must fall back to counting
+    directly rather than raising.
+    """
+    try:
+        blob = json.dumps(
+            obj,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=repr,
+        ).encode()
+    except Exception:
+        return None
+    return hashlib.blake2b(blob, digest_size=16).digest()
+
+
+def _cache_get(cache: OrderedDict[bytes, int], key: bytes) -> int | None:
+    with _CACHE_LOCK:
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+
+def _cache_put(cache: OrderedDict[bytes, int], key: bytes, value: int) -> None:
+    with _CACHE_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > _BODY_CACHE_MAX:
+            cache.popitem(last=False)
+
+
+def _message_body_tokens(msg: Mapping[str, Any]) -> int:
+    """The pure per-message body cost of ``msg`` (no payload-level framing).
+
+    Memoized by content digest; digest failures bypass the cache and
+    count directly (never raise).
+    """
+    from litellm import token_counter
+
+    key = _payload_digest(msg)
+    if key is not None:
+        cached = _cache_get(_BODY_CACHE, key)
+        if cached is not None:
+            return cached
+
+    value = int(token_counter(messages=[msg], count_response_tokens=True))
+
+    if key is not None:
+        _cache_put(_BODY_CACHE, key, value)
+    return value
+
+
+def _extra_tokens(tools: Any, system_present: bool) -> int:
+    """Payload-level overhead: tool-schema cost plus (when a system
+    message is present) the chat-framing tokens litellm adds for it.
+
+    Computed as ``token_counter(messages=[STUB] if system_present else [],
+    tools=tools) - (body(STUB) if system_present else 0)`` — i.e. the
+    total minus the stub's own body cost, isolating the framing/tools
+    overhead. Memoized by (tools digest, system_present).
+    """
+    from litellm import token_counter
+
+    tool_list = list(tools) if tools else None
+    digest_key = _payload_digest((tool_list, system_present))
+    if digest_key is not None:
+        cached = _cache_get(_EXTRA_CACHE, digest_key)
+        if cached is not None:
+            return cached
+
+    if system_present:
+        total = int(token_counter(messages=[_STUB_SYSTEM_MESSAGE], tools=tool_list))
+        value = total - _message_body_tokens(_STUB_SYSTEM_MESSAGE)
+    else:
+        value = int(token_counter(messages=[], tools=tool_list))
+
+    if digest_key is not None:
+        _cache_put(_EXTRA_CACHE, digest_key, value)
+    return value
+
 
 # ─── estimator (delegates to litellm's local tokenizers) ──────────────────
 
@@ -49,18 +163,18 @@ def approx_tokens(
     implementation changes (e.g. a different tokenizer, passing
     ``model=...``), re-run the backfill script to keep stored values
     honest.
-    """
-    # Defer the heavy ``litellm`` import: every consumer of this module
-    # pays ~1.18s of bootstrap otherwise, and many CLI / test code paths
-    # never call into this helper.
-    from litellm import token_counter
 
-    return int(
-        token_counter(
-            messages=list(messages),
-            tools=list(tools) if tools else None,
-        )
-    )
+    Internally built from memoized per-message + per-payload
+    primitives (issue #1744): returns byte-identical results to a
+    direct ``litellm.token_counter(messages=..., tools=...)`` call,
+    but repeat calls on an (almost) unchanged slate cost ~0 after the
+    cache warms.
+    """
+    msgs = list(messages)
+    total = sum(_message_body_tokens(m) for m in msgs)
+    system_present = any(m.get("role") == "system" for m in msgs)
+    total += _extra_tokens(tools, system_present)
+    return total
 
 
 # ─── per-content-class estimator (issue #1609) ────────────────────────────
@@ -111,16 +225,26 @@ def content_class(role: str | None, data: Mapping[str, Any]) -> str:
 
 
 def _count(messages: list[Mapping[str, Any]], *, tools: Any = None) -> int:
-    from litellm import token_counter
+    """Single-payload count, sourced from the same memoized primitives as
+    :func:`approx_tokens` (issue #1744).
 
+    ``_count([m])`` == ``_message_body_tokens(m) + _extra_tokens(None, m.role
+    == "system")``; ``_count([], tools)`` == ``_extra_tokens(tools, False)``.
+    """
     if not messages and not tools:
         return 0
-    return int(
-        token_counter(
-            messages=list(messages),
-            tools=list(tools) if tools else None,
-        )
-    )
+    if len(messages) == 1:
+        msg = messages[0]
+        system_present = msg.get("role") == "system"
+        return _message_body_tokens(msg) + _extra_tokens(tools, system_present)
+    if not messages:
+        return _extra_tokens(tools, False)
+    # General fallback (not used by the current call sites, which only ever
+    # pass 0 or 1 messages here, but keep correct for any future caller).
+    total = sum(_message_body_tokens(m) for m in messages)
+    system_present = any(m.get("role") == "system" for m in messages)
+    total += _extra_tokens(tools, system_present)
+    return total
 
 
 def approx_tokens_by_class(
