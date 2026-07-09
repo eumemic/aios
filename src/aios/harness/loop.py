@@ -63,6 +63,7 @@ from aios.harness.tool_dispatch import (
     launch_mcp_tool_calls,
     launch_tool_calls,
     reject_unoffered_tool_calls,
+    resolve_confirmed_call_as_cancelled,
 )
 from aios.harness.tool_disposition import classify_tool_call
 from aios.jobs.app import defer_run_wake, defer_wake
@@ -391,7 +392,15 @@ async def run_session_step(
         )
         current_task = asyncio.current_task()
         assert current_task is not None
-        inflight_tool_registry.register_step(session_id, current_task)
+        # ``start_seq`` (#1756) is this step's own ``step_start`` span seq — the
+        # interrupt-listener reconnect re-drive (``worker._run_interrupt_listener``)
+        # compares it against the interrupt's seq so a re-drive of an OLDER,
+        # outage-window interrupt can never cancel a step that began AFTER that
+        # interrupt (a legitimate post-interrupt follow-up step, documented
+        # re-wake semantics at ``routers/sessions.py:553-556``).
+        inflight_tool_registry.register_step(
+            session_id, current_task, start_seq=getattr(step_start, "seq", None)
+        )
         result = _StepResult()
         try:
             try:
@@ -1637,6 +1646,22 @@ async def _dispatch_confirmed_tools(
     re-launch the same tool and write a second ``tool_result`` event (violates
     CLAUDE.md invariant #4).  ``list_confirmed_unresolved_tool_calls`` applies
     the complementary already-has-a-result guard.
+
+    Confirm-then-interrupt guard (#1756): a call whose ``tool_confirmed``
+    event ``seq`` is LOWER than the session's latest ``interrupt`` event seq
+    was confirmed before the interrupt landed and must not cold-dispatch —
+    the ``/interrupt`` endpoint's durable marker (``routers/sessions.py``) is
+    otherwise never consulted at this dispatch point, so a user who confirms
+    a dangerous tool and then interrupts would still get the effect fired,
+    arbitrarily later (the sweep's case-(c) predicate keeps re-waking the
+    session until dispatch). Such a call is resolved in-place as a
+    ``tool_result`` ``error="cancelled"`` (mirroring ``_tool_lifecycle``'s
+    cancelled arm) instead of being returned for launch, so the call closes
+    and the sweep stops re-waking. A FRESH confirmation issued after the
+    interrupt has a higher seq than the interrupt and is unaffected — it
+    dispatches normally, preserving both the documented post-interrupt
+    re-wake semantics and the #746 "fresh confirm of an old proposal is
+    fresh intent" rule.
     """
     dispatchable = await sessions_service.list_confirmed_unresolved_tool_calls(
         pool, session_id, account_id=account_id
@@ -1644,7 +1669,37 @@ async def _dispatch_confirmed_tools(
     if not dispatchable:
         return []
     in_flight = inflight_tool_registry.in_flight_tool_call_ids(session_id)
-    return [tc for tc in dispatchable if tc.get("id") not in in_flight]
+    live = [tc for tc in dispatchable if tc.get("id") not in in_flight]
+    if not live:
+        return []
+
+    latest_interrupt_seq = await sessions_service.find_latest_interrupt_seq(
+        pool, session_id, account_id=account_id
+    )
+    if latest_interrupt_seq is None:
+        return live
+
+    call_ids: list[str] = [str(tc["id"]) for tc in live if tc.get("id")]
+    confirm_seqs = await sessions_service.find_tool_confirmed_seqs(
+        pool, session_id, call_ids, account_id=account_id
+    )
+
+    dispatch_now: list[dict[str, Any]] = []
+    for tc in live:
+        call_id = tc.get("id")
+        confirm_seq = confirm_seqs.get(call_id) if call_id else None
+        if confirm_seq is not None and confirm_seq < latest_interrupt_seq:
+            log.info(
+                "step.confirmed_dispatch_cancelled_by_interrupt",
+                session_id=session_id,
+                tool_call_id=call_id,
+                confirm_seq=confirm_seq,
+                latest_interrupt_seq=latest_interrupt_seq,
+            )
+            await resolve_confirmed_call_as_cancelled(pool, session_id, tc, account_id=account_id)
+        else:
+            dispatch_now.append(tc)
+    return dispatch_now
 
 
 async def _append_model_request_error_span(

@@ -326,6 +326,39 @@ def launch_tool_calls(
     )
 
 
+async def resolve_confirmed_call_as_cancelled(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    call: dict[str, Any],
+    *,
+    account_id: str,
+) -> None:
+    """Resolve a confirmed-but-undispatched ``tool_call`` as cancelled — no
+    task is launched, no handler runs.
+
+    Confirm-then-interrupt guard (#1756): ``_dispatch_confirmed_tools``
+    (``harness/loop.py``) calls this instead of ``launch_tool_calls`` for a
+    ``tool_confirmed``/``allow`` whose confirm-event ``seq`` is older than the
+    session's latest ``interrupt`` event. Mirrors the ``except
+    asyncio.CancelledError`` arm of :func:`_tool_lifecycle` — same
+    ``error="cancelled"`` idiom, same dedup-guarded append, same tail sweep —
+    so the call closes exactly as if an in-flight task had been cancelled,
+    and the sweep's case-(c) predicate stops re-waking the session for it. A
+    FRESH confirmation issued after the interrupt has a higher seq and never
+    reaches this path (it dispatches normally via ``launch_tool_calls``).
+    """
+    call_id = call.get("id") or "unknown"
+    function = call.get("function") or {}
+    name = function.get("name") or ""
+    log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name).info(
+        "tool.confirmed_dispatch_cancelled_by_interrupt"
+    )
+    await _append_tool_result(
+        pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+    )
+    await _trigger_sweep(pool, session_id, account_id=account_id)
+
+
 async def _execute_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,

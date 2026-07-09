@@ -51,6 +51,8 @@ async def test_listener_survives_dispatch_exception(
     )
 
     registry = MagicMock(spec=InflightToolRegistry)
+    registry.tracked_session_ids.return_value = set()
+    pool = MagicMock()
 
     first_dispatched = asyncio.Event()
     second_dispatched = asyncio.Event()
@@ -68,7 +70,9 @@ async def test_listener_survives_dispatch_exception(
     registry.cancel_step.side_effect = cancel_step
     registry.cancel_session.return_value = 0
 
-    listener_task = asyncio.create_task(_run_interrupt_listener("postgresql://stub", registry))
+    listener_task = asyncio.create_task(
+        _run_interrupt_listener("postgresql://stub", registry, pool)
+    )
 
     try:
         # First interrupt — drives cancel_step into the exception path.
@@ -122,7 +126,11 @@ async def test_listener_reconnects_after_context_acquisition_failure(
     monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
 
     registry = MagicMock(spec=InflightToolRegistry)
-    listener_task = asyncio.create_task(_run_interrupt_listener("postgresql://stub", registry))
+    registry.tracked_session_ids.return_value = set()
+    pool = MagicMock()
+    listener_task = asyncio.create_task(
+        _run_interrupt_listener("postgresql://stub", registry, pool)
+    )
     try:
         await asyncio.wait_for(first_enter_attempted.wait(), timeout=1.0)
         await asyncio.wait_for(second_entered.wait(), timeout=1.0)
@@ -153,5 +161,7 @@ async def test_listener_cancelled_error_passthrough(
     monkeypatch.setattr("aios.harness.worker._LISTEN_RECONNECT_BACKOFF_SECONDS", 0)
 
     registry = MagicMock(spec=InflightToolRegistry)
+    registry.tracked_session_ids.return_value = set()
+    pool = MagicMock()
     with pytest.raises(asyncio.CancelledError):
-        await _run_interrupt_listener("postgresql://stub", registry)
+        await _run_interrupt_listener("postgresql://stub", registry, pool)

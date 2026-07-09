@@ -21,11 +21,30 @@ class InflightToolRegistry:
 
     def __init__(self) -> None:
         self._tasks: dict[str, dict[str, asyncio.Task[None]]] = {}
+        self._dispatch_seq: dict[str, dict[str, int | None]] = {}
         self._step_tasks: dict[str, asyncio.Task[None]] = {}
+        self._step_start_seq: dict[str, int | None] = {}
 
     def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[None]) -> None:
+        """Register a newly-launched tool task.
+
+        Auto-captures the CURRENT ``start_seq`` of *session_id*'s registered
+        step (from :meth:`register_step`), if any, as this task's
+        ``dispatch_seq`` (#1756) — no call-site change needed: every live
+        dispatch (``launch_tool_calls``/``launch_mcp_tool_calls``) runs
+        synchronously inside the step body, AFTER that step has already
+        called :meth:`register_step`, so the lookup always sees the
+        launching step's seq. A cold dispatch outside any registered step for
+        this session (the periodic sweep's ghost re-park) captures ``None`` —
+        deliberately: a re-parked task is recovering pre-crash work with no
+        current step to attribute it to, so :meth:`cancel_session`'s
+        ``min_start_seq`` treats a ``None`` dispatch_seq as always-cancellable
+        (conservative in the direction of "an interrupt should win").
+        """
         session_tasks = self._tasks.setdefault(session_id, {})
         session_tasks[tool_call_id] = task
+        session_seqs = self._dispatch_seq.setdefault(session_id, {})
+        session_seqs[tool_call_id] = self._step_start_seq.get(session_id)
 
     def remove(self, session_id: str, tool_call_id: str) -> None:
         session_tasks = self._tasks.get(session_id)
@@ -33,22 +52,45 @@ class InflightToolRegistry:
             session_tasks.pop(tool_call_id, None)
             if not session_tasks:
                 del self._tasks[session_id]
+        session_seqs = self._dispatch_seq.get(session_id)
+        if session_seqs is not None:
+            session_seqs.pop(tool_call_id, None)
+            if not session_seqs:
+                del self._dispatch_seq[session_id]
 
-    def cancel_session(self, session_id: str) -> int:
-        """Cancel all in-flight tool tasks for a session. Returns count cancelled.
+    def cancel_session(self, session_id: str, *, min_start_seq: int | None = None) -> int:
+        """Cancel in-flight tool tasks for a session. Returns count cancelled.
 
-        Sole caller: the pg-notify interrupt listener (``worker.py``), which runs from a
-        non-registered listener task — so there is no in-set task to skip (the prior
-        self-skip existed only for the now-deleted in-band ``cancel`` tool, #1458).
+        Callers: the LIVE pg-notify interrupt listener (``worker.py``), which
+        runs from a non-registered listener task — so there is no in-set task
+        to skip (the prior self-skip existed only for the now-deleted in-band
+        ``cancel`` tool, #1458) — and passes no ``min_start_seq`` (unconditional
+        cancel: an interrupt landing on a live LISTEN connection has no
+        ambiguity — every currently in-flight task predates it).
+
+        ``min_start_seq`` (#1756), when given, is the RECONNECT RE-DRIVE's
+        guard: only a task whose ``dispatch_seq`` (captured at :meth:`add`
+        time, from the launching step's ``start_seq``) is STRICTLY LESS than
+        ``min_start_seq`` — or has no recorded ``dispatch_seq`` at all (a cold
+        ghost re-park) — is cancelled. A task dispatched by a step that began
+        AT OR AFTER ``min_start_seq`` (a legitimate post-interrupt follow-up
+        step's own fresh dispatch) is left alone — the same non-cancel-the-
+        follow-up guard :meth:`cancel_step` applies to the step task itself.
         """
         session_tasks = self._tasks.get(session_id)
         if not session_tasks:
             return 0
+        session_seqs = self._dispatch_seq.get(session_id, {})
         count = 0
-        for _tool_call_id, task in list(session_tasks.items()):
-            if not task.done():
-                task.cancel()
-                count += 1
+        for tool_call_id, task in list(session_tasks.items()):
+            if task.done():
+                continue
+            if min_start_seq is not None:
+                dispatch_seq = session_seqs.get(tool_call_id)
+                if dispatch_seq is not None and dispatch_seq >= min_start_seq:
+                    continue
+            task.cancel()
+            count += 1
         if count:
             log.info("session.tasks_cancelled", session_id=session_id, count=count)
         return count
@@ -69,16 +111,66 @@ class InflightToolRegistry:
                 result[sid] = active
         return result
 
-    def register_step(self, session_id: str, task: asyncio.Task[None]) -> None:
+    def tracked_session_ids(self) -> set[str]:
+        """Return every ``session_id`` with a live in-flight tool task and/or a
+        registered step task on THIS worker.
+
+        Consumed by the interrupt-listener reconnect re-drive (#1756,
+        ``worker._run_interrupt_listener``): the re-drive only needs to
+        re-check sessions this worker could actually still be running work
+        for — a cheap local-memory scope, no cross-worker DB scan.
+        """
+        live_task_sids = {
+            sid for sid, tasks in self._tasks.items() if any(not t.done() for t in tasks.values())
+        }
+        live_step_sids = {sid for sid, t in self._step_tasks.items() if not t.done()}
+        return live_task_sids | live_step_sids
+
+    def register_step(
+        self, session_id: str, task: asyncio.Task[None], *, start_seq: int | None = None
+    ) -> None:
+        """Register the currently-running step task for *session_id*.
+
+        ``start_seq`` (#1756) is the seq of the step's own ``step_start`` span
+        event — the event-log position the step began at. It lets a
+        seq-bounded caller (:meth:`cancel_step`'s ``min_start_seq``) tell a
+        STALE step (one that began before a given event) from a step that
+        began AFTER it — e.g. a legitimate post-interrupt follow-up step,
+        which must never be cancelled by a re-drive of an OLDER interrupt.
+        ``None`` (the default) opts a caller out of that comparison — every
+        pre-#1756 call site that doesn't pass it keeps unconditional-cancel
+        behavior.
+        """
         self._step_tasks[session_id] = task
+        self._step_start_seq[session_id] = start_seq
 
     def unregister_step(self, session_id: str) -> None:
         self._step_tasks.pop(session_id, None)
+        self._step_start_seq.pop(session_id, None)
 
-    def cancel_step(self, session_id: str) -> bool:
+    def cancel_step(self, session_id: str, *, min_start_seq: int | None = None) -> bool:
+        """Cancel the registered step task for *session_id*.
+
+        ``min_start_seq`` (#1756), when given, gates the cancel: it only
+        fires if the registered step's ``start_seq`` (from
+        :meth:`register_step`) is STRICTLY LESS than ``min_start_seq`` — i.e.
+        the step began before whatever event ``min_start_seq`` denotes (an
+        interrupt seq, for the reconnect re-drive). A step registered with no
+        ``start_seq``, or one that began AT OR AFTER ``min_start_seq``, is
+        left alone — the load-bearing guard against a re-drive cancelling a
+        legitimate post-interrupt follow-up step. ``None`` (the default)
+        preserves the unconditional-cancel behavior the live pg-notify
+        listener call site relies on (an interrupt landing during a LIVE
+        LISTEN connection has no ambiguity to resolve: any step running at
+        that moment predates the interrupt that just arrived).
+        """
         task = self._step_tasks.get(session_id)
         if task is None or task.done():
             return False
+        if min_start_seq is not None:
+            start_seq = self._step_start_seq.get(session_id)
+            if start_seq is not None and start_seq >= min_start_seq:
+                return False
         task.cancel()
         log.info("step.cancelled", session_id=session_id)
         return True
