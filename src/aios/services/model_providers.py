@@ -25,6 +25,7 @@ import litellm
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ModelProvider, ProviderAuth, provider_auth_conflict
 
 # Surfaced as a session's stop_reason.message (session-visible) and, on the
@@ -175,15 +176,12 @@ async def check_provider_auth_conflict(
     """The static conflict message if this call is inadmissible, else ``None``.
 
     Root lookup is skipped entirely unless ``resolved is None`` AND the call
-    redirects — the common cases (no redirect, or a resolved row) never touch
-    the ``accounts`` table beyond what resolution already did.
+    actually redirects — the common cases (no redirect at all, a redirect
+    with no api_base/base_url key, or a resolved row) never touch the
+    ``accounts`` table beyond what resolution already did.
     """
     account_is_root = True
-    if resolved is None and litellm_extra:
-        # Only reachable when there's a redirect to evaluate (provider_auth_conflict
-        # short-circuits on `redirect is None` before this matters) — but recompute
-        # honestly rather than assume, since a future caller could pass this
-        # differently. Cheap: one row lookup, only on the no-usable-row arm.
+    if resolved is None and api_base_of(litellm_extra) is not None:
         async with pool.acquire() as conn:
             account = await queries.get_account(conn, account_id)
         assert account is not None, f"account {account_id} vanished mid-request"

@@ -376,6 +376,22 @@ async def test_check_conflict_skips_db_when_no_redirect(crypto_box: CryptoBox) -
     assert result is None
 
 
+async def test_check_conflict_skips_db_when_extra_has_no_redirect_key(
+    crypto_box: CryptoBox,
+) -> None:
+    """A non-empty litellm_extra that carries no api_base/base_url (e.g. just
+    sampling knobs) must not trigger the root lookup — gating on truthiness
+    of the whole dict rather than on an actual redirect wastes a DB round
+    trip on every such call.
+    """
+    pool = MagicMock()
+    pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
+    result = await service.check_provider_auth_conflict(
+        pool, account_id="acc_x", litellm_extra={"temperature": 0.7}, resolved=None
+    )
+    assert result is None
+
+
 async def test_check_conflict_skips_db_when_row_resolved(crypto_box: CryptoBox) -> None:
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
