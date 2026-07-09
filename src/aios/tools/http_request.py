@@ -88,7 +88,10 @@ HTTP_REQUEST_DESCRIPTION = (
     'is cut the result carries "truncated": true so callers never mistake a '
     "truncated body for a complete one. Only paths matching an enabled route "
     "on the server's allowlist are permitted; the worker refuses "
-    "non-matching paths."
+    "non-matching paths. For non-idempotent requests to services that "
+    "support idempotency keys, you may set your own Idempotency-Key header "
+    "(it passes through; only Authorization and Host are reserved) and "
+    "should reuse the exact same value if you retry the same request."
 )
 
 HTTP_REQUEST_PARAMETERS_SCHEMA: dict[str, Any] = {

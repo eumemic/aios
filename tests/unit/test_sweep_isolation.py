@@ -163,6 +163,10 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
     content = append_mock.await_args_list[0].kwargs["content"]
     assert "may have completed" in content
     assert "Verify the outcome" in content
+    # #1759: the repair text teaches the DIY Idempotency-Key retry pattern —
+    # tool-agnostic, no argument parsing, just a pointer to a header the model
+    # may already have set.
+    assert "Idempotency-Key" in content
 
 
 async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:

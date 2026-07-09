@@ -676,7 +676,11 @@ async def find_and_repair_ghosts(
                     "may_have_completed",
                     "Tool dispatch was interrupted after execution began. "
                     "The tool may have completed and side effects may have "
-                    "committed. Verify the outcome before retrying.",
+                    "committed. Verify the outcome before retrying. "
+                    "If the original call carried an Idempotency-Key header, "
+                    "retrying the identical request with the same header "
+                    "value is safe at providers that honor it; otherwise "
+                    "verify the outcome out-of-band before retrying.",
                 )
             )
         else:
