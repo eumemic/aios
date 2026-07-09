@@ -385,6 +385,31 @@ async def worker_main() -> None:
         if repaired:
             log.info("worker.workspace_ownership_repaired", count=repaired)
 
+        # Probe the actual memory-store mount's ctime granularity (#1748 §6):
+        # the bash memory-reconcile stat-prefilter's soundness rests on
+        # sub-hot-window ctime granularity. That FS is slated to potentially
+        # move off the shared postgres volume onto something coarser
+        # (overlayfs/tmpfs/NFS), so this is a runtime probe, not a build-time
+        # human check. Cached for the process lifetime; fails closed (forces
+        # every reconcile candidate to be hashed) if the mount reports no
+        # ctime or a granule at/above the hot window. to_thread: two
+        # synchronous writes + stats must not block the event loop.
+        from aios.sandbox.volumes import memory_stores_root
+        from aios.tools.bash_memory_reconcile import (
+            probe_mount_ctime_granularity,
+            set_prefilter_state,
+        )
+
+        prefilter_state = await asyncio.to_thread(
+            probe_mount_ctime_granularity, memory_stores_root()
+        )
+        set_prefilter_state(prefilter_state)
+        if not prefilter_state.enabled:
+            log.warning(
+                "worker.memory_reconcile_prefilter_disabled",
+                observed_granule_ns=prefilter_state.observed_granule_ns,
+            )
+
         # Fail-closed boot-admission gate (#1575): before this worker does ANY
         # work — before it opens procrastinate, sweeps, or touches the liveness
         # heartbeat that the container HEALTHCHECK watches — prove the live DB
@@ -472,6 +497,17 @@ async def worker_main() -> None:
             name="host_dir_reaper",
         )
         _supervise(host_dir_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+
+        # Start the uncorrelated memory-reconcile audit (#1748 §Uncorrelated
+        # detector): a low-rate, out-of-band full-hash disk-vs-DB divergence
+        # check that is the falsifying backstop for the bash memory-reconcile
+        # stat-prefilter. Immediate first sweep at boot so the detector is
+        # proven ringing early; honours ``memory_reconcile_audit_enabled``.
+        memory_reconcile_audit_task = asyncio.create_task(
+            _memory_reconcile_audit_loop(pool),
+            name="memory_reconcile_audit",
+        )
+        _supervise(memory_reconcile_audit_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start the archived-session workspace reaper (#40 — the 45G hole): GC
         # the per-session ``/workspace`` host dir of archived sessions, which
@@ -788,6 +824,42 @@ async def _workspace_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
                 )
         except Exception:
             log.exception("workspace_reaper.tick_failed")
+
+
+async def _memory_reconcile_audit_loop(pool: asyncpg.Pool[Any]) -> None:
+    """Background loop for the uncorrelated memory-reconcile audit (#1748).
+
+    Same shape as the other reaper loops: try/except INSIDE the loop so one
+    DB/FS hiccup never silently disables the audit for the worker's
+    lifetime, immediate first sweep at boot (so the detector is proven
+    ringing early), then every ``memory_reconcile_audit_interval_seconds``.
+    Honours ``memory_reconcile_audit_enabled`` (default ON — this is the
+    uncorrelated backstop for the bash memory-reconcile stat-prefilter and
+    must be live before that prefilter is trusted as the steady state).
+    """
+    log = get_logger("aios.worker.memory_reconcile_audit")
+    settings = get_settings()
+    if not settings.memory_reconcile_audit_enabled:
+        log.warning("memory_reconcile_audit.disabled")
+        return
+    from aios.harness.memory_reconcile_audit import run_memory_reconcile_audit
+
+    interval = settings.memory_reconcile_audit_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            result = await run_memory_reconcile_audit(pool)
+            log.info(
+                "memory_reconcile_audit.tick",
+                stores_checked=result.stores_checked,
+                files_hashed=result.files_hashed,
+                divergences=len(result.divergences),
+            )
+        except Exception:
+            log.exception("memory_reconcile_audit.tick_failed")
 
 
 async def _reclaimable_prune_loop(pool: asyncpg.Pool[Any]) -> None:
