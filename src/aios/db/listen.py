@@ -601,6 +601,56 @@ async def listen_for_mcp_evict_vault(
         conn.terminate()
 
 
+GITHUB_CLONE_BREAKER_CLEAR_CHANNEL = "aios_github_clone_breaker_clear"
+
+
+@asynccontextmanager
+async def listen_for_github_clone_breaker_clear(
+    db_url: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Yield ``resource_id`` payloads from the github-clone-breaker clear channel.
+
+    A token rotation (``PUT /v1/sessions/{id}/resources/{resource_id}``, which
+    calls :func:`aios.services.github_repositories.rotate_token`) runs in the
+    API process and fires a NOTIFY on this channel with the ``ghrepo_...``
+    resource id; the worker — which owns the in-memory
+    :class:`aios.sandbox.github_clone_breaker.GithubCloneBreaker` — LISTENs
+    here and clears that resource's breaker state so a fixed credential
+    re-probes on the very next provision instead of serving out a cooldown
+    opened under the old secret (#1720, re-probe path (a)).
+
+    Delivery is fire-and-forget, exactly like
+    :func:`listen_for_mcp_evict_vault`: a clear-signal emitted while this
+    dedicated LISTEN connection is reconnecting is lost, but the breaker's
+    own cooldown-then-half-open-probe re-probe (path (c)) is the safety net,
+    and a subsequent rotation re-fires.
+    """
+    conn = await _connect_listener(db_url)
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning("listen.github_clone_breaker_clear_queue_full")
+
+        def _termination_callback(_conn: asyncpg.Connection[object]) -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait("")
+
+        conn.add_termination_listener(_termination_callback)
+        await conn.add_listener(GITHUB_CLONE_BREAKER_CLEAR_CHANNEL, _callback)
+        yield queue
+    finally:
+        conn.terminate()
+
+
 # Channel VALUE is byte-identical across the #818 rename (the underlying
 # Postgres NOTIFY trigger function ``notify_scheduled_tasks_due`` and its
 # channel string stay put — renaming buys nothing and opens a deploy window

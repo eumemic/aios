@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from aios.harness.inflight_tool_registry import InflightToolRegistry
+    from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
 
 log = get_logger("aios.harness.loop")
@@ -309,6 +310,25 @@ class _StepResult(NamedTuple):
     autoerror_caller_run_id: str | None = None
     autoerror_caller_session_ids: tuple[str, ...] = ()
     archive_when_idle: bool = False
+
+
+async def _list_session_github_repo_echoes(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> list[GithubRepositoryResourceEcho]:
+    """The session's attached github repo echoes, for the resource-health prelude scope.
+
+    A thin pool.acquire() wrapper — kept separate from
+    ``refresh_session_mount_state`` (which already fetches github echoes for
+    the drift check) so the two concerns stay independently callable; the
+    extra query is one indexed lookup, not worth threading a second return
+    value through that function's existing callers/mocks.
+    """
+    from aios.db import queries
+
+    async with pool.acquire() as conn:
+        return await queries.list_session_github_repo_echoes(
+            conn, session_id, account_id=account_id
+        )
 
 
 async def refresh_session_mount_state(
@@ -841,10 +861,11 @@ async def _run_session_step_body(
 
     from aios.services.channels import list_session_channels
 
-    agent, channels, memory_echoes = await asyncio.gather(
+    agent, channels, memory_echoes, github_repo_echoes = await asyncio.gather(
         agents_service.load_for_session(pool, session, account_id=account_id),
         list_session_channels(pool, session_id, account_id=account_id),
         refresh_session_mount_state(pool, session_id, account_id=account_id),
+        _list_session_github_repo_echoes(pool, session_id, account_id=account_id),
     )
 
     mcp_server_map: dict[str, McpServerSpec] = {s.name: s for s in agent.mcp_servers}
@@ -895,6 +916,7 @@ async def _run_session_step_body(
             agent=agent,
             channels=channels,
             memory_store_echoes=memory_echoes,
+            github_repo_echoes=github_repo_echoes,
         )
     except Exception:
         await sessions_service.append_event(
