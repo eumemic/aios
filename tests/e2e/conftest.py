@@ -10,6 +10,48 @@ Two mocks are installed for the fixture's lifetime:
 Everything else is real: the step function, async tool dispatch, event
 log, context builder, and (in the ``docker_harness`` variant) real
 Docker containers.
+
+**Crash-recovery test architecture (issue #1757).** aios does not run a real
+``kill -9`` worker process in CI — an audit found it would buy near-zero
+marginal DB-visible coverage (Postgres commits ``append_event`` atomically
+under a per-session row lock, so a real kill's ONLY unique content vs. a
+faithful simulator is timing and Postgres teardown semantics, neither of
+which is aios code) while requiring a permanent out-of-process harness
+(subprocess worker, cross-process fake model server, dedicated DB) that has
+no home (no nightly CI lane exists; the ``slow`` marker's "run nightly" is
+aspirational — nothing runs ``-m slow``). Instead, crash recovery is tested at
+three levels, each covering a distinct gap:
+
+1. **Composition** — ``tests/integration/test_worker_startup_recovery.py``
+   seeds the full post-kill residue (a ghost tool call, a wedged
+   procrastinate ``doing`` row, a stranded model-dispatch park) simultaneously
+   against a real Postgres and asserts one
+   :func:`aios.harness.worker.run_startup_recovery` pass converges all of it
+   in the pinned order (reap → reset in-flight harvests → wake sessions →
+   wake runs). This is the boot-time SEQUENCING gap a real-kill e2e would
+   have transitively covered.
+2. **Running-corpse salvage** — ``tests/e2e/test_sandbox_salvage.py``'s
+   ``test_running_corpse_is_salvaged_then_resumed`` is the one state ONLY a
+   real SIGKILL produces that no other test covers: graceful shutdown STOPs
+   every managed container before the process exits, so a crash corpse is
+   normally exercised stopped; a real kill leaves it RUNNING (nothing tells
+   the Docker daemon, a separate process, to stop it). Driven against the
+   real daemon.
+3. **The crash-state contract** — :meth:`~tests.e2e.harness.Harness.simulate_sigkill`'s
+   docstring states the invariant every crash-recovery test in this suite
+   relies on (a committed event prefix; procrastinate rows as-committed;
+   RUNNING sandbox containers; empty process-local state) plus the checklist
+   that defends against simulator drift: any NEW process-local worker state
+   must ship a boot-time reset (like ``reset_inflight_harvests``, #1635) and
+   a seeded crash-recovery test. Read it before adding a new in-memory
+   registry to the harness.
+
+Accepted residual risk (named, not hidden): no automated anchor exercises a
+genuinely-killed process end-to-end. Mitigation is the #147 manual repro drill
+(``docs/ops/``, run before promoting recovery-path changes, never promoted
+into the PR-gating docker shard) plus production telemetry
+(``reap_stalled_jobs`` logs a loud non-zero count on every boot after a real
+death).
 """
 
 from __future__ import annotations
