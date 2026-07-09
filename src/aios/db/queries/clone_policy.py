@@ -220,6 +220,7 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "origin": Arm.RESET_DEFAULT,
     "last_reacted_seq": Arm.COPY,
     "open_tool_call_count": Arm.COPY,
+    "open_tool_call_floor_seq": Arm.COPY,
     "last_error_seq": Arm.COPY,
     "last_user_seq": Arm.COPY,
     "last_stimulus_seq": Arm.COPY,
