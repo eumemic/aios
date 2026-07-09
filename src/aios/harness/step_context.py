@@ -25,6 +25,7 @@ work to honor the "byte-identical" promise.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -36,6 +37,7 @@ from aios.harness.context import (
     message_is_notification_marker,
     stub_missing_reasoning_content,
 )
+from aios.harness.context_persist import persist_clamped_image_parts
 from aios.harness.tokens import approx_tokens
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
@@ -490,11 +492,21 @@ async def compose_step_context(
     in_flight_tool_call_ids: frozenset[str] = frozenset(),
     omission: WindowOmission | None = None,
     capability_model: str | None = None,
+    persist_image_rewrites: bool = False,
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
     Takes a prelude built by :func:`compute_step_prelude` and the
     windowed events slate; glues them into the final message list.
+
+    ``persist_image_rewrites`` (#1745 Part C): when ``True``, an oversize
+    persisted ``image_url`` part (the pre-#1616 backlog) is downsampled
+    ONCE and written back to its event row before ``build_messages`` runs,
+    so this step (and every subsequent one) renders the already-shrunk
+    bytes instead of re-deriving them from the oversize original on every
+    build. The worker step path passes ``True``; the read-only
+    ``GET /v1/sessions/:id/context`` preview passes ``False`` (a dry-run
+    must never write).
 
     ``capability_model`` is the model string the capability gates (vision
     inlining, extended-thinking continuity) key on (#1637): for a ``workflow:``
@@ -540,7 +552,25 @@ async def compose_step_context(
     # renderer change).
     tz_name = await accounts_service.resolve_effective_timezone(pool, account_id)
 
-    ctx = build_messages(
+    # Persist-once self-heal (#1745 Part C): BEFORE build_messages, so this
+    # step (and every subsequent one) renders the already-shrunk bytes
+    # instead of re-decoding + re-downsampling the oversize original on
+    # every build. Gated on the worker-only flag — the read-only
+    # ``GET /v1/sessions/:id/context`` preview leaves this ``False``: a
+    # dry-run must never write.
+    if persist_image_rewrites:
+        await persist_clamped_image_parts(
+            pool, events, session_id=session.id, account_id=account_id
+        )
+
+    # Off the event loop (#1745 Part D): build_messages is pure CPU + file
+    # I/O (no DB, no async — see its module docstring), so running it
+    # inline on the loop thread blocks every other session's step for the
+    # duration. The attachment-render and clamp-fit-verdict LRUs (Parts A/B)
+    # are the only shared state it touches; both are lock-guarded, so
+    # running this on a worker thread is safe under concurrent steps.
+    ctx = await asyncio.to_thread(
+        build_messages,
         events,
         system_prompt=prelude.system_prompt,
         model=gate_model,

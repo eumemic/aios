@@ -509,6 +509,7 @@ from .events import (  # noqa: E402
     read_windowed_context_events,
     read_windowed_events,
     recompute_session_channels,
+    replace_event_data,
 )
 from .files import (  # noqa: E402
     insert_file,
@@ -974,6 +975,7 @@ __all__ = [
     "release_trigger_claim",
     "remove_trigger",
     "reparent_connection",
+    "replace_event_data",
     "resolve_account_by_path",
     "resolve_effective_inbound_policy",
     "resolve_effective_sandbox_snapshot_bytes",
