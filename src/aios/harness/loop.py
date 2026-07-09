@@ -1052,6 +1052,7 @@ async def _run_session_step_body(
             ),
             omission=windowed.omission,
             capability_model=capability_model,
+            persist_image_rewrites=True,
         )
     except Exception:
         await sessions_service.append_event(

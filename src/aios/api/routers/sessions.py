@@ -903,6 +903,7 @@ async def get_context(
         prelude=prelude,
         events=windowed.events,
         omission=windowed.omission,
+        persist_image_rewrites=False,
     )
     return ContextResponse(
         session_id=session_id,

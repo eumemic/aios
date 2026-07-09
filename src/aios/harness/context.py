@@ -35,6 +35,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +65,123 @@ from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event
 from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
+
+# ── Attachment render cache (issue #1745 Part A) ─────────────────────────
+#
+# ``_apply_attachments`` re-reads + re-sniffs + re-base64-encodes every
+# inlinable staged image on EVERY ``build_messages`` call (every wake), even
+# though ``/mnt/attachments/`` staged bytes are immutable in steady state.
+# This module-level LRU memoizes the read+sniff+encode verdict keyed on full
+# file identity (path, mtime, size) so a steady-state replay over a window
+# of previously-seen attachments performs zero file reads.
+#
+# Value shapes:
+#   ("inline", content_type, data_b64)  — the file inlines cleanly.
+#   ("marker",)                          — undecodable / unsupported-format
+#                                           verdict (the model degrades to a
+#                                           text marker either way).
+# A "marker" entry does NOT record the size for the byte-cap accounting
+# below since it holds no encoded payload.
+_ATTACHMENT_CACHE_LOCK = threading.Lock()
+_ATTACHMENT_CACHE: OrderedDict[tuple[str, int, int], tuple[Any, ...]] = OrderedDict()
+_ATTACHMENT_CACHE_BYTES = 0
+_ATTACHMENT_CACHE_MAX_ENTRIES = 256
+
+
+def _attachment_cache_max_bytes() -> int:
+    """Read the byte-cap env override lazily (not at import time) so tests
+    can monkeypatch ``os.environ`` per-case without needing a process
+    restart."""
+    raw = os.environ.get("AIOS_CONTEXT_IMAGE_CACHE_MAX_BYTES")
+    if raw is not None:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return 64 * 1024 * 1024
+
+
+def _attachment_cache_entry_bytes(value: tuple[Any, ...]) -> int:
+    if value and value[0] == "inline":
+        return len(value[2])
+    return 0
+
+
+def _attachment_cache_get(key: tuple[str, int, int]) -> tuple[Any, ...] | None:
+    with _ATTACHMENT_CACHE_LOCK:
+        value = _ATTACHMENT_CACHE.get(key)
+        if value is not None:
+            _ATTACHMENT_CACHE.move_to_end(key)
+        return value
+
+
+def _attachment_cache_put(key: tuple[str, int, int], value: tuple[Any, ...]) -> None:
+    global _ATTACHMENT_CACHE_BYTES
+    with _ATTACHMENT_CACHE_LOCK:
+        # A concurrent racer may have inserted the same key already —
+        # duplicate compute under a race is harmless (deterministic), so
+        # just overwrite and re-account.
+        existing = _ATTACHMENT_CACHE.pop(key, None)
+        if existing is not None:
+            _ATTACHMENT_CACHE_BYTES -= _attachment_cache_entry_bytes(existing)
+        _ATTACHMENT_CACHE[key] = value
+        _ATTACHMENT_CACHE_BYTES += _attachment_cache_entry_bytes(value)
+        max_bytes = _attachment_cache_max_bytes()
+        while _ATTACHMENT_CACHE and (
+            len(_ATTACHMENT_CACHE) > _ATTACHMENT_CACHE_MAX_ENTRIES
+            or max_bytes < _ATTACHMENT_CACHE_BYTES
+        ):
+            _, evicted = _ATTACHMENT_CACHE.popitem(last=False)
+            _ATTACHMENT_CACHE_BYTES -= _attachment_cache_entry_bytes(evicted)
+
+
+def _clear_attachment_cache() -> None:
+    """Test-only: reset the module-level LRU between cases."""
+    global _ATTACHMENT_CACHE_BYTES
+    with _ATTACHMENT_CACHE_LOCK:
+        _ATTACHMENT_CACHE.clear()
+        _ATTACHMENT_CACHE_BYTES = 0
+
+
+# ── Clamp-pass fit-verdict cache (issue #1745 Part B) ────────────────────
+#
+# ``_clamp_oversize_image_data_urls`` full-``base64.b64decode``s EVERY
+# persisted ``image_url`` data-url part on every build to check whether it
+# needs downsampling. This LRU memoizes the FITS/DEGRADE verdict keyed on
+# ``(len(data_b64), hash(data_b64))`` so steady state is a dict lookup, not
+# a decode + Pillow header parse.
+_CLAMP_VERDICT_FITS = "FITS"
+_CLAMP_VERDICT_DEGRADE = "DEGRADE"
+_CLAMP_CACHE_LOCK = threading.Lock()
+_CLAMP_CACHE: OrderedDict[tuple[int, int], str] = OrderedDict()
+_CLAMP_CACHE_MAX_ENTRIES = 8192
+
+
+def _clamp_cache_key(data_b64: str) -> tuple[int, int]:
+    return (len(data_b64), hash(data_b64))
+
+
+def _clamp_cache_get(key: tuple[int, int]) -> str | None:
+    with _CLAMP_CACHE_LOCK:
+        value = _CLAMP_CACHE.get(key)
+        if value is not None:
+            _CLAMP_CACHE.move_to_end(key)
+        return value
+
+
+def _clamp_cache_put(key: tuple[int, int], value: str) -> None:
+    with _CLAMP_CACHE_LOCK:
+        _CLAMP_CACHE[key] = value
+        _CLAMP_CACHE.move_to_end(key)
+        while len(_CLAMP_CACHE) > _CLAMP_CACHE_MAX_ENTRIES:
+            _CLAMP_CACHE.popitem(last=False)
+
+
+def _clear_clamp_cache() -> None:
+    """Test-only: reset the module-level LRU between cases."""
+    with _CLAMP_CACHE_LOCK:
+        _CLAMP_CACHE.clear()
+
 
 # Chat-completions spec fields per role.  Provider-specific extensions
 # (reasoning, reasoning_details, internal reacting_to, etc.) stay in the
@@ -633,12 +753,44 @@ def _apply_attachments(
         ):
             marker_lines.append(text_marker(record))
             continue
-        # v1 deliberately re-reads + re-base64-encodes per render: the
-        # staged bytes are typically immutable (`/mnt/attachments/` is
-        # read-only) so an LRU cache on (host_path, mtime, size) would
-        # be a clean follow-up if profiling shows pressure.  See
-        # PR #216 §14 for the discussion of cache vs. encode-at-staging
-        # alternatives we deferred for v1.
+        # Attachment render cache (#1745 Part A): staged bytes under
+        # ``/mnt/attachments/`` are immutable in steady state, so a cache
+        # keyed on full file identity (path, mtime, size) lets a re-render
+        # of a previously-seen attachment skip the read+sniff+encode
+        # entirely. One ``stat()`` call resolves the key; an ``OSError``
+        # here (file vanished) falls through to the SAME marker fallback
+        # the old direct-read OSError guard used, so behavior is unchanged
+        # for a missing file.
+        try:
+            st = host_path.stat()
+        except OSError as err:
+            log.warning(
+                "context.attachment_read_failed",
+                path=str(host_path),
+                error=str(err),
+            )
+            marker_lines.append(text_marker(record))
+            continue
+        cache_key = (str(host_path), st.st_mtime_ns, st.st_size)
+        cached = _attachment_cache_get(cache_key)
+        if cached is not None:
+            if cached[0] == "inline":
+                _, cached_content_type, cached_data_b64 = cached
+                # Never share the cached dict — each hit rebuilds the part
+                # fresh via make_image_url_part.
+                image_parts.append(
+                    make_image_url_part(
+                        content_type=cached_content_type,
+                        data_b64=cached_data_b64,
+                    )
+                )
+            else:
+                marker_lines.append(text_marker(record))
+            continue
+        # Cache miss: compute (read + sniff + encode) OUTSIDE the lock —
+        # only the insert is lock-guarded (see the cache helpers above).
+        # A duplicate compute under a concurrent-render race is harmless:
+        # the result is a deterministic function of the immutable bytes.
         try:
             payload = host_path.read_bytes()
         except OSError as err:
@@ -667,6 +819,7 @@ def _apply_attachments(
                 path=str(host_path),
                 filename=record.get("filename"),
             )
+            _attachment_cache_put(cache_key, ("marker",))
             marker_lines.append(text_marker(record))
             continue
         if image_format not in PROVIDER_INLINE_IMAGE_FORMATS:
@@ -681,12 +834,15 @@ def _apply_attachments(
                 path=str(host_path),
                 filename=record.get("filename"),
             )
+            _attachment_cache_put(cache_key, ("marker",))
             marker_lines.append(text_marker(record))
             continue
+        data_b64 = base64.b64encode(payload).decode("ascii")
+        _attachment_cache_put(cache_key, ("inline", content_type, data_b64))
         image_parts.append(
             make_image_url_part(
                 content_type=content_type,
-                data_b64=base64.b64encode(payload).decode("ascii"),
+                data_b64=data_b64,
             )
         )
 
@@ -853,18 +1009,45 @@ def _clamp_oversize_image_data_urls(messages: list[dict[str, Any]]) -> None:
             head, sep, data_b64 = url.partition(",")
             if not sep or ";base64" not in head:
                 continue
+            # Fit-verdict cache (#1745 Part B): keyed on the encoded string
+            # itself (length + hash), consulted BEFORE any decode. A hit
+            # means this exact part was already classified on a prior
+            # build — steady state is a dict lookup, zero decode.
+            cache_key = _clamp_cache_key(data_b64)
+            cached_verdict = _clamp_cache_get(cache_key)
+            if cached_verdict == _CLAMP_VERDICT_FITS:
+                continue
+            if cached_verdict == _CLAMP_VERDICT_DEGRADE:
+                if new_content is None:
+                    new_content = list(content)
+                new_content[i] = {
+                    "type": "text",
+                    "text": "[image omitted: too large to display inline]",
+                }
+                continue
+            # Cache miss. O(1) size-gate on the ENCODED length classifies
+            # byte-oversize with zero decode — base64 expands 4 bytes for
+            # every 3 raw bytes, so ``len(data_b64) * 3 // 4`` approximates
+            # the raw size without decoding a single byte. When this alone
+            # already proves oversize, skip the redundant Pillow header
+            # check below (``is_oversize_image``) — we already know the
+            # verdict; decoding still happens once, right before, because
+            # downsampling needs the actual bytes regardless.
+            byte_oversize = (len(data_b64) * 3 // 4) > INLINE_SIZE_CAP_BYTES
             try:
                 raw = base64.b64decode(data_b64, validate=True)
             except Exception:
                 # Malformed base64 — leave it; the mime corrector and the
-                # provider's own decode handle that orthogonal failure.
+                # provider's own decode handle that orthogonal failure. Not
+                # cached: this is a data defect, not a fit verdict.
                 continue
-            # Header-only oversize check first: this pass is scoped to the
-            # DIMENSION wedge only. A part that already fits both caps is left
-            # exactly as the mime corrector produced it (an undecodable-but-
-            # small part is the mime corrector's / provider's concern, not a
-            # dimension wedge — degrading it here would clobber that contract).
-            if not is_oversize_image(raw):
+            # Header-only oversize check: this pass is scoped to the DIMENSION
+            # wedge only. A part that already fits both caps is left exactly
+            # as the mime corrector produced it (an undecodable-but-small part
+            # is the mime corrector's / provider's concern, not a dimension
+            # wedge — degrading it here would clobber that contract).
+            if not byte_oversize and not is_oversize_image(raw):
+                _clamp_cache_put(cache_key, _CLAMP_VERDICT_FITS)
                 continue
             try:
                 # Blocking (not awaited): build_messages is sync. We only
@@ -877,6 +1060,7 @@ def _clamp_oversize_image_data_urls(messages: list[dict[str, Any]]) -> None:
                 # ladder): a part we cannot bound is a wedge if left in place.
                 # Replace it with an inert text placeholder, preserving list
                 # shape rather than dropping the message.
+                _clamp_cache_put(cache_key, _CLAMP_VERDICT_DEGRADE)
                 if new_content is None:
                     new_content = list(content)
                 new_content[i] = {
@@ -887,8 +1071,18 @@ def _clamp_oversize_image_data_urls(messages: list[dict[str, Any]]) -> None:
             if resized is None:
                 # Header check said oversize but the downsample disagreed
                 # (e.g. a race on the cap boundary) — nothing to rewrite.
+                # Not cached: this part's own persisted bytes are the same
+                # every render, so re-deriving this (rare) race each time is
+                # cheap and safer than caching a same-key/different-outcome
+                # verdict.
                 continue
             encoded = base64.b64encode(resized.data).decode("ascii")
+            # NOT cached as FITS: this render successfully shrank the part in
+            # MEMORY only — the persisted bytes are still oversize, so the
+            # NEXT render (absent Part C's persist) must redo this same work.
+            # Once Part C persists the shrunk bytes, the next build sees a
+            # different (smaller) ``data_b64`` — a fresh cache key that hits
+            # the byte-size-gate / header-check FITS path directly.
             if new_content is None:
                 new_content = list(content)
             new_content[i] = {
