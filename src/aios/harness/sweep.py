@@ -1408,7 +1408,9 @@ async def _filter_incomplete_batches(
                 results_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
 
             asst_rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, empty_no_inflight)
-            asst_by_sid = _group_event_data(asst_rows)
+            asst_by_sid: dict[str, list[dict[str, Any]]] = {}
+            for r in asst_rows:
+                asst_by_sid.setdefault(r["session_id"], []).append(r["data"])
 
             # Agent surface + confirmed-``allow`` ids for the dispatch
             # classifier. The classifier reads only ``.tools``/``.http_servers``
@@ -1468,21 +1470,13 @@ def _open_candidates_for(
     return open_calls
 
 
-def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for r in rows:
-        data = r["data"]
-        grouped.setdefault(r["session_id"], []).append(data)
-    return grouped
-
-
 def _group_unreacted_rows(
     rows: list[Any],
 ) -> dict[str, list[tuple[str | None, str | None]]]:
     """Group ``UNREACTED_ROWS_SQL`` rows by session_id into (role, tool_call_id)
-    tuples. Payload-free counterpart of ``_group_event_data`` for the
-    projected-column query (#1738) — the batch filter only ever reads these
-    two fields.
+    tuples. Projected-column counterpart of the raw per-row grouping done
+    inline for ``OPEN_CANDIDATES_ASST_SQL`` (#1755) — the batch filter only
+    ever reads these two fields for the unreacted set.
     """
     grouped: dict[str, list[tuple[str | None, str | None]]] = {}
     for r in rows:
