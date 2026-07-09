@@ -6,6 +6,7 @@ either tier can import it without crossing boundaries.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -172,6 +173,72 @@ def find_seq_scans_over_events(plan_node: dict[str, Any]) -> list[dict[str, Any]
     def walk(node: dict[str, Any]) -> None:
         if node.get("Node Type") == "Seq Scan" and node.get("Relation Name") == "events":
             found.append(node)
+        for child in node.get("Plans", []):
+            walk(child)
+
+    walk(plan_node)
+    return found
+
+
+# The JSONB-over-column index-predicate-mismatch smell (issue #1734/#1750):
+# an ``events`` Seq Scan whose ``Filter`` carries a SELECTIVE equality on
+# ``data->>'role'`` or ``data->>'tool_call_id'`` — exactly the two JSONB
+# expressions that a partial index (``events_tool_result_idx``,
+# ``events_tool_confirmed_allow_idx``, etc., migrations 0011/0023/0065/0097)
+# is predicated on via the BACKFILLED plain column instead (``role``). The
+# planner cannot prove the JSONB predicate implies the column predicate, so a
+# query written against the JSONB expression falls back to a bare
+# ``Seq Scan on events`` keyed on ``session_id`` alone — the #1734 defect
+# class (``find_tool_result_event`` pre-fix).
+#
+# "Selective equality" means compared against a bind parameter (``$N``) or a
+# literal — NOT another ``data->>`` expression (a column-to-column join
+# condition, e.g. ``tr.data->>'tool_call_id' = lc.data->>'tool_call_id'``, is
+# not a scan-narrowing predicate the way a literal/parameter equality is, and
+# is common in legitimate anti-join Filters this oracle must not flag).
+_JSONB_PREDICATE_MISMATCH_RE = re.compile(
+    r"data\s*->>\s*'(role|tool_call_id)'(::text)?\)?\s*=\s*(\$\d+(::text)?|'[^']*'(::text)?)"
+)
+
+
+def _has_jsonb_over_column_predicate(text: str) -> bool:
+    return bool(_JSONB_PREDICATE_MISMATCH_RE.search(text))
+
+
+def find_predicate_mismatch_events_scan(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every ``Seq Scan on events`` whose ``Filter`` carries a selective
+    ``data->>'role'``/``data->>'tool_call_id'`` equality — the index-predicate
+    mismatch class that defeats a partial index predicated on the backfilled
+    plain column (issue #1734, the #1 violation in the #1733 epic).
+
+    This is a SIBLING of :func:`find_unbounded_events_scan_over_seq`, not a
+    replacement: that oracle catches an unbounded AGGREGATE (WindowAgg /
+    Aggregate / GroupAggregate) over ``events``; this one catches a bare
+    ``Seq Scan`` (no aggregate at all — a plain ``SELECT ... LIMIT 1``) whose
+    defect is an unserved selective predicate, not an unbounded aggregate.
+
+    Deliberately narrow: it does NOT flag "any events Seq Scan keyed on
+    session_id alone" (that would false-positive on legitimately-O(1)
+    single-session reads and small/empty-table plans where the planner
+    reasonably prefers a seq scan). It keys on the PRESENCE of the specific
+    JSONB-over-column predicate smell in the scan's own ``Filter`` — the
+    signal that a partial index exists to serve this exact condition (via the
+    normalized column) but the query is written against the un-servable JSONB
+    expression instead, so the planner falls back to scanning the relation
+    (which, being a ``Seq Scan`` node itself, by definition used no index seek
+    for this predicate).
+
+    Present-vs-absent, no wall-clock, no row-count threshold — same
+    discipline as :func:`find_unbounded_events_scan_over_seq` and
+    :func:`find_seq_scans_over_events`.
+    """
+    found: list[dict[str, Any]] = []
+
+    def walk(node: dict[str, Any]) -> None:
+        if node.get("Node Type") == "Seq Scan" and node.get("Relation Name") == "events":
+            filter_text = str(node.get("Filter", ""))
+            if _has_jsonb_over_column_predicate(filter_text):
+                found.append(node)
         for child in node.get("Plans", []):
             walk(child)
 
