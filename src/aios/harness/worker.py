@@ -27,6 +27,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -105,6 +106,75 @@ _REQUIRED_HARNESS_TASKS = {
     "harness.wake_workflow",
     "harness.run_trigger",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class StartupRecoveryResult:
+    """Return value of :func:`run_startup_recovery` — the composed counts
+    from every startup-recovery step, so the boot log line and tests can
+    assert on the whole pass without unrolling the composition.
+    """
+
+    reaped_jobs: int
+    repaired_ghosts: int
+    woken_sessions: int
+    woken_runs: int
+
+
+async def run_startup_recovery(
+    pool: asyncpg.Pool[Any],
+    inflight_tool_registry: InflightToolRegistry,
+) -> StartupRecoveryResult:
+    """The worker's startup-recovery sequence (issue #1757).
+
+    Extracted from :func:`worker_main` so it is a unit an integration test can
+    call directly against a seeded Postgres, rather than only being
+    exercisable by booting a full worker process. Order is load-bearing —
+    each step is a precondition for the next:
+
+    1. :func:`reap_stalled_jobs` — fail every ``doing`` procrastinate job left
+       by the dead predecessor (the singleton lock has handed off, so every
+       ``doing`` row is orphaned by construction). MUST run before step 3: a
+       stalled ``wake_session`` job holds ``lock=session_id`` /
+       ``queueing_lock=session_id``, so until it is failed and its lock
+       released, a fresh wake for that session raises procrastinate's
+       ``AlreadyEnqueued`` and is silently swallowed by
+       :func:`aios.jobs.app.defer_wake` (issue #147) — the session would stay
+       wedged until the *next* sweep tick found it again.
+    2. :func:`reset_inflight_harvests` — clear the in-process
+       model-dispatch-harvest key set. Every harvest task from the
+       predecessor's process is provably gone (same singleton-lock handoff),
+       so a stale key here would make step 3's crash-recovery re-park (#1635)
+       treat a genuinely lost park as still-serviced and skip it. MUST run
+       before step 3 for the same reason.
+    3. :func:`wake_sessions_needing_inference` — repair ghost tool calls
+       (including re-parking the model-dispatch park via
+       :func:`repark_stranded_model_dispatch`) and defer a wake for every
+       session now needing inference. Freshly-unblocked sessions (step 1) and
+       freshly-reparked model-dispatch parks (step 2) are picked up in THIS
+       pass because it runs after both.
+    4. :func:`aios.workflows.sweep.wake_runs_needing_step` — the workflow-run
+       analog of step 3; independent of the session-side steps.
+
+    Called once at worker boot (before this process consumes any job) and
+    exposed here so the integration test can seed the full post-kill residue
+    (a ghost tool call, a wedged ``doing`` job, a stranded model-dispatch
+    park) and assert the combined convergence in one pass.
+    """
+    from aios.harness.model_workflow import reset_inflight_harvests
+    from aios.jobs.app import app as procrastinate_app
+    from aios.workflows.sweep import wake_runs_needing_step
+
+    reaped_jobs = await reap_stalled_jobs(procrastinate_app.job_manager)
+    reset_inflight_harvests()
+    sweep = await wake_sessions_needing_inference(pool, inflight_tool_registry)
+    woken_runs = await wake_runs_needing_step(pool)
+    return StartupRecoveryResult(
+        reaped_jobs=reaped_jobs,
+        repaired_ghosts=sweep.repaired_ghosts,
+        woken_sessions=sweep.woken_sessions,
+        woken_runs=woken_runs,
+    )
 
 
 async def _await_retirements_admissible(
@@ -359,33 +429,18 @@ async def worker_main() -> None:
             concurrency=settings.worker_concurrency,
         )
 
-        # Startup sweep:
-        #   1. Reap every in-flight procrastinate job left by a predecessor.
-        #      The singleton lock has handed off, so the previous worker is
-        #      gone, and this process has not consumed any job yet. Must run
-        #      BEFORE the wake sweep so freshly-unblocked sessions get
-        #      re-enqueued in the same pass.
-        #   2. Repair tool-call ghosts and wake sessions needing inference.
-        await reap_stalled_jobs(procrastinate_app.job_manager)
-        # Every model-dispatch harvest task from a predecessor loop is provably gone (the
-        # singleton lock handed off), so clear the in-flight-harvest key set before the
-        # startup sweep — otherwise a stale key could make the crash-recovery re-park (#1635)
-        # treat a genuinely lost park as still-serviced and skip it.
-        from aios.harness.model_workflow import reset_inflight_harvests
-
-        reset_inflight_harvests()
-        sweep = await wake_sessions_needing_inference(pool, inflight_tool_registry)
-        if sweep.woken_sessions or sweep.repaired_ghosts:
+        # Startup sweep — see :func:`run_startup_recovery` for the composed
+        # sequence and why its ordering (reap → reset in-flight harvests →
+        # wake sessions → wake runs) is load-bearing.
+        recovery = await run_startup_recovery(pool, inflight_tool_registry)
+        if recovery.woken_sessions or recovery.repaired_ghosts:
             log.info(
                 "worker.startup_sweep",
-                woken=sweep.woken_sessions,
-                repaired_ghosts=sweep.repaired_ghosts,
+                woken=recovery.woken_sessions,
+                repaired_ghosts=recovery.repaired_ghosts,
             )
-        from aios.workflows.sweep import wake_runs_needing_step
-
-        woken_runs = await wake_runs_needing_step(pool)
-        if woken_runs:
-            log.info("worker.startup_sweep.workflows", woken_runs=woken_runs)
+        if recovery.woken_runs:
+            log.info("worker.startup_sweep.workflows", woken_runs=recovery.woken_runs)
 
         # Start the snapshot GC reconciler (durable session sandboxes). Its
         # immediate first tick replaces the old boot-time orphan reap: rather
