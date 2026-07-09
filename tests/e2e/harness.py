@@ -328,6 +328,9 @@ class Harness:
         self._env_id: str | None = None
         self.model_calls: list[dict[str, Any]] = []  # captured kwargs from each litellm call
         self._last_streaming_response: dict[str, Any] | None = None
+        # Tools registered via ``register_tool`` this test, so ``start`` can auto-offer
+        # them (name -> {description, input_schema}). See ``start`` for the rationale.
+        self._registered_tool_specs: dict[str, dict[str, Any]] = {}
 
     # ── scripting ────────────────────────────────────────────────────────
 
@@ -347,14 +350,28 @@ class Harness:
         description: str = "test tool",
         schema: dict[str, Any] | None = None,
     ) -> None:
-        """Register a custom tool for this test."""
+        """Register a custom tool for this test.
+
+        The tool is also recorded so :meth:`start` auto-offers it on the agent's
+        tool surface — under the #1773 ``callable ≡ offered`` invariant a tool that
+        is registered but not offered is rejected ("tool not offered") when the
+        scripted model calls it, so registering a handler must also make it callable.
+        """
+        parameters_schema = schema or {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        }
         registry.register(
             name=name,
             description=description,
-            parameters_schema=schema
-            or {"type": "object", "properties": {}, "additionalProperties": True},
+            parameters_schema=parameters_schema,
             handler=handler,
         )
+        self._registered_tool_specs[name] = {
+            "description": description,
+            "input_schema": parameters_schema,
+        }
 
     # ── session lifecycle ────────────────────────────────────────────────
 
@@ -399,9 +416,28 @@ class Harness:
         from aios.models.agents import ToolSpec
 
         if tool_specs is not None:
-            final_specs = tool_specs
+            final_specs = list(tool_specs)
         else:
             final_specs = [ToolSpec(type=t) for t in (tools or [])]
+        # Auto-offer every ``register_tool``-registered tool that the caller did not
+        # already declare (dedup by name so an explicit ToolSpec — e.g. a permission
+        # policy — always wins). Without this, the #1773 offered-set gate rejects the
+        # scripted model's call to a registered-but-unoffered tool as "tool not
+        # offered", and the test would exercise the rejection path instead of real
+        # dispatch. ``type="custom"`` is the only ToolSpec variant carrying an
+        # arbitrary name; dispatch is registry-keyed, so the real handler still runs,
+        # and argument-schema validation still uses the REGISTRY schema.
+        already_offered = {(s.name or s.type) for s in final_specs}
+        final_specs += [
+            ToolSpec(
+                type="custom",
+                name=name,
+                description=spec["description"],
+                input_schema=spec["input_schema"],
+            )
+            for name, spec in self._registered_tool_specs.items()
+            if name not in already_offered
+        ]
         agent = await agents_service.create_agent(
             self._pool,
             name=f"test-agent-{make_id('agent')[-8:]}",

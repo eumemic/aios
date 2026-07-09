@@ -240,9 +240,14 @@ def _unoffered_tool_message(name: str, offered_names: list[str]) -> str:
     NOT in the step's frozen offered set — unknown to the registry entirely, or
     registered but not present in the ``tools`` array this step sent the model.
 
-    Short + imperative, naming the currently-offered tools by name: the incident
-    eval's Arm D (24/24 real trap points → 24/24 clean stops) is the evidence this
-    form of message is actionable by the model where a buried diagnostic isn't.
+    Short + imperative, naming the currently-offered tools by name. This is a
+    design choice, NOT an eval-validated string: the incident's replay eval (Arm D,
+    24/24 real trap points → 24/24 clean stops) validated defect-1's "already
+    answered … end your turn" stop message
+    (:func:`aios.tools.workflow_completion._closed_request_message`), not this
+    unoffered-tool wording. It follows the same actionability principle that eval
+    demonstrated — a short imperative beats a buried diagnostic — but its efficacy
+    on the de-offered-tool case has not been separately measured.
     """
     listing = ", ".join(sorted(offered_names)) if offered_names else "(none offered right now)"
     return (

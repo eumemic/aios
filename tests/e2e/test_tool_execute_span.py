@@ -4,30 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from aios.models.agents import ToolSpec
 from tests.e2e.harness import Harness, assistant, first_tool_result, tool_call, tool_results
 
-
-def _offer(name: str) -> list[ToolSpec]:
-    """Offer a test-registered built-in ``name`` on the agent's tool surface.
-
-    The tools these tests register with ``harness.register_tool`` are handler-backed
-    built-ins in the global registry; declaring them here (``type="custom"`` is the
-    only ToolSpec variant that carries an arbitrary ``name``) puts the name in the
-    step's frozen OFFERED set so the harness's #1773 ``callable ≡ offered`` invariant
-    dispatches the call through the real handler instead of rejecting it as unoffered.
-    Argument-schema validation still runs against the REGISTRY schema
-    (``invoke_builtin`` → ``tool.parameters_schema``), not this declared
-    ``input_schema`` — so the schema-violation path is exercised for real.
-    """
-    return [
-        ToolSpec(
-            type="custom",
-            name=name,
-            description="test tool",
-            input_schema={"type": "object", "additionalProperties": True},
-        )
-    ]
+# NOTE: ``harness.register_tool`` auto-offers each registered tool on the agent's
+# surface (see Harness.start), so a plain ``start(..., tools=[])`` is enough for the
+# scripted model's call to reach REAL dispatch under the #1773 ``callable ≡ offered``
+# invariant. The assertions below pin the real path (result content, not a
+# "tool not offered" rejection) so the tests cannot silently re-hollow.
 
 
 class TestToolExecuteSpan:
@@ -42,7 +25,7 @@ class TestToolExecuteSpan:
                 assistant("Done."),
             ]
         )
-        session = await harness.start("echo ping", tool_specs=_offer("echo"))
+        session = await harness.start("echo ping", tools=[])
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -78,7 +61,7 @@ class TestToolExecuteSpan:
                 assistant("I see the tool failed."),
             ]
         )
-        session = await harness.start("do the thing", tool_specs=_offer("fails"))
+        session = await harness.start("do the thing", tools=[])
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -117,7 +100,7 @@ class TestToolExecuteSpan:
                 assistant("Got the schema error."),
             ]
         )
-        session = await harness.start("call strict", tool_specs=_offer("strict"))
+        session = await harness.start("call strict", tools=[])
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -149,7 +132,7 @@ class TestToolExecuteSpan:
                 assistant("All three done."),
             ]
         )
-        session = await harness.start("batch", tool_specs=_offer("noop"))
+        session = await harness.start("batch", tools=[])
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
