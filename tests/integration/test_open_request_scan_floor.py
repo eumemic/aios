@@ -4,8 +4,8 @@
 ``request_opened`` edge a session ever accrued, every step — unbounded
 lifetime growth on the hottest path for a re-invoked servicer session
 (#1127/#1128). The fix is a monotone per-session floor
-(``sessions.open_request_scan_floor``, migration 0134) plus a supporting
-partial index (``events_request_opened_seq_idx``, migration 0135):
+(``sessions.open_request_scan_floor``, migration 0137) plus a supporting
+partial index (``events_request_opened_seq_idx``, migration 0138):
 :func:`queries.advance_open_request_scan_floor` ratchets the floor forward
 past *answered* edges only, and the two shared readers
 (:func:`queries.get_open_request_ids` / :func:`queries.get_open_obligations`)

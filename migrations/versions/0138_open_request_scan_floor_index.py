@@ -3,10 +3,10 @@ index that lets the floor-bounded open-obligations anti-join (#1747) seek a
 seq range instead of heap-filtering every ``request_opened`` row in
 ``[floor, head]``.
 
-Companion to 0136 (the transactional ``sessions.open_request_scan_floor``
+Companion to 0137 (the transactional ``sessions.open_request_scan_floor``
 column add). Split into its own revision because mixing transactional DDL
 with ``CREATE INDEX CONCURRENTLY`` in one revision is a partial-apply wedge
-(see 0136's docstring) — precedent 0099 / 0128 / 0131 do *only*
+(see 0137's docstring) — precedent 0099 / 0128 / 0131 do *only*
 ``CONCURRENTLY`` per revision.
 
 Why a NEW partial index rather than reusing the pre-existing non-partial
@@ -42,8 +42,8 @@ Post-deploy, the ops-agent asserts ``indisvalid = true`` for this index (see
 ``pg_indexes``/``pg_index`` don't surface a failed CONCURRENTLY build as a
 migration failure by themselves without that follow-up check.
 
-Revision ID: 0137
-Revises: 0136
+Revision ID: 0138
+Revises: 0137
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0137"
-down_revision: str = "0136"
+revision: str = "0138"
+down_revision: str = "0137"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
