@@ -1190,13 +1190,13 @@ async def _filter_incomplete_batches(
         # it. ``OPEN_CANDIDATES_ASST_SQL`` mirrors ``GHOST_ASST_SQL``'s
         # ``open_tool_call_count > 0`` bound.
         if empty_no_inflight:
-            asst_rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, empty_no_inflight)
-            asst_by_sid = _group_event_data(asst_rows)
-
             all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, empty_no_inflight)
             results_by_sid: dict[str, set[str]] = {}
             for r in all_result_rows:
                 results_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+            asst_rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, empty_no_inflight)
+            asst_by_sid = _group_event_data(asst_rows)
 
             # Agent surface + confirmed-``allow`` ids for the dispatch
             # classifier. The classifier reads only ``.tools``/``.http_servers``

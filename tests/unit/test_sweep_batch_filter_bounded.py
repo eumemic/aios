@@ -15,8 +15,17 @@ issues, driven through a fake connection (no docker):
   * its assistant fetch is bounded by tool_call_id containment (``@>``) and
     projects only ``tool_calls[].id`` (no ``data`` payload);
   * its result fetch is bounded to the referenced batch ids (``= ANY``);
-  * a session with no unreacted events never touches ``events`` for
-    assistant/result rows at all.
+  * a session with no unreacted events and no open tool calls at all never
+    reaches the ``@>``-bounded batch machinery above.
+
+Since #1710, a session with an EMPTY unreacted set and no in-flight task is no
+longer decided from the unreacted query alone: it is routed to the
+dispatch-narrowing branch (``OPEN_CANDIDATES_ASST_SQL`` + ``ALL_RESULT_ROWS_SQL``
++ ``AGENT_SURFACE_SQL`` + ``GHOST_LIFECYCLE_SQL``, all scoped to just that
+handful of sids) so a session parked purely on externally-executed work is not
+re-woken every sweep. That narrowing's own bounded-fetch contract is covered by
+``test_sweep_external_pending_no_wake.py``; here we only pin that it stays
+scoped to the empty-unreacted sids and does not resurrect a lifetime scan.
 
 Behaviour parity (a session is/ isn't admitted for the same reasons as before)
 is covered by the docker-backed sweep e2e suite; these are the perf-shape
@@ -98,20 +107,34 @@ async def test_filter_never_issues_unbounded_lifetime_scans() -> None:
     )
 
 
-async def test_no_unreacted_events_touches_no_history() -> None:
-    """A candidate with an empty unreacted set is decided from the unreacted
-    query alone — no assistant/result fetch fires (it can't need bounding what
-    it never reads)."""
-    conn = _dispatching_conn([("s.last_reacted_seq", [])])
+async def test_no_unreacted_events_with_no_open_calls_not_admitted() -> None:
+    """A candidate with an empty unreacted set and no in-flight task is routed
+    to the dispatch-narrowing branch (#1710): with no open assistant tool_calls
+    at all (a stale ``open_tool_call_count`` with nothing to react to), it is
+    NOT admitted — there is no open call to react to, and a real stimulus wakes
+    the session via the normal unreacted path instead."""
+    conn = _dispatching_conn(
+        [
+            ("s.last_reacted_seq", []),  # UNREACTED_ROWS_SQL
+            ("role = 'tool'", []),  # ALL_RESULT_ROWS_SQL
+            ("s.open_tool_call_count > 0", []),  # OPEN_CANDIDATES_ASST_SQL
+            ("av.tools", []),  # AGENT_SURFACE_SQL
+            ("tool_confirmed", []),  # GHOST_LIFECYCLE_SQL
+        ]
+    )
     pool = fake_pool_yielding_conn(conn)
 
     out = await sweep._filter_incomplete_batches(pool, InflightToolRegistry(), {"sess_idle"})
 
-    # No unreacted events and nothing in-flight → ready.
-    assert out == {"sess_idle"}
-    # Exactly one fetch: the seq-bounded unreacted query.
-    assert conn.fetch.await_count == 1
+    # No unreacted events, nothing in-flight, and no open tool_calls to
+    # dispatch-classify → not admitted (#1710).
+    assert out == set()
     assert "s.last_reacted_seq" in conn.fetched_sql[0]
+    # The dispatch-narrowing fetches are scoped to exactly this sid — none of
+    # them is the removed unbounded lifetime scan (bare session-set filter
+    # with no further bound).
+    joined = "\n".join(conn.fetched_sql)
+    assert "s.open_tool_call_count > 0" in joined
 
 
 async def test_incomplete_batch_not_admitted() -> None:
