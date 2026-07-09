@@ -41,7 +41,7 @@ def test_validate_value_rejects_with_path_and_retry_hint() -> None:
     err = _validate_value({"answer": 1}, _SCHEMA)
     assert err is not None
     assert "value.answer" in err  # the failing path, scoped under `value`
-    assert "call return again" in err  # the model is told to retry
+    assert "call `return` again" in err  # the model is told to retry
     # A bare-scalar schema is honored too (output_schema replaces `value` wholesale).
     assert _validate_value("hi", {"type": "number"}) is not None
     assert _validate_value(3, {"type": "number"}) is None

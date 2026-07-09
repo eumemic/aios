@@ -59,6 +59,7 @@ from aios.services.sessions import (
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
+from aios.tools.schema_errors import format_schema_violation
 from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
@@ -110,22 +111,22 @@ def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
 def _validate_output_against_schema(value: Any, schema: dict[str, Any]) -> str | None:
     """Validate a run's terminal ``output`` against the request's ``output_schema``.
 
-    ``None`` on success; otherwise a human-readable message enumerating every
-    failure (the same shape the session ``return`` tool produces, minus the
-    self-correct hint — a run does NOT bounce-and-retry, it fails loud). Drives
-    the run-target ``output_schema_violation`` error-arm in :func:`_complete_run`.
+    ``None`` on success; otherwise a human-readable message built by the shared
+    no-echo formatter (:func:`aios.tools.schema_errors.format_schema_violation` —
+    #1769 spec v2: never echoes the full ``output``, states expected-vs-got JSON
+    types, and includes the schema), the same shape the session ``return`` tool
+    produces, minus the self-correct hint — a run does NOT bounce-and-retry, it
+    fails loud. Drives the run-target ``output_schema_violation`` error-arm in
+    :func:`_complete_run`.
     """
-    errors = sorted(
-        jsonschema.Draft202012Validator(schema).iter_errors(value),
-        key=lambda e: list(e.absolute_path),
+    return format_schema_violation(
+        value,
+        schema,
+        root="output",
+        intro="run output does not conform to the request's required schema.",
+        retry_hint=None,
+        site="workflows.step.run_output",
     )
-    if not errors:
-        return None
-    lines = [f"run output does not match the request's required schema: {json.dumps(value)}"]
-    for err in errors:
-        path = ".".join(str(p) for p in err.absolute_path)
-        lines.append(f"  - at {'output.' + path if path else 'output'}: {err.message}")
-    return "\n".join(lines)
 
 
 def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:

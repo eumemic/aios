@@ -51,7 +51,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -64,6 +63,7 @@ from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
+from aios.tools.schema_errors import format_schema_violation
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
 # long park never blocks the caller's other turns; we re-poll in a loop so a
@@ -159,26 +159,27 @@ def _validate_output(value: Any, schema: dict[str, Any] | None) -> ToolResult | 
     """Validate the resolved ``value`` against ``output_schema`` (fail-loud).
 
     ``None`` on success (or no schema); otherwise a model-visible error ToolResult
-    (``output_schema_violation``) so the caller sees a non-conforming answer as an
-    error rather than silently accepting it — mirrors ``workflow_completion``'s
-    ``return`` enforcement, but on the *caller* side for a run/peer answer that
-    bypassed the servicer's own ``return`` schema gate.
+    (``output_schema_violation``) built by the shared no-echo formatter
+    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2) so
+    the caller sees a non-conforming answer as an error rather than silently
+    accepting it — mirrors ``workflow_completion``'s ``return`` enforcement, but
+    on the *caller* side for a run/peer answer that bypassed the servicer's own
+    ``return`` schema gate. No retry hint: the CALLER doesn't own the answer, it
+    can't make the peer/run re-answer by retrying this call.
     """
     if schema is None:
         return None
-    errors = sorted(
-        jsonschema.Draft202012Validator(schema).iter_errors(value),
-        key=lambda e: list(e.absolute_path),
+    message = format_schema_violation(
+        value,
+        schema,
+        root="",
+        intro="output_schema_violation: the answer does not conform to output_schema.",
+        retry_hint=None,
+        site="invoke_session.call_output",
     )
-    if not errors:
+    if message is None:
         return None
-    detail = "; ".join(
-        f"at {'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}" for e in errors
-    )
-    return ToolResult(
-        content=f"output_schema_violation: the answer does not match output_schema ({detail})",
-        is_error=True,
-    )
+    return ToolResult(content=message, is_error=True)
 
 
 def _ok_result(result: Any) -> dict[str, Any]:

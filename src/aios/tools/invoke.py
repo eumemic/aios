@@ -20,9 +20,8 @@ import contextvars
 import json
 from typing import Any
 
-import jsonschema
-
 from aios.tools.registry import ToolNotFoundError, ToolResult, registry
+from aios.tools.schema_errors import format_schema_violation
 
 # The id of the tool_call the running handler is servicing, scoped per tool task.
 # Set by :func:`invoke_builtin` around the handler call on the model dispatch path
@@ -88,29 +87,26 @@ def validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> str
 
     Returns ``None`` on success, or a human-readable error string that
     enumerates every validation failure (missing required keys,
-    unexpected extra keys, wrong types). The string lands in the
+    unexpected extra keys, wrong types) built by the shared no-echo
+    formatter (:func:`aios.tools.schema_errors.format_schema_violation`) — it
+    never echoes the full ``arguments`` payload, only per-error
+    expected/got lines plus the schema. The string lands in the
     tool_result's ``error`` body, so the model sees every issue at once
     and can self-correct without iterating one-at-a-time.
 
     The schema is the same dict registered with the tool and sent to the
     model as the tool's ``parameters``, so a mismatch genuinely
     indicates the model didn't follow the contract — not a framework
-    bug. Surfacing specific paths (e.g. ``foo.bar[2]``) and
-    passed-value previews keeps the feedback actionable.
+    bug.
     """
-    validator = jsonschema.Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(arguments), key=lambda e: list(e.absolute_path))
-    if not errors:
-        return None
-    lines = [
-        f"Arguments failed schema validation. You sent: {json.dumps(arguments)}",
-        "Errors:",
-    ]
-    for err in errors:
-        path = ".".join(str(p) for p in err.absolute_path) or "<root>"
-        lines.append(f"  - at {path}: {err.message}")
-    lines.append("Look at the tool's `parameters` schema for the correct shape and retry.")
-    return "\n".join(lines)
+    return format_schema_violation(
+        arguments,
+        schema,
+        root="",
+        intro="Arguments failed schema validation.",
+        retry_hint="Look at the tool's `parameters` schema for the correct shape and retry.",
+        site="invoke.validate_arguments",
+    )
 
 
 async def invoke_builtin(

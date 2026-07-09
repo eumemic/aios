@@ -59,11 +59,11 @@ class TestValidateArguments:
         assert "'target' was unexpected" in err
 
     def test_wrong_type_is_reported(self) -> None:
+        """#1769 spec v2: no instance echo — the diagnosis is expected-vs-got
+        JSON type names, not a repr of the sent value."""
         err = validate_arguments({"channel_id": 42}, _SCHEMA)
         assert err is not None
-        assert "42" in err  # what was sent
-        # jsonschema's message varies; just assert we got SOMETHING useful
-        assert "channel_id" in err or "type" in err.lower() or "42" in err
+        assert "expected string or null, got integer" in err
 
     def test_multi_error_accumulation(self) -> None:
         """Missing required + extra property → BOTH surface in a single
@@ -74,13 +74,14 @@ class TestValidateArguments:
         assert "'channel_id' is a required property" in err
         assert "'target' was unexpected" in err
 
-    def test_passed_arguments_echoed_for_context(self) -> None:
-        """The error includes the arguments the model sent so the model
-        can see exactly what shape it produced vs. what was expected.
-        """
+    def test_arguments_not_echoed(self) -> None:
+        """#1769: the shared no-echo formatter never dumps the full sent
+        arguments — only per-error expected/got lines plus the schema."""
         err = validate_arguments({"target": "oops"}, _SCHEMA)
         assert err is not None
-        assert '"target": "oops"' in err
+        assert '"target": "oops"' not in err
+        assert "'channel_id' is a required property" in err
+        assert "'target' was unexpected" in err
 
     def test_error_ends_with_hint_to_consult_schema(self) -> None:
         """Closing guidance points the model back at the tool's
