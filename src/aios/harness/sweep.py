@@ -233,11 +233,18 @@ CANDIDATE_ROWS_SQL = f"""
 # ``confirmed_dispatch_max_age_seconds``), so detection and dispatch resolve the
 # IDENTICAL condition by construction — they cannot drift.  The age bound is on
 # ``lc.created_at`` (the CONFIRM event), NOT the assistant turn: a fresh confirm
-# of an old proposal is a fresh intent to dispatch (#746).  Both are served by
-# ``events_tool_confirmed_allow_idx`` (0065).  Kept as full standalone SQL
-# (composed from, not replaced by, the fragment) so the perf guard can EXPLAIN
-# the exact production text.  ``{age_param}`` survives the fragment to remain a
-# ``str.format`` placeholder bound to the positional ``$N`` at call time.
+# of an old proposal is a fresh intent to dispatch (#746).  This is THIS query
+# (the cross-session detector, which has no ``session_id`` equality to seek on)
+# that is served by ``events_tool_confirmed_allow_recent_idx`` (0134) — a single
+# ``created_at``-keyed partial index the now-sargable age clause prunes at,
+# rather than heap-fetching every confirmed-allow row ever (#1740).  The
+# per-session dispatch resolver (``queries.list_confirmed_unresolved_tool_calls``)
+# still seeks ``events_tool_confirmed_allow_idx`` (0065) via its ``session_id``
+# equality — both indexes are additive, each serving its own reader.  Kept as
+# full standalone SQL (composed from, not replaced by, the fragment) so the
+# perf guard can EXPLAIN the exact production text.  ``{age_param}`` survives
+# the fragment to remain a ``str.format`` placeholder bound to the positional
+# ``$N`` at call time.
 CONFIRMED_ROWS_SQL = f"""
     SELECT DISTINCT lc.session_id
       FROM events lc

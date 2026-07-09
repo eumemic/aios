@@ -12,7 +12,7 @@ import math
 import time
 from datetime import UTC, datetime
 from types import EllipsisType
-from typing import Any, NamedTuple, Protocol, runtime_checkable
+from typing import Any, Final, NamedTuple, Protocol, runtime_checkable
 
 import asyncpg
 
@@ -858,6 +858,19 @@ async def lookup_tool_name_by_call_id(
     return None, focal
 
 
+# A century of seconds — the value callers bind for an effectively unbounded
+# confirm-event age when they want every confirmed-unresolved row regardless
+# of age. ``confirmed_unresolved_predicate``'s age clause is now a plain
+# sargable range (``created_at >= now() - make_interval(...)``) with no
+# ``IS NULL`` OR-arm (that form defeated index pruning under a generic plan —
+# #1740); any real row's ``created_at`` is always within 100 years of
+# ``now()``, so binding this constant is indistinguishable from "unbounded"
+# for every actual row while keeping the clause a single sargable comparison
+# the planner can push into ``events_tool_confirmed_allow_recent_idx``
+# (migration 0134).
+_AGE_UNBOUNDED_SECONDS: Final = 3_155_760_000  # 100 years, in seconds
+
+
 def confirmed_unresolved_predicate(alias: str, age_param: str) -> str:
     """SQL boolean fragment selecting a *confirmed-but-unresolved* dispatch.
 
@@ -871,12 +884,17 @@ def confirmed_unresolved_predicate(alias: str, age_param: str) -> str:
     construction — no wake-with-no-progress (#155 symptom).
 
     ``alias`` binds the ``tool_confirmed`` lifecycle row (``lc``). ``age_param``
-    is the caller's SQL placeholder for the OPTIONAL confirm-event age bound (a
-    ``bigint`` seconds value, or ``NULL`` for unbounded): ``$N`` positional for
-    the resolver, a ``{...}``-substituted ``$N`` for the sweep's ``.format``-d
-    text. The bound is keyed on ``lc.created_at`` (the CONFIRM event), NOT the
-    assistant turn: a fresh confirm of an old proposal is a fresh intent to
-    dispatch (#746).
+    is the caller's SQL placeholder for the confirm-event age bound (a
+    ``bigint`` seconds value): ``$N`` positional for the resolver, a
+    ``{...}``-substituted ``$N`` for the sweep's ``.format``-d text. The clause
+    is a plain sargable range comparison — ``created_at >= now() -
+    make_interval(secs => age_param)`` — with NO ``IS NULL`` OR-arm, so it is
+    prunable at ``events_tool_confirmed_allow_recent_idx`` (migration 0134)
+    under a generic plan. A caller that wants an effectively unbounded read
+    binds :data:`_AGE_UNBOUNDED_SECONDS` rather than ``NULL`` (see
+    :func:`list_confirmed_unresolved_tool_calls`). The bound is keyed on
+    ``lc.created_at`` (the CONFIRM event), NOT the assistant turn: a fresh
+    confirm of an old proposal is a fresh intent to dispatch (#746).
 
     The ``NOT EXISTS`` unresolved guard is tenant-scoped
     (``tr.account_id = {alias}.account_id``) — the resolver's correct form;
@@ -887,10 +905,7 @@ def confirmed_unresolved_predicate(alias: str, age_param: str) -> str:
         f"{alias}.kind = 'lifecycle'\n"
         f"       AND {alias}.data->>'event' = 'tool_confirmed'\n"
         f"       AND {alias}.data->>'result' = 'allow'\n"
-        f"       AND (\n"
-        f"             {age_param}::bigint IS NULL\n"
-        f"             OR {alias}.created_at >= now() - make_interval(secs => {age_param}::bigint)\n"
-        f"           )\n"
+        f"       AND {alias}.created_at >= now() - make_interval(secs => {age_param}::bigint)\n"
         f"       AND NOT EXISTS (\n"
         f"           SELECT 1 FROM events tr\n"
         f"            WHERE tr.session_id = {alias}.session_id\n"
@@ -931,13 +946,19 @@ async def list_confirmed_unresolved_tool_calls(
     dispatch, not expired; no synthetic result).  It is keyed on the CONFIRM
     event, NOT the assistant turn: an operator can confirm an OLD proposal,
     which is a FRESH intent to dispatch (#746).  It defaults to ``None`` (no
-    bound) for safety/testability; this path is dispatch-only (the sole caller
-    is ``_dispatch_confirmed_tools`` via ``sessions.py``, no read-model
-    caller), so the dispatch caller always passes
-    ``settings.confirmed_dispatch_max_age_seconds``.  Parallel to the connector
-    backfill bound in :func:`_unresolved_tool_calls` (#744).
+    bound) for safety/testability; when ``None`` we bind
+    :data:`_AGE_UNBOUNDED_SECONDS` (a 100-year constant, indistinguishable from
+    "unbounded" for any real row) rather than ``NULL`` — the predicate's age
+    clause is a plain sargable range with no ``IS NULL`` OR-arm (#1740), so
+    there is no SQL-level "unbounded" sentinel value anymore.  This path is
+    dispatch-only (the sole caller is ``_dispatch_confirmed_tools`` via
+    ``sessions.py``, no read-model caller), so the dispatch caller always
+    passes ``settings.confirmed_dispatch_max_age_seconds`` (``ge=60``, never
+    ``None``).  Parallel to the connector backfill bound in
+    :func:`_unresolved_tool_calls` (#744).
 
-    Unwindowed otherwise — keyed on ``tool_call_id`` via the
+    Unwindowed otherwise (i.e. when the effective bound is
+    :data:`_AGE_UNBOUNDED_SECONDS`) — keyed on ``tool_call_id`` via the
     ``events_tool_confirmed_allow_idx`` partial index (migration 0065), so a
     confirmed tool whose parent assistant has scrolled out of the token window,
     or simply isn't the latest assistant, is still recovered (#737).  The
@@ -967,7 +988,7 @@ async def list_confirmed_unresolved_tool_calls(
         """,
         session_id,
         account_id,
-        max_age_seconds,
+        max_age_seconds if max_age_seconds is not None else _AGE_UNBOUNDED_SECONDS,
     )
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
