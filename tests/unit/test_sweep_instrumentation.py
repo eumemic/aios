@@ -248,6 +248,7 @@ class TestEntrySweepSpan:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         start_event = SimpleNamespace(id="ev_sweep")
 

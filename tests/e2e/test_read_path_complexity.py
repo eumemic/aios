@@ -80,10 +80,14 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
+from aios.harness.loop import _PREEMPT_STARVATION_COUNT_SQL
 from aios.harness.sweep import (
     ALL_RESULT_ROWS_SQL,
+    CANDIDATE_ROWS_FLOORED_SQL,
+    CONFIRMED_ROWS_FLOORED_SQL,
     CONFIRMED_ROWS_SQL,
     GHOST_ASST_SQL,
+    UNREACTED_ROWS_FLOORED_SQL,
     UNREACTED_ROWS_SQL,
 )
 from tests.conftest import needs_docker
@@ -542,6 +546,18 @@ _SQL_ALL_RESULT_ROWS = ALL_RESULT_ROWS_SQL
 _SQL_UNREACTED_ROWS = UNREACTED_ROWS_SQL
 _SQL_CONFIRMED_ROWS_SCOPED = CONFIRMED_ROWS_SQL.format(scope_clause="AND s.id = $1", age_param="$2")
 
+# The #253 preempt-watcher reads (``_find_needing_inference_floored``) — the
+# floored twins of the three sweep arms above, already single-session
+# parameterized in their module constants (no ``.format`` composition). These
+# run from inside an in-flight step's preempt watcher (up to ~1/s per armed
+# step), so their plan shapes are held to the same gates as the per-step
+# scoped sweep reads they mirror. The starvation-count read runs once per
+# step of every opted-in agent (the arm decision, before the watcher exists).
+_SQL_CANDIDATE_ROWS_FLOORED = CANDIDATE_ROWS_FLOORED_SQL
+_SQL_UNREACTED_ROWS_FLOORED = UNREACTED_ROWS_FLOORED_SQL
+_SQL_CONFIRMED_ROWS_FLOORED = CONFIRMED_ROWS_FLOORED_SQL
+_SQL_PREEMPT_STARVATION_COUNT = _PREEMPT_STARVATION_COUNT_SQL
+
 
 HOT_PATH_READS: list[HotRead] = [
     HotRead(
@@ -613,6 +629,35 @@ HOT_PATH_READS: list[HotRead] = [
         declared_complexity="O(confirmed-allow)",
         sql=_SQL_CONFIRMED_ROWS_SCOPED,
         args=lambda: (_SESSION_ID, 3600),
+        max_rows=_O1_ROW_CEIL,
+    ),
+    # ─── preempt-watcher phase (issue #253) ───────────────────────────────
+    HotRead(
+        name="candidate_rows_floored_seek",
+        declared_complexity="O(1)",
+        sql=_SQL_CANDIDATE_ROWS_FLOORED,
+        args=lambda: (_SESSION_ID, 10),
+        max_rows=_O1_ROW_CEIL,
+    ),
+    HotRead(
+        name="unreacted_rows_floored_scan",
+        declared_complexity="O(unreacted-tail)",
+        sql=_SQL_UNREACTED_ROWS_FLOORED,
+        args=lambda: ([_SESSION_ID], 10),
+        max_rows=_OW_ROW_CEIL,
+    ),
+    HotRead(
+        name="confirmed_rows_floored_scan",
+        declared_complexity="O(confirmed-allow)",
+        sql=_SQL_CONFIRMED_ROWS_FLOORED,
+        args=lambda: (_SESSION_ID, 3600, 10),
+        max_rows=_O1_ROW_CEIL,
+    ),
+    HotRead(
+        name="preempt_starvation_count",
+        declared_complexity="O(post-assistant tail)",
+        sql=_SQL_PREEMPT_STARVATION_COUNT,
+        args=lambda: (_SESSION_ID, _ACCOUNT_ID),
         max_rows=_O1_ROW_CEIL,
     ),
 ]

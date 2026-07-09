@@ -174,6 +174,7 @@ def _agent_surface(*, agent_id: str, version: int, tools: list[ToolSpec]) -> Ste
         litellm_extra={},
         window_min=1000,
         window_max=100000,
+        preempt_policy="wait",
         binding=AgentBinding(agent_id=agent_id, version=version),
     )
 
@@ -191,6 +192,7 @@ def _generic_child_surface(*, session_id: str, tools: list[ToolSpec]) -> StepSur
         litellm_extra={},
         window_min=1000,
         window_max=100000,
+        preempt_policy="wait",
         binding=GenericChildBinding(session_id=session_id),
     )
 

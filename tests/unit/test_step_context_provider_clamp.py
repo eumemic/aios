@@ -49,6 +49,7 @@ def _agent(tools: list[ToolSpec]) -> StepSurface:
         litellm_extra={},
         window_min=1,
         window_max=10,
+        preempt_policy="wait",
         binding=AgentBinding(agent_id="agt_1627", version=1),
     )
 

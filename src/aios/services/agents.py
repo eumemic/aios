@@ -22,6 +22,7 @@ from aios.models.agents import (
     HttpServerSpec,
     McpServerSpec,
     PermissionPolicy,
+    PreemptPolicy,
     StepSurface,
     ToolSpec,
     resolve_mcp_permission,
@@ -108,6 +109,7 @@ async def create_agent(
     litellm_extra: dict[str, Any] | None = None,
     window_min: int,
     window_max: int,
+    preempt_policy: PreemptPolicy = "wait",
     creator_session_id: str | None = None,
 ) -> Agent:
     """Create a new agent at version 1.
@@ -153,6 +155,7 @@ async def create_agent(
             litellm_extra=litellm_extra or {},
             window_min=window_min,
             window_max=window_max,
+            preempt_policy=preempt_policy,
             account_id=account_id,
         )
 
@@ -199,6 +202,7 @@ async def update_agent(
     litellm_extra: dict[str, Any] | None = None,
     window_min: int | None = None,
     window_max: int | None = None,
+    preempt_policy: PreemptPolicy | None = None,
     editor_session_id: str | None = None,
 ) -> Agent:
     """Update an agent in place, creating a new immutable version (optimistic
@@ -248,6 +252,7 @@ async def update_agent(
             litellm_extra=litellm_extra,
             window_min=window_min,
             window_max=window_max,
+            preempt_policy=preempt_policy,
             account_id=account_id,
         )
 
@@ -291,7 +296,7 @@ async def validate_pinned_agent_version(
 
 def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> StepSurface:
     """Project a wire read-model (``Agent``/``AgentVersion``) onto the nominal
-    :class:`StepSurface`, carrying exactly the nine harness-consumed fields.
+    :class:`StepSurface`, carrying exactly the ten harness-consumed fields.
 
     A missing field here is a compile-loud ``StepSurface`` construction error,
     not a silent structural-overlap drift — the projection's drift surface is
@@ -307,6 +312,7 @@ def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> S
         litellm_extra=agent.litellm_extra,
         window_min=agent.window_min,
         window_max=agent.window_max,
+        preempt_policy=agent.preempt_policy,
         binding=binding,
     )
 
@@ -345,6 +351,7 @@ async def _load_for_session_conn(
                 litellm_extra={},
                 window_min=defaults["window_min"].default,
                 window_max=defaults["window_max"].default,
+                preempt_policy=defaults["preempt_policy"].default,
                 binding=GenericChildBinding(session_id=session.id),
             )
         version = await queries.get_agent_version(

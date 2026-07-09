@@ -131,3 +131,49 @@ def test_confirmed_predicate_age_param_is_caller_supplied() -> None:
     sharing one boolean body."""
     assert "$3" in queries.confirmed_unresolved_predicate("lc", "$3")
     assert "{age_param}" in queries.confirmed_unresolved_predicate("lc", "{age_param}")
+
+
+# ─── instance 3: the #253 floored (preempt-trigger) twins — same sources ──────
+
+
+def test_floor_param_default_is_byte_identical() -> None:
+    """``stimulus_floor_param=None`` (the default) emits the exact pre-#253
+    text — the committed wake predicate, the read-path status derivation, and
+    every existing composition are untouched by the parameter's existence."""
+    assert queries.session_active_predicate("s") == queries.session_active_predicate(
+        "s", stimulus_floor_param=None
+    )
+
+
+def test_floored_candidate_sql_generated_from_session_active_predicate() -> None:
+    """``CANDIDATE_ROWS_FLOORED_SQL`` (the preempt trigger's candidate arm) is
+    composed FROM the SAME ``session_active_predicate`` generator as the
+    committed detector — the floor raises the reacted watermark inside the one
+    shared boolean rather than forking a hand-kept re-encode."""
+    floored = _norm(sweep.CANDIDATE_ROWS_FLOORED_SQL)
+    assert _norm(queries.session_active_predicate("s", stimulus_floor_param="$2")) in floored
+    assert "GREATEST(s.last_reacted_seq, $2)" in _norm(
+        queries.session_active_predicate("s", stimulus_floor_param="$2")
+    )
+
+
+def test_unreacted_sql_twins_share_the_template() -> None:
+    """Committed and floored unreacted queries are the SAME template rendered
+    at two watermark expressions — they cannot drift row-shape or filters."""
+    assert (
+        sweep._UNREACTED_ROWS_TEMPLATE.format(watermark_expr="s.last_reacted_seq")
+        == sweep.UNREACTED_ROWS_SQL
+    )
+    assert (
+        sweep._UNREACTED_ROWS_TEMPLATE.format(watermark_expr="GREATEST(s.last_reacted_seq, $2)")
+        == sweep.UNREACTED_ROWS_FLOORED_SQL
+    )
+
+
+def test_floored_confirmed_sql_generated_from_confirmed_unresolved_predicate() -> None:
+    """``CONFIRMED_ROWS_FLOORED_SQL`` composes the SAME confirmed-dispatch
+    boolean as the committed detector and the dispatch resolver, plus the seq
+    floor — one source, three consumers."""
+    floored = _norm(sweep.CONFIRMED_ROWS_FLOORED_SQL)
+    assert _norm(queries.confirmed_unresolved_predicate("lc", "$2")) in floored
+    assert "lc.seq > $3" in floored

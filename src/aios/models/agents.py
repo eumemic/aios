@@ -88,6 +88,15 @@ ToolTransport = Literal["cli", "agent_tool", "both"]
 # ``_ALLOWED_METHODS`` tuple in ``tools/http_request.py``.
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 
+# What happens to an in-flight model call when a new wake-eligible event (e.g.
+# a user message) arrives mid-step. "wait" (default): the step finishes and the
+# queued wake handles the event next step. "preempt": the model phase is
+# cancelled and the step restarts against context that includes the event.
+# Deliberately not named "interrupt" — that vocabulary is the broad operator
+# cancel-everything mechanism (``POST /sessions/:id/interrupt``); this is the
+# narrow, automatic, model-phase-only policy.
+PreemptPolicy = Literal["preempt", "wait"]
+
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 
 # Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
@@ -676,6 +685,15 @@ class AgentCreate(BaseModel):
     )
     window_min: int = Field(default=50_000, ge=1)
     window_max: int = Field(default=150_000, ge=1)
+    preempt_policy: PreemptPolicy = Field(
+        default="wait",
+        description=(
+            "Whether a new wake-eligible event (e.g. a user message) arriving "
+            "mid-step cancels the in-flight model call so the step restarts "
+            "against fresh context ('preempt'), or waits for the step to "
+            "finish ('wait', default)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentCreate:
@@ -709,6 +727,7 @@ class AgentUpdate(BaseModel):
     litellm_extra: dict[str, Any] | None = None
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
+    preempt_policy: PreemptPolicy | None = None
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentUpdate:
@@ -738,6 +757,7 @@ class Agent(BaseModel):
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
+    preempt_policy: PreemptPolicy = "wait"
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
@@ -757,6 +777,7 @@ class AgentVersion(BaseModel):
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
+    preempt_policy: PreemptPolicy = "wait"
     created_at: datetime
 
 
@@ -806,7 +827,7 @@ class StepSurface(BaseModel):
 
     Nominal replacement for the ``Agent | AgentVersion`` structural union (the
     two wire read-models) plus the ``agent_id=""``/``version=0`` sentinel that
-    encoded "no agent at all". Carries **exactly** the nine config fields the
+    encoded "no agent at all". Carries **exactly** the ten config fields the
     harness consumes off the loaded surface (verified by grep over every
     caller — nothing reads ``name``/``metadata``/``description``/``created_at``
     off it) plus a discriminated :data:`StepBinding` identity.
@@ -828,6 +849,7 @@ class StepSurface(BaseModel):
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
+    preempt_policy: PreemptPolicy
     binding: StepBinding
 
 

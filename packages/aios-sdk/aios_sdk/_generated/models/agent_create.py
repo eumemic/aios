@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.agent_create_preempt_policy import AgentCreatePreemptPolicy
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -41,6 +42,9 @@ class AgentCreate:
             accept this field from untrusted principals.
         window_min (int | Unset):  Default: 50000.
         window_max (int | Unset):  Default: 150000.
+        preempt_policy (AgentCreatePreemptPolicy | Unset): Whether a new wake-eligible event (e.g. a user message)
+            arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or
+            waits for the step to finish ('wait', default). Default: AgentCreatePreemptPolicy.WAIT.
     """
 
     name: str
@@ -55,6 +59,7 @@ class AgentCreate:
     litellm_extra: AgentCreateLitellmExtra | Unset = UNSET
     window_min: int | Unset = 50000
     window_max: int | Unset = 150000
+    preempt_policy: AgentCreatePreemptPolicy | Unset = AgentCreatePreemptPolicy.WAIT
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -109,6 +114,10 @@ class AgentCreate:
 
         window_max = self.window_max
 
+        preempt_policy: str | Unset = UNSET
+        if not isinstance(self.preempt_policy, Unset):
+            preempt_policy = self.preempt_policy.value
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -137,6 +146,8 @@ class AgentCreate:
             field_dict["window_min"] = window_min
         if window_max is not UNSET:
             field_dict["window_max"] = window_max
+        if preempt_policy is not UNSET:
+            field_dict["preempt_policy"] = preempt_policy
 
         return field_dict
 
@@ -219,6 +230,13 @@ class AgentCreate:
 
         window_max = d.pop("window_max", UNSET)
 
+        _preempt_policy = d.pop("preempt_policy", UNSET)
+        preempt_policy: AgentCreatePreemptPolicy | Unset
+        if isinstance(_preempt_policy, Unset):
+            preempt_policy = UNSET
+        else:
+            preempt_policy = AgentCreatePreemptPolicy(_preempt_policy)
+
         agent_create = cls(
             name=name,
             model=model,
@@ -232,6 +250,7 @@ class AgentCreate:
             litellm_extra=litellm_extra,
             window_min=window_min,
             window_max=window_max,
+            preempt_policy=preempt_policy,
         )
 
         return agent_create

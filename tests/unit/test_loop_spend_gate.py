@@ -52,6 +52,7 @@ async def test_spend_gate_trips_before_context_build() -> None:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
     with (
@@ -129,6 +130,7 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
     # Flat per-account meter is well under the cap; only the subtree rollup trips.
@@ -208,6 +210,7 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     compose = AsyncMock(side_effect=RuntimeError("stop after admission"))
     with (
@@ -275,6 +278,7 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     step_ctx = SimpleNamespace(
         messages=[{"role": "user", "content": "hi"}], tools=[], skill_versions=[], reacting_to=0

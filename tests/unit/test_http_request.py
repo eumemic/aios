@@ -49,6 +49,7 @@ def _agent(
         litellm_extra={},
         window_min=1000,
         window_max=100000,
+        preempt_policy="wait",
         binding=GenericChildBinding(session_id="ses_test"),
     )
 

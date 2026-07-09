@@ -11043,6 +11043,15 @@
             "type": "integer",
             "title": "Window Max"
           },
+          "preempt_policy": {
+            "type": "string",
+            "enum": [
+              "preempt",
+              "wait"
+            ],
+            "title": "Preempt Policy",
+            "default": "wait"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -11166,6 +11175,16 @@
             "minimum": 1.0,
             "title": "Window Max",
             "default": 150000
+          },
+          "preempt_policy": {
+            "type": "string",
+            "enum": [
+              "preempt",
+              "wait"
+            ],
+            "title": "Preempt Policy",
+            "description": "Whether a new wake-eligible event (e.g. a user message) arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or waits for the step to finish ('wait', default).",
+            "default": "wait"
           }
         },
         "additionalProperties": false,
@@ -11361,6 +11380,21 @@
               }
             ],
             "title": "Window Max"
+          },
+          "preempt_policy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "preempt",
+                  "wait"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preempt Policy"
           }
         },
         "additionalProperties": false,
@@ -11429,6 +11463,15 @@
           "window_max": {
             "type": "integer",
             "title": "Window Max"
+          },
+          "preempt_policy": {
+            "type": "string",
+            "enum": [
+              "preempt",
+              "wait"
+            ],
+            "title": "Preempt Policy",
+            "default": "wait"
           },
           "created_at": {
             "type": "string",

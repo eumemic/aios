@@ -183,6 +183,7 @@ async def create_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         litellm_extra=body.litellm_extra,
         window_min=body.window_min,
         window_max=body.window_max,
+        preempt_policy=body.preempt_policy,
         creator_session_id=session_id,
     )
     return agent.model_dump(mode="json")
@@ -209,6 +210,7 @@ async def update_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         litellm_extra=args.litellm_extra,
         window_min=args.window_min,
         window_max=args.window_max,
+        preempt_policy=args.preempt_policy,
         editor_session_id=session_id,
     )
     return agent.model_dump(mode="json")

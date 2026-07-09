@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.agent_preempt_policy import AgentPreemptPolicy
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ class Agent:
         skills (list[AgentSkillRef] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentLitellmExtra | Unset):
+        preempt_policy (AgentPreemptPolicy | Unset):  Default: AgentPreemptPolicy.WAIT.
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -62,6 +64,7 @@ class Agent:
     skills: list[AgentSkillRef] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentLitellmExtra | Unset = UNSET
+    preempt_policy: AgentPreemptPolicy | Unset = AgentPreemptPolicy.WAIT
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -117,6 +120,10 @@ class Agent:
         if not isinstance(self.litellm_extra, Unset):
             litellm_extra = self.litellm_extra.to_dict()
 
+        preempt_policy: str | Unset = UNSET
+        if not isinstance(self.preempt_policy, Unset):
+            preempt_policy = self.preempt_policy.value
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -150,6 +157,8 @@ class Agent:
             field_dict["http_servers"] = http_servers
         if litellm_extra is not UNSET:
             field_dict["litellm_extra"] = litellm_extra
+        if preempt_policy is not UNSET:
+            field_dict["preempt_policy"] = preempt_policy
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -231,6 +240,13 @@ class Agent:
         else:
             litellm_extra = AgentLitellmExtra.from_dict(_litellm_extra)
 
+        _preempt_policy = d.pop("preempt_policy", UNSET)
+        preempt_policy: AgentPreemptPolicy | Unset
+        if isinstance(_preempt_policy, Unset):
+            preempt_policy = UNSET
+        else:
+            preempt_policy = AgentPreemptPolicy(_preempt_policy)
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -265,6 +281,7 @@ class Agent:
             skills=skills,
             http_servers=http_servers,
             litellm_extra=litellm_extra,
+            preempt_policy=preempt_policy,
             archived_at=archived_at,
         )
 

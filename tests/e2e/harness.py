@@ -29,6 +29,7 @@ import asyncpg
 
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
+from aios.models.agents import PreemptPolicy
 from aios.models.events import Event
 from aios.models.sessions import Session
 from aios.services import agents as agents_service
@@ -383,6 +384,7 @@ class Harness:
         tool_specs: list[Any] | None = None,
         system: str = "You are a test assistant.",
         environment_config: Any | None = None,
+        preempt_policy: PreemptPolicy = "wait",
     ) -> Session:
         """Create an agent + session and append the initial user message.
 
@@ -448,6 +450,7 @@ class Harness:
             metadata={},
             window_min=50_000,
             window_max=150_000,
+            preempt_policy=preempt_policy,
             account_id=account_id,
         )
         session = await sessions_service.create_session(
