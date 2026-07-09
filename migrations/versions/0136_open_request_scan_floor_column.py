@@ -20,7 +20,7 @@ before the column is ratcheted. No backfill: the floor is lazily ratcheted on
 each hot session's first post-deploy step (see the companion service-code
 change), deliberately sidestepping a backfill-under-lock over large sessions.
 
-Split into its own revision — separate from 0135's ``CREATE INDEX
+Split into its own revision — separate from 0137's ``CREATE INDEX
 CONCURRENTLY`` — because a single revision that mixes transactional DDL with
 an ``autocommit_block()`` is a partial-apply wedge: the ADD COLUMN commits
 when the autocommit block opens, but ``alembic_version`` is stamped only
@@ -28,7 +28,7 @@ after ``upgrade()`` returns, so a killed/failed concurrent build leaves the
 column committed but the revision unstamped; a re-run then replays the ADD
 COLUMN into ``column already exists`` (the #152 dup-0122 hazard class).
 Precedent: 0099 / 0128 / 0131 do *only* ``CONCURRENTLY`` per revision — this
-revision follows the transactional-DDL half of that split, mirrored by 0135.
+revision follows the transactional-DDL half of that split, mirrored by 0137.
 
 The ``ALTER TABLE`` needs ACCESS EXCLUSIVE on ``sessions`` — the hottest
 table in the system (``UPDATE sessions ...`` on every event append). Even a
@@ -44,8 +44,8 @@ is still live is a **full outage** (``42703`` on every step / append) — see
 the runbook in #1747. Downgrade is marked production-unsafe-while-new-code-live;
 do not wire it into an automatic rollback path.
 
-Revision ID: 0134
-Revises: 0133
+Revision ID: 0136
+Revises: 0134
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0134"
-down_revision: str = "0133"
+revision: str = "0136"
+down_revision: str = "0134"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
