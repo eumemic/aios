@@ -18,7 +18,9 @@ from aios.models.agents import (
     StepSurface,
     ToolSpec,
 )
+from aios.pinned_transport import PinnedTransport
 from aios.tools.http_request import (
+    HTTP_REQUEST_DESCRIPTION,
     _classify_permission,
     _decode_body,
     _do_http_request,
@@ -305,10 +307,6 @@ def _patch_resolve_auth(headers: dict[str, str] | None = None) -> Any:
     )
 
 
-def _patch_safe_url(safe: bool = True) -> Any:
-    return patch("aios.tools.http_request.is_safe_url", return_value=safe)
-
-
 def _make_stub_client(
     *,
     response: httpx.Response | None = None,
@@ -320,7 +318,9 @@ def _make_stub_client(
     captured at import time so the patch doesn't recurse into itself."""
 
     class _Stub:
-        def __init__(self, **_: Any) -> None:
+        def __init__(self, **kw: Any) -> None:
+            if capture is not None:
+                capture["init_kwargs"] = kw
             if response is not None:
                 self._inner: httpx.AsyncClient | None = _REAL_ASYNC_CLIENT(
                     transport=httpx.MockTransport(lambda _req: response)
@@ -367,17 +367,41 @@ class TestHttpRequestHandler:
             )
         assert "does not match any enabled route" in excinfo.value.message
 
-    async def test_ssrf_blocked_url_returns_error(self, _stub_runtime: Any) -> None:
-        """The SSRF pre-flight blocks a private/internal target after the route
-        matches but before any upstream dispatch — coverage parity with
-        web_fetch's guard test (the offload to a worker thread doesn't change
-        this functional contract)."""
+    async def test_client_is_mounted_with_pinned_transport(self, _stub_runtime: Any) -> None:
+        """The SSRF guard lives in ``PinnedTransport`` (resolve-validate-pin at
+        connect time — see ``tests/unit/test_pinned_transport.py`` for the
+        behavioral rebinding assertions). The stub client swallows the transport,
+        so what this test can honestly pin down is *construction*: the dispatch
+        client must be mounted with ``PinnedTransport``, catching any future
+        refactor that silently drops the guard."""
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
         captured: dict[str, Any] = {}
         stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
         with (
             _patch_load_agent(agent),
-            _patch_safe_url(False),
+            _patch_resolve_auth(),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert isinstance(captured["init_kwargs"]["transport"], PinnedTransport)
+
+    async def test_plaintext_http_with_credential_is_refused(self, _stub_runtime: Any) -> None:
+        """SECURITY-02: a vault credential must not travel cleartext. A server
+        whose base_url is plain http + an attached Authorization header is
+        refused before any dispatch."""
+        agent = _agent(
+            http_servers=[
+                _server(base_url="http://api.example.com/v1", routes=[_route("/lights/*")])
+            ]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer x"}),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail) as excinfo,
         ):
@@ -385,8 +409,48 @@ class TestHttpRequestHandler:
                 "sess_x",
                 {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
             )
-        assert "private/internal" in excinfo.value.message
-        assert "url" not in captured  # blocked before any upstream dispatch
+        assert "plaintext" in excinfo.value.message
+        assert "url" not in captured  # refused before any upstream dispatch
+
+    async def test_https_with_credential_is_not_refused_by_scheme_rule(
+        self, _stub_runtime: Any
+    ) -> None:
+        """The same credentialed request over https is not refused by this rule
+        — it dispatches like any other happy path."""
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth({"Authorization": "Bearer x"}),
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
+
+    async def test_plaintext_http_without_credential_is_allowed(self, _stub_runtime: Any) -> None:
+        """A non-credentialed plaintext call is allowed — the rule gates on a
+        credential actually being attached, not on the scheme alone."""
+        agent = _agent(
+            http_servers=[
+                _server(base_url="http://api.example.com/v1", routes=[_route("/lights/*")])
+            ]
+        )
+        captured: dict[str, Any] = {}
+        stub = _make_stub_client(response=httpx.Response(200, content=b""), capture=captured)
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),  # ("vlt_x", {}) — no auth header attached
+            patch("aios.tools.http_request.httpx.AsyncClient", stub),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {"server_ref": "hue", "path": "/lights/1", "method": "GET"},
+            )
+        assert result["status"] == 200
 
     async def test_method_not_allowed_returns_error(self, _stub_runtime: Any) -> None:
         # A route scoped to GET refuses a POST at the gate (no upstream dispatch).
@@ -396,7 +460,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail) as excinfo,
         ):
@@ -417,7 +480,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth({"Authorization": "Bearer xyz"}),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -447,7 +509,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail),
         ):
@@ -488,7 +549,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -515,7 +575,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail),
         ):
@@ -558,7 +617,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth({"Authorization": "Bearer xyz"}),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -593,7 +651,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -622,7 +679,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth({"Authorization": "Bearer xyz"}),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -644,7 +700,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             result = await http_request_handler(
@@ -665,7 +720,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth({"Authorization": "Bearer broker-token"}),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             await http_request_handler(
@@ -705,7 +759,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth({"Authorization": "Bearer broker-token"}),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
         ):
             await http_request_handler(
@@ -736,7 +789,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail) as excinfo,
         ):
@@ -772,7 +824,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail),
         ):
@@ -809,7 +860,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail),
         ):
@@ -842,7 +892,6 @@ class TestHttpRequestHandler:
         with (
             _patch_load_agent(agent),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             pytest.raises(ToolBail),
         ):
@@ -878,7 +927,6 @@ class TestDoHttpRequest:
             return ("vlt", {"Authorization": "Bearer RUNTOKEN"})
 
         with (
-            _patch_safe_url(True),
             patch(
                 "aios.tools.http_request.httpx.AsyncClient",
                 _make_stub_client(response=httpx.Response(200, json={"ok": True}), capture=capture),
@@ -925,7 +973,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
@@ -964,7 +1011,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
@@ -989,7 +1035,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
@@ -1013,7 +1058,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
@@ -1036,7 +1080,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="on"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
                 record,
@@ -1059,7 +1102,6 @@ class TestOutboundSuppressionHttp:
         with (
             _patch_load_agent(agent, outbound_suppression="off"),
             _patch_resolve_auth(),
-            _patch_safe_url(),
             patch("aios.tools.http_request.httpx.AsyncClient", stub),
             patch(
                 "aios.tools.http_request.outbound_suppression_service.record_http_suppression",
@@ -1072,3 +1114,16 @@ class TestOutboundSuppressionHttp:
             )
         assert captured["method"] == "POST"
         record.assert_not_awaited()
+
+
+class TestHttpRequestDescription:
+    """#1759: teach the model the DIY Idempotency-Key retry pattern in the
+    tool description itself, since ``_RESERVED_HEADERS`` only strips
+    Authorization/Host and lets an agent-set Idempotency-Key header pass
+    to the wire unmodified."""
+
+    def test_mentions_idempotency_key_header(self) -> None:
+        assert "Idempotency-Key" in HTTP_REQUEST_DESCRIPTION
+
+    def test_mentions_reuse_on_retry(self) -> None:
+        assert "same value" in HTTP_REQUEST_DESCRIPTION or "reuse" in HTTP_REQUEST_DESCRIPTION

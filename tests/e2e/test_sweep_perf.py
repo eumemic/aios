@@ -29,16 +29,19 @@ import asyncpg
 import pytest
 
 from aios.db.queries import _SESSION_STATUS_EXPR
+from aios.db.queries.events import UNHARVESTED_MODEL_DISPATCH_PARKS_SQL
 from aios.harness.sweep import (
+    BATCH_RESULT_ROWS_SQL,
     CANDIDATE_ROWS_SQL,
     ERRORED_SESSIONS_SQL,
     FAST_PATH_PENDING_WORK_SQL,
     GHOST_ASST_SQL,
     GHOST_SPAN_START_SQL,
+    REFERENCED_ASST_BATCH_SQL,
     UNREACTED_ROWS_SQL,
 )
 from tests.conftest import needs_docker
-from tests.support import find_subplans_over_events
+from tests.support import find_seq_scans_over_events, find_subplans_over_events
 
 pytestmark = pytest.mark.docker
 
@@ -372,6 +375,26 @@ async def _seed_pathological(pool: asyncpg.Pool[Any]) -> list[str]:
             """
         )
 
+        # A single unharvested ``model_workflow_park`` span (#1707). This makes
+        # the migration-0131 park partial index non-empty on the seeded fixture,
+        # so the cross-session crash-recovery scan
+        # (``find_unharvested_model_dispatch_parks``) has a highly-selective index
+        # to seek into. With the index empty, a cost-based planner can (version-
+        # dependently, e.g. PG16) still pick a ``Seq Scan on events`` because the
+        # empty partial index and a full scan cost ~the same; one real matching
+        # row makes the partial index unambiguously cheaper than scanning the
+        # whole event log, on every supported Postgres version. Deliberately left
+        # unharvested (no ``model_workflow_harvest``/``harvest_end`` span for its
+        # ``run_id``) so it survives both ``NOT EXISTS`` anti-joins and the scan
+        # returns it — exercising the exact production plan the test EXPLAINs.
+        await conn.execute(
+            "INSERT INTO events (id, session_id, seq, kind, data, role, account_id) "
+            "VALUES ('ev_park_sess_perf_000', 'sess_perf_000', 100000, 'span', "
+            "$1::jsonb, NULL, 'acc_test_stub') "
+            "ON CONFLICT (id) DO NOTHING",
+            json.dumps({"event": "model_workflow_park", "run_id": "run_park_perf_000"}),
+        )
+
         # ANALYZE so the planner has fresh stats matching the fixture.
         await conn.execute("ANALYZE events")
         await conn.execute("ANALYZE sessions")
@@ -476,6 +499,35 @@ class TestNoCorrelatedSubplanOverEvents:
             f"{len(found)} correlated subplan(s) over events. GHOST_ASST_SQL must "
             f"stay bounded by the maintained sessions.open_tool_call_count scalar "
             f"(migration 0066), not an event-log subquery. See #840."
+        )
+
+    async def test_unharvested_park_scan_uses_index_not_seq_scan(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """``find_unharvested_model_dispatch_parks`` runs cross-session
+        (``scope_clause=""``) on every 30s periodic sweep. Before #1707 its
+        ``kind='span' AND data->>'event'='model_workflow_park'`` predicate had no
+        supporting index, so the outer scan and both ``NOT EXISTS`` anti-joins
+        fell to ``Seq Scan on events`` — cost proportional to the whole event log,
+        fleet-wide. Migration 0131 adds the park partial index plus the two
+        harvest companions; assert the planner picks index scans and no node in
+        the plan tree is a ``Seq Scan on events``.
+
+        ANALYZE the fixture first so the planner has stats: the partial indexes
+        are tiny (few or zero matching rows on the seeded fixture), so a
+        cost-based planner prefers them over a full seq scan once it knows the
+        table's true row count.
+        """
+        async with seeded_pool.acquire() as conn:
+            await conn.execute("ANALYZE events")
+        plan = await _explain(
+            seeded_pool, UNHARVESTED_MODEL_DISPATCH_PARKS_SQL.format(scope_clause="")
+        )
+        found = find_seq_scans_over_events(plan)
+        assert not found, (
+            f"find_unharvested_model_dispatch_parks seq-scans events: "
+            f"{len(found)} Seq Scan node(s) on events. The park/harvest partial "
+            f"indexes (migration 0131) must serve this cross-session sweep. See #1707."
         )
 
 
@@ -592,6 +644,57 @@ class TestGhostAsstSweepBounded:
         assert returned == {"sess_tc_open"}, (
             f"GHOST_ASST_SQL must return rows ONLY for sessions with "
             f"open_tool_call_count > 0; expected {{'sess_tc_open'}}, got {returned} (#840)."
+        )
+
+
+@needs_docker
+class TestBatchFilterBounded:
+    """#1729: the batch filter's assistant/result fetches are BOUNDED to the
+    batches referenced by the session's *unreacted* tool_call_ids — not the
+    session's entire lifetime.
+
+    The pre-#1729 filter ran two unbounded lifetime scans (every ``role='tool'``
+    row + every assistant ``tool_calls`` payload, 126 MB observed) and decoded
+    them on the worker event loop on every full sweep. The deep, fully-resolved
+    ``sess_tc_deep`` (500 turns x 4 tool_calls) is the fixture that would blow up
+    such a scan; here the bounded queries must return only the handful of rows
+    tied to a referenced batch id, no matter how deep the resolved history is.
+
+    Structural (row-set) assertions, not wall-clock — deterministic on any CI.
+    """
+
+    async def test_referenced_asst_scoped_to_containment_probe(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        # Probe for a single tool_call id belonging to ONE assistant turn deep in
+        # sess_tc_deep. The containment-bounded query must return exactly that
+        # one owning batch row, not the 500 assistant turns in the session.
+        probe_tcid = "tc_sess_tc_deep_250_0"
+        probes = [json.dumps([{"id": probe_tcid}])]
+        async with seeded_pool.acquire() as conn:
+            rows = await conn.fetch(REFERENCED_ASST_BATCH_SQL, "sess_tc_deep", probes)
+
+        assert len(rows) == 1, (
+            f"REFERENCED_ASST_BATCH_SQL must return ONLY the batch owning the "
+            f"probed tcid, got {len(rows)} rows — an unbounded scan leaked the "
+            f"deep resolved history (#1729)."
+        )
+        ids = {tcid for tcid in rows[0]["tool_call_ids"]}
+        assert probe_tcid in ids
+        # Payload-stripped: the row carries the id array, not the full ``data``.
+        assert "data" not in dict(rows[0])
+
+    async def test_batch_result_scoped_to_batch_ids(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        # Results are fetched ONLY for the specific batch ids, not every
+        # ``role='tool'`` row the deep session ever produced (2000 of them).
+        batch_ids = [f"tc_sess_tc_deep_250_{k}" for k in range(_N_TC_PER_ASST)]
+        async with seeded_pool.acquire() as conn:
+            rows = await conn.fetch(BATCH_RESULT_ROWS_SQL, "sess_tc_deep", batch_ids)
+
+        returned = {r["tool_call_id"] for r in rows}
+        assert returned == set(batch_ids), (
+            f"BATCH_RESULT_ROWS_SQL must return results ONLY for the requested "
+            f"batch ids; expected {set(batch_ids)}, got {returned} (#1729)."
         )
 
 

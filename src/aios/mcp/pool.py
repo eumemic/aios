@@ -55,8 +55,10 @@ from mcp.client.session import ClientSession, MessageHandlerFnT
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
+from aios.pinned_transport import PinnedTransport
 
 log = get_logger("aios.mcp.pool")
 
@@ -361,11 +363,19 @@ class McpSessionPool:
         async def _own() -> None:
             try:
                 async with AsyncExitStack() as stack:
+                    # PinnedTransport resolves-validates-pins the connect IP per
+                    # request: a tenant-supplied MCP URL (or a later DNS rebind
+                    # of it) that resolves to a private/internal address is
+                    # refused at the transport. The operator dev bypass set is
+                    # the same one the OAuth connect flow honors.
                     http_client: Any = await stack.enter_async_context(
                         httpx.AsyncClient(
                             headers=headers,
                             timeout=_MCP_HTTPX_TIMEOUT,
                             event_hooks={"response": [_make_error_hook(sink)]},
+                            transport=PinnedTransport(
+                                allow_hosts=get_settings().oauth_allow_insecure_host_set
+                            ),
                         )
                     )
                     read_stream, write_stream, _ = await stack.enter_async_context(

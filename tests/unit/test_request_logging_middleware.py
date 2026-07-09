@@ -70,6 +70,31 @@ def test_request_log_line_emitted() -> None:
     assert rec["duration_ms"] >= 0
 
 
+def test_request_log_redacts_ingest_token() -> None:
+    """The per-trigger ingest bearer token (a live credential in the URL path)
+    is redacted on the api.request line, so it never persists in request logs.
+
+    ``_FAKE_TOKEN`` is a dummy literal (no real ``aios_evt_`` prefix); the route
+    has nothing after the token, so ``…/ingest/<anything>`` → ``…/ingest/<redacted>``.
+    """
+    fake_token = "tok-not-a-real-secret"
+    app = FastAPI()
+    app.add_middleware(RequestLoggingMiddleware)
+
+    @app.post("/v1/triggers/ingest/{ingest_token}")
+    async def _ingest(ingest_token: str) -> dict[str, bool]:
+        return {"ok": True}
+
+    client = TestClient(app)
+    with capture_logs() as entries:
+        resp = client.post(f"/v1/triggers/ingest/{fake_token}", json={})
+    assert resp.status_code == 200
+
+    rec = _find_request_log(entries)
+    assert rec is not None
+    assert rec["path"] == "/v1/triggers/ingest/<redacted>"
+
+
 def test_status_captured_for_404() -> None:
     app = FastAPI()
     app.add_middleware(RequestLoggingMiddleware)

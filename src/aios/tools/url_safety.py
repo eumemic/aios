@@ -114,3 +114,20 @@ def is_safe_url(url: str) -> bool:
         # become SSRF bypass vectors
         log.warning("blocked_url_safety_error", url=url, error=str(exc))
         return False
+
+
+def is_cleartext_credential_target(url: str, *, allow_hosts: frozenset[str] = frozenset()) -> bool:
+    """True when sending a credential to ``url`` would expose it in cleartext:
+    the scheme is not https and the host is not operator-allow-listed.
+
+    Pure scheme+allowlist check — no DNS (connection-time IP validation is
+    ``PinnedTransport``'s job). Host matching mirrors ``_guard_url`` and
+    ``PinnedTransport``: the bare host or the ``host:port`` netloc form may
+    appear in ``allow_hosts`` (the dev-only ``Settings.oauth_allow_insecure_host_set``).
+    Callers AND this with "a credential is actually being attached".
+    """
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host not in allow_hosts and parsed.netloc.lower() not in allow_hosts

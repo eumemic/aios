@@ -128,6 +128,189 @@ class TestApproxTokensWithTools:
         assert approx_tokens(self._MSGS, tools=[]) == approx_tokens(self._MSGS)
 
 
+class TestApproxTokensEquivalenceMatrix:
+    """Issue #1744: the memoized primitives must not change what
+    ``approx_tokens`` returns.  Every slate here is checked against a
+    direct, unmemoized ``litellm.token_counter(messages=..., tools=...)``
+    call — the ground truth the old implementation delegated to directly.
+    """
+
+    _TOOL: ClassVar[dict[str, Any]] = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    }
+
+    _SYSTEM: ClassVar[dict[str, Any]] = {"role": "system", "content": "you are a helpful agent"}
+    _USER: ClassVar[dict[str, Any]] = {"role": "user", "content": "what files are here"}
+    _TOOL_CALL_MSG: ClassVar[dict[str, Any]] = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "tc_1",
+                "type": "function",
+                "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+            }
+        ],
+    }
+    _REASONING_MSG: ClassVar[dict[str, Any]] = {
+        "role": "assistant",
+        "content": "the answer",
+        "reasoning_content": "a long internal chain of deliberation",
+    }
+    _NAME_KEY_MSG: ClassVar[dict[str, Any]] = {
+        "role": "user",
+        "name": "alice",
+        "content": "hi there",
+    }
+    _LIST_CONTENT_MSG: ClassVar[dict[str, Any]] = {
+        "role": "user",
+        "content": [{"type": "text", "text": "hello from a list"}],
+    }
+    _TOOL_RESULT_MSG: ClassVar[dict[str, Any]] = {
+        "role": "tool",
+        "tool_call_id": "tc_1",
+        "content": "result payload text",
+    }
+
+    def _slates(self) -> list[list[dict[str, Any]]]:
+        return [
+            [],
+            [self._USER],
+            [self._SYSTEM, self._USER],
+            [self._SYSTEM, self._USER, self._TOOL_CALL_MSG],
+            [self._REASONING_MSG],
+            [self._NAME_KEY_MSG],
+            [self._LIST_CONTENT_MSG],
+            [self._TOOL_RESULT_MSG],
+            [
+                self._SYSTEM,
+                self._USER,
+                self._REASONING_MSG,
+                self._TOOL_CALL_MSG,
+                self._TOOL_RESULT_MSG,
+                self._NAME_KEY_MSG,
+                self._LIST_CONTENT_MSG,
+            ],
+        ]
+
+    def test_matches_direct_token_counter(self) -> None:
+        from litellm import token_counter
+
+        for tools in (None, [self._TOOL]):
+            for msgs in self._slates():
+                got = approx_tokens(msgs, tools=tools)
+                want = int(
+                    token_counter(
+                        messages=list(msgs),
+                        tools=list(tools) if tools else None,
+                    )
+                )
+                assert got == want, (msgs, tools, got, want)
+
+
+class TestApproxTokensCache:
+    """Issue #1744: memoization must be transparent — same results, but
+    the underlying ``token_counter`` isn't re-invoked on a repeat call
+    with fresh-but-equal dicts.
+    """
+
+    def test_repeat_call_makes_zero_token_counter_calls(self, monkeypatch: Any) -> None:
+        msgs = [
+            {"role": "user", "content": "warm the cache please, this is unique-9182"},
+            {"role": "assistant", "content": "sure thing"},
+        ]
+        # Warm the cache first (fresh dicts).
+        first = approx_tokens([dict(m) for m in msgs])
+
+        calls = {"n": 0}
+        real_token_counter = None
+        import litellm
+
+        real_token_counter = litellm.token_counter
+
+        def _counting(*args: Any, **kwargs: Any) -> int:
+            calls["n"] += 1
+            return int(real_token_counter(*args, **kwargs))
+
+        monkeypatch.setattr(litellm, "token_counter", _counting)
+
+        # Fresh-but-equal dicts (new objects, same content) must hit cache.
+        second = approx_tokens([dict(m) for m in msgs])
+
+        assert second == first
+        assert calls["n"] == 0
+
+    def test_changed_message_is_recounted(self) -> None:
+        a = [{"role": "user", "content": "version A of the message"}]
+        b = [{"role": "user", "content": "version B of the message, different"}]
+        assert approx_tokens(a) != approx_tokens(b)
+
+    def test_unserializable_payload_still_counted(self) -> None:
+        class Weird:
+            def __repr__(self) -> str:
+                return "Weird()"
+
+        # A message value that json.dumps can't natively serialize (falls
+        # back to `default=repr`, or fails outright) must still be counted,
+        # not raise.
+        msg = {"role": "user", "content": "hello", "_marker": Weird()}
+        result = approx_tokens([msg])
+        assert result >= 1
+
+    def test_cache_bound_enforced(self) -> None:
+        from aios.harness.tokens import _BODY_CACHE, _BODY_CACHE_MAX
+
+        # Blow well past the cache bound with unique messages; the cache
+        # must never exceed its max size.
+        for i in range(200):
+            approx_tokens([{"role": "user", "content": f"unique message body {i}"}])
+        assert len(_BODY_CACHE) <= _BODY_CACHE_MAX
+
+
+class TestApproxTokensThreaded:
+    """Issue #1744: concurrent calls (as the loop.py ``to_thread`` call
+    site will make) must return identical, correct results — no shared
+    mutable state races.
+    """
+
+    def test_concurrent_calls_agree(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        msgs: list[dict[str, Any]] = [
+            {"role": "system", "content": "you are a helpful agent"},
+            {"role": "user", "content": "what is the weather like today in paris"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": '{"city": "paris"}'},
+                    }
+                ],
+            },
+        ]
+        expected = approx_tokens(msgs)
+
+        def _call(_: int) -> int:
+            return approx_tokens([dict(m) for m in msgs])
+
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            results = list(ex.map(_call, range(64)))
+
+        assert all(r == expected for r in results)
+
+
 class TestEventTokenDelta:
     """``_event_token_delta`` is the pure per-event token contribution that
     ``append_event`` now computes BEFORE the row lock (issue #862).

@@ -185,6 +185,16 @@ async def _latest_cumulative_state(
 
 
 _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
+# Hard cap on the number of calibration spans the per-model ridge fit pulls
+# per query.  Without it the fetch had no ORDER BY / LIMIT / time bound and
+# scanned *every* successful calibration span ever logged for the model — a
+# row count that grows linearly and forever — on the step hot path
+# (``read_windowed_events``), eventually tripping the pool's 30 s
+# ``statement_timeout`` inside the session step and JSON-decoding all N rows
+# on the event loop.  1000 is large enough for a stable ridge fit while
+# riding migration 0024's ``((data->>'model'), seq DESC)`` partial index as a
+# bounded seek (``ORDER BY seq DESC LIMIT $2``).  See issue #1711.
+_MODEL_TOKEN_RATIO_SAMPLE_LIMIT = 1000
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
 _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS = 60.0
@@ -373,6 +383,23 @@ async def model_token_class_ratios(
     cached portions included — do NOT add ``cache_*`` breakdowns).  Uses
     the ``events_model_request_end_calibration_idx`` partial index
     (migration 0024).
+
+    **``account_id`` is intentionally not a query predicate — by design.**
+    These coefficients are model-intrinsic: the provider ``input_tokens``
+    is regressed on model-neutral, account-neutral local class counts, so
+    the fit is a deliberate *global-per-model* aggregate, not a
+    per-tenant one.  This is NOT a tenant leak.  Do **not** add an
+    ``account_id`` predicate: it would fragment the sample (slowing
+    calibration convergence) and require a new index without buying any
+    correctness.  The param is kept for signature/cache-key compatibility
+    with the scalar contract.
+
+    The fetch is bounded to the most recent
+    :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY seq DESC
+    LIMIT`` (issue #1711).  This rides the 0024 index as a bounded index
+    seek rather than an unbounded lifetime scan on the step hot path; the
+    limit is large enough that the ridge fit is stable while capping both
+    the SQL scan and the per-row JSON decode done on the event loop.
     """
     if k_bucket <= 0:
         raise ValueError("k_bucket must be positive")
@@ -403,8 +430,15 @@ async def model_token_class_ratios(
           AND (data->'model_usage') ? 'input_tokens'
           AND (data->'model_usage'->>'input_tokens') IS NOT NULL
           AND (data->>'local_tokens')::bigint > 0
+        -- Bound the scan to the most recent N spans (issue #1711): rides
+        -- migration 0024's ``((data->>'model'), seq DESC)`` partial index
+        -- as a bounded seek instead of a full lifetime scan on the step
+        -- hot path.  MIN_SAMPLES is still checked below the fetch.
+        ORDER BY seq DESC
+        LIMIT $2
         """,
         model,
+        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
     )
 
     if len(rows) < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
@@ -645,6 +679,18 @@ def _resolve_event_channel(
 
     Non-message events and message events with no identifiable role
     return NULL.
+
+    CROSS-REFERENCE (issue #1742): the ``channels`` SET clause in
+    :func:`append_event`'s seq-allocating UPDATE re-derives this SAME role
+    dispatch in SQL (user/tool arms via the ``chan_candidate`` param computed
+    just above that UPDATE; the assistant arm via ``is_assistant_message`` +
+    the row's own ``focal_channel``, which is exactly the ``focal_at_arrival``
+    value RETURNING hands this function's caller, since the UPDATE never
+    mutates ``focal_channel``). The two MUST stay identical — the integration
+    test matrix in ``tests/integration/test_tool_channel_stamp.py`` and the
+    sessions-channels invariant test enforce this by asserting
+    ``list_session_channels`` == ``recompute_session_channels`` after every
+    scripted append.
     """
     if kind != "message":
         return None
@@ -717,7 +763,7 @@ async def find_tool_result_event(
          WHERE session_id = $1
            AND account_id = $2
            AND kind = 'message'
-           AND data->>'role' = 'tool'
+           AND role = 'tool'
            AND data->>'tool_call_id' = $3
          LIMIT 1
         """,
@@ -1160,6 +1206,20 @@ async def append_event(
     delta = precomputed.token_delta
     resolved_tool_channel = precomputed.resolved_tool_channel
 
+    # ``chan_candidate`` (issue #1742): the channel address, if any, this
+    # append might introduce to the session's maintained ``channels`` set —
+    # mirrors ``_resolve_event_channel``'s user/tool arms exactly (the
+    # assistant arm is handled inline in the SET clause below via the row's
+    # own ``focal_channel``, since that value isn't known until the
+    # RETURNING). Non-message / role-less events pass NULL, contributing
+    # nothing to the array.
+    chan_candidate: str | None = None
+    if kind == "message":
+        if role == "user":
+            chan_candidate = orig_channel
+        elif role == "tool":
+            chan_candidate = resolved_tool_channel
+
     async with conn.transaction():
         seq_row = await conn.fetchrow(
             "UPDATE sessions "
@@ -1173,7 +1233,23 @@ async def append_event(
             "    last_reacted_seq = CASE "
             "        WHEN $7 THEN GREATEST(last_reacted_seq, "
             "            CASE WHEN $6 > 0 THEN $6 ELSE last_event_seq + 1 END) "
-            "        ELSE last_reacted_seq END "
+            "        ELSE last_reacted_seq END, "
+            # ``channels`` (issue #1742): maintain the session's channel set
+            # on the SAME row-locked UPDATE that allocates the seq — zero
+            # extra round trips, race-free. Mirrors ``_resolve_event_channel``
+            # (see cross-reference there): user/tool arms via ``$9``
+            # (``chan_candidate``, computed above before the lock); the
+            # assistant arm via ``$7 is_assistant_message`` + the row's own
+            # ``focal_channel`` (identical to what RETURNING hands the Python
+            # stamp below, since this UPDATE never writes ``focal_channel``).
+            # ``@>`` membership check avoids appending a duplicate.
+            "    channels = CASE "
+            "        WHEN $9::text IS NOT NULL AND NOT (channels @> ARRAY[$9::text]) "
+            "            THEN channels || $9::text "
+            "        WHEN $7 AND focal_channel IS NOT NULL "
+            "            AND NOT (channels @> ARRAY[focal_channel]) "
+            "            THEN channels || focal_channel "
+            "        ELSE channels END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
             "RETURNING last_event_seq, focal_channel",
             session_id,
@@ -1184,6 +1260,7 @@ async def append_event(
             reacting_to_seq,
             is_assistant_message,
             is_stimulus,
+            chan_candidate,
         )
         if seq_row is None:
             # Treat archived as "session no longer exists for write purposes."
@@ -1899,10 +1976,42 @@ async def read_message_events(
 async def list_session_channels(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[str]:
-    """Distinct channel addresses the session has interacted with, sorted.
+    """Channel addresses the session has interacted with, sorted.
 
-    Derived from the event log's ``channel`` column (stamped at append
-    time per :func:`_resolve_event_channel`).
+    Issue #1742: this used to run ``SELECT DISTINCT channel FROM events``
+    (O(session-size)) on EVERY step inside the harness's pre-inference
+    gather. It now reads the ``channels`` array maintained on the
+    ``sessions`` row itself — a primary-key point read, no ``events``
+    scan — by :func:`append_event`'s seq-allocating UPDATE (mirrors
+    :func:`_resolve_event_channel`; see the cross-reference there).
+    Array ``||`` append order is insertion order, not sorted order, so
+    this sorts before returning — preserving the old ``ORDER BY channel``
+    contract byte-for-byte.
+    """
+    row = await conn.fetchrow(
+        "SELECT channels FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    return sorted(row["channels"] or [])
+
+
+async def recompute_session_channels(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> list[str]:
+    """Recompute the channel set straight from the event log (fallback).
+
+    This is the OLD ``list_session_channels`` DISTINCT-scan query, kept
+    as the ground-truth recomputation for the repair path (issue #1742):
+    a rolling-deploy window where an old (pre-migration-code) container
+    appends a new channel after the ``channels`` column has already been
+    backfilled leaves the stored array stale relative to the event log.
+    Callers use this ONLY at cold hard-reject sites (``switch_channel``'s
+    membership check, the POST ``metadata.channel`` bound-check) — never
+    in the hot per-step loop path, which stays an O(1) ``sessions`` read
+    via :func:`list_session_channels`.
     """
     rows = await conn.fetch(
         """
@@ -2341,6 +2450,39 @@ async def find_latest_model_workflow_park(
     return data if isinstance(data, dict) else None
 
 
+# The crash-recovery park scan (#1635). Held as a module constant — rather than
+# inlined in :func:`find_unharvested_model_dispatch_parks` — so the perf test can
+# EXPLAIN the exact production query text and assert an index scan (not a
+# ``Seq Scan on events``). ``{scope_clause}`` is empty on the cross-session
+# periodic path, so the ``model_workflow_park`` partial index (migration 0131) is
+# what restricts the outer scan there; the two ``NOT EXISTS`` anti-joins are served
+# by the companion ``model_workflow_harvest_end`` / ``model_workflow_harvest``
+# partial indexes added in the same migration.
+UNHARVESTED_MODEL_DISPATCH_PARKS_SQL = (
+    "SELECT DISTINCT ON (p.session_id) p.session_id, p.account_id, "
+    "    p.data->>'run_id' AS run_id "
+    "FROM events p "
+    "WHERE p.kind = 'span' AND p.data->>'event' = 'model_workflow_park' "
+    "{scope_clause} "
+    # not yet folded (consumed)
+    "AND NOT EXISTS ("
+    "    SELECT 1 FROM events c "
+    "    WHERE c.session_id = p.session_id AND c.account_id = p.account_id "
+    "    AND c.kind = 'span' AND c.data->>'event' = 'model_workflow_harvest_end' "
+    "    AND c.data->>'run_id' = p.data->>'run_id'"
+    ") "
+    # not yet harvested (the run's terminal state was never written back)
+    "AND NOT EXISTS ("
+    "    SELECT 1 FROM events h "
+    "    WHERE h.session_id = p.session_id AND h.account_id = p.account_id "
+    "    AND h.kind = 'span' AND h.data->>'event' = 'model_workflow_harvest' "
+    "    AND h.data->>'run_id' = p.data->>'run_id'"
+    ") "
+    "AND p.data->>'run_id' IS NOT NULL "
+    "ORDER BY p.session_id, p.seq DESC"
+)
+
+
 async def find_unharvested_model_dispatch_parks(
     conn: asyncpg.Connection[Any],
     *,
@@ -2374,27 +2516,7 @@ async def find_unharvested_model_dispatch_parks(
     scope_clause = "AND p.session_id = $1" if session_id else ""
     params: list[Any] = [session_id] if session_id else []
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (p.session_id) p.session_id, p.account_id, "
-        "    p.data->>'run_id' AS run_id "
-        "FROM events p "
-        "WHERE p.kind = 'span' AND p.data->>'event' = 'model_workflow_park' "
-        f"{scope_clause} "
-        # not yet folded (consumed)
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM events c "
-        "    WHERE c.session_id = p.session_id AND c.account_id = p.account_id "
-        "    AND c.kind = 'span' AND c.data->>'event' = 'model_workflow_harvest_end' "
-        "    AND c.data->>'run_id' = p.data->>'run_id'"
-        ") "
-        # not yet harvested (the run's terminal state was never written back)
-        "AND NOT EXISTS ("
-        "    SELECT 1 FROM events h "
-        "    WHERE h.session_id = p.session_id AND h.account_id = p.account_id "
-        "    AND h.kind = 'span' AND h.data->>'event' = 'model_workflow_harvest' "
-        "    AND h.data->>'run_id' = p.data->>'run_id'"
-        ") "
-        "AND p.data->>'run_id' IS NOT NULL "
-        "ORDER BY p.session_id, p.seq DESC",
+        UNHARVESTED_MODEL_DISPATCH_PARKS_SQL.format(scope_clause=scope_clause),
         *params,
     )
     return [(r["session_id"], r["run_id"], r["account_id"]) for r in rows]

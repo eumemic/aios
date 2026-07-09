@@ -112,6 +112,13 @@ class _SweepAgentSurface:
     http_servers: list[HttpServerSpec]
 
 
+# The zero-tool, zero-server surface used as the fallback for a candidate whose
+# agent config could not be loaded (a race where the session/agent row is gone).
+# A call classified against it is never dispatched — consistent with leaving an
+# unresolvable call alone rather than fabricating work.
+_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
+
+
 # ─── query constants ─────────────────────────────────────────────────────────
 #
 # Sweep SQL lives here as module constants so tests/e2e/test_sweep_perf.py
@@ -159,6 +166,24 @@ GHOST_LIFECYCLE_SQL = """
        AND e.kind = 'lifecycle'
        AND e.data->>'event' = 'tool_confirmed'
        AND e.data->>'result' = 'allow'
+"""
+
+# Per-session agent surface (tools + http_servers) for the disposition
+# classifier. LEFT JOIN agent_versions to respect version pinning;
+# ``http_servers`` is fetched alongside ``tools`` so the classifier can apply
+# the arg-aware route refinement for ``http_request`` (#1076) — the same
+# refinement the dispatch and read paths apply. Shared by ghost repair
+# (:func:`find_and_repair_ghosts`) and the inference batch filter
+# (:func:`_filter_incomplete_batches`) via :func:`_load_surfaces`.
+AGENT_SURFACE_SQL = """
+    SELECT s.id AS session_id,
+           COALESCE(av.tools, a.tools) AS tools,
+           COALESCE(av.http_servers, a.http_servers) AS http_servers
+      FROM sessions s
+      JOIN agents a ON a.id = s.agent_id
+      LEFT JOIN agent_versions av
+        ON av.agent_id = s.agent_id AND av.version = s.agent_version
+     WHERE s.id = ANY($1::text[])
 """
 
 # Dispatch-marker spans: pre-invoke ``tool_execute_start`` events keyed by
@@ -238,7 +263,7 @@ CONFIRMED_ROWS_SQL = f"""
 # NULL → TRUE → the row still counts (every historical/unmarked result wakes
 # exactly as before); only the literal JSON ``true`` is excluded.
 UNREACTED_ROWS_SQL = """
-    SELECT e.session_id, e.data
+    SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE e.session_id = ANY($1::text[])
@@ -248,6 +273,68 @@ UNREACTED_ROWS_SQL = """
        AND e.seq > s.last_reacted_seq
 """
 
+# ─── batch filter: bounded, payload-stripped fetches (#1729) ─────────────────
+#
+# ``_filter_incomplete_batches`` decides, per candidate session, whether the
+# session's ONLY unreacted events are tool results from a batch whose sibling
+# tools are still in-flight (→ not yet ready). Its actual need is tiny: the
+# unreacted tool_call_ids (already fetched, seq-bounded by
+# ``UNREACTED_ROWS_SQL``) → their OWNING assistant batches → whether each such
+# batch's ids are fully covered by tool results.
+#
+# The pre-#1729 queries fetched the session's ENTIRE lifetime history — every
+# ``role='tool'`` message ever (``ALL_RESULT_ROWS_SQL``) and every assistant
+# message with tool_calls ever, WITH FULL ``data`` PAYLOAD (``ALL_ASST_ROWS_SQL``:
+# 126 MB of JSONB observed on the largest session). All of it was pulled over
+# the wire and JSON-decoded row-by-row on the worker event loop on EVERY full
+# sweep (~2/min), a 16.6s-median pre-model tax that grows linearly and forever
+# with session size. Neither query was seq-bounded or LIMITed.
+#
+# The two replacements below bound the scan to exactly what the filter inspects
+# and strip the payload to the only field it reads (``tool_calls[].id``):
+#
+# * ``REFERENCED_ASST_BATCH_SQL`` — assistant batches OWNING an unreacted tcid.
+#   The ``@>`` containment (``data->'tool_calls' @> $2``, one probe per unreacted
+#   tcid, built as ``[{"id": tcid}]``) restricts to the handful of assistant
+#   rows the unreacted results belong to — not the whole history. It projects
+#   ``jsonb_path_query_array(data->'tool_calls', '$[*].id')`` (the id array)
+#   rather than ``data``, so the 126 MB decode is gone even before bounding.
+#
+# * ``BATCH_RESULT_ROWS_SQL`` — tool results whose ``tool_call_id`` is one of the
+#   ids belonging to those referenced batches (``= ANY($2)``), not every
+#   ``role='tool'`` row the session has ever produced.
+#
+# Rows drop from ~65k (34k results + 30k assistants) to ~dozens, and the decoded
+# bytes from 126 MB to a few id strings.
+REFERENCED_ASST_BATCH_SQL = """
+    SELECT e.session_id,
+           jsonb_path_query_array(e.data->'tool_calls', '$[*].id') AS tool_call_ids
+      FROM events e
+     WHERE e.session_id = $1
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND e.data->'tool_calls' @> ANY($2::jsonb[])
+"""
+
+BATCH_RESULT_ROWS_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = $1
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+       AND e.data->>'tool_call_id' = ANY($2::text[])
+"""
+
+# ``ALL_RESULT_ROWS_SQL`` — every ``role='tool'`` result across a session set.
+# Retained for GHOST REPAIR (``find_and_repair_ghosts``), where the session set
+# is already bounded upstream by ``GHOST_ASST_SQL``'s ``open_tool_call_count > 0``
+# gate (migration 0066) — a fully-resolved session contributes zero rows. The
+# batch filter (#1729) no longer uses this for the has-unreacted path: it
+# fetches results per session and bounded to specific batch ids via
+# ``BATCH_RESULT_ROWS_SQL``. It IS reused by the dispatch-narrowing branch
+# (#1710, ``OPEN_CANDIDATES_ASST_SQL`` below) for the same reason ghost repair
+# reuses it: that branch's session set is already bounded to the handful of
+# sids with no unreacted events and no in-flight task.
 ALL_RESULT_ROWS_SQL = """
     SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
@@ -256,10 +343,18 @@ ALL_RESULT_ROWS_SQL = """
        AND e.role = 'tool'
 """
 
-ALL_ASST_ROWS_SQL = """
+# ``OPEN_CANDIDATES_ASST_SQL`` — assistant-with-tool_calls events for the
+# dispatch-narrowing branch of ``_filter_incomplete_batches`` (#1710). Scoped
+# to the caller-supplied session set (already narrowed to sids with an empty
+# unreacted set and no in-flight task — typically a handful per sweep) and
+# further bounded by ``open_tool_call_count > 0``, mirroring ``GHOST_ASST_SQL``:
+# a fully-resolved session contributes zero rows.
+OPEN_CANDIDATES_ASST_SQL = """
     SELECT e.session_id, e.data
       FROM events e
+      JOIN sessions s ON s.id = e.session_id
      WHERE e.session_id = ANY($1::text[])
+       AND s.open_tool_call_count > 0
        AND e.kind = 'message'
        AND e.role = 'assistant'
        AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
@@ -356,6 +451,53 @@ async def session_has_pending_work(
     if row is None:
         return False
     return bool(row["has_pending_work"])
+
+
+# ─── shared surface loading ──────────────────────────────────────────────────
+
+
+def _build_surfaces(agent_rows: list[Any]) -> dict[str, _SweepAgentSurface]:
+    """Materialize ``AGENT_SURFACE_SQL`` rows into ``_SweepAgentSurface`` per
+    session — the thin duck-typed ``Agent`` the disposition classifier reads.
+    """
+    from aios.models.agents import HttpServerSpec, load_tool_specs
+
+    surface_by_session: dict[str, _SweepAgentSurface] = {}
+    for r in agent_rows:
+        tools_list = r["tools"]
+        http_list = r["http_servers"]
+        surface_by_session[r["session_id"]] = _SweepAgentSurface(
+            tools=load_tool_specs(tools_list or []),
+            http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
+        )
+    return surface_by_session
+
+
+async def _load_surfaces(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> tuple[dict[str, _SweepAgentSurface], dict[str, set[str]]]:
+    """Load the per-session agent surface and confirmed-``allow`` tool_call ids
+    for ``session_ids``.
+
+    Two batched queries (no N+1): ``AGENT_SURFACE_SQL`` (tools + http_servers,
+    version-pinned) and ``GHOST_LIFECYCLE_SQL`` (``tool_confirmed``/``allow``
+    events). Returns ``(surface_by_sid, confirmed_by_sid)``. The confirmed set
+    is exactly the one :func:`_was_dispatched` consumes as ``confirmed_ids``, so
+    both ghost repair and the inference filter resolve the identical
+    confirmation-satisfied bit.
+    """
+    if not session_ids:
+        return {}, {}
+
+    agent_rows = await conn.fetch(AGENT_SURFACE_SQL, session_ids)
+    surface_by_sid = _build_surfaces(agent_rows)
+
+    lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
+    confirmed_by_sid: dict[str, set[str]] = {}
+    for r in lifecycle_rows:
+        confirmed_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+    return surface_by_sid, confirmed_by_sid
 
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
@@ -465,33 +607,14 @@ async def find_and_repair_ghosts(
     # bound). All other candidates are left alone (legitimately waiting).
     candidate_sids = list({c.session_id for c in candidates})
     async with pool.acquire() as conn:
-        # LEFT JOIN agent_versions to respect version pinning. ``http_servers``
-        # is fetched alongside ``tools`` so the classifier can apply the
-        # arg-aware route refinement for ``http_request`` (#1076) — the same
-        # refinement the dispatch and read paths apply.
-        agent_rows = await conn.fetch(
-            """
-            SELECT s.id AS session_id,
-                   COALESCE(av.tools, a.tools) AS tools,
-                   COALESCE(av.http_servers, a.http_servers) AS http_servers
-              FROM sessions s
-              JOIN agents a ON a.id = s.agent_id
-              LEFT JOIN agent_versions av
-                ON av.agent_id = s.agent_id AND av.version = s.agent_version
-             WHERE s.id = ANY($1::text[])
-            """,
-            candidate_sids,
-        )
-    from aios.models.agents import HttpServerSpec, load_tool_specs
+        # ``AGENT_SURFACE_SQL`` LEFT JOINs agent_versions to respect version
+        # pinning and fetches ``http_servers`` alongside ``tools`` so the
+        # classifier can apply the arg-aware route refinement for
+        # ``http_request`` (#1076) — the same refinement the dispatch and read
+        # paths apply.
+        agent_rows = await conn.fetch(AGENT_SURFACE_SQL, candidate_sids)
 
-    agent_surface_by_session: dict[str, _SweepAgentSurface] = {}
-    for r in agent_rows:
-        tools_list = r["tools"]
-        http_list = r["http_servers"]
-        agent_surface_by_session[r["session_id"]] = _SweepAgentSurface(
-            tools=load_tool_specs(tools_list or []),
-            http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
-        )
+    agent_surface_by_session = _build_surfaces(agent_rows)
 
     # Abandoned-client-call bound (#752): a client-result-pending call whose
     # assistant turn is older than this is treated as abandoned. The cutoff is
@@ -500,12 +623,11 @@ async def find_and_repair_ghosts(
     client_max_age = get_settings().client_tool_call_max_age_seconds
     abandoned_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=client_max_age)
 
-    empty_surface = _SweepAgentSurface(tools=[], http_servers=[])
     ghosts: list[_Candidate] = []
     abandoned: list[_Candidate] = []
     for c in candidates:
         confirmed = confirmed_by_session.get(c.session_id, set())
-        surface = agent_surface_by_session.get(c.session_id, empty_surface)
+        surface = agent_surface_by_session.get(c.session_id, _EMPTY_SURFACE)
         if _was_dispatched(c, confirmed, surface):
             ghosts.append(c)
         elif (
@@ -627,7 +749,11 @@ async def find_and_repair_ghosts(
                     "may_have_completed",
                     "Tool dispatch was interrupted after execution began. "
                     "The tool may have completed and side effects may have "
-                    "committed. Verify the outcome before retrying.",
+                    "committed. Verify the outcome before retrying. "
+                    "If the original call carried an Idempotency-Key header, "
+                    "retrying the identical request with the same header "
+                    "value is safe at providers that honor it; otherwise "
+                    "verify the outcome out-of-band before retrying.",
                 )
             )
         else:
@@ -914,11 +1040,43 @@ async def find_sessions_needing_inference(
     candidates -= errored
     confirmed_sessions -= errored
     to_filter = candidates - confirmed_sessions
-    filtered = (
-        await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
-        if to_filter
-        else set()
-    )
+    if not to_filter:
+        return confirmed_sessions | cancel_marked
+
+    # Span the batch filter (#1729): ``sweep.batch_filter_start/end``. Before
+    # #1729 this region fetched the session's entire assistant/tool-result
+    # lifetime (126 MB observed) and decoded it on the event loop — a
+    # multi-second pre-model stall that was invisible to every existing span
+    # (``sweep.query_exec`` measured only the scalar-gate SQL, ~0.01s). Bracket
+    # it so the next residual on this path is a query, not an archaeology dig
+    # (same lesson as #1658/#1725). Only spanned on the per-step scoped path
+    # (``session_id`` set), where an ``account_id`` is resolvable; the
+    # cross-session sweep has no single session to stamp.
+    if session_id is not None:
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        bf_start = await sessions_service.append_event(
+            pool,
+            session_id,
+            "span",
+            {"event": "sweep.batch_filter_start", "candidate_count": len(to_filter)},
+            account_id=account_id,
+        )
+        try:
+            filtered = await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
+        finally:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "sweep.batch_filter_end",
+                    "start_id": bf_start.id,
+                },
+                account_id=account_id,
+            )
+    else:
+        filtered = await _filter_incomplete_batches(pool, inflight_tool_registry, to_filter)
+
     return filtered | confirmed_sessions | cancel_marked
 
 
@@ -930,45 +1088,176 @@ async def _filter_incomplete_batches(
     """Remove sessions whose only unreacted events are tool results from
     in-progress batches (where sibling tools are still in-flight).
 
-    Uses three batched queries across all candidates (no N+1).
+    The unreacted set is fetched in ONE seq-bounded batched query
+    (``UNREACTED_ROWS_SQL``, gated by ``seq > last_reacted_seq``). The assistant
+    batches and their tool results are then fetched per session, but ONLY the
+    batches that OWN an unreacted tool_call_id and ONLY the tool results for
+    those batches' ids — via ``@>`` containment and ``= ANY`` rather than the
+    pre-#1729 unbounded lifetime scans (which pulled every ``role='tool'`` row
+    plus every assistant ``tool_calls`` payload — 126 MB observed — and decoded
+    it on the event loop on every full sweep). See the query docstrings above.
+    Sessions with no unreacted events (or whose unreacted set contains a user
+    message) are decided without touching ``events`` at all — EXCEPT the
+    dispatch-narrowing fetch below.
+
+    Empty-unreacted / no-in-flight sessions are narrowed further: a session is
+    woken from that branch ONLY if at least one of its open tool calls (no
+    result, no in-flight task) was actually **dispatched** by the harness. A
+    session parked purely on externally-executed work — a client ``custom`` call
+    awaiting the client's result POST, or an ``always_ask`` call awaiting
+    operator confirmation — is NOT dispatched, so it is left alone rather than
+    re-fired on every sweep (a full paid model step with only a
+    ``_PENDING_EXTERNAL`` placeholder as new context, #1710). This narrowing's
+    supporting fetch (``OPEN_CANDIDATES_ASST_SQL``) is scoped to ONLY the sids
+    that reach the empty-unreacted branch (typically a handful) and further
+    bounded by ``open_tool_call_count > 0`` — it does not resurrect the
+    pre-#1729 unbounded lifetime scan for the common (has-unreacted) path.
+
+    **Wedge-safety invariant (fail toward waking too much, never too little):**
+    a missed wake permanently wedges a months-long session; an extra wake costs
+    one step. This narrowing is safe because :func:`find_and_repair_ghosts` runs
+    BEFORE this filter (see the composed sweep): a genuinely-dispatched-but-
+    taskless call (a crashed-worker ghost) is error-repaired first, so its
+    synthesized result becomes an *unreacted* event and the session no longer
+    reaches this empty-unreacted branch; confirmed-``allow`` calls are woken via
+    the separate ``confirmed_sessions`` union that bypasses this filter. So by
+    the time a session lands here with an open, result-less, taskless call, that
+    call is either an unconfirmed ``always_ask`` or a client ``custom`` — both
+    ``not _was_dispatched`` — and a crashed built-in ghost classifies as
+    dispatched, so the narrowing never holds one back.
+
+    Uses batched queries across all candidates (no N+1).
     """
     session_list = list(candidates)
 
     async with pool.acquire() as conn:
         unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
-        all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_list)
-        all_asst_rows = await conn.fetch(ALL_ASST_ROWS_SQL, session_list)
+        unreacted_by_sid = _group_unreacted_rows(unreacted_rows)
 
-    unreacted_by_sid = _group_event_data(unreacted_rows)
-    results_by_sid = _group_tool_call_ids(all_result_rows)
-    asst_by_sid = _group_event_data(all_asst_rows)
+        result: set[str] = set()
+        # Sids whose unreacted set is empty and have no in-flight task —
+        # deferred to a single batched dispatch-narrowing pass below (#1710)
+        # rather than queried one-by-one inside this loop.
+        empty_no_inflight: list[str] = []
 
-    result: set[str] = set()
-    for sid in candidates:
-        in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
-        unreacted = unreacted_by_sid.get(sid, [])
+        for sid in candidates:
+            in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
+            unreacted = unreacted_by_sid.get(sid, [])
 
-        if not unreacted:
-            if not in_flight:
-                result.add(sid)
-            continue
-
-        if any(evt.get("role") == "user" for evt in unreacted):
-            result.add(sid)
-            continue
-
-        unreacted_tcids = {evt.get("tool_call_id") for evt in unreacted if evt.get("tool_call_id")}
-        all_result_ids = results_by_sid.get(sid, set())
-
-        for asst_data in asst_by_sid.get(sid, []):
-            batch_ids = {tc["id"] for tc in (asst_data.get("tool_calls") or []) if tc.get("id")}
-            if not (batch_ids & unreacted_tcids):
+            if not unreacted:
+                if not in_flight:
+                    empty_no_inflight.append(sid)
                 continue
-            if batch_ids <= all_result_ids:
+
+            if any(role == "user" for role, _ in unreacted):
                 result.add(sid)
-                break
+                continue
+
+            unreacted_tcids = {tcid for _, tcid in unreacted if tcid}
+            if not unreacted_tcids:
+                # Unreacted non-user events with no tool_call_id: pre-#1729 the
+                # assistant loop ran but no batch intersected the (empty)
+                # unreacted-tcid set, so the session was NOT admitted. Preserve
+                # that — skip the (now pointless) bounded fetch and drop it.
+                continue
+
+            # Bounded fetch (#1729): only the assistant batches that OWN one of
+            # this session's unreacted tool_call_ids, projected to their id
+            # arrays (no payload). One containment probe per unreacted tcid.
+            probes = [json.dumps([{"id": tcid}]) for tcid in unreacted_tcids]
+            asst_rows = await conn.fetch(REFERENCED_ASST_BATCH_SQL, sid, probes)
+
+            referenced_batches: list[set[str]] = []
+            all_batch_ids: set[str] = set()
+            for r in asst_rows:
+                batch_ids = {tcid for tcid in (r["tool_call_ids"] or []) if tcid}
+                if batch_ids & unreacted_tcids:
+                    referenced_batches.append(batch_ids)
+                    all_batch_ids |= batch_ids
+
+            if not referenced_batches:
+                continue
+
+            # Bounded fetch (#1729): only the tool results for THESE batches'
+            # ids, not the session's entire ``role='tool'`` history.
+            result_rows = await conn.fetch(BATCH_RESULT_ROWS_SQL, sid, list(all_batch_ids))
+            result_ids = {r["tool_call_id"] for r in result_rows if r["tool_call_id"]}
+
+            for batch_ids in referenced_batches:
+                if batch_ids <= result_ids:
+                    result.add(sid)
+                    break
+
+        # Dispatch-narrowing pass (#1710): batched across ONLY the sids that
+        # landed in the empty-unreacted/no-in-flight branch — not the whole
+        # candidate set — so the common (has-unreacted) path never pays for
+        # it. ``OPEN_CANDIDATES_ASST_SQL`` mirrors ``GHOST_ASST_SQL``'s
+        # ``open_tool_call_count > 0`` bound.
+        if empty_no_inflight:
+            all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, empty_no_inflight)
+            results_by_sid: dict[str, set[str]] = {}
+            for r in all_result_rows:
+                results_by_sid.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+
+            asst_rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, empty_no_inflight)
+            asst_by_sid = _group_event_data(asst_rows)
+
+            # Agent surface + confirmed-``allow`` ids for the dispatch
+            # classifier. The classifier reads only ``.tools``/``.http_servers``
+            # and the confirmed set matches the confirmed-dispatch path by
+            # construction.
+            surface_by_sid, confirmed_by_sid = await _load_surfaces(conn, empty_no_inflight)
+
+            for sid in empty_no_inflight:
+                in_flight = inflight_tool_registry.in_flight_tool_call_ids(sid)
+                # Wake only if at least one open call was dispatched (#1710).
+                # An empty ``open_calls`` (a stale counter — the maintained
+                # ``open_tool_call_count > 0`` with no actual open assistant
+                # tool_call) yields ``any(...) is False`` → not woken, which is
+                # correct: there is no open call to react to, and a real
+                # stimulus wakes the session via the normal unreacted path.
+                open_calls = _open_candidates_for(sid, asst_by_sid, results_by_sid, in_flight)
+                confirmed = confirmed_by_sid.get(sid, set())
+                surface = surface_by_sid.get(sid, _EMPTY_SURFACE)
+                if any(_was_dispatched(c, confirmed, surface) for c in open_calls):
+                    result.add(sid)
 
     return result
+
+
+def _open_candidates_for(
+    sid: str,
+    asst_by_sid: dict[str, list[dict[str, Any]]],
+    results_by_sid: dict[str, set[str]],
+    in_flight: set[str],
+) -> list[_Candidate]:
+    """Build the OPEN tool_calls for ``sid`` — assistant tool_calls with no
+    tool-result and no in-flight task — as ``_Candidate`` objects the dispatch
+    classifier (#1710) can inspect.
+
+    Mirrors the ghost-candidate construction in :func:`find_and_repair_ghosts`.
+    ``created_at`` is not carried on the batch-filter's assistant rows and the
+    disposition classifier does not read it, so a placeholder is used. Only
+    ``tool_name``/``arguments``/``tool_call_id`` drive ``_was_dispatched``.
+    """
+    result_ids = results_by_sid.get(sid, set())
+    open_calls: list[_Candidate] = []
+    for asst_data in asst_by_sid.get(sid, []):
+        for tc in asst_data.get("tool_calls") or []:
+            tcid = tc.get("id")
+            if not tcid or tcid in result_ids or tcid in in_flight:
+                continue
+            function = tc.get("function") or {}
+            open_calls.append(
+                _Candidate(
+                    session_id=sid,
+                    tool_call_id=tcid,
+                    tool_name=function.get("name", ""),
+                    created_at=dt.datetime.now(dt.UTC),
+                    arguments=function.get("arguments"),
+                )
+            )
+    return open_calls
 
 
 def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
@@ -979,10 +1268,17 @@ def _group_event_data(rows: list[Any]) -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
-def _group_tool_call_ids(rows: list[Any]) -> dict[str, set[str]]:
-    grouped: dict[str, set[str]] = {}
+def _group_unreacted_rows(
+    rows: list[Any],
+) -> dict[str, list[tuple[str | None, str | None]]]:
+    """Group ``UNREACTED_ROWS_SQL`` rows by session_id into (role, tool_call_id)
+    tuples. Payload-free counterpart of ``_group_event_data`` for the
+    projected-column query (#1738) — the batch filter only ever reads these
+    two fields.
+    """
+    grouped: dict[str, list[tuple[str | None, str | None]]] = {}
     for r in rows:
-        grouped.setdefault(r["session_id"], set()).add(r["tool_call_id"])
+        grouped.setdefault(r["session_id"], []).append((r["role"], r["tool_call_id"]))
     return grouped
 
 

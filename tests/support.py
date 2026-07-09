@@ -153,6 +153,32 @@ def find_unbounded_events_scan_over_seq(plan_node: dict[str, Any]) -> list[dict[
     return found
 
 
+def find_seq_scans_over_events(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every ``Seq Scan`` node in the plan tree whose scan target is the
+    ``events`` relation.
+
+    The plan-shape oracle for partial-index regression guards (issue #1707): the
+    ``model_workflow_park`` crash-recovery sweep seq-scanned ``events`` on every
+    30s cross-session pass because its ``kind='span' AND data->>'event'=
+    'model_workflow_park'`` predicate had no supporting index. With the migration
+    0131 partial indexes in place the planner picks an index scan; a dropped /
+    unusable index regresses back to a ``Seq Scan on events`` and lights this up.
+
+    Present-vs-absent, no wall-clock, no row-count threshold — same discipline as
+    :func:`find_subplans_over_events`.
+    """
+    found: list[dict[str, Any]] = []
+
+    def walk(node: dict[str, Any]) -> None:
+        if node.get("Node Type") == "Seq Scan" and node.get("Relation Name") == "events":
+            found.append(node)
+        for child in node.get("Plans", []):
+            walk(child)
+
+    walk(plan_node)
+    return found
+
+
 def has_external_disk_sort(plan_node: dict[str, Any]) -> bool:
     """True if any ``Sort`` node in the plan spilled to disk via an
     external merge.

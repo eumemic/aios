@@ -259,3 +259,33 @@ async def test_clone_mints_fresh_github_repo_id(pool: asyncpg.Pool[Any]) -> None
         assert grows[0]["id"].startswith(f"{GITHUB_REPOSITORY}_")
         assert grows[0]["repo_url"] == "http://r"
         assert grows[0]["ciphertext"] == b"cipher"
+
+
+async def test_clone_copies_channels_array(pool: asyncpg.Pool[Any]) -> None:
+    """Issue #1742: a cloned session's ``channels`` equals the parent's.
+
+    Events copy verbatim on clone (``EVENTS_POLICY``), so the parent's
+    maintained ``channels`` set is valid as-copied — this pins the
+    ``SESSIONS_POLICY["channels"] = Arm.COPY`` decision.
+    """
+    async with pool.acquire() as conn:
+        await register_jsonb_codec(conn)
+        agent_id, env_id = await _seed_agent_env(conn)
+        parent = make_id(SESSION)
+        await conn.execute(
+            """
+            INSERT INTO sessions (id, agent_id, environment_id, agent_version, title,
+                metadata, workspace_volume_path, env, account_id, last_event_seq, channels)
+            VALUES ($1, $2, $3, 1, 't', '{}'::jsonb, '/w/p', '{}'::jsonb, $4, 0,
+                ARRAY['chan_a', 'chan_b'])
+            """,
+            parent,
+            agent_id,
+            env_id,
+            ACCOUNT,
+        )
+
+        clone = await clone_session(conn, parent, account_id=ACCOUNT, workspace_path="/w/clone")
+        srow = await conn.fetchrow("SELECT channels FROM sessions WHERE id = $1", clone.id)
+        assert srow is not None
+        assert list(srow["channels"]) == ["chan_a", "chan_b"]

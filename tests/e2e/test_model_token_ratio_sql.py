@@ -19,6 +19,7 @@ import uuid
 import pytest
 
 from aios.db import queries
+from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT
 from aios.harness.tokens import CONTENT_CLASSES
 from aios.services import sessions as sessions_service
 from tests.e2e.harness import Harness
@@ -236,8 +237,10 @@ class TestModelTokenRatioSQL:
         assert ratio == pytest.approx(2.0, abs=0.01)
 
     async def test_lifetime_aggregate_retains_old_samples(self, harness: Harness) -> None:
-        """All historical calibration samples for the model contribute to
-        the aggregate; older samples do not fall out of a LIMIT-N window."""
+        """Below the sample limit, all historical calibration samples for the
+        model contribute to the aggregate (60 spans << the 1000-span bound of
+        issue #1711, so the ORDER BY seq DESC LIMIT is a no-op here); older
+        samples do not fall out of the window."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
         model = f"test-model-{uuid.uuid4().hex[:8]}"
         session = await harness.start("seed")
@@ -305,3 +308,30 @@ class TestModelTokenRatioSQL:
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
+
+    async def test_recency_bound_honors_recent_spans(self, harness: Harness) -> None:
+        """Recency honored (issue #1711): seed MORE than the sample limit,
+        with a deliberately skewed OLD tail (ratio 4.0) below the newest
+        ``_MODEL_TOKEN_RATIO_SAMPLE_LIMIT`` spans (ratio 1.5).  The
+        ``ORDER BY seq DESC LIMIT $2`` bound must select only the recent
+        window, so the fit reflects the recent regime, not the old tail."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        model = f"test-model-{uuid.uuid4().hex[:8]}"
+        session = await harness.start("seed")
+        # Old, skewed tail (ratio 4.0): seeded FIRST, so lowest seq.
+        for _ in range(20):
+            await _seed_valid_span(
+                harness, session.id, model=model, local_tokens=100, input_tokens=400
+            )
+        # Recent regime (ratio 1.5): fills the entire bounded window.
+        for _ in range(_MODEL_TOKEN_RATIO_SAMPLE_LIMIT):
+            await _seed_valid_span(
+                harness, session.id, model=model, local_tokens=100, input_tokens=150
+            )
+        async with harness._pool.acquire() as conn:
+            ratio = await queries.model_token_ratio(
+                conn, model, k_bucket=0.001, account_id=account_id
+            )
+        # Only the recent (1.5) spans are in-window; the 4.0 tail is excluded
+        # by the LIMIT, so the fit lands at the recent regime, not a blend.
+        assert ratio == pytest.approx(1.5, abs=0.02)

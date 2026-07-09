@@ -529,7 +529,26 @@ async def post_message(
         channel = metadata.get("channel")
         if isinstance(channel, str):
             async with pool.acquire() as conn:
-                bound = await queries.list_session_channels(conn, session_id, account_id=account_id)
+                bound = set(
+                    await queries.list_session_channels(conn, session_id, account_id=account_id)
+                )
+                if channel not in bound:
+                    # Repair-on-mismatch (issue #1742): before hard-rejecting,
+                    # recompute the ground truth from the event log — the
+                    # maintained ``channels`` array can be briefly stale in a
+                    # rolling-deploy window (an old container appended a new
+                    # channel without maintaining the column). If it
+                    # disagrees, repair the row and re-check.
+                    recomputed = set(
+                        await queries.recompute_session_channels(
+                            conn, session_id, account_id=account_id
+                        )
+                    )
+                    if recomputed != bound:
+                        await queries.set_session_channels(
+                            conn, session_id, sorted(recomputed), account_id=account_id
+                        )
+                        bound = recomputed
             if channel not in bound:
                 raise ValidationError(
                     f"metadata.channel={channel!r} is not a bound channel "

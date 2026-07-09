@@ -393,20 +393,36 @@ async def _materialize_github_clones(
     session_id: str,
     *,
     account_id: str,
-) -> tuple[list[GithubRepositoryResourceEcho], GitProxy | None]:
+) -> tuple[
+    list[GithubRepositoryResourceEcho],
+    list[GithubRepositoryResourceEcho],
+    GitProxy | None,
+]:
     """Decrypt tokens, start a per-session :class:`GitProxy`, then run
     the host-side clone for each attached github_repository — rewriting
     each working tree's ``origin`` to the proxy URL so the bind-mounted
     ``.git/config`` inside the sandbox carries no credential.
 
-    Returns the materialized echo list and the proxy (or ``None`` when
-    the session has no github_repository attachments).
+    Returns ``(materialized, attempted, proxy)`` (proxy is ``None`` when
+    the session has no github_repository attachments):
+
+    - ``materialized`` is the subset whose clone succeeded — these drive
+      the actual bind mounts.
+    - ``attempted`` is EVERY attached github_repository echo (whether or
+      not its clone succeeded). This is what the mount snapshot / drift
+      key is stamped from, so that a clone failure does not change the
+      drift key (issue #1725). If it did, the provision-time snapshot
+      (materialized-only) would be structurally unequal to the step-time
+      DB echo set (all-attached) forever, churning provision↔release on
+      every step for a *permanently* failing clone (e.g. a dead embedded
+      token).
 
     Per-repo clone failures are non-fatal — they log + append a
     lifecycle event and drop the repo from the materialized list (its
-    working tree won't be bind-mounted). The proxy stays alive for
-    sibling repos. Per-clone wall-clock is bounded by
-    ``Settings.github_clone_session_timeout_seconds`` (issue #697).
+    working tree won't be bind-mounted) while STAYING in the attempted
+    list. The proxy stays alive for sibling repos. Per-clone wall-clock
+    is bounded by ``Settings.github_clone_session_timeout_seconds``
+    (issue #697).
     """
     from aios.sandbox.git_proxy import repo_key
     from aios.services import github_repositories as github_repo_service
@@ -421,7 +437,7 @@ async def _materialize_github_clones(
             conn, session_id, account_id=account_id
         )
         if not echoes:
-            return [], None
+            return [], [], None
         echo_tokens: list[tuple[GithubRepositoryResourceEcho, str]] = []
         repos_map: dict[str, str] = {}
         for echo in echoes:
@@ -486,7 +502,12 @@ async def _materialize_github_clones(
                     },
                     account_id=account_id,
                 )
-        return materialized, proxy
+        # ``attempted`` is every attached echo regardless of clone outcome
+        # — the drift key is stamped from THIS, not ``materialized``, so a
+        # failed clone can't skew the provision-time snapshot below the
+        # step-time DB echo set (issue #1725).
+        attempted = [echo for echo, _ in echo_tokens]
+        return materialized, attempted, proxy
     except BaseException:
         try:
             await proxy.stop()
@@ -639,7 +660,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
     secret_proxy: SecretEgressProxy | None = None
     broker_registered = False
     try:
-        github_echoes, git_proxy = await _materialize_github_clones(
+        github_echoes, attempted_github_echoes, git_proxy = await _materialize_github_clones(
             session_id, account_id=account_id
         )
         # Start the per-session secret-egress proxy when the session has
@@ -697,6 +718,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
             session_env=session_env,
             memory_echoes=memory_echoes,
             github_echoes=github_echoes,
+            snapshot_github_echoes=attempted_github_echoes,
             git_proxy=git_proxy,
             tool_broker_url=tool_broker_url,
             tool_broker_secret=tool_broker_secret,
@@ -842,6 +864,7 @@ def _assemble_plan(
     git_proxy: GitProxy | None,
     tool_broker_url: str,
     tool_broker_secret: str,
+    snapshot_github_echoes: list[GithubRepositoryResourceEcho] | None = None,
     tool_socket_host_path: Path | None = None,
     snapshot_ref: str | None = None,
     snapshot_budget_bytes: int | None = None,
@@ -855,6 +878,14 @@ def _assemble_plan(
     the broker socket file is appended at
     ``TOOL_BROKER_SOCKET_SANDBOX_PATH``; the caller is expected to have
     set ``tool_broker_url`` to the matching ``unix://`` URL.
+
+    ``github_echoes`` drives the actual bind mounts (only successfully
+    cloned repos). ``snapshot_github_echoes`` — the set folded into the
+    ``mount_snapshot`` drift key — defaults to ``github_echoes`` but the
+    session path passes the ATTEMPTED (all-attached) set so a failed
+    clone does not shift the drift key below the step-time DB echo set
+    (issue #1725). The run path has no github attachments, so the
+    default keeps the two sets identical there.
     """
     from aios.sandbox.volumes import (
         ensure_session_attachments_dir,
@@ -1000,7 +1031,15 @@ def _assemble_plan(
         BASE_IMAGE_LABEL_KEY: image,
     }
 
-    snapshot = mount_snapshot_from_echoes(memory_echoes, github_echoes, env_var_credentials)
+    # Drift key is stamped from the ATTEMPTED github set (issue #1725):
+    # a repo whose clone failed still counts toward the snapshot so the
+    # provision-time key matches the step-time DB echo set (all attached
+    # repos), instead of dropping below it and churning provision↔release
+    # on every step forever for a permanently-failing clone.
+    snapshot_github = (
+        snapshot_github_echoes if snapshot_github_echoes is not None else github_echoes
+    )
+    snapshot = mount_snapshot_from_echoes(memory_echoes, snapshot_github, env_var_credentials)
     settings = get_settings()
     spec = SandboxSpec(
         session_id=session_id,

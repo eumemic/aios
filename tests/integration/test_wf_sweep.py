@@ -27,6 +27,7 @@ pytestmark = pytest.mark.integration
 
 AGENT_DEADLINE = 3600.0
 TOOL_STALE = 60.0
+CALL_LLM_STALE = 1200.0
 
 
 @pytest.fixture
@@ -123,7 +124,10 @@ async def _signal(
 async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
     async with pool.acquire() as conn:
         ids = await wf_queries.list_run_ids_needing_step(
-            conn, agent_deadline_seconds=AGENT_DEADLINE, tool_stale_seconds=TOOL_STALE
+            conn,
+            agent_deadline_seconds=AGENT_DEADLINE,
+            tool_stale_seconds=TOOL_STALE,
+            call_llm_stale_seconds=CALL_LLM_STALE,
         )
     return set(ids)
 
@@ -182,6 +186,34 @@ async def test_inflight_tool_wakes_past_redispatch_horizon(
     assert run_id not in await _needing(pool)
 
 
+async def test_inflight_call_llm_wakes_past_stale_horizon(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """#1706 — a ``call_llm()`` capability is worker-task-backed like ``tool``/
+    ``agent``: the worker runs the inference and writes its ``tool_result`` signal
+    only on completion. A worker crash mid-inference (restart / redeploy / OOM /
+    graceful-shutdown ``CancelledError``) leaves an open ``call_started`` with no
+    signal and no external resume, so — before the fix — the run wedged forever
+    (the CASE had no ``call_llm`` arm → NULL → the stale clause never fired).
+
+    An inflight ``call_llm`` below the horizon is a live inference — left alone;
+    aged ABOVE it, the stale clause re-wakes the run so the harvest re-dispatches
+    (at-least-once). This is NOT the gate pattern: a gate is external-resume-driven
+    and stays NULL-mapped (``test_inflight_gate_is_never_stale``)."""
+    pool = sweep_pool
+    run_id = await _make_run(pool)
+    # A live inference below the horizon must stay quiet.
+    await _call_started(pool, run_id, "sha:l#0", "call_llm", age_seconds=CALL_LLM_STALE / 2)
+    assert run_id not in await _needing(pool)
+    # Past the horizon: the crashed-worker backstop fires (before the fix: it did NOT).
+    await _call_started(pool, run_id, "sha:l#1", "call_llm", age_seconds=CALL_LLM_STALE * 2)
+    assert run_id in await _needing(pool)
+    # Resolved (the re-dispatched worker wrote its result) → quiet again.
+    await _call_result(pool, run_id, "sha:l#1")
+    # The still-young "sha:l#0" remains under the horizon, so the run is quiet.
+    assert run_id not in await _needing(pool)
+
+
 async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:
@@ -201,7 +233,10 @@ async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
     async def _needing_at_horizon() -> set[str]:
         async with sweep_pool.acquire() as conn:
             ids = await wf_queries.list_run_ids_needing_step(
-                conn, agent_deadline_seconds=AGENT_DEADLINE, tool_stale_seconds=horizon
+                conn,
+                agent_deadline_seconds=AGENT_DEADLINE,
+                tool_stale_seconds=horizon,
+                call_llm_stale_seconds=CALL_LLM_STALE,
             )
         return set(ids)
 
