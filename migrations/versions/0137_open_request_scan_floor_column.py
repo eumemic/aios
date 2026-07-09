@@ -45,22 +45,23 @@ the runbook in #1747. Downgrade is marked production-unsafe-while-new-code-live;
 do not wire it into an automatic rollback path.
 
 Revision ID: 0137
-Revises: 0134
+Revises: 0136
 
 Renumbered 0136 -> 0137 (and the companion index migration 0137 -> 0138) to
 resolve a concurrent-build migration-number collision with PR #1783 (issue
 #1746), which also claimed 0136 off the same master head. Per the collision
 resolution recorded on this PR: #1783 keeps 0136
-(``0136_sessions_open_tool_call_floor_seq.py``). #1783 has not merged yet and
-this branch predates master's own 0135 (``0135_lifecycle_seq_idx.py``,
-landed via #1754 after this branch's base), so neither 0135 nor 0136 exists
-in this branch's ``migrations/versions`` tree — pointing ``down_revision`` at
-either left the chain unresolvable (``KeyError`` in alembic's
-``ScriptDirectory``) for any checkout of this PR alone. ``down_revision``
-therefore points at 0134, this branch's actual last-known revision; whichever
-of #1783 / #1784 merges second is responsible for re-pointing its
-down_revision at the other's (and master's) actual landed revisions at merge
-/ rebase time (a rebase-time renumber, not a merge conflict).
+(``0136_sessions_open_tool_call_floor_seq.py``).
+
+Rebased onto master 2026-07-09: #1783 has now MERGED, so master's alembic head
+is 0136 (``0136_sessions_open_tool_call_floor_seq.py``). ``down_revision``
+therefore chains from 0136 — the current master head — giving the single linear
+ladder 0134 -> 0135 -> 0136 -> 0137 -> 0138 with 0138 as the sole head. This is
+the rebase-time re-point (0135 -> 0136) the earlier stacking note called for; it
+is a one-line down_revision change (0137 stays a free number > 0136), not a
+renumber and not a git conflict. Any future migration PR that lands before this
+one owns its own re-point + a re-run of
+``tests/unit/test_migration_chain.py`` before merge.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0137"
-down_revision: str = "0134"
+down_revision: str = "0136"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
