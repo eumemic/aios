@@ -123,6 +123,42 @@ class TestRace:
             )
         assert result is response
 
+    async def test_degraded_branch_cancellation_tears_down_model_task(self) -> None:
+        """Step-task cancellation while degraded (watcher already failed) must
+        still cancel the model child — it must not outlive the step (the
+        20-50s litellm HTTP call would otherwise run detached)."""
+        model_cancelled = asyncio.Event()
+        model_running = asyncio.Event()
+
+        async def model() -> Any:
+            model_running.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                model_cancelled.set()
+                raise
+
+        async def watcher(*args: Any, **kwargs: Any) -> int | None:
+            await model_running.wait()
+            raise RuntimeError("watcher exploded")
+
+        with patch.object(loop_mod, "_wait_for_preempt", watcher):
+            race = asyncio.create_task(
+                _race_model_against_preempt(
+                    model, MagicMock(), InflightToolRegistry(), SID, reacted_floor=0
+                )
+            )
+            await asyncio.wait_for(model_running.wait(), timeout=5)
+            # Let the watcher's failure propagate through asyncio.wait so the
+            # race reaches the degraded ``await model_task`` before the cancel.
+            # (If the cancel lands earlier, the asyncio.wait arm tears the
+            # model down instead — the asserted invariant holds either way.)
+            await asyncio.sleep(0.05)
+            race.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await race
+        assert model_cancelled.is_set()
+
     async def test_outer_cancellation_tears_down_both_and_propagates(self) -> None:
         """Operator interrupt / step timeout / shutdown cancel the STEP task;
         the race must cancel both children and re-raise — today's semantics."""
@@ -170,7 +206,6 @@ class TestWaitForPreempt:
         stimuli and invisible to the watermark)."""
         conn = MagicMock()
         conn.fetchrow = AsyncMock(return_value={"last_event_seq": 5, "last_stimulus_seq": 9})
-        conn.fetchval = AsyncMock(return_value=9)
         predicate = AsyncMock(return_value={SID})
         registry = InflightToolRegistry()
 
@@ -187,7 +222,6 @@ class TestWaitForPreempt:
         seq past the floor — ``cancelled_by`` is omitted, not fabricated."""
         conn = MagicMock()
         conn.fetchrow = AsyncMock(return_value={"last_event_seq": 5, "last_stimulus_seq": 7})
-        conn.fetchval = AsyncMock(return_value=7)
         predicate = AsyncMock(return_value={SID})
 
         with patch.object(loop_mod, "find_sessions_needing_inference", predicate):
@@ -208,7 +242,6 @@ class TestWaitForPreempt:
         ] * 10
         conn = MagicMock()
         conn.fetchrow = AsyncMock(side_effect=rows)
-        conn.fetchval = AsyncMock(return_value=11)
         predicate = AsyncMock(side_effect=[set(), {SID}])
 
         with patch.object(loop_mod, "find_sessions_needing_inference", predicate):
@@ -217,9 +250,10 @@ class TestWaitForPreempt:
             )
         assert result == 11
         # Exactly two full evaluations: first tick + the gate advance; the 9
-        # unchanged reads in between ran no predicate.
+        # unchanged reads in between ran no predicate. 12 fetchrows: 11 gate
+        # ticks + the post-eligibility cancelled_by re-read.
         assert predicate.await_count == 2
-        assert conn.fetchrow.await_count == 11
+        assert conn.fetchrow.await_count == 12
 
 
 # ─── _preempt_allowed (starvation guard) ──────────────────────────────────────

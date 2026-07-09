@@ -41,12 +41,15 @@ class _GatedModel:
     def __init__(self, harness: Harness) -> None:
         self._harness = harness
         self.release = asyncio.Event()
+        self.returned = asyncio.Event()
         self._entered: asyncio.Queue[None] = asyncio.Queue()
 
     async def acompletion(self, **kwargs: Any) -> Any:
         self._entered.put_nowait(None)
         await self.release.wait()
-        return self._harness._pop_response(**kwargs)
+        response = self._harness._pop_response(**kwargs)
+        self.returned.set()
+        return response
 
     async def wait_entered(self) -> None:
         await asyncio.wait_for(self._entered.get(), timeout=10.0)
@@ -138,6 +141,11 @@ class TestPreemptOnUserMessage:
         step = asyncio.create_task(harness.run_step(session.id))
         await gated_model.wait_entered()
         await harness.inject_message(session.id, "wait, actually...")
+        # Hold the gate through ~30 watcher ticks: a wrongly-armed watcher
+        # would preempt well within this window — releasing immediately would
+        # let model-first-on-ties mask the regression.
+        await asyncio.sleep(0.3)
+        assert not step.done()
         gated_model.release.set()
         await asyncio.wait_for(step, timeout=10.0)
 
@@ -148,6 +156,40 @@ class TestPreemptOnUserMessage:
         assert reply.data["reacting_to"] < injected_seq
         assert _spans(events, "step_preempted") == []
         # The injected message is the next step's work.
+        assert await harness.sessions_needing_inference(session.id) == {session.id}
+
+
+@needs_docker
+class TestScopeModelPhaseOnly:
+    async def test_message_after_model_returns_does_not_cancel_the_tail(
+        self, harness: Harness, gated_model: _GatedModel
+    ) -> None:
+        """Once the model call returns, the step runs to completion
+        un-preemptible (the watcher is torn down before the append/dispatch
+        tail). A message racing the tail is next step's work.
+
+        The inject waits for the model's return signal, so it lands in the
+        tail window (a few ms of appends) or just after the step — the
+        assertions hold in both cases; the structural guarantee (no watcher
+        survives the model's completion) is pinned deterministically by the
+        race unit tests. Injecting any earlier would race the still-running
+        model call, where preemption would be correct.
+        """
+        harness.script_model([assistant("committed reply")])
+        session = await harness.start("hello", preempt_policy="preempt")
+
+        step = asyncio.create_task(harness.run_step(session.id))
+        await gated_model.wait_entered()
+        gated_model.release.set()
+        await asyncio.wait_for(gated_model.returned.wait(), timeout=10.0)
+        await harness.inject_message(session.id, "too late for this turn")
+        await asyncio.wait_for(step, timeout=10.0)
+
+        events = await harness.all_events(session.id)
+        (reply,) = _assistants(events)
+        assert reply.data["content"] == "committed reply"
+        assert _spans(events, "step_preempted") == []
+        # The late message is unreacted — the next step's work.
         assert await harness.sessions_needing_inference(session.id) == {session.id}
 
 

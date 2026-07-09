@@ -420,7 +420,7 @@ async def _preempt_allowed(pool: Any, session_id: str, *, account_id: str) -> bo
     """
     async with pool.acquire() as conn:
         count = await conn.fetchval(_PREEMPT_STARVATION_COUNT_SQL, session_id, account_id)
-    if count is not None and count >= _PREEMPT_STARVATION_CAP:
+    if count >= _PREEMPT_STARVATION_CAP:
         log.info("step.preempt_starved", session_id=session_id, consecutive_preempts=count)
         return False
     return True
@@ -443,9 +443,12 @@ async def _wait_for_preempt(
     ``last_event_seq`` has advanced past the value captured BEFORE the previous
     full evaluation (so rows appended mid-evaluation are never skipped).
 
-    ``cancelled_by`` is the gate read's ``last_stimulus_seq`` when it lies past
-    the floor — the stimulus whose append tripped the gate. A confirmed-dispatch
-    or cancel-marker admission carries no stimulus past the floor → ``None``.
+    ``cancelled_by`` is ``last_stimulus_seq`` re-read AFTER the eligible
+    evaluation (a stimulus admitted by the predicate committed before its
+    snapshot, so the re-read always covers it — the pre-evaluation gate row can
+    be older than the admitting stimulus and would misattribute or drop it). A
+    confirmed-dispatch or cancel-marker admission carries no stimulus past the
+    floor → ``None``.
     """
     baseline: int | None = None
     while True:
@@ -460,7 +463,9 @@ async def _wait_for_preempt(
                 reacted_floor=reacted_floor,
             )
             if eligible:
-                last_stimulus = gate["last_stimulus_seq"]
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(_PREEMPT_GATE_SQL, session_id)
+                last_stimulus = None if row is None else row["last_stimulus_seq"]
                 if last_stimulus is not None and last_stimulus > reacted_floor:
                     return int(last_stimulus)
                 return None
@@ -506,7 +511,14 @@ async def _race_model_against_preempt(
             session_id=session_id,
             error=repr(watch_task.exception()),
         )
-        return await model_task
+        try:
+            return await model_task
+        except asyncio.CancelledError:
+            # Step-task cancellation while degraded: the model child must not
+            # outlive the step (same teardown as the asyncio.wait arm above).
+            model_task.cancel()
+            await asyncio.gather(model_task, return_exceptions=True)
+            raise
     # Watcher won: cancel the model phase. The stream teardown
     # (``response.aclose()``) runs in ``stream_litellm``'s own finally on
     # cancellation; already-streamed deltas were transient pg_notify only.
