@@ -24,7 +24,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
-from aios.harness import tool_dispatch
+from aios.harness import runtime, tool_dispatch
 from aios.harness.tool_dispatch import (
     _classify_tool_error,
     _tool_lifecycle,
@@ -255,9 +255,7 @@ class TestRejectUnofferedToolCalls:
         monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
         from aios.harness.inflight_tool_registry import InflightToolRegistry
 
-        monkeypatch.setattr(
-            tool_dispatch.runtime, "require_inflight_tool_registry", InflightToolRegistry
-        )
+        monkeypatch.setattr(runtime, "require_inflight_tool_registry", InflightToolRegistry)
 
         reject_unoffered_tool_calls(
             MagicMock(),

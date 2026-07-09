@@ -17,6 +17,8 @@ from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
+from aios.db import queries
+from aios.harness import runtime
 from aios.models.sessions import Err, Ok
 from aios.tools import workflow_completion
 from aios.tools.registry import ToolResult
@@ -53,13 +55,11 @@ class TestClosedRequestMessage:
 
 class TestClosedRequestErrorShortCircuit:
     async def test_returns_none_when_request_still_open(self, monkeypatch: Any) -> None:
-        monkeypatch.setattr(
-            workflow_completion.queries, "get_closed_request", AsyncMock(return_value=None)
-        )
+        monkeypatch.setattr(queries, "get_closed_request", AsyncMock(return_value=None))
         pool = mock.MagicMock()
         pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock.MagicMock())
         pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        monkeypatch.setattr(workflow_completion.runtime, "require_pool", lambda: pool)
+        monkeypatch.setattr(runtime, "require_pool", lambda: pool)
 
         result = await _closed_request_error("ses_1", "req_1")
         assert result is None
@@ -68,21 +68,21 @@ class TestClosedRequestErrorShortCircuit:
         # No request_id (or a malformed one) is the existing unknown_request path's
         # job downstream — this short-circuit must not swallow it.
         get_closed = AsyncMock()
-        monkeypatch.setattr(workflow_completion.queries, "get_closed_request", get_closed)
+        monkeypatch.setattr(queries, "get_closed_request", get_closed)
         result = await _closed_request_error("ses_1", None)
         assert result is None
         get_closed.assert_not_called()
 
     async def test_returns_terminal_error_when_closed(self, monkeypatch: Any) -> None:
         monkeypatch.setattr(
-            workflow_completion.queries,
+            queries,
             "get_closed_request",
             AsyncMock(return_value=(Err(error={"kind": "timeout"}), _CLOSED_AT)),
         )
         pool = mock.MagicMock()
         pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock.MagicMock())
         pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        monkeypatch.setattr(workflow_completion.runtime, "require_pool", lambda: pool)
+        monkeypatch.setattr(runtime, "require_pool", lambda: pool)
 
         result = await _closed_request_error("ses_1", "req_1")
         assert isinstance(result, ToolResult)
@@ -127,6 +127,7 @@ class TestHandlerLivenessFirst:
 
         assert result == {"ok": True}
         finish.assert_awaited_once()
+        assert finish.await_args is not None
         assert finish.await_args.kwargs["request_id"] == "req_1"
         assert finish.await_args.kwargs["outcome"] == Ok(result={"answer": "x"})
 
@@ -154,4 +155,5 @@ class TestHandlerLivenessFirst:
 
         assert result == {"ok": True}
         finish.assert_awaited_once()
+        assert finish.await_args is not None
         assert finish.await_args.kwargs["outcome"] == Err(error={"message": "nope"})
