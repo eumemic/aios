@@ -165,6 +165,30 @@ def _unit_no_session_cancel_harvest() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _unit_no_scan_floor_advance() -> Iterator[None]:
+    """Auto-mock the step prelude's perf-only scan-floor ratchet leaf (#1747).
+
+    ``compute_step_prelude`` calls
+    ``_advance_open_request_scan_floor_best_effort`` (which opens its own
+    ``conn.transaction()`` savepoint) right after ``get_open_obligations`` on
+    every step. Unit tests drive it over a MagicMock pool/conn that can't
+    await ``conn.transaction()`` — exactly the same shape as the sibling
+    ``harvest_session_cancel_markers`` stub above — so default the leaf to a
+    no-op here rather than let every such test hit the mock's ``TypeError``
+    (the leaf swallows it internally by design, but it still logs a warning
+    and leaves an unawaited-coroutine warning behind from the MagicMock
+    transaction context manager). The leaf's real behavior is covered by the
+    integration tier (``tests/integration/test_open_request_scan_floor.py``).
+    """
+    with mock.patch(
+        "aios.harness.step_context._advance_open_request_scan_floor_best_effort",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _unit_spend_state_ungated() -> Iterator[None]:
     """Auto-mock the pre-inference spend-admission collaborators.
 

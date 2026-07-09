@@ -520,10 +520,17 @@ async def get_open_request_ids(
     are partial-indexed (``events_request_opened_idx`` /
     ``events_request_response_idx``) so this stays
     a point lookup rather than a per-wake history scan.
+
+    #1747: ``floor_bounded=True`` — the anti-join scan is restricted to
+    ``req.seq >= sessions.open_request_scan_floor``, bounding the per-step cost
+    to O(open edges + request-edges-since-floor) instead of O(lifetime asks
+    served). See :func:`advance_open_request_scan_floor` for the invariant that
+    makes this safe (the floor never advances past a genuinely-open edge) and
+    the SEQ-PREFIX INVARIANT it depends on.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
         "SELECT req.data->>'request_id' AS rid FROM events req WHERE "
-        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True)
+        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True, floor_bounded=True)
         + "ORDER BY req.seq ASC",
         session_id,
         account_id,
@@ -567,6 +574,10 @@ async def get_open_obligations(
     NOTE: the cheap quiescence GUARD decision ("do I owe anything at all?") stays
     on :func:`get_open_request_ids` (bare ids) — it must NOT pay for the schema
     projection. Only the **content render** uses this widened model.
+
+    #1747: ``floor_bounded=True`` — same seq-range restriction as
+    :func:`get_open_request_ids`; see its docstring and
+    :func:`advance_open_request_scan_floor` for the invariant.
     """
     rows: list[asyncpg.Record] = await conn.fetch(
         "SELECT req.data->>'request_id' AS rid, "
@@ -576,7 +587,7 @@ async def get_open_obligations(
         "req.data->>'summary' AS summary, "
         "req.data->'output_schema' AS output_schema "
         "FROM events req WHERE "
-        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True)
+        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True, floor_bounded=True)
         + "ORDER BY req.seq ASC",
         session_id,
         account_id,
@@ -597,6 +608,93 @@ async def get_open_obligations(
     ]
 
 
+async def advance_open_request_scan_floor(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Ratchet ``sessions.open_request_scan_floor`` forward (#1747) — the
+    monotone scan-floor that bounds the per-step open-obligations anti-join
+    (:func:`get_open_request_ids` / :func:`get_open_obligations`,
+    ``floor_bounded=True``) to O(open edges + request-edges-since-floor)
+    instead of O(lifetime asks served).
+
+    ONE data-modifying-CTE statement — single snapshot, race-safe by the
+    SEQ-PREFIX INVARIANT (documented on :func:`aios.db.queries.open_request_anti_join`
+    and at ``append_event``: within a session, commit order == seq order and
+    events are never deleted/re-sequenced/truncated, so any statement
+    snapshot sees a seq-prefix of the session's history).
+
+    ``open_edges`` reuses :func:`~aios.db.queries.open_request_anti_join`
+    VERBATIM (``awaited_only=True, floor_bounded=True``) — no hand-copied
+    predicate, so this can never independently drift from what the readers
+    treat as "open". The new floor is:
+
+      * if any awaited open edge exists at/after the current floor: the seq
+        of the OLDEST such edge (``min``, not ``min + 1`` — the oldest open
+        edge sits AT the new floor, and readers use an inclusive
+        ``req.seq >= floor`` bound, so it must stay visible);
+      * else (every request edge at/after the floor is answered or
+        unawaited, i.e. nothing is open): one past the newest **request**
+        edge in the whole session (``max(seq) + 1`` over ALL
+        ``request_opened`` rows, open+answered+unawaited) — an O(1)
+        index-max on the partial ``request_opened`` index. Deliberately
+        NOT ``sessions.last_event_seq``: that column advances on every
+        ordinary event, which would force a floor **write** (the
+        monotone-``<`` guard only skips a no-op *value*, not a no-op
+        *statement*) on every step of every session, including the ~99% of
+        sessions that never had a perf problem (write amplification on the
+        common path). Request-edge-max is NULL — and so triggers no write
+        at all — for a session with zero request edges, and is otherwise
+        stable between asks.
+
+    Safety of the empty branch under the SEQ-PREFIX INVARIANT: ``open_edges``
+    empty (with the floor bound already applied) means no open awaited edge
+    has ``seq >= current floor``; since the floor never exceeds the oldest
+    open edge (this function's own invariant, inductively), that means NO
+    awaited edge is open at all. So every request edge with ``seq <= max`` is
+    either answered or unawaited, and ``max + 1`` skips only settled edges;
+    any FUTURE awaited edge necessarily has ``seq > max``, i.e.
+    ``seq >= new_floor``, so the readers' inclusive bound keeps it visible
+    the moment it is appended.
+
+    The ``WHERE ... AND open_request_scan_floor < (SELECT v FROM f)`` monotone
+    guard is what makes concurrent advances safe: two racing advances (e.g.
+    an #1747 step-path call racing a reconciliation-sweep read, or two
+    overlapping steps for the same re-entrant session) each recompute the same
+    deterministic value from their own snapshot, and only a strictly-forward
+    move commits — never a regression, and a stale loser is a no-op, not an
+    error.
+
+    Best-effort by contract: the ONLY use of this value is a perf bound, so a
+    lost/rolled-back advance leaves the floor exactly where it was — never
+    invisible-obligation risk. Callers on the hot step path MUST wrap this in
+    a SAVEPOINT and swallow+count any exception (a raw swallow would leave a
+    failed UPDATE's implicit abort poisoning the rest of the step's
+    transaction in PG) — see ``compute_step_prelude`` in
+    ``harness/step_context.py`` for the call site and its counted-swallow
+    contract.
+    """
+    await conn.execute(
+        "WITH open_edges AS ("
+        "    SELECT req.seq FROM events req WHERE "
+        + open_request_anti_join(sid="$1", acct="$2", awaited_only=True, floor_bounded=True)
+        + "), f AS ("
+        "    SELECT COALESCE("
+        "        (SELECT min(seq) FROM open_edges),"
+        "        (SELECT max(seq) + 1 FROM events e"
+        "           WHERE e.session_id = $1 AND e.account_id = $2"
+        "             AND e.kind = 'lifecycle' AND e.data->>'event' = 'request_opened')"
+        "    ) AS v"
+        ")"
+        "UPDATE sessions"
+        "   SET open_request_scan_floor = (SELECT v FROM f)"
+        " WHERE id = $1 AND account_id = $2"
+        "   AND (SELECT v FROM f) IS NOT NULL"
+        "   AND open_request_scan_floor < (SELECT v FROM f)",
+        session_id,
+        account_id,
+    )
+
+
 async def get_open_obligations_batch(
     conn: asyncpg.Connection[Any], session_ids: list[str], *, account_id: str
 ) -> dict[str, list[Obligation]]:
@@ -612,6 +710,18 @@ async def get_open_obligations_batch(
     :func:`services.sessions.compute_obligations` so the list-sessions /
     get-session obligations view pays exactly one DB round-trip for a batch of N
     sessions.
+
+    #1747: deliberately stays **unbounded** (``floor_bounded`` is NOT set) — its
+    ``sid`` is the batch array form ``ANY($1::text[])``, which is structurally
+    incompatible with the floor's scalar-subquery bound (see
+    :func:`~aios.db.queries.open_request_anti_join`'s guard, which raises if this
+    is ever flipped without also rewriting the bound as a LATERAL join). The
+    list-sessions accounting surface staying unbounded-by-design is intentional:
+    under any (guarded-against) floor bug, this reader is the independent
+    off-substrate ground truth the reconciliation sweep diffs against, and it
+    is not on the hot per-step path this issue targets (API-side, one
+    round-trip per batch — #1561 out of scope). A future LATERAL rewrite to
+    bound this path is a possible follow-up, not part of this change.
     """
     if not session_ids:
         return {}
