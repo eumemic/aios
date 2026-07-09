@@ -6604,6 +6604,345 @@
         }
       }
     },
+    "/v1/model-providers": {
+      "post": {
+        "tags": [
+          "model-providers"
+        ],
+        "summary": "Create",
+        "description": "Create a model-provider config for this account.\n\n``provider`` is a LiteLLM provider name (``anthropic``, ``openai``,\n``openrouter``, \u2026) \u2014 one active config per ``(account, provider)``; a\nsecond create for the same provider on this account 409s (archive the\nexisting one first to replace it). ``api_key`` is encrypted at rest and\nnever returned; ``api_base`` is stored plaintext for proxy/self-hosted\nrouting.",
+        "operationId": "create_model_provider",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProviderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProvider"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "model-providers"
+        ],
+        "summary": "List ",
+        "description": "List this account's own model-provider configs, newest first, excluding archived.\n\nOwn rows only \u2014 does not reflect whether an ancestor account's config\nwould win resolution for a provider this account has no row for.\nFirst page: optional ``provider`` filter + ``?limit=``. Subsequent\npages: ``?cursor=<next_cursor>`` (carries the filter).",
+        "operationId": "list_model_providers",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 200,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_ModelProvider_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/model-providers/{model_provider_id}": {
+      "get": {
+        "tags": [
+          "model-providers"
+        ],
+        "summary": "Get",
+        "description": "Fetch one model-provider config by id. ``api_key`` is never returned.",
+        "operationId": "get_model_provider",
+        "parameters": [
+          {
+            "name": "model_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model Provider Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProvider"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "model-providers"
+        ],
+        "summary": "Update",
+        "description": "Rotate the key and/or edit ``api_base``.\n\n``api_key`` omitted \u2192 keep the existing key (there is no way to clear it\nback to unset \u2014 archive and recreate instead). ``api_base`` omitted \u2192\nkeep; explicit ``null`` \u2192 clear.",
+        "operationId": "update_model_provider",
+        "parameters": [
+          {
+            "name": "model_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model Provider Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProviderUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProvider"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "model-providers"
+        ],
+        "summary": "Archive",
+        "description": "Archive a config and **zero its encrypted key**.\n\nHides it from default lists and from resolution; a future DB dump\ncannot leak the scrubbed key. Idempotent \u2014 archiving an already-archived\nconfig is a no-op, not a 404.",
+        "operationId": "archive_model_provider",
+        "parameters": [
+          {
+            "name": "model_provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Model Provider Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
     "/v1/connections": {
       "post": {
         "tags": [
@@ -13344,6 +13683,38 @@
         ],
         "title": "ListResponse[MemoryVersion]"
       },
+      "ListResponse_ModelProvider_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ModelProvider"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[ModelProvider]"
+      },
       "ListResponse_RecentChat_": {
         "properties": {
           "data": {
@@ -14579,6 +14950,132 @@
           "plaintext_key"
         ],
         "title": "MintKeyResponse"
+      },
+      "ModelProvider": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "api_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Base"
+          },
+          "api_key_set": {
+            "type": "boolean",
+            "title": "Api Key Set"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "api_key_set",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ModelProvider",
+        "description": "Read view of a model-provider config. ``api_key`` is never returned."
+      },
+      "ModelProviderCreate": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Provider"
+          },
+          "api_key": {
+            "type": "string",
+            "format": "password",
+            "title": "Api Key",
+            "writeOnly": true
+          },
+          "api_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Base"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "api_key"
+        ],
+        "title": "ModelProviderCreate",
+        "description": "Request body for ``POST /v1/model-providers``.\n\n``provider`` is a LiteLLM provider name (e.g. ``anthropic``, ``openai``,\n``openrouter``) \u2014 lower-cased and stripped so it matches what\n``litellm.get_llm_provider`` returns at resolve time regardless of the\ncaller's casing. ``api_key`` is write-only and required in v1 (a keyless\narm for unauthenticated self-hosted endpoints is a documented future\nextension, not yet supported)."
+      },
+      "ModelProviderUpdate": {
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "api_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Base"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ModelProviderUpdate",
+        "description": "Request body for ``PUT /v1/model-providers/{id}``.\n\n``api_key`` omitted \u2192 keep the existing key (rotation is opt-in via an\nexplicit value; there is no way to clear it back to unset in v1 \u2014 archive\nand recreate instead). ``api_base`` omitted \u2192 keep; explicit ``null`` \u2192\nclear (checked via ``model_fields_set``, not a sentinel default, since\n``None`` is itself a valid target value)."
       },
       "NativeButtons": {
         "properties": {

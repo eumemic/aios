@@ -100,6 +100,7 @@ from aios.cli.commands import connections as _connections  # noqa: E402
 from aios.cli.commands import dev as _dev  # noqa: E402
 from aios.cli.commands import envs as _envs  # noqa: E402
 from aios.cli.commands import init as _init  # noqa: E402
+from aios.cli.commands import model_providers as _model_providers  # noqa: E402
 from aios.cli.commands import ops as _ops  # noqa: E402
 from aios.cli.commands import sandbox as _sandbox  # noqa: E402
 from aios.cli.commands import session_templates as _session_templates  # noqa: E402
@@ -122,6 +123,7 @@ app.add_typer(_skills.app, name="skills")
 app.add_typer(_vaults.app, name="vaults")
 app.add_typer(_connections.app, name="connections")
 app.add_typer(_envs.app, name="envs")
+app.add_typer(_model_providers.app, name="model-providers")
 app.add_typer(_dev.app, name="dev")
 app.add_typer(_signal.app, name="signal")
 app.add_typer(_whatsapp.app, name="whatsapp")
