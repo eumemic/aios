@@ -91,6 +91,7 @@ dev = [
     "aios-echo-http",
     "aios-signal",
     "aios-slack",
+    "aios-sms",
     "aios-telegram",
     "aios-whatsapp",
 ]
