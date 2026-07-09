@@ -225,27 +225,83 @@ async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -
     return None if schema is None else _validate_value(value, schema)
 
 
+def _closed_request_message(outcome: Outcome, closed_at: Any) -> str:
+    """The terminal stop message for a `return`/`error` call that targets an
+    ALREADY-answered request (#1773 defect 1).
+
+    The ``deadline timeout`` wording is the exact string the incident's replay
+    eval (Arm D, 24/24 real trap points → 24/24 clean stops) validated as
+    actually stopping the model — use it verbatim for that case. Any other
+    closing (a duplicate self-answer, `no_return`, the child going away) still
+    gets a truthful, equally terminal message; it just isn't the specific
+    wording the eval pinned, since claiming "deadline timeout" for a close the
+    request itself caused would be false.
+    """
+    ts = closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
+    is_timeout = isinstance(outcome, Err) and outcome.error.get("kind") == "timeout"
+    qualifier = f"deadline timeout at {ts}" if is_timeout else f"at {ts}"
+    return (
+        f"this request was already answered ({qualifier}); "
+        "do not call return again — end your turn."
+    )
+
+
+async def _closed_request_error(session_id: str, request_id: Any) -> ToolResult | None:
+    """If ``request_id`` names a request that's ALREADY closed, the terminal
+    :class:`ToolResult` error `return`/`error` must surface BEFORE anything else
+    (schema validation included) — the #1773 liveness-first fix. ``None`` means
+    "proceed normally": the request is still open, or ``request_id`` doesn't
+    resolve to any request at all (the existing ``unknown_request`` path downstream
+    handles that untouched).
+
+    Checking liveness first (rather than after schema validation, as before) means
+    a child blindly re-answering a request that closed out from under it — e.g. the
+    caller's await deadline wrote a timeout response before the child's first
+    `return` landed — gets ONE clear stop signal instead of an endless
+    ``output_schema_violation`` bounce that never mentions the request is dead.
+    """
+    if not isinstance(request_id, str):
+        return None
+    async with runtime.require_pool().acquire() as conn:
+        closed = await queries.get_closed_request(conn, session_id, request_id=request_id)
+    if closed is None:
+        return None
+    outcome, closed_at = closed
+    return ToolResult(content=_closed_request_message(outcome, closed_at), is_error=True)
+
+
 async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    request_id = arguments.get("request_id")
+    # Liveness FIRST (#1773 defect 1): a closed request short-circuits here, before
+    # schema validation ever runs — otherwise a child answering a dead request that
+    # happens to send a schema-invalid value loops forever on the schema bounce and
+    # never learns the request is closed.
+    closed_error = await _closed_request_error(session_id, request_id)
+    if closed_error is not None:
+        return closed_error
     # Structured output: when the request demanded an output_schema, the value must
     # match it. A mismatch is a tool error the child retries on (no response written),
     # exactly like a malformed tool arg — so the workflow only ever harvests a
     # schema-valid value. error() is unconstrained (a child that can't conform bails).
-    schema_error = await _enforce_output_schema(
-        session_id, arguments.get("request_id"), arguments.get("value")
-    )
+    schema_error = await _enforce_output_schema(session_id, request_id, arguments.get("value"))
     if schema_error is not None:
         return ToolResult(content=schema_error, is_error=True)
     return await _finish(
         session_id,
-        request_id=arguments.get("request_id"),
+        request_id=request_id,
         outcome=Ok(result=arguments.get("value")),
     )
 
 
 async def error_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    request_id = arguments.get("request_id")
+    # Same liveness-first short-circuit as return_handler — see #1773 defect 1.
+    closed_error = await _closed_request_error(session_id, request_id)
+    if closed_error is not None:
+        return closed_error
     return await _finish(
         session_id,
-        request_id=arguments.get("request_id"),
+        request_id=request_id,
         outcome=Err(error={"message": arguments.get("message")}),
     )
 

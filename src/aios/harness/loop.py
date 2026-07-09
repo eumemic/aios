@@ -59,7 +59,11 @@ from aios.harness.step_context import (
 )
 from aios.harness.sweep import find_sessions_needing_inference, session_has_pending_work
 from aios.harness.tokens import approx_tokens, approx_tokens_by_class
-from aios.harness.tool_dispatch import launch_mcp_tool_calls, launch_tool_calls
+from aios.harness.tool_dispatch import (
+    launch_mcp_tool_calls,
+    launch_tool_calls,
+    reject_unoffered_tool_calls,
+)
 from aios.harness.tool_disposition import classify_tool_call
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
@@ -1257,13 +1261,41 @@ async def _run_session_step_body(
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
+        # ── harness invariant (#1773 defect 2): the callable set ≡ the offered set ──
+        #
+        # ``tools`` (== ``step_ctx.tools``, above) is the FROZEN array actually sent
+        # with THIS inference call — the model may only invoke a name present in it.
+        # A call naming anything else (unknown to the registry entirely, or
+        # registered-but-not-offered this step, e.g. ``return``/``error`` after the
+        # request that opened them closed) is REJECTED with a visible, typed tool
+        # error, never routed to a handler. Per-call granularity: an offered call in
+        # the same turn as an unoffered one still dispatches normally.
+        offered_names = {(t.get("function") or {}).get("name") for t in tools}
+        offered_calls = [tc for tc in tool_calls if _tc_name(tc) in offered_names]
+        unoffered_calls = [tc for tc in tool_calls if _tc_name(tc) not in offered_names]
+
+        if unoffered_calls:
+            reject_unoffered_tool_calls(
+                pool,
+                session_id,
+                unoffered_calls,
+                offered_names=sorted(n for n in offered_names if n),
+                account_id=account_id,
+            )
+            log.info(
+                "step.tools_rejected_unoffered",
+                session_id=session_id,
+                count=len(unoffered_calls),
+                tool_names=[_tc_name(tc) for tc in unoffered_calls],
+            )
+
         immediate: list[dict[str, Any]] = []
         mcp_immediate: list[dict[str, Any]] = []
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
         unknown_mcp: list[dict[str, Any]] = []
 
-        for tc in tool_calls:
+        for tc in offered_calls:
             kind = _classify_tool_call(tc, agent, mcp_server_map)
             if kind == "immediate":
                 immediate.append(tc)

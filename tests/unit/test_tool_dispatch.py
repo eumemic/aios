@@ -25,7 +25,12 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness import tool_dispatch
-from aios.harness.tool_dispatch import _classify_tool_error, _tool_lifecycle
+from aios.harness.tool_dispatch import (
+    _classify_tool_error,
+    _tool_lifecycle,
+    _unoffered_tool_message,
+    reject_unoffered_tool_calls,
+)
 from aios.services import sessions as sessions_service
 from aios.tools.bash import BashArgumentError
 from aios.tools.invoke import ToolBail, validate_arguments
@@ -211,6 +216,92 @@ class TestToolLifecycleEviction:
         evicted, append_result = await self._drive(monkeypatch, ValueError("oops"))
         assert evicted == ["ses_1"]
         assert append_result.await_args.kwargs["error"] == "ValueError: oops"
+
+
+class TestUnofferedToolMessage:
+    """The #1773 defect-2 rejection wording: short + imperative, names the
+    currently-offered tools."""
+
+    def test_names_the_call_and_the_offered_set(self) -> None:
+        msg = _unoffered_tool_message("return", ["bash", "read"])
+        assert "return" in msg
+        assert "not offered" in msg
+        assert "bash" in msg and "read" in msg
+        assert "do not call it" in msg
+
+    def test_empty_offered_set_is_worded_clearly(self) -> None:
+        msg = _unoffered_tool_message("return", [])
+        assert "return" in msg
+        assert "none offered right now" in msg
+
+
+class TestRejectUnofferedToolCalls:
+    """``reject_unoffered_tool_calls`` — the #1773 defect-2 harness invariant: a call
+    naming a tool absent from the step's frozen offered set is rejected through the
+    exact same lifecycle bracket a real dispatch uses (span pair, dedup-guarded
+    ``is_error=True`` result, tail sweep) — it just never reaches a handler.
+    """
+
+    async def _drive(
+        self, monkeypatch: Any, tool_calls: list[dict[str, Any]], offered_names: list[str]
+    ) -> Any:
+        monkeypatch.setattr(
+            sessions_service,
+            "append_event",
+            AsyncMock(return_value=MagicMock(id="span_1")),
+        )
+        append_result = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_result)
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
+        from aios.harness.inflight_tool_registry import InflightToolRegistry
+
+        monkeypatch.setattr(
+            tool_dispatch.runtime, "require_inflight_tool_registry", InflightToolRegistry
+        )
+
+        reject_unoffered_tool_calls(
+            MagicMock(),
+            "ses_1",
+            tool_calls,
+            offered_names=offered_names,
+            account_id="acc_1",
+        )
+        # The tasks are launched fire-and-forget; give the loop a beat to run them.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return append_result
+
+    async def test_rejects_with_is_error_and_names_offered_set(self, monkeypatch: Any) -> None:
+        call = {"id": "tc_1", "function": {"name": "return", "arguments": "{}"}}
+        append_result = await self._drive(monkeypatch, [call], ["bash", "read"])
+        assert append_result.await_count == 1
+        args = append_result.await_args.args
+        kwargs = append_result.await_args.kwargs
+        assert args[1] == "ses_1"  # session_id
+        assert args[3] == "return"  # tool name
+        error = kwargs["error"]
+        assert "return" in error
+        assert "not offered" in error
+        assert "bash" in error and "read" in error
+
+    async def test_never_reaches_a_handler(self, monkeypatch: Any) -> None:
+        """The tool's own handler must not run — only the rejection path does."""
+        call = {"id": "tc_1", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+        invoke_builtin = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke_builtin)
+        await self._drive(monkeypatch, [call], ["read"])
+        invoke_builtin.assert_not_called()
+
+    async def test_per_call_granularity(self, monkeypatch: Any) -> None:
+        """Only the unoffered calls in the batch are rejected — each independently."""
+        calls = [
+            {"id": "tc_1", "function": {"name": "return", "arguments": "{}"}},
+            {"id": "tc_2", "function": {"name": "error", "arguments": "{}"}},
+        ]
+        append_result = await self._drive(monkeypatch, calls, [])
+        assert append_result.await_count == 2
+        names = {c.args[3] for c in append_result.await_args_list}
+        assert names == {"return", "error"}
 
 
 class TestCancelDuringStartSpan:

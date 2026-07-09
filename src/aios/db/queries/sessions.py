@@ -697,6 +697,37 @@ async def get_request_output_schema(
     return schema if schema is not None else None
 
 
+async def get_closed_request(
+    conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
+) -> tuple[Outcome, Any] | None:
+    """The terminal ``(outcome, closed_at)`` of a request that has ALREADY been
+    answered, or ``None`` if it's still open (or ``request_id`` names no request
+    at all — the caller's own ``unknown_request`` path handles that).
+
+    The #1773 liveness-first primitive: ``return``/``error`` must check this
+    BEFORE doing any other work (schema validation included) so a child blindly
+    answering a request that closed out from under it (e.g. the run's await
+    deadline wrote a timeout response first) gets one clear terminal stop signal
+    instead of an endless schema-bounce loop that never mentions the request is
+    dead. Reads the same ``request_response`` lifecycle event
+    :func:`read_request_response` does, plus its ``created_at`` (the closing
+    timestamp the stop message quotes). Like :func:`get_request_output_schema`,
+    ``session_id`` is a unique PK and so is sufficient scope on its own — no
+    ``account_id`` predicate, so the tool path resolves this without first
+    looking up the session's account.
+    """
+    row = await conn.fetchrow(
+        "SELECT data, created_at FROM events WHERE session_id = $1 "
+        "AND kind = 'lifecycle' AND data->>'event' = 'request_response' "
+        "AND data->>'request_id' = $2 ORDER BY seq DESC LIMIT 1",
+        session_id,
+        request_id,
+    )
+    if row is None:
+        return None
+    return queries.outcome_from_jsonb(row["data"]), row["created_at"]
+
+
 async def count_request_nudges(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> int:
