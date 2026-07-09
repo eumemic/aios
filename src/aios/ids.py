@@ -71,6 +71,10 @@ WORKFLOW_EVENT: Final = "wfe"
 # Run→child spawns reuse the workflow ``call_key`` as the request_id; the API
 # caller (#1128) has no call_key, so it mints a fresh ``req_`` id here.
 REQUEST: Final = "req"
+# Per-account model-provider config: an encrypted api_key + plaintext
+# api_base for one (account, provider) pair, resolved nearest-ancestor-wins
+# up the account tree at model-call time. See migration 0140.
+MODEL_PROVIDER: Final = "mp"
 
 _PREFIXES: Final = frozenset(
     {
@@ -102,6 +106,7 @@ _PREFIXES: Final = frozenset(
         WORKFLOW_RUN,
         WORKFLOW_EVENT,
         REQUEST,
+        MODEL_PROVIDER,
     }
 )
 
