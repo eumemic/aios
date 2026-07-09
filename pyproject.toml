@@ -89,6 +89,7 @@ dev = [
     "aios-slack",
     "aios-telegram",
     "aios-whatsapp",
+    "hypothesis>=6.156.4",
 ]
 
 [project.scripts]

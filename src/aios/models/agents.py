@@ -408,6 +408,61 @@ def validate_http_servers(servers: list[HttpServerSpec]) -> None:
         seen.add(server.base_url)
 
 
+def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
+    """Cross-item invariant for ingress ``mcp_servers`` lists: unique ``name``.
+
+    ``name`` is the sole join key used everywhere a server is looked up (the
+    ``mcp_toolset.mcp_server_name`` cross-reference, the ``mcp__<name>__<tool>``
+    dispatch namespace, ``discover_session_mcp_tools``'s ``{name: spec}`` map)
+    — a second entry with the same ``name`` is unreachable dead config at best
+    (only the runtime's last-writer-wins lookup would ever be used) and, at the
+    attenuation meet (:mod:`aios.models.attenuation`, keyed on the joint
+    ``(name, url)``), a same-name pair with differing ``url``/``headers``
+    breaks the normal-form contract ``attenuate(x, x) == canonicalize(x)``
+    (the meet's launcher-verbatim survival picks whichever same-key entry
+    happens to land last in the dict comprehension, which the un-deduped
+    input was never guaranteed to reproduce). Reject at the ingress boundary
+    rather than let it silently persist.
+    """
+    seen: set[str] = set()
+    for server in servers:
+        if server.name in seen:
+            raise ValueError(f"duplicate mcp server name {server.name!r}")
+        seen.add(server.name)
+
+
+def validate_tools(tools: list[ToolSpec]) -> None:
+    """Cross-item invariant for ingress ``tools`` lists: unique attenuation identity.
+
+    Mirrors :func:`validate_http_servers`/:func:`validate_mcp_servers` for the
+    tools dimension, keyed on the same identity the attenuation meet joins on
+    (``models.attenuation._tool_key``, reproduced inline here to avoid a
+    downward import from this module into ``attenuation``): builtins by
+    ``type``, custom tools by ``name``, MCP toolsets by ``mcp_server_name``. A
+    second entry sharing a key is unreachable dead config (only one survives
+    any runtime lookup keyed the same way — the CLI broker's
+    ``_find_builtin_spec``/``_find_mcp_toolset``, the resolver ladder in this
+    module) and, worse, at the attenuation meet it makes
+    ``attenuate(x, x) != canonicalize(x)``: the meet's launcher lookup is a
+    ``{key: spec}`` dict (one entry wins), while ``canonicalize`` keeps every
+    entry in the output list — so a duplicate key fails the module's own
+    documented normal-form contract before it ever reaches the
+    security-relevant clamp. Reject at the ingress boundary.
+    """
+    seen: set[tuple[str, str | None]] = set()
+    for t in tools:
+        if t.type == "mcp_toolset":
+            key: tuple[str, str | None] = ("mcp_toolset", t.mcp_server_name)
+        elif t.type == "custom":
+            key = ("custom", t.name)
+        else:
+            key = ("builtin", t.type)
+        if key in seen:
+            label = t.name or t.mcp_server_name or t.type
+            raise ValueError(f"duplicate tool entry {label!r} (identity key {key!r})")
+        seen.add(key)
+
+
 # ── names-only http_server declaration (Ask 3 from #939) ──────────────────────
 #
 # A workflow author may reference a grant the acting agent already holds by *name
@@ -565,6 +620,25 @@ class ToolSpec(BaseModel):
         elif self.type == "mcp_toolset":
             if self.mcp_server_name is None:
                 raise ValueError("mcp_toolset requires mcp_server_name")
+            if self.configs:
+                # A ``configs[]`` entry is keyed on ``name`` by every reader (the
+                # resolver ladder in this module, the attenuation meet's
+                # ``_canon_toolset_name_triple``). Two entries sharing a name are
+                # unreachable dead config for the runtime resolvers (first match
+                # wins in the ``for cfg in spec.configs`` scan) and, worse, break
+                # the attenuation module's own normal-form contract
+                # ``attenuate(x, x) == canonicalize(x)``: ``canonicalize`` sorts
+                # by name and keeps every entry, while the meet re-derives one
+                # resolved triple per distinct name — so a duplicate silently
+                # drops an entry under the meet but not under canonicalize.
+                seen_names: set[str] = set()
+                for cfg in self.configs:
+                    if cfg.name in seen_names:
+                        raise ValueError(
+                            f"duplicate configs[] entry {cfg.name!r} for mcp_toolset "
+                            f"{self.mcp_server_name!r}"
+                        )
+                    seen_names.add(cfg.name)
         return self
 
 
@@ -606,6 +680,8 @@ class AgentCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentCreate:
         validate_http_servers(self.http_servers)
+        validate_mcp_servers(self.mcp_servers)
+        validate_tools(self.tools)
         return self
 
 
@@ -638,6 +714,10 @@ class AgentUpdate(BaseModel):
     def _validate_http_servers(self) -> AgentUpdate:
         if self.http_servers is not None:
             validate_http_servers(self.http_servers)
+        if self.mcp_servers is not None:
+            validate_mcp_servers(self.mcp_servers)
+        if self.tools is not None:
+            validate_tools(self.tools)
         return self
 
 

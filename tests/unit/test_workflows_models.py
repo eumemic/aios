@@ -95,6 +95,31 @@ class TestWorkflowCreate:
                 }
             )
 
+    def test_rejects_duplicate_tool_key(self) -> None:
+        """#1758 scope (1): unique-attenuation-identity applies at every ingress
+        edge that carries a ``tools`` list, not just ``AgentCreate``."""
+        with pytest.raises(ValidationError, match=r"duplicate tool entry 'bash'"):
+            WorkflowCreate.model_validate(
+                {
+                    "name": "w",
+                    "script": "async def main(i): return 1",
+                    "tools": [{"type": "bash"}, {"type": "bash"}],
+                }
+            )
+
+    def test_rejects_duplicate_mcp_server_name(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate mcp server name 'gh'"):
+            WorkflowCreate.model_validate(
+                {
+                    "name": "w",
+                    "script": "async def main(i): return 1",
+                    "mcp_servers": [
+                        {"name": "gh", "url": "https://gh1"},
+                        {"name": "gh", "url": "https://gh2"},
+                    ],
+                }
+            )
+
     def test_accepts_duplicate_http_server_names_with_distinct_base_urls(self) -> None:
         workflow = WorkflowCreate.model_validate(
             {
