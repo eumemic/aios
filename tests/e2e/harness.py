@@ -494,6 +494,58 @@ class Harness:
         is suppressed during cancellation cleanup, then restores it.
         After this call, the tasks are gone and the log shows what a
         real SIGKILL would leave: no events from the cancelled tasks.
+
+        **The crash-state contract this simulates (issue #1757 audit).** A
+        real worker SIGKILL leaves exactly:
+
+        (a) a committed event prefix — ``append_event`` (db/queries/events.py)
+            is one transaction under a per-session row lock, so Postgres
+            atomicity guarantees the log ends at a clean event boundary, never
+            mid-write. This mock's suppression of ``append_event`` during
+            cancel-path cleanup is what makes that boundary land exactly where
+            a real kill would have landed it — not one write further.
+        (b) procrastinate rows exactly as-committed, including a ``doing`` row
+            still holding the job's ``lock``/``queueing_lock`` (the #147
+            shape, enumerated against the real schema in
+            ``tests/e2e/test_reap_stalled_jobs.py``).
+        (c) RUNNING sandbox containers — graceful shutdown STOPs every managed
+            container; a SIGKILL runs no shutdown code at all, so a container
+            provisioned pre-kill is left RUNNING, not stopped (see
+            ``tests/e2e/test_sandbox_salvage.py::test_running_corpse_is_salvaged_then_resumed``).
+        (d) empty process-local state — ``InflightToolRegistry`` and the
+            in-flight-harvest key set (``aios.harness.model_workflow``) are
+            in-memory only; a killed process takes them to zero along with
+            itself. The successor worker starts with fresh empty registries
+            by construction — nothing to reset there — but any DURABLE
+            residue that in-memory state was tracking (a park with no live
+            harvester, a tool call with no live task) needs its own boot-time
+            sweep to notice. See :func:`aios.harness.worker.run_startup_recovery`.
+
+        **Checklist for future process-local worker state:** any NEW
+        in-memory registry the harness adds (mirroring
+        ``InflightToolRegistry`` / ``_INFLIGHT_HARVESTS``) MUST ship (1) a
+        boot-time reset analogous to ``reset_inflight_harvests`` (#1635) if a
+        stale in-memory key could suppress correct recovery, and (2) a seeded
+        crash-recovery test exercising the durable state that in-memory
+        registry was shadowing — not just a unit test of the registry itself.
+
+        **Fidelity note — this is a simulator, not a real kill.** This method
+        runs REAL cancel-path code (the ``except asyncio.CancelledError``
+        handlers in ``tool_dispatch.py``) with only ``queries.append_event``
+        patched out; a genuine SIGKILL runs NO code at all past the signal.
+        The two are equivalent for DB-visible state only because every write
+        those handlers would have made is suppressed here — if a cancel-path
+        branch is ever added that has an externally-visible side effect NOT
+        mediated by ``append_event`` (a direct network call, a second query
+        function, etc.), this simulator would silently stop being faithful.
+        Note in particular that ``sweep.py``'s ``defer_wake`` import (line 41
+        as of the #1757 audit) is NOT patched by this method or by
+        ``conftest.py``'s fixtures that install it — the sweep's wake-side
+        effects during ghost repair are real writes, not cancel-path writes,
+        so they are outside this simulator's suppression scope by design.
+        Keep the cancel path itself write-free at the queries layer (routing
+        all real persistence through ``append_event``/``append_tool_result``)
+        so this mock's single patch point stays sufficient.
         """
         from unittest import mock
 

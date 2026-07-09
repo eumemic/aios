@@ -171,7 +171,13 @@ def mock_runtime() -> Iterator[None]:
 class TestStepStartEndSpans:
     async def test_sweep_early_out_still_emits_pair(self, mock_runtime: None) -> None:
         """Early-out from the sweep guard is a "wasted wake" — must still
-        emit ``step_start``/``step_end`` so the profiler sees the cost."""
+        emit ``step_start``/``step_end`` so the profiler sees the cost.
+
+        #1749: the entry-site sweep spans (bracketed here in the flag-on
+        assertion below) are gated off by default; with
+        ``AIOS_SWEEP_SPAN_DEBUG`` unset (the default in this test), only the
+        ``step_start``/``step_end`` pair is emitted — which is exactly this
+        test's own docstring intent ("must still emit step_start/step_end")."""
         from aios.harness.loop import run_session_step
 
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_step"))
@@ -193,17 +199,10 @@ class TestStepStartEndSpans:
         ):
             await run_session_step("sess_x", cause="message")
 
-        # Entry-site sweep spans wrap the guard check even on the wasted-wake
-        # path, so the profiler can see the (fast-path) cost — including the
-        # pool-acquire and query-exec child spans of the fast-path gate.
+        # Flag off (default): the 6 entry-site sweep spans are suppressed;
+        # only the step_start/step_end pair marks the wasted-wake cost.
         assert _span_event_names(append_event) == [
             "step_start",
-            "sweep_start",
-            "sweep.pool_acquire_start",
-            "sweep.pool_acquire_end",
-            "sweep.query_exec_start",
-            "sweep.query_exec_end",
-            "sweep_end",
             "step_end",
         ]
         # step_end must reference step_start by id
@@ -331,8 +330,12 @@ class TestStepStartEndSpans:
             ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
         )
 
-    async def test_happy_path_span_ordering(self) -> None:
-        """Regression fence: on a clean end-turn, spans nest in the expected order."""
+    async def test_happy_path_span_ordering(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression fence: on a clean end-turn, spans nest in the expected order.
+
+        Flag-on assertion (``AIOS_SWEEP_SPAN_DEBUG=1``) — the 6 entry-site
+        sweep spans asserted here are gated off by default (#1749)."""
+        monkeypatch.setenv("AIOS_SWEEP_SPAN_DEBUG", "1")
         from aios.harness.loop import run_session_step
 
         session = SimpleNamespace(
