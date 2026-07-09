@@ -301,6 +301,20 @@ CANDIDATE_ROWS_SQL = f"""
        {{scope_clause}}
 """
 
+# Floored variant for the #253 preemption trigger — the SAME single-source
+# predicate re-parameterized against the in-flight step's context watermark
+# (``$2``): during a step, the committed ``last_reacted_seq`` is the *previous*
+# step's watermark, so the unfloored form would re-admit the very stimuli the
+# in-flight step is already reacting to. Always single-session (``$1``) — the
+# preempt check runs from inside a step, never cross-session.
+CANDIDATE_ROWS_FLOORED_SQL = f"""
+    SELECT s.id AS session_id
+      FROM sessions s
+     WHERE s.archived_at IS NULL
+       AND {session_active_predicate("s", stimulus_floor_param="$2")}
+       AND s.id = $1
+"""
+
 # Cross-session detection of confirmed-but-unresolved tools, for the wake
 # decision (case (c)).  The dispatch-side counterpart that resolves these same
 # confirmed-allow, result-less tool_calls into the actual tool_call dicts to
@@ -332,6 +346,27 @@ CONFIRMED_ROWS_SQL = f"""
        {{scope_clause}}
 """
 
+# Floored variant for the #253 preemption trigger. ``lc.seq > $3`` bounds the
+# confirmed arm to confirms the in-flight step could NOT have consumed: a step
+# that reaches the model phase already resolved every confirm it saw at its
+# confirmed-dispatch check (``_dispatch_confirmed_tools`` early-returns when it
+# dispatches), so only a confirm sequenced past the step's context watermark
+# represents new dispatchable work. Projects ``tool_call_id`` (not DISTINCT
+# session_id) so the caller can additionally subtract already-dispatched calls
+# — in-flight in the registry or bearing a ``tool_execute_start`` span — which
+# the registry-blind predicate cannot see; without that subtraction a confirmed
+# tool dispatched by a PRIOR step but still running would re-admit on every
+# evaluation and thrash the preempt loop.
+CONFIRMED_ROWS_FLOORED_SQL = f"""
+    SELECT lc.session_id, lc.data->>'tool_call_id' AS tool_call_id
+      FROM events lc
+      JOIN sessions s ON s.id = lc.session_id
+     WHERE s.archived_at IS NULL
+       AND {confirmed_unresolved_predicate("lc", "$2")}
+       AND lc.seq > $3
+       AND lc.session_id = $1
+"""
+
 # The reaction watermark — ``MAX(COALESCE(reacting_to, seq))`` over assistant
 # messages — lives in exactly ONE writable place: the ``last_reacted_seq``
 # UPDATE in ``append_event`` (db/queries/events.py), seeded once by migration
@@ -347,7 +382,7 @@ CONFIRMED_ROWS_SQL = f"""
 # ``is_stimulus``). ``IS DISTINCT FROM 'true'`` is NULL-safe: a missing key →
 # NULL → TRUE → the row still counts (every historical/unmarked result wakes
 # exactly as before); only the literal JSON ``true`` is excluded.
-UNREACTED_ROWS_SQL = """
+_UNREACTED_ROWS_TEMPLATE = """
     SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
       JOIN sessions s ON s.id = e.session_id
@@ -355,8 +390,20 @@ UNREACTED_ROWS_SQL = """
        AND e.kind = 'message'
        AND e.role <> 'assistant'
        AND e.data->>'no_reaction' IS DISTINCT FROM 'true'
-       AND e.seq > s.last_reacted_seq
+       AND e.seq > {watermark_expr}
 """
+
+UNREACTED_ROWS_SQL = _UNREACTED_ROWS_TEMPLATE.format(watermark_expr="s.last_reacted_seq")
+
+# Floored variant for the #253 preemption trigger — same rows, with the
+# watermark raised to the in-flight step's context watermark (``$2``).
+# ``GREATEST`` rather than a bare ``$2`` is belt-free self-documentation: the
+# step's watermark is ≥ ``last_reacted_seq`` by construction (its context
+# includes everything the previous assistant reacted to), so the two forms are
+# equivalent; GREATEST states the invariant in the query text.
+UNREACTED_ROWS_FLOORED_SQL = _UNREACTED_ROWS_TEMPLATE.format(
+    watermark_expr="GREATEST(s.last_reacted_seq, $2)"
+)
 
 # ─── batch filter: bounded, payload-stripped fetches (#1729) ─────────────────
 #
@@ -1189,6 +1236,7 @@ async def find_sessions_needing_inference(
     inflight_tool_registry: InflightToolRegistry,
     *,
     session_id: str | None = None,
+    reacted_floor: int | None = None,
 ) -> set[str]:
     """Return session IDs that need an inference step.
 
@@ -1205,7 +1253,20 @@ async def find_sessions_needing_inference(
     Sessions from (a)/(b) are filtered: if the only unreacted events are
     tool results from a batch with in-flight tasks, the session is not
     yet ready. Case (c) sessions bypass this filter.
+
+    ``reacted_floor`` (requires ``session_id``) is the #253 preemption
+    trigger: the SAME predicate evaluated against the in-flight step's
+    context watermark instead of the committed ``last_reacted_seq`` —
+    "would this session be wake-eligible immediately after the current
+    step finished?". See :func:`_find_needing_inference_floored` for the
+    two floored-only restrictions.
     """
+    if reacted_floor is not None:
+        if session_id is None:
+            raise ValueError("reacted_floor requires session_id")
+        return await _find_needing_inference_floored(
+            pool, inflight_tool_registry, session_id, reacted_floor
+        )
     scope_clause = "AND s.id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
@@ -1288,10 +1349,81 @@ async def find_sessions_needing_inference(
     return filtered | confirmed_sessions | cancel_marked
 
 
+async def _find_needing_inference_floored(
+    pool: asyncpg.Pool[Any],
+    inflight_tool_registry: InflightToolRegistry,
+    session_id: str,
+    reacted_floor: int,
+) -> set[str]:
+    """The #253 preemption-trigger variant of the wake predicate.
+
+    Same arms as :func:`find_sessions_needing_inference` — candidate gate,
+    unreacted batch filter, confirmed-dispatch union, errored subtraction,
+    cancel-marker union — with every seq-anchored comparison raised to the
+    in-flight step's context watermark (the ``*_FLOORED_SQL`` constants, each
+    composed from the same single-source fragment as its committed twin).
+    Cancel markers need no floor: the step harvests them before building
+    context, so any unharvested marker post-dates the watermark.
+
+    Two floored-only restrictions, both erring toward NOT preempting (the
+    inverse of the sweep's wedge-safety doctrine — a missed wake wedges a
+    session forever, a missed preempt costs one stale model call that the
+    already-queued wake supersedes next step):
+
+    * The #1710 empty-unreacted dispatch-narrowing pass is skipped
+      (``preempt_floor`` on :func:`_filter_incomplete_batches`): its
+      wedge-safety argument assumes :func:`find_and_repair_ghosts` ran first,
+      which only the composed sweep guarantees — and anything it admits was
+      already true when the step's entry guard ran this predicate unfloored,
+      so it cannot represent an *arriving* event.
+    * The confirmed arm subtracts already-dispatched calls (in-flight in the
+      registry, or bearing a durable ``tool_execute_start`` span) — see
+      ``CONFIRMED_ROWS_FLOORED_SQL``.
+
+    No span bracketing around the batch filter: this runs from the preempt
+    watcher (potentially once per poll tick), and span appends here would
+    both spam the log and re-trip the watcher's own ``last_event_seq`` gate.
+    """
+    confirmed_max_age_seconds = get_settings().confirmed_dispatch_max_age_seconds
+    async with pool.acquire() as conn:
+        candidate_rows = await conn.fetch(CANDIDATE_ROWS_FLOORED_SQL, session_id, reacted_floor)
+        candidates = {r["session_id"] for r in candidate_rows}
+
+        confirmed_rows = await conn.fetch(
+            CONFIRMED_ROWS_FLOORED_SQL,
+            session_id,
+            confirmed_max_age_seconds,
+            reacted_floor,
+        )
+        confirmed_tcids = {r["tool_call_id"] for r in confirmed_rows if r["tool_call_id"]}
+        confirmed_tcids -= inflight_tool_registry.in_flight_tool_call_ids(session_id)
+        if confirmed_tcids:
+            span_rows = await conn.fetch(GHOST_SPAN_START_SQL, [session_id], list(confirmed_tcids))
+            confirmed_tcids -= {r["tool_call_id"] for r in span_rows}
+        confirmed_sessions = {session_id} if confirmed_tcids else set()
+
+        errored = await _errored_session_ids(conn, session_id=session_id)
+        cancel_marked = await list_session_ids_with_unharvested_cancel_marker(
+            conn, session_id=session_id
+        )
+
+    candidates -= errored
+    confirmed_sessions -= errored
+    to_filter = candidates - confirmed_sessions
+    if not to_filter:
+        return confirmed_sessions | cancel_marked
+    filtered = await _filter_incomplete_batches(
+        pool, inflight_tool_registry, to_filter, preempt_floor=reacted_floor
+    )
+    return filtered | confirmed_sessions | cancel_marked
+
+
 async def _filter_incomplete_batches(
     pool: asyncpg.Pool[Any],
     inflight_tool_registry: InflightToolRegistry,
     candidates: set[str],
+    *,
+    preempt_floor: int | None = None,
 ) -> set[str]:
     """Remove sessions whose only unreacted events are tool results from
     in-progress batches (where sibling tools are still in-flight).
@@ -1339,7 +1471,12 @@ async def _filter_incomplete_batches(
     session_list = list(candidates)
 
     async with pool.acquire() as conn:
-        unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
+        if preempt_floor is not None:
+            unreacted_rows = await conn.fetch(
+                UNREACTED_ROWS_FLOORED_SQL, session_list, preempt_floor
+            )
+        else:
+            unreacted_rows = await conn.fetch(UNREACTED_ROWS_SQL, session_list)
         unreacted_by_sid = _group_unreacted_rows(unreacted_rows)
 
         result: set[str] = set()
@@ -1401,7 +1538,16 @@ async def _filter_incomplete_batches(
         # candidate set — so the common (has-unreacted) path never pays for
         # it. ``OPEN_CANDIDATES_ASST_SQL`` mirrors ``GHOST_ASST_SQL``'s
         # ``open_tool_call_count > 0`` bound.
-        if empty_no_inflight:
+        #
+        # Skipped on the #253 floored path (``preempt_floor``): this branch's
+        # wedge-safety argument assumes ghost repair ran first (true only in
+        # the composed sweep), and anything it admits — a dispatched-but-
+        # taskless open call — was already true when the step's entry guard
+        # ran this predicate unfloored, so it cannot represent an *arriving*
+        # event. Admitting it would preempt-loop on state the restarted step
+        # cannot progress. False-negative-safe: no preempt → the step
+        # completes → the composed sweep handles the ghost as today.
+        if empty_no_inflight and preempt_floor is None:
             all_result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, empty_no_inflight)
             results_by_sid: dict[str, set[str]] = {}
             for r in all_result_rows:

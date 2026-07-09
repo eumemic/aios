@@ -177,6 +177,7 @@ def mock_step_dependencies() -> Any:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     start_event = SimpleNamespace(id="ev_start")
 

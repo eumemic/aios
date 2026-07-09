@@ -50,6 +50,7 @@ def _agent(
         litellm_extra={},
         window_min=1000,
         window_max=100000,
+        preempt_policy="wait",
         binding=AgentBinding(agent_id="agt_1", version=3),
     )
 

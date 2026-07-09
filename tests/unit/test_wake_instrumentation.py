@@ -240,6 +240,7 @@ class TestStepStartEndSpans:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         start_event = SimpleNamespace(id="ev_step")
 
@@ -357,6 +358,7 @@ class TestStepStartEndSpans:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         start_event = SimpleNamespace(id="ev_step")
 
@@ -479,6 +481,7 @@ class TestStepStartEndSpans:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         start_event = SimpleNamespace(id="ev_step")
 
@@ -583,6 +586,7 @@ class TestStepStartEndSpans:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         start_event = SimpleNamespace(id="ev_step")
 
@@ -687,6 +691,7 @@ class TestStepStartEndSpans:
             litellm_extra={},
             window_min=1000,
             window_max=10000,
+            preempt_policy="wait",
         )
         append_event = AsyncMock(return_value=SimpleNamespace(id="ev_step"))
 
@@ -788,6 +793,7 @@ async def _harness_with_guard(
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     manager = MagicMock()
     append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))

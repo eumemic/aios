@@ -100,16 +100,28 @@ def session_errored_predicate(alias: str) -> str:
     return f"({alias}.last_error_seq > 0 AND {alias}.last_error_seq > {alias}.last_user_seq)"
 
 
-def session_active_predicate(alias: str) -> str:
+def session_active_predicate(alias: str, *, stimulus_floor_param: str | None = None) -> str:
     """SQL boolean fragment: does the session have work the model must react to?
 
     One source for the active predicate, alias-parameterized so the read-path
     status derivation (``sessions`` alias) and the sweep's wake candidate filter
     (``CANDIDATE_ROWS_SQL``, ``s`` alias) compose the IDENTICAL boolean — they
     MUST agree or the worker wakes with no progress (#155) / skips inference.
+
+    ``stimulus_floor_param`` (a positional placeholder like ``"$2"``) raises the
+    reacted watermark to ``GREATEST(last_reacted_seq, <param>)`` — the #253
+    preemption trigger's re-parameterization against the in-flight step's
+    context watermark (``sweep.CANDIDATE_ROWS_FLOORED_SQL``): during a step the
+    last-appended assistant's watermark is the *previous* step's, so the
+    committed column would re-admit the very stimuli the in-flight step is
+    already reacting to. The default emits the byte-identical committed
+    predicate.
     """
+    reacted = f"{alias}.last_reacted_seq"
+    if stimulus_floor_param is not None:
+        reacted = f"GREATEST({alias}.last_reacted_seq, {stimulus_floor_param})"
     return (
-        f"(({alias}.last_stimulus_seq > {alias}.last_reacted_seq"
+        f"(({alias}.last_stimulus_seq > {reacted}"
         f" OR {alias}.open_tool_call_count > 0)"
         f" AND NOT {session_errored_predicate(alias)})"
     )

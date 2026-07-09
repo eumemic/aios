@@ -112,6 +112,7 @@ async def test_real_gate_trips_when_subtree_over_finite_limit() -> None:
         litellm_extra={},
         window_min=1000,
         window_max=10000,
+        preempt_policy="wait",
     )
     append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
     with (

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os as _os
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import litellm.exceptions as litellm_exceptions
@@ -35,6 +36,7 @@ from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
 from aios.harness.completion import (
     LlmRequest,
+    LlmResponse,
     ModelCallDeadlineError,
     call_litellm,
     estimate_cost_usd,
@@ -338,6 +340,211 @@ async def refresh_session_mount_state(
             session_id, memory_echoes, github_echoes, env_var_echoes
         )
     return memory_echoes
+
+
+# ─── #253 auto-preemption ─────────────────────────────────────────────────────
+#
+# When ``agent.preempt_policy == "preempt"``, the inline model call is raced
+# against a watcher that resolves the moment the session becomes wake-eligible
+# past the in-flight step's context watermark — the wake predicate
+# (``find_sessions_needing_inference``) re-parameterized with
+# ``reacted_floor=step_ctx.reacting_to``, NOT an enumerated event-kind list, so
+# the trigger can never drift from wake semantics. The model phase is
+# side-effect-free by construction (no DB writes between ``model_request_start``
+# and the assistant append; streaming deltas are transient pg_notify only), so
+# cancelling the model child task discards nothing durable; the event append
+# that made the session eligible already deferred a wake, and the preempted
+# step's normal early return releases the procrastinate lock for it. Once the
+# model call returns, the watcher is torn down before the append/dispatch tail
+# — un-preemptibility after the model phase is structural, not checked.
+
+# Poll cadence of the watcher's cheap gate. Worst case adds one interval to
+# preemption latency — negligible against the 20-50s model calls preemption
+# targets (the wake-tail p90/p99 this feature exists to cut is 15s/51s).
+_PREEMPT_POLL_INTERVAL_S = 1.0
+
+# Starvation cap: consecutive preemptions (no completed assistant turn) before
+# the step runs un-preemptible so a sustained inbound burst gets SOME reply.
+_PREEMPT_STARVATION_CAP = 3
+
+# One PK-scoped read per poll tick. ``last_event_seq`` advances on EVERY event
+# append, and every wake-eligible transition appends a row — the stimulus
+# itself, or the ``wake_deferred`` span ``defer_wake`` writes even when
+# procrastinate dedups the job — so "unchanged" proves the full floored
+# predicate would return what it returned last time.
+_PREEMPT_GATE_SQL = "SELECT last_event_seq, last_stimulus_seq FROM sessions WHERE id = $1"
+
+# Trailing ``step_preempted`` spans since the last completed assistant turn.
+# The floor is the last assistant message's own seq, NOT ``last_reacted_seq``:
+# a preempt span is sequenced after the stimulus that triggered it, so it can
+# lie above the eventual assistant's ``reacting_to`` while still belonging to
+# the completed turn.
+_PREEMPT_STARVATION_COUNT_SQL = """
+    SELECT count(*)
+      FROM events
+     WHERE session_id = $1
+       AND account_id = $2
+       AND kind = 'span'
+       AND data->>'event' = 'step_preempted'
+       AND seq > COALESCE((
+           SELECT max(a.seq)
+             FROM events a
+            WHERE a.session_id = $1
+              AND a.account_id = $2
+              AND a.kind = 'message'
+              AND a.role = 'assistant'
+       ), 0)
+"""
+
+
+class _Preempted(NamedTuple):
+    """Race outcome: the watcher won — the model phase was cancelled.
+
+    ``cancelled_by`` is the preempting stimulus seq (``last_stimulus_seq`` at
+    detection), or ``None`` when the admission carried no stimulus seq (a
+    confirmed-dispatch or cancel-marker admission).
+    """
+
+    cancelled_by: int | None
+
+
+async def _preempt_allowed(pool: Any, session_id: str, *, account_id: str) -> bool:
+    """Starvation guard: cap consecutive preemptions at ``_PREEMPT_STARVATION_CAP``.
+
+    A sustained inbound burst faster than the model responds would otherwise
+    cancel-and-restart the step forever, deferring the reply indefinitely (the
+    livelock the #253 decision comment required a cap for). The count is
+    derived from the event log — trailing ``step_preempted`` spans past the
+    last assistant message — so it is correct across workers and resets on any
+    completed assistant turn. An errored turn deliberately does not reset it.
+    """
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(_PREEMPT_STARVATION_COUNT_SQL, session_id, account_id)
+    if count is not None and count >= _PREEMPT_STARVATION_CAP:
+        log.info("step.preempt_starved", session_id=session_id, consecutive_preempts=count)
+        return False
+    return True
+
+
+async def _wait_for_preempt(
+    pool: Any,
+    inflight_tool_registry: InflightToolRegistry,
+    session_id: str,
+    *,
+    reacted_floor: int,
+) -> int | None:
+    """Resolve when the session becomes wake-eligible past ``reacted_floor``.
+
+    Runs as a child task raced against the model call; cancelled when the
+    model wins. The FIRST iteration always runs the full floored predicate —
+    events may have landed between context build and this task starting, and
+    confirms are not stimuli so the watermark alone cannot see them. Later
+    iterations poll the one-row gate and re-run the full predicate only when
+    ``last_event_seq`` has advanced past the value captured BEFORE the previous
+    full evaluation (so rows appended mid-evaluation are never skipped).
+    """
+    baseline: int | None = None
+    while True:
+        async with pool.acquire() as conn:
+            gate = await conn.fetchrow(_PREEMPT_GATE_SQL, session_id)
+        if gate is not None and gate["last_event_seq"] != baseline:
+            baseline = gate["last_event_seq"]
+            eligible = await find_sessions_needing_inference(
+                pool,
+                inflight_tool_registry,
+                session_id=session_id,
+                reacted_floor=reacted_floor,
+            )
+            if eligible:
+                async with pool.acquire() as conn:
+                    last_stimulus = await conn.fetchval(
+                        "SELECT last_stimulus_seq FROM sessions WHERE id = $1", session_id
+                    )
+                if last_stimulus is not None and last_stimulus > reacted_floor:
+                    return int(last_stimulus)
+                return None
+        await asyncio.sleep(_PREEMPT_POLL_INTERVAL_S)
+
+
+async def _race_model_against_preempt(
+    call_model: Callable[[], Coroutine[Any, Any, LlmResponse]],
+    pool: Any,
+    inflight_tool_registry: InflightToolRegistry,
+    session_id: str,
+    *,
+    reacted_floor: int,
+) -> LlmResponse | _Preempted:
+    """Race the model call against the preempt watcher.
+
+    Model-first on ties: a completed inference is never discarded. A watcher
+    failure degrades to "wait" semantics — preemption plumbing must never
+    break inference. Cancellation of the step task itself (operator interrupt,
+    the job-level ``wait_for`` timeout, worker shutdown) tears down both
+    children and propagates, preserving today's semantics exactly. Raises the
+    model call's exception (into the caller's existing handler arms) when the
+    model errored.
+    """
+    model_task = asyncio.create_task(call_model())
+    watch_task = asyncio.create_task(
+        _wait_for_preempt(pool, inflight_tool_registry, session_id, reacted_floor=reacted_floor)
+    )
+    try:
+        await asyncio.wait({model_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+    except asyncio.CancelledError:
+        model_task.cancel()
+        watch_task.cancel()
+        await asyncio.gather(model_task, watch_task, return_exceptions=True)
+        raise
+    if model_task.done():
+        watch_task.cancel()
+        await asyncio.gather(watch_task, return_exceptions=True)
+        return model_task.result()
+    if watch_task.exception() is not None:
+        log.warning(
+            "step.preempt_watcher_failed",
+            session_id=session_id,
+            error=repr(watch_task.exception()),
+        )
+        return await model_task
+    # Watcher won: cancel the model phase. The stream teardown
+    # (``response.aclose()``) runs in ``stream_litellm``'s own finally on
+    # cancellation; already-streamed deltas were transient pg_notify only.
+    model_task.cancel()
+    await asyncio.gather(model_task, return_exceptions=True)
+    return _Preempted(cancelled_by=watch_task.result())
+
+
+async def _append_preempted_spans(
+    pool: Any,
+    session_id: str,
+    *,
+    start_event_id: str,
+    cancelled_by: int | None,
+    account_id: str,
+) -> None:
+    """Close the cancelled ``model_request`` span pair and record the preemption.
+
+    The cancelled ``model_request_end`` deliberately omits ``local_tokens`` /
+    ``local_tokens_by_class`` / ``model`` / ``model_usage``: the token-
+    calibration reader keys on those fields' presence, so their absence keeps
+    the cancelled request structurally out of calibration (and out of the 0024
+    partial index) — no usage was observed, so none is stamped.
+    """
+    end_payload: dict[str, Any] = {
+        "event": "model_request_end",
+        "model_request_start_id": start_event_id,
+        "is_error": False,
+    }
+    preempted_payload: dict[str, Any] = {"event": "step_preempted"}
+    if cancelled_by is not None:
+        end_payload["cancelled_by"] = cancelled_by
+        preempted_payload["cancelled_by"] = cancelled_by
+    await sessions_service.append_event(
+        pool, session_id, "span", end_payload, account_id=account_id
+    )
+    await sessions_service.append_event(
+        pool, session_id, "span", preempted_payload, account_id=account_id
+    )
 
 
 async def run_session_step(
@@ -1031,18 +1238,58 @@ async def _run_session_step_body(
             account_id=account_id,
         )
         subscribed = await has_subscriber(pool, session_id)
-        try:
+
+        async def _call_model() -> LlmResponse:
             if subscribed:
-                llm_response = await stream_litellm(
+                return await stream_litellm(
                     llm_request,
                     model=agent.model,
                     pool=pool,
                 )
-            else:
-                llm_response = await call_litellm(
-                    llm_request,
-                    model=agent.model,
+            return await call_litellm(
+                llm_request,
+                model=agent.model,
+            )
+
+        # #253 arm decision: policy is agent-level ("wait" default keeps the
+        # exact pre-preemption await), gated by the starvation cap. Both are
+        # only evaluated for opted-in agents — zero extra reads on the default
+        # path.
+        preempt_armed = agent.preempt_policy == "preempt" and await _preempt_allowed(
+            pool, session_id, account_id=account_id
+        )
+        try:
+            if preempt_armed:
+                outcome = await _race_model_against_preempt(
+                    _call_model,
+                    pool,
+                    inflight_tool_registry,
+                    session_id,
+                    reacted_floor=step_ctx.reacting_to,
                 )
+                if isinstance(outcome, _Preempted):
+                    # No assistant message, no charge (charge is post-persist),
+                    # no turn_ended: the step exits owing nothing. The append
+                    # that made the session eligible already deferred a wake;
+                    # the lock releases on return and that wake re-steps with
+                    # context including the new event(s).
+                    await _append_preempted_spans(
+                        pool,
+                        session_id,
+                        start_event_id=start_event.id,
+                        cancelled_by=outcome.cancelled_by,
+                        account_id=account_id,
+                    )
+                    log.info(
+                        "step.preempted",
+                        session_id=session_id,
+                        cancelled_by=outcome.cancelled_by,
+                        reacted_floor=step_ctx.reacting_to,
+                    )
+                    return _StepResult()
+                llm_response = outcome
+            else:
+                llm_response = await _call_model()
         except ModelCallDeadlineError as exc:
             log.exception(
                 "step.model_call_deadline", session_id=session_id, chunks_seen=exc.chunks_seen

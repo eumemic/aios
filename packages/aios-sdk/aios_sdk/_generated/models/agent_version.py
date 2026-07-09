@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.agent_version_preempt_policy import AgentVersionPreemptPolicy
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ class AgentVersion:
         skills (list[AgentSkillRef] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentVersionLitellmExtra | Unset):
+        preempt_policy (AgentVersionPreemptPolicy | Unset):  Default: AgentVersionPreemptPolicy.WAIT.
     """
 
     agent_id: str
@@ -52,6 +54,7 @@ class AgentVersion:
     skills: list[AgentSkillRef] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentVersionLitellmExtra | Unset = UNSET
+    preempt_policy: AgentVersionPreemptPolicy | Unset = AgentVersionPreemptPolicy.WAIT
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -97,6 +100,10 @@ class AgentVersion:
         if not isinstance(self.litellm_extra, Unset):
             litellm_extra = self.litellm_extra.to_dict()
 
+        preempt_policy: str | Unset = UNSET
+        if not isinstance(self.preempt_policy, Unset):
+            preempt_policy = self.preempt_policy.value
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -118,6 +125,8 @@ class AgentVersion:
             field_dict["http_servers"] = http_servers
         if litellm_extra is not UNSET:
             field_dict["litellm_extra"] = litellm_extra
+        if preempt_policy is not UNSET:
+            field_dict["preempt_policy"] = preempt_policy
 
         return field_dict
 
@@ -183,6 +192,13 @@ class AgentVersion:
         else:
             litellm_extra = AgentVersionLitellmExtra.from_dict(_litellm_extra)
 
+        _preempt_policy = d.pop("preempt_policy", UNSET)
+        preempt_policy: AgentVersionPreemptPolicy | Unset
+        if isinstance(_preempt_policy, Unset):
+            preempt_policy = UNSET
+        else:
+            preempt_policy = AgentVersionPreemptPolicy(_preempt_policy)
+
         agent_version = cls(
             agent_id=agent_id,
             version=version,
@@ -196,6 +212,7 @@ class AgentVersion:
             skills=skills,
             http_servers=http_servers,
             litellm_extra=litellm_extra,
+            preempt_policy=preempt_policy,
         )
 
         agent_version.additional_properties = d

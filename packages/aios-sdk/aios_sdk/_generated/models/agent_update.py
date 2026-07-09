@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.agent_update_preempt_policy_type_0 import AgentUpdatePreemptPolicyType0
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class AgentUpdate:
             litellm_extra (AgentUpdateLitellmExtraType0 | None | Unset):
             window_min (int | None | Unset):
             window_max (int | None | Unset):
+            preempt_policy (AgentUpdatePreemptPolicyType0 | None | Unset):
     """
 
     version: int
@@ -57,6 +59,7 @@ class AgentUpdate:
     litellm_extra: AgentUpdateLitellmExtraType0 | None | Unset = UNSET
     window_min: int | None | Unset = UNSET
     window_max: int | None | Unset = UNSET
+    preempt_policy: AgentUpdatePreemptPolicyType0 | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_update_litellm_extra_type_0 import (
@@ -166,6 +169,14 @@ class AgentUpdate:
         else:
             window_max = self.window_max
 
+        preempt_policy: None | str | Unset
+        if isinstance(self.preempt_policy, Unset):
+            preempt_policy = UNSET
+        elif isinstance(self.preempt_policy, AgentUpdatePreemptPolicyType0):
+            preempt_policy = self.preempt_policy.value
+        else:
+            preempt_policy = self.preempt_policy
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -197,6 +208,8 @@ class AgentUpdate:
             field_dict["window_min"] = window_min
         if window_max is not UNSET:
             field_dict["window_max"] = window_max
+        if preempt_policy is not UNSET:
+            field_dict["preempt_policy"] = preempt_policy
 
         return field_dict
 
@@ -398,6 +411,25 @@ class AgentUpdate:
 
         window_max = _parse_window_max(d.pop("window_max", UNSET))
 
+        def _parse_preempt_policy(
+            data: object,
+        ) -> AgentUpdatePreemptPolicyType0 | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                preempt_policy_type_0 = AgentUpdatePreemptPolicyType0(data)
+
+                return preempt_policy_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(AgentUpdatePreemptPolicyType0 | None | Unset, data)
+
+        preempt_policy = _parse_preempt_policy(d.pop("preempt_policy", UNSET))
+
         agent_update = cls(
             version=version,
             name=name,
@@ -412,6 +444,7 @@ class AgentUpdate:
             litellm_extra=litellm_extra,
             window_min=window_min,
             window_max=window_max,
+            preempt_policy=preempt_policy,
         )
 
         return agent_update

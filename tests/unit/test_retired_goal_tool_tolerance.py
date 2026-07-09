@@ -87,6 +87,7 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "litellm_extra": {},
         "window_min": 1,
         "window_max": 10,
+        "preempt_policy": "wait",
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
