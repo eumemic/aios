@@ -576,11 +576,46 @@ def test_attenuate_is_idempotent_against_launcher(d: Surface, ln: Surface) -> No
 
 @pytest.mark.parametrize("d", _gnarly_surfaces())
 @pytest.mark.parametrize("ln", _gnarly_surfaces())
-def test_meet_never_exceeds_either_operand(d: Surface, ln: Surface) -> None:
-    # Absorption: the meet is a fixpoint against each operand (≤ both).
+def test_meet_is_a_fixpoint_against_the_launcher(d: Surface, ln: Surface) -> None:
+    # The security-load-bearing direction: the meet never exceeds its launcher
+    # operand, and is already clamped (a fixpoint) once computed against it —
+    # re-attenuating the output against the SAME launcher changes nothing.
+    #
+    # The declared-side absorption (``att(out, d) == out``) is FALSE BY DESIGN
+    # and deliberately NOT asserted here: mcp_servers and http_servers are
+    # emitted **launcher-verbatim** on a key match (parent-wins-frozen), so
+    # ``out`` can carry launcher-only fields ``d`` never declared (extra
+    # headers on a shared MCP ``(name, url)``, extra routes/methods on a
+    # shared http ``base_url``). Meeting ``out`` against ``d`` again then
+    # clamps those launcher-verbatim riders down to what ``d`` itself
+    # declared — narrowing further, not holding fixed. Concretely (see
+    # ``models/attenuation.py`` module docstring and
+    # ``test_declared_side_absorption_is_false_by_design`` below):
+    # ``canonicalize(d)`` may have zero mcp_servers/http_servers (nothing
+    # declared) while ``out`` inherited the launcher's server/routes wholesale
+    # — so ``att(out, d)`` drops them, and ``att(out, d) != out``.
     out = att(d, ln)
     assert att(out, ln) == out
-    assert att(out, d) == out
+
+
+def test_declared_side_absorption_is_false_by_design() -> None:
+    """Concrete witness for the exclusion documented on
+    :func:`test_meet_is_a_fixpoint_against_the_launcher` and in the module
+    docstring: ``att(out, d) == out`` does NOT hold in general. A launcher
+    grants an http route the child never declared; the meet survives it
+    launcher-verbatim (parent-wins-frozen). Re-meeting the *result* against
+    the ORIGINAL declared (which never mentioned that route) drops it —
+    proving the declared side is not an absorbing element of the meet.
+    """
+    l_srv = HttpServerSpec(
+        name="api", base_url="https://api", routes=[HttpRouteSpec(path_pattern="/only-on-launcher")]
+    )
+    d_srv = HttpServerSpec(name="api", base_url="https://api", routes=[])
+    ln = Surface([], [], [l_srv])
+    d = Surface([], [], [d_srv])
+    out = att(d, ln)
+    assert out.http_servers[0].routes != []  # launcher-verbatim route survived
+    assert att(out, d) != out  # meeting again against `d` alone drops it
 
 
 # ── the model-identity tripwire (g) ───────────────────────────────────────────
