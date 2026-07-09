@@ -148,7 +148,7 @@ _EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
 # ``session_errored_predicate`` that backs ``ERRORED_SESSIONS_SQL`` and the read
 # path, all consuming the maintained scalar columns (migration 0066).
 #
-# ``s.open_tool_call_floor_seq`` (migration 0134, #1746) is a PROVEN lower
+# ``s.open_tool_call_floor_seq`` (migration 0136, #1746) is a PROVEN lower
 # bound on the oldest still-open tool_call's ``seq`` — never a heuristic. It is
 # advanced ``GREATEST``-only, and ONLY by the ghost sweep itself (see
 # ``_advance_open_tool_call_floor`` below), from the reconciliation this very

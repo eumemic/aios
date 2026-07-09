@@ -64,14 +64,16 @@ during any window is just a safe over-scan, never an under-scan). Only run
 the column while new code is still live reintroduces the exact
 ``UndefinedColumnError`` this migration's ordering is designed to avoid.
 
-Revision ID: 0134
-Revises: 0133
+Revision ID: 0136
+Revises: 0135
 
-Renumbered 0132 -> 0134 at build time: master's 0133
-(``sessions_channels_array.py``) also revises 0131, creating a migration-chain
-fork with this issue's original 0132 head. Chained after 0133 per the issue's
-own L2-7 disposition ("confirm alembic head is still 0130 at merge and
-renumber if another 013x lands first").
+Renumbered 0132 -> 0134 -> 0136 at build time: master landed both 0133
+(``sessions_channels_array.py``) and, after this branch's first renumber to
+0134, a THIRD independent 0134 (``confirmed_allow_recent_index.py``, chained
+to 0135 ``lifecycle_seq_idx.py``) — creating a second migration-chain fork
+with this issue's revision id. Re-chained after 0135 (master's new head) per
+the issue's own L2-7 disposition ("confirm alembic head is still 0130 at
+merge and renumber if another 013x lands first").
 """
 
 from __future__ import annotations
@@ -81,8 +83,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0134"
-down_revision: str = "0133"
+revision: str = "0136"
+down_revision: str = "0135"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
