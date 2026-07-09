@@ -26,8 +26,7 @@ async def _read_session_row(harness: Harness, session_id: str) -> dict[str, Any]
     aren't exposed through the service layer's ``Session`` model."""
     async with harness._pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT open_tool_call_count, open_tool_call_floor_seq "
-            "FROM sessions WHERE id = $1",
+            "SELECT open_tool_call_count, open_tool_call_floor_seq FROM sessions WHERE id = $1",
             session_id,
         )
     assert row is not None
@@ -459,9 +458,7 @@ class TestGhostRecovery:
         # Step 3: model sees the ghost error.
         await harness.run_step(session.id)
 
-    async def test_floor_advances_and_repairs_orphan_in_later_batch(
-        self, harness: Harness
-    ) -> None:
+    async def test_floor_advances_and_repairs_orphan_in_later_batch(self, harness: Harness) -> None:
         """The sweep-maintained floor (#1746): fully resolve batch 1, run
         several turns, then orphan a call in a LATER batch.
 
@@ -532,9 +529,7 @@ class TestGhostRecovery:
         )
 
         floor_after = await _read_floor(harness, session.id)
-        assert floor_after >= floor_before, (
-            "the floor must be monotonic (GREATEST-only advance)"
-        )
+        assert floor_after >= floor_before, "the floor must be monotonic (GREATEST-only advance)"
 
         # The floor must never have exceeded call_b4's owning batch seq —
         # otherwise this repair couldn't have found it at all. Cross-checked

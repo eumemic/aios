@@ -635,9 +635,7 @@ async def find_and_repair_ghosts(
         if floor_column_present:
             lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
         else:
-            lifecycle_rows = await conn.fetch(
-                _GHOST_LIFECYCLE_SQL_UNBOUNDED_FALLBACK, session_ids
-            )
+            lifecycle_rows = await conn.fetch(_GHOST_LIFECYCLE_SQL_UNBOUNDED_FALLBACK, session_ids)
         confirmed_by_session: dict[str, set[str]] = {}
         for r in lifecycle_rows:
             confirmed_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
