@@ -137,8 +137,9 @@ _EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
 # exactly the sessions that can hold a ghost.  Without the bound, a fully
 # resolved session's entire tool-call history is rescanned on every sweep pass
 # (#840).  Sessions with open calls still return ALL their
-# assistant-with-tool_calls events, so the per-tcid candidate loop downstream is
-# behaviorally unchanged.
+# assistant-with-tool_calls events AT OR AFTER the floor, so the per-tcid
+# candidate loop downstream is behaviorally unchanged for every batch that
+# could still be open.
 #
 # Also bounded by the errored-session predicate (#897): an errored session is
 # parked until a user message recovers it, so its open tool_calls are part of
@@ -146,8 +147,46 @@ _EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
 # for ghost repair — composed from the same single source
 # ``session_errored_predicate`` that backs ``ERRORED_SESSIONS_SQL`` and the read
 # path, all consuming the maintained scalar columns (migration 0066).
+#
+# ``s.open_tool_call_floor_seq`` (migration 0136, #1746) is a PROVEN lower
+# bound on the oldest still-open tool_call's ``seq`` — never a heuristic. It is
+# advanced ``GREATEST``-only, and ONLY by the ghost sweep itself (see
+# ``_advance_open_tool_call_floor`` below), from the reconciliation this very
+# function already computes. It is NEVER stamped by the write path off the
+# ``open_tool_call_count == 0`` transition — that edge is NOT trustworthy (a
+# dedup-skip decrement can drive the count to 0 with a genuinely-open sibling
+# still outstanding; see ``decrement_open_tool_call_count``'s docstring). A
+# fresh session (or one whose floor has never been advanced) has floor 0 —
+# unbounded, today's exact behavior. Projects ``e.seq`` (to compute the new
+# floor) and ``e.data->'tool_calls'`` (NOT full ``e.data`` — the candidate loop
+# only reads ``tool_calls`` + ``created_at`` + ``seq``) rather than the whole
+# JSONB payload, bounding bytes-per-row for the rare very-old legitimately-
+# waiting call whose batch survives the floor.
 GHOST_ASST_SQL = f"""
-    SELECT e.session_id, e.data, e.created_at
+    SELECT e.session_id, e.seq, e.data->'tool_calls' AS tool_calls, e.created_at
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+     WHERE s.archived_at IS NULL
+       AND s.open_tool_call_count > 0
+       AND NOT {session_errored_predicate("s")}
+       AND e.kind = 'message'
+       AND e.role = 'assistant'
+       AND jsonb_array_length(COALESCE(NULLIF(e.data->'tool_calls', 'null'::jsonb), '[]'::jsonb)) > 0
+       AND e.seq >= s.open_tool_call_floor_seq
+       {{scope_clause}}
+"""
+
+# Deploy-ordering fail-closed fallback (#1746, Rollout section): ``aios-worker``
+# boots straight into new code with no migration step of its own, so a naive
+# single-image promote can serve this code before the post-deploy ``aios
+# migrate`` has added ``open_tool_call_floor_seq``. Rather than let
+# ``UndefinedColumnError`` abort the whole cross-session sweep (a fleet-wide
+# wake outage), ``find_and_repair_ghosts`` catches it and re-issues these three
+# floor-free twins — byte-identical to the pre-#1746 unbounded queries — so
+# ghost repair degrades to "scan everything" (always correct, merely slower)
+# instead of going dark.
+_GHOST_ASST_SQL_UNBOUNDED_FALLBACK = f"""
+    SELECT e.session_id, e.seq, e.data->'tool_calls' AS tool_calls, e.created_at
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE s.archived_at IS NULL
@@ -159,13 +198,52 @@ GHOST_ASST_SQL = f"""
        {{scope_clause}}
 """
 
-GHOST_LIFECYCLE_SQL = """
+_GHOST_RESULT_ROWS_SQL_UNBOUNDED_FALLBACK = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+"""
+
+_GHOST_LIFECYCLE_SQL_UNBOUNDED_FALLBACK = """
     SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'lifecycle'
        AND e.data->>'event' = 'tool_confirmed'
        AND e.data->>'result' = 'allow'
+"""
+
+# ``GHOST_RESULT_ROWS_SQL`` / ``GHOST_LIFECYCLE_SQL`` — the tool-result and
+# tool_confirmed-lifecycle counterparts of ``GHOST_ASST_SQL``, bounded by the
+# SAME floor via a join to ``sessions``. Safe per invariant 2 (no false
+# ghosts): a result/confirm event for an in-scope candidate is always appended
+# AFTER its owning assistant batch, so its seq is strictly greater than the
+# batch's — which is itself ``>= floor`` for anything ``GHOST_ASST_SQL``
+# fetched. A row below the floor can only pair with an assistant batch that is
+# ALSO below the floor, i.e. already fully resolved and irrelevant to this
+# scan (dropped along with its batch, not "falsely resolved" — it was never a
+# candidate in the first place).
+GHOST_RESULT_ROWS_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'message'
+       AND e.role = 'tool'
+       AND e.seq >= s.open_tool_call_floor_seq
+"""
+
+GHOST_LIFECYCLE_SQL = """
+    SELECT e.session_id, e.data->>'tool_call_id' AS tool_call_id
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
+     WHERE e.session_id = ANY($1::text[])
+       AND e.kind = 'lifecycle'
+       AND e.data->>'event' = 'tool_confirmed'
+       AND e.data->>'result' = 'allow'
+       AND e.seq >= s.open_tool_call_floor_seq
 """
 
 # Per-session agent surface (tools + http_servers) for the disposition
@@ -509,6 +587,60 @@ async def _load_surfaces(
 
 # ─── ghost repair ────────────────────────────────────────────────────────────
 
+# The sweep-maintained floor advance (#1746). ``open_tool_call_floor_seq`` is
+# written in EXACTLY this one statement — nowhere else in the codebase sets
+# it (structurally guarded by
+# ``tests/unit/test_open_tool_call_floor_seq_single_writer.py``). Bulk,
+# set-based ``UPDATE ... FROM unnest(...)`` rather than one round trip per
+# session: a single cross-session sweep pass can touch thousands of sessions
+# and a per-row ``executemany`` would reintroduce a linear-in-session-count
+# round-trip cost this whole feature exists to eliminate. ``GREATEST`` makes
+# the write monotonic and race-safe: two concurrent sweeps computing bounds
+# from consistent (possibly different) snapshots each produce a valid lower
+# bound (invariant: oldest-open-call.seq is non-decreasing over time), and the
+# max of two valid lower bounds is still a valid lower bound — so concurrent
+# advances can never regress the floor below a value it already holds.
+_ADVANCE_OPEN_TOOL_CALL_FLOOR_SQL = """
+    UPDATE sessions
+       SET open_tool_call_floor_seq = GREATEST(open_tool_call_floor_seq, v.floor_seq)
+      FROM (
+          SELECT * FROM unnest($1::text[], $2::bigint[]) AS t(session_id, floor_seq)
+      ) v
+     WHERE sessions.id = v.session_id
+"""
+
+
+async def _advance_open_tool_call_floor(
+    pool: asyncpg.Pool[Any],
+    session_ids: list[str],
+    min_open_seq: dict[str, int],
+) -> None:
+    """Advance ``open_tool_call_floor_seq`` for every session with a computed bound.
+
+    ``min_open_seq`` is populated in :func:`find_and_repair_ghosts` from the
+    reconciliation it already performs — the seq of the oldest fetched
+    assistant batch still carrying a no-result tcid, per session. Given a
+    previously-valid floor, ``min_open_seq`` is well-defined for every session
+    ``GHOST_ASST_SQL`` returned (the ``open_tool_call_count > 0`` gate
+    guarantees a genuinely-open call exists somewhere, and a valid floor
+    guarantees its batch's seq is ``>= floor`` — hence fetched). A session
+    absent from ``min_open_seq`` (which invariant 0 says should not happen)
+    is simply left unadvanced — safe, since a stale-low floor is never
+    unsound, only a slower scan.
+
+    A no-op cross-session round trip when ``min_open_seq`` is empty (every
+    fetched batch's tcids all resolved via a race with a concurrent append,
+    or ``session_ids`` itself is empty) — ``asyncpg`` executes ``UPDATE ...
+    FROM unnest($1::text[], $2::bigint[])`` against two empty arrays and
+    matches zero rows.
+    """
+    ids = [sid for sid in session_ids if sid in min_open_seq]
+    if not ids:
+        return
+    floors = [min_open_seq[sid] for sid in ids]
+    async with pool.acquire() as conn:
+        await conn.execute(_ADVANCE_OPEN_TOOL_CALL_FLOOR_SQL, ids, floors)
+
 
 async def find_and_repair_ghosts(
     pool: asyncpg.Pool[Any],
@@ -561,23 +693,49 @@ async def find_and_repair_ghosts(
     scope_clause = "AND e.session_id = $1" if session_id else ""
     scope_params: list[Any] = [session_id] if session_id else []
 
+    # Rollout ordering fail-closed guard (#1746): ``aios-worker`` boots
+    # straight into new code with no migration step of its own, so a naive
+    # single-image promote can serve this code before the post-deploy ``aios
+    # migrate`` has added ``open_tool_call_floor_seq``. Rather than let the
+    # whole cross-session sweep abort with ``UndefinedColumnError`` (a
+    # fleet-wide wake outage), degrade ALL THREE floor-bounded queries to
+    # their pre-#1746 unbounded twins for this pass — never fail dark. The
+    # floor is not advanced in this mode (``floor_column_present`` gates the
+    # advance call below): with no reliable floor-bounded fetch, there is
+    # nothing safe to derive a tighter bound from.
+    floor_column_present = True
+
     async with pool.acquire() as conn:
-        asst_rows = await conn.fetch(
-            GHOST_ASST_SQL.format(scope_clause=scope_clause),
-            *scope_params,
-        )
+        try:
+            asst_rows = await conn.fetch(
+                GHOST_ASST_SQL.format(scope_clause=scope_clause),
+                *scope_params,
+            )
+        except asyncpg.UndefinedColumnError:
+            log.warning("sweep.open_tool_call_floor_seq_missing_column_fallback")
+            floor_column_present = False
+            asst_rows = await conn.fetch(
+                _GHOST_ASST_SQL_UNBOUNDED_FALLBACK.format(scope_clause=scope_clause),
+                *scope_params,
+            )
 
         if not asst_rows:
             return []
 
         session_ids = list({r["session_id"] for r in asst_rows})
 
-        result_rows = await conn.fetch(ALL_RESULT_ROWS_SQL, session_ids)
+        if floor_column_present:
+            result_rows = await conn.fetch(GHOST_RESULT_ROWS_SQL, session_ids)
+        else:
+            result_rows = await conn.fetch(_GHOST_RESULT_ROWS_SQL_UNBOUNDED_FALLBACK, session_ids)
         results_by_session: dict[str, set[str]] = {}
         for r in result_rows:
             results_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
 
-        lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
+        if floor_column_present:
+            lifecycle_rows = await conn.fetch(GHOST_LIFECYCLE_SQL, session_ids)
+        else:
+            lifecycle_rows = await conn.fetch(_GHOST_LIFECYCLE_SQL_UNBOUNDED_FALLBACK, session_ids)
         confirmed_by_session: dict[str, set[str]] = {}
         for r in lifecycle_rows:
             confirmed_by_session.setdefault(r["session_id"], set()).add(r["tool_call_id"])
@@ -585,25 +743,68 @@ async def find_and_repair_ghosts(
     # First pass: find candidate ghosts (no result, no in-flight task).
     # We don't yet know their dispatch status — that requires agent config.
     # ``created_at`` is the assistant turn's emit time, carried so the
-    # abandoned-client-call branch can age-bound off it (#752).
+    # abandoned-client-call branch can age-bound off it (#752). Also tracks,
+    # per session, ``min_open_seq`` — the seq of the OLDEST fetched batch that
+    # still has an OPEN tcid (no result row) — the sweep-derived floor advance
+    # (#1746).
+    #
+    # "Open" here means EXACTLY what ``open_tool_call_count`` means (no result
+    # row), NOT the narrower "no result AND not in-flight" ghost-candidacy
+    # test below. This distinction is load-bearing: an in-flight call has no
+    # result yet, so it IS genuinely open — its batch must still anchor the
+    # floor, because the in-flight task can crash later (after this floor
+    # advance persists) and become a true ghost. Excluding an in-flight-only
+    # batch from the floor computation would let the floor advance past a call
+    # that has not actually resolved, reintroducing the exact permanent-wedge
+    # class this redesign exists to prevent. This is also why ``min_open_seq``
+    # is ALWAYS well-defined for a session ``GHOST_ASST_SQL`` returns: that
+    # query's ``open_tool_call_count > 0`` gate guarantees (invariant 0's sound
+    # side) at least one genuinely no-result tcid exists somewhere in the
+    # session, and a valid floor guarantees its batch's seq is ``>= floor`` —
+    # hence fetched. So there is no "no open batch found" branch to handle.
     candidates: list[_Candidate] = []
+    min_open_seq: dict[str, int] = {}
 
     for row in asst_rows:
         sid = row["session_id"]
-        data = row["data"]
+        tool_calls = row["tool_calls"] or []
+        seq = row.get("seq")
         created_at = row["created_at"]
         existing_results = results_by_session.get(sid, set())
         session_in_flight = in_flight.get(sid, set())
 
-        for tc in data.get("tool_calls") or []:
+        batch_has_open_tcid = False
+        for tc in tool_calls:
             tcid = tc.get("id")
-            if not tcid or tcid in existing_results or tcid in session_in_flight:
+            if not tcid or tcid in existing_results:
+                continue
+            # No result row → genuinely open (regardless of in-flight status)
+            # → this batch anchors the floor.
+            batch_has_open_tcid = True
+            if tcid in session_in_flight:
+                # In-flight: genuinely open, but a live task is already
+                # servicing it — not a ghost-repair candidate.
                 continue
             function = tc.get("function") or {}
             name = function.get("name", "")
             candidates.append(
                 _Candidate(sid, tcid, name, created_at, arguments=function.get("arguments"))
             )
+
+        if batch_has_open_tcid and seq is not None:
+            prior = min_open_seq.get(sid)
+            if prior is None or seq < prior:
+                min_open_seq[sid] = seq
+
+    # Advance the floor for EVERY in-scope session, before the
+    # ``not candidates`` early-return below — a session whose fetched batches
+    # are all fully resolved must still advance its floor past them (#1746).
+    # ``GREATEST``-only (never lowers the stored floor); skipped entirely when
+    # the column was missing this pass — the fallback branch fetched from the
+    # unbounded twins, so ``min_open_seq`` was derived without a floor
+    # guarantee and is not safe to write back as one.
+    if floor_column_present:
+        await _advance_open_tool_call_floor(pool, session_ids, min_open_seq)
 
     if not candidates:
         return []

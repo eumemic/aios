@@ -19,6 +19,25 @@ from tests.e2e.harness import Harness, assistant, tool_call
 
 pytestmark = pytest.mark.docker
 
+
+async def _read_session_row(harness: Harness, session_id: str) -> dict[str, Any]:
+    """Read the maintained scalar columns off ``sessions`` directly (#1746
+    test support) — the sweep-derived floor and its counterpart counter
+    aren't exposed through the service layer's ``Session`` model."""
+    async with harness._pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT open_tool_call_count, open_tool_call_floor_seq FROM sessions WHERE id = $1",
+            session_id,
+        )
+    assert row is not None
+    return dict(row)
+
+
+async def _read_floor(harness: Harness, session_id: str) -> int:
+    row = await _read_session_row(harness, session_id)
+    return int(row["open_tool_call_floor_seq"])
+
+
 # ─── ghost recovery ──────────────────────────────────────────────────────────
 
 
@@ -438,6 +457,226 @@ class TestGhostRecovery:
 
         # Step 3: model sees the ghost error.
         await harness.run_step(session.id)
+
+    async def test_floor_advances_and_repairs_orphan_in_later_batch(self, harness: Harness) -> None:
+        """The sweep-maintained floor (#1746): fully resolve batch 1, run
+        several turns, then orphan a call in a LATER batch.
+
+        The orphan must still be repaired (the floor must never exceed the
+        oldest currently-open call's seq), and ``open_tool_call_floor_seq``
+        must have advanced to (at least) the resolved batch's seq once batch 1
+        is fully settled.
+        """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+
+        async def handler_ok(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"result": "ok"}
+
+        tool_lost_started = asyncio.Event()
+        tool_lost_proceed = asyncio.Event()
+
+        async def handler_lost(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            tool_lost_started.set()
+            await tool_lost_proceed.wait()
+            return {"result": "lost_done"}
+
+        harness.register_tool("ok_tool", handler_ok)
+        harness.register_tool("lost_tool", handler_lost)
+
+        harness.script_model(
+            [
+                # Batch 1: fully resolves.
+                assistant(tool_calls=[tool_call("ok_tool", {}, call_id="call_b1")]),
+                # A few turns of plain conversation to advance the log.
+                assistant("Turn 2."),
+                assistant("Turn 3."),
+                # Later batch: lost_tool orphans.
+                assistant(tool_calls=[tool_call("lost_tool", {}, call_id="call_b4")]),
+                assistant("Lost tool failed. Moving on."),
+            ]
+        )
+
+        session = await harness.start("start", tools=[])
+
+        # Step 1: batch 1 resolves fully.
+        await harness.run_step(session.id)
+        await harness.wait_for_tools(session.id)
+
+        # Ghost repair with nothing open — floor must not move (0 stays 0,
+        # since open_tool_call_count is 0 and GHOST_ASST_SQL never fetches
+        # this session).
+        repaired0 = await harness.run_ghost_repair(session.id)
+        assert repaired0 == []
+
+        # Turns 2 + 3: plain conversation, no tool calls.
+        await harness.inject_message(session.id, "continue")
+        await harness.run_step(session.id)
+        await harness.inject_message(session.id, "continue again")
+        await harness.run_step(session.id)
+
+        # Batch 4: lost_tool dispatches then is lost (SIGKILL simulation).
+        await harness.inject_message(session.id, "run lost_tool")
+        await harness.run_step(session.id)
+        await asyncio.wait_for(tool_lost_started.wait(), timeout=5.0)
+        await harness.simulate_sigkill(session.id)
+
+        floor_before = await _read_floor(harness, session.id)
+
+        repaired = await harness.run_ghost_repair(session.id)
+        assert repaired == [(session.id, "call_b4")], (
+            f"the later-batch orphan must be repaired regardless of any prior "
+            f"floor advance; got {repaired}"
+        )
+
+        floor_after = await _read_floor(harness, session.id)
+        assert floor_after >= floor_before, "the floor must be monotonic (GREATEST-only advance)"
+
+        # The floor must never have exceeded call_b4's owning batch seq —
+        # otherwise this repair couldn't have found it at all. Cross-checked
+        # here directly against the event log for an independent assertion.
+        events = await sessions_service.read_message_events(
+            harness._pool, session.id, account_id=account_id
+        )
+        b4_seq = next(
+            e.seq
+            for e in events
+            if e.kind == "message"
+            and e.data.get("role") == "assistant"
+            and any(tc.get("id") == "call_b4" for tc in (e.data.get("tool_calls") or []))
+        )
+        assert floor_before <= b4_seq, (
+            f"floor {floor_before} exceeded call_b4's batch seq {b4_seq} — "
+            f"the exact permanent-wedge class this design forecloses"
+        )
+
+    async def test_over_decrement_dedup_skip_does_not_lose_older_ghost(
+        self, harness: Harness
+    ) -> None:
+        """Over-decrement regression (finding L0-1/L0-2): a duplicate result
+        dedup-skip can drive ``open_tool_call_count`` to 0 with a sibling call
+        STILL open. This is the exact scenario the rejected write-path-stamp
+        design failed on (it would have permanently excluded the older batch
+        once the counter transiently hit 0).
+
+        B0 = {X, Y}; resolve Y; deliver a DUPLICATE Y result (dedup-skip
+        decrements again, driving the counter toward/at 0 while X is still
+        open); a fresh batch B2 opens (count rises again, bypassing the
+        batch-completion gate the same way a user message would) — ghost
+        repair must still find X, and the floor must never have exceeded
+        B0's seq at the moment X is found.
+
+        Manually constructs the event log (pattern:
+        ``test_confirmed_always_ask_ghost`` below) rather than driving it
+        through scripted model turns, so the dedup-skip and the re-opening
+        batch are deterministic and don't depend on ``run_step`` scheduling.
+        """
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+
+        harness.script_model([assistant("unused")])
+        session = await harness.start("run B0", tools=[])
+
+        # B0 = {X, Y}, both dispatched (bash is always_allow by default with
+        # no tool_specs restriction here — tools=[] means no MCP/registry
+        # gating applies to the ghost classifier's dispatched check for a
+        # plain custom-style call name, so this exercises the same
+        # "did not run" ghost path as test_all_tools_lost_after_sigkill).
+        b0 = await sessions_service.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_X", "type": "function", "function": {"name": "bash"}},
+                    {"id": "call_Y", "type": "function", "function": {"name": "bash"}},
+                ],
+                "reacting_to": 1,
+            },
+            account_id=account_id,
+        )
+        b0_seq = b0.seq
+
+        # Resolve Y once (the legitimate result). X has no result and no
+        # in-flight task — a "did not run" ghost, same as
+        # test_all_tools_lost_after_sigkill / test_confirmed_always_ask_ghost.
+        async with harness._pool.acquire() as conn:
+            await sessions_service.append_tool_result(
+                conn,
+                account_id=account_id,
+                session_id=session.id,
+                tool_call_id="call_Y",
+                content="{}",
+            )
+
+        b0_row = await _read_session_row(harness, session.id)
+        assert b0_row["open_tool_call_count"] == 1  # X still open
+
+        # Deliver a DUPLICATE Y result — dedup-skips (idempotent retry /
+        # at-least-once redelivery), applying the compensating -1 a SECOND
+        # time and driving the counter to 0 while X is still genuinely open.
+        async with harness._pool.acquire() as conn:
+            await sessions_service.append_tool_result(
+                conn,
+                account_id=account_id,
+                session_id=session.id,
+                tool_call_id="call_Y",
+                content="{}",
+            )
+
+        after_dup_row = await _read_session_row(harness, session.id)
+        assert after_dup_row["open_tool_call_count"] == 0, (
+            "the dedup-skip compensation should have driven the counter to 0 "
+            "with X still genuinely open — the exact over-decrement scenario"
+        )
+
+        # A fresh batch B2 opens (mirrors "a user message bypasses the batch
+        # gate; inference opens B2" from the issue) — the counter rises again,
+        # re-admitting the session past the open_tool_call_count > 0 gate.
+        # B2's own call is left open too so this batch also needs repair.
+        await sessions_service.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {"role": "user", "content": "what's taking so long?"},
+            account_id=account_id,
+        )
+        b2 = await sessions_service.append_event(
+            harness._pool,
+            session.id,
+            "message",
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_Z", "type": "function", "function": {"name": "bash"}},
+                ],
+                "reacting_to": None,
+            },
+            account_id=account_id,
+        )
+
+        raised_row = await _read_session_row(harness, session.id)
+        assert raised_row["open_tool_call_count"] > 0, (
+            "expected the counter to have risen once B2 opened — this is the "
+            "re-admission this regression test exercises"
+        )
+
+        floor_before = await _read_floor(harness, session.id)
+        assert floor_before <= b0_seq, (
+            f"floor {floor_before} already exceeded B0's seq {b0_seq} before "
+            f"the repair ran — the floor must never exclude a genuinely open call"
+        )
+
+        repaired = await harness.run_ghost_repair(session.id)
+        repaired_tcids = {tcid for _sid, tcid in repaired}
+        assert "call_X" in repaired_tcids, (
+            f"OVER-DECREMENT REGRESSION: call_X (from B0, still genuinely open "
+            f"despite the counter having transiently read 0) was not repaired; "
+            f"got {repaired}. This is the exact permanent-wedge class the "
+            f"rejected write-path-stamp design failed on."
+        )
+        del b2  # only its seq-side-effect (raising the counter) is needed above
 
     async def test_confirmed_always_ask_ghost(self, harness: Harness) -> None:
         """always_ask tool confirmed-allow, dispatched, then lost. Is a ghost.

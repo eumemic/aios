@@ -50,19 +50,15 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
-            },
+            "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
         },
         {
             "session_id": "sess_b",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [{"id": "tc_b", "type": "function", "function": {"name": "bash"}}],
-            },
+            "tool_calls": [{"id": "tc_b", "type": "function", "function": {"name": "bash"}}],
         },
     ]
     # Mark both tool_calls as confirmed-via-lifecycle so ``_was_dispatched``
@@ -77,13 +73,14 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
         {"session_id": "sess_b", "tools": [], "http_servers": []},
     ]
     # find_and_repair_ghosts issues five ``conn.fetch`` calls in order:
-    # GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL, agents,
+    # GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL, agents,
     # GHOST_SPAN_START_SQL.  The empty span result means both ghosts hit
     # the "never started" branch of the recovery synthesis (#685) — which
     # is fine for this test, which only cares that per-ghost failures
     # don't abort the batch.
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], lifecycle_rows, agent_rows, []])
+    conn.execute = AsyncMock(return_value=None)
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock(side_effect=[RuntimeError("first ghost db blip"), None])
@@ -122,11 +119,9 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
-            },
+            "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
         },
     ]
     # ``tool_confirmed allow`` for the always_ask bash builtin so the
@@ -143,10 +138,11 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
         {"session_id": "sess_a", "tool_call_id": "tc_a"},
     ]
     # find_and_repair_ghosts now issues five ``conn.fetch`` calls in order:
-    # GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL, agents,
+    # GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL, agents,
     # GHOST_SPAN_START_SQL.
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], lifecycle_rows, agent_rows, span_rows])
+    conn.execute = AsyncMock(return_value=None)
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock(return_value=None)
@@ -179,11 +175,9 @@ async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
-            },
+            "tool_calls": [{"id": "tc_a", "type": "function", "function": {"name": "bash"}}],
         },
     ]
     lifecycle_rows = [
@@ -194,10 +188,11 @@ async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:
     ]
     # NO span for tc_a → routes the synthesis to the "did not run" branch.
     span_rows: list[dict[str, Any]] = []
-    # Five fetches: GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL,
+    # Five fetches: GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL,
     # agents, GHOST_SPAN_START_SQL.
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], lifecycle_rows, agent_rows, span_rows])
+    conn.execute = AsyncMock(return_value=None)
     pool = fake_pool_yielding_conn(conn)
 
     append_mock = AsyncMock(return_value=None)
@@ -228,24 +223,23 @@ async def test_ghost_repair_does_not_refetch_errored_set(monkeypatch: Any) -> No
     ghost_rows = [
         {
             "session_id": "sess_a",
+            "seq": 10,
             "created_at": _NOW,
-            "data": {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "tc_a",
-                        "type": "function",
-                        "function": {"name": "bash", "arguments": "{}"},
-                    }
-                ],
-            },
+            "tool_calls": [
+                {
+                    "id": "tc_a",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{}"},
+                }
+            ],
         }
     ]
     agent_rows = [{"session_id": "sess_a", "tools": [], "http_servers": []}]
     conn = MagicMock()
-    # 5, not 6: GHOST_ASST_SQL, ALL_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL,
+    # 5, not 6: GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL,
     # agents, GHOST_SPAN_START_SQL — no ERRORED_SESSIONS_SQL slot.
     conn.fetch = AsyncMock(side_effect=[ghost_rows, [], [], agent_rows, []])
+    conn.execute = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
         "aios.harness.sweep.sessions_service.load_session_account_id",
