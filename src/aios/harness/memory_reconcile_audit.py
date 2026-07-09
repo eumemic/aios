@@ -41,7 +41,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.db import queries
+from aios.db import queries as queries
 from aios.logging import get_logger
 from aios.sandbox.memory_mounts import MATERIALIZED_MARKER
 from aios.sandbox.volumes import memory_store_host_dir, memory_stores_root

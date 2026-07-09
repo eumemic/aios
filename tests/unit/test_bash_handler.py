@@ -256,6 +256,7 @@ class TestMemoryReconcileFastPath:
 
         mock_snapshot.assert_not_called()
         mock_reconcile.assert_awaited_once()
+        assert mock_reconcile.await_args is not None
         args = mock_reconcile.await_args.args
         assert args[1] == {}
         assert args[2] == 0
@@ -291,6 +292,7 @@ class TestMemoryReconcileFastPath:
 
             mock_snapshot.assert_called_once_with("sess_01TEST")
             mock_reconcile.assert_awaited_once()
+            assert mock_reconcile.await_args is not None
             args = mock_reconcile.await_args.args
             assert args[1] == {}
             assert args[2] == 12345

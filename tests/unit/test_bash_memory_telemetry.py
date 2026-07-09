@@ -48,7 +48,7 @@ class TestCandidateReadCounter:
                 raise RuntimeError("sink exploded")
 
         prev = mod._CANDIDATE_READS
-        mod._CANDIDATE_READS = _BoomCounter()  # type: ignore[assignment]
+        mod._CANDIDATE_READS = _BoomCounter()
         try:
             telemetry.record_candidate_reads(1)  # must not raise
         finally:

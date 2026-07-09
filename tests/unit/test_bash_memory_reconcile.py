@@ -166,7 +166,7 @@ class TestSnapshot:
             patch.object(Path, "read_bytes", _spy_read_bytes),
         ):
             snapshot_memory_mounts(SESSION_ID)
-        assert real_read_bytes  # sanity: original still bound elsewhere
+        assert real_read_bytes is not None  # sanity: original still bound elsewhere
 
     async def test_nested_path(self, tmp_path: Path) -> None:
         """File at a/b/c.md resolves to store path /a/b/c.md."""
@@ -456,7 +456,7 @@ class TestReconcile:
                 SESSION_ID, before=before, snapshot_ns=cold_snapshot_ns
             )
 
-        assert real_read_bytes
+        assert real_read_bytes is not None
         assert warnings == []
         mocks["aios.tools.bash_memory_reconcile.memory_service.create_memory"].assert_not_awaited()
         mocks["aios.tools.bash_memory_reconcile.memory_service.update_memory"].assert_not_awaited()
