@@ -194,6 +194,22 @@ def build_projection(
 #                                     volume)
 #   - archived_at                     RESET (a clone is born un-archived)
 #   - created_at / updated_at         RESET (now())
+#   - open_request_scan_floor         RESET (#1747 — the monotone open-request
+#                                     anti-join scan-floor. RESET_DEFAULT, not
+#                                     COPY: the clone starts at floor 0 (a full
+#                                     scan, always safe) and ratchets lazily on
+#                                     its own steps. This deliberately
+#                                     DECOUPLES the clone's floor from
+#                                     event-copy fidelity — COPY would only be
+#                                     safe *because* clone_session currently
+#                                     copies every event verbatim with
+#                                     identical seqs (the SEQ-PREFIX
+#                                     INVARIANT), an invariant that would
+#                                     silently break the moment anyone adds
+#                                     event truncation/filtering to clone. A
+#                                     stale/zero floor is perf-only, never a
+#                                     correctness gap, so RESET is the safe
+#                                     default here.)
 SESSIONS_POLICY: dict[str, Arm] = {
     "id": Arm.MINT_ID,
     "agent_id": Arm.COPY,
@@ -239,6 +255,7 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "litellm_extra": Arm.COPY,
     "outbound_suppression": Arm.COPY,
     "tools_vocab_epoch": Arm.COPY,
+    "open_request_scan_floor": Arm.RESET_DEFAULT,
 }
 
 

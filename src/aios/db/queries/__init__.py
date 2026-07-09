@@ -251,7 +251,9 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def open_request_anti_join(*, sid: str, acct: str, awaited_only: bool) -> str:
+def open_request_anti_join(
+    *, sid: str, acct: str, awaited_only: bool, floor_bounded: bool = False
+) -> str:
     """SQL predicate for the open-request anti-join: a ``request_opened`` edge on
     (``sid``, ``acct``) with no answering ``request_response``.
 
@@ -273,13 +275,59 @@ def open_request_anti_join(*, sid: str, acct: str, awaited_only: bool) -> str:
       * False → every still-open edge, awaited or not (e.g. wake-priority
                 demotion keys off any triggering edge, including a background
                 fan-out's unawaited ``Tell`` child).
+
+    ``floor_bounded`` (#1747) additionally restricts the scan to
+    ``req.seq >= <session's open_request_scan_floor>`` via an uncorrelated
+    scalar InitPlan subquery — usable as an index range bound (rather than a
+    correlated subquery, which the planner can't hoist out of the per-row
+    evaluation). The floor is monotone and can never advance past a
+    genuinely-open lower-seq edge (see the SEQ-PREFIX INVARIANT documented at
+    :func:`aios.db.queries.sessions.advance_open_request_scan_floor`), so
+    bounding the scan is perf-only, never a correctness change, PROVIDED the
+    two structural guards below hold:
+
+      * ``floor_bounded`` requires ``awaited_only=True`` — the floor is only
+        ever proven (by the advance function) against the *awaited* open set;
+        floor-bounding the ``awaited_only=False`` reader (wake-priority
+        demotion, which must see an unawaited ``Tell`` edge regardless of the
+        awaited-floor's position) would be unsound.
+      * ``floor_bounded`` requires a **scalar** ``sid`` expression. The bound
+        is emitted as a scalar subquery ``(SELECT ... WHERE id = {sid})``; if
+        ``sid`` is a batch/array form (e.g. ``ANY($1::text[])``, used by
+        :func:`aios.db.queries.sessions.get_open_obligations_batch`), the
+        scalar subquery would match multiple sessions and Postgres raises
+        ``more than one row returned by a subquery`` at RUNTIME. Guarded
+        structurally here (at construction) rather than left to a runtime
+        surprise, so a future perf edit that flips ``floor_bounded=True`` on
+        the batch reader fails immediately and loudly instead of crashing the
+        list-sessions obligations view in production.
+
+    Both guards ``raise ValueError`` — a comment is not a guard.
     """
+    if floor_bounded and not awaited_only:
+        raise ValueError(
+            "open_request_anti_join: floor_bounded=True requires awaited_only=True "
+            "— the scan-floor is only proven against the awaited open set"
+        )
+    if floor_bounded and ("ANY(" in sid or "any(" in sid):
+        raise ValueError(
+            "open_request_anti_join: floor_bounded=True requires a scalar `sid` "
+            f"expression (got {sid!r}) — a batch/ANY() sid makes the floor's scalar "
+            "subquery return more than one row at runtime"
+        )
     awaited = "AND COALESCE((req.data->>'awaited')::boolean, TRUE) " if awaited_only else ""
+    floor = (
+        f"AND req.seq >= COALESCE((SELECT open_request_scan_floor FROM sessions "
+        f"WHERE id = {sid}), 0) "
+        if floor_bounded
+        else ""
+    )
     return (
         f"req.session_id = {sid} AND req.account_id = {acct} "
         "AND req.kind = 'lifecycle' AND req.data->>'event' = 'request_opened' "
         "AND req.data->>'request_id' IS NOT NULL "
         f"{awaited}"
+        f"{floor}"
         "AND NOT EXISTS (SELECT 1 FROM events resp "
         f"    WHERE resp.session_id = {sid} AND resp.account_id = {acct} "
         "    AND resp.kind = 'lifecycle' AND resp.data->>'event' = 'request_response' "
@@ -530,6 +578,7 @@ from .sessions import (  # noqa: E402
     _SESSION_ACTIVE_EXPR,
     _SESSION_ERRORED_EXPR,
     _SESSION_STATUS_EXPR,
+    advance_open_request_scan_floor,
     append_request_opened,
     archive_session,
     clone_session,
@@ -699,6 +748,7 @@ __all__ = [
     "acquire_account_triggers_lock",
     "acquire_session_resources_lock",
     "add_trigger",
+    "advance_open_request_scan_floor",
     "append_event",
     "append_request_opened",
     "archive_account",
