@@ -64,8 +64,8 @@ during any window is just a safe over-scan, never an under-scan). Only run
 the column while new code is still live reintroduces the exact
 ``UndefinedColumnError`` this migration's ordering is designed to avoid.
 
-Revision ID: 0132
-Revises: 0131
+Revision ID: 0134
+Revises: 0133
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0132"
-down_revision: str = "0131"
+revision: str = "0134"
+down_revision: str = "0133"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
