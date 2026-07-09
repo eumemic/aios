@@ -4,7 +4,30 @@ from __future__ import annotations
 
 from typing import Any
 
-from tests.e2e.harness import Harness, assistant, tool_call
+from aios.models.agents import ToolSpec
+from tests.e2e.harness import Harness, assistant, first_tool_result, tool_call, tool_results
+
+
+def _offer(name: str) -> list[ToolSpec]:
+    """Offer a test-registered built-in ``name`` on the agent's tool surface.
+
+    The tools these tests register with ``harness.register_tool`` are handler-backed
+    built-ins in the global registry; declaring them here (``type="custom"`` is the
+    only ToolSpec variant that carries an arbitrary ``name``) puts the name in the
+    step's frozen OFFERED set so the harness's #1773 ``callable ≡ offered`` invariant
+    dispatches the call through the real handler instead of rejecting it as unoffered.
+    Argument-schema validation still runs against the REGISTRY schema
+    (``invoke_builtin`` → ``tool.parameters_schema``), not this declared
+    ``input_schema`` — so the schema-violation path is exercised for real.
+    """
+    return [
+        ToolSpec(
+            type="custom",
+            name=name,
+            description="test tool",
+            input_schema={"type": "object", "additionalProperties": True},
+        )
+    ]
 
 
 class TestToolExecuteSpan:
@@ -19,7 +42,7 @@ class TestToolExecuteSpan:
                 assistant("Done."),
             ]
         )
-        session = await harness.start("echo ping", tools=[])
+        session = await harness.start("echo ping", tool_specs=_offer("echo"))
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -38,6 +61,11 @@ class TestToolExecuteSpan:
         assert end.data["tool_name"] == "echo"
         assert end.data["tool_call_id"] == start.data["tool_call_id"]
         assert end.data["is_error"] is False
+        # The real echo_handler ran (not a "tool not offered" rejection): its return
+        # value is round-tripped into the tool-result content.
+        result = first_tool_result(events)
+        assert "echoed" in str(result.get("content", ""))
+        assert "tool not offered" not in str(result.get("content", ""))
 
     async def test_span_pair_flags_error_on_handler_exception(self, harness: Harness) -> None:
         async def failing_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +78,7 @@ class TestToolExecuteSpan:
                 assistant("I see the tool failed."),
             ]
         )
-        session = await harness.start("do the thing", tools=[])
+        session = await harness.start("do the thing", tool_specs=_offer("fails"))
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -58,6 +86,12 @@ class TestToolExecuteSpan:
         assert len(ends) == 1
         assert ends[0].data["is_error"] is True
         assert ends[0].data["tool_name"] == "fails"
+        # is_error is True because the HANDLER raised — not because the tool was
+        # unoffered. Pin the real exception path so this can't silently regress to a
+        # "tool not offered" rejection.
+        result = first_tool_result(events)
+        assert "tool not offered" not in str(result.get("content", ""))
+        assert "boom" in str(result.get("content", ""))
 
     async def test_span_pair_flags_error_on_schema_violation(self, harness: Harness) -> None:
         """Schema validation failure is still a tool-execute failure for span purposes."""
@@ -83,13 +117,18 @@ class TestToolExecuteSpan:
                 assistant("Got the schema error."),
             ]
         )
-        session = await harness.start("call strict", tools=[])
+        session = await harness.start("call strict", tool_specs=_offer("strict"))
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
         ends = [e for e in events if e.kind == "span" and e.data["event"] == "tool_execute_end"]
         assert len(ends) == 1
         assert ends[0].data["is_error"] is True
+        # is_error is True because argument-schema validation failed on the real
+        # dispatch path — NOT because the tool was unoffered.
+        result = first_tool_result(events)
+        assert "tool not offered" not in str(result.get("content", ""))
+        assert "schema validation" in str(result.get("content", "")).lower()
 
     async def test_span_pair_per_tool_call_on_batch(self, harness: Harness) -> None:
         """Three parallel tool calls produce three span pairs, each linked correctly."""
@@ -110,7 +149,7 @@ class TestToolExecuteSpan:
                 assistant("All three done."),
             ]
         )
-        session = await harness.start("batch", tools=[])
+        session = await harness.start("batch", tool_specs=_offer("noop"))
         await harness.run_until_idle(session.id)
 
         events = await harness.all_events(session.id)
@@ -128,3 +167,9 @@ class TestToolExecuteSpan:
         start_call_ids = {s.data["tool_call_id"] for s in starts}
         end_call_ids = {e.data["tool_call_id"] for e in ends}
         assert start_call_ids == end_call_ids
+        # All three dispatched through the real noop_handler (is_error False), not
+        # rejected as unoffered.
+        assert all(e.data["is_error"] is False for e in ends)
+        results = tool_results(events)
+        assert len(results) == 3
+        assert all("tool not offered" not in str(r.get("content", "")) for r in results)
