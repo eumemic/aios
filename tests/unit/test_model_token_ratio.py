@@ -28,7 +28,7 @@ from aios.db.queries import (
     model_token_class_ratios,
     model_token_ratio,
 )
-from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT
+from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT, _fit_class_ratios
 from aios.harness.tokens import CONTENT_CLASSES
 
 # The three classes the synthetic calibration data exercises; the rest stay
@@ -150,6 +150,21 @@ class TestModelTokenClassRatios:
         assert "LIMIT $2" in sql
 
     @pytest.mark.asyncio
+    async def test_sql_requires_strictly_positive_input_tokens(self) -> None:
+        """Regression for the Ultron/sol outage (2026-07-09): streamed spans
+        whose provider omitted the usage trailer get coerced to
+        ``input_tokens = 0`` and persisted as ``is_error=false`` successes.
+        The old guard only checked ``IS NOT NULL``, so these zero-usage rows
+        were admitted as calibration samples and asserted "~100-300k local =
+        0 provider", collapsing ``blended_r_eff`` and detonating the window
+        reader's retention budget. The query must also require
+        ``input_tokens`` to be strictly positive."""
+        conn = _mock_conn([])
+        await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
+        sql = conn.fetch.await_args.args[0]
+        assert "(data->'model_usage'->>'input_tokens')::bigint > 0" in sql
+
+    @pytest.mark.asyncio
     async def test_fetch_bound_to_sample_limit_constant(self) -> None:
         """The LIMIT is bound to the module constant (locked at 1000, issue
         #1711), passed as ``$2`` alongside the model — not inlined — so the
@@ -242,6 +257,97 @@ class TestModelTokenClassRatios:
         second = await model_token_class_ratios(conn, "model-cold", account_id="acc_test_stub")
         assert second == first
         conn.fetch.assert_not_awaited()
+
+
+class TestZeroUsagePoisonExclusion:
+    """Regression for the Ultron/sol outage (2026-07-09, issue #1794).
+
+    Five streamed "success" spans (prod seqs 883805/883844/883993/884032/
+    884075) were persisted with ``model_usage.input_tokens = 0`` because the
+    provider omitted the streaming usage trailer and ``_normalize_usage``
+    coerced the absent value to 0 — while still carrying full, large
+    ``local_tokens`` (mostly ``tool_result`` mass). The old calibration
+    guard only required ``input_tokens IS NOT NULL``, so these zero rows
+    were admitted and asserted "~100-300k local = 0 provider tokens",
+    pinning the ``tool_result`` coefficient at its floor and collapsing
+    ``blended_r_eff`` 0.99 -> 0.135 — which the window reader then divides
+    its retention budget by, guaranteeing a context-overflow outage.
+
+    These cases fix a corpus mirroring the incident shape (clean spans with
+    realistic usage + zero-``input_tokens`` poison spans) and assert the fit
+    is driven only by the positive-usage rows.
+    """
+
+    def _incident_shaped_rows(
+        self, *, n_clean: int, n_poison: int
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Mirror the incident: ``tool_result`` carries most of the mass in
+        both the clean and poison spans (poison spans are large streamed
+        tool-result-heavy turns whose usage trailer got dropped)."""
+        true = {"text": 1.0, "tool_result": 1.0, "thinking": 1.0}
+        clean = _linear_rows(true, n=n_clean, base=100)
+        poison = [
+            _row(
+                {
+                    "text": 5_000.0,
+                    "tool_result": 150_000.0 + 10_000.0 * i,
+                    "thinking": 8_000.0,
+                },
+                input_tokens=0.0,
+            )
+            for i in range(n_poison)
+        ]
+        return clean, poison
+
+    def test_poison_rows_would_collapse_the_fit_if_admitted(self) -> None:
+        """Documents the pre-fix failure mode directly against the fitter:
+        mixing in the zero-``input_tokens`` poison rows collapses the
+        ``tool_result`` coefficient toward the physical floor and drags
+        ``blended_r_eff`` far below the clean-only fit — this is exactly
+        the mechanism that produced R_eff 0.99 -> 0.135 in prod."""
+        clean, poison = self._incident_shaped_rows(n_clean=11, n_poison=5)
+
+        clean_fit = _fit_class_ratios(clean)
+        assert clean_fit is not None
+        clean_comp = {"text": 100.0, "tool_result": 900.0, "thinking": 100.0}
+        clean_r_eff = blended_r_eff(clean_fit, clean_comp)
+        assert clean_r_eff == pytest.approx(1.0, abs=0.25)
+
+        contaminated_fit = _fit_class_ratios(clean + poison)
+        assert contaminated_fit is not None
+        contaminated_r_eff = blended_r_eff(contaminated_fit, clean_comp)
+
+        # The poisoned fit's tool_result coefficient is dragged sharply
+        # toward zero, and the resulting blend collapses well below the
+        # clean-only fit -- reproducing the outage mechanism.
+        assert contaminated_fit["tool_result"] < clean_fit["tool_result"] - 0.3
+        assert contaminated_r_eff < clean_r_eff - 0.3
+
+    @pytest.mark.asyncio
+    async def test_calibration_excludes_zero_input_token_rows(self) -> None:
+        """End-to-end through :func:`model_token_class_ratios`: the SQL
+        guard (asserted separately in ``test_sql_requires_strictly_positive_
+        input_tokens``) means the DB never hands back the zero-usage poison
+        rows — so simulating that post-fix corpus (only the clean rows, as
+        the real query now returns) must fit close to the clean-only ratio,
+        not the collapsed contaminated one."""
+        clean, poison = self._incident_shaped_rows(n_clean=11, n_poison=5)
+
+        # Post-fix: the DB query's ``> 0`` predicate excludes the poison
+        # rows, so only the clean rows are ever fetched.
+        conn = _mock_conn(clean)
+        ratios = await model_token_class_ratios(conn, "gpt-5.6-sol", account_id="acc_test_stub")
+        comp = {"text": 100.0, "tool_result": 900.0, "thinking": 100.0}
+        r_eff = blended_r_eff(ratios, comp)
+        assert r_eff == pytest.approx(1.0, abs=0.25)
+
+        # Sanity check against the pre-fix behavior: had the poison rows
+        # leaked through (the bug this closes), the blend would have
+        # collapsed well below this.
+        contaminated_fit = _fit_class_ratios(clean + poison)
+        assert contaminated_fit is not None
+        contaminated_r_eff = blended_r_eff(contaminated_fit, comp)
+        assert r_eff > contaminated_r_eff + 0.3
 
 
 class TestBlendedREff:

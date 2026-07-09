@@ -429,6 +429,7 @@ async def model_token_class_ratios(
           -- Exclude old/malformed success spans before casting.
           AND (data->'model_usage') ? 'input_tokens'
           AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+          AND (data->'model_usage'->>'input_tokens')::bigint > 0
           AND (data->>'local_tokens')::bigint > 0
         -- Bound the scan to the most recent N spans (issue #1711): rides
         -- migration 0024's ``((data->>'model'), seq DESC)`` partial index
