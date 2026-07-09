@@ -170,7 +170,11 @@ def test_upgrade_downgrade_roundtrip(postgres: object) -> None:
     up = _run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
-    down = _run_alembic(["downgrade", "-1"], db_url)
+    # Target this migration's own down_revision explicitly rather than the
+    # relative "-1" — head has since grown a sibling migration (0136,
+    # renumbered from 0132/0134 per #1746) chained after this one, so "-1"
+    # from head would only undo 0136 and leave this index in place.
+    down = _run_alembic(["downgrade", "0134"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
 
     indexdef = asyncio.run(
