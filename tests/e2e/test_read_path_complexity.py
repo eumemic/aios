@@ -89,6 +89,7 @@ async def seed_large_session(
     *,
     window_tokens: int,
     session_id: str = _SESSION_ID,
+    n_lifecycle: int = 0,
 ) -> None:
     """Seed one session with ``n_messages`` message events reproducing
     ``append_event``'s in-DB running sums.
@@ -106,6 +107,16 @@ async def seed_large_session(
     assistant(thinking), so ALL FOUR ``content_class`` CASE branches (text /
     tool_use / tool_result / thinking) appear in the slate — the composition the
     windower blends over and the branches the pre-fix WindowAgg GROUPed BY.
+
+    ``n_lifecycle`` (default 0, so existing callers are unchanged) additionally
+    seeds ``n_lifecycle`` ``kind='lifecycle'`` rows, interleaved by seq with the
+    message rows (each lifecycle row's seq is offset past the message range so
+    the two kinds interleave in an even/odd-ish pattern across the shared
+    ``events_session_seq_idx`` ordering) — the lifecycle arm of
+    ``read_windowed_context_events`` (#1741) needs real rows to plan against.
+    Most are non-model-visible per-inference noise
+    (``request_opened``/``request_response``, the #1741 issue's exact
+    offenders); every 200th is a model-visible ``sandbox_fs_reset`` notice.
 
     ``ANALYZE events; ANALYZE sessions`` runs after seeding (as the sweep-perf
     precedent does) so the planner picks its real plan for this slate — the plan
@@ -133,13 +144,25 @@ async def seed_large_session(
             account_id,
         )
 
+        # ``n_lifecycle > 0`` reserves the even seq slots for lifecycle rows
+        # (interleaved with the messages below), so messages get the odd
+        # slots (``2g - 1``) instead of the plain ``g`` the n_lifecycle=0
+        # (default, all existing callers) path uses. Downstream ``cumulative_*``
+        # correctness is untouched either way: those columns are window
+        # running-sums ``OVER (ORDER BY g)``, monotonic in ``g`` regardless of
+        # which literal ``seq`` value each row is stamped with.
+        message_seq_expr = "(2 * g - 1)" if n_lifecycle > 0 else "g"
+
         # ONE INSERT ... SELECT generate_series. ``g`` is the 1-based seq; the
         # role cycle drives both ``data`` (so the JSONB content_class CASE fires
         # on real shapes) and the per-class delta attribution. Every
         # cumulative_* column is a window running-sum over ``g`` — the shape
         # append_event builds incrementally, but computed set-wise in one pass.
-        await conn.execute(
-            """
+        # Plain (non-f) string + a single ``.replace()`` for the seq
+        # expression: the JSONB literals below are riddled with ``{``/``}``,
+        # which an f-string would (and briefly did) misparse as nested
+        # expressions.
+        insert_sql = """
             INSERT INTO events
                 (id, session_id, seq, kind, data, created_at,
                  cumulative_tokens, cumulative_messages,
@@ -149,7 +172,7 @@ async def seed_large_session(
             SELECT
                 'ev_readpath_' || $4 || '_' || g,
                 $1,
-                g,
+                __MESSAGE_SEQ_EXPR__,
                 'message',
                 CASE (g % 5)
                     WHEN 0 THEN '{"role":"user","content":"u"}'::jsonb
@@ -186,7 +209,9 @@ async def seed_large_session(
                 $2
             FROM generate_series(1, $3) AS g
             ON CONFLICT (id) DO NOTHING
-            """,
+            """.replace("__MESSAGE_SEQ_EXPR__", message_seq_expr)
+        await conn.execute(
+            insert_sql,
             session_id,
             account_id,
             n_messages,
@@ -194,11 +219,54 @@ async def seed_large_session(
             _DELTA,
         )
 
+        # ``n_lifecycle`` non-model-visible-mostly lifecycle rows, seq
+        # ``2, 4, ..., 2*n_lifecycle`` — interleaved with the messages'
+        # odd seq slots (``2g - 1``) above when ``n_lifecycle > 0``. Every
+        # 200th (``h % 200 == 0``) is a model-visible ``sandbox_fs_reset``
+        # notice; the rest cycle ``request_opened``/``request_response``,
+        # the exact per-inference noise the #1741 issue calls out.
+        # ``cumulative_tokens`` stays NULL (lifecycle rows carry no token
+        # accounting, matching production's ``append_event``), so they never
+        # touch the message arm's index.
+        if n_lifecycle > 0:
+            await conn.execute(
+                """
+                INSERT INTO events
+                    (id, session_id, seq, kind, data, created_at,
+                     role, account_id)
+                SELECT
+                    'ev_readpath_lc_' || $4 || '_' || h,
+                    $1,
+                    2 * h,
+                    'lifecycle',
+                    CASE WHEN h % 200 = 0
+                         THEN '{"event": "sandbox_fs_reset", "reason": "seeded"}'::jsonb
+                         WHEN h % 2 = 0
+                         THEN '{"event": "request_opened"}'::jsonb
+                         ELSE '{"event": "request_response"}'::jsonb
+                    END,
+                    now(),
+                    NULL,
+                    $2
+                FROM generate_series(1, $3) AS h
+                ON CONFLICT (id) DO NOTHING
+                """,
+                session_id,
+                account_id,
+                n_lifecycle,
+                session_id,
+            )
+
         # Keep the sessions scalar honest (production maintains it in append).
+        # The max stamped seq is the larger of the messages' top odd slot
+        # (``2*n_messages - 1`` when interleaved, else plain ``n_messages``)
+        # and the lifecycle rows' top even slot (``2*n_lifecycle``).
+        max_message_seq = (2 * n_messages - 1) if n_lifecycle > 0 else n_messages
+        last_seq = max(max_message_seq, 2 * n_lifecycle)
         await conn.execute(
             "UPDATE sessions SET last_event_seq = $2 WHERE id = $1",
             session_id,
-            n_messages,
+            last_seq,
         )
 
         # Fresh stats so the planner picks its real plan for this slate.
@@ -224,6 +292,32 @@ async def seeded_pool(aios_env: dict[str, str]) -> AsyncIterator[asyncpg.Pool[An
     # complement is a genuinely large omitted prefix — the shape the pre-fix
     # count(*) / LAG WindowAgg scanned linearly.
     await seed_large_session(pool, _ACCOUNT_ID, _N_LARGE, window_tokens=_N_LARGE * _DELTA // 2)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
+_SESSION_ID_LIFECYCLE = "sess_readpath_1741_lifecycle"
+_N_LIFECYCLE = 4_000
+
+
+@pytest.fixture
+async def lifecycle_seeded_pool(aios_env: dict[str, str]) -> AsyncIterator[asyncpg.Pool[Any]]:
+    """A session whose lifecycle arm actually has rows to plan against (#1741)
+    — ``seeded_pool`` above seeds ``kind='message'`` only, so it never
+    exercises ``read_windowed_context_events``'s lifecycle UNION arm."""
+    from aios.db.pool import create_pool
+
+    pool = await create_pool(aios_env["AIOS_DB_URL"], min_size=1, max_size=4)
+    await seed_large_session(
+        pool,
+        _ACCOUNT_ID,
+        _N_LARGE,
+        window_tokens=_N_LARGE * _DELTA // 2,
+        session_id=_SESSION_ID_LIFECYCLE,
+        n_lifecycle=_N_LIFECYCLE,
+    )
     try:
         yield pool
     finally:
@@ -483,6 +577,130 @@ class TestRowsReturnedGate:
             f"{read.max_rows} on an N={_N_LARGE} slate. A hot read must not stream "
             f"the whole session into the app (#1661)."
         )
+
+
+# ─── GATE 1c: lifecycle-arm plan shape (#1741, deterministic, GATING) ────────
+#
+# The message-only ``_SQL_RETAINED_WINDOW`` HotRead above never exercises the
+# lifecycle UNION arm of ``read_windowed_context_events`` (#1741): before
+# migration 0135 that arm had no supporting partial index and fell back to a
+# whole-session heap filter on ``kind = 'lifecycle'``. This EXPLAINs the real
+# ``drop=None`` lifecycle arm (verbatim from ``events.py``) against a slate
+# seeded with lifecycle rows and asserts the ``events`` scan carries no
+# residual ``kind`` filter — i.e. ``events_session_lifecycle_seq_idx``
+# absorbed the predicate.
+
+_SQL_LIFECYCLE_ARM = (
+    "SELECT * FROM events "
+    "WHERE session_id = $1 AND account_id = $2 "
+    "AND kind = 'lifecycle' AND data->>'event' = ANY($3) "
+    "ORDER BY seq ASC"
+)
+
+
+@needs_docker
+class TestLifecycleArmPlanShapeGate:
+    """The lifecycle arm of ``read_windowed_context_events`` (``drop=None``
+    variant) must plan as an index scan on ``events_session_lifecycle_seq_idx``
+    — no residual ``Filter: (kind = 'lifecycle')`` over an unbounded scan.
+    RED on master (no partial index; heap-filters the whole session slate),
+    GREEN after migration 0135."""
+
+    async def test_lifecycle_arm_uses_partial_index(
+        self, lifecycle_seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS
+
+        allowlist = list(MODEL_VISIBLE_LIFECYCLE_EVENTS)
+        async with lifecycle_seeded_pool.acquire() as conn:
+            # Disable seq/bitmap-heap fallbacks so the plan reflects the
+            # index's applicability to the predicate, not the planner's
+            # cost heuristics on this fixture's row counts.
+            await conn.execute("SET enable_seqscan = off")
+            await conn.execute("SET enable_bitmapscan = off")
+            result = await conn.fetchval(
+                f"EXPLAIN (FORMAT JSON) {_SQL_LIFECYCLE_ARM}",
+                _SESSION_ID_LIFECYCLE,
+                _ACCOUNT_ID,
+                allowlist,
+            )
+        if isinstance(result, str):
+            result = json.loads(result)
+        plan = cast(dict[str, Any], result[0]["Plan"])
+
+        def _collect(node: dict[str, Any]) -> list[dict[str, Any]]:
+            out = [node]
+            for child in node.get("Plans", []):
+                out.extend(_collect(child))
+            return out
+
+        nodes = _collect(plan)
+        events_scans = [n for n in nodes if n.get("Relation Name") == "events"]
+        assert events_scans, f"no scan node over events in plan: {plan}"
+
+        for scan in events_scans:
+            filt = str(scan.get("Filter", ""))
+            assert "kind" not in filt, (
+                f"lifecycle arm still heap-filters kind over an unbounded scan "
+                f"(missing events_session_lifecycle_seq_idx?): {scan}"
+            )
+
+        index_names = {n.get("Index Name") for n in nodes if n.get("Index Name")}
+        assert "events_session_lifecycle_seq_idx" in index_names, (
+            f"plan does not use events_session_lifecycle_seq_idx; scan nodes: "
+            f"{[(n.get('Node Type'), n.get('Index Name')) for n in events_scans]}"
+        )
+
+    async def test_message_arm_plan_unchanged(
+        self, lifecycle_seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """The message arm (disjoint ``kind='message'`` predicate) must stay
+        a bounded (non-unbounded-aggregate) scan on ``cumulative_tokens`` —
+        the new lifecycle-only partial index is additive and must not push
+        the message arm onto an unbounded plan shape.
+
+        NOTE: this does not pin a specific index name. At this fixture's
+        retained-window fraction (``drop`` == half the slate — see
+        ``seeded_pool``'s comment) the planner's own cost model already
+        picks a plain ``Seq Scan`` with a ``cumulative_tokens`` filter over
+        ``events_session_cumtokens_idx`` for *this exact query*, with or
+        without the lifecycle rows/index from this issue (confirmed against
+        the pre-existing ``seeded_pool`` fixture, which has zero lifecycle
+        rows) — a cost decision, not a regression. The correctness property
+        this issue's fix must preserve is the same one GATE 1 checks
+        everywhere else: no unbounded aggregate over ``events``.
+        """
+        async with lifecycle_seeded_pool.acquire() as conn:
+            result = await conn.fetchval(
+                f"EXPLAIN (FORMAT JSON) {_SQL_RETAINED_WINDOW}",
+                _SESSION_ID_LIFECYCLE,
+                _ACCOUNT_ID,
+                _N_LARGE * _DELTA // 2,
+            )
+        if isinstance(result, str):
+            result = json.loads(result)
+        plan = cast(dict[str, Any], result[0]["Plan"])
+
+        offenders = find_unbounded_events_scan_over_seq(plan)
+        assert not offenders, (
+            f"message arm regressed to an unbounded aggregate after adding "
+            f"lifecycle rows/index: {offenders}"
+        )
+
+        def _collect(node: dict[str, Any]) -> list[dict[str, Any]]:
+            out = [node]
+            for child in node.get("Plans", []):
+                out.extend(_collect(child))
+            return out
+
+        nodes = _collect(plan)
+        events_scans = [n for n in nodes if n.get("Relation Name") == "events"]
+        assert events_scans, f"no scan node over events in plan: {plan}"
+        for scan in events_scans:
+            filt = str(scan.get("Filter", "")) + str(scan.get("Index Cond", ""))
+            assert "cumulative_tokens" in filt, (
+                f"message arm scan lost its cumulative_tokens bound: {scan}"
+            )
 
 
 # ─── GATE 3: REGISTRY-COMPLETENESS (deterministic, GATING) ───────────────────
