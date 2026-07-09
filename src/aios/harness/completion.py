@@ -35,18 +35,20 @@ from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
 litellm.modify_params = True
 
-# LiteLLM 1.83.4's Anthropic adapter silently DROPS a requested ``thinking``
-# param whenever the last tool-calling assistant message in the replayed
-# history lacks ``thinking_blocks`` (guard for upstream issue #18926). The
-# guard is over-broad: Anthropic accepts a thinking-enabled request against a
+# LiteLLM's Anthropic adapter silently DROPS a requested ``thinking`` param
+# whenever the last tool-calling assistant message in the replayed history
+# lacks ``thinking_blocks`` (guard for upstream issue #18926; still present
+# as of litellm 1.91.1 — before removing this patch on an upgrade, confirm
+# ``last_assistant_with_tool_calls_has_no_thinking_blocks`` is no longer
+# consulted in ``litellm.llms.anthropic.chat.transformation``). The guard is
+# over-broad: Anthropic accepts a thinking-enabled request against a
 # thinking-less history (verified live against claude-fable-5 and
 # claude-opus-4-8, 2026-06-10) — the real contract only requires that
 # *previously emitted* thinking blocks be preserved, which ``_normalize_message``'s
 # lift + ``_strip_to_spec``'s whitelist now do. Left in place, the guard also
 # creates a bootstrap deadlock: thinking can never turn on for an existing
 # session because no prior turn has thinking blocks, and no turn can produce
-# them while the param keeps being dropped. Neutralize it. Remove when a
-# litellm upgrade narrows the guard upstream.
+# them while the param keeps being dropped. Neutralize it.
 try:  # defensive: private module path, may move across litellm versions
     from litellm.llms.anthropic.chat import transformation as _anthropic_transformation
 
@@ -399,8 +401,9 @@ def _apply_provider_cache_hints(
       :func:`inject_cache_breakpoints` directly on the messages list.
       Nothing to do here.
     * **OpenAI** — explicit ``prompt_cache_key`` field, nested under
-      ``extra_body`` so it survives the litellm boundary. litellm 1.83.4
-      strips unknown top-level kwargs from the outbound OpenAI HTTP body;
+      ``extra_body`` so it survives the litellm boundary. litellm (verified
+      through 1.91.1) does not forward unknown top-level kwargs to the
+      outbound OpenAI HTTP body as-is;
       ``extra_body`` is the documented pass-through that the OpenAI
       Python SDK merges into the request JSON. OpenAI's Responses / Chat
       Completions APIs group requests by ``prompt_cache_key`` for cache
@@ -783,9 +786,10 @@ async def stream_litellm(
     chunks: list[Any] = []
     aiter = response.__aiter__()
     first = True
-    # Capture a ``content_filter`` refusal directly off the wire. litellm
-    # 1.83.4's ``stream_chunk_builder`` derives the assembled ``finish_reason``
-    # via an UNCONDITIONAL last-wins loop over chunks, and its Anthropic
+    # Capture a ``content_filter`` refusal directly off the wire. litellm's
+    # ``stream_chunk_builder`` (unchanged through 1.91.1) derives the
+    # assembled ``finish_reason`` via an UNCONDITIONAL last-wins loop over
+    # chunks, and its Anthropic
     # streaming adapter defaults ``finish_reason=""`` on every chunk (setting
     # the mapped value only on the ``message_delta`` event). So any
     # choice-bearing chunk arriving AFTER the refusal (e.g. an auto

@@ -1,6 +1,6 @@
 """Tests for claude-fable-5 cost resolution via litellm's native model_cost map.
 
-The pinned litellm (1.83.4) ships a native ``claude-fable-5`` entry in its
+The pinned litellm ships a native ``claude-fable-5`` entry in its
 bundled model-cost map whose pricing/capability fields are identical to the
 hand-typed dict the old ``_FABLE5_MODEL_COST`` shim used to ``setdefault`` (#1561
 deleted that inert block). These tests pin the behavior the shim used to
