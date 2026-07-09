@@ -2040,6 +2040,41 @@ async def get_event(
     return _row_to_event(row)
 
 
+async def replace_event_data(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    event_id: str,
+    data: dict[str, Any],
+    *,
+    account_id: str,
+) -> None:
+    """Overwrite ``events.data`` for a single row (issue #1745 Part C).
+
+    The ONLY in-place event mutation in the codebase — every other write
+    path is an append. It exists for exactly one caller,
+    :func:`aios.harness.context_persist.persist_clamped_image_parts`: a
+    deterministic, idempotent, account-scoped self-heal that shrinks an
+    oversize persisted image part once so the render-time clamp pass
+    (:func:`aios.harness.context._clamp_oversize_image_data_urls`) doesn't
+    have to re-decode + re-downsample it on every future build. ``seq``,
+    ``created_at``, and ``kind`` are never touched, so rendered-context
+    monotonicity holds — only the JSONB payload changes, and only to bytes
+    that are byte-equal to what the in-memory clamp pass already produces.
+
+    Account-scoping mirrors :func:`get_event`. Silently no-ops if the row
+    doesn't match (id/session/account mismatch) — same posture as an
+    ``UPDATE`` affecting zero rows; the caller logs the affected-row count
+    if it cares.
+    """
+    await conn.execute(
+        "UPDATE events SET data = $1::jsonb WHERE id = $2 AND session_id = $3 AND account_id = $4",
+        json.dumps(data),
+        event_id,
+        session_id,
+        account_id,
+    )
+
+
 async def get_session_event_stats(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> tuple[int, datetime | None]:
