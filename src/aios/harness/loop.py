@@ -82,6 +82,7 @@ from aios.models.events import (
 )
 from aios.services import accounts as accounts_service
 from aios.services import agents as agents_service
+from aios.services import model_providers as model_providers_service
 from aios.services import sessions as sessions_service
 from aios.tools.workflow_completion import fail_all_open_requests
 
@@ -1243,6 +1244,29 @@ async def _run_session_step_body(
         # non-streaming path.  OpenRouter-style proxies can be 2-3x slower on
         # the streaming path when nobody is consuming the deltas.
         #
+        # Resolve the account-scoped provider credential and check it doesn't
+        # conflict with a litellm_extra redirect BEFORE the model_request_start
+        # span — a deterministic config error, refused before any inference
+        # leaves the worker (see _handle_provider_auth_conflict). For a
+        # workflow child, agent.litellm_extra here is already the frozen
+        # spawn-clamped identity (#823), so the guard sees exactly what the
+        # call below will send.
+        auth = await model_providers_service.resolve_provider_auth(
+            pool,
+            runtime.require_crypto_box(),
+            account_id=account_id,
+            model=agent.model,
+            litellm_extra=agent.litellm_extra,
+        )
+        conflict = await model_providers_service.check_provider_auth_conflict(
+            pool, account_id=account_id, litellm_extra=agent.litellm_extra, resolved=auth
+        )
+        if conflict is not None:
+            await _handle_provider_auth_conflict(
+                pool, session_id, message=conflict, account_id=account_id
+            )
+            return _StepResult()
+
         # Emit span start so consumers can measure inference latency.
         start_event = await sessions_service.append_event(
             pool,
@@ -1259,10 +1283,12 @@ async def _run_session_step_body(
                     llm_request,
                     model=agent.model,
                     pool=pool,
+                    auth=auth,
                 )
             return await call_litellm(
                 llm_request,
                 model=agent.model,
+                auth=auth,
             )
 
         # #253 arm decision: policy is agent-level ("wait" default keeps the
@@ -2191,6 +2217,32 @@ async def _handle_spend_cap(
         session_id,
         error_kind="spend_cap_exceeded",
         stop_message=_SPEND_CAP_STOP_REASON_MESSAGE,
+        account_id=account_id,
+    )
+
+
+async def _handle_provider_auth_conflict(
+    pool: Any, session_id: str, *, message: str, account_id: str
+) -> None:
+    """Latch a session whose litellm_extra would send an above-owned api_key to a redirect.
+
+    Mirrors ``_handle_spend_cap``: a deterministic config error, not a transient
+    provider failure, so it lands here — before any inference leaves the worker —
+    rather than through the model-call try/except (which would misclassify it as
+    retryable and burn the backoff ladder).
+    """
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "span",
+        {"event": "provider_auth_conflict", "is_error": True},
+        account_id=account_id,
+    )
+    await _latch_errored_turn(
+        pool,
+        session_id,
+        error_kind="provider_auth_conflict",
+        stop_message=message,
         account_id=account_id,
     )
 

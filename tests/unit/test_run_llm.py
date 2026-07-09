@@ -2,9 +2,10 @@
 
 Pure in-memory — the run is a stand-in carrying only the fields the resolver
 reads (``account_id``, ``default_child_model``), and ``call_litellm`` is mocked
-so no provider call leaves the process. These cover the three runtime guards
-(``workflow:`` rejection, the api_base clamp, model resolution), the raw-turn
-projection, the "errors are values" contract, and the cost-meter charge.
+so no provider call leaves the process. These cover the four runtime guards
+(``workflow:`` rejection, the api_base clamp, model resolution, the
+provider-auth conflict guard), the raw-turn projection, the "errors are
+values" contract, and the cost-meter charge.
 """
 
 from __future__ import annotations
@@ -13,11 +14,32 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from aios.config import Settings
 from aios.harness.completion import LlmResponse, ModelCallDeadlineError
+from aios.models.model_providers import ProviderAuth
 from aios.workflows import run_llm
 from aios.workflows.run_llm import _to_microusd, invoke_call_llm
 from aios.workflows.wf_script_host import call_llm
+
+
+@pytest.fixture(autouse=True)
+def _stub_provider_auth_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Guard 3 (provider-auth conflict) needs a worker context (pool/crypto_box)
+    and hits the DB. Stub it to a clean pass — no resolved row, no conflict —
+    so tests exercising the OTHER guards don't need to know about it. Tests
+    for Guard 3 itself override ``resolve_provider_auth``/
+    ``check_provider_auth_conflict`` directly.
+    """
+    monkeypatch.setattr("aios.harness.runtime.require_pool", lambda: object())
+    monkeypatch.setattr("aios.harness.runtime.require_crypto_box", lambda: object())
+    monkeypatch.setattr(
+        "aios.services.model_providers.resolve_provider_auth", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        "aios.services.model_providers.check_provider_auth_conflict", AsyncMock(return_value=None)
+    )
 
 
 def _run(*, default_child_model: str | None = "gpt-4o-mini") -> Any:
@@ -160,6 +182,38 @@ async def test_trusted_api_base_admitted() -> None:
     # params (carrying the trusted api_base) round-trips into the LlmRequest.
     assert m.await_args is not None
     assert m.await_args.args[0].params == {"api_base": "https://ok.example"}
+
+
+# ─── guard 3: provider-auth conflict ──────────────────────────────────────────
+
+
+async def test_provider_auth_conflict_rejected() -> None:
+    with (
+        patch(
+            "aios.services.model_providers.check_provider_auth_conflict",
+            AsyncMock(return_value="conflict message"),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec())
+    assert result == {"error": "call_llm refused: conflict message"}
+    assert cost == 0
+    m.assert_not_awaited()  # the inference never ran
+
+
+async def test_resolved_auth_forwarded_to_call_litellm() -> None:
+    auth = ProviderAuth(api_key="sk-resolved", api_base=None, owner_account_id="acc_t")
+    with (
+        patch(
+            "aios.services.model_providers.resolve_provider_auth",
+            AsyncMock(return_value=auth),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m,
+    ):
+        result, _ = await invoke_call_llm(run=_run(), spec=_spec())
+    assert "error" not in result
+    assert m.await_args is not None
+    assert m.await_args.kwargs["auth"] is auth
 
 
 # ─── errors are values ────────────────────────────────────────────────────────

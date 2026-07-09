@@ -214,3 +214,32 @@ def _unit_spend_state_ungated() -> Iterator[None]:
         ),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _unit_provider_auth_ungated() -> Iterator[None]:
+    """Auto-mock the pre-inference provider-auth-conflict guard's collaborators.
+
+    The inline-model-call arm resolves the account's ``model_providers`` config
+    and checks it against ``litellm_extra`` before every raw model call.
+    ``runtime.require_crypto_box()`` raises outside a real worker context, and
+    the real resolver would hit the (fake) pool. Default both to a clean pass —
+    no resolved row, no conflict — exactly as the sibling spend-state stub
+    above. The guard's real behavior is covered by ``test_loop_provider_guard``,
+    which patches these at the ``aios.harness.loop.model_providers_service``
+    call site.
+    """
+    with (
+        mock.patch("aios.harness.runtime.require_crypto_box", return_value=MagicMock()),
+        mock.patch(
+            "aios.services.model_providers.resolve_provider_auth",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        mock.patch(
+            "aios.services.model_providers.check_provider_auth_conflict",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        yield
