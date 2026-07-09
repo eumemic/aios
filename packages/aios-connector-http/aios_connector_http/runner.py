@@ -185,6 +185,15 @@ class _ToolMeta:
 
     fn: ToolFn
     focal_params: frozenset[str]
+    # Subset of ``focal_params`` the signature requires (no default) — the
+    # method literally cannot run without them. Used at dispatch time
+    # (#1722) to detect an unresolvable focal channel BEFORE calling the
+    # tool body: a required ``chat_id``/``external_account_id`` that
+    # ``_inject_focal_kwargs`` couldn't fill (empty/malformed
+    # ``focal_channel``, e.g. cleared mid-turn) fails loud with a typed
+    # ``channel_unresolved`` error instead of the tool method raising an
+    # opaque ``TypeError: missing required keyword-only argument``.
+    required_focal_params: frozenset[str]
     sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
     fire_and_forget: bool = False
 
@@ -1199,6 +1208,17 @@ class HttpConnector:
         are parsed out of ``focal_channel``
         (``<connector>/<external_account_id>/<chat_id>``).
 
+        A REQUIRED focal kwarg (no default) that stays unfilled after
+        injection — e.g. ``chat_id`` on a send tool when the session's
+        focal channel is empty/malformed/cleared mid-turn — fails loud
+        with a typed ``{"code": "channel_unresolved"}`` error result
+        instead of running the tool body against garbage state or
+        letting it crash with an opaque exception (#1722).  A
+        fire-and-forget tool (send/react) whose body then raises for
+        any other reason is reported as ``{"code": "delivery_failed"}``
+        so the model can distinguish a failed send from an ordinary
+        tool bug and retry/re-target — never silently dropped.
+
         ``SandboxPath``-annotated params get their in-sandbox path
         strings resolved to host :class:`Path`s before the body runs.
 
@@ -1254,6 +1274,51 @@ class HttpConnector:
             args = {}
         focal_channel = call.get("focal_channel") or ""
         args = _inject_focal_kwargs(meta, args, focal_channel, connection_id)
+        # #1722: a send (or any focal-required tool) whose channel can't be
+        # resolved must fail loud, not silently no-op. ``_inject_focal_kwargs``
+        # fills a required param only when it has a source (``connection_id``
+        # from the call payload; ``chat_id``/``external_account_id`` parsed out
+        # of ``focal_channel``) — a still-missing required focal param here
+        # means the session's focal channel was empty/malformed/cleared
+        # mid-turn (or ``connection_id`` itself was blank), and the model
+        # never explicitly supplied it either. Without this check the tool
+        # body would either KeyError on an empty ``self.state[""]`` lookup or
+        # (worse) run with a garbage chat_id, both surfacing as opaque errors
+        # at best and a vanished send at worst. Detect it BEFORE the body
+        # runs and return a typed, retriable error instead.
+        missing_focal = sorted(
+            p for p in meta.required_focal_params if p not in args or not args[p]
+        )
+        if missing_focal:
+            log.warning(
+                "connector.tool_call.failed",
+                name=name,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                reason="channel_unresolved",
+                missing=missing_focal,
+            )
+            error_content = json.dumps(
+                {
+                    "error": (
+                        "focal channel could not be resolved "
+                        f"(missing: {', '.join(missing_focal)}) — the session's "
+                        "focal channel may have been cleared or changed mid-turn; "
+                        "switch_channel to a valid channel and retry"
+                    ),
+                    "code": "channel_unresolved",
+                }
+            )
+            await self._mark_answered(tool_call_id, error_content)
+            await self._post_tool_result(
+                client,
+                connection_id=connection_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                content=error_content,
+                is_error=True,
+            )
+            return
         try:
             args = _resolve_sandbox_paths(
                 meta, args, session_id=session_id, workspace_path=workspace_path
@@ -1303,6 +1368,19 @@ class HttpConnector:
                     "connection_id": connection_id,
                 }
                 reason = "connection_state_race"
+            elif meta.fire_and_forget:
+                # #1722: a fire-and-forget tool (a send/react — the turn is
+                # "over" once it runs) that raises mid-dispatch is a connector-side
+                # delivery failure, not a generic tool bug: the model believed
+                # (or was about to believe) the message was on its way. Typed
+                # ``delivery_failed`` so the model can distinguish "my send
+                # attempt itself errored" from an ordinary tool exception and
+                # decide whether to retry or re-target — it is NEVER silently
+                # dropped: this exception branch always sets ``is_error=True``
+                # below, and fire-and-forget's ``no_reaction`` suppression only
+                # ever applies to the SUCCESS path (see the completion branch).
+                error_payload = {"error": str(exc), "code": "delivery_failed"}
+                reason = "delivery_failed"
             else:
                 error_payload = {"error": str(exc)}
                 reason = "tool_exception"
@@ -1581,6 +1659,9 @@ def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
     """Inspect ``fn`` once and freeze the dispatch-time metadata."""
     sig = inspect.signature(fn)
     focal = frozenset(set(sig.parameters) & _FOCAL_INJECTABLE)
+    required_focal = frozenset(
+        name for name in focal if sig.parameters[name].default is inspect.Parameter.empty
+    )
     try:
         hints = get_type_hints(fn, include_extras=True)
     except Exception:
@@ -1594,6 +1675,7 @@ def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
     return _ToolMeta(
         fn=fn,
         focal_params=focal,
+        required_focal_params=required_focal,
         sandbox_params=tuple(sandbox),
         fire_and_forget=fire_and_forget,
     )
