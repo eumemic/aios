@@ -96,6 +96,11 @@ _REKEY_COLUMNS = (
     # pruned at ~10min) and ciphertext is NOT NULL — so "TRUE" rekeys every
     # live row. Omitting it left an active flow undecryptable across a rotation.
     _EncryptedColumn("oauth_flows", "ciphertext", "nonce", "TRUE"),
+    # Per-account model-provider config (#model_providers): the encrypted
+    # api_key, keyed by the owning account's subkey. archived rows have their
+    # ciphertext zeroed (not NULL), so the same "archived_at IS NULL" filter
+    # vault_credentials uses keeps a rekey from re-encrypting scrubbed bytes.
+    _EncryptedColumn("model_providers", "ciphertext", "nonce", "archived_at IS NULL"),
 )
 
 

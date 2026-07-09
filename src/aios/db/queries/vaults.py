@@ -515,6 +515,19 @@ async def update_vault_credential(
     display_name: str | None | EllipsisType = ...,
     metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
+    # Pre-check + a WHERE ... archived_at IS NULL guard (mirrors update_vault,
+    # :99-140): without it, a concurrent archive_vault_credential (which zeroes
+    # ciphertext/nonce) racing this update could have its scrub silently
+    # overwritten by a fresh ciphertext — resurrecting a "archived" row that
+    # holds a live, un-scrubbed secret and that a later archive can no longer
+    # re-zero (its own archived_at IS NULL guard would then no-op against it).
+    current = await get_vault_credential(conn, vault_id, credential_id, account_id=account_id)
+    if current.archived_at is not None:
+        raise ConflictError(
+            f"credential {credential_id} is archived",
+            detail={"id": credential_id, "vault_id": vault_id},
+        )
+
     sets: list[str] = []
     args: list[Any] = [credential_id, vault_id]
     if display_name is not ...:
@@ -529,17 +542,18 @@ async def update_vault_credential(
         args.append(json.dumps(metadata))
         sets.append(f"metadata = ${len(args)}::jsonb")
     if not sets:
-        return await get_vault_credential(conn, vault_id, credential_id, account_id=account_id)
+        return current
     sets.append("updated_at = now()")
     args.append(account_id)
     sql = (
         f"UPDATE vault_credentials SET {', '.join(sets)} "
-        f"WHERE id = $1 AND vault_id = $2 AND account_id = ${len(args)} RETURNING *"
+        f"WHERE id = $1 AND vault_id = $2 AND account_id = ${len(args)} "
+        "AND archived_at IS NULL RETURNING *"
     )
     row = await conn.fetchrow(sql, *args)
     if row is None:
-        raise NotFoundError(
-            f"credential {credential_id} not found in vault {vault_id}",
+        raise ConflictError(
+            f"credential {credential_id} is archived",
             detail={"id": credential_id, "vault_id": vault_id},
         )
     return _row_to_vault_credential(row)
