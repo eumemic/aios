@@ -25,6 +25,8 @@ from aios.models.agents import (
     McpServerSpec,
     ToolSpec,
     validate_http_servers,
+    validate_mcp_servers,
+    validate_tools,
 )
 
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
@@ -350,6 +352,8 @@ class WorkflowCreate(BaseModel):
         # Cross-item base_url uniqueness applies to full specs only; bare names
         # carry no base_url until resolved against the agent (validated there).
         validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        validate_mcp_servers(self.mcp_servers)
+        validate_tools(self.tools)
         return self
 
 
@@ -388,6 +392,10 @@ class WorkflowUpdate(BaseModel):
     def _validate_http_servers(self) -> WorkflowUpdate:
         if self.http_servers is not None:
             validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        if self.mcp_servers is not None:
+            validate_mcp_servers(self.mcp_servers)
+        if self.tools is not None:
+            validate_tools(self.tools)
         return self
 
 
@@ -416,6 +424,8 @@ class InlineScriptBody(BaseModel):
     @model_validator(mode="after")
     def _validate_http_servers(self) -> InlineScriptBody:
         validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        validate_mcp_servers(self.mcp_servers)
+        validate_tools(self.tools)
         return self
 
 

@@ -28,6 +28,33 @@ default *before* meeting (resolve-then-meet); ``configs[]`` are sorted by name a
 default-equal entries dropped; empty collections use a single representation. The
 meet only ever narrows, so the predicate's equality fails exactly when ``declared``
 tried to widen.
+
+**Laws deliberately NOT asserted — commutativity, associativity, raw two-sided
+absorption.** The meet is a *directed*, parent-wins-frozen clamp, not a symmetric
+lattice operation, so none of the following hold in general and none should be
+"completed" onto the law set later:
+
+* ``attenuate(a, b) != attenuate(b, a)`` in general — ``mcp_servers`` and
+  ``http_servers`` are emitted **launcher-verbatim** (the second argument's routes,
+  headers, ordering, and permission gates win outright on a key match; the first
+  argument narrows only the http per-route ``methods`` dimension), and builtin/custom
+  tool *definitions* (name/description/input_schema) ride from the first argument
+  (``declared``) — swapping the arguments swaps which side's verbatim fields survive.
+* Not associative under naive re-grouping for the same reason (each step's "launcher"
+  argument must be the ALREADY-FROZEN effective surface of the true parent, per the
+  materialize-once law above — composition is free only along that specific chain,
+  not for an arbitrary re-association of the two-argument operator).
+* Two-sided absorption — ``attenuate(attenuate(d, l), l) == attenuate(d, l)`` (the
+  launcher-side fixpoint / clamp idempotence) holds and IS asserted, but
+  ``attenuate(attenuate(d, l), d) == attenuate(d, l)`` does NOT: the launcher-verbatim
+  riders the meet pulled in from ``l`` (a header ``d`` never declared, a route ``d``
+  never mentioned) are not present in ``d``, so re-meeting the output against ``d``
+  alone narrows them away instead of holding fixed. See
+  ``tests/unit/test_attenuation.py::test_declared_side_absorption_is_false_by_design``
+  for a concrete witness and
+  ``tests/unit/test_attenuation.py::test_meet_is_a_fixpoint_against_the_launcher`` for
+  the (correctly scoped) launcher-side property that IS load-bearing for security: a
+  clamped surface, re-clamped against the same launcher, never narrows further.
 """
 
 from __future__ import annotations
