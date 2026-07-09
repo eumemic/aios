@@ -50,7 +50,9 @@ class _FakeTransactionCtx:
         return False
 
 
-async def test_advance_swallows_query_failure_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_advance_swallows_query_failure_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conn = MagicMock()
     conn.transaction = MagicMock(return_value=_FakeTransactionCtx())
 
@@ -61,9 +63,7 @@ async def test_advance_swallows_query_failure_without_raising(monkeypatch: pytes
     )
 
     # Must not raise.
-    await _real_advance(
-        conn, "sess_x", account_id="acc_x"
-    )
+    await _real_advance(conn, "sess_x", account_id="acc_x")
 
     failing_advance.assert_awaited_once_with(conn, "sess_x", account_id="acc_x")
 
@@ -75,9 +75,7 @@ async def test_advance_swallows_transaction_enter_failure_without_raising() -> N
     conn = MagicMock()
     conn.transaction = MagicMock(return_value=_FakeTransactionCtx(raise_on_enter=True))
 
-    await _real_advance(
-        conn, "sess_x", account_id="acc_x"
-    )
+    await _real_advance(conn, "sess_x", account_id="acc_x")
 
 
 async def test_advance_increments_module_swallow_counter_on_failure(
@@ -91,14 +89,10 @@ async def test_advance_increments_module_swallow_counter_on_failure(
     )
     monkeypatch.setattr(step_context, "_open_request_scan_floor_advance_swallow_count", 0)
 
-    await _real_advance(
-        conn, "sess_x", account_id="acc_x"
-    )
+    await _real_advance(conn, "sess_x", account_id="acc_x")
     assert step_context._open_request_scan_floor_advance_swallow_count == 1
 
-    await _real_advance(
-        conn, "sess_x", account_id="acc_x"
-    )
+    await _real_advance(conn, "sess_x", account_id="acc_x")
     assert step_context._open_request_scan_floor_advance_swallow_count == 2
 
 
@@ -114,9 +108,7 @@ async def test_advance_calls_query_on_success_and_does_not_swallow_silently(
     monkeypatch.setattr("aios.db.queries.advance_open_request_scan_floor", ok_advance)
     monkeypatch.setattr(step_context, "_open_request_scan_floor_advance_swallow_count", 0)
 
-    await _real_advance(
-        conn, "sess_x", account_id="acc_x"
-    )
+    await _real_advance(conn, "sess_x", account_id="acc_x")
 
     ok_advance.assert_awaited_once_with(conn, "sess_x", account_id="acc_x")
     assert step_context._open_request_scan_floor_advance_swallow_count == 0

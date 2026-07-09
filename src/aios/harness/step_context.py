@@ -309,9 +309,7 @@ async def compute_step_prelude(
         # connection/step that just read it — perf-only, best-effort; see
         # ``_advance_open_request_scan_floor_best_effort`` for why failures
         # here must never propagate.
-        await _advance_open_request_scan_floor_best_effort(
-            conn, session_id, account_id=account_id
-        )
+        await _advance_open_request_scan_floor_best_effort(conn, session_id, account_id=account_id)
     owes_request = bool(obligations)
     if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs

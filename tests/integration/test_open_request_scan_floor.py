@@ -87,7 +87,9 @@ async def _open(
         )
 
 
-async def _answer(pool: asyncpg.Pool[Any], *, session_id: str, account_id: str, request_id: str) -> None:
+async def _answer(
+    pool: asyncpg.Pool[Any], *, session_id: str, account_id: str, request_id: str
+) -> None:
     async with pool.acquire() as conn:
         wrote = await queries.write_response_if_absent(
             conn,
@@ -134,7 +136,9 @@ async def test_floor_edge_stays_visible_to_both_readers(
     pool, account_id, _agent_id, env_id = pool_env
     _agent, _env, session = await seed_agent_env_session(pool, account_id=account_id, prefix="t1")
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
 
     seq_a = await _seq_of(pool, session_id=session.id, request_id="A")
@@ -156,7 +160,9 @@ async def test_floor_advances_strictly_past_answered_edge(
     pool, account_id, _agent_id, env_id = pool_env
     _agent, _env, session = await seed_agent_env_session(pool, account_id=account_id, prefix="t2")
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
     seq_a = await _seq_of(pool, session_id=session.id, request_id="A")
 
@@ -166,7 +172,9 @@ async def test_floor_advances_strictly_past_answered_edge(
     floor_after_answer = await _floor(pool, session_id=session.id)
     assert floor_after_answer > seq_a, "floor must strictly pass an answered edge"
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="B")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="B"
+    )
     async with pool.acquire() as conn:
         ids = await queries.get_open_request_ids(conn, session.id, account_id=account_id)
     assert ids == ["B"]
@@ -222,17 +230,23 @@ async def test_interleaved_sequence_only_open_edge_survives(
     pool, account_id, _agent_id, env_id = pool_env
     _agent, _env, session = await seed_agent_env_session(pool, account_id=account_id, prefix="t4")
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
     await _answer(pool, session_id=session.id, account_id=account_id, request_id="A")
     await _advance(pool, session_id=session.id, account_id=account_id)
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="B")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="B"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
     await _answer(pool, session_id=session.id, account_id=account_id, request_id="B")
     await _advance(pool, session_id=session.id, account_id=account_id)
 
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="C")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="C"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
 
     seq_c = await _seq_of(pool, session_id=session.id, request_id="C")
@@ -262,7 +276,9 @@ async def test_demote_reader_stays_unbounded_and_sees_old_unawaited_tell(
     )
     # Advance the floor via a separate, later AWAITED+answered edge so the
     # floor moves well past the unawaited Tell's seq.
-    await _open(pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A")
+    await _open(
+        pool, session_id=session.id, account_id=account_id, environment_id=env_id, request_id="A"
+    )
     await _advance(pool, session_id=session.id, account_id=account_id)
     await _answer(pool, session_id=session.id, account_id=account_id, request_id="A")
     await _advance(pool, session_id=session.id, account_id=account_id)
@@ -286,9 +302,7 @@ async def test_demote_reader_stays_unbounded_and_sees_old_unawaited_tell(
 
 def test_floor_bounded_requires_awaited_only() -> None:
     with pytest.raises(ValueError, match="awaited_only=True"):
-        queries.open_request_anti_join(
-            sid="$1", acct="$2", awaited_only=False, floor_bounded=True
-        )
+        queries.open_request_anti_join(sid="$1", acct="$2", awaited_only=False, floor_bounded=True)
 
 
 def test_floor_bounded_rejects_batch_any_sid() -> None:
@@ -481,9 +495,7 @@ def test_floor_bounded_query_uses_partial_index_not_full_scan(postgres: object) 
 
     query = (
         "SELECT req.data->>'request_id' AS rid FROM events req WHERE "
-        + queries.open_request_anti_join(
-            sid="$1", acct="$2", awaited_only=True, floor_bounded=True
-        )
+        + queries.open_request_anti_join(sid="$1", acct="$2", awaited_only=True, floor_bounded=True)
         + "ORDER BY req.seq ASC"
     )
 
@@ -491,9 +503,7 @@ def test_floor_bounded_query_uses_partial_index_not_full_scan(postgres: object) 
         conn = await asyncpg.connect(db_url)
         try:
             await conn.execute("SET enable_seqscan = off")
-            result = await conn.fetchval(
-                f"EXPLAIN (FORMAT JSON) {query}", "sess_a", "acc_root"
-            )
+            result = await conn.fetchval(f"EXPLAIN (FORMAT JSON) {query}", "sess_a", "acc_root")
             if isinstance(result, str):
                 result = json.loads(result)
             return result[0]["Plan"]  # type: ignore[no-any-return]
