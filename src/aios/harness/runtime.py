@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from aios.harness.inflight_tool_registry import InflightToolRegistry
     from aios.mcp.pool import McpSessionPool
     from aios.models.memory_stores import MemoryStoreResourceEcho
+    from aios.sandbox.github_clone_breaker import GithubCloneBreaker
     from aios.sandbox.registry import SandboxRegistry
     from aios.sandbox.tool_broker import ToolBroker
     from aios.tools.providers import ToolProvider
@@ -37,6 +38,7 @@ worker_id: str | None = None
 sandbox_registry: SandboxRegistry | None = None
 inflight_tool_registry: InflightToolRegistry | None = None
 mcp_session_pool: McpSessionPool | None = None
+github_clone_breaker: GithubCloneBreaker | None = None
 tool_broker: ToolBroker | None = None
 tool_provider: ToolProvider | None = None
 
@@ -113,6 +115,10 @@ def require_crypto_box() -> CryptoBox:
 
 def require_sandbox_registry() -> SandboxRegistry:
     return _require("sandbox_registry", sandbox_registry)
+
+
+def require_github_clone_breaker() -> GithubCloneBreaker:
+    return _require("github_clone_breaker", github_clone_breaker)
 
 
 def require_inflight_tool_registry() -> InflightToolRegistry:

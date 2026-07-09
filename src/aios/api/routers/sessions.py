@@ -870,6 +870,9 @@ async def get_context(
         memory_echoes = await _queries.list_session_memory_store_echoes(
             _conn, session_id, account_id=account_id
         )
+        github_repo_echoes = await _queries.list_session_github_repo_echoes(
+            _conn, session_id, account_id=account_id
+        )
 
     prelude = await compute_step_prelude(
         pool,
@@ -879,6 +882,7 @@ async def get_context(
         agent=agent,
         channels=channels,
         memory_store_echoes=memory_echoes,
+        github_repo_echoes=github_repo_echoes,
     )
     windowed = await service.read_windowed_events(
         pool,

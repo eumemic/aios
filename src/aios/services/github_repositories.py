@@ -20,6 +20,7 @@ import asyncpg
 
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
+from aios.db.listen import GITHUB_CLONE_BREAKER_CLEAR_CHANNEL
 from aios.errors import ConflictError, RateLimitedError
 from aios.models.github_repositories import (
     MAX_REPOS_PER_SESSION,
@@ -27,6 +28,22 @@ from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
 )
 from aios.sandbox.github_clone import remove_session_working_tree
+
+
+async def _notify_clear_clone_breaker(pool: asyncpg.Pool[Any], resource_id: str) -> None:
+    """Signal the worker's github-clone circuit breaker to clear ``resource_id``
+    after a token rotation (#1720, re-probe path (a)).
+
+    The rotation runs in the API process; the breaker lives in the worker.
+    This fires a ``pg_notify`` on ``GITHUB_CLONE_BREAKER_CLEAR_CHANNEL`` which
+    the worker's clear-listener drains and dispatches to
+    :meth:`aios.sandbox.github_clone_breaker.GithubCloneBreaker.clear` — so a
+    fixed credential re-probes on the very next provision instead of serving
+    out a cooldown opened under the old secret. Fire-and-forget, like the MCP
+    vault-eviction NOTIFY (#1030): a notification lost during a listener
+    reconnect falls back to the breaker's own cooldown/half-open re-probe.
+    """
+    await pool.execute("SELECT pg_notify($1, $2)", GITHUB_CLONE_BREAKER_CLEAR_CHANNEL, resource_id)
 
 
 def _encrypt_token(crypto_box: CryptoBox, token: str, *, account_id: str) -> Any:
@@ -193,10 +210,14 @@ async def rotate_token(
     :func:`aios.sandbox.spec.mount_snapshot_from_echoes`), so the
     per-step :meth:`SandboxRegistry.release_if_mounts_changed` already
     recycles the sandbox on the next step.
+
+    Also fires the github-clone-breaker clear NOTIFY (#1720) after commit
+    so a rotated token re-probes on the very next provision instead of
+    serving out a cooldown opened under the old secret.
     """
     blob = _encrypt_token(crypto_box, new_token, account_id=account_id)
     async with pool.acquire() as conn, conn.transaction():
-        return await queries.update_session_github_repo_blob(
+        result = await queries.update_session_github_repo_blob(
             conn,
             session_id,
             resource_id,
@@ -204,6 +225,8 @@ async def rotate_token(
             identity=identity,
             account_id=account_id,
         )
+    await _notify_clear_clone_breaker(pool, resource_id)
+    return result
 
 
 async def get_session_token(

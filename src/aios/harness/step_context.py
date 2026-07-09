@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         ToolSpec,
     )
     from aios.models.events import Event
+    from aios.models.github_repositories import GithubRepositoryResourceEcho
     from aios.models.memory_stores import MemoryStoreResourceEcho
     from aios.models.sessions import Obligation, Session
     from aios.models.skills import SkillVersion
@@ -265,6 +266,7 @@ async def compute_step_prelude(
     agent: StepSurface,
     channels: list[str],
     memory_store_echoes: list[MemoryStoreResourceEcho],
+    github_repo_echoes: list[GithubRepositoryResourceEcho] | None = None,
 ) -> StepPrelude:
     """Build the events-independent parts of the step payload.
 
@@ -284,6 +286,7 @@ async def compute_step_prelude(
     )
     from aios.harness.memory_stores import augment_with_memory_stores
     from aios.harness.obligations import max_obligations_block_local
+    from aios.harness.resource_health import augment_with_resource_health
     from aios.harness.skills import augment_system_prompt
     from aios.services import skills as skills_service
 
@@ -367,6 +370,11 @@ async def compute_step_prelude(
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
     system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
+    system_prompt = augment_with_resource_health(
+        system_prompt,
+        degraded_repos=_session_degraded_repos(github_repo_echoes),
+        degraded_mcp_server_names=_session_degraded_mcp_server_names(agent.mcp_servers),
+    )
 
     return StepPrelude(
         system_prompt=system_prompt,
@@ -376,6 +384,49 @@ async def compute_step_prelude(
         obligations=obligations,
         obligations_block_upper_bound_local=max_obligations_block_local(obligations),
     )
+
+
+def _session_degraded_repos(
+    github_repo_echoes: list[GithubRepositoryResourceEcho] | None,
+) -> list[tuple[str, str]]:
+    """``(mount_path, since_iso)`` for each attached repo whose clone breaker is open.
+
+    Scoped to THIS session's attached echoes so a repo degraded for a
+    different session (same worker, different attachment) never leaks into
+    this session's prelude. No breaker (API process, or a worker that never
+    initialized one) or no attached repos both render nothing — fail-open,
+    matching the breaker's own fail-open default.
+    """
+    from aios.harness import runtime as harness_runtime
+
+    breaker = harness_runtime.github_clone_breaker
+    if breaker is None or not github_repo_echoes:
+        return []
+    attached_ids = {echo.id for echo in github_repo_echoes}
+    mount_path_by_id = {echo.id: echo.mount_path for echo in github_repo_echoes}
+    out: list[tuple[str, str]] = []
+    for degraded in breaker.degraded_repos():
+        if degraded.resource_id not in attached_ids:
+            continue
+        mount_path = mount_path_by_id.get(degraded.resource_id, degraded.mount_path)
+        out.append((mount_path, degraded.since.isoformat()))
+    return out
+
+
+def _session_degraded_mcp_server_names(mcp_servers: list[McpServerSpec]) -> list[str]:
+    """Agent-declared ``name`` for each MCP server whose connect breaker is open.
+
+    Scoped to THIS agent's declared servers (by URL) — a different agent's
+    down server never leaks into this prelude. No pool (API process) or no
+    declared servers both render nothing.
+    """
+    from aios.harness import runtime as harness_runtime
+
+    pool = harness_runtime.mcp_session_pool
+    if pool is None or not mcp_servers:
+        return []
+    degraded_urls = set(pool.degraded_servers())
+    return [s.name for s in mcp_servers if s.url in degraded_urls]
 
 
 def _build_instructions_block(
