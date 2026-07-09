@@ -10,8 +10,8 @@ in per agent.  No CHECK constraint — the ``PreemptPolicy`` Literal on
 the pydantic models is the single validation point (0111 precedent).
 Purely additive, safe in the new-code/old-schema deploy window.
 
-Revision ID: 0136
-Revises: 0135
+Revision ID: 0139
+Revises: 0138
 Create Date: 2026-07-09
 """
 
@@ -21,8 +21,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0136"
-down_revision: str = "0135"
+revision: str = "0139"
+down_revision: str = "0138"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
