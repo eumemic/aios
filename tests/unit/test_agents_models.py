@@ -104,6 +104,120 @@ class TestAgentUpdateHttpServers:
         assert update.http_servers is None
 
 
+class TestAgentCreateDuplicateIngressInvariants:
+    """#1758 scope (1): duplicate ``_tool_key`` / mcp-server-name / configs[]-name
+    entries are API-reachable and break the attenuation module's own normal-form
+    contract (``attenuate(x, x) == canonicalize(x)``) — see
+    ``models.attenuation._tool_key`` and the two soft spots documented on issue
+    #1758. Reject at the ingress boundary (mirroring the existing ``base_url``
+    dedup) rather than let the un-enforced invariant erode the meet's laws.
+    """
+
+    def test_rejects_duplicate_builtin_tool_type(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate tool entry 'bash'"):
+            AgentCreate.model_validate(
+                {
+                    "name": "agent",
+                    "model": "gpt-4",
+                    "tools": [
+                        {"type": "bash", "permission": "always_allow"},
+                        {"type": "bash", "permission": "always_ask"},
+                    ],
+                }
+            )
+
+    def test_rejects_duplicate_custom_tool_name(self) -> None:
+        custom = {
+            "type": "custom",
+            "name": "fetch",
+            "description": "d",
+            "input_schema": {"type": "object"},
+        }
+        with pytest.raises(ValidationError, match=r"duplicate tool entry 'fetch'"):
+            AgentCreate.model_validate(
+                {"name": "agent", "model": "gpt-4", "tools": [custom, custom]}
+            )
+
+    def test_rejects_duplicate_mcp_toolset_server(self) -> None:
+        toolset = {"type": "mcp_toolset", "mcp_server_name": "gh"}
+        with pytest.raises(ValidationError, match=r"duplicate tool entry 'gh'"):
+            AgentCreate.model_validate(
+                {"name": "agent", "model": "gpt-4", "tools": [toolset, toolset]}
+            )
+
+    def test_rejects_duplicate_mcp_server_name(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate mcp server name 'gh'"):
+            AgentCreate.model_validate(
+                {
+                    "name": "agent",
+                    "model": "gpt-4",
+                    "mcp_servers": [
+                        {"name": "gh", "url": "https://gh1"},
+                        {"name": "gh", "url": "https://gh2"},
+                    ],
+                }
+            )
+
+    def test_rejects_duplicate_configs_name_within_toolset(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate configs\[\] entry 'create_issue'"):
+            AgentCreate.model_validate(
+                {
+                    "name": "agent",
+                    "model": "gpt-4",
+                    "tools": [
+                        {
+                            "type": "mcp_toolset",
+                            "mcp_server_name": "gh",
+                            "configs": [
+                                {"name": "create_issue", "enabled": True},
+                                {"name": "create_issue", "enabled": False},
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    def test_accepts_distinct_keys_on_every_dimension(self) -> None:
+        agent = AgentCreate.model_validate(
+            {
+                "name": "agent",
+                "model": "gpt-4",
+                "tools": [
+                    {"type": "bash"},
+                    {"type": "read"},
+                    {
+                        "type": "custom",
+                        "name": "fetch",
+                        "description": "d",
+                        "input_schema": {"type": "object"},
+                    },
+                    {"type": "mcp_toolset", "mcp_server_name": "gh"},
+                ],
+                "mcp_servers": [{"name": "gh", "url": "https://gh"}],
+            }
+        )
+        assert len(agent.tools) == 4
+        assert len(agent.mcp_servers) == 1
+
+    def test_agent_update_rejects_duplicate_mcp_server_name(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate mcp server name 'gh'"):
+            AgentUpdate.model_validate(
+                {
+                    "version": 1,
+                    "mcp_servers": [
+                        {"name": "gh", "url": "https://gh1"},
+                        {"name": "gh", "url": "https://gh2"},
+                    ],
+                }
+            )
+
+    def test_agent_update_rejects_duplicate_tool_key(self) -> None:
+        with pytest.raises(ValidationError, match=r"duplicate tool entry 'bash'"):
+            AgentUpdate.model_validate(
+                {"version": 1, "tools": [{"type": "bash"}, {"type": "bash"}]}
+            )
+
+
 class TestResolveHttpServerRefs:
     """#953: names-only ``http_servers`` resolution against an acting agent's servers.
 

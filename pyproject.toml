@@ -77,6 +77,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
     "pytest-xdist>=3.6",          # parallel test execution on docker e2e shard
+    # Generative (hypothesis) law tests for the attenuation operator (#1758) —
+    # hand-built strategies over Surface, no plugin (pydantic v2 has none). Seeded/
+    # derandomized so `pytest -n 4` (unit CI) stays deterministic across workers.
+    "hypothesis>=6.100",
     "httpx>=0.27",                # FastAPI TestClient backend
     "testcontainers[postgres]>=4.8",
     "ruff>=0.8",
@@ -87,6 +91,7 @@ dev = [
     "aios-echo-http",
     "aios-signal",
     "aios-slack",
+    "aios-sms",
     "aios-telegram",
     "aios-whatsapp",
 ]
