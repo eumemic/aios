@@ -73,7 +73,9 @@ def create(
     ] = None,
 ) -> None:
     def _run() -> None:
-        body = ModelProviderCreate(provider=provider, api_key=api_key, api_base=api_base)
+        body = ModelProviderCreate(
+            provider=provider, api_key=api_key, api_base=api_base if api_base is not None else UNSET
+        )
         call_single(ctx, create_model_provider.sync_detailed, body=body)
 
     run_or_die(_run)

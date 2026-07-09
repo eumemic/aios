@@ -126,6 +126,13 @@ _RESOURCE_BASES: dict[str, dict[str, Any]] = {
         "created_at": _FIXED_TS,
         "updated_at": _FIXED_TS,
     },
+    "model_provider": {
+        "id": "mp_1",
+        "provider": "anthropic",
+        "api_key_set": True,
+        "created_at": _FIXED_TS,
+        "updated_at": _FIXED_TS,
+    },
 }
 
 
