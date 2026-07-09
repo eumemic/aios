@@ -235,6 +235,67 @@ async def _tool_lifecycle(
         await _trigger_sweep(pool, session_id, account_id=account_id)
 
 
+def _unoffered_tool_message(name: str, offered_names: list[str]) -> str:
+    """The #1773 defect-2 rejection message for a tool call naming a tool that is
+    NOT in the step's frozen offered set — unknown to the registry entirely, or
+    registered but not present in the ``tools`` array this step sent the model.
+
+    Short + imperative, naming the currently-offered tools by name. This is a
+    design choice, NOT an eval-validated string: the incident's replay eval (Arm D,
+    24/24 real trap points → 24/24 clean stops) validated defect-1's "already
+    answered … end your turn" stop message
+    (:func:`aios.tools.workflow_completion._closed_request_message`), not this
+    unoffered-tool wording. It follows the same actionability principle that eval
+    demonstrated — a short imperative beats a buried diagnostic — but its efficacy
+    on the de-offered-tool case has not been separately measured.
+    """
+    listing = ", ".join(sorted(offered_names)) if offered_names else "(none offered right now)"
+    return (
+        f"tool not offered: `{name}` is not in this turn's offered tools — do not call it. "
+        f"Currently offered: {listing}."
+    )
+
+
+def reject_unoffered_tool_calls(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_calls: list[dict[str, Any]],
+    *,
+    offered_names: list[str],
+    account_id: str,
+) -> None:
+    """Reject each tool call naming a tool absent from the step's frozen offered
+    set — the harness invariant from #1773: **the callable set ≡ the offered set**.
+    Returns immediately (same fire-and-forget shape as :func:`launch_tool_calls`).
+
+    Routed through :func:`_tool_lifecycle` exactly like a real dispatch, so each
+    call still gets its ``tool_execute_start``/``tool_execute_end`` span pair, its
+    dedup-guarded ``role: "tool"`` result event (``is_error=True``), and the tail
+    sweep — a rejected call is resolved in-task with NO different a shape than an
+    executed one from the log-consumer's point of view; it just never reaches
+    :func:`aios.tools.invoke.invoke_builtin`, and the tool's handler never runs.
+    Raising :class:`~aios.tools.invoke.ToolBail` inside the lifecycle body is what
+    gets that: an expected, model-visible, non-evicting refusal (the same path an
+    unknown built-in name or a schema mismatch takes). No ``parent_focal_at_arrival``
+    thread-through — :func:`_tool_lifecycle`'s own error branch (``_append_tool_result``)
+    never takes that optimization either; it falls back to the pre-tx parent lookup.
+    """
+
+    async def _reject_one(call: dict[str, Any]) -> None:
+        async with _tool_lifecycle(
+            pool,
+            session_id,
+            call,
+            account_id=account_id,
+            log_prefix="tool_reject",
+        ) as tc:
+            raise ToolBail(_unoffered_tool_message(tc.name, offered_names))
+        # _append_tool_result_event is only reachable via the ToolBail branch inside
+        # _tool_lifecycle's except clause above — no success path exists here.
+
+    _launch_tasks(session_id, tool_calls, _reject_one, prefix="tool_reject")
+
+
 def launch_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
