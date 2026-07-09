@@ -442,6 +442,10 @@ async def _wait_for_preempt(
     iterations poll the one-row gate and re-run the full predicate only when
     ``last_event_seq`` has advanced past the value captured BEFORE the previous
     full evaluation (so rows appended mid-evaluation are never skipped).
+
+    ``cancelled_by`` is the gate read's ``last_stimulus_seq`` when it lies past
+    the floor — the stimulus whose append tripped the gate. A confirmed-dispatch
+    or cancel-marker admission carries no stimulus past the floor → ``None``.
     """
     baseline: int | None = None
     while True:
@@ -456,10 +460,7 @@ async def _wait_for_preempt(
                 reacted_floor=reacted_floor,
             )
             if eligible:
-                async with pool.acquire() as conn:
-                    last_stimulus = await conn.fetchval(
-                        "SELECT last_stimulus_seq FROM sessions WHERE id = $1", session_id
-                    )
+                last_stimulus = gate["last_stimulus_seq"]
                 if last_stimulus is not None and last_stimulus > reacted_floor:
                     return int(last_stimulus)
                 return None

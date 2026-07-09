@@ -29,9 +29,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("ALTER TABLE agents ADD COLUMN preempt_policy text NOT NULL DEFAULT 'wait';")
-    op.execute(
-        "ALTER TABLE agent_versions ADD COLUMN preempt_policy text NOT NULL DEFAULT 'wait';"
-    )
+    op.execute("ALTER TABLE agent_versions ADD COLUMN preempt_policy text NOT NULL DEFAULT 'wait';")
 
 
 def downgrade() -> None:
