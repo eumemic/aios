@@ -38,7 +38,17 @@ from aios.harness.context import (
 )
 from aios.harness.tokens import approx_tokens
 from aios.harness.window import WindowOmission
+from aios.logging import get_logger
 from aios.tools.registry import to_openai_tools
+
+log = get_logger(__name__)
+
+# #1747: counts advance-swallows (best-effort scan-floor ratchet failures) so a
+# fleet-wide freeze (floor stuck at 0 behind a green build) is detectable
+# off-substrate rather than only inferred from a hung caller. Perf-only —
+# never consulted by any correctness path; see
+# ``_advance_open_request_scan_floor_best_effort``.
+_open_request_scan_floor_advance_swallow_count = 0
 
 if TYPE_CHECKING:
     import asyncpg
@@ -204,6 +214,46 @@ class StepContext:
     skill_versions: list[SkillVersion]
 
 
+async def _advance_open_request_scan_floor_best_effort(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> None:
+    """Ratchet the monotone open-request scan-floor (#1747), swallowing failure.
+
+    Called on the same connection/step that just read the open obligations,
+    keeping the bounded anti-join's residual cost near-zero on a hot
+    re-invoked servicer session. This is PERF-ONLY (see
+    ``queries.advance_open_request_scan_floor``'s docstring) — so it MUST NOT
+    be allowed to fail the step. A SAVEPOINT (nested transaction) contains a
+    failed UPDATE's abort: a bare try/except around the statement without one
+    would leave the surrounding step transaction poisoned in PG (every
+    subsequent statement on this conn would error until rollback), turning a
+    "harmless" perf-only failure into a step-failing one. On failure we roll
+    back to the savepoint, count it (fleet-wide swallow-rate alarm,
+    §"Immune check" in #1747 — a floor stuck at 0 forever behind a green
+    build must be detectable off-substrate), and continue the step.
+
+    Extracted to its own function (rather than inlined in
+    ``compute_step_prelude``) so unit tests driving the harness over a mocked
+    pool/conn can stub this one perf-only leaf wholesale — exactly the same
+    shape as the sibling ``harvest_session_cancel_markers`` stub.
+    """
+    from aios.db import queries
+
+    try:
+        async with conn.transaction():
+            await queries.advance_open_request_scan_floor(conn, session_id, account_id=account_id)
+    except Exception:
+        global _open_request_scan_floor_advance_swallow_count
+        _open_request_scan_floor_advance_swallow_count += 1
+        log.warning(
+            "open_request_scan_floor_advance_swallowed",
+            session_id=session_id,
+            account_id=account_id,
+            swallow_count=_open_request_scan_floor_advance_swallow_count,
+            exc_info=True,
+        )
+
+
 async def compute_step_prelude(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -255,6 +305,11 @@ async def compute_step_prelude(
     # background-child step (a stated, accepted cost).
     async with pool.acquire() as conn:
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
+        # #1747: ratchet the monotone open-request scan-floor on the same
+        # connection/step that just read it — perf-only, best-effort; see
+        # ``_advance_open_request_scan_floor_best_effort`` for why failures
+        # here must never propagate.
+        await _advance_open_request_scan_floor_best_effort(conn, session_id, account_id=account_id)
     owes_request = bool(obligations)
     if owes_request:
         from aios.tools.workflow_completion import workflow_completion_tool_specs
