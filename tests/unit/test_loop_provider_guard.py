@@ -66,12 +66,8 @@ def _enter_base_patches(
         ("aios.harness.loop._dispatch_confirmed_tools", AsyncMock(return_value=[])),
         ("aios.harness.loop.compose_step_context", AsyncMock(return_value=_STEP_CTX)),
         (
-            "aios.harness.loop.model_providers_service.resolve_provider_auth",
-            AsyncMock(return_value=resolved),
-        ),
-        (
-            "aios.harness.loop.model_providers_service.check_provider_auth_conflict",
-            AsyncMock(return_value=conflict),
+            "aios.harness.loop.model_providers_service.resolve_provider_auth_or_conflict",
+            AsyncMock(return_value=(resolved, conflict)),
         ),
     ]:
         stack.enter_context(patch(target, mock))

@@ -29,16 +29,13 @@ def _stub_provider_auth_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guard 3 (provider-auth conflict) needs a worker context (pool/crypto_box)
     and hits the DB. Stub it to a clean pass — no resolved row, no conflict —
     so tests exercising the OTHER guards don't need to know about it. Tests
-    for Guard 3 itself override ``resolve_provider_auth``/
-    ``check_provider_auth_conflict`` directly.
+    for Guard 3 itself override ``resolve_provider_auth_or_conflict`` directly.
     """
     monkeypatch.setattr("aios.harness.runtime.require_pool", lambda: object())
     monkeypatch.setattr("aios.harness.runtime.require_crypto_box", lambda: object())
     monkeypatch.setattr(
-        "aios.services.model_providers.resolve_provider_auth", AsyncMock(return_value=None)
-    )
-    monkeypatch.setattr(
-        "aios.services.model_providers.check_provider_auth_conflict", AsyncMock(return_value=None)
+        "aios.services.model_providers.resolve_provider_auth_or_conflict",
+        AsyncMock(return_value=(None, None)),
     )
 
 
@@ -190,8 +187,8 @@ async def test_trusted_api_base_admitted() -> None:
 async def test_provider_auth_conflict_rejected() -> None:
     with (
         patch(
-            "aios.services.model_providers.check_provider_auth_conflict",
-            AsyncMock(return_value="conflict message"),
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(return_value=(None, "conflict message")),
         ),
         patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
     ):
@@ -205,8 +202,8 @@ async def test_resolved_auth_forwarded_to_call_litellm() -> None:
     auth = ProviderAuth(api_key="sk-resolved", api_base=None, owner_account_id="acc_t")
     with (
         patch(
-            "aios.services.model_providers.resolve_provider_auth",
-            AsyncMock(return_value=auth),
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(return_value=(auth, None)),
         ),
         patch("aios.workflows.run_llm.call_litellm", AsyncMock(return_value=_response())) as m,
     ):

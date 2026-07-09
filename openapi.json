@@ -15020,6 +15020,7 @@
           },
           "api_key": {
             "type": "string",
+            "minLength": 1,
             "format": "password",
             "title": "Api Key",
             "writeOnly": true
@@ -15051,6 +15052,7 @@
             "anyOf": [
               {
                 "type": "string",
+                "minLength": 1,
                 "format": "password",
                 "writeOnly": true
               },

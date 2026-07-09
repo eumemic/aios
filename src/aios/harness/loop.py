@@ -1250,16 +1250,19 @@ async def _run_session_step_body(
         # leaves the worker (see _handle_provider_auth_conflict). For a
         # workflow child, agent.litellm_extra here is already the frozen
         # spawn-clamped identity (#823), so the guard sees exactly what the
-        # call below will send.
-        auth = await model_providers_service.resolve_provider_auth(
-            pool,
-            runtime.require_crypto_box(),
-            account_id=account_id,
-            model=agent.model,
-            litellm_extra=agent.litellm_extra,
-        )
-        conflict = await model_providers_service.check_provider_auth_conflict(
-            pool, account_id=account_id, litellm_extra=agent.litellm_extra, resolved=auth
+        # call below will send. has_subscriber() has no data dependency on the
+        # guard (it only picks streaming vs. non-streaming, used below), so it
+        # runs concurrently rather than after — on the rare conflict path this
+        # spends one harmless extra read alongside the guard's own latch writes.
+        (auth, conflict), subscribed = await asyncio.gather(
+            model_providers_service.resolve_provider_auth_or_conflict(
+                pool,
+                runtime.require_crypto_box(),
+                account_id=account_id,
+                model=agent.model,
+                litellm_extra=agent.litellm_extra,
+            ),
+            has_subscriber(pool, session_id),
         )
         if conflict is not None:
             await _handle_provider_auth_conflict(
@@ -1275,7 +1278,6 @@ async def _run_session_step_body(
             {"event": "model_request_start"},
             account_id=account_id,
         )
-        subscribed = await has_subscriber(pool, session_id)
 
         async def _call_model() -> LlmResponse:
             if subscribed:

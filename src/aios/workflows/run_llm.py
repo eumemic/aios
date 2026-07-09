@@ -206,24 +206,19 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             0,
         )
 
-    # Guard 3 — provider-auth conflict. Resolve the account-scoped credential first
-    # (pool/crypto_box come off the worker-global runtime module — this function has
-    # no pool param, matching the connector-auth-resolution precedent in run_tools.py
-    # — not threaded through launch_call_llm_task/_run_call_llm_task); then check
-    # `params`'s redirect (if any) doesn't send an above-owned key to it. `resolved`
-    # is None uniformly for "no row" and "unresolvable model" — check_provider_auth_conflict
-    # treats both identically (see its docstring for why a bare skip would reopen the
-    # guard's central bypass).
+    # Guard 3 — provider-auth conflict. pool/crypto_box come off the worker-global
+    # runtime module — this function has no pool param, matching the
+    # connector-auth-resolution precedent in run_tools.py — not threaded through
+    # launch_call_llm_task/_run_call_llm_task. resolve_provider_auth_or_conflict
+    # fuses resolution with the conflict check on `params`'s redirect (if any) so
+    # the two can never run out of order or independently at this call site.
     pool = runtime.require_pool()
-    auth = await model_providers_service.resolve_provider_auth(
+    auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
         pool,
         runtime.require_crypto_box(),
         account_id=run.account_id,
         model=model,
         litellm_extra=params,
-    )
-    conflict = await model_providers_service.check_provider_auth_conflict(
-        pool, account_id=run.account_id, litellm_extra=params, resolved=auth
     )
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0

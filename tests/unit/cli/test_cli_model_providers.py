@@ -35,6 +35,8 @@ def test_get(mocked_cli):
 
 
 def test_create(mocked_cli):
+    """Secret hygiene: create takes the full body via --data (no plain
+    --api-key VALUE flag) so a real key never lands in shell history."""
     mocked_cli.queue_response(
         httpx.Response(201, json=resource_response("model_provider", id="mp_new"))
     )
@@ -43,12 +45,8 @@ def test_create(mocked_cli):
         [
             "model-providers",
             "create",
-            "--provider",
-            "anthropic",
-            "--api-key",
-            "sk-real",
-            "--api-base",
-            "https://proxy.example",
+            "--data",
+            '{"provider": "anthropic", "api_key": "sk-real", "api_base": "https://proxy.example"}',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -65,16 +63,24 @@ def test_create_without_api_base(mocked_cli):
     mocked_cli.queue_response(httpx.Response(201, json=resource_response("model_provider")))
     result = runner.invoke(
         app,
-        ["model-providers", "create", "--provider", "openai", "--api-key", "sk-real"],
+        ["model-providers", "create", "--data", '{"provider": "openai", "api_key": "sk-real"}'],
     )
     assert result.exit_code == 0, result.output
     # api_base omitted entirely (Unset), not sent as null.
     assert "api_base" not in mocked_cli.captured.body
 
 
+def test_create_requires_a_payload_source(mocked_cli):
+    result = runner.invoke(app, ["model-providers", "create"])
+    assert result.exit_code != 0
+    assert mocked_cli.captured.method == ""  # no HTTP call was made
+
+
 def test_update_rotates_key_only(mocked_cli):
     mocked_cli.queue_response(httpx.Response(200, json=resource_response("model_provider")))
-    result = runner.invoke(app, ["model-providers", "update", "mp_1", "--api-key", "sk-new"])
+    result = runner.invoke(
+        app, ["model-providers", "update", "mp_1", "--data", '{"api_key": "sk-new"}']
+    )
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.method == "PUT"
     assert mocked_cli.captured.path == "/v1/model-providers/mp_1"
@@ -83,7 +89,9 @@ def test_update_rotates_key_only(mocked_cli):
 
 def test_update_clears_api_base(mocked_cli):
     mocked_cli.queue_response(httpx.Response(200, json=resource_response("model_provider")))
-    result = runner.invoke(app, ["model-providers", "update", "mp_1", "--clear-api-base"])
+    result = runner.invoke(
+        app, ["model-providers", "update", "mp_1", "--data", '{"api_base": null}']
+    )
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.body == {"api_base": None}
 
@@ -92,10 +100,27 @@ def test_update_sets_api_base(mocked_cli):
     mocked_cli.queue_response(httpx.Response(200, json=resource_response("model_provider")))
     result = runner.invoke(
         app,
-        ["model-providers", "update", "mp_1", "--api-base", "https://new-proxy.example"],
+        [
+            "model-providers",
+            "update",
+            "mp_1",
+            "--data",
+            '{"api_base": "https://new-proxy.example"}',
+        ],
     )
     assert result.exit_code == 0, result.output
     assert mocked_cli.captured.body == {"api_base": "https://new-proxy.example"}
+
+
+def test_update_via_body_file(mocked_cli, tmp_path):
+    body_file = tmp_path / "update.json"
+    body_file.write_text('{"api_key": "sk-from-file"}')
+    mocked_cli.queue_response(httpx.Response(200, json=resource_response("model_provider")))
+    result = runner.invoke(
+        app, ["model-providers", "update", "mp_1", "--body-file", str(body_file)]
+    )
+    assert result.exit_code == 0, result.output
+    assert mocked_cli.captured.body == {"api_key": "sk-from-file"}
 
 
 def test_archive_is_delete(mocked_cli):

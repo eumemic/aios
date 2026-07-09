@@ -43,7 +43,7 @@ class ModelProviderCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(min_length=1, max_length=64)
-    api_key: SecretStr
+    api_key: SecretStr = Field(min_length=1)
     api_base: str | None = None
 
     @field_validator("provider")
@@ -64,7 +64,7 @@ class ModelProviderUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    api_key: SecretStr | None = None
+    api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
 
 
@@ -121,6 +121,13 @@ def provider_auth_conflict(
     * a ``model_providers`` row **owned by this account itself**
       (``resolved.owner_account_id == account_id``) — the account's own key,
       redirected by the account's own agent, is not privilege escalation.
+      This exemption relies on ``resolved.api_key`` never being empty: both
+      ``ModelProviderCreate`` and ``ModelProviderUpdate`` enforce
+      ``min_length=1`` on ``api_key`` for exactly this reason — an
+      own-row exemption over an empty key would fall back to LiteLLM's env
+      resolution the same way a falsy ``litellm_extra["api_key"]`` would,
+      reopening this guard via a self-created empty row instead of an
+      ancestor's.
 
     Any other case is a conflict: a row owned by a strict ancestor
     (``resolved is not None and resolved.owner_account_id != account_id``),

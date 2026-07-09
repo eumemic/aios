@@ -1,12 +1,15 @@
 """Unit tests for the model_providers models + service layer.
 
 Covers the pure guard predicate (``provider_auth_conflict``) exhaustively —
-including the two red-team-confirmed bypass fixes (truthiness not presence
-on the self-supplied-key exemption; a bare no-row and an unresolvable-model
-resolution both route through the same not-root check) — plus the service
-wrappers: encryption under the caller/owner subkey, the update omitted-vs-null
-mapping, ``resolve_provider_auth``'s provider-derivation short-circuit, and
-``check_provider_auth_conflict``'s root-lookup-only-when-needed behavior.
+including the red-team-confirmed bypass fixes (truthiness not presence on the
+self-supplied-key exemption; a bare no-row and an unresolvable-model
+resolution both route through the same not-root check) and the
+code-review-confirmed empty-own-row bypass (an account's own row with an
+empty ``api_key`` must not be creatable) — plus the service wrappers:
+encryption under the caller/owner subkey, the update omitted-vs-null mapping,
+``_resolve_provider_auth``'s provider-derivation short-circuit,
+``_check_provider_auth_conflict``'s root-lookup-only-when-needed behavior,
+and ``resolve_provider_auth_or_conflict``'s fused resolve+check contract.
 """
 
 from __future__ import annotations
@@ -32,12 +35,11 @@ from tests.unit.conftest import fake_pool_yielding_conn
 def _unit_provider_auth_ungated() -> None:
     """Shadow (by name) the conftest-level autouse stub of the same name.
 
-    That fixture globally replaces ``resolve_provider_auth``/
-    ``check_provider_auth_conflict`` with a clean-pass mock so every OTHER
-    unit test doesn't need to know about the guard. THIS file tests those
-    two functions' real implementations directly, so it must not stub them —
-    a fixture defined in a test module shadows a conftest fixture of the
-    same name for that module.
+    That fixture globally replaces ``resolve_provider_auth_or_conflict`` with
+    a clean-pass mock so every OTHER unit test doesn't need to know about the
+    guard. THIS file tests the real implementations directly, so it must not
+    stub them — a fixture defined in a test module shadows a conftest fixture
+    of the same name for that module.
     """
     return None
 
@@ -186,6 +188,41 @@ class TestProviderAuthConflict:
         )
 
 
+# ─── wire models: empty api_key rejected ──────────────────────────────────────
+
+
+class TestEmptyApiKeyRejected:
+    """Code-review finding (xhigh pass): api_key had no min_length, so an
+    account could create/update its OWN row with an empty key. The guard's
+    own-row exemption (provider_auth_conflict) would then admit a redirect
+    against that empty-key row, and litellm treats a falsy api_key exactly
+    like an omitted one — falling back to the worker's env-owned key. Same
+    exfiltration shape as the already-fixed falsy-litellm_extra-api_key
+    bypass, reached via a self-created empty row instead.
+    """
+
+    def test_create_rejects_empty_api_key(self) -> None:
+        from pydantic import ValidationError
+
+        from aios.models.model_providers import ModelProviderCreate
+
+        with pytest.raises(ValidationError):
+            ModelProviderCreate(provider="anthropic", api_key="")
+
+    def test_update_rejects_empty_api_key(self) -> None:
+        from pydantic import ValidationError
+
+        from aios.models.model_providers import ModelProviderUpdate
+
+        with pytest.raises(ValidationError):
+            ModelProviderUpdate(api_key="")
+
+    def test_update_omitted_api_key_still_valid(self) -> None:
+        from aios.models.model_providers import ModelProviderUpdate
+
+        assert ModelProviderUpdate().api_key is None
+
+
 # ─── create/update: encryption + omitted-vs-null mapping ─────────────────────
 
 
@@ -281,6 +318,39 @@ async def test_update_explicit_null_api_base_clears(crypto_box: CryptoBox) -> No
     assert captured["api_base"] is None  # explicit null → clear, not Ellipsis
 
 
+async def test_update_service_layer_uses_presence_not_truthiness(crypto_box: CryptoBox) -> None:
+    """Defense-in-depth for a direct service call bypassing the router's
+    Pydantic validation (which now rejects an empty api_key at the wire
+    boundary): update_model_provider must treat api_key="" as a PRESENT
+    (rotate) value per its own documented contract ("api_key=None means
+    keep"), not silently collapse it to "keep" via truthiness.
+    """
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    captured: dict[str, Any] = {}
+
+    async def _update(_conn: Any, _id: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _row_to_model_provider(
+            {
+                "id": "mp_1",
+                "provider": "anthropic",
+                "api_base": None,
+                "ciphertext": b"",
+                "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "updated_at": datetime(2024, 1, 1, tzinfo=UTC),
+                "archived_at": None,
+            }
+        )
+
+    with patch("aios.services.model_providers.queries.update_model_provider", _update):
+        await service.update_model_provider(
+            pool, crypto_box, "mp_1", account_id="acc_x", api_key=""
+        )
+
+    assert captured["blob"] is not None  # "" is present, not omitted — must (attempt to) rotate
+
+
 async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> None:
     """update_model_provider mirrors update_vault's guarded pattern — a
     concurrent archive winning the race surfaces as ConflictError, not a
@@ -307,7 +377,7 @@ async def test_resolve_provider_auth_unresolvable_model_skips_db(crypto_box: Cry
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
 
-    result = await service.resolve_provider_auth(
+    result = await service._resolve_provider_auth(
         pool, crypto_box, account_id="acc_x", model="totally-bogus-model-xyz", litellm_extra=None
     )
     assert result is None
@@ -326,7 +396,7 @@ async def test_resolve_provider_auth_decrypts_with_owner_subkey(crypto_box: Cryp
         "aios.services.model_providers.queries.resolve_model_provider",
         AsyncMock(return_value=resolved),
     ):
-        auth = await service.resolve_provider_auth(
+        auth = await service._resolve_provider_auth(
             pool,
             crypto_box,
             account_id="acc_child",
@@ -347,7 +417,7 @@ async def test_resolve_provider_auth_no_row_returns_none(crypto_box: CryptoBox) 
         "aios.services.model_providers.queries.resolve_model_provider",
         AsyncMock(return_value=None),
     ):
-        auth = await service.resolve_provider_auth(
+        auth = await service._resolve_provider_auth(
             pool, crypto_box, account_id="acc_x", model="anthropic/claude-x", litellm_extra=None
         )
     assert auth is None
@@ -370,7 +440,7 @@ async def test_resolve_provider_auth_honors_custom_llm_provider_override() -> No
 async def test_check_conflict_skips_db_when_no_redirect(crypto_box: CryptoBox) -> None:
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
-    result = await service.check_provider_auth_conflict(
+    result = await service._check_provider_auth_conflict(
         pool, account_id="acc_x", litellm_extra=None, resolved=None
     )
     assert result is None
@@ -386,7 +456,7 @@ async def test_check_conflict_skips_db_when_extra_has_no_redirect_key(
     """
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
-    result = await service.check_provider_auth_conflict(
+    result = await service._check_provider_auth_conflict(
         pool, account_id="acc_x", litellm_extra={"temperature": 0.7}, resolved=None
     )
     assert result is None
@@ -396,7 +466,7 @@ async def test_check_conflict_skips_db_when_row_resolved(crypto_box: CryptoBox) 
     pool = MagicMock()
     pool.acquire = MagicMock(side_effect=AssertionError("must not touch the pool"))
     resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_x")
-    result = await service.check_provider_auth_conflict(
+    result = await service._check_provider_auth_conflict(
         pool,
         account_id="acc_x",
         litellm_extra={"api_base": "https://x.example"},
@@ -410,7 +480,7 @@ async def test_check_conflict_looks_up_root_only_on_no_row_arm() -> None:
     pool = fake_pool_yielding_conn(conn)
     get_account = AsyncMock(return_value=_account("acc_child", parent_account_id="acc_root"))
     with patch("aios.db.queries.get_account", get_account):
-        result = await service.check_provider_auth_conflict(
+        result = await service._check_provider_auth_conflict(
             pool,
             account_id="acc_child",
             litellm_extra={"api_base": "https://evil.example"},
@@ -429,7 +499,7 @@ async def test_check_conflict_message_is_static_no_account_ids_or_depth() -> Non
         "aios.db.queries.get_account",
         AsyncMock(return_value=_account("acc_child", parent_account_id="acc_root")),
     ):
-        result = await service.check_provider_auth_conflict(
+        result = await service._check_provider_auth_conflict(
             pool,
             account_id="acc_child",
             litellm_extra={"api_base": "https://evil.example"},
@@ -438,3 +508,56 @@ async def test_check_conflict_message_is_static_no_account_ids_or_depth() -> Non
     assert result is not None
     assert "acc_root" not in result
     assert "acc_child" not in result
+
+
+# ─── resolve_provider_auth_or_conflict: the fused production entry point ──────
+
+
+async def test_fused_entry_point_returns_resolved_auth_and_no_conflict(
+    crypto_box: CryptoBox,
+) -> None:
+    owner_subkey = crypto_box.derive_account_subkey("acc_x")
+    blob = owner_subkey.encrypt("sk-own")
+    resolved = ResolvedModelProvider(owner_account_id="acc_x", api_base=None, blob=blob)
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=resolved),
+    ):
+        auth, conflict = await service.resolve_provider_auth_or_conflict(
+            pool, crypto_box, account_id="acc_x", model="anthropic/claude-x", litellm_extra=None
+        )
+
+    assert conflict is None
+    assert auth is not None
+    assert auth.api_key == "sk-own"
+
+
+async def test_fused_entry_point_surfaces_conflict_with_resolved_auth(
+    crypto_box: CryptoBox,
+) -> None:
+    """The conflict check must see the SAME resolved value the guard would
+    inject — proving the fusion doesn't let resolve and check drift apart."""
+    owner_subkey = crypto_box.derive_account_subkey("acc_parent")
+    blob = owner_subkey.encrypt("sk-ancestor")
+    resolved = ResolvedModelProvider(owner_account_id="acc_parent", api_base=None, blob=blob)
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=resolved),
+    ):
+        auth, conflict = await service.resolve_provider_auth_or_conflict(
+            pool,
+            crypto_box,
+            account_id="acc_child",
+            model="anthropic/claude-x",
+            litellm_extra={"api_base": "https://evil.example"},
+        )
+
+    assert conflict == service.PROVIDER_AUTH_CONFLICT_MESSAGE
+    assert auth is not None  # still resolved — the CALLER decides not to use it on conflict
+    assert auth.owner_account_id == "acc_parent"

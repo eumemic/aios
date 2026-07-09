@@ -1,8 +1,12 @@
 """Business logic for the model_providers resource.
 
-Thin wrapper over :mod:`aios.db.queries`, plus the two functions the harness
-calls on every model call: :func:`resolve_provider_auth` (nearest-ancestor
-credential resolution) and :func:`check_provider_auth_conflict` (the guard).
+Thin wrapper over :mod:`aios.db.queries`, plus :func:`resolve_provider_auth_or_conflict`
+— the single entry point the harness calls on every model call. It fuses
+nearest-ancestor credential resolution with the conflict guard: resolving
+auth without also running the check (or vice versa) is exactly the security
+hole this guard exists to close, so the two inner steps
+(``_resolve_provider_auth`` / ``_check_provider_auth_conflict``) are private
+and only reachable together.
 
 **The guard is deliberately call-time-only, never agent-write-time.** A
 ``model_providers`` row can be created, rotated, or archived by an ancestor
@@ -17,6 +21,7 @@ added alongside this one without an explicit follow-up decision.
 
 from __future__ import annotations
 
+from functools import cache
 from types import EllipsisType
 from typing import Any
 
@@ -101,7 +106,11 @@ async def update_model_provider(
     at the router — pass ``...`` (the default) to keep, an explicit value
     (including ``None``) to set/clear.
     """
-    blob = _encrypt_api_key(api_key, crypto_box, account_id=account_id) if api_key else None
+    blob = (
+        _encrypt_api_key(api_key, crypto_box, account_id=account_id)
+        if api_key is not None
+        else None
+    )
     async with pool.acquire() as conn:
         return await queries.update_model_provider(
             conn, model_provider_id, account_id=account_id, blob=blob, api_base=api_base
@@ -121,7 +130,26 @@ async def archive_model_provider(
         )
 
 
-async def resolve_provider_auth(
+@cache
+def _derive_provider(model: str, custom_llm_provider: str | None) -> str | None:
+    """``litellm.get_llm_provider``'s provider sniff, cached.
+
+    Same rationale as ``harness.completion.model_descriptor``: a pure
+    function of its (hashable) args, called on every model call, over a
+    distinct-``(model, custom_llm_provider)`` cardinality that's low in
+    practice (agents typically reuse one or two models). ``None`` means
+    unresolvable (``get_llm_provider`` raised — e.g. a ``workflow:`` binding
+    or a garbage string) and is cached too, so a repeated bad string doesn't
+    re-raise on every call.
+    """
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model, custom_llm_provider=custom_llm_provider)
+    except Exception:
+        return None
+    return str(provider)
+
+
+async def _resolve_provider_auth(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     *,
@@ -141,16 +169,13 @@ async def resolve_provider_auth(
     An unresolvable ``model`` (``get_llm_provider`` raises — e.g. a
     ``workflow:`` binding or a garbage string) returns ``None`` without a DB
     round trip. This is intentionally NOT distinguished from a genuine
-    no-row lookup at this boundary: :func:`check_provider_auth_conflict`
+    no-row lookup at this boundary: :func:`_check_provider_auth_conflict`
     treats every ``None`` identically (see its docstring for why a bare
     "nothing to check" pass here would reopen the guard's central bypass).
     """
     custom_llm_provider = (litellm_extra or {}).get("custom_llm_provider")
-    try:
-        provider = litellm.get_llm_provider(
-            model, custom_llm_provider=custom_llm_provider if custom_llm_provider else None
-        )[1]
-    except Exception:
+    provider = _derive_provider(model, custom_llm_provider if custom_llm_provider else None)
+    if provider is None:
         return None
     async with pool.acquire() as conn:
         resolved = await queries.resolve_model_provider(
@@ -166,7 +191,7 @@ async def resolve_provider_auth(
     )
 
 
-async def check_provider_auth_conflict(
+async def _check_provider_auth_conflict(
     pool: asyncpg.Pool[Any],
     *,
     account_id: str,
@@ -194,3 +219,34 @@ async def check_provider_auth_conflict(
     ):
         return PROVIDER_AUTH_CONFLICT_MESSAGE
     return None
+
+
+async def resolve_provider_auth_or_conflict(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    *,
+    account_id: str,
+    model: str,
+    litellm_extra: dict[str, Any] | None,
+) -> tuple[ProviderAuth | None, str | None]:
+    """Resolve provider auth AND run the conflict guard, in one call.
+
+    The single production entry point for the model-call sites (harness/loop.py,
+    workflows/run_llm.py). Resolving auth without also checking it for conflict
+    (or checking a conflict against auth resolved a different way) is exactly
+    the cross-tenant key-exfiltration hole this feature exists to close, so the
+    two steps are fused here rather than left as two functions a future call
+    site could invoke out of order, partially, or with mismatched arguments —
+    ``_resolve_provider_auth``/``_check_provider_auth_conflict`` are private.
+
+    Returns ``(auth, conflict_message)``. ``conflict_message`` is ``None`` when
+    the call is admissible — ``auth`` may still be ``None`` in that case (no
+    row anywhere in the chain; LiteLLM falls back to the worker's env key).
+    """
+    auth = await _resolve_provider_auth(
+        pool, crypto_box, account_id=account_id, model=model, litellm_extra=litellm_extra
+    )
+    conflict = await _check_provider_auth_conflict(
+        pool, account_id=account_id, litellm_extra=litellm_extra, resolved=auth
+    )
+    return auth, conflict
