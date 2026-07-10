@@ -1,0 +1,406 @@
+{
+ "_comment": "Extra-hard checkable-answer reasoning problems designed to defeat a frontier LLM reasoner (Opus-4.8 / GPT-5.5 class). Built for the WaM fusion benchmark to provide difficulty headroom above reasoning_hard/reasoning_headroom. Every canonical answer was computed and independently re-verified with Python (brute force / exact simulation / fractions). Categories: long-exact-arithmetic (x001-x016), deep-combinatorics (x017-x032), number-theory-traps (x033-x048), logic-scheduling-calendar (x049-x064), iterated-process (x065-x080).",
+ "answer_format_instruction": "Work carefully step by step, then end your reply with a line of the exact form 'ANSWER: <value>' where <value> is a single number (integer, reduced fraction a/b, or decimal) or a single word. Do not include units, commas, currency symbols, or extra text on that line.",
+ "items": [
+  {
+   "id": "x001",
+   "prompt": "You deposit $12,500.00 into an account. Interest is credited once at the end of each year and the balance is then rounded to the nearest cent (round half up). After the interest is credited and rounded each year, a flat $35.00 annual fee is subtracted. The annual interest rates for years 1 through 5 are 4.3%, 5.75%, 3.85%, 6.25%, and 4.90% respectively. What is the exact balance in dollars at the end of year 5? Give the answer as a number with two decimals.",
+   "answer": "15764.18"
+  },
+  {
+   "id": "x002",
+   "prompt": "A quantity starts at 480. It is then changed by the following sequence of percentage changes, applied one after another to the running value: increase by 37.5%, decrease by 22%, increase by 15%, decrease by 8%, increase by 64%, decrease by 55%. What is the exact final value? Express it as a reduced fraction a/b (or an integer if it is whole).",
+   "answer": "251223687/625000"
+  },
+  {
+   "id": "x003",
+   "prompt": "A person has gross income of $187,400 and a standard deduction of $14,600, giving taxable income. Tax is computed on the taxable income using these marginal brackets: 10% on the portion from $0 to $11,600; 12% on the portion from $11,600 to $47,150; 22% on the portion from $47,150 to $100,525; 24% on the portion from $100,525 to $191,950; 32% on the portion from $191,950 to $243,725. What is the exact total tax owed, in dollars? Give the answer as a reduced fraction a/b or an integer.",
+   "answer": "69029/2"
+  },
+  {
+   "id": "x004",
+   "prompt": "A machine produces 4,750 widgets per hour. It runs 6.5 hours per day for 5 days. Of all widgets produced, exactly 12% are defective and discarded. Each good widget weighs 37 grams. Good widgets are packed into crates that hold exactly 25 kilograms each. How many completely FULL crates can be filled? (Answer with an integer.)",
+   "answer": "201"
+  },
+  {
+   "id": "x005",
+   "prompt": "An item lists at $899.99. In this exact order: a 15% discount is applied, then a flat $50.00 coupon is subtracted, then an 8% loyalty discount is applied to that result, and finally 7.25% sales tax is added. Round only the final amount to the nearest cent (round half up). What is the final price in dollars, with two decimals?",
+   "answer": "705.48"
+  },
+  {
+   "id": "x006",
+   "prompt": "Compute the following expression exactly, step by step, evaluating left to right: take 87,654, multiply by 23, add 998,877, multiply the result by 7, subtract 4,567,890, then divide by 3. The final division is exact. What integer results?",
+   "answer": "5512181"
+  },
+  {
+   "id": "x007",
+   "prompt": "Three workers are paid weekly. Regular hours (up to 40) are paid at the base rate; hours beyond 40 are paid at 1.5x the base rate. Worker A worked 46 hours at $28.50/hour. Worker B worked 52 hours at $21.40/hour. Worker C worked 38 hours at $31.75/hour. What is the exact total weekly payroll in dollars? Give a reduced fraction a/b or a number.",
+   "answer": "19221/5"
+  },
+  {
+   "id": "x008",
+   "prompt": "You mix 350 mL of an 18% (by volume) salt solution, 200 mL of a 42% solution, and 150 mL of a 6% solution. You then evaporate 100 mL of pure water from the mixture (removing only water, no salt). What is the exact final salt concentration as a reduced fraction (a/b, a fraction between 0 and 1)?",
+   "answer": "13/50"
+  },
+  {
+   "id": "x009",
+   "prompt": "Start with the integer 1,000,000. Apply these seven multipliers in order, and after EACH multiplication take the floor (round down to the nearest integer) before applying the next: 1.03, 0.97, 1.11, 0.89, 1.27, 0.94, 1.08. What is the final integer?",
+   "answer": "1272554"
+  },
+  {
+   "id": "x010",
+   "prompt": "A road trip has three legs: 247 miles at 31 miles per gallon, 388 miles at 27 miles per gallon, and 176 miles at 34 miles per gallon. Gasoline costs $4.29 per gallon. Compute the exact total gallons used, then the total fuel cost, and round the final cost to the nearest cent (round half up). What is the total fuel cost in dollars, with two decimals?",
+   "answer": "118.04"
+  },
+  {
+   "id": "x011",
+   "prompt": "A course grade weights: Homework 20%, Midterm 30%, Project 25%, Final 25%. The homework score is the average of 91, 84, 77, 88, 95. The project score is the average of 90 and 86. The midterm is 82 and the final is 79. What is the exact weighted course grade? Give a reduced fraction a/b or a number.",
+   "answer": "335/4"
+  },
+  {
+   "id": "x012",
+   "prompt": "You start with 10,000 USD. You convert USD to EUR at a rate of 0.9180 EUR per USD, then a 1.5% conversion fee is deducted from the resulting EUR amount. You convert that EUR to GBP at 0.8620 GBP per EUR, then a 1.2% fee is deducted from the GBP. You convert that GBP back to USD at 1.2650 USD per GBP, then a 0.9% fee is deducted from the USD. Round only the final USD amount to the nearest cent (round half up). How many USD do you end with, with two decimals?",
+   "answer": "9654.00"
+  },
+  {
+   "id": "x013",
+   "prompt": "Five processes take these durations: 2 hours 37 minutes 48 seconds; 1 hour 55 minutes 22 seconds; 3 hours 9 minutes 59 seconds; 48 minutes 35 seconds; and 4 hours 12 minutes 6 seconds. What is the total duration, expressed as a whole number of SECONDS?",
+   "answer": "45830"
+  },
+  {
+   "id": "x014",
+   "prompt": "An item costs the store $240. The price is set by a 65% markup on cost. Then it is marked down 30%, then marked down a further 15% off the current price, then marked up 20% off the current price. Round the final price to the nearest cent (round half up). What is the final price in dollars, with two decimals?",
+   "answer": "282.74"
+  },
+  {
+   "id": "x015",
+   "prompt": "An account starts at $5,000.00. Interest compounds monthly at an annual nominal rate of 6% (so 0.5% per month), and the balance is rounded to the nearest cent (round half up) at the end of EACH month. At the end of each 12-month year (after that year's 12 monthly compoundings), exactly $800.00 is withdrawn. What is the exact balance after 3 full years (3 withdrawals total), in dollars with two decimals?",
+   "answer": "3432.33"
+  },
+  {
+   "id": "x016",
+   "prompt": "Let N = 999,983. Compute N squared, then subtract 123,456,789, then add 987,654,321. What are the last six digits of the resulting number? (Answer as an integer from 0 to 999999; drop leading zeros.)",
+   "answer": "197821"
+  },
+  {
+   "id": "x017",
+   "prompt": "Seven distinct people are to be seated in a row of 7 seats. The following pairs refuse to sit in adjacent seats: (A and B), (C and D), and (E and F). The seventh person, G, has no restriction. In how many distinct arrangements can all seven be seated so that none of those three pairs sit next to each other?",
+   "answer": "1968"
+  },
+  {
+   "id": "x018",
+   "prompt": "How many integers n with 1 <= n <= 10000 are divisible by NONE of 6, 10, 15, and 14?",
+   "answer": "6953"
+  },
+  {
+   "id": "x019",
+   "prompt": "How many ordered integer solutions (a, b, c, d) are there to a + b + c + d = 25 where each of a, b, c, d satisfies 1 <= value <= 10?",
+   "answer": "592"
+  },
+  {
+   "id": "x020",
+   "prompt": "How many integers n with 1 <= n <= 2000 are divisible by AT LEAST ONE of 2, 3, 5, and 7?",
+   "answer": "1542"
+  },
+  {
+   "id": "x021",
+   "prompt": "A row of 6 cells is colored, each cell one of 3 colors. No two ADJACENT cells may share a color, AND the first cell and the last cell must also be different colors from each other. How many colorings are possible?",
+   "answer": "66"
+  },
+  {
+   "id": "x022",
+   "prompt": "From a standard 52-card deck, 5 cards are drawn at random (all 5-card hands equally likely). What is the probability that the hand contains EXACTLY 2 aces AND AT LEAST 1 king? Give the answer as a reduced fraction a/b.",
+   "answer": "1013/108290"
+  },
+  {
+   "id": "x023",
+   "prompt": "A 2-by-10 rectangular board (2 rows, 10 columns) is to be completely tiled using two kinds of tiles: 1-by-2 dominoes (which may be placed horizontally or vertically) and 2-by-2 square tiles. Tiles may not overlap and must cover the whole board exactly. How many distinct tilings are there?",
+   "answer": "683"
+  },
+  {
+   "id": "x024",
+   "prompt": "Consider all permutations of the 8 numbers 1 through 8. How many of these permutations have EXACTLY 2 fixed points (positions i where the number in position i equals i)?",
+   "answer": "7420"
+  },
+  {
+   "id": "x025",
+   "prompt": "A path goes from (0,0) to (7,6), moving only one unit right (+1 in x) or one unit up (+1 in y) at each step. How many such paths avoid BOTH of the points (2,3) and (5,2)?",
+   "answer": "841"
+  },
+  {
+   "id": "x026",
+   "prompt": "How many distinct arrangements are there of all the letters in the word BOOKKEEPER? (The word has letters B, O, O, K, K, E, E, P, E, R.)",
+   "answer": "151200"
+  },
+  {
+   "id": "x027",
+   "prompt": "How many ordered 5-tuples of integers (x1, x2, x3, x4, x5) satisfy x1 + x2 + x3 + x4 + x5 = 30 with each xi in the range 0 <= xi <= 9?",
+   "answer": "3246"
+  },
+  {
+   "id": "x028",
+   "prompt": "Seven distinct people are seated around a round table. Two seatings are considered the same if one is a rotation of the other (but reflections are considered different). Two particular people, call them A and B, must NOT be seated in adjacent chairs. How many distinct seatings are possible?",
+   "answer": "480"
+  },
+  {
+   "id": "x029",
+   "prompt": "Four fair six-sided dice are rolled. What is the probability that their sum is exactly 15? Give the answer as a reduced fraction a/b.",
+   "answer": "35/324"
+  },
+  {
+   "id": "x030",
+   "prompt": "How many three-digit numbers (from 100 to 999) have digits that are strictly increasing from left to right AND have a digit sum that is divisible by 5?",
+   "answer": "16"
+  },
+  {
+   "id": "x031",
+   "prompt": "A committee of 5 people is chosen from a group of 6 men and 5 women. The committee must contain at least 2 men and at least 2 women. In how many ways can the committee be formed?",
+   "answer": "350"
+  },
+  {
+   "id": "x032",
+   "prompt": "An urn contains 4 red, 5 blue, and 3 green balls (12 total, all distinguishable by position). Four balls are drawn at random without replacement. What is the probability that all three colors appear among the 4 drawn? Give the answer as a reduced fraction a/b.",
+   "answer": "6/11"
+  },
+  {
+   "id": "x033",
+   "prompt": "Compute 7^(7^7), that is, 7 raised to the power (7 raised to the 7th power). What are its last three digits? (Answer as an integer 0-999; drop leading zeros.)",
+   "answer": "343"
+  },
+  {
+   "id": "x034",
+   "prompt": "What are the last four digits of 2^1000 (2 raised to the 1000th power)? Answer as an integer (drop any leading zeros).",
+   "answer": "9376"
+  },
+  {
+   "id": "x035",
+   "prompt": "How many integers n with 1 <= n <= 100000 are divisible by 7 but NOT divisible by 11 and NOT divisible by 13?",
+   "answer": "11988"
+  },
+  {
+   "id": "x036",
+   "prompt": "What is the multiplicative order of 3 modulo 1000? (That is, the smallest positive integer k such that 3^k leaves remainder 1 when divided by 1000.)",
+   "answer": "100"
+  },
+  {
+   "id": "x037",
+   "prompt": "Compute 2^100 (2 raised to the 100th power) as an ordinary base-10 integer, then add up all of its decimal digits. What is the digit sum?",
+   "answer": "115"
+  },
+  {
+   "id": "x038",
+   "prompt": "Let A be the hexadecimal (base 16) number 2F3B7, B be the base-7 number 6540123, and C be the base-5 number 4302114. Convert all three to base 10 and compute A + B - C. What is the result in base 10?",
+   "answer": "920903"
+  },
+  {
+   "id": "x039",
+   "prompt": "What are the last three digits of 13^100 (13 raised to the 100th power)? Answer as an integer 0-999 (drop leading zeros).",
+   "answer": "1"
+  },
+  {
+   "id": "x040",
+   "prompt": "How many positive divisors does 360360 have (including 1 and 360360 itself)?",
+   "answer": "192"
+  },
+  {
+   "id": "x041",
+   "prompt": "Compute (123^45 + 67^89) modulo 100. Answer with an integer from 0 to 99.",
+   "answer": "90"
+  },
+  {
+   "id": "x042",
+   "prompt": "How many integers n with 1 <= n <= 10000 have a decimal digit sum exactly equal to 13?",
+   "answer": "480"
+  },
+  {
+   "id": "x043",
+   "prompt": "Compute 3^(3^(3^3)), i.e. 3 raised to the power (3 raised to the power (3 raised to the 3rd power)). What are its last two digits? Answer as an integer 0-99 (drop leading zeros).",
+   "answer": "87"
+  },
+  {
+   "id": "x044",
+   "prompt": "What is the least common multiple (LCM) of the eight numbers 12, 18, 21, 28, 33, 44, 50, and 63?",
+   "answer": "69300"
+  },
+  {
+   "id": "x045",
+   "prompt": "How many four-digit numbers (from 1000 to 9999) are palindromes (read the same forwards and backwards) AND divisible by 7?",
+   "answer": "18"
+  },
+  {
+   "id": "x046",
+   "prompt": "How many integers n with 1 <= n <= 10000 are relatively prime to 210 (i.e. share no common factor greater than 1 with 210)? Note 210 = 2 * 3 * 5 * 7.",
+   "answer": "2285"
+  },
+  {
+   "id": "x047",
+   "prompt": "Compute the sum 1! + 2! + 3! + ... + 20! (sum of factorials from 1 to 20). What are the last three digits of this sum? Answer as an integer 0-999 (drop leading zeros).",
+   "answer": "313"
+  },
+  {
+   "id": "x048",
+   "prompt": "How many integers n with 1 <= n <= 10000 satisfy ALL THREE of n mod 7 = 3, n mod 9 = 4, and n mod 11 = 5 (where 'mod' is the nonnegative remainder)?",
+   "answer": "14"
+  },
+  {
+   "id": "x049",
+   "prompt": "How many days are there from March 15, 2019 to November 8, 2027 (counting the end date but not the start date, i.e. the difference b - a in days)? Note that 2020 and 2024 are leap years.",
+   "answer": "3160"
+  },
+  {
+   "id": "x050",
+   "prompt": "Starting from July 1, 2026, add exactly 1000 days. On what day-of-the-year number does the resulting date fall? (Day-of-year: January 1 is day 1; account for leap years. Answer as an integer.)",
+   "answer": "86"
+  },
+  {
+   "id": "x051",
+   "prompt": "A flight departs New York on March 7, 2026 at 22:30 local New York time (America/New_York) and is in the air for exactly 11 hours and 40 minutes of real elapsed time. Using correct time-zone and daylight-saving rules (note: US daylight saving time begins at 02:00 local on Sunday March 8, 2026, springing clocks forward one hour; the UK is still on GMT in early March), at what LOCAL London time (Europe/London) does the flight arrive? Express the answer as the arrival's minute-of-day: hour*60 + minute (an integer 0 to 1439).",
+   "answer": "910"
+  },
+  {
+   "id": "x052",
+   "prompt": "A tank has capacity 200 gallons and starts empty. Pipe A adds 3 gallons per minute starting at minute 0. Pipe B adds 5 gallons per minute starting at the beginning of minute 4 (i.e., it is active during minute 4 onward). Drain C removes 2 gallons per minute starting at the beginning of minute 9. Rates are constant within each whole minute. After how many whole minutes does the tank first contain at least 200 gallons?",
+   "answer": "34"
+  },
+  {
+   "id": "x053",
+   "prompt": "Five people A, B, C, D, E each occupy a distinct position numbered 1 to 5 in a row. Constraints: A is somewhere to the left of B (smaller position number); C is exactly at position 3; D is immediately to the right of A (D's position = A's position + 1); E is not at position 1 and not at position 5. How many distinct arrangements satisfy all of these constraints?",
+   "answer": "1"
+  },
+  {
+   "id": "x054",
+   "prompt": "A job is done by three workers whose individual rates are 1/6, 1/8, and 1/12 of the job per hour. Worker 1 starts at time 0 and works continuously. Worker 2 joins at time t = 2 hours. Worker 3 joins at time t = 3 hours. All continue until the job is complete. What is the exact total time in hours to finish the whole job? Give a reduced fraction a/b or a number.",
+   "answer": "4"
+  },
+  {
+   "id": "x055",
+   "prompt": "Two trains travel a straight 385-mile route between city A and city B. Train X leaves A heading toward B at 9:00, going 60 mph. Train Y leaves B heading toward A at 9:45, going 80 mph. At what clock time do they meet, expressed as minutes-after-midnight? (9:00 is 540 minutes after midnight.) Give the exact value as a reduced fraction a/b or a number.",
+   "answer": "5115/7"
+  },
+  {
+   "id": "x056",
+   "prompt": "Counting every date from January 1, 2000 through December 31, 2030 (inclusive), how many of them are a Friday that falls on the 13th of a month?",
+   "answer": "53"
+  },
+  {
+   "id": "x057",
+   "prompt": "Three lighthouses flash at regular intervals of 42, 54, and 66 seconds respectively. At time t = 0 seconds all three flash together. Over the next 24 hours (86400 seconds, from t = 0 up to and including t = 86400), how many times do all three flash at the same instant (count the flash at t = 0)?",
+   "answer": "21"
+  },
+  {
+   "id": "x058",
+   "prompt": "Six people (numbered 0 to 5) are each assigned exactly one of six tasks (numbered 0 to 5), one task per person, all tasks used. Person i is forbidden from doing task i (for every i from 0 to 5). Additionally, person 0 cannot do task 5, and person 5 cannot do task 0. How many valid assignments are there?",
+   "answer": "168"
+  },
+  {
+   "id": "x059",
+   "prompt": "The product of the ages of three brothers is 2450 and the sum of their ages is 76. Each age is a positive integer. What is the age of the OLDEST brother? (There is a unique set of three ages fitting these facts.)",
+   "answer": "49"
+  },
+  {
+   "id": "x060",
+   "prompt": "How many weekdays (Monday through Friday, ignoring holidays) are there from January 1, 2026 to June 30, 2026, inclusive of both endpoints?",
+   "answer": "129"
+  },
+  {
+   "id": "x061",
+   "prompt": "Two clocks are set to exactly the correct time at noon. Clock A gains 3 seconds every hour; Clock B loses 5 seconds every hour (both at constant rates). After how many whole hours will the two clocks first show times that differ by at least 10 minutes (600 seconds) from each other?",
+   "answer": "75"
+  },
+  {
+   "id": "x062",
+   "prompt": "A pump runs in a repeating 10-minute cycle: it is ON for the first 7 minutes of each cycle (adding 12 gallons per minute) and OFF for the last 3 minutes (adding nothing). It starts at the beginning of an ON phase at minute 0. Exactly how many gallons have been added after 100 minutes?",
+   "answer": "840"
+  },
+  {
+   "id": "x063",
+   "prompt": "Three runners start together at the start line of a 400-meter circular track, all running the same direction at constant speeds 5, 6, and 8 meters per second. After how many seconds do all three simultaneously return to the start line together for the first time? Give the exact answer as a reduced fraction a/b or an integer.",
+   "answer": "400"
+  },
+  {
+   "id": "x064",
+   "prompt": "During the 60 minutes numbered 0 through 59 of one hour, three machines each run maintenance on certain minutes: Machine 1 on every minute m where m is divisible by 4; Machine 2 on every minute where m is divisible by 6; Machine 3 on every minute where m is divisible by 9. On how many of the 60 minutes is NO machine running maintenance?",
+   "answer": "37"
+  },
+  {
+   "id": "x065",
+   "prompt": "Start with n = 27. Repeat this rule: if n is even, replace n with n/2; if n is odd, replace n with 3n+1. Count how many steps it takes to first reach 1. How many steps?",
+   "answer": "111"
+  },
+  {
+   "id": "x066",
+   "prompt": "Start with the number 999999999999 (twelve 9's). Repeatedly replace the current number by the sum of the squares of its decimal digits. Apply this operation exactly 20 times. What is the resulting number?",
+   "answer": "4"
+  },
+  {
+   "id": "x067",
+   "prompt": "A sequence is defined by a(0) = 2, a(1) = 5, and for n >= 2, a(n) = 3*a(n-1) - 2*a(n-2) + n. What is a(20)?",
+   "answer": "6291202"
+  },
+  {
+   "id": "x068",
+   "prompt": "Start with the string \"1\". At each step, simultaneously replace every '1' with the two characters '10' and every '0' with the single character '1'. (All replacements in a step use the string as it was at the start of that step.) After 15 steps, how many '1' characters does the string contain?",
+   "answer": "987"
+  },
+  {
+   "id": "x069",
+   "prompt": "There are 41 people standing in a circle, numbered 1 to 41 clockwise. Starting the count at person 1, every 3rd person is eliminated going clockwise (so persons 3, 6, 9, ... are removed first), and counting continues around the circle over the remaining people until only one remains. What is the number of the last remaining person?",
+   "answer": "31"
+  },
+  {
+   "id": "x070",
+   "prompt": "A population has three age classes: juveniles (J), adults (A), and elders (E). Each time step, the counts update simultaneously by these rules: new J = 2*A + E; new A = old J; new E = old A. Initially J = 1, A = 0, E = 0. After 20 time steps, what is the total population J + A + E?",
+   "answer": "13531"
+  },
+  {
+   "id": "x071",
+   "prompt": "Define a sequence by x(0) = 7 and x(n+1) = (x(n)^2 + 1) mod 1000. What is x(50)?",
+   "answer": "901"
+  },
+  {
+   "id": "x072",
+   "prompt": "A deck of 52 cards undergoes repeated perfect out-shuffles. Under an out-shuffle, the card in position i (positions numbered 0 to 51) moves to position (2*i) mod 51, except the last card (position 51) stays fixed. How many out-shuffles are needed to return the deck to its original order?",
+   "answer": "8"
+  },
+  {
+   "id": "x073",
+   "prompt": "Start with n = 1. Repeat 30 times: replace n with n plus the sum of the decimal digits of n. What is the final value of n after 30 repetitions?",
+   "answer": "271"
+  },
+  {
+   "id": "x074",
+   "prompt": "A ball starts at corner (0,0) of a rectangular billiard table with corners (0,0), (7,0), (0,5), (7,5). It moves diagonally, initially in direction (+1,+1), one unit in x and one unit in y per step. When it hits a vertical wall (x=0 or x=7) the x-direction flips; when it hits a horizontal wall (y=0 or y=5) the y-direction flips (a corner flips both). It stops the moment it arrives at any of the four corners. How many unit diagonal steps does it take to reach a corner?",
+   "answer": "35"
+  },
+  {
+   "id": "x075",
+   "prompt": "Start with the 4-tuple (0, 653, 1854, 4063). Repeat this operation: replace (a, b, c, d) with (|a-b|, |b-c|, |c-d|, |d-a|) (absolute differences of adjacent entries, cyclically). How many steps does it take to first reach (0, 0, 0, 0)?",
+   "answer": "23"
+  },
+  {
+   "id": "x076",
+   "prompt": "A Tribonacci-like sequence is defined mod 100: s(0)=s(1)=s(2)=1, and for n>=3, s(n) = (s(n-1) + s(n-2) + s(n-3)) mod 100. What is s(100)?",
+   "answer": "81"
+  },
+  {
+   "id": "x077",
+   "prompt": "Start with n = 500. Repeat this operation exactly 4 times: write n in binary (base 2), then read that same string of digits as if it were a base-3 numeral, and let that value be the new n. What is the final value?",
+   "answer": "1883617943244157"
+  },
+  {
+   "id": "x078",
+   "prompt": "Define f(i) = (i*i + 7) mod 1000. Start with x(0) = 8 and generate the sequence x(1) = f(x(0)), x(2) = f(x(1)), x(3) = f(x(2)), and so on. Counting applications of f, at which step number k (k >= 1) does x(k) first equal a value that already appeared earlier in the sequence (i.e. x(k) = x(j) for some j with 0 <= j < k)? Give the integer k.",
+   "answer": "8"
+  },
+  {
+   "id": "x079",
+   "prompt": "Consider a 1-dimensional row of 21 cells (positions 0 to 20), each either 0 or 1. Initially only the center cell (position 10) is 1. At each step, every cell's new value is the XOR of its left and right neighbors' current values (cells outside the row count as 0); this is 'Rule 90'. After 10 steps, how many cells contain a 1?",
+   "answer": "4"
+  },
+  {
+   "id": "x080",
+   "prompt": "Start with n = 1000000. Repeatedly replace n with d(n), the number of positive divisors of n (for example d(12) = 6). Continue until n first equals 2. How many replacement steps does this take?",
+   "answer": "3"
+  }
+ ]
+}
