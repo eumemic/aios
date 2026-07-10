@@ -225,9 +225,7 @@ async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -
     return None if schema is None else _validate_value(value, schema)
 
 
-def _closed_request_message(
-    outcome: Outcome | None = None, closed_at: Any | None = None
-) -> str:
+def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | None = None) -> str:
     """The terminal stop message for a `return`/`error` call after all requests
     are ALREADY answered (#1773 defect 1).
 
@@ -245,8 +243,7 @@ def _closed_request_message(
         detail = f"deadline timeout at {ts}" if is_timeout else f"at {ts}"
         qualifier = f" ({detail})"
     return (
-        f"this request was already answered{qualifier}; "
-        "do not call return again — end your turn."
+        f"this request was already answered{qualifier}; do not call return again — end your turn."
     )
 
 

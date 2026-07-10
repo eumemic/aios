@@ -36,8 +36,7 @@ class TestClosedRequestMessage:
     def test_close_without_event_detail_keeps_terminal_framing(self) -> None:
         msg = _closed_request_message()
         assert msg == (
-            "this request was already answered; "
-            "do not call return again — end your turn."
+            "this request was already answered; do not call return again — end your turn."
         )
 
     def test_timeout_close_names_deadline_timeout(self) -> None:
