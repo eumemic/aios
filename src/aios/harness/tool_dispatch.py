@@ -119,6 +119,93 @@ def _classify_tool_error(err: BaseException) -> tuple[bool, str, dict[str, Any]]
     return True, f"{type(err).__name__}: {err}", {}
 
 
+async def _session_is_archived(pool: asyncpg.Pool[Any], session_id: str) -> bool:
+    """The SINGLE archived-vs-live predicate for the edge-owned-lifetime teardown fence
+    (#1823 C2). A session whose live row is gone (``load_live_session_account_id`` →
+    ``None``) has been archived by Phase B: a ``NotFoundError`` from an append against it
+    is the archived fence — a CLEAN DROP (the work is gone because the session is gone).
+    A ``NotFoundError`` while the session is STILL LIVE is a real error.
+
+    Every fence-aware site (the explicit body-``NotFoundError`` arm and
+    :func:`_append_result_fenced`) resolves archived-vs-live through here — one predicate,
+    no second archived-detection path to drift out of sync.
+    """
+    return await sessions_service.load_live_session_account_id(pool, session_id) is None
+
+
+async def _append_result_fenced(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    call_id: str,
+    name: str,
+    *,
+    account_id: str,
+    error: str,
+    detail: dict[str, Any] | None = None,
+    bound_log: Any,
+) -> None:
+    """Append a tool-role result, fencing the Phase-B archive race (#1823 C2).
+
+    EVERY result append inside :func:`_tool_lifecycle`'s handlers — the cancel arms, the
+    generic-exception arm, and the explicit ``NotFoundError`` arm's replacement append —
+    can race Phase B archiving the session between the tool's outcome (or the arm's own
+    liveness check) and this write. When the session has been archived, ``append_event``
+    raises the archived fence ``NotFoundError``; that must become a clean drop, NOT escape.
+    A ``NotFoundError`` from a still-live session is a real error and re-raises unchanged.
+
+    Routing every handler append through this ONE helper is what closes the escaping-fence
+    class: after it, no handler can forget the fence. The archived-vs-live decision reuses
+    :func:`_session_is_archived` — the same predicate the body-``NotFoundError`` arm uses.
+    A non-``NotFoundError`` failure (including a ``CancelledError`` striking the append or
+    the liveness re-check) propagates untouched — only the archived fence is swallowed.
+    """
+    try:
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error=error, detail=detail
+        )
+    except NotFoundError:
+        if await _session_is_archived(pool, session_id):
+            bound_log.info("tool.result_dropped_archived")
+            return
+        raise
+
+
+async def _trigger_sweep_fenced(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    bound_log: Any,
+) -> None:
+    """Run the tail sweep, fencing the Phase-B archive race (#1823 C2).
+
+    The span-start cancel arm of :func:`_tool_lifecycle` owns its OWN tail sweep: the
+    ``tool_execute_start`` cancel strikes inside ``__aenter__``, before the body
+    try/finally is entered, so the lifecycle ``finally`` (which fences the normal-path
+    span-end + sweep) never runs for that path. Like every append after the flip, that
+    arm's sweep — whose first act is a ``sweep_start`` span append — can race Phase B
+    archiving the session; when it does, ``append_event`` raises the archived fence
+    ``NotFoundError``. That MUST be a CLEAN DROP, not an escaping error that would REPLACE
+    the ``CancelledError`` the arm re-raises immediately after. A ``NotFoundError`` from a
+    still-live session is a real error and propagates unchanged.
+
+    The archived-vs-live decision reuses :func:`_session_is_archived` — the one predicate
+    :func:`_append_result_fenced` and the body-``NotFoundError`` arm also resolve through,
+    so no second archived-detection path can drift. The caller re-raises the
+    ``CancelledError`` AFTER this fenced sweep, so cancellation still propagates on the
+    (reachable) archived branch. (The lifecycle ``finally``'s own span-end + sweep tail is
+    fenced separately and swallows ``NotFoundError`` UNCONDITIONALLY: a ``finally`` must
+    never re-raise, or it would mask whatever is already propagating.)
+    """
+    try:
+        await _trigger_sweep(pool, session_id, account_id=account_id)
+    except NotFoundError:
+        if await _session_is_archived(pool, session_id):
+            bound_log.info("tool.sweep_dropped_archived")
+            return
+        raise
+
+
 @asynccontextmanager
 async def _tool_lifecycle(
     pool: asyncpg.Pool[Any],
@@ -165,6 +252,7 @@ async def _tool_lifecycle(
     # *second* cancel can still interrupt the cleanup awaits below — same exposure as the
     # in-body cancel handler; the ghost sweep is the backstop for that, for worker death, and
     # for a DB failure writing this span.)
+    bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
     try:
         span_start = (
             await sessions_service.append_event(
@@ -182,36 +270,65 @@ async def _tool_lifecycle(
             else None
         )
     except asyncio.CancelledError:
-        log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name).info(
-            f"{log_prefix}.cancelled_before_start"
+        bound_log.info(f"{log_prefix}.cancelled_before_start")
+        # This arm runs OUTSIDE the body try/finally (the cancel struck ``__aenter__``), so
+        # it owns BOTH tails itself, and BOTH can race the Phase-B flip. Fenced: if Phase B
+        # already archived the session, the cancelled-result append AND the tail sweep each
+        # hit the archived fence — a clean drop — instead of an escaping ``NotFoundError``
+        # that would replace the ``CancelledError`` we re-raise last. The sweep still fires
+        # (via the fenced helper) so a live session wakes now rather than at the ≤30s ghost
+        # sweep; only its archived-fence ``NotFoundError`` is swallowed.
+        await _append_result_fenced(
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error="cancelled",
+            bound_log=bound_log,
         )
-        await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error="cancelled"
-        )
-        await _trigger_sweep(pool, session_id, account_id=account_id)
+        await _trigger_sweep_fenced(pool, session_id, account_id=account_id, bound_log=bound_log)
         raise
-    bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
     tc = _ToolCall(call_id=call_id, name=name, raw_args=raw_args, bound_log=bound_log)
     try:
         yield tc
     except asyncio.CancelledError:
         bound_log.info(f"{log_prefix}.cancelled")
         tc.is_error = True
-        await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error="cancelled"
+        # Fenced: a cancel landing after Phase B archives the session must NOT surface the
+        # archived-fence ``NotFoundError`` — it is a clean drop. The ``CancelledError``
+        # itself is never swallowed: it re-raises below, so cancellation still propagates.
+        await _append_result_fenced(
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error="cancelled",
+            bound_log=bound_log,
         )
+        raise
     except NotFoundError as err:
         # Distinguish a normal tool-level 404 from append_event's archived fence.
         # Only the latter is dropped; live-session NotFoundError remains a model-
         # visible refusal under the ordinary classifier contract.
-        if await sessions_service.load_live_session_account_id(pool, session_id) is None:
+        if await _session_is_archived(pool, session_id):
             bound_log.info("tool.result_dropped_archived")
             return
         tc.is_error = True
         _evict, message, detail = _classify_tool_error(err)
         bound_log.info(f"{log_prefix}.refused", error=message)
-        await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error=message, detail=detail
+        # Fenced: archival can win the TOCTOU between the liveness check just above and
+        # this replacement append — the fence then drops it cleanly rather than escaping.
+        await _append_result_fenced(
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error=message,
+            detail=detail,
+            bound_log=bound_log,
         )
     except (Exception, BaseExceptionGroup) as err:
         # Broadened to include ``BaseExceptionGroup`` (#1698 final backstop): a
@@ -232,8 +349,17 @@ async def _tool_lifecycle(
                 on_exception(session_id)
         else:
             bound_log.info(f"{log_prefix}.refused", error=message)
-        await _append_tool_result(
-            pool, session_id, call_id, name, account_id=account_id, error=message, detail=detail
+        # Fenced: a handler failure landing after Phase B archives the session must produce
+        # the promised clean drop, not an escaping archived-fence ``NotFoundError``.
+        await _append_result_fenced(
+            pool,
+            session_id,
+            call_id,
+            name,
+            account_id=account_id,
+            error=message,
+            detail=detail,
+            bound_log=bound_log,
         )
     finally:
         try:
@@ -253,7 +379,13 @@ async def _tool_lifecycle(
                 )
             await _trigger_sweep(pool, session_id, account_id=account_id)
         except NotFoundError:
-            # The archive can race either the result append or this span/sweep tail.
+            # The archive can race the span/sweep tail. This is a cleanup block, so it
+            # swallows unconditionally rather than re-raising: re-raising from ``finally``
+            # would MASK whatever is already propagating (the re-raised ``CancelledError``
+            # from the cancel arm, or a real live-session error surfaced by the fenced
+            # result append). The live-vs-archived distinction that matters — a real
+            # error must not be silently dropped — is enforced at the RESULT append via
+            # :func:`_append_result_fenced`; the tail here is best-effort observability.
             bound_log.info("tool.result_dropped_archived")
 
 

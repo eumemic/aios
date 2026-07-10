@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -436,6 +436,157 @@ class TestCancelDuringStartSpan:
         assert append_result.await_count == 1  # resolved in-task, not left to the sweep
         assert append_result.await_args.kwargs["error"] == "cancelled"
         assert trigger_sweep.await_count == 1  # tail sweep fired so the step wakes now
+
+    async def test_cancel_during_start_span_drops_archived_sweep_tail_and_reraises_cancel(
+        self, monkeypatch: Any
+    ) -> None:
+        # The archive-fence twin of the above, on the path the ``TestArchiveFenceRace`` cancel
+        # test cannot reach: the cancel struck the ``tool_execute_start`` append (inside
+        # ``__aenter__``), so this arm owns its OWN tail sweep — OUTSIDE the body try/finally
+        # that fences the normal-path tails. Model "archival winning BEFORE the sweep tail":
+        # the fenced cancelled-result append lands (session still live at that instant), THEN
+        # Phase B archives, so the tail sweep's ``sweep_start`` append hits the archived fence
+        # (``NotFoundError``). The fence MUST be a clean drop — the ``CancelledError`` still
+        # propagates and is never replaced by the sweep's ``NotFoundError``.
+        #
+        # Fail-before / pass-after: with the pre-fix unfenced ``await _trigger_sweep(...)`` tail
+        # the sweep's ``NotFoundError`` propagated in place of the cancel and this
+        # ``pytest.raises(asyncio.CancelledError)`` failed (it saw ``NotFoundError``).
+        span_committed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_append_event(
+            _pool: Any, _session_id: str, _kind: str, data: dict[str, Any], **_kw: Any
+        ) -> Any:
+            if data.get("event") == "tool_execute_start":
+                span_committed.set()
+                await release.wait()  # hold the client await open so the cancel lands here
+            return MagicMock(id="span_1")
+
+        monkeypatch.setattr(sessions_service, "append_event", fake_append_event)
+        # The fenced cancelled-result append succeeds (archival has not yet won at this point).
+        append_result = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_result)
+        # ...then archival wins: the tail sweep races the flip and hits the archived fence.
+        trigger_sweep = AsyncMock(side_effect=NotFoundError("archived fence"))
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", trigger_sweep)
+        # The session is archived, so the fence resolves to a clean drop (not a live 404).
+        monkeypatch.setattr(
+            sessions_service, "load_live_session_account_id", AsyncMock(return_value=None)
+        )
+
+        body_ran = asyncio.Event()
+        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+
+        async def driver() -> None:
+            async with _tool_lifecycle(
+                MagicMock(), "ses_1", call, account_id="acc_1", log_prefix="tool"
+            ):
+                body_ran.set()  # must NOT happen — the cancel struck during the start span
+
+        task = asyncio.create_task(driver())
+        await span_committed.wait()  # span "committed"; the lifecycle is suspended on it
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # the cancel propagates, NOT the fence
+            await task
+
+        assert not body_ran.is_set()  # the body provably never ran
+        assert append_result.await_count == 1  # cancelled-result append attempted (fenced)
+        assert trigger_sweep.await_count == 1  # tail sweep fired and hit the archived fence
+
+
+class TestArchiveFenceRace:
+    """Edge-owned-lifetime P1 (#1823 C2): once Phase B archives the session, ANY result
+    append in the lifecycle's error/cancel/notfound handlers hits the archived fence and
+    ``append_event`` raises ``NotFoundError``. That fence is a CLEAN DROP (the work is gone
+    because the session is gone), NOT an error to escape.
+
+    Before the consolidated fence, only a ``NotFoundError`` from the yielded tool *body*
+    entered the liveness arm; a fence hit by the CANCEL append, the GENERIC-exception
+    append, or the notfound-arm's own replacement append (a TOCTOU: live at the check,
+    archived before the append) escaped instead. Every handler append now routes through
+    ``_append_result_fenced``, so the class is closed — while a real live-session
+    ``NotFoundError`` still propagates, and cancellation is never swallowed."""
+
+    @staticmethod
+    def _stub(monkeypatch: Any, *, append_raises: BaseException, live_account: Any) -> AsyncMock:
+        """Stub the lifecycle's DB touchpoints. ``append_tool_result`` raises
+        ``append_raises`` (the archived fence, or a live-session 404).
+        ``load_live_session_account_id`` returns ``live_account`` — ``None`` models an
+        archived session (clean drop), a truthy id a still-live one (real error), and a
+        list is a per-call sequence (the notfound-arm TOCTOU: live at the check, archived
+        before the replacement append). Returns the ``_append_tool_result`` mock."""
+        monkeypatch.setattr(
+            sessions_service, "append_event", AsyncMock(return_value=MagicMock(id="span_1"))
+        )
+        append_result = AsyncMock(side_effect=append_raises)
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_result)
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
+        live = (
+            AsyncMock(side_effect=live_account)
+            if isinstance(live_account, list)
+            else AsyncMock(return_value=live_account)
+        )
+        monkeypatch.setattr(sessions_service, "load_live_session_account_id", live)
+        return append_result
+
+    _CALL: ClassVar[dict[str, Any]] = {
+        "id": "tc_1",
+        "function": {"name": "demo", "arguments": "{}"},
+    }
+
+    async def test_generic_exception_after_archive_is_clean_drop(self, monkeypatch: Any) -> None:
+        # A handler-failure (generic Exception arm) append racing the flip: the archived
+        # fence must produce a clean drop, NOT an escaping NotFoundError.
+        append_result = self._stub(
+            monkeypatch, append_raises=NotFoundError("archived fence"), live_account=None
+        )
+        async with _tool_lifecycle(
+            MagicMock(), "ses_1", self._CALL, account_id="acc_1", log_prefix="tool"
+        ):
+            raise ValueError("handler boom")
+        # mypy can't see the lifecycle SUPPRESSES the handled exception (the fence drop) —
+        # the assert is reached at runtime.
+        assert append_result.await_count == 1  # type: ignore[unreachable]  # append attempted, then dropped
+
+    async def test_cancel_after_archive_drops_append_but_reraises_cancel(
+        self, monkeypatch: Any
+    ) -> None:
+        # A cancel landing after archival: the append's archived-fence NotFoundError is
+        # dropped, but the CancelledError itself is NEVER swallowed — it re-raises.
+        append_result = self._stub(
+            monkeypatch, append_raises=NotFoundError("archived fence"), live_account=None
+        )
+        with pytest.raises(asyncio.CancelledError):
+            async with _tool_lifecycle(
+                MagicMock(), "ses_1", self._CALL, account_id="acc_1", log_prefix="tool"
+            ):
+                raise asyncio.CancelledError()
+        assert append_result.await_count == 1  # cancelled-result append attempted, then dropped
+
+    async def test_notfound_arm_toctou_flip_is_clean_drop(self, monkeypatch: Any) -> None:
+        # The explicit NotFoundError arm sees the session LIVE, then archival wins before
+        # its replacement error append — that append's fence must drop cleanly, not escape.
+        self._stub(
+            monkeypatch,
+            append_raises=NotFoundError("archived fence"),
+            live_account=["acc_1", None],  # live at the arm's check, archived at the re-check
+        )
+        async with _tool_lifecycle(
+            MagicMock(), "ses_1", self._CALL, account_id="acc_1", log_prefix="tool"
+        ):
+            raise NotFoundError("no such workflow")
+        # reaching here == no escaping NotFoundError
+
+    async def test_live_session_notfound_still_propagates(self, monkeypatch: Any) -> None:
+        # The other half of the invariant: a NotFoundError from a STILL-LIVE session is a
+        # real error — the fence must NOT swallow it (guards against an over-broad fix).
+        self._stub(monkeypatch, append_raises=NotFoundError("real 404"), live_account="acc_1")
+        with pytest.raises(NotFoundError):
+            async with _tool_lifecycle(
+                MagicMock(), "ses_1", self._CALL, account_id="acc_1", log_prefix="tool"
+            ):
+                raise ValueError("handler boom")
 
 
 class TestParentChannelThreading:

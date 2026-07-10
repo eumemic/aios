@@ -318,7 +318,7 @@ class _StepResult(NamedTuple):
     autoerror_caller_run_id: str | None = None
     autoerror_caller_session_ids: tuple[str, ...] = ()
     archive_when_idle: bool = False
-    cancel_teardown: bool | None = None
+    cancel_harvest: sessions_service.CancelMarkerHarvest | None = None
 
 
 async def _list_session_github_repo_echoes(
@@ -727,14 +727,17 @@ async def run_session_step(
             )
 
         # C2 Phase B is step-final: step_end and all wake spans are durable before
-        # archived_at flips. None means no Phase A ran; False consumes fulfilled /
-        # self-owned markers without archiving.
-        if result.cancel_teardown is not None:
+        # archived_at flips. None means no Phase A ran; ``teardown=False`` consumes
+        # fulfilled / self-owned markers without archiving. Phase B harvests EXACTLY the
+        # marker set Phase A classified (``request_ids``), never a fresh re-query — a marker
+        # inserted into the A→B gap is left for the next sweep.
+        if result.cancel_harvest is not None:
             archived = await sessions_service.finalize_session_cancel_markers(
                 pool,
                 session_id,
                 account_id=account_id,
-                teardown=result.cancel_teardown,
+                teardown=result.cancel_harvest.teardown,
+                request_ids=result.cancel_harvest.request_ids,
             )
             if archived:
                 log.info("step.session_cancelled_archived", session_id=session_id)
@@ -878,7 +881,7 @@ async def _run_session_step_body(
     )
     if cancel_harvest is not None:
         log.info("step.cancel_harvested", session_id=session_id)
-        return _StepResult(cancel_teardown=cancel_harvest.teardown)
+        return _StepResult(cancel_harvest=cancel_harvest)
 
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 

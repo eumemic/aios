@@ -304,14 +304,14 @@ async def test_engine_semantics_terminal_seeds_marker_in_same_transaction(
     decision = await sessions_service.harvest_session_cancel_markers(
         pool, child_id, account_id=_ACCOUNT
     )
-    assert decision is not None and decision.teardown
+    assert decision is not None and decision.teardown and decision.request_ids == ("ask_es",)
     async with pool.acquire() as conn:
         marker = await db_queries.get_session_cancel_marker(
             conn, session_id=child_id, request_id="ask_es"
         )
         assert marker is not None and marker.harvested_at is None
     assert await sessions_service.finalize_session_cancel_markers(
-        pool, child_id, account_id=_ACCOUNT, teardown=True
+        pool, child_id, account_id=_ACCOUNT, teardown=True, request_ids=decision.request_ids
     )
     async with pool.acquire() as conn:
         marker = await db_queries.get_session_cancel_marker(

@@ -1595,9 +1595,17 @@ async def seed_outbound_cancel_conn(
 
 
 class CancelMarkerHarvest(NamedTuple):
-    """Phase-A decision carried to the step-final Phase B."""
+    """Phase-A decision carried to the step-final Phase B.
+
+    ``request_ids`` is the EXACT marker set Phase A classified and answered — the snapshot
+    Phase B consumes. Carrying it (rather than letting Phase B re-query "all unharvested")
+    is what makes a marker inserted into the A→B gap safe: it is not in this set, so Phase B
+    leaves it for the next sweep to re-drive Phase A on, never harvesting it without its
+    ``cancelled`` response (a silently-dropped cancel).
+    """
 
     teardown: bool
+    request_ids: tuple[str, ...]
 
 
 async def harvest_session_cancel_markers(
@@ -1694,17 +1702,36 @@ async def harvest_session_cancel_markers(
             await defer_run_wake(child.id, batch=True)
         elif child.request_id is not None:
             await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
-    return CancelMarkerHarvest(teardown=teardown)
+    # Carry the EXACT set Phase A answered so Phase B finalizes only these (never a fresh
+    # re-query). ``markers`` is non-empty here (the early ``return None`` above guards it).
+    return CancelMarkerHarvest(
+        teardown=teardown, request_ids=tuple(marker.request_id for marker in markers)
+    )
 
 
 async def finalize_session_cancel_markers(
-    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, teardown: bool
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    teardown: bool,
+    request_ids: tuple[str, ...],
 ) -> bool:
-    """Phase B: under the session lock, archive a still-leaf node and harvest markers.
+    """Phase B: under the session lock, archive a still-leaf node and harvest EXACTLY the
+    marker set Phase A classified (``request_ids``) — never a fresh "all unharvested" re-query.
 
-    A racing inbound awaited edge aborts teardown and leaves markers untouched so the
+    Phase A wrote a ``cancelled`` response for each id in ``request_ids`` before it committed.
+    A ``cancel_task`` racing into the A→B gap inserts a NEW marker (a different request_id)
+    that Phase A never answered; because it is NOT in ``request_ids`` Phase B leaves it
+    un-harvested, so the C2 sweep re-drives Phase A on it (classify + open-request check +
+    teardown decision, afresh). This upholds the leaf invariant — a marker is never marked
+    harvested without its ``cancelled`` response — including in the ``teardown=False`` branch,
+    which otherwise would consume the racing marker silently.
+
+    A racing inbound awaited edge aborts teardown and leaves ALL markers untouched so the
     durable sweep re-drives Phase A after that edge closes. Non-teardown (fulfilled or
-    self-owned) leaves merely consume their markers. Returns whether archival won.
+    self-owned) leaves merely consume their (already-answered) markers. Returns whether
+    archival won.
     """
     archived = False
     async with pool.acquire() as conn, conn.transaction():
@@ -1726,9 +1753,12 @@ async def finalize_session_cancel_markers(
                     account_id,
                 )
                 archived = True
-        for marker in await queries.list_unharvested_session_cancel_markers(conn, session_id):
+        # Consume ONLY Phase A's classified set. Each id was answered ``cancelled`` in Phase A;
+        # ``mark_..._harvested`` is idempotent (its ``harvested_at IS NULL`` guard). A marker
+        # that arrived after Phase A's snapshot is not here → left for the next sweep.
+        for request_id in request_ids:
             await queries.mark_session_cancel_marker_harvested(
-                conn, session_id=session_id, request_id=marker.request_id
+                conn, session_id=session_id, request_id=request_id
             )
     if archived:
         await pool.execute(
