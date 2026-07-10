@@ -252,6 +252,7 @@ class TestRejectUnofferedToolCalls:
         offered_names: list[str],
         *,
         closed: tuple[Any, Any] | None = None,
+        get_closed_request: AsyncMock | None = None,
     ) -> Any:
         monkeypatch.setattr(
             sessions_service,
@@ -277,7 +278,10 @@ class TestRejectUnofferedToolCalls:
         pool = MagicMock()
         pool.acquire = MagicMock(return_value=acquire)
         monkeypatch.setattr(runtime, "require_pool", lambda: pool)
-        monkeypatch.setattr(queries, "get_closed_request", AsyncMock(return_value=closed))
+        gcr = (
+            get_closed_request if get_closed_request is not None else AsyncMock(return_value=closed)
+        )
+        monkeypatch.setattr(queries, "get_closed_request", gcr)
 
         reject_unoffered_tool_calls(
             MagicMock(),
@@ -340,14 +344,15 @@ class TestRejectUnofferedToolCalls:
         # Pure name hallucination with no request_id at all — resolved to the generic
         # rejection (never the closed-request lie), and without even a state lookup.
         call = {"id": "tc_1", "function": {"name": "error", "arguments": "{}"}}
-        append_result = await self._drive(monkeypatch, [call], ["bash"])
+        gcr = AsyncMock(return_value=None)
+        append_result = await self._drive(monkeypatch, [call], ["bash"], get_closed_request=gcr)
         error = append_result.await_args.kwargs["error"]
         assert "tool not offered" in error
         assert "error" in error
         assert "already answered" not in error
-        # No request_id → short-circuits before the DB read: the get_closed_request
-        # mock ``_drive`` installed is never called.
-        queries.get_closed_request.assert_not_called()
+        # No request_id → short-circuits before the DB read: get_closed_request is
+        # never called (the whole point — no state lookup for a nameless hallucination).
+        gcr.assert_not_called()
 
     async def test_hallucinated_name_keeps_generic_unoffered_message(
         self, monkeypatch: Any
