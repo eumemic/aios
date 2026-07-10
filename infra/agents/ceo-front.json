@@ -255,7 +255,7 @@
           "description": "read"
         },
         {
-          "path_pattern": "/v1/health",
+          "path_pattern": "/health",
           "methods": [
             "GET"
           ],
