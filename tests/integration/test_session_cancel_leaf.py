@@ -118,10 +118,20 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
         marker = await queries.get_session_cancel_marker(
             conn, session_id=session_id, request_id="req_c"
         )
+        assert marker is not None and marker.harvested_at is None
+
+    # Phase B is the only consumer of markers. This non-owned root is not archived.
+    assert not await service.finalize_session_cancel_markers(
+        pool, session_id, account_id=_ACCOUNT, teardown=False
+    )
+    async with pool.acquire() as conn:
+        marker = await queries.get_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_c"
+        )
         assert marker is not None and marker.harvested_at is not None
 
     # Idempotent: with the marker harvested, a second leaf run is a no-op (no hot-loop).
-    assert not await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    assert await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
     needs_again = await find_sessions_needing_inference(
         pool, InflightToolRegistry(), session_id=session_id
     )
@@ -134,7 +144,7 @@ async def test_unmarked_session_runs_no_leaf(
     """A session with an open request but NO cancel-marker is untouched by the leaf."""
     pool, session_id, env_id = pool_and_session
     await _open_request(pool, session_id, env_id, request_id="req_live")
-    assert not await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    assert await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
     async with pool.acquire() as conn:
         assert await queries.get_open_request_ids(conn, session_id, account_id=_ACCOUNT) == [
             "req_live"
@@ -272,13 +282,36 @@ async def test_owned_session_cancel_propagates_to_awaited_children(
             conn, session_id=parent_id, request_id="req_root", account_id=_ACCOUNT
         )
 
-    # Harvesting the parent's marker answers req_root cancelled AND (owned) markers the child.
-    assert await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
+    # Phase A answers req_root and propagates, but does not archive or harvest yet.
+    decision = await service.harvest_session_cancel_markers(
+        pool, parent_id, account_id=_ACCOUNT
+    )
+    assert decision is not None and decision.teardown
     async with pool.acquire() as conn:
         child_marker = await queries.get_session_cancel_marker(
             conn, session_id=child.id, request_id="req_child"
         )
-        assert child_marker is not None and child_marker.harvested_at is None  # cascade reached it
+        assert child_marker is not None and child_marker.harvested_at is None
+        parent_marker = await queries.get_session_cancel_marker(
+            conn, session_id=parent_id, request_id="req_root"
+        )
+        assert parent_marker is not None and parent_marker.harvested_at is None
+        assert await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id=$1", parent_id
+        ) is None
+
+    # Phase B is the atomic archive + marker-consume flip.
+    assert await service.finalize_session_cancel_markers(
+        pool, parent_id, account_id=_ACCOUNT, teardown=True
+    )
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id=$1", parent_id
+        ) is not None
+        parent_marker = await queries.get_session_cancel_marker(
+            conn, session_id=parent_id, request_id="req_root"
+        )
+        assert parent_marker is not None and parent_marker.harvested_at is not None
 
 
 async def test_self_owned_session_never_propagates(
@@ -345,7 +378,7 @@ async def test_fulfilled_marker_set_does_not_propagate(
         marker = await queries.get_session_cancel_marker(
             conn, session_id=parent_id, request_id="req_done"
         )
-        assert marker is not None and marker.harvested_at is not None
+        assert marker is not None and marker.harvested_at is None
         resolved = await queries.derive_response(
             conn, parent_id, account_id=_ACCOUNT, request_id="req_done"
         )
@@ -357,6 +390,9 @@ async def test_fulfilled_marker_set_does_not_propagate(
             )
             is None
         )
+    assert not await service.finalize_session_cancel_markers(
+        pool, parent_id, account_id=_ACCOUNT, teardown=False
+    )
 
 
 async def test_shared_session_cancel_does_not_over_cancel_children(
@@ -386,3 +422,34 @@ async def test_shared_session_cancel_does_not_over_cancel_children(
             is None
         )
         assert await queries.get_open_request_ids(conn, parent_id, account_id=_ACCOUNT) == ["req_b"]
+
+
+async def test_phase_b_surviving_inbound_aborts_teardown(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """R11: a new awaited edge in the A→B gap keeps the session and markers live."""
+    pool, session_id, env_id = pool_and_session
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sessions SET archive_when_idle=TRUE WHERE id=$1", session_id)
+    await _open_request(pool, session_id, env_id, request_id="req_revoked")
+    async with pool.acquire() as conn:
+        await queries.insert_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_revoked", account_id=_ACCOUNT
+        )
+    decision = await service.harvest_session_cancel_markers(
+        pool, session_id, account_id=_ACCOUNT
+    )
+    assert decision is not None and decision.teardown
+
+    await _open_request(pool, session_id, env_id, request_id="req_survivor")
+    assert not await service.finalize_session_cancel_markers(
+        pool, session_id, account_id=_ACCOUNT, teardown=True
+    )
+    async with pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT archived_at FROM sessions WHERE id=$1", session_id
+        ) is None
+        marker = await queries.get_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_revoked"
+        )
+        assert marker is not None and marker.harvested_at is None

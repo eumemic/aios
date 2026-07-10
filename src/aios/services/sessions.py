@@ -1594,15 +1594,21 @@ async def seed_outbound_cancel_conn(
     return seeded
 
 
+class CancelMarkerHarvest(NamedTuple):
+    """Phase-A decision carried to the step-final Phase B."""
+
+    teardown: bool
+
+
 async def harvest_session_cancel_markers(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
-) -> bool:
+) -> CancelMarkerHarvest | None:
     """The session-side cancel **leaf** — answer each unharvested cancel-marker's request with
-    ``outcome=cancelled`` and harvest the marker, atomically (cancel-design §4/§6).
+    ``outcome=cancelled`` and classify whether teardown is required (C2 Phase A).
 
     Run as a pre-inference harvest in the session's own step (the session is the single writer
     of its own log, under its own procrastinate lock — the supervision-tree invariant). Returns
-    ``True`` iff at least one marker was applied, so the step skips inference this turn: the
+    a decision iff at least one marker was applied, so the step skips inference this turn: the
     cancelled request needs no model work. Answering via :func:`respond_to_request_conn` closes
     the open set AND latches first-writer-wins, so a late ``return(R)`` no-ops; the caller is
     woken (run / session) so it re-resolves ``cancelled`` promptly.
@@ -1625,10 +1631,9 @@ async def harvest_session_cancel_markers(
     child is a first-writer-wins no-op (no outcome corruption). The precise per-edge
     ``attributed_to`` reclaim (§7) is a later slice.
 
-    Minimal cut: the owned-session teardown (request-scoped interrupt + drain + archive +
-    sandbox release, §4/C1) and the §9 quiescence counter are deferred residuals — the cancelled
-    request's in-flight tool tasks run to completion and the session lingers idle-but-answered.
-    The caller has already learned ``cancelled`` and the subtree is marked.
+    Markers remain unharvested until the step-final Phase B archives a teardown target (or
+    consumes a non-teardown marker set). Thus a worker crash after this transaction causes the
+    C2 sweep to re-drive this idempotent phase rather than stranding a half-applied cascade.
     """
 
     wakes: list[RequestResponseWrite] = []
@@ -1636,7 +1641,7 @@ async def harvest_session_cancel_markers(
     async with pool.acquire() as conn, conn.transaction():
         markers = await queries.list_unharvested_session_cancel_markers(conn, session_id)
         if not markers:
-            return False
+            return None
         revocation_context = False
         for marker in markers:
             write = await respond_to_request_conn(
@@ -1660,18 +1665,18 @@ async def harvest_session_cancel_markers(
                 )
                 if isinstance(closed, Err) and closed.error.get("kind") in REVOCATION_KINDS:
                     revocation_context = True
-            await queries.mark_session_cancel_marker_harvested(
-                conn, session_id=session_id, request_id=marker.request_id
-            )
+        # Markers deliberately remain unharvested in Phase A. Phase B consumes them
+        # only after step_end, making a worker death in this gap safely re-drivable.
         # §2.3 propagation gate: fires only when this node is itself tearing down —
         # revocation-context ∧ zero surviving open inbound ∧ owned. A purely-fulfilled
         # marker set never propagates; ownership is the creation edge or the ephemeral
         # flag (never bare parent_run_id, never any-inbound-edge EXISTS).
-        if (
+        teardown = (
             revocation_context
             and not await queries.get_open_request_ids(conn, session_id, account_id=account_id)
             and await _session_owned(conn, session_id, account_id=account_id)
-        ):
+        )
+        if teardown:
             propagated = await seed_outbound_cancel_conn(
                 conn, caller_kind="session", caller_id=session_id, account_id=account_id
             )
@@ -1689,7 +1694,47 @@ async def harvest_session_cancel_markers(
             await defer_run_wake(child.id, batch=True)
         elif child.request_id is not None:
             await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
-    return True
+    return CancelMarkerHarvest(teardown=teardown)
+
+
+async def finalize_session_cancel_markers(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, teardown: bool
+) -> bool:
+    """Phase B: under the session lock, archive a still-leaf node and harvest markers.
+
+    A racing inbound awaited edge aborts teardown and leaves markers untouched so the
+    durable sweep re-drives Phase A after that edge closes. Non-teardown (fulfilled or
+    self-owned) leaves merely consume their markers. Returns whether archival won.
+    """
+    archived = False
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT archived_at FROM sessions WHERE id=$1 AND account_id=$2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        if row is None:
+            return False
+        if teardown:
+            if await queries.get_open_request_ids(conn, session_id, account_id=account_id):
+                return False
+            if row["archived_at"] is None:
+                await conn.execute(
+                    "UPDATE sessions SET archived_at=now(), updated_at=now() "
+                    "WHERE id=$1 AND account_id=$2 AND archived_at IS NULL",
+                    session_id,
+                    account_id,
+                )
+                archived = True
+        for marker in await queries.list_unharvested_session_cancel_markers(conn, session_id):
+            await queries.mark_session_cancel_marker_harvested(
+                conn, session_id=session_id, request_id=marker.request_id
+            )
+    if archived:
+        await pool.execute(
+            "SELECT pg_notify($1, $2)", f"events_{session_id}", EVENTS_ARCHIVED_NOTIFY
+        )
+    return archived
 
 
 class AssistantAppendResult(NamedTuple):
