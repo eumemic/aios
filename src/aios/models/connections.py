@@ -24,6 +24,8 @@ connection).
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 from datetime import datetime
 from typing import Any, Literal
 
@@ -138,6 +140,7 @@ class Connection(BaseModel):
     session_template_id: str | None = None
     metadata: dict[str, Any]
     secrets_set: bool = False
+    created_by: Actor | None = None
     created_at: datetime
     attached_at: datetime | None = None
     updated_at: datetime

@@ -12,6 +12,8 @@ from typing import Any
 
 import asyncpg
 
+from aios.actors import actor_columns, actor_from_row
+
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,
@@ -65,6 +67,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         window_min=row["window_min"],
         window_max=row["window_max"],
         preempt_policy=row["preempt_policy"],
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -131,10 +134,10 @@ async def insert_agent(
                     id, name, model, system, tools, skills, mcp_servers, http_servers,
                     description, metadata, litellm_extra,
                     window_min, window_max, preempt_policy,
-                    version, account_id, tools_vocab_epoch
+                    version, account_id, tools_vocab_epoch, created_by_type, created_by_ref
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
-                        $9, $10::jsonb, $11::jsonb, $12, $13, $14, 1, $15, $16)
+                        $9, $10::jsonb, $11::jsonb, $12, $13, $14, 1, $15, $16, $17, $18)
                 RETURNING *
                 """,
                 new_id,
@@ -153,6 +156,7 @@ async def insert_agent(
                 preempt_policy,
                 account_id,
                 TOOLS_VOCAB_EPOCH,
+                *actor_columns(),
             )
             assert row is not None
             # Snapshot version 1 into agent_versions.

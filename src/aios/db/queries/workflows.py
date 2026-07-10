@@ -21,6 +21,8 @@ from typing import Any, NamedTuple
 
 import asyncpg
 
+from aios.actors import actor_columns, actor_from_row
+
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,
@@ -66,6 +68,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -180,9 +183,9 @@ async def insert_workflow(
                 INSERT INTO workflows
                     (id, account_id, name, version, script, input_schema, output_schema,
                      output_model, description, tools, mcp_servers, http_servers,
-                     tools_vocab_epoch)
+                     tools_vocab_epoch, created_by_type, created_by_ref)
                 VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7, $8,
-                        $9::jsonb, $10::jsonb, $11::jsonb, $12)
+                        $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14)
                 RETURNING *
                 """,
                 new_id,
@@ -197,6 +200,7 @@ async def insert_workflow(
                 json.dumps([s.model_dump() for s in (mcp_servers or [])]),
                 json.dumps([s.model_dump() for s in (http_servers or [])]),
                 TOOLS_VOCAB_EPOCH,
+                *actor_columns(),
             )
             assert row is not None
             await _insert_workflow_version(conn, row)

@@ -8,6 +8,8 @@ the full history. The ``model`` field is a free-form LiteLLM model string
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 import re
 from collections.abc import Iterable
 from datetime import datetime
@@ -765,6 +767,7 @@ class Agent(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy = "wait"
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

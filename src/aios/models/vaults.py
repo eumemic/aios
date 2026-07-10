@@ -11,6 +11,8 @@ rest via the CryptoBox and are write-only — never returned in API responses.
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -199,6 +201,7 @@ class Vault(BaseModel):
     id: str
     display_name: str
     metadata: dict[str, Any]
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

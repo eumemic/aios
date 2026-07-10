@@ -9,6 +9,8 @@ shape.
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -423,6 +425,7 @@ class Session(BaseModel):
     usage: SessionUsage = Field(default_factory=SessionUsage)
     resources: list[SessionResourceEcho] = Field(default_factory=list)
     triggers: list[TriggerEcho] = Field(default_factory=list)
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

@@ -12,6 +12,9 @@ from typing import Any
 
 import asyncpg
 
+from aios.actors import actor_from_row
+
+from aios.actors import actor_columns
 from aios.db.queries import (
     _archive_scoped,
     _build_set_assignments,
@@ -37,6 +40,7 @@ def _row_to_environment(row: asyncpg.Record) -> Environment:
         id=row["id"],
         name=row["name"],
         config=EnvironmentConfig.model_validate(config_data),
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         archived_at=row["archived_at"],
     )
@@ -53,11 +57,12 @@ async def insert_environment(
     config_json = json.dumps((config or EnvironmentConfig()).model_dump(exclude_none=True))
     try:
         row = await conn.fetchrow(
-            "INSERT INTO environments (id, name, config, account_id) VALUES ($1, $2, $3::jsonb, $4) RETURNING *",
+            "INSERT INTO environments (id, name, config, account_id, created_by_type, created_by_ref) VALUES ($1, $2, $3::jsonb, $4, $5, $6) RETURNING *",
             new_id,
             name,
             config_json,
             account_id,
+            *actor_columns(),
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(

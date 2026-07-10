@@ -12,6 +12,8 @@ full history including file content.
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +82,7 @@ class Skill(BaseModel):
     id: str
     display_title: str
     latest_version: int
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

@@ -14,6 +14,8 @@ reuse the read views directly, the way ``Agent``/``Session`` do.
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 from datetime import datetime
 from typing import Any, Literal
 
@@ -71,6 +73,7 @@ class Workflow(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

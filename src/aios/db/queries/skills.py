@@ -12,6 +12,10 @@ from typing import Any
 
 import asyncpg
 
+from aios.actors import actor_from_row
+
+from aios.actors import actor_columns
+
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,
@@ -36,6 +40,7 @@ def _row_to_skill(row: asyncpg.Record) -> Skill:
         id=row["id"],
         display_title=row["display_title"],
         latest_version=row["latest_version"],
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -74,13 +79,14 @@ async def insert_skill(
     async with conn.transaction():
         skill_row = await conn.fetchrow(
             """
-            INSERT INTO skills (id, display_title, latest_version, account_id)
-            VALUES ($1, $2, 1, $3)
+            INSERT INTO skills (id, display_title, latest_version, account_id, created_by_type, created_by_ref)
+            VALUES ($1, $2, 1, $3, $4, $5)
             RETURNING *
             """,
             new_id,
             display_title,
             account_id,
+            *actor_columns(),
         )
         assert skill_row is not None
         ver_row = await conn.fetchrow(

@@ -7,6 +7,8 @@ packages, network access rules, and (later) custom base images. The
 
 from __future__ import annotations
 
+from aios.actors import Actor
+
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -227,5 +229,6 @@ class Environment(BaseModel):
     id: str
     name: str
     config: EnvironmentConfig
+    created_by: Actor | None = None
     created_at: datetime
     archived_at: datetime | None = None
