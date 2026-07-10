@@ -42,6 +42,7 @@ from aios.harness.completion import (
     estimate_cost_usd,
     stream_litellm,
 )
+from aios.harness.context_budget import effective_window_max
 from aios.harness.model_binding import (
     BindingBoundaryError,
     effective_capability_model,
@@ -953,11 +954,21 @@ async def _run_session_step_body(
         account_id=account_id,
     )
     try:
+        request_window_max = effective_window_max(
+            model=capability_model,
+            window_max=agent.window_max,
+            params=agent.litellm_extra,
+            shrink_factor=(
+                0.8
+                if (getattr(session, "stop_reason", None) or {}).get("context_overflow") is True
+                else 1.0
+            ),
+        )
         windowed = await sessions_service.read_windowed_events(
             pool,
             session_id,
-            window_min=agent.window_min,
-            window_max=agent.window_max,
+            window_min=min(agent.window_min, request_window_max),
+            window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),
             account_id=account_id,
@@ -985,6 +996,8 @@ async def _run_session_step_body(
             "read_window_start_id": read_window_start.id,
             "is_error": False,
             "event_count_read": len(events),
+            "request_window_max": request_window_max,
+            "configured_window_max": agent.window_max,
         },
         account_id=account_id,
     )
@@ -1381,6 +1394,20 @@ async def _run_session_step_body(
                 retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
             )
         except Exception as exc:
+            if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+                log.warning("step.model_context_overflow", session_id=session_id)
+                await _append_model_request_error_span(
+                    pool,
+                    session_id,
+                    start_event_id=start_event.id,
+                    account_id=account_id,
+                    provider_error=_provider_error_detail(exc),
+                )
+                return _StepResult(
+                    retry_delay=await _apply_context_overflow_retry(
+                        pool, session_id, account_id=account_id
+                    )
+                )
             if _is_terminal_model_error(exc):
                 log.warning(
                     "step.model_terminal_error",
@@ -2182,6 +2209,25 @@ async def _handle_streaming_model_deadline(
         ),
         account_id=account_id,
     )
+
+
+async def _apply_context_overflow_retry(pool: Any, session_id: str, *, account_id: str) -> float:
+    """Schedule one non-identical retry whose next build uses 80% of the input cap."""
+    await sessions_service.set_session_stop_reason(
+        pool,
+        session_id,
+        {"type": "rescheduling", "context_overflow": True},
+        account_id=account_id,
+    )
+    await _append_lifecycle(
+        pool,
+        session_id,
+        "turn_ended",
+        "rescheduling",
+        "context_overflow",
+        account_id=account_id,
+    )
+    return _RETRY_BACKOFF_SECONDS[0]
 
 
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:

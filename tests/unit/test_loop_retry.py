@@ -53,7 +53,6 @@ def _make_litellm_error(cls: type[Exception]) -> Exception:
 _TERMINAL_ERROR_CLASSES = [
     litellm_exceptions.BadRequestError,
     litellm_exceptions.AuthenticationError,
-    litellm_exceptions.ContextWindowExceededError,
     litellm_exceptions.ContentPolicyViolationError,
     litellm_exceptions.PermissionDeniedError,
     litellm_exceptions.NotFoundError,
@@ -643,3 +642,21 @@ class TestErroredSpanCarriesProviderError:
         assert provider_errors
         assert provider_errors[-1]["exception_class"] == "AuthenticationError"
         assert provider_errors[-1]["http_status"] == 401
+
+
+class TestRunSessionStepOnContextOverflow:
+    async def test_overflow_schedules_shrinking_retry(self, mock_step_dependencies: Any) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        assert any(
+            call.args[2] == {"type": "rescheduling", "context_overflow": True}
+            for call in mock_step_dependencies.set_stop_reason.call_args_list
+        )
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
