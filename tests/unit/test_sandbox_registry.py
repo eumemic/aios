@@ -1455,6 +1455,32 @@ class TestSalvageBreaker:
         assert alert.await_count == 1
         assert self._snapshot_count(backend) == threshold  # unchanged
 
+    async def test_breaker_half_open_recovers_after_cooldown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = FakeBackend()
+        session_id = "sess_half_open"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        registry._alert_operator = AsyncMock()  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+        now = 1000.0
+        monkeypatch.setattr("aios.sandbox.registry.time.monotonic", lambda: now)
+
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses(session_id)
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses(session_id)
+
+        now += 300.0
+        backend.snapshot_raises = False
+        await registry._salvage_session_corpses(session_id)
+        assert ref.sandbox_id not in registry._salvage_failures
+        assert ("force_remove", {"sandbox_id": ref.sandbox_id}) in backend.calls
+
     async def test_breaker_alert_retries_when_wake_write_fails(self) -> None:
         """A failed wake write must leave the one-shot un-alarmed so the next
         provision retries it — the ``alarmed``-after-success ordering."""
