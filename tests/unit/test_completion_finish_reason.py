@@ -97,7 +97,7 @@ class _FakeStream:
 
 def _clobbered_builder(finish_reason: str) -> Any:
     """A ``stream_chunk_builder`` stand-in returning a given assembled
-    ``finish_reason`` — used to simulate litellm 1.83.4's last-wins clobber."""
+    ``finish_reason`` — used to simulate litellm's last-wins clobber."""
     return lambda chunks: {
         "usage": {},
         "choices": [
@@ -110,7 +110,8 @@ class TestStreamStickyContentFilter:
     """``stream_litellm`` must preserve a ``content_filter`` refusal across
     ``stream_chunk_builder``'s last-wins assembly.
 
-    Reproduced against the pinned litellm 1.83.4 during PR review: its
+    Reproduced against litellm 1.83.4 during PR review, and the behavior is
+    unchanged as of 1.91.1: its
     ``stream_chunk_builder`` overwrites ``finish_reason`` from every
     choice-bearing chunk, and the Anthropic streaming adapter defaults
     ``finish_reason=""`` on all but the ``message_delta`` chunk — so a trailing
