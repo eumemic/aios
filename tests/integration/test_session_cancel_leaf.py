@@ -105,15 +105,16 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
     )
     assert session_id in needs
 
-    # The leaf answers the request cancelled + harvests the marker.
-    assert await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    # The leaf answers the request cancelled (Phase A); the marker stays unharvested.
+    decision = await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    assert decision is not None and decision.request_ids == ("req_c",)
 
     async with pool.acquire() as conn:
         resolved = await queries.derive_response(
             conn, session_id, account_id=_ACCOUNT, request_id="req_c"
         )
         assert resolved == Err(error={"kind": "cancelled"})
-        # The request is closed (answered), and the marker is harvested → no re-wake.
+        # The request is closed (answered); the marker is not yet harvested (Phase B does that).
         assert await queries.get_open_request_ids(conn, session_id, account_id=_ACCOUNT) == []
         marker = await queries.get_session_cancel_marker(
             conn, session_id=session_id, request_id="req_c"
@@ -122,7 +123,7 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
 
     # Phase B is the only consumer of markers. This non-owned root is not archived.
     assert not await service.finalize_session_cancel_markers(
-        pool, session_id, account_id=_ACCOUNT, teardown=False
+        pool, session_id, account_id=_ACCOUNT, teardown=False, request_ids=decision.request_ids
     )
     async with pool.acquire() as conn:
         marker = await queries.get_session_cancel_marker(
@@ -304,7 +305,7 @@ async def test_owned_session_cancel_propagates_to_awaited_children(
 
     # Phase B is the atomic archive + marker-consume flip.
     assert await service.finalize_session_cancel_markers(
-        pool, parent_id, account_id=_ACCOUNT, teardown=True
+        pool, parent_id, account_id=_ACCOUNT, teardown=True, request_ids=decision.request_ids
     )
     async with pool.acquire() as conn:
         assert (
@@ -375,8 +376,9 @@ async def test_fulfilled_marker_set_does_not_propagate(
             conn, session_id=parent_id, request_id="req_done", account_id=_ACCOUNT
         )
 
-    # The leaf applies the marker (harvests it; the cancelled write no-ops)…
-    assert await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
+    # The leaf applies the marker (Phase A answers it; the cancelled write no-ops)…
+    decision = await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
+    assert decision is not None and decision.request_ids == ("req_done",)
     async with pool.acquire() as conn:
         marker = await queries.get_session_cancel_marker(
             conn, session_id=parent_id, request_id="req_done"
@@ -394,7 +396,7 @@ async def test_fulfilled_marker_set_does_not_propagate(
             is None
         )
     assert not await service.finalize_session_cancel_markers(
-        pool, parent_id, account_id=_ACCOUNT, teardown=False
+        pool, parent_id, account_id=_ACCOUNT, teardown=False, request_ids=decision.request_ids
     )
 
 
@@ -444,7 +446,7 @@ async def test_phase_b_surviving_inbound_aborts_teardown(
 
     await _open_request(pool, session_id, env_id, request_id="req_survivor")
     assert not await service.finalize_session_cancel_markers(
-        pool, session_id, account_id=_ACCOUNT, teardown=True
+        pool, session_id, account_id=_ACCOUNT, teardown=True, request_ids=decision.request_ids
     )
     async with pool.acquire() as conn:
         assert (
@@ -454,3 +456,76 @@ async def test_phase_b_surviving_inbound_aborts_teardown(
             conn, session_id=session_id, request_id="req_revoked"
         )
         assert marker is not None and marker.harvested_at is None
+
+
+async def test_phase_b_leaves_marker_inserted_after_phase_a(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """A→B race, ``teardown=False`` branch: a ``cancel_task`` that lands a NEW marker after
+    Phase A commits but before Phase B must NOT have that marker silently consumed.
+
+    Phase B finalizes EXACTLY the marker set Phase A classified (``request_ids``), so the late
+    marker — which Phase A never answered — is left un-harvested for the C2 sweep to re-drive
+    Phase A on (which then writes its ``cancelled`` response). This regresses the re-query
+    implementation, whose ``teardown=False`` branch marked every currently-unharvested marker
+    harvested, dropping the late cancel with no response written = a node that should tear down
+    but never does.
+    """
+    pool, session_id, env_id = pool_and_session
+    # A non-owned root ⇒ Phase A classifies teardown=False (revocation-context, but not owned).
+    await _open_request(pool, session_id, env_id, request_id="req_first")
+    async with pool.acquire() as conn:
+        await queries.insert_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_first", account_id=_ACCOUNT
+        )
+
+    # Phase A answers req_first cancelled and classifies its set — but harvests nothing yet.
+    decision = await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    assert decision is not None and decision.teardown is False
+    assert decision.request_ids == ("req_first",)
+
+    # THE RACE: a concurrent cancel_task lands a marker on a fresh edge in the A→B gap.
+    await _open_request(pool, session_id, env_id, request_id="req_late")
+    async with pool.acquire() as conn:
+        await queries.insert_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_late", account_id=_ACCOUNT
+        )
+
+    # Phase B (teardown=False, no archive) consumes ONLY Phase A's set.
+    assert not await service.finalize_session_cancel_markers(
+        pool, session_id, account_id=_ACCOUNT, teardown=False, request_ids=decision.request_ids
+    )
+
+    async with pool.acquire() as conn:
+        # Phase A's marker was harvested — its cancelled response is written.
+        first = await queries.get_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_first"
+        )
+        assert first is not None and first.harvested_at is not None
+        # THE INVARIANT: the late marker is never harvested-without-response. It is either still
+        # un-harvested (left for the sweep) or already carries its cancelled response.
+        late = await queries.get_session_cancel_marker(
+            conn, session_id=session_id, request_id="req_late"
+        )
+        assert late is not None
+        late_response = await queries.derive_response(
+            conn, session_id, account_id=_ACCOUNT, request_id="req_late"
+        )
+        assert late.harvested_at is None or late_response == Err(error={"kind": "cancelled"})
+        # Concretely, the carry-the-set fix leaves it for the sweep: un-harvested, unanswered.
+        assert late.harvested_at is None
+        assert late_response is None
+
+    # The un-harvested late marker keeps the session in the C2 sweep, which re-drives Phase A —
+    # it now answers req_late cancelled (no silent drop).
+    needs = await find_sessions_needing_inference(
+        pool, InflightToolRegistry(), session_id=session_id
+    )
+    assert session_id in needs
+    redrive = await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
+    assert redrive is not None and redrive.request_ids == ("req_late",)
+    async with pool.acquire() as conn:
+        resolved = await queries.derive_response(
+            conn, session_id, account_id=_ACCOUNT, request_id="req_late"
+        )
+        assert resolved == Err(error={"kind": "cancelled"})
