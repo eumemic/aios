@@ -266,14 +266,24 @@ class TestApproxTokensCache:
         result = approx_tokens([msg])
         assert result >= 1
 
-    def test_cache_bound_enforced(self) -> None:
-        from aios.harness.tokens import _BODY_CACHE, _BODY_CACHE_MAX
+    def test_cache_bound_enforced(self, monkeypatch: Any) -> None:
+        from aios.harness import tokens
 
-        # Blow well past the cache bound with unique messages; the cache
-        # must never exceed its max size.
-        for i in range(200):
-            approx_tokens([{"role": "user", "content": f"unique message body {i}"}])
-        assert len(_BODY_CACHE) <= _BODY_CACHE_MAX
+        # Use a small capacity so the test exercises eviction without doing
+        # tens of thousands of real tokenizer calls.
+        monkeypatch.setattr(tokens, "_CACHE_MAX", 3)
+        tokens._BODY_CACHE.clear()
+        keys = [bytes([i]) for i in range(4)]
+
+        for i, key in enumerate(keys[:3]):
+            tokens._cache_put(tokens._BODY_CACHE, key, i)
+        assert tokens._cache_get(tokens._BODY_CACHE, keys[0]) == 0  # refresh LRU
+        tokens._cache_put(tokens._BODY_CACHE, keys[3], 3)
+
+        assert len(tokens._BODY_CACHE) == 3
+        assert keys[1] not in tokens._BODY_CACHE  # oldest unrefreshed entry evicted
+        assert keys[0] in tokens._BODY_CACHE
+        assert keys[3] in tokens._BODY_CACHE
 
 
 class TestApproxTokensThreaded:

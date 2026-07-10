@@ -37,7 +37,9 @@ from typing import Any
 # message is present) in isolation from any real message's body cost.
 _STUB_SYSTEM_MESSAGE: dict[str, Any] = {"role": "system", "content": ""}
 
-_BODY_CACHE_MAX = 65536
+_CACHE_MAX = 65536
+# Process-wide caches shared by all sessions and worker threads; each is
+# independently capped at _CACHE_MAX entries (roughly tens of MB at capacity).
 _BODY_CACHE: OrderedDict[bytes, int] = OrderedDict()
 _EXTRA_CACHE: OrderedDict[bytes, int] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
@@ -75,7 +77,7 @@ def _cache_put(cache: OrderedDict[bytes, int], key: bytes, value: int) -> None:
     with _CACHE_LOCK:
         cache[key] = value
         cache.move_to_end(key)
-        while len(cache) > _BODY_CACHE_MAX:
+        while len(cache) > _CACHE_MAX:
             cache.popitem(last=False)
 
 
