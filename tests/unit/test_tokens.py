@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from aios.harness.context import render_user_event
-from aios.harness.tokens import approx_tokens
+from aios.harness.tokens import approx_tokens, tokens_to_drop
 
 _CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
@@ -430,3 +430,42 @@ class TestPrecomputeEventAppend:
         )
         assert result.token_delta == 0
         assert result.resolved_tool_channel is None
+
+
+class TestTokensToDrop:
+    """``tokens_to_drop`` is the pure snap-boundary math that decides how many
+    front-of-window tokens ``read_windowed_events`` sheds.  Its precondition is a
+    valid window band ``window_min <= window_max``; ``==`` is a legal band the
+    runtime can produce, so the function must be total over it (no crash).
+    """
+
+    def test_fits_within_max_drops_nothing(self) -> None:
+        assert tokens_to_drop(120_000, window_min=100_000, window_max=150_000) == 0
+        # Boundary: total exactly at window_max still fits.
+        assert tokens_to_drop(150_000, window_min=100_000, window_max=150_000) == 0
+
+    def test_normal_band_snaps_to_chunk_multiples(self) -> None:
+        # chunk = 50k; a 1-token overshoot snaps a whole chunk so the cutoff
+        # advances in cache-stable steps, leaving the retained window in
+        # (window_min, window_max].
+        assert tokens_to_drop(150_001, window_min=100_000, window_max=150_000) == 50_000
+        # A 2-chunk overshoot drops exactly two chunks.
+        assert tokens_to_drop(250_000, window_min=100_000, window_max=150_000) == 100_000
+
+    def test_collapsed_band_does_not_divide_by_zero(self) -> None:
+        """Degenerate band (``window_min == window_max``) with an overflowing
+        total.  Before the fix this raised ``ZeroDivisionError`` at the ceil
+        division (``chunk == 0``); the correct degenerate behavior is to drop
+        exactly the overshoot, retaining ``window_max``.
+
+        This band is REACHABLE from a valid stored config: the context-overflow
+        shrink ladder collapses the effective band to a point once the shrunk
+        request ceiling falls to or below ``agent.window_min`` (``loop.py`` passes
+        ``window_min=min(agent.window_min, request_window_max)``). The crash lands
+        on the very path meant to shrink the prompt, so the session can never
+        build a smaller request and never converges.
+        """
+        drop = tokens_to_drop(200_000, window_min=120_000, window_max=120_000)
+        assert drop == 80_000  # overshoot; remaining = 200_000 - 80_000 == window_max
+        # A collapsed band that still fits takes the early return, never the divide.
+        assert tokens_to_drop(120_000, window_min=120_000, window_max=120_000) == 0
