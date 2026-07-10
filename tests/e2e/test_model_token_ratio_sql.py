@@ -325,7 +325,11 @@ class TestModelTokenRatioSQL:
             )
         # JSON permits this future hostile shape despite today's int-typed provider model.
         await _seed_valid_span(
-            harness, session.id, model=model, local_tokens=100, input_tokens=150.5  # type: ignore[arg-type]
+            harness,
+            session.id,
+            model=model,
+            local_tokens=100,
+            input_tokens=150.5,  # type: ignore[arg-type]
         )
         async with harness._pool.acquire() as conn:
             ratio = await queries.model_token_ratio(conn, model, account_id=account_id)

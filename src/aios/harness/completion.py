@@ -847,7 +847,9 @@ async def stream_litellm(
                     usage: dict[str, int] = {}
                     cost: float | None = None
                     if chunks:
-                        partial_assembled: Any = litellm.stream_chunk_builder(chunks=chunks, messages=messages)
+                        partial_assembled: Any = litellm.stream_chunk_builder(
+                            chunks=chunks, messages=messages
+                        )
                         if partial_assembled is not None:
                             _, usage, cost, _ = _unpack_litellm_response(
                                 partial_assembled, source="stream_chunk_builder"
