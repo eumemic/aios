@@ -160,7 +160,17 @@ _CLAMP_CACHE_MAX_ENTRIES = 8192
 
 
 def _clamp_cache_key(data_b64: str) -> tuple[int, bytes]:
-    digest = hashlib.blake2b(data_b64.encode("ascii"), digest_size=16).digest()
+    # Encode with a TOTAL codec: the data-url payload is untrusted and may
+    # carry non-ASCII bytes (or lone surrogates reachable via JSON \uD
+    # escapes). ``.encode("ascii")`` raised UnicodeEncodeError on those,
+    # crashing context composition BEFORE the guarded ``base64.b64decode``
+    # below could degrade the malformed part — and since the offending event
+    # is persisted and replayed every build, that was a permanent per-session
+    # wedge. utf-8 with ``surrogatepass`` never raises, so a malformed payload
+    # keys the cache cleanly and falls through to the decode guard as intended.
+    digest = hashlib.blake2b(
+        data_b64.encode("utf-8", "surrogatepass"), digest_size=16
+    ).digest()
     return (len(data_b64), digest)
 
 

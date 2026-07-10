@@ -327,6 +327,26 @@ class TestClampFitVerdictCache:
         assert digest == hashlib.blake2b(data_b64.encode("ascii"), digest_size=16).digest()
         assert isinstance(digest, bytes)
 
+    def test_clamp_key_non_ascii_payload_does_not_raise(self) -> None:
+        # Regression (PR#1829): the data-url payload is untrusted and may
+        # contain non-ASCII characters, or lone surrogates reachable via JSON
+        # \uD escapes. ``.encode("ascii")`` raised UnicodeEncodeError on those,
+        # crashing context composition BEFORE the guarded b64decode could
+        # degrade the malformed part — a permanent per-session wedge because
+        # the offending event is persisted and replayed every build. The key
+        # must be derivable (total codec) for ANY str payload without raising.
+        for payload in (
+            "iVBORw0KGgoé=",  # non-ASCII (latin-1) char in the payload
+            "AAAA\ud800BBBB",  # lone surrogate (JSON \uD800), plain utf-8 fails
+            "\U0001f600multibyte",  # astral-plane emoji
+        ):
+            length, digest = _clamp_cache_key(payload)
+            assert length == len(payload)
+            assert isinstance(digest, bytes)
+            assert len(digest) == 16
+            # Stable + deterministic: same payload always keys the same slot.
+            assert _clamp_cache_key(payload) == (length, digest)
+
     def test_degrade_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
         url, _raw = _big_png_data_url()
         events = [*_preceding_events(), _tool_event_with_image(url)]
