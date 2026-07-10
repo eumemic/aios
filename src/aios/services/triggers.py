@@ -156,15 +156,32 @@ async def validate_trigger_spec(
 
 def _lifecycle_snapshot(trigger: TriggerEcho, reason: str) -> dict[str, Any]:
     source = trigger.source.model_dump(mode="json")
-    return {"event": "trigger_enabled" if trigger.enabled else "trigger_disabled",
-            "trigger_id": trigger.id, "trigger_name": trigger.name, "reason": reason,
-            "source": source, "schedule": source, "action_kind": trigger.action.kind}
+    return {
+        "event": "trigger_enabled" if trigger.enabled else "trigger_disabled",
+        "trigger_id": trigger.id,
+        "trigger_name": trigger.name,
+        "reason": reason,
+        "source": source,
+        "schedule": source,
+        "action_kind": trigger.action.kind,
+    }
 
 
-async def _append_transition(conn: asyncpg.Connection[Any], trigger: TriggerEcho, reason: str, *, account_id: str, session_id: str) -> None:
-    await queries.append_event(conn, account_id=account_id,
-        session_id=session_id, kind="lifecycle",
-        data=_lifecycle_snapshot(trigger, reason))
+async def _append_transition(
+    conn: asyncpg.Connection[Any],
+    trigger: TriggerEcho,
+    reason: str,
+    *,
+    account_id: str,
+    session_id: str,
+) -> None:
+    await queries.append_event(
+        conn,
+        account_id=account_id,
+        session_id=session_id,
+        kind="lifecycle",
+        data=_lifecycle_snapshot(trigger, reason),
+    )
 
 
 async def add_trigger(
@@ -257,7 +274,9 @@ async def remove_trigger(
         await queries.remove_trigger(conn, session_id, name, account_id=account_id)
         # Deletion disarms the captured specification.
         disabled = current.model_copy(update={"enabled": False})
-        await _append_transition(conn, disabled, "api", account_id=account_id, session_id=session_id)
+        await _append_transition(
+            conn, disabled, "api", account_id=account_id, session_id=session_id
+        )
 
 
 async def update_trigger(
@@ -408,7 +427,9 @@ async def update_trigger(
             account_id=account_id,
         )
         if echo.enabled != current.enabled:
-            await _append_transition(conn, echo, "api", account_id=account_id, session_id=session_id)
+            await _append_transition(
+                conn, echo, "api", account_id=account_id, session_id=session_id
+            )
         return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext)
 
 

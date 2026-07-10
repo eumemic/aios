@@ -283,8 +283,15 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 result_id=result_id,
                 started_at=started_at,
             )
-            await _append_fire_event(conn, trigger, trun_id=trun_id, status=status,
-                error_summary=error_summary, result_id=result_id, started_at=started_at)
+            await _append_fire_event(
+                conn,
+                trigger,
+                trun_id=trun_id,
+                status=status,
+                error_summary=error_summary,
+                result_id=result_id,
+                started_at=started_at,
+            )
         return
 
     # Standing rows (cron tick fires + run_completion event fires): echo
@@ -320,8 +327,15 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 result_id=result_id,
                 started_at=started_at,
             )
-        await _append_fire_event(conn, trigger, trun_id=trun_id, status=status,
-            error_summary=error_summary, result_id=result_id, started_at=started_at)
+        await _append_fire_event(
+            conn,
+            trigger,
+            trun_id=trun_id,
+            status=status,
+            error_summary=error_summary,
+            result_id=result_id,
+            started_at=started_at,
+        )
         # ``failures is None`` = the trigger row vanished mid-fire (an API
         # DELETE raced us) — benign; the carrier finalize above still landed.
         # The gate is ``==``, not ``>=``: under concurrent event fires a
@@ -330,12 +344,21 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         auto_disable = failures is not None and failures == MAX_CONSECUTIVE_FAILURES
         if auto_disable:
             await queries.disable_trigger(conn, trigger_id)
-            await queries.append_event(conn, account_id=trigger.account_id,
-                session_id=trigger.owner_session_id, kind="lifecycle",
-                data={"event": "trigger_disabled", "trigger_id": trigger.id,
-                      "trigger_name": trigger.name, "reason": "breaker",
-                      "source": {"kind": trigger.source, **trigger.source_spec},
-                      "schedule": trigger.source_spec, "action_kind": trigger.action.kind})
+            await queries.append_event(
+                conn,
+                account_id=trigger.account_id,
+                session_id=trigger.owner_session_id,
+                kind="lifecycle",
+                data={
+                    "event": "trigger_disabled",
+                    "trigger_id": trigger.id,
+                    "trigger_name": trigger.name,
+                    "reason": "breaker",
+                    "source": {"kind": trigger.source, **trigger.source_spec},
+                    "schedule": trigger.source_spec,
+                    "action_kind": trigger.action.kind,
+                },
+            )
             log.warning(
                 "trigger.auto_disabled",
                 trigger_id=trigger_id,
@@ -413,27 +436,63 @@ async def _skip_claimed_fire(
             await queries.record_trigger_fire(conn, trigger.id, status="skipped", fired_at=fired_at)
 
 
-def _trigger_lifecycle_payload(trigger: queries.TriggerRow, *, trun_id: str, status: TriggerFireStatus, error_summary: str | None, result_id: str | None, started_at: datetime, duration_ms: int) -> dict[str, Any]:
+def _trigger_lifecycle_payload(
+    trigger: queries.TriggerRow,
+    *,
+    trun_id: str,
+    status: TriggerFireStatus,
+    error_summary: str | None,
+    result_id: str | None,
+    started_at: datetime,
+    duration_ms: int,
+) -> dict[str, Any]:
     """Stable, quiet fire receipt. Workflow ``ok`` means launched, not completed."""
-    return {"event": "trigger_fired", "trigger_id": trigger.id, "trigger_name": trigger.name,
-            "trun_id": trun_id, "fired_at": started_at.isoformat(), "status": status,
-            "exit_code": None, "duration_ms": duration_ms,
-            "error_summary": error_summary[:1000] if error_summary else None,
-            "consecutive_failures": trigger.consecutive_failures, "result_id": result_id,
-            "action_kind": trigger.action.kind}
+    return {
+        "event": "trigger_fired",
+        "trigger_id": trigger.id,
+        "trigger_name": trigger.name,
+        "trun_id": trun_id,
+        "fired_at": started_at.isoformat(),
+        "status": status,
+        "exit_code": None,
+        "duration_ms": duration_ms,
+        "error_summary": error_summary[:1000] if error_summary else None,
+        "consecutive_failures": trigger.consecutive_failures,
+        "result_id": result_id,
+        "action_kind": trigger.action.kind,
+    }
 
 
-async def _append_fire_event(conn: asyncpg.Connection[Any], trigger: queries.TriggerRow, *, trun_id: str,
-                             status: TriggerFireStatus, error_summary: str | None, result_id: str | None,
-                             started_at: datetime) -> None:
+async def _append_fire_event(
+    conn: asyncpg.Connection[Any],
+    trigger: queries.TriggerRow,
+    *,
+    trun_id: str,
+    status: TriggerFireStatus,
+    error_summary: str | None,
+    result_id: str | None,
+    started_at: datetime,
+) -> None:
     """Append atomically when possible; an archive race must never abort finalization."""
     try:
         async with conn.transaction():
-            await queries.append_event(conn, account_id=trigger.account_id,
-                session_id=trigger.owner_session_id, kind="lifecycle",
-                data=_trigger_lifecycle_payload(trigger, trun_id=trun_id, status=status,
-                    error_summary=error_summary, result_id=result_id, started_at=started_at,
-                    duration_ms=max(0, int((datetime.now(UTC)-started_at).total_seconds()*1000))))
+            await queries.append_event(
+                conn,
+                account_id=trigger.account_id,
+                session_id=trigger.owner_session_id,
+                kind="lifecycle",
+                data=_trigger_lifecycle_payload(
+                    trigger,
+                    trun_id=trun_id,
+                    status=status,
+                    error_summary=error_summary,
+                    result_id=result_id,
+                    started_at=started_at,
+                    duration_ms=max(
+                        0, int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+                    ),
+                ),
+            )
     except NotFoundError:
         log.info("trigger.lifecycle_owner_archived", trigger_id=trigger.id)
 
