@@ -15,7 +15,9 @@ table persists across cases within the module-scoped pool fixture.
 from __future__ import annotations
 
 import uuid
+from typing import Any, cast
 
+import asyncpg
 import pytest
 
 from aios.db import queries
@@ -361,3 +363,73 @@ class TestModelTokenRatioSQL:
         # Only the recent (1.5) spans are in-window; the 4.0 tail is excluded
         # by the LIMIT, so the fit lands at the recent regime, not a blend.
         assert ratio == pytest.approx(1.5, abs=0.02)
+
+    async def test_recency_fetch_is_a_bounded_index_scan(self, harness: Harness) -> None:
+        """Perf guard (issue #1711 / #1798): the ``ORDER BY created_at DESC,
+        session_id DESC, seq DESC LIMIT`` recency fetch must be a bounded index
+        seek, not a full-model scan + Sort.
+
+        The query orders by global recency; migration 0024's
+        ``((data->>'model'), seq DESC)`` index can seek the model but cannot
+        satisfy that order, so without a matching covering index the planner
+        must read *every* lifetime row for the model and Sort it before the
+        ``LIMIT`` applies — the limit stops bounding the scan and the cost
+        grows without bound as calibration history accumulates.  Migration
+        0142 adds ``events_model_calibration_recency_idx`` keyed
+        ``((data->>'model'), created_at DESC, session_id DESC, seq DESC)`` so
+        the plan is an ordered index scan whose ``LIMIT`` bounds the read.
+
+        This EXPLAINs the *actual* SQL the query issues (captured, not
+        duplicated) so a future ORDER-BY change that the index no longer
+        covers reintroduces a ``Sort`` node and fails here.
+        """
+        account_id = "acc_test_stub"
+        model = f"test-model-{uuid.uuid4().hex[:8]}"
+        session = await harness.start("seed")
+        for _ in range(30):
+            await _seed_valid_span(
+                harness, session.id, model=model, local_tokens=100, input_tokens=150
+            )
+
+        class _CapturingConn:
+            """Delegates to a real connection while recording the one SQL the
+            ratio query issues, so the plan is checked against the live query."""
+
+            def __init__(self, real: asyncpg.Connection[Any]) -> None:
+                self._real = real
+                self.sql: str | None = None
+                self.args: tuple[Any, ...] = ()
+
+            async def fetch(self, query: str, *args: Any, **kwargs: Any) -> list[asyncpg.Record]:
+                self.sql = query
+                self.args = args
+                rows: list[asyncpg.Record] = await self._real.fetch(query, *args, **kwargs)
+                return rows
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        async with harness._pool.acquire() as conn:
+            capturing = _CapturingConn(conn)
+            # Fresh model name ⇒ cache miss ⇒ a real DB fetch we can capture.
+            await queries.model_token_class_ratios(
+                cast("asyncpg.Connection[Any]", capturing), model, account_id=account_id
+            )
+            assert capturing.sql is not None, "the ratio query issued no fetch to EXPLAIN"
+
+            await conn.execute("ANALYZE events")
+            # Nudge the planner off a whole-table seq scan so the plan reveals
+            # whether an ordered index path exists that satisfies the ORDER BY
+            # without a Sort.  If none does (the regression), a Sort node
+            # survives and the assertion below fails.
+            async with conn.transaction():
+                await conn.execute("SET LOCAL enable_seqscan = off")
+                plan_rows = await conn.fetch(f"EXPLAIN {capturing.sql}", *capturing.args)
+            plan = "\n".join(row[0] for row in plan_rows)
+
+        assert "events_model_calibration_recency_idx" in plan, (
+            f"recency fetch did not use the covering index:\n{plan}"
+        )
+        assert "Sort" not in plan, (
+            f"recency fetch still sorts — the LIMIT no longer bounds the scan:\n{plan}"
+        )

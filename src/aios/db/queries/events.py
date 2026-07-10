@@ -393,8 +393,10 @@ async def model_token_class_ratios(
     NORMALIZATION; the same string must appear at stamp and query time.
     "actual" is the provider's ``input_tokens`` (the full prompt count,
     cached portions included — do NOT add ``cache_*`` breakdowns).  Uses
-    the ``events_model_request_end_calibration_idx`` partial index
-    (migration 0024).
+    the ``events_model_calibration_recency_idx`` partial index (migration
+    0142), keyed ``((data->>'model'), created_at DESC, session_id DESC,
+    seq DESC)`` so the ``ORDER BY … LIMIT`` recency fetch is a bounded
+    index seek rather than a full-model scan + sort (issue #1711).
 
     **``account_id`` is intentionally not a query predicate — by design.**
     These coefficients are model-intrinsic: the provider ``input_tokens``
