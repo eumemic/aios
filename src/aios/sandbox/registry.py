@@ -232,6 +232,9 @@ class SandboxRegistry:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
+        # Consecutive failures keyed by full corpse id; value also records
+        # whether the one-shot operator alarm has been emitted.
+        self._salvage_failures: dict[str, tuple[int, bool]] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
@@ -952,18 +955,53 @@ class SandboxRegistry:
         refs = await self._backend.list_managed(
             instance_id=settings.instance_id, session_id=session_id
         )
+        present = {ref.sandbox_id for ref in refs}
+        for corpse_id in list(self._salvage_failures):
+            if corpse_id not in present:
+                self._salvage_failures.pop(corpse_id, None)
         for ref in refs:
+            failures, alarmed = self._salvage_failures.get(ref.sandbox_id, (0, False))
+            if failures >= settings.sandbox_salvage_breaker_threshold:
+                log.warning(
+                    "sandbox.salvage_breaker_open",
+                    session_id=session_id,
+                    container_id=ref.sandbox_id[:12],
+                    failures=failures,
+                )
+                raise SandboxBackendError(
+                    f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
+                    "refusing to provision over unrecovered state"
+                )
             removable = await self._snapshot_and_record(
                 session_id,
                 ref.sandbox_id,
                 disk_limit_bytes=settings.sandbox_snapshot_budget_bytes,
             )
             if not removable:
+                failures += 1
+                opened = failures >= settings.sandbox_salvage_breaker_threshold
+                self._salvage_failures[ref.sandbox_id] = (failures, alarmed or opened)
+                if opened and not alarmed:
+                    log.error(
+                        "sandbox.salvage_breaker_open",
+                        session_id=session_id,
+                        container_id=ref.sandbox_id[:12],
+                        failures=failures,
+                    )
+                    try:
+                        await self._append_fs_event(
+                            session_id,
+                            "sandbox.salvage_breaker_open",
+                            {"container_id": ref.sandbox_id[:12], "failures": failures},
+                        )
+                    except Exception as err:
+                        log.warning("sandbox.salvage_breaker_alert_failed", error=str(err))
                 raise SandboxBackendError(
                     f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
                     "failed (snapshot or pointer write); refusing to provision over "
                     "unrecovered state"
                 )
+            self._salvage_failures.pop(ref.sandbox_id, None)
             await self._backend.force_remove(ref.sandbox_id)
 
     async def _reconcile_pointer_from_local(self, session_id: str) -> None:

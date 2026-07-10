@@ -105,104 +105,83 @@ async def run_docker_pipeline(
     producer_argv: list[str],
     consumer_argv: list[str],
     *,
-    timeout_s: float,
+    stall_timeout_s: float,
+    max_timeout_s: float,
 ) -> tuple[int, bytes, bytes]:
-    """Run ``producer_argv | consumer_argv`` joined by an ``os.pipe()`` fd pair.
+    """Run a Docker producer/consumer pipeline with progress-based deadlines.
 
-    Used for the flatten path ``docker export <id> | docker import - <tag>``
-    without a host shell: both argvs go straight to ``execve`` and are
-    connected at the OS level, so no shell metacharacter interpretation
-    happens on the host (same security posture as
-    :func:`run_subprocess_with_timeout`). Returns the **consumer's**
-    ``(returncode, stdout, stderr)`` — ``docker import`` prints the new
-    image id to stdout — so the caller can read the flattened image id.
-
-    Raises :class:`SandboxBackendError` on launch failure, on timeout
-    (both children are SIGKILLed), or when the **producer** exits nonzero
-    (a failed ``export`` would otherwise feed the consumer a truncated
-    stream that imports as a silently-corrupt image). The consumer's own
-    nonzero exit is returned for the caller to interpret, mirroring
-    :func:`run_docker_cli`.
+    The relay makes stream progress observable. A lack of bytes before EOF is
+    a stall; after EOF the consumer may legitimately spend substantial time
+    finalizing, so only the absolute ceiling applies then.
     """
-    rd, wr = os.pipe()
     producer: asyncio.subprocess.Process | None = None
     consumer: asyncio.subprocess.Process | None = None
+    started = asyncio.get_running_loop().time()
+
+    async def _kill_all() -> None:
+        for proc in (producer, consumer):
+            if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+
     try:
         try:
             producer = await asyncio.create_subprocess_exec(
-                *producer_argv, stdout=wr, stderr=asyncio.subprocess.PIPE
+                *producer_argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-        except (OSError, FileNotFoundError) as host_err:
-            raise SandboxBackendError(
-                f"failed to launch {producer_argv[0]}: {host_err}"
-            ) from host_err
-        # The producer now holds the only writer; the parent must drop its
-        # copy so the consumer sees EOF when the producer exits.
-        os.close(wr)
-        wr = -1
-        try:
             consumer = await asyncio.create_subprocess_exec(
-                *consumer_argv,
-                stdin=rd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                *consumer_argv, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
         except (OSError, FileNotFoundError) as host_err:
-            raise SandboxBackendError(
-                f"failed to launch {consumer_argv[0]}: {host_err}"
-            ) from host_err
-        os.close(rd)
-        rd = -1
+            raise SandboxBackendError(f"failed to launch docker pipeline: {host_err}") from host_err
+        assert producer.stdout is not None and consumer.stdin is not None
 
-        async def _drain() -> tuple[tuple[bytes, bytes], tuple[bytes, bytes]]:
-            # Drive both concurrently so neither stderr/stdout pipe can
-            # fill and deadlock the other. Both are non-None here (assigned
-            # above before _drain is ever awaited).
-            return await asyncio.gather(consumer.communicate(), producer.communicate())
+        async def _pump() -> int:
+            moved = 0
+            while True:
+                remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
+                if remaining <= 0:
+                    raise TimeoutError("absolute ceiling")
+                try:
+                    chunk = await asyncio.wait_for(
+                        producer.stdout.read(1024 * 1024), timeout=min(stall_timeout_s, remaining)
+                    )
+                except TimeoutError as err:
+                    raise TimeoutError("stream stalled") from err
+                if not chunk:
+                    consumer.stdin.close()
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        await consumer.stdin.wait_closed()
+                    return moved
+                consumer.stdin.write(chunk)
+                await consumer.stdin.drain()
+                moved += len(chunk)
 
+        prod_err_task = asyncio.create_task(producer.stderr.read())  # type: ignore[union-attr]
+        cons_out_task = asyncio.create_task(consumer.stdout.read())  # type: ignore[union-attr]
+        cons_err_task = asyncio.create_task(consumer.stderr.read())  # type: ignore[union-attr]
         try:
-            (cons_out, cons_err), (_prod_out, prod_err) = await asyncio.wait_for(
-                _drain(), timeout=timeout_s
+            moved = await _pump()
+            remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
+            if remaining <= 0:
+                raise TimeoutError("absolute ceiling")
+            await asyncio.wait_for(asyncio.gather(producer.wait(), consumer.wait()), remaining)
+            prod_err, cons_out, cons_err = await asyncio.gather(
+                prod_err_task, cons_out_task, cons_err_task
             )
         except TimeoutError as timeout_err:
-            for proc in (producer, consumer):
-                if proc is not None:
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
+            await _kill_all()
             raise SandboxBackendError(
-                f"docker pipeline timed out after {timeout_s}s: "
+                f"docker pipeline timed out ({timeout_err}; {moved if 'moved' in locals() else 0} bytes moved): "
                 f"{' '.join(producer_argv)} | {' '.join(consumer_argv)}"
             ) from timeout_err
-        except BaseException:
-            # CancelledError is a BaseException, not a TimeoutError, so an
-            # outer cancel (caller's job deadline, worker SIGTERM mid
-            # multi-GB export) skips the timeout branch above — both
-            # children keep running and their parent-side pipe FDs leak.
-            # Mirror run_subprocess_with_timeout: SIGKILL both and close
-            # their transports before propagating. (The timeout branch
-            # needs no close — the loop reclaims each transport on the
-            # killed child's pipe EOF — but a propagating cancel returns
-            # immediately, so it must release them here.)
-            for proc in (producer, consumer):
-                if proc is not None:
-                    with contextlib.suppress(ProcessLookupError):
-                        proc.kill()
-                    proc._transport.close()  # type: ignore[attr-defined]  # typeshed omits Process._transport
-            raise
-
         if producer.returncode != 0:
             raise SandboxBackendError(
                 f"{producer_argv[0]} export failed (exit {producer.returncode}): "
                 f"{prod_err.decode('utf-8', errors='replace').strip()}"
             )
-        return (
-            consumer.returncode if consumer.returncode is not None else -1,
-            cons_out,
-            cons_err,
-        )
-    finally:
-        # Close any fd we still own (launch-failure / early-raise paths).
-        for fd in (rd, wr):
-            if fd != -1:
-                with contextlib.suppress(OSError):
-                    os.close(fd)
+        return consumer.returncode if consumer.returncode is not None else -1, cons_out, cons_err
+    except BaseException:
+        await _kill_all()
+        raise
