@@ -11,7 +11,10 @@ not OpenAI wire format — shared with the future ``call_llm()`` builtin):
 ``LlmResponse.cost`` is the LiteLLM-computed USD cost for the request, or
 ``None`` when the provider/model didn't report one.
 
-Model API keys are resolved by LiteLLM from standard environment variables
+Model API keys resolve in two layers: the caller-supplied ``auth``
+(:class:`~aios.models.model_providers.ProviderAuth`, resolved per-account —
+see ``aios.services.model_providers.resolve_provider_auth``) when present,
+else LiteLLM's own fallback to standard environment variables
 (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``, etc.) based on the model string
 prefix.
 """
@@ -30,6 +33,8 @@ import litellm
 
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
+from aios.models.attenuation import api_base_of
+from aios.models.model_providers import ProviderAuth
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
@@ -626,7 +631,7 @@ def _build_litellm_kwargs(
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
-    api_base: str | None,
+    auth: ProviderAuth | None,
     extra: dict[str, Any] | None,
     session_id: str | None,
     stream: bool,
@@ -642,8 +647,16 @@ def _build_litellm_kwargs(
         kwargs["stream_timeout"] = _STREAM_INTER_CHUNK_TIMEOUT_S
     if tools:
         kwargs["tools"] = tools
-    if api_base is not None:
-        kwargs["api_base"] = api_base
+    if auth is not None:
+        kwargs["api_key"] = auth.api_key
+        # Only inject auth.api_base when `extra` doesn't already redirect —
+        # otherwise both `api_base` and its `base_url` alias could end up in
+        # kwargs (one from here, one from extra), and litellm's api_base-over-
+        # base_url precedence would silently invert "extra wins". `extra`
+        # itself needs no such guard: kwargs.update(extra) below overwrites
+        # a same-key api_base naturally.
+        if auth.api_base is not None and api_base_of(extra) is None:
+            kwargs["api_base"] = auth.api_base
     if extra:
         kwargs.update(extra)
     _apply_provider_cache_hints(kwargs, model, session_id)
@@ -683,13 +696,18 @@ async def call_litellm(
     request: LlmRequest,
     *,
     model: str,
+    auth: ProviderAuth | None = None,
 ) -> LlmResponse:
     """Call ``litellm.acompletion`` and return an :class:`LlmResponse`.
 
     Consumes a named :class:`LlmRequest` (``messages``/``tools``/``params``/
     ``session_id``) — the shared shape between the session model-call path and
     the future ``call_llm()`` builtin — and ``model`` (the model string, which
-    is a binding concern, not part of the payload).
+    is a binding concern, not part of the payload). ``auth`` (also a binding
+    concern, resolved fresh by the caller for every call — never part of
+    ``LlmRequest``, which can be journaled/replayed) supplies a per-account
+    ``api_key``/``api_base``; ``None`` falls back to LiteLLM's own
+    environment-variable resolution.
 
     The returned :class:`LlmResponse` retains the message exactly as litellm
     produced it (including provider-specific extensions like
@@ -709,7 +727,7 @@ async def call_litellm(
         model=model,
         messages=request.messages,
         tools=request.tools,
-        api_base=None,
+        auth=auth,
         extra=request.params,
         session_id=request.session_id,
         stream=False,
@@ -735,13 +753,14 @@ async def stream_litellm(
     *,
     model: str,
     pool: asyncpg.Pool[Any],
+    auth: ProviderAuth | None = None,
 ) -> LlmResponse:
     """Call ``litellm.acompletion`` with streaming, returning an :class:`LlmResponse`.
 
     Consumes a named :class:`LlmRequest` and ``model`` (see
-    :func:`call_litellm`). ``request.session_id`` is required on this path —
-    it names the ``pg_notify`` channel for per-token deltas as well as the
-    provider cache bucket.
+    :func:`call_litellm`, which ``auth`` also matches). ``request.session_id``
+    is required on this path — it names the ``pg_notify`` channel for
+    per-token deltas as well as the provider cache bucket.
 
     Each content delta fires a transient ``pg_notify`` on the session's
     event channel. SSE clients receive these as ``event: delta`` — no DB
@@ -763,7 +782,7 @@ async def stream_litellm(
         model=model,
         messages=messages,
         tools=tools,
-        api_base=None,
+        auth=auth,
         extra=request.params,
         session_id=session_id,
         stream=True,

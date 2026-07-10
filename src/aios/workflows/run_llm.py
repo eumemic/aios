@@ -6,7 +6,10 @@ author ``call_llm(request)`` primitive: it runs one inference turn against
 turn** (content + *unexecuted* tool_calls + usage + finish_reason + cost). The
 script subprocess is credential-free (no provider keys), so — exactly like
 ``tool()`` — the script only emits the ``call_llm`` frontier and the inference
-runs HERE, on the worker, against the worker's provider credentials.
+runs HERE, on the worker, against credentials resolved from the run's
+account (per-account ``model_providers`` config, or the worker's env vars
+when the account has none configured — see
+``aios.services.model_providers.resolve_provider_auth``).
 
 **Park-and-harvest.** Identical shape to :mod:`aios.workflows.run_tools`: the step
 opens a ``call_llm`` frontier (journals ``call_started``), launches a
@@ -14,7 +17,7 @@ fire-and-forget worker task here, and parks the run. The task runs the inference
 and, on completion, writes a ``tool_result`` ``wf_run_signals`` row + wakes the
 run; the next step's pre-replay harvest folds the signal into a ``call_result``.
 
-**The three runtime guards (this module owns them; they're per-call, not static):**
+**The four runtime guards (this module owns them; they're per-call, not static):**
 
 * **``workflow:`` rejection (leaf-only).** ``call_llm`` is the inference *leaf* — it
   must never recurse into a workflow binding. The model arg may be COMPUTED, so this
@@ -23,7 +26,15 @@ run; the next step's pre-replay harvest folds the signal into a ``call_result``.
   another endpoint, sending the whole prompt there. Admit it iff it equals the
   launcher's (a run has none → the operator default) OR sits in the operator
   ``trusted_inference_api_bases`` allowlist; else reject — same clamp the spawn edge
-  applies to a child ``agent()``'s model identity.
+  applies to a child ``agent()``'s model identity. Orthogonal to the next guard: this
+  one asks "may the prompt go there at all"; the next asks "whose key rides along."
+* **provider-auth conflict.** ``auth.api_base`` (injected via the separate ``auth``
+  parameter, never through ``params``/``litellm_extra``) is never evaluated by this
+  clamp or its allowlist — trust for an account-resolved redirect is established by
+  row ownership instead (see ``aios.services.model_providers``). Reject when
+  ``params`` redirects the endpoint while the effective key would come from an
+  account above the run's own (an ancestor's ``model_providers`` row, or the
+  worker's env var on a non-root account).
 * **cost meter (charge once at the inference site).** A successful call charges
   LiteLLM's per-request cost to the run's ``call_llm_cost_microusd`` meter, in the
   SAME transaction that writes the result signal, so the next step's ``budget_usd``
@@ -47,6 +58,7 @@ from typing import Any
 import asyncpg
 
 from aios.db.queries import workflows as wf_queries
+from aios.harness import runtime
 from aios.harness.completion import (
     LlmRequest,
     ModelCallDeadlineError,
@@ -58,6 +70,7 @@ from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
 from aios.models.workflows import WfRun
 from aios.services import attenuation as attenuation_service
+from aios.services import model_providers as model_providers_service
 
 log = get_logger("aios.workflows.run_llm")
 
@@ -140,9 +153,10 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     ``cost_microusd`` is what to charge the run's inference meter: the call's cost
     on success, ``0`` on any error (a rejected/failed call bought nothing).
 
-    The three runtime guards are applied IN ORDER before any inference leaves the
+    The four runtime guards are applied IN ORDER before any inference leaves the
     worker: resolve+validate the model, reject a ``workflow:`` target, clamp the
-    effective ``api_base``. Only a call past all three runs.
+    effective ``api_base``, then check the account-resolved provider auth doesn't
+    conflict with it. Only a call past all four runs.
     """
     messages = spec.get("messages")
     if not isinstance(messages, list):
@@ -192,12 +206,44 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
             0,
         )
 
+    # Guard 3 — provider-auth conflict. pool/crypto_box come off the worker-global
+    # runtime module — this function has no pool param, matching the
+    # connector-auth-resolution precedent in run_tools.py — not threaded through
+    # launch_call_llm_task/_run_call_llm_task. resolve_provider_auth_or_conflict
+    # fuses resolution with the conflict check on `params`'s redirect (if any) so
+    # the two can never run out of order or independently at this call site.
+    #
+    # The resolve does I/O (DB) and crypto (decrypt), so unlike guards 1-2 it CAN
+    # raise (a corrupt/key-mismatched ciphertext row → CryptoDecryptError). This
+    # function's contract is "never raises — every failure is a recoverable value"
+    # (see module docstring); an uncaught raise here would escape _run_call_llm_task
+    # (which has no outer except) with no result signal, and the sweep would
+    # re-dispatch forever — a silent wedge. So a persistent resolve failure resolves
+    # as an error the script branches on, exactly like a provider error from the
+    # inference call below. Transient DB errors self-heal via the sweep's re-wake.
+    pool = runtime.require_pool()
+    try:
+        auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
+            pool,
+            runtime.require_crypto_box(),
+            account_id=run.account_id,
+            model=model,
+            litellm_extra=params,
+        )
+    except Exception as exc:
+        log.warning("call_llm.provider_auth_error", run_id=run.id, model=model, error=str(exc))
+        return {
+            "error": f"call_llm provider-auth resolution failed: {type(exc).__name__}: {exc}"
+        }, 0
+    if conflict is not None:
+        return {"error": f"call_llm refused: {conflict}"}, 0
+
     tools = spec.get("tools") if isinstance(spec.get("tools"), list) else None
     session_id = spec.get("session_id") if isinstance(spec.get("session_id"), str) else None
     request = LlmRequest(messages=messages, tools=tools, params=params, session_id=session_id)
 
     try:
-        response = await call_litellm(request, model=model)
+        response = await call_litellm(request, model=model, auth=auth)
     except ModelCallDeadlineError as exc:
         # A deadline still spent provider time — charge whatever the partial usage
         # estimates, so a run can't dodge its budget by timing out. Result is the

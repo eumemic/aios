@@ -98,6 +98,7 @@ from .list_response_environment import ListResponseEnvironment
 from .list_response_event import ListResponseEvent
 from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
+from .list_response_model_provider import ListResponseModelProvider
 from .list_response_recent_chat import ListResponseRecentChat
 from .list_response_runtime_token import ListResponseRuntimeToken
 from .list_response_session import ListResponseSession
@@ -148,6 +149,9 @@ from .mint_account_request import MintAccountRequest
 from .mint_account_response import MintAccountResponse
 from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
+from .model_provider import ModelProvider
+from .model_provider_create import ModelProviderCreate
+from .model_provider_update import ModelProviderUpdate
 from .native_buttons import NativeButtons
 from .o_auth_complete_request import OAuthCompleteRequest
 from .o_auth_start_request import OAuthStartRequest
@@ -430,6 +434,7 @@ __all__ = (
     "ListResponseEvent",
     "ListResponseMemoryStore",
     "ListResponseMemoryVersion",
+    "ListResponseModelProvider",
     "ListResponseRecentChat",
     "ListResponseRuntimeToken",
     "ListResponseSession",
@@ -478,6 +483,9 @@ __all__ = (
     "MintAccountResponse",
     "MintKeyRequest",
     "MintKeyResponse",
+    "ModelProvider",
+    "ModelProviderCreate",
+    "ModelProviderUpdate",
     "NativeButtons",
     "OAuthCompleteRequest",
     "OAuthStartRequest",

@@ -27,6 +27,7 @@ from aios.api.routers import (
     environments,
     health,
     memory_stores,
+    model_providers,
     runtime_tokens,
     session_templates,
     sessions,
@@ -174,6 +175,7 @@ def create_app() -> FastAPI:
     app.include_router(skills.router)
     app.include_router(vaults.router)
     app.include_router(memory_stores.router)
+    app.include_router(model_providers.router)
     app.include_router(connections.router)
     app.include_router(runtime_tokens.router)
     app.include_router(triggers_ingest.router)
