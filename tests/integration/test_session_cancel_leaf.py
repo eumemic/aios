@@ -131,7 +131,9 @@ async def test_cancel_marked_session_is_swept_then_leaf_answers_cancelled(
         assert marker is not None and marker.harvested_at is not None
 
     # Idempotent: with the marker harvested, a second leaf run is a no-op (no hot-loop).
-    assert await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
+    assert (
+        await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
+    )
     needs_again = await find_sessions_needing_inference(
         pool, InflightToolRegistry(), session_id=session_id
     )
@@ -144,7 +146,9 @@ async def test_unmarked_session_runs_no_leaf(
     """A session with an open request but NO cancel-marker is untouched by the leaf."""
     pool, session_id, env_id = pool_and_session
     await _open_request(pool, session_id, env_id, request_id="req_live")
-    assert await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
+    assert (
+        await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT) is None
+    )
     async with pool.acquire() as conn:
         assert await queries.get_open_request_ids(conn, session_id, account_id=_ACCOUNT) == [
             "req_live"
@@ -283,9 +287,7 @@ async def test_owned_session_cancel_propagates_to_awaited_children(
         )
 
     # Phase A answers req_root and propagates, but does not archive or harvest yet.
-    decision = await service.harvest_session_cancel_markers(
-        pool, parent_id, account_id=_ACCOUNT
-    )
+    decision = await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
     assert decision is not None and decision.teardown
     async with pool.acquire() as conn:
         child_marker = await queries.get_session_cancel_marker(
@@ -296,18 +298,19 @@ async def test_owned_session_cancel_propagates_to_awaited_children(
             conn, session_id=parent_id, request_id="req_root"
         )
         assert parent_marker is not None and parent_marker.harvested_at is None
-        assert await conn.fetchval(
-            "SELECT archived_at FROM sessions WHERE id=$1", parent_id
-        ) is None
+        assert (
+            await conn.fetchval("SELECT archived_at FROM sessions WHERE id=$1", parent_id) is None
+        )
 
     # Phase B is the atomic archive + marker-consume flip.
     assert await service.finalize_session_cancel_markers(
         pool, parent_id, account_id=_ACCOUNT, teardown=True
     )
     async with pool.acquire() as conn:
-        assert await conn.fetchval(
-            "SELECT archived_at FROM sessions WHERE id=$1", parent_id
-        ) is not None
+        assert (
+            await conn.fetchval("SELECT archived_at FROM sessions WHERE id=$1", parent_id)
+            is not None
+        )
         parent_marker = await queries.get_session_cancel_marker(
             conn, session_id=parent_id, request_id="req_root"
         )
@@ -436,9 +439,7 @@ async def test_phase_b_surviving_inbound_aborts_teardown(
         await queries.insert_session_cancel_marker(
             conn, session_id=session_id, request_id="req_revoked", account_id=_ACCOUNT
         )
-    decision = await service.harvest_session_cancel_markers(
-        pool, session_id, account_id=_ACCOUNT
-    )
+    decision = await service.harvest_session_cancel_markers(pool, session_id, account_id=_ACCOUNT)
     assert decision is not None and decision.teardown
 
     await _open_request(pool, session_id, env_id, request_id="req_survivor")
@@ -446,9 +447,9 @@ async def test_phase_b_surviving_inbound_aborts_teardown(
         pool, session_id, account_id=_ACCOUNT, teardown=True
     )
     async with pool.acquire() as conn:
-        assert await conn.fetchval(
-            "SELECT archived_at FROM sessions WHERE id=$1", session_id
-        ) is None
+        assert (
+            await conn.fetchval("SELECT archived_at FROM sessions WHERE id=$1", session_id) is None
+        )
         marker = await queries.get_session_cancel_marker(
             conn, session_id=session_id, request_id="req_revoked"
         )
