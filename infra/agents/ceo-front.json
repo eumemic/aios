@@ -211,7 +211,6 @@
       ]
     },
     {
-      "type": "url",
       "name": "aios",
       "base_url": "https://api.aios.eumemic.ai",
       "routes": [
@@ -220,53 +219,59 @@
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/agents/**",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/triggers/**",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/runs/**",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/workflows/**",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/health",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         },
         {
           "path_pattern": "/v1/memory-stores/**",
           "methods": [
             "GET"
           ],
-          "allow_query": true
+          "allow_query": true,
+          "description": "read"
         }
       ],
-      "include_instructions": true,
-      "headers": null
+      "description": "Prod aios API, GET-only read (machine ground truth)"
     }
   ],
   "description": "Phase-1 conversational CEO-FRONT (write-tool-less). The chairman talks to it as his CEO over Telegram (@EumemicBot). Read-only by substrate.",
