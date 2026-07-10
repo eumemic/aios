@@ -170,6 +170,42 @@ async def _append_result_fenced(
         raise
 
 
+async def _trigger_sweep_fenced(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    bound_log: Any,
+) -> None:
+    """Run the tail sweep, fencing the Phase-B archive race (#1823 C2).
+
+    The span-start cancel arm of :func:`_tool_lifecycle` owns its OWN tail sweep: the
+    ``tool_execute_start`` cancel strikes inside ``__aenter__``, before the body
+    try/finally is entered, so the lifecycle ``finally`` (which fences the normal-path
+    span-end + sweep) never runs for that path. Like every append after the flip, that
+    arm's sweep — whose first act is a ``sweep_start`` span append — can race Phase B
+    archiving the session; when it does, ``append_event`` raises the archived fence
+    ``NotFoundError``. That MUST be a CLEAN DROP, not an escaping error that would REPLACE
+    the ``CancelledError`` the arm re-raises immediately after. A ``NotFoundError`` from a
+    still-live session is a real error and propagates unchanged.
+
+    The archived-vs-live decision reuses :func:`_session_is_archived` — the one predicate
+    :func:`_append_result_fenced` and the body-``NotFoundError`` arm also resolve through,
+    so no second archived-detection path can drift. The caller re-raises the
+    ``CancelledError`` AFTER this fenced sweep, so cancellation still propagates on the
+    (reachable) archived branch. (The lifecycle ``finally``'s own span-end + sweep tail is
+    fenced separately and swallows ``NotFoundError`` UNCONDITIONALLY: a ``finally`` must
+    never re-raise, or it would mask whatever is already propagating.)
+    """
+    try:
+        await _trigger_sweep(pool, session_id, account_id=account_id)
+    except NotFoundError:
+        if await _session_is_archived(pool, session_id):
+            bound_log.info("tool.sweep_dropped_archived")
+            return
+        raise
+
+
 @asynccontextmanager
 async def _tool_lifecycle(
     pool: asyncpg.Pool[Any],
@@ -235,9 +271,13 @@ async def _tool_lifecycle(
         )
     except asyncio.CancelledError:
         bound_log.info(f"{log_prefix}.cancelled_before_start")
-        # Fenced: if Phase B already archived the session the cancelled-result append hits
-        # the archived fence — a clean drop — instead of an escaping ``NotFoundError`` that
-        # would replace the ``CancelledError`` we re-raise below.
+        # This arm runs OUTSIDE the body try/finally (the cancel struck ``__aenter__``), so
+        # it owns BOTH tails itself, and BOTH can race the Phase-B flip. Fenced: if Phase B
+        # already archived the session, the cancelled-result append AND the tail sweep each
+        # hit the archived fence — a clean drop — instead of an escaping ``NotFoundError``
+        # that would replace the ``CancelledError`` we re-raise last. The sweep still fires
+        # (via the fenced helper) so a live session wakes now rather than at the ≤30s ghost
+        # sweep; only its archived-fence ``NotFoundError`` is swallowed.
         await _append_result_fenced(
             pool,
             session_id,
@@ -247,7 +287,7 @@ async def _tool_lifecycle(
             error="cancelled",
             bound_log=bound_log,
         )
-        await _trigger_sweep(pool, session_id, account_id=account_id)
+        await _trigger_sweep_fenced(pool, session_id, account_id=account_id, bound_log=bound_log)
         raise
     tc = _ToolCall(call_id=call_id, name=name, raw_args=raw_args, bound_log=bound_log)
     try:
