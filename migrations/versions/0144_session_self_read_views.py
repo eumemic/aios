@@ -1,14 +1,14 @@
 """Session-scoped tool-call, span, lifecycle, and schema-help search views.
 
-Revision ID: 0143
-Revises: 0142
+Revision ID: 0144
+Revises: 0143
 """
 from __future__ import annotations
 from collections.abc import Sequence
 from alembic import op
 
-revision: str = "0143"
-down_revision: str = "0142"
+revision: str = "0144"
+down_revision: str = "0143"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
