@@ -24,7 +24,7 @@ from aios.db.pool import create_pool
 from aios.errors import NotFoundError
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import find_sessions_needing_inference
-from aios.models.sessions import Err
+from aios.models.sessions import Err, Ok
 from aios.services import sessions as service
 from aios.services import tasks as tasks_service
 from tests.integration.conftest import seed_agent_env_session
@@ -255,9 +255,13 @@ async def _open_child_session_edge(
 async def test_owned_session_cancel_propagates_to_awaited_children(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
-    """§2.3: when the cancelled request was the session's SOLE inbound, the leaf seeds a
-    cancel-marker on each outbound awaited child — the recursive cascade hop."""
+    """§2.3: when the cancelled request was an OWNED session's SOLE inbound, the leaf seeds
+    a cancel-marker on each outbound awaited child — the recursive cascade hop. Ownership
+    here is flag-declared (``archive_when_idle=TRUE``, the servicer class every edge-created
+    child carries); a bare inbound Ask no longer classifies a session as owned."""
     pool, parent_id, env_id = pool_and_session
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sessions SET archive_when_idle = TRUE WHERE id = $1", parent_id)
     await _open_request(pool, parent_id, env_id, request_id="req_root")  # the parent's sole inbound
     _a, _e, child = await seed_agent_env_session(
         pool, account_id=_ACCOUNT, prefix="cancel-leaf-child"
@@ -275,6 +279,84 @@ async def test_owned_session_cancel_propagates_to_awaited_children(
             conn, session_id=child.id, request_id="req_child"
         )
         assert child_marker is not None and child_marker.harvested_at is None  # cascade reached it
+
+
+async def test_self_owned_session_never_propagates(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """FATAL-2 wrong-kill immunity: a SELF-OWNED session (no creation edge, no
+    ``archive_when_idle`` flag — the lieutenant/root shape) never auto-propagates on
+    obligation withdrawal, even when its sole inbound was revoked. Receiving an
+    awaited Ask must NOT classify a session as owned (the any-edge join defect)."""
+    pool, parent_id, env_id = pool_and_session
+    await _open_request(pool, parent_id, env_id, request_id="req_root")  # sole inbound
+    _a, _e, child = await seed_agent_env_session(pool, account_id=_ACCOUNT, prefix="cancel-leaf-lt")
+    await _open_child_session_edge(pool, child.id, parent_id, env_id, request_id="req_child")
+    async with pool.acquire() as conn:
+        await queries.insert_session_cancel_marker(
+            conn, session_id=parent_id, request_id="req_root", account_id=_ACCOUNT
+        )
+
+    # The leaf answers req_root cancelled (revocation-context) and harvests…
+    assert await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
+    async with pool.acquire() as conn:
+        resolved = await queries.derive_response(
+            conn, parent_id, account_id=_ACCOUNT, request_id="req_root"
+        )
+        assert resolved == Err(error={"kind": "cancelled"})
+        # …but the live subtree is untouched: not owned ⇒ zero propagation.
+        assert (
+            await queries.get_session_cancel_marker(
+                conn, session_id=child.id, request_id="req_child"
+            )
+            is None
+        )
+
+
+async def test_fulfilled_marker_set_does_not_propagate(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """§1 revoked/fulfilled asymmetry: a marker whose request the SERVICER already
+    answered (``Ok``) classifies FULFILLED — an owned session with a purely-fulfilled
+    marker set and zero surviving inbound must NOT propagate cancellation."""
+    pool, parent_id, env_id = pool_and_session
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET archive_when_idle = TRUE WHERE id = $1", parent_id
+        )  # owned via the flag — isolates the revocation-context gate
+    await _open_request(pool, parent_id, env_id, request_id="req_done")  # sole inbound
+    _a, _e, child = await seed_agent_env_session(
+        pool, account_id=_ACCOUNT, prefix="cancel-leaf-fulfilled"
+    )
+    await _open_child_session_edge(pool, child.id, parent_id, env_id, request_id="req_child")
+    async with pool.acquire() as conn:
+        # the servicer answers FIRST (first-writer-wins latches the Ok)…
+        assert await queries.write_response_if_absent(
+            conn, parent_id, account_id=_ACCOUNT, request_id="req_done", outcome=Ok(result="done")
+        )
+        # …then a stray marker lands on the already-fulfilled edge
+        await queries.insert_session_cancel_marker(
+            conn, session_id=parent_id, request_id="req_done", account_id=_ACCOUNT
+        )
+
+    # The leaf applies the marker (harvests it; the cancelled write no-ops)…
+    assert await service.harvest_session_cancel_markers(pool, parent_id, account_id=_ACCOUNT)
+    async with pool.acquire() as conn:
+        marker = await queries.get_session_cancel_marker(
+            conn, session_id=parent_id, request_id="req_done"
+        )
+        assert marker is not None and marker.harvested_at is not None
+        resolved = await queries.derive_response(
+            conn, parent_id, account_id=_ACCOUNT, request_id="req_done"
+        )
+        assert resolved == Ok(result="done")  # the servicer's answer survived
+        # …and does NOT cascade: fulfilled ⇒ no revocation-context ⇒ zero propagation.
+        assert (
+            await queries.get_session_cancel_marker(
+                conn, session_id=child.id, request_id="req_child"
+            )
+            is None
+        )
 
 
 async def test_shared_session_cancel_does_not_over_cancel_children(
