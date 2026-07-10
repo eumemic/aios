@@ -35,11 +35,14 @@ class AgentCreate:
         description (None | str | Unset):
         metadata (AgentCreateMetadata | Unset):
         litellm_extra (AgentCreateLitellmExtra | Unset): Provider-specific LiteLLM kwargs merged into every model
-            request for this agent.  Common shapes: OpenRouter ``extra_body.provider.order`` for provider pinning, Anthropic
-            ``thinking``, OpenAI ``reasoning_effort``, raw sampling knobs (``temperature``, ``max_tokens``), ``api_base``
-            for self-hosted inference.  Validated by LiteLLM / the provider; bad kwargs surface as tool-path errors the
-            model sees.  Security: ``api_base`` redirects the model call — treat operator-set agents as trusted and don't
-            accept this field from untrusted principals.
+            request for this agent.  Reasoning depth: ``reasoning_effort`` ('low'/'medium'/'high' everywhere; 'xhigh'/'max'
+            on Claude only) is the portable knob — LiteLLM translates it per provider, e.g. on current Claude models into
+            ``thinking: {type: 'adaptive'}`` plus ``output_config: {effort: ...}``.  Provider-native params (Anthropic
+            ``thinking``, ``output_config``) compose with it and take precedence over the translated values when both are
+            set.  Other common shapes: OpenRouter ``extra_body.provider.order`` for provider pinning, raw sampling knobs
+            (``temperature``, ``max_tokens``), ``api_base`` for self-hosted inference.  Validated by LiteLLM / the provider;
+            bad kwargs surface as tool-path errors the model sees.  Security: ``api_base`` redirects the model call — treat
+            operator-set agents as trusted and don't accept this field from untrusted principals.
         window_min (int | Unset):  Default: 50000.
         window_max (int | Unset):  Default: 150000.
         preempt_policy (AgentCreatePreemptPolicy | Unset): Whether a new wake-eligible event (e.g. a user message)

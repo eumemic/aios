@@ -369,7 +369,8 @@ async def test_call_litellm_openai_path_prompt_cache_key_reaches_http_body(
     JSON body, not just in kwargs passed to ``litellm.acompletion``.
 
     The previous fix (PR #556) failed this because top-level kwargs are
-    stripped by litellm 1.83.4 before the OpenAI HTTP request is built;
+    stripped by litellm (verified through 1.91.1) before the OpenAI HTTP
+    request is built;
     ``extra_body`` is the pass-through that the OpenAI Python SDK merges
     into the request JSON.
     """
