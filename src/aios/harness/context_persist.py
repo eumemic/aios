@@ -92,84 +92,87 @@ async def persist_clamped_image_parts(
         _clamp_cache_put,
     )
 
-    async with pool.acquire() as conn:
-        for e in events:
-            if e.kind != "message":
+    for e in events:
+        if e.kind != "message":
+            continue
+        content = e.data.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        pending_logs: list[dict[str, Any]] = []
+        for i, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
                 continue
-            content = e.data.get("content")
-            if not isinstance(content, list):
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
                 continue
-            new_content: list[Any] | None = None
-            for i, part in enumerate(content):
-                if not isinstance(part, dict) or part.get("type") != "image_url":
-                    continue
-                image_url = part.get("image_url")
-                if not isinstance(image_url, dict):
-                    continue
-                url = image_url.get("url")
-                if not isinstance(url, str) or not url.startswith("data:"):
-                    continue
-                head, sep, data_b64 = url.partition(",")
-                if not sep or ";base64" not in head:
-                    continue
-                # Same fit-verdict cache the render pass consults — a hit
-                # here means either a prior render or a prior persist call
-                # already classified this exact part: FITS needs no write,
-                # DEGRADE must never be written.
-                cache_key = _clamp_cache_key(data_b64)
-                cached_verdict = _clamp_cache_get(cache_key)
-                if cached_verdict in (_CLAMP_VERDICT_FITS, _CLAMP_VERDICT_DEGRADE):
-                    continue
-                byte_oversize = (len(data_b64) * 3 // 4) > INLINE_SIZE_CAP_BYTES
-                try:
-                    raw = base64.b64decode(data_b64, validate=True)
-                except Exception:
-                    # Malformed base64 — not this pass's concern (mirrors
-                    # the render pass's stance); leave it for the provider.
-                    continue
-                if not byte_oversize and not is_oversize_image(raw):
-                    _clamp_cache_put(cache_key, _CLAMP_VERDICT_FITS)
-                    continue
-                try:
-                    resized = await asyncio.to_thread(
-                        _blocking_downsample,
-                        raw,
-                        INLINE_SIZE_CAP_BYTES,
-                        INLINE_MAX_DIMENSION,
-                    )
-                except ImageDownsampleError:
-                    _clamp_cache_put(cache_key, _CLAMP_VERDICT_DEGRADE)
-                    continue
-                if resized is None:
-                    # Header check said oversize but the downsample
-                    # disagreed (race on the cap boundary) — nothing to
-                    # persist this round.
-                    continue
-                encoded = base64.b64encode(resized.data).decode("ascii")
-                if new_content is None:
-                    new_content = list(content)
-                old_size = len(data_b64)
-                new_content[i] = {
-                    **part,
-                    "image_url": {
-                        **image_url,
-                        "url": f"data:{resized.content_type};base64,{encoded}",
-                    },
-                }
-                log.info(
-                    "context.image_part_persisted_clamp",
-                    event_id=e.id,
-                    part_idx=i,
-                    old_size=old_size,
-                    new_size=len(encoded),
+            url = image_url.get("url")
+            if not isinstance(url, str) or not url.startswith("data:"):
+                continue
+            head, sep, data_b64 = url.partition(",")
+            if not sep or ";base64" not in head:
+                continue
+            # Same fit-verdict cache the render pass consults — a hit
+            # here means either a prior render or a prior persist call
+            # already classified this exact part: FITS needs no write,
+            # DEGRADE must never be written.
+            cache_key = _clamp_cache_key(data_b64)
+            cached_verdict = _clamp_cache_get(cache_key)
+            if cached_verdict in (_CLAMP_VERDICT_FITS, _CLAMP_VERDICT_DEGRADE):
+                continue
+            byte_oversize = (len(data_b64) * 3 // 4) > INLINE_SIZE_CAP_BYTES
+            try:
+                raw = base64.b64decode(data_b64, validate=True)
+            except Exception:
+                # Malformed base64 — not this pass's concern (mirrors
+                # the render pass's stance); leave it for the provider.
+                continue
+            if not byte_oversize and not is_oversize_image(raw):
+                _clamp_cache_put(cache_key, _CLAMP_VERDICT_FITS)
+                continue
+            try:
+                resized = await asyncio.to_thread(
+                    _blocking_downsample,
+                    raw,
+                    INLINE_SIZE_CAP_BYTES,
+                    INLINE_MAX_DIMENSION,
                 )
-            if new_content is not None:
-                # Copy-on-write: never mutate ``e.data`` (or the original
-                # part dicts) in place — mirrors the render pass's contract
-                # that the source-of-truth event is immutable except
-                # through this single, deliberate self-heal write.
-                new_data = {**e.data, "content": new_content}
-                await queries.replace_event_data(
+            except ImageDownsampleError:
+                _clamp_cache_put(cache_key, _CLAMP_VERDICT_DEGRADE)
+                continue
+            if resized is None:
+                # Header check said oversize but the downsample
+                # disagreed (race on the cap boundary) — nothing to
+                # persist this round.
+                continue
+            encoded = base64.b64encode(resized.data).decode("ascii")
+            if new_content is None:
+                new_content = list(content)
+            old_size = len(data_b64)
+            new_content[i] = {
+                **part,
+                "image_url": {
+                    **image_url,
+                    "url": f"data:{resized.content_type};base64,{encoded}",
+                },
+            }
+            pending_logs.append(
+                {
+                    "event_id": e.id,
+                    "part_idx": i,
+                    "old_size": old_size,
+                    "new_size": len(encoded),
+                }
+            )
+        if new_content is not None:
+            # Acquire only for the UPDATE: decode/downsample can take seconds and
+            # must not occupy a scarce pool connection while running in a thread.
+            new_data = {**e.data, "content": new_content}
+            async with pool.acquire() as conn:
+                updated = await queries.replace_event_data(
                     conn, session_id, e.id, new_data, account_id=account_id
                 )
+            if updated:
                 e.data = new_data
+                for fields in pending_logs:
+                    log.info("context.image_part_persisted_clamp", **fields)

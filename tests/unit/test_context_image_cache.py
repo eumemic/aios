@@ -5,6 +5,7 @@ fit-verdict cache (B), persist-once (C), and the loop-thread offload (D).
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 from datetime import UTC, datetime
 from pathlib import Path
@@ -318,6 +319,14 @@ class TestClampFitVerdictCache:
         assert full_decode_calls["n"] == 0
         assert is_oversize_calls["n"] == 0
 
+    def test_clamp_key_uses_stable_blake2b_digest(self) -> None:
+        data_b64 = "same-length-payload"
+        length, digest = _clamp_cache_key(data_b64)
+
+        assert length == len(data_b64)
+        assert digest == hashlib.blake2b(data_b64.encode("ascii"), digest_size=16).digest()
+        assert isinstance(digest, bytes)
+
     def test_degrade_cached(self, monkeypatch: pytest.MonkeyPatch) -> None:
         url, _raw = _big_png_data_url()
         events = [*_preceding_events(), _tool_event_with_image(url)]
@@ -424,8 +433,9 @@ class TestPersistClampedImageParts:
 
         async def fake_replace(
             conn_arg: Any, session_id: str, event_id: str, data: Any, *, account_id: str
-        ) -> None:
+        ) -> bool:
             update_calls.append({"event_id": event_id, "data": data, "account_id": account_id})
+            return True
 
         monkeypatch.setattr(
             "aios.db.queries.replace_event_data", AsyncMock(side_effect=fake_replace)

@@ -34,6 +34,7 @@ event in the window still renders.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import threading
@@ -148,20 +149,22 @@ def _clear_attachment_cache() -> None:
 # ``_clamp_oversize_image_data_urls`` full-``base64.b64decode``s EVERY
 # persisted ``image_url`` data-url part on every build to check whether it
 # needs downsampling. This LRU memoizes the FITS/DEGRADE verdict keyed on
-# ``(len(data_b64), hash(data_b64))`` so steady state is a dict lookup, not
-# a decode + Pillow header parse.
+# ``(len(data_b64), blake2b-128(data_b64))`` so steady state is a dict lookup,
+# not a decode + Pillow header parse. The stable cryptographic digest avoids
+# sticky false verdicts from same-length collisions in Python's 64-bit hash.
 _CLAMP_VERDICT_FITS = "FITS"
 _CLAMP_VERDICT_DEGRADE = "DEGRADE"
 _CLAMP_CACHE_LOCK = threading.Lock()
-_CLAMP_CACHE: OrderedDict[tuple[int, int], str] = OrderedDict()
+_CLAMP_CACHE: OrderedDict[tuple[int, bytes], str] = OrderedDict()
 _CLAMP_CACHE_MAX_ENTRIES = 8192
 
 
-def _clamp_cache_key(data_b64: str) -> tuple[int, int]:
-    return (len(data_b64), hash(data_b64))
+def _clamp_cache_key(data_b64: str) -> tuple[int, bytes]:
+    digest = hashlib.blake2b(data_b64.encode("ascii"), digest_size=16).digest()
+    return (len(data_b64), digest)
 
 
-def _clamp_cache_get(key: tuple[int, int]) -> str | None:
+def _clamp_cache_get(key: tuple[int, bytes]) -> str | None:
     with _CLAMP_CACHE_LOCK:
         value = _CLAMP_CACHE.get(key)
         if value is not None:
@@ -169,7 +172,7 @@ def _clamp_cache_get(key: tuple[int, int]) -> str | None:
         return value
 
 
-def _clamp_cache_put(key: tuple[int, int], value: str) -> None:
+def _clamp_cache_put(key: tuple[int, bytes], value: str) -> None:
     with _CLAMP_CACHE_LOCK:
         _CLAMP_CACHE[key] = value
         _CLAMP_CACHE.move_to_end(key)
