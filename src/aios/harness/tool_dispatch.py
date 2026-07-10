@@ -46,6 +46,11 @@ from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
+from aios.tools.workflow_completion import (
+    ERROR_TOOL_NAME,
+    RETURN_TOOL_NAME,
+    closed_request_stop_message,
+)
 
 if TYPE_CHECKING:
     from aios.services.tasks import ServicerKind
@@ -256,6 +261,30 @@ def _unoffered_tool_message(name: str, offered_names: list[str]) -> str:
     )
 
 
+async def _rejection_message(session_id: str, tc: _ToolCall, offered_names: list[str]) -> str:
+    """The model-visible rejection wording for one unoffered tool call.
+
+    ``return``/``error`` are de-offered once the request that opened them has
+    closed (#1773) — so a de-offered ``return`` answering a genuinely-closed request
+    must get defect-1's eval-validated "already answered … end your turn" stop
+    (#1789 the gate: route the validated framing to the de-offered path). But those
+    names are ALSO unoffered for an ordinary session that never owned a request, so a
+    hallucinated ``return``/``error`` there must NOT be told the factual falsehood that
+    its request was already answered. The distinction is made from durable request state,
+    NOT the tool name: :func:`closed_request_stop_message` resolves the call's
+    ``request_id`` exactly as the ``return``/``error`` handler does, and only a real
+    closed request yields the closed-request stop. Absent one (pure name hallucination),
+    the generic unoffered-tool rejection stands.
+    """
+    if tc.name in {RETURN_TOOL_NAME, ERROR_TOOL_NAME}:
+        parsed = parse_arguments(tc.raw_args)
+        request_id = parsed.get("request_id") if parsed else None
+        stop_message = await closed_request_stop_message(session_id, request_id)
+        if stop_message is not None:
+            return stop_message
+    return _unoffered_tool_message(tc.name, offered_names)
+
+
 def reject_unoffered_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -289,7 +318,7 @@ def reject_unoffered_tool_calls(
             account_id=account_id,
             log_prefix="tool_reject",
         ) as tc:
-            raise ToolBail(_unoffered_tool_message(tc.name, offered_names))
+            raise ToolBail(await _rejection_message(session_id, tc, offered_names))
         # _append_tool_result_event is only reachable via the ToolBail branch inside
         # _tool_lifecycle's except clause above — no success path exists here.
 
