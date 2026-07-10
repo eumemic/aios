@@ -2047,7 +2047,7 @@ async def replace_event_data(
     data: dict[str, Any],
     *,
     account_id: str,
-) -> None:
+) -> bool:
     """Overwrite ``events.data`` for a single row (issue #1745 Part C).
 
     The ONLY in-place event mutation in the codebase — every other write
@@ -2061,18 +2061,17 @@ async def replace_event_data(
     monotonicity holds — only the JSONB payload changes, and only to bytes
     that are byte-equal to what the in-memory clamp pass already produces.
 
-    Account-scoping mirrors :func:`get_event`. Silently no-ops if the row
-    doesn't match (id/session/account mismatch) — same posture as an
-    ``UPDATE`` affecting zero rows; the caller logs the affected-row count
-    if it cares.
+    Account-scoping mirrors :func:`get_event`. Returns whether one row was
+    updated; a mismatched id/session/account returns ``False``.
     """
-    await conn.execute(
+    status = await conn.execute(
         "UPDATE events SET data = $1::jsonb WHERE id = $2 AND session_id = $3 AND account_id = $4",
         json.dumps(data),
         event_id,
         session_id,
         account_id,
     )
+    return bool(status == "UPDATE 1")
 
 
 async def get_session_event_stats(
