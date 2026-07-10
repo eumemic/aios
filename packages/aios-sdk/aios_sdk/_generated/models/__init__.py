@@ -69,6 +69,9 @@ from .event_kind import EventKind
 from .external_event_source import ExternalEventSource
 from .file_upload_response import FileUploadResponse
 from .gate_resume import GateResume
+from .get_calibration_telemetry_response_get_calibration_telemetry import (
+    GetCalibrationTelemetryResponseGetCalibrationTelemetry,
+)
 from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
@@ -409,6 +412,7 @@ __all__ = (
     "ExternalEventSource",
     "FileUploadResponse",
     "GateResume",
+    "GetCalibrationTelemetryResponseGetCalibrationTelemetry",
     "GetHealthResponseGetHealth",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",

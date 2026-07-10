@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from aios import __version__
+from aios.db.queries.events import calibration_telemetry
 
 router = APIRouter()
 
@@ -40,6 +41,14 @@ async def health() -> dict[str, str]:
         "version": __version__,
         "source_commit": os.environ.get("SOURCE_COMMIT") or "unknown",
     }
+
+
+@router.get("/telemetry/calibration", operation_id="get_calibration_telemetry")
+async def calibration(request: Request) -> dict[str, object]:
+    """On-demand calibration observability for models active in the last 24h."""
+    async with request.app.state.pool.acquire() as conn:
+        models = await calibration_telemetry(conn)
+    return {"models": models, "window_hours": 24}
 
 
 @router.get("/ready", operation_id="get_ready")

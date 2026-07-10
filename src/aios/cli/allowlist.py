@@ -70,6 +70,10 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "its typed capability descriptor at startup; operators don't hand-write it."
     ),
     # ── Infra/orchestrator probe ─────────────────────────────────────
+    "get_calibration_telemetry": (
+        "Machine-polled observability endpoint consumed by the off-substrate ops-agent; "
+        "not an interactive operator workflow."
+    ),
     "get_ready": (
         "Readiness probe (SELECT 1 under a short timeout) consumed by the "
         "Docker/compose healthcheck and load balancers, not operators. "
