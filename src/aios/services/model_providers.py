@@ -172,9 +172,19 @@ async def _resolve_provider_auth(
     no-row lookup at this boundary: :func:`_check_provider_auth_conflict`
     treats every ``None`` identically (see its docstring for why a bare
     "nothing to check" pass here would reopen the guard's central bypass).
+
+    ``litellm_extra["custom_llm_provider"]`` is call-supplied and untyped
+    (a ``dict[str, Any]`` — on the workflow path it's a script-computed
+    value with no schema). ``_derive_provider`` is ``@cache``d, which
+    requires hashable args; passing through a non-``str`` value (e.g. a
+    list) would raise ``TypeError: unhashable type`` on lookup rather than
+    resolving to "unresolvable", so it's only forwarded when it's actually
+    a ``str`` — anything else is treated the same as absent.
     """
     custom_llm_provider = (litellm_extra or {}).get("custom_llm_provider")
-    provider = _derive_provider(model, custom_llm_provider if custom_llm_provider else None)
+    provider = _derive_provider(
+        model, custom_llm_provider if isinstance(custom_llm_provider, str) else None
+    )
     if provider is None:
         return None
     async with pool.acquire() as conn:

@@ -212,14 +212,33 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     # launch_call_llm_task/_run_call_llm_task. resolve_provider_auth_or_conflict
     # fuses resolution with the conflict check on `params`'s redirect (if any) so
     # the two can never run out of order or independently at this call site.
+    #
+    # Wrapped in try/except: unlike the session-step call site (bounded by
+    # harness/loop.py's own harness_error retry ladder), a raise here on the
+    # workflow lane has no outer handler — invoke_call_llm's whole contract is
+    # "errors resolve as values, never a run-terminal raise" (docstring above),
+    # and _run_call_llm_task has no except around this call. A PERSISTENT raise
+    # (e.g. a corrupt/key-mismatched ciphertext row raising CryptoDecryptError)
+    # would otherwise kill the fire-and-forget task with no signal; the periodic
+    # sweep then re-wakes the run, the step re-dispatches, and the same raise
+    # repeats forever — a silent infinite re-dispatch loop, the exact quiet-wedge
+    # class this codebase's error-as-value convention exists to foreclose. A
+    # transient cause (a DB blip) self-heals identically to any other guard's
+    # recoverable error: the script sees ``{"error": ...}`` and can retry.
     pool = runtime.require_pool()
-    auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
-        pool,
-        runtime.require_crypto_box(),
-        account_id=run.account_id,
-        model=model,
-        litellm_extra=params,
-    )
+    try:
+        auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
+            pool,
+            runtime.require_crypto_box(),
+            account_id=run.account_id,
+            model=model,
+            litellm_extra=params,
+        )
+    except Exception as exc:
+        log.warning(
+            "call_llm.provider_auth_guard_error", run_id=run.id, model=model, error=str(exc)
+        )
+        return {"error": f"call_llm failed to resolve provider auth: {exc}"}, 0
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
 

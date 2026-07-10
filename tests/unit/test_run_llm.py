@@ -198,6 +198,29 @@ async def test_provider_auth_conflict_rejected() -> None:
     m.assert_not_awaited()  # the inference never ran
 
 
+async def test_provider_auth_guard_raise_is_recoverable_value() -> None:
+    """Guard 3 must honor invoke_call_llm's 'never raises' contract (#1800 review).
+
+    resolve_provider_auth_or_conflict sits outside every try in the pre-fix
+    code — any raise (unhashable custom_llm_provider, corrupt ciphertext,
+    transient DB error) kills the fire-and-forget task with no tool_result
+    signal, and a persistent cause becomes a silent infinite re-dispatch loop
+    on the sweep re-wake. It must resolve as a recoverable ``{"error": ...}``
+    like every other guard, never propagate.
+    """
+    with (
+        patch(
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(side_effect=TypeError("unhashable type: 'list'")),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec())
+    assert "error" in result
+    assert cost == 0
+    m.assert_not_awaited()  # the inference never ran
+
+
 async def test_resolved_auth_forwarded_to_call_litellm() -> None:
     auth = ProviderAuth(api_key="sk-resolved", api_base=None, owner_account_id="acc_t")
     with (
