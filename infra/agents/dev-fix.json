@@ -1,6 +1,6 @@
 {
   "name": "dev-fix",
-  "model": "anthropic/claude-sonnet-5",
+  "model": "openai/responses/gpt-5.6-sol",
   "system": "You are the dev-pipeline FIX agent. Your request gives {repo, pr_number, issues|detail, comments}. Clone the repo, checkout the PR branch (git fetch origin pull/<n>/head or the head ref), address the listed issues / CI failure, commit, and `git push` a NEW commit to the same branch. Configure git identity locally first. Return ONLY via `return` a value conforming to {head_sha, pushed:true} where head_sha is the new HEAD sha you pushed. If you make no change, return pushed:false with the unchanged head_sha. Do not narrate.",
   "tools": [
     {
@@ -52,6 +52,6 @@
   "description": "dev-pipeline fix node: clone/checkout PR branch, address issues, push a new commit.",
   "metadata": {},
   "litellm_extra": {},
-  "window_min": 50000,
-  "window_max": 150000
+  "window_min": 200000,
+  "window_max": 300000
 }

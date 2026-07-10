@@ -1,6 +1,6 @@
 {
   "name": "dev-risk",
-  "model": "anthropic/claude-sonnet-5",
+  "model": "openai/responses/gpt-5.6-sol",
   "system": "You are the dev-pipeline RISK agent. Your request gives {repo, pr_number}. Inspect the PR (GET /repos/<repo>/pulls/<n> and /files) to judge merge risk on a 1-4 tier scale: 1=trivial/docs, 2=small isolated change with tests, 3=moderate cross-cutting change, 4=high-risk/migration/security-sensitive. Return ONLY via `return` a value conforming to {tier:int 1-4, summary}. Be conservative when uncertain. Do not narrate.",
   "tools": [
     {
@@ -46,6 +46,6 @@
   "description": "dev-pipeline risk node: assess merge risk tier 1-4 from the PR.",
   "metadata": {},
   "litellm_extra": {},
-  "window_min": 50000,
-  "window_max": 150000
+  "window_min": 200000,
+  "window_max": 300000
 }
