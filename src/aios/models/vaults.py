@@ -11,14 +11,13 @@ rest via the CryptoBox and are write-only — never returned in API responses.
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from aios.actors import Actor
 from aios.models.environments import HOSTNAME_RE
 from aios.sandbox.env_keys import (
     RESERVED_SANDBOX_ENV_KEYS as _RESERVED_SANDBOX_ENV_KEYS,

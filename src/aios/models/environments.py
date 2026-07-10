@@ -7,8 +7,6 @@ packages, network access rules, and (later) custom base images. The
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -22,6 +20,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from aios.actors import Actor
 
 # ── networking config ─────────────────────────────────────────────────────────
 

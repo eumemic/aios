@@ -12,10 +12,9 @@ from datetime import datetime
 from typing import Any, NamedTuple, NoReturn
 
 import asyncpg
-
-from aios.actors import actor_from_row
 from pydantic import TypeAdapter
 
+from aios.actors import actor_from_row
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _escape_like,

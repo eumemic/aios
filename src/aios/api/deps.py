@@ -14,8 +14,8 @@ from fastapi import Depends, Header, Request
 from procrastinate import App as ProcrastinateApp
 from structlog.contextvars import bind_contextvars
 
-from aios.crypto.vault import CryptoBox
 from aios.actors import set_api_actor
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import UnauthorizedError
 from aios.services import accounts as accounts_service

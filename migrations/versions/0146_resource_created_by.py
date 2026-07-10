@@ -3,6 +3,7 @@
 Revision ID: 0146
 Revises: 0145
 """
+
 from alembic import op
 
 revision = "0146"
@@ -11,8 +12,15 @@ branch_labels = None
 depends_on = None
 
 _TABLES = (
-    "agents", "workflows", "skills", "sessions", "vaults",
-    "vault_credentials", "environments", "connections", "triggers",
+    "agents",
+    "workflows",
+    "skills",
+    "sessions",
+    "vaults",
+    "vault_credentials",
+    "environments",
+    "connections",
+    "triggers",
 )
 
 

@@ -8,8 +8,6 @@ the full history. The ``model`` field is a free-form LiteLLM model string
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 import re
 from collections.abc import Iterable
 from datetime import datetime
@@ -17,6 +15,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aios.actors import Actor
 from aios.models.skills import AgentSkillRef
 from aios.retirements.registry import tolerated_rename_map
 from aios.retirements.telemetry import record_tolerance_hit

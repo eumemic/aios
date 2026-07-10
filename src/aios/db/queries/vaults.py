@@ -14,10 +14,8 @@ from typing import Any, NamedTuple, cast
 
 import asyncpg
 
-from aios.actors import actor_from_row
-
+from aios.actors import actor_columns, actor_from_row
 from aios.crypto.vault import EncryptedBlob
-from aios.actors import actor_columns
 from aios.db.queries import (
     _build_set_assignments,
     _get_scoped,

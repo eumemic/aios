@@ -12,10 +12,7 @@ from typing import Any
 
 import asyncpg
 
-from aios.actors import actor_from_row
-
-from aios.actors import actor_columns
-
+from aios.actors import actor_columns, actor_from_row
 from aios.db.queries import (
     _archive_scoped,
     _get_scoped,

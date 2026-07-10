@@ -1,4 +1,5 @@
 """Trusted caller provenance propagated through request/job task contexts."""
+
 from __future__ import annotations
 
 import contextvars
@@ -15,7 +16,9 @@ class Actor(BaseModel):
     session_id: str | None = None
 
 
-_current: contextvars.ContextVar[Actor | None] = contextvars.ContextVar("current_actor", default=None)
+_current: contextvars.ContextVar[Actor | None] = contextvars.ContextVar(
+    "current_actor", default=None
+)
 
 
 def set_api_actor(key_id: str) -> None:

@@ -9,14 +9,13 @@ shape.
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aios.actors import Actor
 from aios.models.events import Event
 from aios.models.github_repositories import (
     MAX_REPOS_PER_SESSION,

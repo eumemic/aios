@@ -16,7 +16,6 @@ from typing import Any
 import asyncpg
 
 from aios.actors import actor_columns, actor_from_row
-
 from aios.db import queries
 from aios.db.queries import (
     _archive_scoped,

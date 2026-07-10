@@ -12,11 +12,11 @@ full history including file content.
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from aios.actors import Actor
 
 # ── Agent skill reference ──────────────────────────────────────────────────
 

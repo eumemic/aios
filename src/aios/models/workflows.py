@@ -14,13 +14,12 @@ reuse the read views directly, the way ``Agent``/``Session`` do.
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aios.actors import Actor
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,

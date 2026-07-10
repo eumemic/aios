@@ -24,13 +24,12 @@ connection).
 
 from __future__ import annotations
 
-from aios.actors import Actor
-
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.actors import Actor
 from aios.models.inbound_policy import DenyAll, InboundPolicy
 
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
