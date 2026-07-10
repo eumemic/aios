@@ -43,6 +43,9 @@ FULFILLED_KINDS: frozenset[str] = frozenset(
         "child_errored",
         "spend_cap_exceeded",
         "provider_auth_conflict",
+        # the session errored its OWN turn: its context didn't fit and it
+        # exhausted the shrink-on-retry ladder (#1792) — servicer's own erroring
+        "context_overflow",
         # run-side script/host failures (HostErrorKind + step dispatch arms): the
         # run answers its caller via its own terminal record
         "author_exception",
