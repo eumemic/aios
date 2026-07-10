@@ -159,7 +159,7 @@ def _unit_no_session_cancel_harvest() -> Iterator[None]:
     with mock.patch(
         "aios.services.sessions.harvest_session_cancel_markers",
         new_callable=AsyncMock,
-        return_value=False,
+        return_value=None,
     ):
         yield
 
