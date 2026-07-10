@@ -1,7 +1,26 @@
 """Session-scoped tool-call, span, lifecycle, and schema-help search views.
 
-Revision ID: 0144
-Revises: 0143
+Four new relations for the ``search_events`` allowlist (#1844):
+
+* ``tool_calls_search`` — one row per emitted tool call WITH its paired
+  result, session-scoped via ``current_setting('app.session_id', true)``.
+* ``spans_search`` — one row per span event, cost-redacted (no model name,
+  no ``model_usage`` / ``local_tokens`` / ``cost_usd`` — the migration-0022
+  fence), session-scoped.
+* ``lifecycle_search`` — kind-ALLOWLISTED lifecycle events, no raw JSONB
+  column (``detail_text`` is the payload MINUS the redacted keys),
+  session-scoped.
+* ``search_views_help`` — the agent-facing schema catalog: one row per
+  (relation, column) of every allowlisted relation INCLUDING ITSELF, plus
+  ``__``-prefixed idiom/example rows whose ``example_sql`` is executable
+  against a seeded DB in CI
+  (``tests/integration/test_migrations_0144_search_views.py``).
+
+Scope contract: the three data views are session-scoped by a real
+``session_id = current_setting('app.session_id', true)`` predicate.
+``search_views_help`` is the ONE documented static carve-in — see the
+comment on its CREATE below and the explicit carve-in in
+``tests/unit/test_search_events_allowlist_drift.py``.
 """
 
 from __future__ import annotations
@@ -49,11 +68,25 @@ def upgrade() -> None:
     WHERE a.session_id=current_setting('app.session_id', true)
       AND a.kind='message' AND a.role='assistant' AND a.data ? 'tool_calls'
     """)
-    op.execute("""
+    # The linking id on ``*_end`` span rows follows the writer convention
+    # ``<prefix>_start_id`` (``tool_execute_start_id``, ``step_start_id``,
+    # ``model_request_start_id``, ``sweep_start_id``, plain ``start_id``, …) —
+    # there is NO literal ``start_event_id`` payload key.  Derive it
+    # generically from the first (only) key matching the convention so new
+    # span kinds keep linking without a view migration; the seeded-row
+    # derivation test in ``tests/integration/test_migrations_0144_search_views.py``
+    # keeps this honest (an always-NULL derivation fails it).
+    start_id = (
+        "(SELECT kv.value FROM jsonb_each_text(data) AS kv"
+        " WHERE kv.key = 'start_id' OR kv.key LIKE '%\\_start\\_id'"
+        " ORDER BY kv.key LIMIT 1)"
+    )
+    op.execute(f"""
     CREATE VIEW spans_search AS
     SELECT id AS event_id, seq, created_at, data->>'event' AS span_kind,
       focal_channel_at_arrival AS focal_channel, data->>'tool_call_id' AS tool_call_id,
-      data->>'tool_name' AS tool_name, data->>'start_event_id' AS start_event_id,
+      data->>'tool_name' AS tool_name,
+      {start_id} AS start_event_id,
       CASE WHEN data ? 'is_error' THEN (data->>'is_error')::boolean END AS is_error
     FROM events WHERE session_id=current_setting('app.session_id', true) AND kind='span'
     """)
@@ -106,7 +139,11 @@ def upgrade() -> None:
             ("focal_channel", "text", "channel at arrival"),
             ("tool_call_id", "text", "call join key"),
             ("tool_name", "text", "payload tool name"),
-            ("start_event_id", "text", "end-to-start link"),
+            (
+                "start_event_id",
+                "text",
+                "on *_end rows, event_id of the paired *_start row; NULL on start rows",
+            ),
             ("is_error", "boolean", "payload failure flag"),
         ],
         "lifecycle_search": [
@@ -122,6 +159,20 @@ def upgrade() -> None:
             ("detail_text", "text", "redacted payload, capped at 8 KiB"),
             ("detail_len", "integer", "full redacted byte length"),
         ],
+        # The help view describes ITSELF too: the invariant is every column of
+        # every allowlisted relation — search_views_help included — has a help
+        # row (enforced by the set-equality completeness test).
+        "search_views_help": [
+            ("relation_name", "text", "allowlisted relation the row documents"),
+            (
+                "column_name",
+                "text",
+                "column name; __-prefixed rows are idioms/examples, not columns",
+            ),
+            ("data_type", "text", "postgres type, or 'example'/'note' for idiom rows"),
+            ("semantics", "text", "meaning, units, and gotchas"),
+            ("example_sql", "text", "runnable query for idiom rows; empty for column rows"),
+        ],
     }
     rows = []
     for relation, cols in columns.items():
@@ -133,13 +184,35 @@ def upgrade() -> None:
                 )
                 + ")"
             )
+    # Idiom/example rows. Every example is SELF-CONTAINED: cursors and seq
+    # windows are derived from the data itself (subselects), never hard-coded
+    # literals, so each one runs — and returns rows — against any session that
+    # has the relevant events. CI executes every example_sql below against a
+    # seeded DB and asserts non-error AND non-empty
+    # (``tests/integration/test_migrations_0144_search_views.py``).
     rows += [
-        "('tool_calls_search','__example__','example','keyset pagination','SELECT * FROM tool_calls_search WHERE (seq,call_ordinal) > (100,2) ORDER BY seq,call_ordinal LIMIT 50')",
-        "('spans_search','__example__','example','windowed non-CTE duration join','SELECT e.seq, e.created_at-s.created_at AS duration FROM spans_search e JOIN spans_search s ON s.event_id=e.start_event_id WHERE e.seq BETWEEN 100 AND 200')",
-        "('events_search','__example__','example','channel address forms drift; suffix match','SELECT * FROM events_search WHERE channel LIKE ''%/12345'' ORDER BY seq DESC LIMIT 20')",
-        "('tool_calls_search','__cast_guard__','example','only cast complete JSON arguments','SELECT CASE WHEN args_len <= 16384 THEN arguments_text::jsonb END FROM tool_calls_search')",
-        "('lifecycle_search','__scope__','note','request edges are logged by the servicer session','SELECT * FROM lifecycle_search ORDER BY seq DESC LIMIT 50')",
+        "('tool_calls_search','__example__','example','keyset pagination: page by (seq,call_ordinal) — sibling calls share one seq, so a seq-only cursor skips or duplicates rows; resume strictly after the last cursor row you saw (derived here from the data itself)','SELECT * FROM tool_calls_search WHERE (seq, call_ordinal) > (SELECT seq, call_ordinal FROM tool_calls_search ORDER BY seq, call_ordinal LIMIT 1) ORDER BY seq, call_ordinal LIMIT 50')",
+        "('spans_search','__example__','example','windowed non-CTE duration self-join: *_end rows point at their start row via start_event_id; keep a seq window on the outer row so the partial span index stays in play (window derived here from the data itself)','SELECT e.seq, e.span_kind, e.created_at - s.created_at AS duration FROM spans_search e JOIN spans_search s ON s.event_id = e.start_event_id WHERE e.seq BETWEEN (SELECT min(seq) FROM spans_search) AND (SELECT max(seq) FROM spans_search) ORDER BY e.seq LIMIT 50')",
+        "('events_search','__example__','example','channel address forms drift between writers; match on the stable /<chat_id> suffix','SELECT * FROM events_search WHERE channel LIKE ''%/12345'' ORDER BY seq DESC LIMIT 20')",
+        "('tool_calls_search','__cast_guard__','example','only cast complete JSON arguments: arguments_text is cell-capped at 16 KiB, so guard the cast on args_len','SELECT CASE WHEN args_len <= 16384 THEN arguments_text::jsonb END AS args FROM tool_calls_search LIMIT 50')",
+        "('lifecycle_search','__scope__','note','request edges are logged by the SERVICER session: this view enumerates self-goals and inbound-serviced requests; a caller''s outbound asks live on the callee','SELECT * FROM lifecycle_search ORDER BY seq DESC LIMIT 50')",
     ]
+    # DOCUMENTED CARVE-IN (allowlist scope contract): search_views_help is the
+    # one allowlisted relation WITHOUT per-session row scoping — deliberately.
+    # It reads NO tables (a pure VALUES list: static schema documentation, zero
+    # tenant data), so there is nothing to scope; every session sees the same
+    # catalog, exactly like information_schema. The
+    # ``current_setting('app.session_id', true) IS NOT NULL`` predicate is NOT
+    # scoping — it is a fail-closed gate so the view returns nothing on a
+    # connection where the search_events GUC discipline is absent (any
+    # non-tool code path that never ran set_config). Enforced three ways in
+    # ``tests/integration/test_migrations_0144_search_views.py``: the view
+    # depends on zero tables (information_schema.view_table_usage is empty),
+    # returns zero rows with the GUC unset, and returns byte-identical rows
+    # for two different sessions. The unit drift guard
+    # (``tests/unit/test_search_events_allowlist_drift.py``) carries the
+    # matching explicit carve-in rather than accepting this predicate as
+    # session scoping.
     op.execute(
         "CREATE VIEW search_views_help AS SELECT * FROM (VALUES "
         + ",".join(rows)
