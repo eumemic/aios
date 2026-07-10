@@ -639,6 +639,16 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum zero-lease lifetime for ephemeral sessions.",
     )
+    invariant_sweep_dry_run: bool = Field(
+        default=True,
+        description="Keep C5 invariant reconciliation measurement-only until its cohort is reviewed.",
+    )
+    invariant_sweep_interval_seconds: int = Field(
+        default=10 * 60,
+        ge=5 * 60,
+        le=15 * 60,
+        description="Low-cadence interval for the edge-owned-lifetime invariant sweep.",
+    )
     workflow_agent_deadline_seconds: float = Field(
         default=60 * 60,  # 1 hour
         gt=0,

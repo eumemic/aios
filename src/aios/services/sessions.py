@@ -1594,15 +1594,21 @@ async def seed_outbound_cancel_conn(
     return seeded
 
 
+class CancelMarkerHarvest(NamedTuple):
+    """Phase-A decision carried to the step-final Phase B."""
+
+    teardown: bool
+
+
 async def harvest_session_cancel_markers(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
-) -> bool:
+) -> CancelMarkerHarvest | None:
     """The session-side cancel **leaf** — answer each unharvested cancel-marker's request with
-    ``outcome=cancelled`` and harvest the marker, atomically (cancel-design §4/§6).
+    ``outcome=cancelled`` and classify whether teardown is required (C2 Phase A).
 
     Run as a pre-inference harvest in the session's own step (the session is the single writer
     of its own log, under its own procrastinate lock — the supervision-tree invariant). Returns
-    ``True`` iff at least one marker was applied, so the step skips inference this turn: the
+    a decision iff at least one marker was applied, so the step skips inference this turn: the
     cancelled request needs no model work. Answering via :func:`respond_to_request_conn` closes
     the open set AND latches first-writer-wins, so a late ``return(R)`` no-ops; the caller is
     woken (run / session) so it re-resolves ``cancelled`` promptly.
@@ -1625,10 +1631,9 @@ async def harvest_session_cancel_markers(
     child is a first-writer-wins no-op (no outcome corruption). The precise per-edge
     ``attributed_to`` reclaim (§7) is a later slice.
 
-    Minimal cut: the owned-session teardown (request-scoped interrupt + drain + archive +
-    sandbox release, §4/C1) and the §9 quiescence counter are deferred residuals — the cancelled
-    request's in-flight tool tasks run to completion and the session lingers idle-but-answered.
-    The caller has already learned ``cancelled`` and the subtree is marked.
+    Markers remain unharvested until the step-final Phase B archives a teardown target (or
+    consumes a non-teardown marker set). Thus a worker crash after this transaction causes the
+    C2 sweep to re-drive this idempotent phase rather than stranding a half-applied cascade.
     """
 
     wakes: list[RequestResponseWrite] = []
@@ -1636,7 +1641,7 @@ async def harvest_session_cancel_markers(
     async with pool.acquire() as conn, conn.transaction():
         markers = await queries.list_unharvested_session_cancel_markers(conn, session_id)
         if not markers:
-            return False
+            return None
         revocation_context = False
         for marker in markers:
             write = await respond_to_request_conn(
@@ -1660,18 +1665,18 @@ async def harvest_session_cancel_markers(
                 )
                 if isinstance(closed, Err) and closed.error.get("kind") in REVOCATION_KINDS:
                     revocation_context = True
-            await queries.mark_session_cancel_marker_harvested(
-                conn, session_id=session_id, request_id=marker.request_id
-            )
+        # Markers deliberately remain unharvested in Phase A. Phase B consumes them
+        # only after step_end, making a worker death in this gap safely re-drivable.
         # §2.3 propagation gate: fires only when this node is itself tearing down —
         # revocation-context ∧ zero surviving open inbound ∧ owned. A purely-fulfilled
         # marker set never propagates; ownership is the creation edge or the ephemeral
         # flag (never bare parent_run_id, never any-inbound-edge EXISTS).
-        if (
+        teardown = (
             revocation_context
             and not await queries.get_open_request_ids(conn, session_id, account_id=account_id)
             and await _session_owned(conn, session_id, account_id=account_id)
-        ):
+        )
+        if teardown:
             propagated = await seed_outbound_cancel_conn(
                 conn, caller_kind="session", caller_id=session_id, account_id=account_id
             )
@@ -1689,7 +1694,47 @@ async def harvest_session_cancel_markers(
             await defer_run_wake(child.id, batch=True)
         elif child.request_id is not None:
             await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
-    return True
+    return CancelMarkerHarvest(teardown=teardown)
+
+
+async def finalize_session_cancel_markers(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, teardown: bool
+) -> bool:
+    """Phase B: under the session lock, archive a still-leaf node and harvest markers.
+
+    A racing inbound awaited edge aborts teardown and leaves markers untouched so the
+    durable sweep re-drives Phase A after that edge closes. Non-teardown (fulfilled or
+    self-owned) leaves merely consume their markers. Returns whether archival won.
+    """
+    archived = False
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT archived_at FROM sessions WHERE id=$1 AND account_id=$2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        if row is None:
+            return False
+        if teardown:
+            if await queries.get_open_request_ids(conn, session_id, account_id=account_id):
+                return False
+            if row["archived_at"] is None:
+                await conn.execute(
+                    "UPDATE sessions SET archived_at=now(), updated_at=now() "
+                    "WHERE id=$1 AND account_id=$2 AND archived_at IS NULL",
+                    session_id,
+                    account_id,
+                )
+                archived = True
+        for marker in await queries.list_unharvested_session_cancel_markers(conn, session_id):
+            await queries.mark_session_cancel_marker_harvested(
+                conn, session_id=session_id, request_id=marker.request_id
+            )
+    if archived:
+        await pool.execute(
+            "SELECT pg_notify($1, $2)", f"events_{session_id}", EVENTS_ARCHIVED_NOTIFY
+        )
+    return archived
 
 
 class AssistantAppendResult(NamedTuple):
@@ -2168,48 +2213,87 @@ async def increment_usage(
         )
 
 
-async def archive_session(
-    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, idempotent: bool = False
-) -> Session:
-    # Archiving a workflow child that still owes its agent() response is a
-    # COMPLETION: fail its open requests through write_child_response (error
-    # child_gone) FIRST — before the archived_at flip, because append_event is
-    # fenced by ``archived_at IS NULL`` and raises NotFoundError on an archived
-    # row — so the child_gone response + its child_done signal commit atomically
-    # with the archive. The run is then sweep-visible within a tick (#904) instead
-    # of waiting out the 1h agent deadline. Enrich vault_ids / resources / triggers
-    # so the API response shape matches GET /sessions/{id}; the lists are read
-    # post-update to surface any concurrent mutation that committed before archive.
-    propagated: list[queries.ChildNode] = []
-    async with pool.acquire() as conn, conn.transaction():
-        propagated = await seed_outbound_cancel_conn(
-            conn, caller_kind="session", caller_id=session_id, account_id=account_id
-        )
-        parent_run_id = await fail_open_child_requests_conn(
-            conn, session_id, account_id=account_id, error={"kind": "child_gone"}
-        )
-        session = await queries.archive_session(
-            conn, session_id, account_id=account_id, idempotent=idempotent
-        )
-        session = await _enrich_session(conn, session, account_id=account_id)
-    # Wake any consumer LISTENing on this session's events channel (#906): the
-    # await primitive, the long-poll /wait endpoint, the SSE /stream. Archival
-    # appends no event of its own (it only flips ``archived_at``, and
-    # ``append_event`` is fenced by ``archived_at IS NULL``), so without this
-    # poke a mid-flight listener sits until its own timeout. Fired AFTER the
-    # transaction commits — the NOTIFY-after-commit invariant (a subscriber
-    # must never see a payload for state that isn't yet committed); the bare
-    # ``EVENTS_ARCHIVED_NOTIFY`` sentinel is neither an ``evt_`` id nor a
-    # ``{"delta": …}`` payload, so each consumer recognizes it on its own terms.
+class _ArchiveCommit(NamedTuple):
+    """The archived session plus the post-commit wakes its transaction defers to
+    the caller (fired only AFTER commit — see :func:`archive_session_post_commit`)."""
+
+    session: Session
+    parent_run_id: str | None
+    propagated: list[queries.ChildNode]
+
+
+async def archive_session_conn(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, idempotent: bool = False
+) -> _ArchiveCommit:
+    """Transactional core of :func:`archive_session`, run on the CALLER's already-open
+    transaction so a caller that has ALREADY taken the session ``FOR UPDATE`` row lock
+    archives ATOMICALLY under that lock.
+
+    The C5 invariant sweep is the motivating caller
+    (:func:`aios.harness.invariant_sweep.sweep_session_invariants`): it locks the row,
+    re-validates that the selected reclaim clause STILL holds, and then archives here in
+    the same transaction — closing the select-then-archive TOCTOU (a new awaited inbound
+    edge racing in between selection and archival) without a second connection. Returns
+    the post-commit wakes for the caller to fire via :func:`archive_session_post_commit`.
+
+    Archiving a workflow child that still owes its agent() response is a COMPLETION: fail
+    its open requests through write_child_response (error child_gone) FIRST — before the
+    archived_at flip, because append_event is fenced by ``archived_at IS NULL`` and raises
+    NotFoundError on an archived row — so the child_gone response + its child_done signal
+    commit atomically with the archive. The run is then sweep-visible within a tick (#904)
+    instead of waiting out the 1h agent deadline. Enrich vault_ids / resources / triggers
+    so the API response shape matches GET /sessions/{id}; the lists are read post-update to
+    surface any concurrent mutation that committed before archive.
+    """
+    propagated = await seed_outbound_cancel_conn(
+        conn, caller_kind="session", caller_id=session_id, account_id=account_id
+    )
+    parent_run_id = await fail_open_child_requests_conn(
+        conn, session_id, account_id=account_id, error={"kind": "child_gone"}
+    )
+    session = await queries.archive_session(
+        conn, session_id, account_id=account_id, idempotent=idempotent
+    )
+    session = await _enrich_session(conn, session, account_id=account_id)
+    return _ArchiveCommit(session, parent_run_id, propagated)
+
+
+async def archive_session_post_commit(
+    pool: asyncpg.Pool[Any], session_id: str, commit: _ArchiveCommit, *, account_id: str
+) -> None:
+    """Fire an archive's post-commit wakes/notify — AFTER its transaction commits.
+
+    Shared by the public :func:`archive_session` and the C5 sweep's under-lock
+    actuation so both surface archival identically.
+
+    Wakes any consumer LISTENing on this session's events channel (#906): the await
+    primitive, the long-poll /wait endpoint, the SSE /stream. Archival appends no event of
+    its own (it only flips ``archived_at``, and ``append_event`` is fenced by
+    ``archived_at IS NULL``), so without this poke a mid-flight listener sits until its own
+    timeout. Fired AFTER the transaction commits — the NOTIFY-after-commit invariant (a
+    subscriber must never see a payload for state that isn't yet committed); the bare
+    ``EVENTS_ARCHIVED_NOTIFY`` sentinel is neither an ``evt_`` id nor a ``{"delta": …}``
+    payload, so each consumer recognizes it on its own terms.
+    """
     await pool.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", EVENTS_ARCHIVED_NOTIFY)
-    if parent_run_id is not None:
-        await defer_run_wake(parent_run_id, batch=True)
-    for child in propagated:
+    if commit.parent_run_id is not None:
+        await defer_run_wake(commit.parent_run_id, batch=True)
+    for child in commit.propagated:
         if child.kind == "run":
             await defer_run_wake(child.id, batch=True)
         else:
             await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
-    return session
+
+
+async def archive_session(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str, idempotent: bool = False
+) -> Session:
+    async with pool.acquire() as conn, conn.transaction():
+        commit = await archive_session_conn(
+            conn, session_id, account_id=account_id, idempotent=idempotent
+        )
+    await archive_session_post_commit(pool, session_id, commit, account_id=account_id)
+    return commit.session
 
 
 async def clone_session(

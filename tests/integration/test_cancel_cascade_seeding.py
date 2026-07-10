@@ -298,11 +298,20 @@ async def test_engine_semantics_terminal_seeds_marker_in_same_transaction(
     # the prompt wake reached the marked child
     assert child_id in {c.args[1] for c in step_wake.await_args_list}
 
-    # the child's own leaf harvests the marker: the already-closed edge classifies
-    # REVOKED (engine_semantics_changed ∈ REVOCATION_KINDS) — the leaf applies it
-    # (returns True) and the marker is consumed.
-    assert await sessions_service.harvest_session_cancel_markers(
+    # The child's Phase A classifies the already-closed edge as REVOKED
+    # (engine_semantics_changed ∈ REVOCATION_KINDS). The marker remains durable
+    # until the step-final Phase B archives the owned child and consumes it.
+    decision = await sessions_service.harvest_session_cancel_markers(
         pool, child_id, account_id=_ACCOUNT
+    )
+    assert decision is not None and decision.teardown
+    async with pool.acquire() as conn:
+        marker = await db_queries.get_session_cancel_marker(
+            conn, session_id=child_id, request_id="ask_es"
+        )
+        assert marker is not None and marker.harvested_at is None
+    assert await sessions_service.finalize_session_cancel_markers(
+        pool, child_id, account_id=_ACCOUNT, teardown=True
     )
     async with pool.acquire() as conn:
         marker = await db_queries.get_session_cancel_marker(

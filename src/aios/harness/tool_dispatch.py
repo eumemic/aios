@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from aios.errors import AiosError
+from aios.errors import AiosError, NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
@@ -200,6 +200,19 @@ async def _tool_lifecycle(
         await _append_tool_result(
             pool, session_id, call_id, name, account_id=account_id, error="cancelled"
         )
+    except NotFoundError as err:
+        # Distinguish a normal tool-level 404 from append_event's archived fence.
+        # Only the latter is dropped; live-session NotFoundError remains a model-
+        # visible refusal under the ordinary classifier contract.
+        if await sessions_service.load_live_session_account_id(pool, session_id) is None:
+            bound_log.info("tool.result_dropped_archived")
+            return
+        tc.is_error = True
+        _evict, message, detail = _classify_tool_error(err)
+        bound_log.info(f"{log_prefix}.refused", error=message)
+        await _append_tool_result(
+            pool, session_id, call_id, name, account_id=account_id, error=message, detail=detail
+        )
     except (Exception, BaseExceptionGroup) as err:
         # Broadened to include ``BaseExceptionGroup`` (#1698 final backstop): a
         # group whose non-Exception leaf (e.g. anyio's ``[HTTPError,
@@ -223,21 +236,25 @@ async def _tool_lifecycle(
             pool, session_id, call_id, name, account_id=account_id, error=message, detail=detail
         )
     finally:
-        if span_start is not None:
-            await sessions_service.append_event(
-                pool,
-                session_id,
-                "span",
-                {
-                    "event": "tool_execute_end",
-                    "tool_execute_start_id": span_start.id,
-                    "tool_call_id": call_id,
-                    "tool_name": name,
-                    "is_error": tc.is_error,
-                },
-                account_id=account_id,
-            )
-        await _trigger_sweep(pool, session_id, account_id=account_id)
+        try:
+            if span_start is not None:
+                await sessions_service.append_event(
+                    pool,
+                    session_id,
+                    "span",
+                    {
+                        "event": "tool_execute_end",
+                        "tool_execute_start_id": span_start.id,
+                        "tool_call_id": call_id,
+                        "tool_name": name,
+                        "is_error": tc.is_error,
+                    },
+                    account_id=account_id,
+                )
+            await _trigger_sweep(pool, session_id, account_id=account_id)
+        except NotFoundError:
+            # The archive can race either the result append or this span/sweep tail.
+            bound_log.info("tool.result_dropped_archived")
 
 
 def _unoffered_tool_message(name: str, offered_names: list[str]) -> str:

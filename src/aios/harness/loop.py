@@ -318,6 +318,7 @@ class _StepResult(NamedTuple):
     autoerror_caller_run_id: str | None = None
     autoerror_caller_session_ids: tuple[str, ...] = ()
     archive_when_idle: bool = False
+    cancel_teardown: bool | None = None
 
 
 async def _list_session_github_repo_echoes(
@@ -725,6 +726,19 @@ async def run_session_step(
                 pool, caller_session_id, cause="invoke_response", account_id=account_id
             )
 
+        # C2 Phase B is step-final: step_end and all wake spans are durable before
+        # archived_at flips. None means no Phase A ran; False consumes fulfilled /
+        # self-owned markers without archiving.
+        if result.cancel_teardown is not None:
+            archived = await sessions_service.finalize_session_cancel_markers(
+                pool,
+                session_id,
+                account_id=account_id,
+                teardown=result.cancel_teardown,
+            )
+            if archived:
+                log.info("step.session_cancelled_archived", session_id=session_id)
+
         # Archive-on-quiescence, performed LAST: a session launched ``archive_when_idle``
         # self-archives the first time it goes idle. It runs after ``step_end`` and every
         # wake span so it is the step's final session write — once archived, ``append_event``
@@ -859,11 +873,12 @@ async def _run_session_step_body(
     # inference this turn — the cancelled request needs no model work. The C2 sweep clause
     # is what put a marked session into ``needs`` above, so this only runs when there's an
     # exit to apply; once harvested it no longer re-wakes (no hot-loop).
-    if await sessions_service.harvest_session_cancel_markers(
+    cancel_harvest = await sessions_service.harvest_session_cancel_markers(
         pool, session_id, account_id=account_id
-    ):
+    )
+    if cancel_harvest is not None:
         log.info("step.cancel_harvested", session_id=session_id)
-        return _StepResult()
+        return _StepResult(cancel_teardown=cancel_harvest.teardown)
 
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
 
