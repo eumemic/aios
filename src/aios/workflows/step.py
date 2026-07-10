@@ -56,6 +56,7 @@ from aios.services.sessions import (
     AskNewSession,
     create_child_session,
     fail_open_child_requests_conn,
+    seed_outbound_cancel_conn,
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
@@ -237,13 +238,18 @@ async def _resolve_agent_call(
     if now - started_at < deadline:
         return None  # pending, within deadline
     with contextlib.suppress(NotFoundError):
-        await db_queries.write_response_if_absent(
-            conn,
-            child_id,
-            account_id=account_id,
-            request_id=request_id,
-            outcome=Err(error={"kind": "timeout"}),
-        )
+        async with conn.transaction():
+            wrote = await db_queries.write_response_if_absent(
+                conn,
+                child_id,
+                account_id=account_id,
+                request_id=request_id,
+                outcome=Err(error={"kind": "timeout"}),
+            )
+            if wrote and get_settings().cancel_cascade_enabled:
+                await db_queries.insert_session_cancel_marker(
+                    conn, session_id=child_id, request_id=request_id, account_id=account_id
+                )
     resolved = await db_queries.derive_response(
         conn, child_id, account_id=account_id, request_id=request_id
     )
@@ -1442,20 +1448,45 @@ async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any 
 
 async def _fail_child_requests_for_terminal_error(
     conn: asyncpg.Connection[Any], run: WfRun, *, error_kind: str
-) -> None:
+) -> list[str]:
+    """Close each live child's open requests with ``error_kind`` AND seed the cancel
+    marker those closures would otherwise orphan (event-path parity, spec §5).
+
+    This runs BEFORE ``seed_outbound_cancel_conn``'s open-edge enumeration in the same
+    terminal transaction, so the edges it closes are invisible to the C1 seeder — each
+    child must get its cancel-marker HERE, in the SAME transaction, or the
+    ``engine_semantics_changed`` / ``nondeterministic_replay`` cohort never runs its
+    lifecycle leaf until the durable sweep (the backstop silently becoming the primary
+    path). The marker is the wake carrier only; the child's own leaf classifies the
+    already-written ``error_kind`` (∈ ``REVOCATION_KINDS``) under its own lock. Returns
+    the marked session ids so the post-commit loop can prompt each child's leaf.
+    """
+    marked: list[str] = []
     rows = await conn.fetch(
         "SELECT id FROM sessions "
         "WHERE parent_run_id = $1 AND account_id = $2 AND archived_at IS NULL",
         run.id,
         run.account_id,
     )
+    cascade_enabled = get_settings().cancel_cascade_enabled
     for row in rows:
+        # Snapshot the open set BEFORE the closures — these are exactly the requests
+        # ``fail_open_child_requests_conn`` answers (same conn, same transaction).
+        open_ids = await db_queries.get_open_request_ids(conn, row["id"], account_id=run.account_id)
         await fail_open_child_requests_conn(
             conn,
             row["id"],
             account_id=run.account_id,
             error={"kind": error_kind},
         )
+        if not cascade_enabled or not open_ids:
+            continue
+        for request_id in open_ids:
+            await db_queries.insert_session_cancel_marker(
+                conn, session_id=row["id"], request_id=request_id, account_id=run.account_id
+            )
+        marked.append(row["id"])
+    return marked
 
 
 async def _commit_terminal_and_dispatch(
@@ -1480,6 +1511,8 @@ async def _commit_terminal_and_dispatch(
     rows the periodic sweep re-defers; never a silently dropped event fire.
     """
     fires: list[db_queries.TriggerFireRef] = []
+    cascade_children: list[db_queries.ChildNode] = []
+    terminal_marked: list[str] = []
     # The CALLER run to answer, or None — a run servicing a RUN caller (single-sourced so
     # the durable signal-write and the prompt wake below can never desync on the gate).
     run_caller_id = (
@@ -1499,7 +1532,9 @@ async def _commit_terminal_and_dispatch(
         if status == "errored" and (error := payload.get("error")) is not None:
             kind = error.get("kind")
             if kind in {"engine_semantics_changed", "nondeterministic_replay"}:
-                await _fail_child_requests_for_terminal_error(conn, run, error_kind=kind)
+                terminal_marked = await _fail_child_requests_for_terminal_error(
+                    conn, run, error_kind=kind
+                )
         # A run in service of a request answers via its terminal record itself (#1126):
         # the ``run_completed`` bookend (above) + the ``status`` flip (below) ARE the
         # answer, read back by ``derive_run_response``. No separate ``request_response``
@@ -1508,6 +1543,13 @@ async def _commit_terminal_and_dispatch(
         # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
+        )
+        cascade_children = (
+            await seed_outbound_cancel_conn(
+                conn, caller_kind="run", caller_id=run.id, account_id=run.account_id
+            )
+            if inserted is not None
+            else []
         )
         # Durable run-caller wake (C4/C5): a run answering a RUN caller writes a
         # ``child_done`` signal into the CALLER's signal side-table (never its journal —
@@ -1545,6 +1587,22 @@ async def _commit_terminal_and_dispatch(
     if inserted is not None and run_caller_id is not None:
         with contextlib.suppress(Exception):
             await defer_run_wake(run_caller_id, batch=True)
+    # Prompt each seeded child to run its cancel leaf now instead of waiting out the
+    # durable backstops (the C2 marker sweep / the run cancel-signal sweep clause).
+    # Session children use the same pool/deferred-wake plumbing ``archive_session``
+    # rides after its own outbound pass; the worker's runtime pool is always set here
+    # (``run_workflow_step`` required it at step entry).
+    for child in cascade_children:
+        if child.kind == "run":
+            await defer_run_wake(child.id, batch=True)
+        else:
+            await defer_wake(
+                runtime.require_pool(), child.id, cause="cancel", account_id=run.account_id
+            )
+    for marked_session_id in terminal_marked:
+        await defer_wake(
+            runtime.require_pool(), marked_session_id, cause="cancel", account_id=run.account_id
+        )
     for fire in fires:
         try:
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)

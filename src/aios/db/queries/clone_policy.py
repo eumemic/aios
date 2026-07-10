@@ -240,7 +240,8 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "last_error_seq": Arm.COPY,
     "last_user_seq": Arm.COPY,
     "last_stimulus_seq": Arm.COPY,
-    "archive_when_idle": Arm.COPY,
+    # A clone is an operator/forensic artifact, not the ephemeral servicer it copies.
+    "archive_when_idle": Arm.RESET_DEFAULT,
     "spec_version": Arm.RESET_DEFAULT,
     "tools": Arm.COPY,
     "mcp_servers": Arm.COPY,

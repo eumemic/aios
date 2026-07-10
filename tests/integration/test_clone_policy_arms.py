@@ -89,11 +89,12 @@ async def test_clone_copies_authority_and_class_mass_and_resets_run_child(
                 workspace_volume_path, env, focal_channel, focal_locked, account_id,
                 last_event_seq, input_tokens, output_tokens, cost_microusd,
                 parent_run_id, origin, surface_frozen, model, litellm_extra,
-                tools, mcp_servers, http_servers, snapshot_ref, outbound_suppression)
+                tools, mcp_servers, http_servers, snapshot_ref, outbound_suppression,
+                archive_when_idle)
             VALUES ($1, $2, $3, 1, 't', '{}'::jsonb, '/w/p', '{}'::jsonb, 'tg/c1',
                 TRUE, $4, 2, 100, 50, 4242, 'run_p', 'background', TRUE,
                 'anthropic/claude', '{"api_base":"x"}'::jsonb, '[]'::jsonb, '[]'::jsonb,
-                '[]'::jsonb, 'snap_p', 'on')
+                '[]'::jsonb, 'snap_p', 'on', TRUE)
             """,
             parent,
             agent_id,
@@ -136,6 +137,10 @@ async def test_clone_copies_authority_and_class_mass_and_resets_run_child(
         # run-lineage arms — RESET (no phantom run-child membership)
         assert srow["parent_run_id"] is None
         assert srow["origin"] == "foreground"
+
+        # cascade-immunity arm (#1152 §6(m)) — RESET: a forensic clone of an ephemeral
+        # servicer is an operator artifact, never flag-owned by the cancel cascade
+        assert srow["archive_when_idle"] is False
 
         # usage arms — RESET (paid on the parent)
         assert srow["input_tokens"] == 0

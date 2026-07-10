@@ -605,6 +605,20 @@ class Settings(BaseSettings):
         "single run's standing agent() fan-out. The re-drive uses the existing "
         "child-completion re-wake — no new machinery.",
     )
+    cancel_cascade_enabled: bool = Field(
+        default=True,
+        description="Kill switch for seeding edge-owned lifetime cancellation carriers.",
+    )
+    api_lease_deadline_seconds: float = Field(
+        default=6 * 60 * 60,
+        gt=0,
+        description="Dry-run API lease abandonment horizon (separate from workflow deadlines).",
+    )
+    lease_ceiling_seconds: float = Field(
+        default=60 * 60,
+        gt=0,
+        description="Maximum zero-lease lifetime for ephemeral sessions.",
+    )
     workflow_agent_deadline_seconds: float = Field(
         default=60 * 60,  # 1 hour
         gt=0,
