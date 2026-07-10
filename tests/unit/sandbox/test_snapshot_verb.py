@@ -58,7 +58,11 @@ class _FakeDocker:
         if sub == "stop":
             return 0, b"cid\n", b""
         if sub == "inspect" and "--size" in argv:
-            out = f"{self.parent_image}\t{self.size_rw}\t{json.dumps(self.container_labels)}"
+            # The budgeted writable-layer size-walk: `{{.SizeRw}}` only.
+            return 0, f"{self.size_rw}".encode(), b""
+        if sub == "inspect":
+            # The cheap metadata probe: `{{.Image}}\t{{json .Config.Labels}}`.
+            out = f"{self.parent_image}\t{json.dumps(self.container_labels)}"
             return 0, out.encode(), b""
         if sub == "image" and len(argv) > 2 and argv[2] == "inspect":
             ref = argv[-1]
@@ -235,6 +239,42 @@ class TestSnapshotTimeoutBudget:
             timeout for argv, timeout in fake_docker.cli_timeouts if argv[1] == "commit"
         )
         assert commit_timeout == 240.0
+
+    @pytest.mark.asyncio
+    async def test_inspect_size_walk_gets_generous_timeout(self, fake_docker: _FakeDocker) -> None:
+        """The ``docker inspect --size`` writable-layer walk must NOT run on the
+        blanket 30s CLI bound. ``--size`` stat-walks the corpse's RW layer, so a
+        large corpse would time out here before commit is even reached — the one
+        size-scaling call #1838 left unbudgeted — wedging salvage (the breaker's
+        half-open re-probe then re-hits the same 30s wall forever).
+        """
+        fake_docker.size_rw = 12_000_000_000  # large, slow-to-walk corpse
+        await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        size_walk_timeout = next(
+            t for argv, t in fake_docker.cli_timeouts if argv[1] == "inspect" and "--size" in argv
+        )
+        assert size_walk_timeout == get_settings().sandbox_inspect_size_timeout_seconds
+
+    @pytest.mark.asyncio
+    async def test_inspect_metadata_stays_on_blanket_timeout(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """The cheap metadata inspect (parent image + labels, no ``--size``) is a
+        management call and stays on the blanket bound — only the data-walking
+        ``--size`` probe is budgeted. This is the split that makes the module
+        comment's 'metadata on the blanket bound, data-walk budgeted' literally true.
+        """
+        await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        meta_timeout = next(
+            t
+            for argv, t in fake_docker.cli_timeouts
+            if argv[1] == "inspect" and "--size" not in argv
+        )
+        assert meta_timeout == 30.0
 
 
 class TestFlattenTriggers:

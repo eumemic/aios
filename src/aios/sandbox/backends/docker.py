@@ -76,7 +76,9 @@ _FLATTEN_DEPTH_CEILING = 200
 
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
 # metadata/management calls on the blanket Docker CLI bound, but budget the
-# data-moving commit/export/import work by SizeRw so large corpses converge.
+# data-scaling work so large corpses converge: commit/export/import by SizeRw,
+# and the ``inspect --size`` writable-layer walk (whose size is not yet known)
+# by the fixed ``sandbox_inspect_size_timeout_seconds`` bound.
 _SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
 _SNAPSHOT_TIMEOUT_NS_PER_BYTE = 20e-9
 
@@ -845,25 +847,51 @@ class DockerBackend:
     ) -> tuple[str, int | None, dict[str, str]]:
         """Return ``(parent_image_id, size_rw, labels)`` for a container.
 
-        ``size_rw`` is ``None`` only when the daemon reports an unparseable
-        value — the snapshot path then declines the empty short-circuit
-        (commit rather than risk losing data).
+        Split into two calls, each on the bound its cost warrants. The parent
+        image and labels (needed for the lineage gate) are cheap metadata on the
+        blanket ``DOCKER_CLI_TIMEOUT_S``; the writable-layer size is a separate
+        ``--size`` stat-walk that scales with the corpse, so it gets the generous
+        ``sandbox_inspect_size_timeout_seconds`` bound (see
+        :meth:`_inspect_container_size_rw`). Folding ``--size`` into a single
+        blanket-bounded call was the one size-scaling step #1838 left on the 30s
+        CLI timeout, so a large corpse timed out here before commit and wedged
+        salvage (the breaker's half-open re-probe then re-hit the same wall).
         """
-        fmt = "{{.Image}}\t{{.SizeRw}}\t{{json .Config.Labels}}"
+        meta_fmt = "{{.Image}}\t{{json .Config.Labels}}"
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-            ["docker", "inspect", "--size", "--format", fmt, sandbox_id]
+            ["docker", "inspect", "--format", meta_fmt, sandbox_id]
         )
         if rc != 0:
             raise SandboxBackendError(
                 f"docker inspect (container) failed (exit {rc}) for {sandbox_id[:12]}: "
                 f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
             )
-        parts = stdout_bytes.decode("utf-8").rstrip("\n").split("\t", 2)
+        parts = stdout_bytes.decode("utf-8").rstrip("\n").split("\t", 1)
         parent_image = parts[0].strip()
-        raw_rw = parts[1].strip() if len(parts) > 1 else ""
-        size_rw = int(raw_rw) if raw_rw.isdigit() else None
-        labels = _parse_json_labels(parts[2]) if len(parts) > 2 else {}
+        labels = _parse_json_labels(parts[1]) if len(parts) > 1 else {}
+        size_rw = await self._inspect_container_size_rw(sandbox_id)
         return parent_image, size_rw, labels
+
+    async def _inspect_container_size_rw(self, sandbox_id: str) -> int | None:
+        """Return the container's writable-layer bytes (``.SizeRw``), or ``None``
+        when the daemon reports an unparseable value — the snapshot path then
+        declines the empty short-circuit (commit rather than risk losing data).
+
+        The ``--size`` walk is budgeted by ``sandbox_inspect_size_timeout_seconds``
+        rather than the blanket CLI bound; see :meth:`_inspect_container_for_snapshot`
+        for why.
+        """
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+            ["docker", "inspect", "--size", "--format", "{{.SizeRw}}", sandbox_id],
+            timeout_s=get_settings().sandbox_inspect_size_timeout_seconds,
+        )
+        if rc != 0:
+            raise SandboxBackendError(
+                f"docker inspect --size failed (exit {rc}) for {sandbox_id[:12]}: "
+                f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+            )
+        raw_rw = stdout_bytes.decode("utf-8").strip()
+        return int(raw_rw) if raw_rw.isdigit() else None
 
     async def _inspect_image_fields(self, ref: str) -> tuple[str, int, int, dict[str, str]] | None:
         """Return ``(image_id, size_bytes, layer_depth, labels)`` or ``None`` if absent.

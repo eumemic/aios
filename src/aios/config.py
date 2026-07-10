@@ -208,6 +208,13 @@ class Settings(BaseSettings):
         gt=0,
         description="Absolute backstop for a Docker flatten pipeline.",
     )
+    sandbox_inspect_size_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="Timeout for the ``docker inspect --size`` writable-layer "
+        "walk during salvage; it scales with the corpse, so it gets this "
+        "generous bound rather than the blanket ``DOCKER_CLI_TIMEOUT_S``.",
+    )
     sandbox_salvage_breaker_threshold: int = Field(
         default=3,
         ge=1,
