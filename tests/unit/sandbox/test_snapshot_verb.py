@@ -356,14 +356,19 @@ class TestFlattenDiskGate:
         assert not fake_docker.pipelines, "a deferred flatten must never start the pipeline"
 
     @pytest.mark.asyncio
-    async def test_over_5gb_flattens_via_progress_pipeline(
-        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("size_rw", [6_000_000_000, 200_000_000_000])
+    async def test_large_corpse_flatten_deadlines_are_size_independent(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch, size_rw: int
     ) -> None:
-        """A >5 GB writable layer — arithmetically impossible for the retired
-        size-scaled timeout — flattens through the pipeline with the
-        config-driven stall + absolute deadlines (independent of size)."""
-        fake_docker.size_rw = 6_000_000_000  # 6 GB
-        _set_free_disk(monkeypatch, 100 * 1024**3)  # 100 GiB — well over required
+        """The layer that USED to compute the timeout (``DockerBackend.snapshot``)
+        must no longer derive it from size. A >5 GB corpse — and a 200 GB one —
+        both flatten with the SAME config-driven stall/absolute deadlines; the
+        retired ``floor + bytes*ns_per_byte`` formula is gone, so there is no
+        size-scaled kill for a large corpse (the arithmetic that bricked
+        salvage). Byte-stream relay through the real pump is proven separately
+        in ``test_subprocess.py`` (large-progressing-stream test)."""
+        fake_docker.size_rw = size_rw
+        _set_free_disk(monkeypatch, 2 * 1024**5)  # 2 PiB — over required for any size here
         out = await DockerBackend().snapshot(
             "cid",
             "tag:latest",
@@ -371,9 +376,10 @@ class TestFlattenDiskGate:
             flatten_if_unique_bytes_over=4 * 1024 * 1024 * 1024,
         )
         assert out.kind == "flattened"
-        assert fake_docker.pipelines, "the >5 GB corpse must flatten via the pipeline"
+        assert fake_docker.pipelines, "a large corpse must flatten via the pipeline"
         settings = get_settings()
-        # Progress-based deadlines, NOT a per-byte size-scaled timeout.
+        # Deadlines are the CONSTANT config values, identical across the 6 GB and
+        # 200 GB cases — i.e. not derived from size (the killed regression).
         assert fake_docker.pipeline_timeouts == [
             (settings.sandbox_pipeline_stall_seconds, settings.sandbox_pipeline_max_seconds)
         ]

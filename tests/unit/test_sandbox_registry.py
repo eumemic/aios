@@ -1502,7 +1502,8 @@ class TestSalvageBreaker:
 
         with pytest.raises(SandboxBackendError):
             await registry._salvage_session_corpses(session_id)
-        assert registry._salvage_failures[ref.sandbox_id][0] == 1
+        # value = (owning_session_id, failures, alarmed)
+        assert registry._salvage_failures[ref.sandbox_id] == (session_id, 1, False)
 
         # A subsequent SUCCESSFUL salvage clears the counter and removes the corpse.
         backend.snapshot_raises = False
@@ -1587,3 +1588,39 @@ class TestSalvageBreaker:
         assert call.kwargs["content"] == "salvage breaker OPEN"
         assert call.kwargs["cause"] == "sandbox.salvage_breaker_open"
         assert call.kwargs["account_id"] == "acct_x"
+
+    async def test_pass_for_one_session_does_not_reset_another_sessions_breaker(self) -> None:
+        """A salvage pass for session A must NOT clear session B's open-breaker
+        state. ``list_managed`` is session-filtered, so the stale-counter GC must
+        be scoped to the CURRENT session's entries; otherwise A's pass GCs B's
+        entry (B's corpse isn't in A's present set), B retries the expensive
+        flatten and re-emits its 'one-shot' alert — the breaker is defeated in
+        normal multi-session operation."""
+        backend = FakeBackend()
+        corpse_a = self._corpse_ref("sess_A", sandbox_id="corpseAAAAAAAAAA")
+        corpse_b = self._corpse_ref("sess_B", sandbox_id="corpseBBBBBBBBBB")
+        backend.managed = [corpse_a, corpse_b]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        registry._alert_operator = AsyncMock()  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+
+        # Drive session B's corpse to an OPEN breaker.
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses("sess_B")
+        assert registry._salvage_failures[corpse_b.sandbox_id] == ("sess_B", threshold, True)
+
+        # A salvage pass for session A (its own corpse also fails) must leave
+        # B's entry fully intact — this is the fail-before/pass-after.
+        with pytest.raises(SandboxBackendError, match="failed"):
+            await registry._salvage_session_corpses("sess_A")
+        assert corpse_b.sandbox_id in registry._salvage_failures
+        assert registry._salvage_failures[corpse_b.sandbox_id] == ("sess_B", threshold, True)
+
+        # B's breaker is still OPEN: a fresh B pass is suppressed (no new
+        # snapshot attempt, no re-alert) rather than retrying the flatten.
+        snaps_before = self._snapshot_count(backend)
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses("sess_B")
+        assert self._snapshot_count(backend) == snaps_before

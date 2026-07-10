@@ -232,9 +232,13 @@ class SandboxRegistry:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
-        # Consecutive failures keyed by full corpse id; value also records
-        # whether the one-shot operator alarm has been emitted.
-        self._salvage_failures: dict[str, tuple[int, bool]] = {}
+        # Consecutive salvage failures keyed by full corpse id. The value is
+        # ``(owning_session_id, failures, alarmed)`` — the owning session is
+        # stored so a salvage pass for one session only reconciles/clears its
+        # OWN entries (``list_managed`` is session-filtered, so a session-A
+        # pass must never GC session-B's open-breaker entry). ``alarmed``
+        # records whether the one-shot operator wake has been emitted.
+        self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
@@ -955,12 +959,19 @@ class SandboxRegistry:
         refs = await self._backend.list_managed(
             instance_id=settings.instance_id, session_id=session_id
         )
+        # GC only THIS session's stale counters. ``present`` is session-local
+        # (``list_managed`` was filtered to ``session_id``), so we must never
+        # reconcile it against other sessions' entries — doing so would clear a
+        # different session's open breaker and let it retry the expensive
+        # flatten and re-emit its "one-shot" alert.
         present = {ref.sandbox_id for ref in refs}
-        for corpse_id in list(self._salvage_failures):
-            if corpse_id not in present:
+        for corpse_id, (owner, _failures, _alarmed) in list(self._salvage_failures.items()):
+            if owner == session_id and corpse_id not in present:
                 self._salvage_failures.pop(corpse_id, None)
         for ref in refs:
-            failures, alarmed = self._salvage_failures.get(ref.sandbox_id, (0, False))
+            _owner, failures, alarmed = self._salvage_failures.get(
+                ref.sandbox_id, (session_id, 0, False)
+            )
             if failures >= settings.sandbox_salvage_breaker_threshold:
                 # Already tripped by a prior attempt — suppress the salvage
                 # retry entirely. Still (re)fire the one-shot alert if a prior
@@ -968,7 +979,7 @@ class SandboxRegistry:
                 alarmed = await self._alarm_salvage_breaker_once(
                     session_id, ref.sandbox_id, failures, alarmed
                 )
-                self._salvage_failures[ref.sandbox_id] = (failures, alarmed)
+                self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
                 raise SandboxBackendError(
                     f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
                     "refusing to provision over unrecovered state"
@@ -984,7 +995,7 @@ class SandboxRegistry:
                     alarmed = await self._alarm_salvage_breaker_once(
                         session_id, ref.sandbox_id, failures, alarmed
                     )
-                self._salvage_failures[ref.sandbox_id] = (failures, alarmed)
+                self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
                 raise SandboxBackendError(
                     f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
                     "failed (snapshot or pointer write); refusing to provision over "

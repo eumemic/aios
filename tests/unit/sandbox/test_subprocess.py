@@ -331,3 +331,59 @@ async def test_pipeline_finalization_bounded_by_absolute_ceiling(
     assert "timed out" in str(excinfo.value)
     assert producer._transport.kill.called
     assert consumer._transport.kill.called
+
+
+async def test_pipeline_relays_large_progressing_stream_without_size_derived_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large corpse that keeps making progress must salvage to completion.
+
+    The retired design put a SINGLE size-derived wall-clock timeout on the whole
+    ``docker export | docker import`` — a corpse whose flatten legitimately ran
+    longer than that estimate was killed, retained, and retried forever (the
+    brick). The progress-based deadlines replace it: as long as bytes keep
+    MOVING within the stall window, an arbitrarily large stream completes,
+    bounded only by the (generous) absolute ceiling.
+
+    This drives the REAL ``run_docker_pipeline`` and relays a substantial stream
+    (256 MiB across 256 chunks) whose aggregate wall-time far exceeds the stall
+    bound — a single stall/size-sized wall-clock cap would have killed it — yet
+    it finishes with every byte relayed."""
+    chunk = b"x" * (1024 * 1024)  # one reused 1 MiB buffer → low resident memory
+    n_chunks = 256
+    remaining = {"n": n_chunks}
+
+    async def _read(_n: int) -> bytes:
+        if remaining["n"] == 0:
+            return b""  # EOF
+        remaining["n"] -= 1
+        await asyncio.sleep(0.002)  # each chunk arrives within the stall window
+        return chunk
+
+    producer = _pipe_proc()
+    producer.stdout.read = _read
+    consumer = _pipe_proc()
+    consumer.stdout.read = AsyncMock(return_value=b"sha256:flattened\n")
+    _spawn_pair(monkeypatch, producer, consumer)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    rc, out, _err = await run_docker_pipeline(
+        ["docker", "export", "big-corpse"],
+        ["docker", "import", "-", "tag"],
+        stall_timeout_s=0.05,  # << aggregate relay time (~0.5s)
+        max_timeout_s=30.0,
+    )
+    elapsed = loop.time() - start
+
+    assert rc == 0
+    assert out == b"sha256:flattened\n"
+    # The full stream was relayed chunk-by-chunk through the real pump.
+    assert consumer.stdin.write.call_count == n_chunks
+    moved = sum(len(call.args[0]) for call in consumer.stdin.write.call_args_list)
+    assert moved == n_chunks * len(chunk)  # 256 MiB relayed end-to-end
+    consumer.stdin.close.assert_called_once()  # write side closed on EOF
+    # Aggregate wall-time outran the per-op stall bound ~10x: a single
+    # size/stall-sized wall-clock cap would have killed this large corpse;
+    # progress-based deadlines let it finish.
+    assert elapsed > 0.05
