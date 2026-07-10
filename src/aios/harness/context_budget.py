@@ -47,7 +47,7 @@ def effective_window_max(
     """
     ceiling = served_ceiling(model)
     if ceiling is None:
-        # Unmapped models keep window_max-only behavior at full budget
+        # Unmapped models retain window_max-only behavior at full budget
         # (shrink_factor == 1.0, today's semantics). But an overflow retry
         # (shrink_factor < 1) MUST still tighten the budget here — otherwise the
         # retry re-sends the identical oversized request and loops verbatim up
