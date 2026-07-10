@@ -22,12 +22,15 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import GITHUB_CLONE_BREAKER_CLEAR_CHANNEL
 from aios.errors import ConflictError, RateLimitedError
+from aios.logging import get_logger
 from aios.models.github_repositories import (
     MAX_REPOS_PER_SESSION,
     GithubRepositoryResource,
     GithubRepositoryResourceEcho,
 )
 from aios.sandbox.github_clone import remove_session_working_tree
+
+log = get_logger("aios.services.github_repositories")
 
 
 async def _notify_clear_clone_breaker(pool: asyncpg.Pool[Any], resource_id: str) -> None:
@@ -225,7 +228,22 @@ async def rotate_token(
             identity=identity,
             account_id=account_id,
         )
-    await _notify_clear_clone_breaker(pool, resource_id)
+    # Best-effort, fire-and-forget (#1720 seat-gate): the token rotation has
+    # already COMMITTED above — a failed advisory NOTIFY (e.g. a transient
+    # connection error on ``pool.execute``) must not turn a SUCCESSFUL rotation
+    # into a 500. If the signal is lost the breaker's own cooldown/half-open
+    # re-probe still picks up the fixed credential (just after the cooldown
+    # instead of immediately). Mirrors the MCP vault-eviction NOTIFY's
+    # fire-and-forget contract.
+    try:
+        await _notify_clear_clone_breaker(pool, resource_id)
+    except Exception:
+        log.warning(
+            "github_repositories.breaker_clear_notify_failed",
+            resource_id=resource_id,
+            session_id=session_id,
+            exc_info=True,
+        )
     return result
 
 

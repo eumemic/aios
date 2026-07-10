@@ -75,3 +75,30 @@ async def test_rotate_token_fires_breaker_clear_notify() -> None:
     assert args[0] == "SELECT pg_notify($1, $2)"
     assert args[1] == GITHUB_CLONE_BREAKER_CLEAR_CHANNEL
     assert args[2] == "ghr_1"
+
+
+async def test_rotate_token_survives_failed_breaker_clear_notify() -> None:
+    """Item 5b (#1720 seat-gate): the rotation UPDATE already committed, so a
+    failed advisory NOTIFY must NOT 500 — rotate_token swallows it and returns
+    the rotated echo. The breaker's own cooldown/half-open re-probe still
+    recovers the fixed credential."""
+    pool = _fake_pool_with_conn()
+    pool.execute = AsyncMock(side_effect=RuntimeError("pg_notify connection reset"))
+    crypto_box = MagicMock()
+    crypto_box.derive_account_subkey = MagicMock(return_value=MagicMock(encrypt=MagicMock()))
+
+    with patch.object(
+        queries, "update_session_github_repo_blob", AsyncMock(return_value=_echo("ghr_1"))
+    ):
+        result = await github_repo_service.rotate_token(
+            pool,
+            crypto_box,
+            account_id="acc_1",
+            session_id="sess_1",
+            resource_id="ghr_1",
+            new_token="new-token",
+        )
+
+    # The rotation succeeded despite the NOTIFY failure.
+    assert result.id == "ghr_1"
+    pool.execute.assert_awaited_once()

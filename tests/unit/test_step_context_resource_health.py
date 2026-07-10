@@ -122,12 +122,39 @@ async def test_healthy_session_has_no_resource_health_block() -> None:
 async def test_degraded_repo_renders_auth_failed_line(monkeypatch: Any) -> None:
     breaker = GithubCloneBreaker()
     for _ in range(_BREAKER_FAILURE_THRESHOLD):
-        breaker.record_failure(_REPO_ID, _REPO_URL, _MOUNT_PATH)
+        breaker.record_failure(
+            _REPO_ID,
+            _REPO_URL,
+            _MOUNT_PATH,
+            auth_failure=True,
+            last_error="Authentication failed",
+        )
     monkeypatch.setattr(runtime, "github_clone_breaker", breaker)
 
     system = await _prelude_system(_agent(), github_repo_echoes=[_repo_echo()])
     assert "━━━ Resource health ━━━" in system
     assert f"repos: {_MOUNT_PATH} AUTH-FAILED since" in system
+
+
+async def test_degraded_repo_transient_renders_clone_failing_not_auth(monkeypatch: Any) -> None:
+    """A transient (non-auth) breaker-open repo renders CLONE-FAILING with the
+    real git cause, never a hardcoded AUTH-FAILED (#1720 seat-gate fix)."""
+    breaker = GithubCloneBreaker()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        breaker.record_failure(
+            _REPO_ID,
+            _REPO_URL,
+            _MOUNT_PATH,
+            auth_failure=False,
+            last_error="git clone timed out after 30.0s",
+        )
+    monkeypatch.setattr(runtime, "github_clone_breaker", breaker)
+
+    system = await _prelude_system(_agent(), github_repo_echoes=[_repo_echo()])
+    assert "━━━ Resource health ━━━" in system
+    assert f"repos: {_MOUNT_PATH} CLONE-FAILING since" in system
+    assert "git clone timed out after 30.0s" in system
+    assert "AUTH-FAILED" not in system
 
 
 async def test_degraded_repo_not_attached_to_this_session_is_not_leaked(monkeypatch: Any) -> None:

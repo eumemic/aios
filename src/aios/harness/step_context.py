@@ -386,16 +386,32 @@ async def compute_step_prelude(
     )
 
 
+_MAX_CLONE_ERROR_CHARS = 200
+
+
+def _summarize_clone_error(message: str) -> str:
+    """Collapse a (token-redacted) git error to a single length-capped line for
+    the prelude health surface — raw git stderr can be multi-line and long,
+    and this renders inline into the always-visible system prompt."""
+    collapsed = " ".join(message.split())
+    if len(collapsed) > _MAX_CLONE_ERROR_CHARS:
+        collapsed = collapsed[: _MAX_CLONE_ERROR_CHARS - 1].rstrip() + "…"
+    return collapsed
+
+
 def _session_degraded_repos(
     github_repo_echoes: list[GithubRepositoryResourceEcho] | None,
-) -> list[tuple[str, str]]:
-    """``(mount_path, since_iso)`` for each attached repo whose clone breaker is open.
+) -> list[tuple[str, str, bool, str]]:
+    """``(mount_path, since_iso, auth_failure, last_error)`` for each attached
+    repo whose clone breaker is open.
 
     Scoped to THIS session's attached echoes so a repo degraded for a
     different session (same worker, different attachment) never leaks into
     this session's prelude. No breaker (API process, or a worker that never
     initialized one) or no attached repos both render nothing — fail-open,
-    matching the breaker's own fail-open default.
+    matching the breaker's own fail-open default. ``auth_failure`` +
+    ``last_error`` carry the real cause so the renderer shows ``AUTH-FAILED``
+    only for a classified auth failure (#1720 seat-gate fix).
     """
     from aios.harness import runtime as harness_runtime
 
@@ -404,12 +420,19 @@ def _session_degraded_repos(
         return []
     attached_ids = {echo.id for echo in github_repo_echoes}
     mount_path_by_id = {echo.id: echo.mount_path for echo in github_repo_echoes}
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, bool, str]] = []
     for degraded in breaker.degraded_repos():
         if degraded.resource_id not in attached_ids:
             continue
         mount_path = mount_path_by_id.get(degraded.resource_id, degraded.mount_path)
-        out.append((mount_path, degraded.since.isoformat()))
+        out.append(
+            (
+                mount_path,
+                degraded.since.isoformat(),
+                degraded.auth_failure,
+                _summarize_clone_error(degraded.last_error),
+            )
+        )
     return out
 
 

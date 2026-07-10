@@ -203,3 +203,54 @@ async def test_cache_clone_uses_cache_timeout_not_session_timeout(
         assert call.kwargs["timeout_s"] == 99.0, (
             f"expected cache budget (99.0) for {call.args[0]!r}, got {call.kwargs['timeout_s']}"
         )
+
+
+class TestAuthFailureClassification:
+    """`GithubCloneError.auth_failure` / `is_auth_failure_message` — auth-shaped
+    (dead/expired token) vs transient (timeout/network/5xx) classification
+    (#1720 seat-gate fix). Auth-shaped is the ONLY class that earns the 1h
+    breaker lockout + the AUTH-FAILED prelude label."""
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "remote: Invalid username or token. Password authentication is not supported",
+            "fatal: Authentication failed for 'https://github.com/acme/foo.git/'",
+            "The requested URL returned error: 403",
+            "The requested URL returned error: 401",
+            "error: RPC failed; HTTP 403 curl 22",
+            "error: RPC failed; HTTP 401",
+            "remote: 403 Forbidden",
+            "401 Unauthorized",
+        ],
+    )
+    def test_auth_shaped_messages_classified_auth(self, stderr: str) -> None:
+        from aios.sandbox.github_clone import is_auth_failure_message
+
+        assert is_auth_failure_message(stderr) is True
+        assert GithubCloneError(f"git clone --reference failed: {stderr}").auth_failure is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "git clone --reference timed out after 30.0s",
+            "fatal: unable to access 'https://github.com/acme/foo.git/': "
+            "Could not resolve host: github.com",
+            "error: RPC failed; HTTP 500 curl 22",
+            "error: RPC failed; HTTP 502",
+            "fatal: the remote end hung up unexpectedly",
+            "clone breaker open; skipping attempt",
+        ],
+    )
+    def test_transient_messages_not_classified_auth(self, stderr: str) -> None:
+        from aios.sandbox.github_clone import is_auth_failure_message
+
+        assert is_auth_failure_message(stderr) is False
+        assert GithubCloneError(stderr).auth_failure is False
+
+    def test_explicit_auth_failure_overrides_message_autoderive(self) -> None:
+        # An explicit verdict wins over the auto-derived one.
+        err = GithubCloneError("some opaque failure", auth_failure=True)
+        assert err.auth_failure is True
+        err2 = GithubCloneError("Authentication failed", auth_failure=False)
+        assert err2.auth_failure is False

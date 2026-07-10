@@ -870,10 +870,18 @@ async def get_context(
         memory_echoes = await _queries.list_session_memory_store_echoes(
             _conn, session_id, account_id=account_id
         )
-        github_repo_echoes = await _queries.list_session_github_repo_echoes(
-            _conn, session_id, account_id=account_id
-        )
 
+    # The resource-health prelude block (#1720) is deliberately NOT threaded
+    # here: it's a projection of the WORKER process's in-memory
+    # ``GithubCloneBreaker`` state, which this API process never initializes.
+    # Passing the repo echoes would make ``compute_step_prelude`` render the
+    # block from a breaker that is always ``None`` here → an unconditional
+    # "healthy" line that silently diverges from the prompt the agent actually
+    # received (a degraded repo would show AUTH-FAILED/CLONE-FAILING in the
+    # worker, healthy here). Rather than ship an observability surface that
+    # lies by omission, the ``/context`` preview omits resource-health
+    # entirely — it is a worker-only surface. Cross-process breaker state is
+    # explicitly out of scope.
     prelude = await compute_step_prelude(
         pool,
         session_id,
@@ -882,7 +890,6 @@ async def get_context(
         agent=agent,
         channels=channels,
         memory_store_echoes=memory_echoes,
-        github_repo_echoes=github_repo_echoes,
     )
     windowed = await service.read_windowed_events(
         pool,

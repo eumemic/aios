@@ -14,9 +14,12 @@ Pins the breaker contract issue #1720 specifies:
 
 from __future__ import annotations
 
+import time
+
 from aios.sandbox.github_clone_breaker import (
+    _BREAKER_AUTH_BACKOFF_S,
     _BREAKER_FAILURE_THRESHOLD,
-    _BREAKER_UNHEALTHY_BACKOFF_S,
+    _BREAKER_TRANSIENT_BACKOFF_S,
     GithubCloneBreaker,
 )
 
@@ -153,8 +156,65 @@ def test_independent_resource_ids_have_independent_breaker_state() -> None:
     assert len(breaker.degraded_repos()) == 1
 
 
-def test_backoff_constant_is_positive_and_threshold_is_at_least_two() -> None:
+def test_backoff_constants_positive_and_threshold_is_at_least_two() -> None:
     # Sanity guard against an accidental K=1 (breaker on first failure,
     # useless for transient blips) or a zero/negative cooldown.
     assert _BREAKER_FAILURE_THRESHOLD >= 2
-    assert _BREAKER_UNHEALTHY_BACKOFF_S > 0
+    assert _BREAKER_AUTH_BACKOFF_S > 0
+    assert _BREAKER_TRANSIENT_BACKOFF_S > 0
+    # A transient blip must re-probe faster than a dead credential, else the
+    # #1720 regression (1h lockout after a recovered outage) returns.
+    assert _BREAKER_TRANSIENT_BACKOFF_S < _BREAKER_AUTH_BACKOFF_S
+
+
+def test_auth_failure_opens_long_cooldown_and_records_cause() -> None:
+    breaker = GithubCloneBreaker()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        breaker.record_failure(_REPO, _URL, auth_failure=True, last_error="Authentication failed")
+    # Auth failures earn the long (1h) cooldown.
+    remaining = breaker._unhealthy_until[_REPO] - time.monotonic()
+    assert remaining > _BREAKER_TRANSIENT_BACKOFF_S
+    assert remaining <= _BREAKER_AUTH_BACKOFF_S + 1.0
+    degraded = breaker.degraded_repos()[0]
+    assert degraded.auth_failure is True
+    assert degraded.last_error == "Authentication failed"
+
+
+def test_transient_failure_opens_short_cooldown_not_the_hour_lockout() -> None:
+    """The seat-gate regression fix: a transient (timeout/network/5xx) failure
+    must NOT sit out the 1h lockout — it gets the short cooldown."""
+    breaker = GithubCloneBreaker()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        breaker.record_failure(
+            _REPO, _URL, auth_failure=False, last_error="git clone timed out after 30.0s"
+        )
+    remaining = breaker._unhealthy_until[_REPO] - time.monotonic()
+    assert remaining <= _BREAKER_TRANSIENT_BACKOFF_S + 1.0
+    degraded = breaker.degraded_repos()[0]
+    assert degraded.auth_failure is False
+    assert degraded.last_error == "git clone timed out after 30.0s"
+
+
+def test_half_open_reopen_refreshes_cause_and_backoff_class() -> None:
+    """A half-open probe that fails for a NEW reason refreshes the recorded
+    cause/backoff-class while keeping the original ``since``."""
+    breaker = GithubCloneBreaker()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        breaker.record_failure(
+            _REPO, _URL, auth_failure=False, last_error="git clone timed out after 30.0s"
+        )
+    original_since = breaker.degraded_repos()[0].since
+    opened_at = breaker._unhealthy_until[_REPO]
+    assert breaker.is_open(_REPO, now=opened_at + 1.0) is False  # enters half-open
+
+    # The probe now fails with an auth error — reopen with the long cooldown.
+    assert (
+        breaker.record_failure(_REPO, _URL, auth_failure=True, last_error="Authentication failed")
+        is False
+    )
+    degraded = breaker.degraded_repos()[0]
+    assert degraded.auth_failure is True
+    assert degraded.last_error == "Authentication failed"
+    assert degraded.since == original_since  # degradation start is preserved
+    remaining = breaker._unhealthy_until[_REPO] - time.monotonic()
+    assert remaining > _BREAKER_TRANSIENT_BACKOFF_S

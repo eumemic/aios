@@ -472,7 +472,11 @@ async def _materialize_github_clones(
     breaker = runtime.github_clone_breaker
     try:
         materialized: list[GithubRepositoryResourceEcho] = []
-        failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError]] = []
+        # (echo, error, breaker_was_open) — ``breaker_was_open`` distinguishes a
+        # per-turn skip (breaker already OPEN) from a real clone attempt that
+        # failed, so the event-append loop can suppress the former's
+        # ``github_clone_failed`` churn (#1720 item 3).
+        failures: list[tuple[GithubRepositoryResourceEcho, GithubCloneError, bool]] = []
         degraded_down_edges: list[GithubRepositoryResourceEcho] = []
         for echo, token in echo_tokens:
             # Circuit breaker (#1720): a repo whose clone has failed
@@ -483,7 +487,9 @@ async def _materialize_github_clones(
             # retries on EVERY step forever (issue #1720's 2,100
             # failures/24h production evidence).
             if breaker is not None and breaker.is_open(echo.id):
-                failures.append((echo, GithubCloneError("clone breaker open; skipping attempt")))
+                failures.append(
+                    (echo, GithubCloneError("clone breaker open; skipping attempt"), True)
+                )
                 continue
             try:
                 cache_dir = await ensure_cache_clone(echo.url, token)
@@ -498,9 +504,13 @@ async def _materialize_github_clones(
                     git_user_email=echo.git_user_email,
                 )
             except GithubCloneError as err:
-                failures.append((echo, err))
+                failures.append((echo, err, False))
                 if breaker is not None and breaker.record_failure(
-                    echo.id, echo.url, echo.mount_path
+                    echo.id,
+                    echo.url,
+                    echo.mount_path,
+                    auth_failure=err.auth_failure,
+                    last_error=str(err),
                 ):
                     degraded_down_edges.append(echo)
                 continue
@@ -511,7 +521,22 @@ async def _materialize_github_clones(
         # Log + append failure events outside the conn block so we don't
         # hold one connection while acquiring a second from the same pool.
         if failures:
-            for failed_echo, failure in failures:
+            for failed_echo, failure, breaker_was_open in failures:
+                if breaker_was_open:
+                    # Breaker already OPEN — we skipped the clone entirely this
+                    # turn. The standing prelude health line + the one-shot
+                    # ``github_clone_degraded`` DOWN edge already carry this
+                    # signal, so appending a ``github_clone_failed`` event every
+                    # step is pure churn (the 2,100-rows/day pathology #1720 set
+                    # out to kill). Demote to a debug log; the ``failures`` /
+                    # ``attempted`` bookkeeping (drift key) stays intact.
+                    log.debug(
+                        "sandbox.github_clone_skipped_breaker_open",
+                        session_id=session_id,
+                        resource_id=failed_echo.id,
+                        repo_url=failed_echo.url,
+                    )
+                    continue
                 log.warning(
                     "sandbox.github_clone_failed",
                     session_id=session_id,

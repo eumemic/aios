@@ -153,6 +153,64 @@ async def test_open_breaker_skips_clone_subprocess() -> None:
     assert {e.id for e in attempted} == {"ghr_dead2"}
 
 
+async def test_open_breaker_does_not_append_clone_failed_event_per_turn() -> None:
+    """Item 3 (#1720): while the breaker is OPEN, the per-turn skip must NOT
+    append a ``github_clone_failed`` event (the 2,100-rows/day churn). The
+    prelude line + the one-shot ``github_clone_degraded`` edge carry the signal.
+    """
+    breaker = GithubCloneBreaker()
+    echo = _make_echo("ghr_open")
+
+    # Drive it OPEN (records the degraded DOWN edge on the K-th failure).
+    open_append = AsyncMock()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        await _run_once(breaker=breaker, echo=echo, append_event_mock=open_append)
+    assert breaker.is_open("ghr_open") is True
+
+    # Now a further turn hits the skip path (is_open True) — fresh mock.
+    skip_append = AsyncMock()
+    mock_proxy = MagicMock()
+    mock_proxy.start = AsyncMock()
+    mock_proxy.stop = AsyncMock()
+    mock_proxy.proxy_url = MagicMock(return_value="http://stub/proxy")
+    with (
+        patch("aios.sandbox.spec.GitProxy", return_value=mock_proxy),
+        patch(
+            "aios.sandbox.spec.queries.list_session_github_repo_echoes",
+            AsyncMock(return_value=[echo]),
+        ),
+        patch(
+            "aios.services.github_repositories.get_session_token",
+            AsyncMock(return_value="ghp_TEST"),
+        ),
+        patch("aios.sandbox.spec.ensure_cache_clone", AsyncMock(return_value=Path("/tmp/cache"))),
+        patch("aios.sandbox.spec.ensure_session_working_tree", AsyncMock()),
+        patch("aios.sandbox.spec.runtime.require_pool", return_value=_make_pool_with_conn()),
+        patch("aios.sandbox.spec.runtime.require_crypto_box", return_value=MagicMock()),
+        patch("aios.sandbox.spec.runtime.github_clone_breaker", breaker),
+        patch("aios.sandbox.spec.sessions_service.append_event", skip_append),
+    ):
+        await _materialize_github_clones("sess_x", account_id="acct_x")
+
+    events = [c.args[3]["event"] for c in skip_append.await_args_list]
+    assert "github_clone_failed" not in events
+
+
+async def test_transient_failure_records_auth_false_and_error_on_breaker() -> None:
+    """The classification (#1720 item 1) is threaded from the error into the
+    breaker: a non-auth ``GithubCloneError`` opens with ``auth_failure=False``
+    and carries the (redacted) message as ``last_error``."""
+    breaker = GithubCloneBreaker()
+    echo = _make_echo("ghr_transient")
+    append = AsyncMock()
+    for _ in range(_BREAKER_FAILURE_THRESHOLD):
+        await _run_once(breaker=breaker, echo=echo, append_event_mock=append)
+
+    degraded = breaker.degraded_repos()[0]
+    assert degraded.auth_failure is False  # "boom" is not auth-shaped
+    assert "boom" in degraded.last_error
+
+
 async def test_breaker_recovers_on_successful_clone() -> None:
     breaker = GithubCloneBreaker()
     echo = _make_echo("ghr_recovers")
