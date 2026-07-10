@@ -582,8 +582,20 @@ class TestSweepQueryBudget:
     async def test_open_candidates_asst_buffer_budget(self, seeded_pool: asyncpg.Pool[Any]) -> None:
         """Exercise the exact assistant fetch used by ``empty_no_inflight``
         against a mixed candidate set containing deep resolved history and one
-        genuinely open call. Buffer work must remain linear, with resolved
-        sessions suppressed by the scalar gate."""
+        genuinely open call. Two invariants, both required:
+
+        - **Cardinality (correctness)** — the scalar gate
+          (``s.open_tool_call_count > 0``) must suppress every fully-resolved
+          session, so the query returns rows ONLY for ``sess_tc_open``. Without
+          this assertion the budget check is a HOLLOW fence: deleting the gate
+          leaks all 500 assistant rows of the resolved ``sess_tc_deep`` bait
+          into the result yet stays ~141x under the buffer budget, so the budget
+          alone cannot ring on the exact regression (gate deletion) it exists to
+          catch. Mirrors ``TestGhostAsstSweepBounded``'s exact-set fence for the
+          structurally-identical ``GHOST_ASST_SQL``.
+        - **Buffer budget (perf)** — buffer work stays linear, a backstop for an
+          N+1/unbounded plan-choice regression even while the gate is intact.
+        """
         session_ids = [
             *(f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)),
             *(f"sess_tc_{i:03d}" for i in range(_N_TC_SESSIONS)),
@@ -591,6 +603,19 @@ class TestSweepQueryBudget:
             "sess_tc_open",
         ]
         async with seeded_pool.acquire() as conn:
+            # Cardinality first: the scalar gate suppresses every fully-resolved
+            # session, so only the genuinely-open one survives. With the gate
+            # removed, the resolved/deep bait sessions leak into the result set
+            # and this assertion fails — as it must.
+            rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, session_ids)
+            returned = {r["session_id"] for r in rows}
+            assert returned == {"sess_tc_open"}, (
+                f"OPEN_CANDIDATES_ASST_SQL must return rows ONLY for sessions "
+                f"with open_tool_call_count > 0; expected {{'sess_tc_open'}}, got "
+                f"{returned}. Resolved/deep bait sessions leaking in means the "
+                f"scalar gate was dropped."
+            )
+
             result = await conn.fetchval(
                 f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {OPEN_CANDIDATES_ASST_SQL}",
                 session_ids,
