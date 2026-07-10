@@ -36,6 +36,9 @@ class _WedgedProc:
         # transport, so route kill through the same mock — the fake
         # can't drift from Process's real kill/_transport coupling.
         self._transport = MagicMock(name="transport")
+        self.stdin: Any = None
+        self.stdout: Any = None
+        self.stderr: Any = None
 
     def kill(self) -> None:
         self._transport.kill()

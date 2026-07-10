@@ -140,7 +140,9 @@ async def run_docker_pipeline(
             raise SandboxBackendError(f"failed to launch docker pipeline: {host_err}") from host_err
         assert producer.stdout is not None and consumer.stdin is not None
 
-        async def _pump() -> int:
+        async def _pump(
+            producer_stdout: asyncio.StreamReader, consumer_stdin: asyncio.StreamWriter
+        ) -> int:
             moved = 0
             while True:
                 remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
@@ -148,24 +150,24 @@ async def run_docker_pipeline(
                     raise TimeoutError("absolute ceiling")
                 try:
                     chunk = await asyncio.wait_for(
-                        producer.stdout.read(1024 * 1024), timeout=min(stall_timeout_s, remaining)
+                        producer_stdout.read(1024 * 1024), timeout=min(stall_timeout_s, remaining)
                     )
                 except TimeoutError as err:
                     raise TimeoutError("stream stalled") from err
                 if not chunk:
-                    consumer.stdin.close()
+                    consumer_stdin.close()
                     with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                        await consumer.stdin.wait_closed()
+                        await consumer_stdin.wait_closed()
                     return moved
-                consumer.stdin.write(chunk)
-                await consumer.stdin.drain()
+                consumer_stdin.write(chunk)
+                await consumer_stdin.drain()
                 moved += len(chunk)
 
         prod_err_task = asyncio.create_task(producer.stderr.read())  # type: ignore[union-attr]
         cons_out_task = asyncio.create_task(consumer.stdout.read())  # type: ignore[union-attr]
         cons_err_task = asyncio.create_task(consumer.stderr.read())  # type: ignore[union-attr]
         try:
-            moved = await _pump()
+            moved = await _pump(producer.stdout, consumer.stdin)
             remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
             if remaining <= 0:
                 raise TimeoutError("absolute ceiling")
