@@ -168,9 +168,7 @@ def _clamp_cache_key(data_b64: str) -> tuple[int, bytes]:
     # is persisted and replayed every build, that was a permanent per-session
     # wedge. utf-8 with ``surrogatepass`` never raises, so a malformed payload
     # keys the cache cleanly and falls through to the decode guard as intended.
-    digest = hashlib.blake2b(
-        data_b64.encode("utf-8", "surrogatepass"), digest_size=16
-    ).digest()
+    digest = hashlib.blake2b(data_b64.encode("utf-8", "surrogatepass"), digest_size=16).digest()
     return (len(data_b64), digest)
 
 
