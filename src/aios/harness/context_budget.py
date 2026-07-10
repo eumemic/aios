@@ -47,6 +47,11 @@ def effective_window_max(
     """
     ceiling = served_ceiling(model)
     if ceiling is None:
-        return window_max
+        # Unmapped models keep window_max-only behavior at full budget
+        # (shrink_factor == 1.0, today's semantics). But an overflow retry
+        # (shrink_factor < 1) MUST still tighten the budget here — otherwise the
+        # retry re-sends the identical oversized request and loops verbatim up
+        # the reschedule ladder (the 2026-07-09 Ultron/sol outage class).
+        return max(1, int(window_max * shrink_factor))
     input_cap = min(window_max, max(1, ceiling - output_reservation(params)))
     return max(1, int(input_cap * shrink_factor))

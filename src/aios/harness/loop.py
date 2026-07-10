@@ -99,6 +99,12 @@ log = get_logger("aios.harness.loop")
 
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 
+# Per-overflow multiplicative tightening of the effective input budget. Each
+# consecutive provider ``context_length_exceeded`` shrinks the next build by a
+# further factor (0.8, 0.64, ...), so the retry is never the identical oversized
+# request; the reschedule ladder bounds the attempts (terminal once spent).
+_CONTEXT_OVERFLOW_SHRINK_BASE: float = 0.8
+
 # ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
 # wall-clock cap on a single ``run_session_step`` call. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
@@ -954,13 +960,17 @@ async def _run_session_step_body(
         account_id=account_id,
     )
     try:
+        # A prior context-overflow retry stamps the progressively-tightened
+        # shrink factor onto the stop_reason; a fresh/non-overflow step reads
+        # none and builds at full budget (shrink 1.0).
+        _stop_reason = getattr(session, "stop_reason", None) or {}
         request_window_max = effective_window_max(
             model=capability_model,
             window_max=agent.window_max,
             params=agent.litellm_extra,
             shrink_factor=(
-                0.8
-                if (getattr(session, "stop_reason", None) or {}).get("context_overflow") is True
+                _stop_reason.get("context_shrink_factor", _CONTEXT_OVERFLOW_SHRINK_BASE)
+                if _stop_reason.get("context_overflow") is True
                 else 1.0
             ),
         )
@@ -2211,12 +2221,38 @@ async def _handle_streaming_model_deadline(
     )
 
 
-async def _apply_context_overflow_retry(pool: Any, session_id: str, *, account_id: str) -> float:
-    """Schedule one non-identical retry whose next build uses 80% of the input cap."""
+async def _apply_context_overflow_retry(
+    pool: Any, session_id: str, *, account_id: str
+) -> float | None:
+    """Schedule a strictly-smaller retry after a provider context overflow.
+
+    Context overflow is non-retryable-as-is (#1792 Part 2): each consecutive
+    overflow tightens the next build's effective input budget by a further
+    factor (``_CONTEXT_OVERFLOW_SHRINK_BASE ** n``) so the retry is never the
+    identical oversized request. The reschedule ladder bounds the attempts —
+    once the backoff budget is spent the session lands terminal (``None``)
+    rather than re-firing the same request forever (the compounding-cooldown
+    class from the 2026-07-09 outage).
+
+    Returns the retry delay (seconds), or ``None`` when the budget is spent and
+    the session has been latched into the terminal ``errored`` state.
+    """
+    attempt = await _count_consecutive_context_overflow(pool, session_id, account_id=account_id)
+    delay = _retry_delay_for_attempt(attempt)
+    if delay is None:
+        await _latch_errored_turn(
+            pool, session_id, error_kind="context_overflow", account_id=account_id
+        )
+        return None
+    shrink_factor = round(_CONTEXT_OVERFLOW_SHRINK_BASE ** (attempt + 1), 4)
     await sessions_service.set_session_stop_reason(
         pool,
         session_id,
-        {"type": "rescheduling", "context_overflow": True},
+        {
+            "type": "rescheduling",
+            "context_overflow": True,
+            "context_shrink_factor": shrink_factor,
+        },
         account_id=account_id,
     )
     await _append_lifecycle(
@@ -2227,7 +2263,7 @@ async def _apply_context_overflow_retry(pool: Any, session_id: str, *, account_i
         "context_overflow",
         account_id=account_id,
     )
-    return _RETRY_BACKOFF_SECONDS[0]
+    return delay
 
 
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:
@@ -2375,12 +2411,12 @@ async def _handle_step_timeout(pool: Any, session_id: str, *, account_id: str) -
     return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
 
 
-async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account_id: str) -> int:
-    """Count consecutive rescheduling lifecycle events at the tail of the log.
-
-    Returns the number of consecutive ``turn_ended`` lifecycle events
-    with ``stop_reason == "rescheduling"`` at the end of the lifecycle
-    event sequence. A non-rescheduling event breaks the streak.
+async def _count_consecutive_stop_reason(
+    pool: Any, session_id: str, *, stop_reason: str, account_id: str
+) -> int:
+    """Count consecutive ``turn_ended`` lifecycle events with ``stop_reason`` at
+    the tail of the log. A ``turn_ended`` with any other stop_reason — or any
+    non-``turn_ended`` event — breaks the streak.
     """
     # Only the tail matters; reading ASC with the default LIMIT would miss the
     # recent streak entirely on a session with >limit lifecycle events.
@@ -2394,11 +2430,33 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account
     )
     count = 0
     for e in lifecycle_events:
-        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == "rescheduling":
+        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == stop_reason:
             count += 1
         else:
             break
     return count
+
+
+async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account_id: str) -> int:
+    """Count consecutive transient-error reschedulings at the tail (drives the
+    backoff attempt index for :func:`_apply_retry_or_failure`)."""
+    return await _count_consecutive_stop_reason(
+        pool, session_id, stop_reason="rescheduling", account_id=account_id
+    )
+
+
+async def _count_consecutive_context_overflow(
+    pool: Any, session_id: str, *, account_id: str
+) -> int:
+    """Count consecutive context-overflow reschedulings at the tail (drives the
+    progressive shrink + bounded ladder for :func:`_apply_context_overflow_retry`).
+
+    A successful turn or any other rescheduling class breaks the streak, so an
+    overflow that recurs only after intervening progress starts fresh.
+    """
+    return await _count_consecutive_stop_reason(
+        pool, session_id, stop_reason="context_overflow", account_id=account_id
+    )
 
 
 async def _append_lifecycle(
