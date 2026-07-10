@@ -29,6 +29,27 @@
         }
       }
     },
+    "/telemetry/calibration": {
+      "get": {
+        "summary": "Calibration",
+        "description": "On-demand calibration observability for models active in the last 24h.",
+        "operationId": "get_calibration_telemetry",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Get Calibration Telemetry"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ready": {
       "get": {
         "summary": "Ready",

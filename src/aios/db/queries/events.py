@@ -413,47 +413,11 @@ async def model_token_class_ratios(
             return dict(ratios)
         del _model_token_ratio_cache[cache_key]
 
-    rows = await conn.fetch(
-        """
-        SELECT
-            (data->'model_usage'->>'input_tokens')::float AS it,
-            data->'local_tokens_by_class'                 AS by_class
-        FROM events
-        WHERE kind = 'span'
-          AND data->>'event' = 'model_request_end'
-          AND (data->>'is_error')::boolean = false
-          AND data->>'model' = $1
-          AND data ? 'local_tokens'
-          AND data ? 'local_tokens_by_class'
-          AND data ? 'model'
-          -- Exclude old/malformed success spans before casting.
-          AND (data->'model_usage') ? 'input_tokens'
-          AND (data->'model_usage'->>'input_tokens') IS NOT NULL
-          AND (data->'model_usage'->>'input_tokens')::bigint > 0
-          AND (data->>'local_tokens')::bigint > 0
-        -- Bound the scan to the most recent N spans (issue #1711): rides
-        -- migration 0024's ``((data->>'model'), seq DESC)`` partial index
-        -- as a bounded seek instead of a full lifetime scan on the step
-        -- hot path.  MIN_SAMPLES is still checked below the fetch.
-        ORDER BY seq DESC
-        LIMIT $2
-        """,
-        model,
-        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
+    fitted, n_samples = await model_token_class_ratio_fit(
+        conn, model, account_id=account_id
     )
 
-    if len(rows) < _MODEL_TOKEN_RATIO_MIN_SAMPLES:
-        neutral = _neutral_class_ratios()
-        _model_token_ratio_cache[cache_key] = (
-            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
-            neutral,
-        )
-        return dict(neutral)
-
-    fitted = _fit_class_ratios(rows)
-    if fitted is None:
-        # Degenerate / singular system → fold back to neutral but cache
-        # briefly (the data may settle as more varied spans arrive).
+    if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
         neutral = _neutral_class_ratios()
         _model_token_ratio_cache[cache_key] = (
             now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
@@ -467,6 +431,88 @@ async def model_token_class_ratios(
     )
     return dict(fitted)
 
+
+
+async def model_token_class_ratio_fit(
+    conn: asyncpg.Connection[Any], model: str, *, account_id: str
+) -> tuple[dict[str, float] | None, int]:
+    """Return a fresh bounded calibration fit and its usable sample count.
+
+    This is the uncached calibration reader shared by the hot-path cached
+    wrapper and the on-demand observability surface. ``account_id`` remains
+    intentionally unused because calibration is global per model.
+    """
+    del account_id
+    rows = await conn.fetch(
+        """
+        SELECT
+            (data->'model_usage'->>'input_tokens')::float AS it,
+            data->'local_tokens_by_class'                 AS by_class
+        FROM events
+        WHERE kind = 'span'
+          AND data->>'event' = 'model_request_end'
+          AND (data->>'is_error')::boolean = false
+          AND data->>'model' = $1
+          AND data ? 'local_tokens'
+          AND data ? 'local_tokens_by_class'
+          AND data ? 'model'
+          AND (data->'model_usage') ? 'input_tokens'
+          AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+          AND (data->'model_usage'->>'input_tokens')::bigint > 0
+          AND (data->>'local_tokens')::bigint > 0
+        ORDER BY seq DESC
+        LIMIT $2
+        """,
+        model,
+        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
+    )
+    return _fit_class_ratios(rows), len(rows)
+
+
+async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict[str, Any]]:
+    """Compute fit-vs-measured token ratios for models active in the last 24h."""
+    measured = await conn.fetch(
+        """
+        SELECT data->>'model' AS model,
+               avg((data->'model_usage'->>'input_tokens')::float /
+                   (data->>'local_tokens')::float) AS mean_ratio,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY
+                   (data->'model_usage'->>'input_tokens')::float /
+                   (data->>'local_tokens')::float) AS p50_ratio,
+               count(*) AS n_samples
+        FROM events
+        WHERE kind = 'span'
+          AND data->>'event' = 'model_request_end'
+          AND (data->>'is_error')::boolean = false
+          AND created_at >= now() - interval '24 hours'
+          AND data ? 'local_tokens'
+          AND data ? 'local_tokens_by_class'
+          AND data ? 'model'
+          AND (data->'model_usage') ? 'input_tokens'
+          AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+          AND (data->'model_usage'->>'input_tokens')::bigint > 0
+          AND (data->>'local_tokens')::bigint > 0
+        GROUP BY data->>'model'
+        ORDER BY data->>'model'
+        """
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for row in measured:
+        model = str(row["model"])
+        coefficients, fitted_n = await model_token_class_ratio_fit(
+            conn, model, account_id="telemetry"
+        )
+        effective = coefficients or _neutral_class_ratios()
+        result[model] = {
+            "fitted_r_eff": sum(effective.values()) / len(effective),
+            "fitted_coefficients": effective,
+            "measured_ratio": {
+                "mean": float(row["mean_ratio"]),
+                "p50": float(row["p50_ratio"]),
+            },
+            "n_samples": {"fitted": fitted_n, "measured": int(row["n_samples"])},
+        }
+    return result
 
 def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
     """Ridge-fit the per-class coefficient dict from calibration rows.
