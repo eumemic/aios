@@ -413,9 +413,7 @@ async def model_token_class_ratios(
             return dict(ratios)
         del _model_token_ratio_cache[cache_key]
 
-    fitted, n_samples = await model_token_class_ratio_fit(
-        conn, model, account_id=account_id
-    )
+    fitted, n_samples = await model_token_class_ratio_fit(conn, model, account_id=account_id)
 
     if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
         neutral = _neutral_class_ratios()
@@ -430,7 +428,6 @@ async def model_token_class_ratios(
         fitted,
     )
     return dict(fitted)
-
 
 
 async def model_token_class_ratio_fit(
@@ -513,6 +510,7 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
             "n_samples": {"fitted": fitted_n, "measured": int(row["n_samples"])},
         }
     return result
+
 
 def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
     """Ridge-fit the per-class coefficient dict from calibration rows.

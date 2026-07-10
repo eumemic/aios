@@ -20,9 +20,11 @@ class _Conn:
 
 
 async def test_calibration_telemetry_aggregates_recent_successes(monkeypatch: Any) -> None:
-    conn = _Conn([
-        {"model": "model-a", "mean_ratio": 1.2, "p50_ratio": 1.1, "n_samples": 7},
-    ])
+    conn = _Conn(
+        [
+            {"model": "model-a", "mean_ratio": 1.2, "p50_ratio": 1.1, "n_samples": 7},
+        ]
+    )
 
     async def _fit(_conn: Any, model: str, *, account_id: str) -> tuple[dict[str, float], int]:
         assert model == "model-a"
@@ -33,12 +35,14 @@ async def test_calibration_telemetry_aggregates_recent_successes(monkeypatch: An
 
     assert "created_at >= now() - interval '24 hours'" in conn.query
     assert "input_tokens')::bigint > 0" in conn.query
-    assert result == {"model-a": {
-        "fitted_r_eff": 1.0,
-        "fitted_coefficients": {"message": 0.9, "tool_result": 1.1},
-        "measured_ratio": {"mean": 1.2, "p50": 1.1},
-        "n_samples": {"fitted": 19, "measured": 7},
-    }}
+    assert result == {
+        "model-a": {
+            "fitted_r_eff": 1.0,
+            "fitted_coefficients": {"message": 0.9, "tool_result": 1.1},
+            "measured_ratio": {"mean": 1.2, "p50": 1.1},
+            "n_samples": {"fitted": 19, "measured": 7},
+        }
+    }
 
 
 def test_calibration_telemetry_route_uses_pool(monkeypatch: Any) -> None:
@@ -52,6 +56,7 @@ def test_calibration_telemetry_route_uses_pool(monkeypatch: Any) -> None:
     class _Acquire:
         async def __aenter__(self) -> object:
             return object()
+
         async def __aexit__(self, *args: Any) -> None:
             return None
 
