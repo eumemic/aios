@@ -213,6 +213,27 @@ async def test_resolved_auth_forwarded_to_call_litellm() -> None:
     assert m.await_args.kwargs["auth"] is auth
 
 
+async def test_provider_auth_resolution_raise_is_recoverable_value() -> None:
+    """Guard 3 does I/O + crypto, so unlike guards 1-2 it CAN raise (a corrupt
+    ciphertext row → CryptoDecryptError). invoke_call_llm's 'never raises'
+    contract requires that to become a recoverable {"error": ...} value —
+    an uncaught raise escapes _run_call_llm_task (no outer except) with no
+    result signal, and the sweep re-dispatches forever (silent wedge)."""
+    from aios.errors import CryptoDecryptError
+
+    with (
+        patch(
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(side_effect=CryptoDecryptError("corrupt row")),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as m,
+    ):
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec())
+    assert "error" in result and "resolution failed" in result["error"]
+    assert cost == 0
+    m.assert_not_awaited()  # the inference never ran
+
+
 # ─── errors are values ────────────────────────────────────────────────────────
 
 

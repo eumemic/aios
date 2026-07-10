@@ -21,7 +21,7 @@ added alongside this one without an explicit follow-up decision.
 
 from __future__ import annotations
 
-from functools import cache
+from functools import lru_cache
 from types import EllipsisType
 from typing import Any
 
@@ -130,7 +130,7 @@ async def archive_model_provider(
         )
 
 
-@cache
+@lru_cache(maxsize=1024)
 def _derive_provider(model: str, custom_llm_provider: str | None) -> str | None:
     """``litellm.get_llm_provider``'s provider sniff, cached.
 
@@ -141,6 +141,14 @@ def _derive_provider(model: str, custom_llm_provider: str | None) -> str | None:
     unresolvable (``get_llm_provider`` raised — e.g. a ``workflow:`` binding
     or a garbage string) and is cached too, so a repeated bad string doesn't
     re-raise on every call.
+
+    Bounded (``maxsize``) rather than unbounded ``@cache`` because on the
+    workflow ``call_llm`` path the ``model`` arg is script-computed, so an
+    adversarial script could otherwise grow this cache monotonically. Both
+    args MUST be hashable — the caller guarantees ``str | None`` (an
+    unhashable ``custom_llm_provider`` would raise a ``TypeError`` in the
+    lru_cache key machinery, BEFORE this body's try/except, so the caller
+    normalizes it, not us).
     """
     try:
         _, provider, _, _ = litellm.get_llm_provider(model, custom_llm_provider=custom_llm_provider)
@@ -173,8 +181,16 @@ async def _resolve_provider_auth(
     treats every ``None`` identically (see its docstring for why a bare
     "nothing to check" pass here would reopen the guard's central bypass).
     """
-    custom_llm_provider = (litellm_extra or {}).get("custom_llm_provider")
-    provider = _derive_provider(model, custom_llm_provider if custom_llm_provider else None)
+    # Only a non-empty *string* custom_llm_provider is an override; anything
+    # else (None, a non-str the script smuggled into params — values are
+    # unvalidated ``dict[str, Any]``) is normalized to None here so the
+    # hashable-args contract of the lru_cache'd ``_derive_provider`` holds. A
+    # truthy non-str would otherwise raise a ``TypeError`` in the cache-key
+    # machinery, escaping this whole path as a raise (on the run_llm lane that
+    # is an unbounded re-dispatch loop; see invoke_call_llm's guard-3 wrapping).
+    raw_custom = (litellm_extra or {}).get("custom_llm_provider")
+    custom_llm_provider = raw_custom if isinstance(raw_custom, str) and raw_custom else None
+    provider = _derive_provider(model, custom_llm_provider)
     if provider is None:
         return None
     async with pool.acquire() as conn:

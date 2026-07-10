@@ -212,14 +212,29 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
     # launch_call_llm_task/_run_call_llm_task. resolve_provider_auth_or_conflict
     # fuses resolution with the conflict check on `params`'s redirect (if any) so
     # the two can never run out of order or independently at this call site.
+    #
+    # The resolve does I/O (DB) and crypto (decrypt), so unlike guards 1-2 it CAN
+    # raise (a corrupt/key-mismatched ciphertext row → CryptoDecryptError). This
+    # function's contract is "never raises — every failure is a recoverable value"
+    # (see module docstring); an uncaught raise here would escape _run_call_llm_task
+    # (which has no outer except) with no result signal, and the sweep would
+    # re-dispatch forever — a silent wedge. So a persistent resolve failure resolves
+    # as an error the script branches on, exactly like a provider error from the
+    # inference call below. Transient DB errors self-heal via the sweep's re-wake.
     pool = runtime.require_pool()
-    auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
-        pool,
-        runtime.require_crypto_box(),
-        account_id=run.account_id,
-        model=model,
-        litellm_extra=params,
-    )
+    try:
+        auth, conflict = await model_providers_service.resolve_provider_auth_or_conflict(
+            pool,
+            runtime.require_crypto_box(),
+            account_id=run.account_id,
+            model=model,
+            litellm_extra=params,
+        )
+    except Exception as exc:
+        log.warning("call_llm.provider_auth_error", run_id=run.id, model=model, error=str(exc))
+        return {
+            "error": f"call_llm provider-auth resolution failed: {type(exc).__name__}: {exc}"
+        }, 0
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
 

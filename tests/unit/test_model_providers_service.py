@@ -175,6 +175,27 @@ class TestProviderAuthConflict:
             is True
         )
 
+    @pytest.mark.parametrize("degenerate_key", ["   ", "\t\n", 12345, {"nested": 1}])
+    def test_whitespace_or_nonstr_self_supplied_key_does_not_exempt(
+        self, degenerate_key: object
+    ) -> None:
+        """Code-review hardening: a whitespace-only or non-str api_key must NOT
+        exempt the guard. The guard's correctness must not depend on
+        un-contracted LiteLLM/httpx handling of a degenerate key (whitespace
+        is sent literally and httpx rejects it — but that's implementation
+        happenstance, not a contract). The exemption is a stripped-non-empty-
+        string check, so these fall through to the ancestor-owned conflict."""
+        resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
+        assert (
+            provider_auth_conflict(
+                litellm_extra={"api_base": "https://x.example", "api_key": degenerate_key},
+                resolved=resolved,
+                account_id="acc_child",
+                account_is_root=False,
+            )
+            is True
+        )
+
     def test_base_url_alias_triggers_same_as_api_base(self) -> None:
         resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
         assert (
@@ -381,6 +402,33 @@ async def test_resolve_provider_auth_unresolvable_model_skips_db(crypto_box: Cry
         pool, crypto_box, account_id="acc_x", model="totally-bogus-model-xyz", litellm_extra=None
     )
     assert result is None
+
+
+@pytest.mark.parametrize("bad_override", [{"nested": 1}, [1, 2], 123, True])
+async def test_resolve_provider_auth_nonstr_custom_llm_provider_does_not_raise(
+    crypto_box: CryptoBox, bad_override: object
+) -> None:
+    """Code-review blocking fix: a truthy non-str custom_llm_provider (script
+    params are unvalidated dict[str, Any]) must NOT raise. Before the isinstance
+    normalization, an unhashable value hit the lru_cache key machinery and
+    raised TypeError BEFORE _derive_provider's own try/except — which on the
+    run_llm lane escaped as a silent infinite re-dispatch loop. It's now
+    normalized to None (no override), so resolution derives from the model
+    string and returns cleanly."""
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=None),
+    ):
+        result = await service._resolve_provider_auth(
+            pool,
+            crypto_box,
+            account_id="acc_x",
+            model="anthropic/claude-x",
+            litellm_extra={"custom_llm_provider": bad_override},
+        )
+    assert result is None  # no raise — derived anthropic, no row
 
 
 async def test_resolve_provider_auth_decrypts_with_owner_subkey(crypto_box: CryptoBox) -> None:
