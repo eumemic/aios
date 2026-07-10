@@ -467,16 +467,39 @@ async def model_token_class_ratio_fit(
 
 
 async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict[str, Any]]:
-    """Compute fit-vs-measured token ratios for models active in the last 24h."""
+    """Compute fit-vs-measured token ratios for models active in the last 24h.
+
+    ``fitted_r_eff`` is the *composition-weighted* blended ratio the windower
+    actually consumes (:func:`blended_r_eff`: ``Σ_c coef_c·local_c / Σ_c
+    local_c``), evaluated over a representative composition — the summed
+    ``local_tokens_by_class`` mass over the same 24h window as
+    ``measured_ratio``.  It is NOT the unweighted arithmetic mean of the
+    per-class coefficients: for a skewed class mix the two diverge
+    substantially, so the mean would put ``fitted_r_eff`` on a different scale
+    than ``measured_ratio`` and make the ops-agent's ``|fitted - measured|``
+    divergence check miss or falsely fire — the exact failure this endpoint
+    exists to detect.  ``fitted_coefficients`` still carries the raw per-class
+    fit for finer diagnosis.
+    """
+    # Aggregate the recent class composition alongside the measured ratio.  The
+    # per-class mass columns are built from the trusted ``CONTENT_CLASSES``
+    # constant (never user input — no injection surface), and ``coalesce``
+    # keeps a class absent from every span at 0.0 mass rather than NULL.
+    class_mass_cols = ",\n".join(
+        f"               coalesce(sum((data->'local_tokens_by_class'->>'{c}')::float), 0.0) "
+        f"AS mass_{c}"
+        for c in CONTENT_CLASSES
+    )
     measured = await conn.fetch(
-        """
+        f"""
         SELECT data->>'model' AS model,
                avg((data->'model_usage'->>'input_tokens')::float /
                    (data->>'local_tokens')::float) AS mean_ratio,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY
                    (data->'model_usage'->>'input_tokens')::float /
                    (data->>'local_tokens')::float) AS p50_ratio,
-               count(*) AS n_samples
+               count(*) AS n_samples,
+{class_mass_cols}
         FROM events
         WHERE kind = 'span'
           AND data->>'event' = 'model_request_end'
@@ -500,8 +523,9 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
             conn, model, account_id="telemetry"
         )
         effective = coefficients or _neutral_class_ratios()
+        composition = {c: float(row[f"mass_{c}"]) for c in CONTENT_CLASSES}
         result[model] = {
-            "fitted_r_eff": sum(effective.values()) / len(effective),
+            "fitted_r_eff": blended_r_eff(effective, composition),
             "fitted_coefficients": effective,
             "measured_ratio": {
                 "mean": float(row["mean_ratio"]),
