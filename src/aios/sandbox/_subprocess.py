@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 
 from aios.sandbox.backends.base import SandboxBackendError
 
@@ -118,11 +117,13 @@ async def run_docker_pipeline(
     consumer: asyncio.subprocess.Process | None = None
     started = asyncio.get_running_loop().time()
 
-    async def _kill_all() -> None:
+    async def _kill_all(*, close_transports: bool = False) -> None:
         for proc in (producer, consumer):
             if proc is not None:
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
+                if close_transports:
+                    proc._transport.close()  # type: ignore[attr-defined]
 
     try:
         try:
@@ -130,8 +131,10 @@ async def run_docker_pipeline(
                 *producer_argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             consumer = await asyncio.create_subprocess_exec(
-                *consumer_argv, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                *consumer_argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         except (OSError, FileNotFoundError) as host_err:
             raise SandboxBackendError(f"failed to launch docker pipeline: {host_err}") from host_err
@@ -183,5 +186,7 @@ async def run_docker_pipeline(
             )
         return consumer.returncode if consumer.returncode is not None else -1, cons_out, cons_err
     except BaseException:
-        await _kill_all()
+        # Outer cancellation returns immediately, so close both transports
+        # after killing to release their parent-side pipe descriptors.
+        await _kill_all(close_transports=True)
         raise

@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -110,23 +109,38 @@ async def test_pipeline_outer_cancel_kills_and_closes_both(
     SIGTERM or job-deadline cancel mid ``docker export | docker import``
     leaves both children running and strands their parent-side pipe
     FDs."""
+
+    async def _hang(*_args: Any) -> bytes:
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
     producer = _WedgedProc()
+    producer.stdout = MagicMock()
+    producer.stdout.read = AsyncMock(side_effect=_hang)
+    producer.stderr = MagicMock()
+    producer.stderr.read = AsyncMock(side_effect=_hang)
     consumer = _WedgedProc()
+    consumer.stdin = MagicMock()
+    consumer.stdin.drain = AsyncMock()
+    consumer.stdout = MagicMock()
+    consumer.stdout.read = AsyncMock(side_effect=_hang)
+    consumer.stderr = MagicMock()
+    consumer.stderr.read = AsyncMock(side_effect=_hang)
     spawned = iter((producer, consumer))
 
     async def _fake_spawn(*_argv: Any, **_kwargs: Any) -> _WedgedProc:
         return next(spawned)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
-    # Keep the pipe plumbing hermetic — no real host FDs are created or closed.
-    monkeypatch.setattr(os, "pipe", lambda: (100, 101))
-    monkeypatch.setattr(os, "close", lambda _fd: None)
 
-    # Generous timeout so the wait_for itself never fires — outer
-    # cancellation is what we're testing.
+    # Generous deadlines so neither timeout fires — outer cancellation is
+    # what we're testing.
     task = asyncio.create_task(
         run_docker_pipeline(
-            ["docker", "export", "x"], ["docker", "import", "-", "tag"], timeout_s=60.0
+            ["docker", "export", "x"],
+            ["docker", "import", "-", "tag"],
+            stall_timeout_s=60.0,
+            max_timeout_s=60.0,
         )
     )
     # Let the task reach `await asyncio.wait_for(_drain(), ...)`.

@@ -62,7 +62,12 @@ class _FakeDocker:
         raise AssertionError(f"unexpected docker cli: {argv}")
 
     async def pipeline(
-        self, producer: list[str], consumer: list[str], *, timeout_s: float
+        self,
+        producer: list[str],
+        consumer: list[str],
+        *,
+        stall_timeout_s: float,
+        max_timeout_s: float,
     ) -> tuple[int, bytes, bytes]:
         self.pipelines.append((producer, consumer))
         tag = consumer[-1]

@@ -23,13 +23,13 @@ from __future__ import annotations
 import json
 import shutil
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import (
     run_docker_cli,
     run_docker_pipeline,
     run_subprocess_with_timeout,
 )
-from aios.config import get_settings
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
@@ -73,6 +73,7 @@ _CONTAINER_TIMEOUT_EXIT_CODE = 137
 # the kernel overlayfs lower-layer max so a budget-less session can't grow
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
+
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
     """Decode ``raw`` as UTF-8 (with replacement) and truncate to ``max_bytes``.
