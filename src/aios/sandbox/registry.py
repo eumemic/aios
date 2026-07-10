@@ -209,6 +209,9 @@ def _classify_images(
     return verdicts
 
 
+_SALVAGE_BREAKER_COOLDOWN_S = 300.0
+
+
 class SandboxRegistry:
     """Maps session_id to a live :class:`SandboxHandle` with idle-TTL.
 
@@ -239,6 +242,7 @@ class SandboxRegistry:
         # pass must never GC session-B's open-breaker entry). ``alarmed``
         # records whether the one-shot operator wake has been emitted.
         self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
+        self._salvage_breaker_opened_at: dict[str, float] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
@@ -968,22 +972,26 @@ class SandboxRegistry:
         for corpse_id, (owner, _failures, _alarmed) in list(self._salvage_failures.items()):
             if owner == session_id and corpse_id not in present:
                 self._salvage_failures.pop(corpse_id, None)
+                self._salvage_breaker_opened_at.pop(corpse_id, None)
         for ref in refs:
             _owner, failures, alarmed = self._salvage_failures.get(
                 ref.sandbox_id, (session_id, 0, False)
             )
             if failures >= settings.sandbox_salvage_breaker_threshold:
-                # Already tripped by a prior attempt — suppress the salvage
-                # retry entirely. Still (re)fire the one-shot alert if a prior
-                # transition failed to write it, so a lost wake is recovered.
-                alarmed = await self._alarm_salvage_breaker_once(
-                    session_id, ref.sandbox_id, failures, alarmed
+                opened_at = self._salvage_breaker_opened_at.setdefault(
+                    ref.sandbox_id, time.monotonic()
                 )
-                self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
-                raise SandboxBackendError(
-                    f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
-                    "refusing to provision over unrecovered state"
-                )
+                if time.monotonic() - opened_at < _SALVAGE_BREAKER_COOLDOWN_S:
+                    # Suppress retries until the cooldown expires, then permit
+                    # one half-open attempt under the backend snapshot budget.
+                    alarmed = await self._alarm_salvage_breaker_once(
+                        session_id, ref.sandbox_id, failures, alarmed
+                    )
+                    self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
+                    raise SandboxBackendError(
+                        f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
+                        "refusing to provision over unrecovered state"
+                    )
             removable = await self._snapshot_and_record(
                 session_id,
                 ref.sandbox_id,
@@ -996,12 +1004,14 @@ class SandboxRegistry:
                         session_id, ref.sandbox_id, failures, alarmed
                     )
                 self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
+                self._salvage_breaker_opened_at[ref.sandbox_id] = time.monotonic()
                 raise SandboxBackendError(
                     f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
                     "failed (snapshot or pointer write); refusing to provision over "
                     "unrecovered state"
                 )
             self._salvage_failures.pop(ref.sandbox_id, None)
+            self._salvage_breaker_opened_at.pop(ref.sandbox_id, None)
             await self._backend.force_remove(ref.sandbox_id)
 
     async def _alarm_salvage_breaker_once(
