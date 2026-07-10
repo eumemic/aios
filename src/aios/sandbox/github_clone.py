@@ -49,12 +49,57 @@ from aios.sandbox.volumes import (
 log = get_logger("aios.sandbox.github_clone")
 
 
+# Case-insensitive substrings that mark a git clone/fetch failure as
+# AUTH-SHAPED — a dead/expired/invalid credential — rather than a transient
+# timeout / network / GitHub-5xx blip. Only auth-shaped failures earn the
+# breaker's long (1h) cooldown and the ``AUTH-FAILED`` prelude label; a
+# transient class must re-probe fast (issue #1720 seat-gate fix — the 1h
+# lockout after a recovered GitHub outage was a regression). Matched against
+# git's stderr, which is already token-redacted at the raise sites. Kept
+# CONSERVATIVE on purpose: mis-labeling a transient failure as auth is the
+# harmful direction (wrong 1h lockout + wrong "rotate your token" prompt),
+# so only unambiguous auth-rejection signatures are listed.
+_AUTH_FAILURE_SIGNATURES = (
+    "invalid username or token",
+    "authentication failed",
+    "error: 401",
+    "error: 403",
+    "http 401",
+    "http 403",
+    "401 unauthorized",
+    "403 forbidden",
+)
+
+
+def is_auth_failure_message(message: str) -> bool:
+    """True if ``message`` (a git stderr / error string) looks like an auth
+    failure (dead/expired/invalid token) as opposed to a transient
+    timeout/network/5xx failure. Case-insensitive substring match against the
+    known git auth-rejection signatures (issue #1720)."""
+    low = message.lower()
+    return any(sig in low for sig in _AUTH_FAILURE_SIGNATURES)
+
+
 class GithubCloneError(Exception):
     """Raised when a clone or fetch fails in a way the agent can't recover
     from (e.g. invalid token, repo missing). The provisioner catches this,
     logs a lifecycle event, and continues so the agent sees the failure
     context without the session halting.
+
+    Carries ``auth_failure`` (issue #1720): whether this failure is
+    auth-shaped (dead/expired token) vs transient (timeout/network/5xx). The
+    circuit breaker keys its cooldown length + AUTH label on this so a
+    transient GitHub blip doesn't earn a 1h lockout or a false ``AUTH-FAILED``
+    prelude line. When not passed explicitly it is auto-derived from the
+    message text — every raise site's message already carries the (redacted)
+    git stderr the signatures live in.
     """
+
+    def __init__(self, message: str, *, auth_failure: bool | None = None) -> None:
+        super().__init__(message)
+        self.auth_failure: bool = (
+            auth_failure if auth_failure is not None else is_auth_failure_message(message)
+        )
 
 
 def url_hash(repo_url: str) -> str:
@@ -360,6 +405,7 @@ __all__ = [
     "GithubCloneError",
     "ensure_cache_clone",
     "ensure_session_working_tree",
+    "is_auth_failure_message",
     "remove_session_working_tree",
     "url_hash",
 ]
