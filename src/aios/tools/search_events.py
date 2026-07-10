@@ -131,7 +131,11 @@ def _validate_sql(sql: str) -> str | None:
     for table in tree.find_all(exp.Table):
         schema = (table.db or "").lower()
         if schema not in _ALLOWED_SCHEMAS:
-            redirect = "; query search_views_help instead" if schema in {"information_schema", "pg_catalog"} else ""
+            redirect = (
+                "; query search_views_help instead"
+                if schema in {"information_schema", "pg_catalog"}
+                else ""
+            )
             return (
                 f"Schema {schema!r} is not accessible; search_events may only read "
                 f"{', '.join(sorted(_ALLOWED_RELATIONS))}{redirect}"
@@ -252,11 +256,9 @@ SEARCH_EVENTS_DESCRIPTION = (
     "                       user events without metadata.\n"
     "- created_at (timestamptz)  when the event was appended\n"
     "- content_text (text)  the raw stored content (see IMPORTANT above)\n\n"
-    "NOT in the view (known limitations): the full metadata object on user\n"
-    "events (reactions, reply_to, sender_uuid, chat_type, ...), the full\n"
-    "tool_calls array on assistant events, span events (cost/timing/tokens),\n"
-    "and the rendered channel header. If you need any of those, ask — there\n"
-    "isn't currently a way to get them from SQL.\n\n"
+    "Known limitations: costs and token/model usage are intentionally redacted;\n"
+    "events from other sessions and in-sandbox CLI tool-lane calls are not\n"
+    "available. Rendered channel headers also are not stored in these views.\n\n"
     "Role semantics: role='tool' rows are tool RESULTS. Tool CALLS\n"
     "live on assistant rows and are discoverable via tool_name.\n\n"
     "Dialect: PostgreSQL 16. ILIKE, CTEs, window functions, JSON operators\n"
