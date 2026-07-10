@@ -76,9 +76,10 @@ class TestUpdateAgentWindowValidation:
     ) -> None:
         """PUT setting only ``window_max`` equal to current ``window_min`` must raise.
 
-        After the queries-level merge, this produces
-        ``new_wmin == new_wmax`` — a downstream session step would
-        ``ZeroDivisionError`` in ``tokens_to_drop`` without this guard.
+        After the queries-level merge this produces ``new_wmin == new_wmax`` — a
+        zero-width band. ``tokens_to_drop`` itself tolerates a collapsed band at
+        runtime, so this guard is a config-quality constraint (a stored window
+        band must have positive snap hysteresis), not crash-prevention.
         """
         pool, account_id = pool_and_account
         agent = await _seed_valid_agent(pool, account_id, "bound-test")
