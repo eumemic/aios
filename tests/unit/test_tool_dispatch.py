@@ -10,11 +10,13 @@ or a genuine failure (also evicts the sandbox).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from aios.db import queries
 from aios.errors import (
     AiosError,
     ConflictError,
@@ -31,6 +33,7 @@ from aios.harness.tool_dispatch import (
     _unoffered_tool_message,
     reject_unoffered_tool_calls,
 )
+from aios.models.sessions import Err
 from aios.services import sessions as sessions_service
 from aios.tools.bash import BashArgumentError
 from aios.tools.invoke import ToolBail, validate_arguments
@@ -243,7 +246,12 @@ class TestRejectUnofferedToolCalls:
     """
 
     async def _drive(
-        self, monkeypatch: Any, tool_calls: list[dict[str, Any]], offered_names: list[str]
+        self,
+        monkeypatch: Any,
+        tool_calls: list[dict[str, Any]],
+        offered_names: list[str],
+        *,
+        closed: tuple[Any, Any] | None = None,
     ) -> Any:
         monkeypatch.setattr(
             sessions_service,
@@ -256,6 +264,20 @@ class TestRejectUnofferedToolCalls:
         from aios.harness.inflight_tool_registry import InflightToolRegistry
 
         monkeypatch.setattr(runtime, "require_inflight_tool_registry", InflightToolRegistry)
+
+        # A de-offered `return`/`error` classifies by DURABLE request state (#1789),
+        # exactly like the return/error handler: it resolves the request_id via
+        # ``get_closed_request`` over a pooled connection. Mock both so the rejection
+        # path can distinguish a genuinely-closed request (``closed`` is a tuple) from a
+        # session that never owned one (``closed=None`` → the generic rejection).
+        conn = MagicMock()
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=conn)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=acquire)
+        monkeypatch.setattr(runtime, "require_pool", lambda: pool)
+        monkeypatch.setattr(queries, "get_closed_request", AsyncMock(return_value=closed))
 
         reject_unoffered_tool_calls(
             MagicMock(),
@@ -270,8 +292,14 @@ class TestRejectUnofferedToolCalls:
         return append_result
 
     async def test_closed_control_call_gets_terminal_stop_message(self, monkeypatch: Any) -> None:
-        call = {"id": "tc_1", "function": {"name": "return", "arguments": "{}"}}
-        append_result = await self._drive(monkeypatch, [call], ["bash", "read"])
+        # A de-offered `return` answering a GENUINELY-CLOSED request (durable state
+        # resolves a real closed request) → defect-1's eval-validated terminal stop.
+        call = {
+            "id": "tc_1",
+            "function": {"name": "return", "arguments": '{"request_id": "req_1", "value": 1}'},
+        }
+        closed = (Err(error={"kind": "timeout"}), datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+        append_result = await self._drive(monkeypatch, [call], ["bash", "read"], closed=closed)
         assert append_result.await_count == 1
         args = append_result.await_args.args
         kwargs = append_result.await_args.kwargs
@@ -280,7 +308,46 @@ class TestRejectUnofferedToolCalls:
         error = kwargs["error"]
         assert "already answered" in error
         assert "end your turn" in error
+        assert "deadline timeout" in error  # the eval-validated handler wording, verbatim
         assert "tool not offered" not in error
+
+    async def test_hallucinated_control_name_without_closed_request_gets_generic(
+        self, monkeypatch: Any
+    ) -> None:
+        """#1789 regression: the state-classification the seat gate demanded.
+
+        A session that never owned a request can also hallucinate the literal name
+        ``return``/``error`` — those names are unoffered for it too. With no closed
+        request resolving (``get_closed_request`` → ``None``), it must get the GENERIC
+        unoffered rejection, NOT the factual falsehood ``this request was already
+        answered``. The pre-fix name-only branch failed exactly here.
+        """
+        call = {
+            "id": "tc_1",
+            "function": {"name": "return", "arguments": '{"request_id": "req_ghost", "value": 1}'},
+        }
+        append_result = await self._drive(monkeypatch, [call], ["bash", "read"], closed=None)
+        error = append_result.await_args.kwargs["error"]
+        assert "tool not offered" in error
+        assert "return" in error
+        assert "bash" in error and "read" in error
+        assert "already answered" not in error
+        assert "end your turn" not in error
+
+    async def test_de_offered_error_name_with_no_request_id_gets_generic(
+        self, monkeypatch: Any
+    ) -> None:
+        # Pure name hallucination with no request_id at all — resolved to the generic
+        # rejection (never the closed-request lie), and without even a state lookup.
+        call = {"id": "tc_1", "function": {"name": "error", "arguments": "{}"}}
+        append_result = await self._drive(monkeypatch, [call], ["bash"])
+        error = append_result.await_args.kwargs["error"]
+        assert "tool not offered" in error
+        assert "error" in error
+        assert "already answered" not in error
+        # No request_id → short-circuits before the DB read: the get_closed_request
+        # mock ``_drive`` installed is never called.
+        queries.get_closed_request.assert_not_called()
 
     async def test_hallucinated_name_keeps_generic_unoffered_message(
         self, monkeypatch: Any

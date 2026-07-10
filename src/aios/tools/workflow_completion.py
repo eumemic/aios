@@ -247,6 +247,35 @@ def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | Non
     )
 
 
+async def closed_request_stop_message(session_id: str, request_id: Any) -> str | None:
+    """The terminal stop message for a `return`/`error` naming an ALREADY-CLOSED
+    request, or ``None`` when the request is still open OR ``request_id`` resolves to
+    no request at all (a non-``str`` id included — the existing ``unknown_request``
+    path downstream owns that).
+
+    The single liveness-first state resolution (#1773 defect 1) shared by BOTH the
+    ``return``/``error`` handlers (via :func:`_closed_request_error`) and the harness
+    de-offered-tool rejection path (:func:`aios.harness.tool_dispatch.reject_unoffered_tool_calls`).
+    Sharing it is load-bearing for #1789: the rejection path must select the closed-request
+    framing from *durable request state*, never from the tool NAME alone — a session that
+    never owned a request but hallucinates the literal name ``return``/``error`` resolves
+    here to ``None`` and gets the generic unoffered rejection, NOT a false "your request
+    was already answered".
+
+    Emits defect-1's eval-validated wording (Arm D, 24/24) verbatim when the closing
+    event is available, quoting the outcome/timestamp the ``_closed_request_message``
+    detail arm renders.
+    """
+    if not isinstance(request_id, str):
+        return None
+    async with runtime.require_pool().acquire() as conn:
+        closed = await queries.get_closed_request(conn, session_id, request_id=request_id)
+    if closed is None:
+        return None
+    outcome, closed_at = closed
+    return _closed_request_message(outcome, closed_at)
+
+
 async def _closed_request_error(session_id: str, request_id: Any) -> ToolResult | None:
     """If ``request_id`` names a request that's ALREADY closed, the terminal
     :class:`ToolResult` error `return`/`error` must surface BEFORE anything else
@@ -260,15 +289,12 @@ async def _closed_request_error(session_id: str, request_id: Any) -> ToolResult 
     caller's await deadline wrote a timeout response before the child's first
     `return` landed — gets ONE clear stop signal instead of an endless
     ``output_schema_violation`` bounce that never mentions the request is dead.
+
+    The handler-path wrapper over :func:`closed_request_stop_message` — the same
+    resolution the rejection path mirrors (#1789).
     """
-    if not isinstance(request_id, str):
-        return None
-    async with runtime.require_pool().acquire() as conn:
-        closed = await queries.get_closed_request(conn, session_id, request_id=request_id)
-    if closed is None:
-        return None
-    outcome, closed_at = closed
-    return ToolResult(content=_closed_request_message(outcome, closed_at), is_error=True)
+    message = await closed_request_stop_message(session_id, request_id)
+    return None if message is None else ToolResult(content=message, is_error=True)
 
 
 async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any] | ToolResult:
