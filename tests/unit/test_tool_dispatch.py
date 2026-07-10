@@ -269,7 +269,7 @@ class TestRejectUnofferedToolCalls:
         await asyncio.sleep(0)
         return append_result
 
-    async def test_rejects_with_is_error_and_names_offered_set(self, monkeypatch: Any) -> None:
+    async def test_closed_control_call_gets_terminal_stop_message(self, monkeypatch: Any) -> None:
         call = {"id": "tc_1", "function": {"name": "return", "arguments": "{}"}}
         append_result = await self._drive(monkeypatch, [call], ["bash", "read"])
         assert append_result.await_count == 1
@@ -278,9 +278,20 @@ class TestRejectUnofferedToolCalls:
         assert args[1] == "ses_1"  # session_id
         assert args[3] == "return"  # tool name
         error = kwargs["error"]
-        assert "return" in error
-        assert "not offered" in error
+        assert "already answered" in error
+        assert "end your turn" in error
+        assert "tool not offered" not in error
+
+    async def test_hallucinated_name_keeps_generic_unoffered_message(
+        self, monkeypatch: Any
+    ) -> None:
+        call = {"id": "tc_1", "function": {"name": "hallucinated", "arguments": "{}"}}
+        append_result = await self._drive(monkeypatch, [call], ["bash", "read"])
+        error = append_result.await_args.kwargs["error"]
+        assert "tool not offered" in error
+        assert "hallucinated" in error
         assert "bash" in error and "read" in error
+        assert "end your turn" not in error
 
     async def test_never_reaches_a_handler(self, monkeypatch: Any) -> None:
         """The tool's own handler must not run — only the rejection path does."""

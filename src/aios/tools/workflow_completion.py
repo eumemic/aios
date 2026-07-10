@@ -225,23 +225,27 @@ async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -
     return None if schema is None else _validate_value(value, schema)
 
 
-def _closed_request_message(outcome: Outcome, closed_at: Any) -> str:
-    """The terminal stop message for a `return`/`error` call that targets an
-    ALREADY-answered request (#1773 defect 1).
+def _closed_request_message(
+    outcome: Outcome | None = None, closed_at: Any | None = None
+) -> str:
+    """The terminal stop message for a `return`/`error` call after all requests
+    are ALREADY answered (#1773 defect 1).
 
     The ``deadline timeout`` wording is the exact string the incident's replay
     eval (Arm D, 24/24 real trap points → 24/24 clean stops) validated as
-    actually stopping the model — use it verbatim for that case. Any other
-    closing (a duplicate self-answer, `no_return`, the child going away) still
-    gets a truthful, equally terminal message; it just isn't the specific
-    wording the eval pinned, since claiming "deadline timeout" for a close the
-    request itself caused would be false.
+    actually stopping the model — use it verbatim when the closing event is
+    available. The dispatch rejection path only knows that no obligation remains;
+    omitting the unavailable close detail keeps the same validated terminal
+    framing without inventing a timeout or timestamp.
     """
-    ts = closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
-    is_timeout = isinstance(outcome, Err) and outcome.error.get("kind") == "timeout"
-    qualifier = f"deadline timeout at {ts}" if is_timeout else f"at {ts}"
+    qualifier = ""
+    if outcome is not None and closed_at is not None:
+        ts = closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
+        is_timeout = isinstance(outcome, Err) and outcome.error.get("kind") == "timeout"
+        detail = f"deadline timeout at {ts}" if is_timeout else f"at {ts}"
+        qualifier = f" ({detail})"
     return (
-        f"this request was already answered ({qualifier}); "
+        f"this request was already answered{qualifier}; "
         "do not call return again — end your turn."
     )
 

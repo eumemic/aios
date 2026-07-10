@@ -46,6 +46,11 @@ from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
 from aios.tools.registry import ToolResult
+from aios.tools.workflow_completion import (
+    ERROR_TOOL_NAME,
+    RETURN_TOOL_NAME,
+    _closed_request_message,
+)
 
 if TYPE_CHECKING:
     from aios.services.tasks import ServicerKind
@@ -289,7 +294,12 @@ def reject_unoffered_tool_calls(
             account_id=account_id,
             log_prefix="tool_reject",
         ) as tc:
-            raise ToolBail(_unoffered_tool_message(tc.name, offered_names))
+            message = (
+                _closed_request_message()
+                if tc.name in {RETURN_TOOL_NAME, ERROR_TOOL_NAME}
+                else _unoffered_tool_message(tc.name, offered_names)
+            )
+            raise ToolBail(message)
         # _append_tool_result_event is only reachable via the ToolBail branch inside
         # _tool_lifecycle's except clause above — no success path exists here.
 
