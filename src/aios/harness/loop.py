@@ -42,6 +42,7 @@ from aios.harness.completion import (
     estimate_cost_usd,
     stream_litellm,
 )
+from aios.harness.context_budget import effective_window_max
 from aios.harness.model_binding import (
     BindingBoundaryError,
     effective_capability_model,
@@ -97,6 +98,12 @@ log = get_logger("aios.harness.loop")
 
 
 _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
+
+# Per-overflow multiplicative tightening of the effective input budget. Each
+# consecutive provider ``context_length_exceeded`` shrinks the next build by a
+# further factor (0.8, 0.64, ...), so the retry is never the identical oversized
+# request; the reschedule ladder bounds the attempts (terminal once spent).
+_CONTEXT_OVERFLOW_SHRINK_BASE: float = 0.8
 
 # ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
 # wall-clock cap on a single ``run_session_step`` call. The harness's
@@ -953,11 +960,25 @@ async def _run_session_step_body(
         account_id=account_id,
     )
     try:
+        # A prior context-overflow retry stamps the progressively-tightened
+        # shrink factor onto the stop_reason; a fresh/non-overflow step reads
+        # none and builds at full budget (shrink 1.0).
+        _stop_reason = getattr(session, "stop_reason", None) or {}
+        request_window_max = effective_window_max(
+            model=capability_model,
+            window_max=agent.window_max,
+            params=agent.litellm_extra,
+            shrink_factor=(
+                _stop_reason.get("context_shrink_factor", _CONTEXT_OVERFLOW_SHRINK_BASE)
+                if _stop_reason.get("context_overflow") is True
+                else 1.0
+            ),
+        )
         windowed = await sessions_service.read_windowed_events(
             pool,
             session_id,
-            window_min=agent.window_min,
-            window_max=agent.window_max,
+            window_min=min(agent.window_min, request_window_max),
+            window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),
             account_id=account_id,
@@ -985,6 +1006,8 @@ async def _run_session_step_body(
             "read_window_start_id": read_window_start.id,
             "is_error": False,
             "event_count_read": len(events),
+            "request_window_max": request_window_max,
+            "configured_window_max": agent.window_max,
         },
         account_id=account_id,
     )
@@ -1381,6 +1404,20 @@ async def _run_session_step_body(
                 retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
             )
         except Exception as exc:
+            if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+                log.warning("step.model_context_overflow", session_id=session_id)
+                await _append_model_request_error_span(
+                    pool,
+                    session_id,
+                    start_event_id=start_event.id,
+                    account_id=account_id,
+                    provider_error=_provider_error_detail(exc),
+                )
+                return _StepResult(
+                    retry_delay=await _apply_context_overflow_retry(
+                        pool, session_id, account_id=account_id
+                    )
+                )
             if _is_terminal_model_error(exc):
                 log.warning(
                     "step.model_terminal_error",
@@ -2184,6 +2221,51 @@ async def _handle_streaming_model_deadline(
     )
 
 
+async def _apply_context_overflow_retry(
+    pool: Any, session_id: str, *, account_id: str
+) -> float | None:
+    """Schedule a strictly-smaller retry after a provider context overflow.
+
+    Context overflow is non-retryable-as-is (#1792 Part 2): each consecutive
+    overflow tightens the next build's effective input budget by a further
+    factor (``_CONTEXT_OVERFLOW_SHRINK_BASE ** n``) so the retry is never the
+    identical oversized request. The reschedule ladder bounds the attempts —
+    once the backoff budget is spent the session lands terminal (``None``)
+    rather than re-firing the same request forever (the compounding-cooldown
+    class from the 2026-07-09 outage).
+
+    Returns the retry delay (seconds), or ``None`` when the budget is spent and
+    the session has been latched into the terminal ``errored`` state.
+    """
+    attempt = await _count_consecutive_context_overflow(pool, session_id, account_id=account_id)
+    delay = _retry_delay_for_attempt(attempt)
+    if delay is None:
+        await _latch_errored_turn(
+            pool, session_id, error_kind="context_overflow", account_id=account_id
+        )
+        return None
+    shrink_factor = round(_CONTEXT_OVERFLOW_SHRINK_BASE ** (attempt + 1), 4)
+    await sessions_service.set_session_stop_reason(
+        pool,
+        session_id,
+        {
+            "type": "rescheduling",
+            "context_overflow": True,
+            "context_shrink_factor": shrink_factor,
+        },
+        account_id=account_id,
+    )
+    await _append_lifecycle(
+        pool,
+        session_id,
+        "turn_ended",
+        "rescheduling",
+        "context_overflow",
+        account_id=account_id,
+    )
+    return delay
+
+
 async def _apply_retry_or_failure(pool: Any, session_id: str, *, account_id: str) -> float | None:
     """Apply the rescheduling state when backoff budget allows; otherwise
     mark a terminal error.
@@ -2329,12 +2411,12 @@ async def _handle_step_timeout(pool: Any, session_id: str, *, account_id: str) -
     return await _apply_retry_or_failure(pool, session_id, account_id=account_id)
 
 
-async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account_id: str) -> int:
-    """Count consecutive rescheduling lifecycle events at the tail of the log.
-
-    Returns the number of consecutive ``turn_ended`` lifecycle events
-    with ``stop_reason == "rescheduling"`` at the end of the lifecycle
-    event sequence. A non-rescheduling event breaks the streak.
+async def _count_consecutive_stop_reason(
+    pool: Any, session_id: str, *, stop_reason: str, account_id: str
+) -> int:
+    """Count consecutive ``turn_ended`` lifecycle events with ``stop_reason`` at
+    the tail of the log. A ``turn_ended`` with any other stop_reason — or any
+    non-``turn_ended`` event — breaks the streak.
     """
     # Only the tail matters; reading ASC with the default LIMIT would miss the
     # recent streak entirely on a session with >limit lifecycle events.
@@ -2348,11 +2430,33 @@ async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account
     )
     count = 0
     for e in lifecycle_events:
-        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == "rescheduling":
+        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == stop_reason:
             count += 1
         else:
             break
     return count
+
+
+async def _count_consecutive_rescheduling(pool: Any, session_id: str, *, account_id: str) -> int:
+    """Count consecutive transient-error reschedulings at the tail (drives the
+    backoff attempt index for :func:`_apply_retry_or_failure`)."""
+    return await _count_consecutive_stop_reason(
+        pool, session_id, stop_reason="rescheduling", account_id=account_id
+    )
+
+
+async def _count_consecutive_context_overflow(
+    pool: Any, session_id: str, *, account_id: str
+) -> int:
+    """Count consecutive context-overflow reschedulings at the tail (drives the
+    progressive shrink + bounded ladder for :func:`_apply_context_overflow_retry`).
+
+    A successful turn or any other rescheduling class breaks the streak, so an
+    overflow that recurs only after intervening progress starts fresh.
+    """
+    return await _count_consecutive_stop_reason(
+        pool, session_id, stop_reason="context_overflow", account_id=account_id
+    )
 
 
 async def _append_lifecycle(

@@ -21,6 +21,8 @@ import pytest
 
 from aios.harness.completion import ModelCallDeadlineError
 from aios.harness.loop import (
+    _RETRY_BACKOFF_SECONDS,
+    _count_consecutive_context_overflow,
     _count_consecutive_rescheduling,
     _is_terminal_model_error,
     _provider_error_detail,
@@ -53,7 +55,6 @@ def _make_litellm_error(cls: type[Exception]) -> Exception:
 _TERMINAL_ERROR_CLASSES = [
     litellm_exceptions.BadRequestError,
     litellm_exceptions.AuthenticationError,
-    litellm_exceptions.ContextWindowExceededError,
     litellm_exceptions.ContentPolicyViolationError,
     litellm_exceptions.PermissionDeniedError,
     litellm_exceptions.NotFoundError,
@@ -643,3 +644,124 @@ class TestErroredSpanCarriesProviderError:
         assert provider_errors
         assert provider_errors[-1]["exception_class"] == "AuthenticationError"
         assert provider_errors[-1]["http_status"] == 401
+
+
+class TestRunSessionStepOnContextOverflow:
+    """Overflow is non-retryable-as-is: each retry shrinks, and the ladder is
+    bounded so a persistently-oversized request lands terminal instead of
+    looping verbatim (the 2026-07-09 Ultron/sol outage class)."""
+
+    async def test_first_overflow_shrinks_to_80pct(self, mock_step_dependencies: Any) -> None:
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=0),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        # The stop_reason stamps the shrink factor the next build reads, so the
+        # retry request is strictly smaller — never the identical payload.
+        assert any(
+            call.args[2]
+            == {"type": "rescheduling", "context_overflow": True, "context_shrink_factor": 0.8}
+            for call in mock_step_dependencies.set_stop_reason.call_args_list
+        )
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+    async def test_repeated_overflow_shrinks_progressively_and_is_not_verbatim(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        """Regression: a SECOND overflow must tighten further (0.64) on a longer
+        backoff, not re-fire the same 80% request forever."""
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=1),  # one prior overflow already at 0.8
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=8, account_id=ANY
+        )
+        assert any(
+            call.args[2]
+            == {"type": "rescheduling", "context_overflow": True, "context_shrink_factor": 0.64}
+            for call in mock_step_dependencies.set_stop_reason.call_args_list
+        )
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+    async def test_overflow_budget_exhausted_lands_terminal(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        """Once the backoff ladder is spent, overflow stops retrying and latches
+        the session errored — the unbounded identical-retry loop is gone."""
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=len(_RETRY_BACKOFF_SECONDS)),  # budget spent
+        ):
+            await run_session_step("sess_x")  # must NOT raise
+
+        mock_step_dependencies.defer_wake.assert_not_awaited()
+        mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
+            ANY, "sess_x", account_id=ANY, error={"kind": "context_overflow"}
+        )
+        stop_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        assert {"type": "error"} in stop_reasons
+        # No further rescheduling stop_reason recorded on the terminal attempt.
+        assert not any(reason.get("context_overflow") is True for reason in stop_reasons)
+
+
+class TestCountConsecutiveContextOverflow:
+    async def test_counts_only_trailing_context_overflow_streak(self) -> None:
+        # Newest-first: overflow, overflow, end_turn, overflow. The end_turn
+        # breaks the streak, so only the two trailing overflows count.
+        events_newest_first = [
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "context_overflow"}),
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "context_overflow"}),
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "end_turn"}),
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "context_overflow"}),
+        ]
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=events_newest_first),
+        ):
+            assert (
+                await _count_consecutive_context_overflow(
+                    pool, "sess_x", account_id="acc_test_stub"
+                )
+                == 2
+            )
+
+    async def test_rescheduling_tail_does_not_count_as_overflow(self) -> None:
+        """A plain transient rescheduling is a DIFFERENT streak — it must not be
+        mistaken for an overflow retry (which would over-shrink)."""
+        events_newest_first = [
+            SimpleNamespace(data={"event": "turn_ended", "stop_reason": "rescheduling"}),
+        ]
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=events_newest_first),
+        ):
+            assert (
+                await _count_consecutive_context_overflow(
+                    pool, "sess_x", account_id="acc_test_stub"
+                )
+                == 0
+            )
