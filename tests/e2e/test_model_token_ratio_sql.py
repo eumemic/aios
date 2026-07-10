@@ -309,6 +309,28 @@ class TestModelTokenRatioSQL:
             ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
         assert ratio == pytest.approx(1.5, abs=0.005)
 
+    async def test_zero_input_usage_and_decimal_values_are_excluded(self, harness: Harness) -> None:
+        """Real-Postgres discriminator: zero usage is poison, while a future
+        non-integral value must be ignored rather than crashing the cast."""
+        account_id = "acc_test_stub"
+        model = f"test-model-{uuid.uuid4().hex[:8]}"
+        session = await harness.start("seed")
+        for _ in range(20):
+            await _seed_valid_span(
+                harness, session.id, model=model, local_tokens=100_000, input_tokens=0
+            )
+        for _ in range(5):
+            await _seed_valid_span(
+                harness, session.id, model=model, local_tokens=100, input_tokens=150
+            )
+        # JSON permits this future hostile shape despite today's int-typed provider model.
+        await _seed_valid_span(
+            harness, session.id, model=model, local_tokens=100, input_tokens=150.5  # type: ignore[arg-type]
+        )
+        async with harness._pool.acquire() as conn:
+            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+        assert ratio == pytest.approx(1.5, abs=0.01)
+
     async def test_recency_bound_honors_recent_spans(self, harness: Harness) -> None:
         """Recency honored (issue #1711): seed MORE than the sample limit,
         with a deliberately skewed OLD tail (ratio 4.0) below the newest

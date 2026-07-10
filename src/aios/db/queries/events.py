@@ -192,8 +192,8 @@ _MODEL_TOKEN_RATIO_MIN_SAMPLES = 5
 # (``read_windowed_events``), eventually tripping the pool's 30 s
 # ``statement_timeout`` inside the session step and JSON-decoding all N rows
 # on the event loop.  1000 is large enough for a stable ridge fit while
-# riding migration 0024's ``((data->>'model'), seq DESC)`` partial index as a
-# bounded seek (``ORDER BY seq DESC LIMIT $2``).  See issue #1711.
+# bounding the fit to the newest rows (``ORDER BY created_at DESC LIMIT $2``).
+# See issue #1711.  ``seq`` is session-local and cannot express global recency.
 _MODEL_TOKEN_RATIO_SAMPLE_LIMIT = 1000
 _MODEL_TOKEN_RATIO_MIN = 0.5
 _MODEL_TOKEN_RATIO_BUCKET_FLOOR = 0.001
@@ -239,7 +239,7 @@ _MODEL_TOKEN_CLASS_PRIOR = 1.0
 # prices a class below 0 tok/local-tok, and the windower divides by the
 # blend so a near-zero blend must be guarded.  Mirrors the scalar's
 # ``_MODEL_TOKEN_RATIO_MIN`` lower bound and adds a generous upper bound.
-_MODEL_TOKEN_CLASS_MIN = 0.0
+_MODEL_TOKEN_CLASS_MIN = 0.05
 _MODEL_TOKEN_CLASS_MAX = 8.0
 
 # Safety-margin slack between the budgeted window and the provider hard cap
@@ -291,10 +291,22 @@ def _solve_ridge(
     class-by-class meaning.
     """
     p = n_features
+    # Normalize the whole least-squares system to token-scale units before
+    # forming XᵀX.  Without this, ~1e10 normal-matrix entries make λ=1e-2
+    # numerically equivalent to unregularized OLS.  A single global scale
+    # preserves coefficient units and the neutral 1.0 prior.
+    # Keep typical normalized normal-matrix entries around 1e2 rather than
+    # 1e10.  This leaves data dominant while making λ representable and
+    # consequential for weak/collinear directions.
+    scale = math.sqrt(sum(sum(v * v for v in x) for x, _ in rows) / max(len(rows), 1)) / 10.0
+    if not math.isfinite(scale) or scale <= 0:
+        return None
+    normalized_rows = [([v / scale for v in x], y / scale) for x, y in rows]
+
     # Normal equations: (XᵀX + λI) β = Xᵀy + λ·prior·1
     ata = [[0.0] * p for _ in range(p)]
     aty = [0.0] * p
-    for x, y in rows:
+    for x, y in normalized_rows:
         for j in range(p):
             aty[j] += x[j] * y
             xj = x[j]
@@ -395,11 +407,10 @@ async def model_token_class_ratios(
     with the scalar contract.
 
     The fetch is bounded to the most recent
-    :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY seq DESC
-    LIMIT`` (issue #1711).  This rides the 0024 index as a bounded index
-    seek rather than an unbounded lifetime scan on the step hot path; the
-    limit is large enough that the ridge fit is stable while capping both
-    the SQL scan and the per-row JSON decode done on the event loop.
+    :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY created_at
+    DESC LIMIT`` (issue #1711).  ``seq`` is only session-local, so it cannot
+    rank spans pooled across sessions.  The limit caps both the SQL result
+    and the per-row JSON decode done on the event loop.
     """
     if k_bucket <= 0:
         raise ValueError("k_bucket must be positive")
@@ -455,9 +466,16 @@ async def model_token_class_ratio_fit(
           AND data ? 'model'
           AND (data->'model_usage') ? 'input_tokens'
           AND (data->'model_usage'->>'input_tokens') IS NOT NULL
-          AND (data->'model_usage'->>'input_tokens')::bigint > 0
-          AND (data->>'local_tokens')::bigint > 0
-        ORDER BY seq DESC
+          -- Regex gates make the casts defensive against future malformed or
+          -- non-integral JSON values (e.g. "150.5").
+          AND (data->'model_usage'->>'input_tokens') ~ '^[0-9]+$'
+          AND (data->'model_usage'->>'input_tokens')::numeric > 0
+          AND (data->>'local_tokens') ~ '^[0-9]+$'
+          AND (data->>'local_tokens')::numeric > 0
+        -- Bound the scan to the globally most recent N spans (issue #1711).
+        -- seq is session-local, so created_at must lead across sessions.
+        -- MIN_SAMPLES is still checked below the fetch.
+        ORDER BY created_at DESC, session_id DESC, seq DESC
         LIMIT $2
         """,
         model,
@@ -627,8 +645,10 @@ def blended_r_eff(ratios: dict[str, float], local_by_class: dict[str, float]) ->
     """
     total = sum(local_by_class.get(c, 0.0) for c in ratios)
     if total <= 0:
-        return sum(ratios.values()) / len(ratios)
-    return sum(ratios[c] * float(local_by_class.get(c, 0.0)) for c in ratios) / total
+        blend = sum(ratios.values()) / len(ratios)
+    else:
+        blend = sum(ratios[c] * float(local_by_class.get(c, 0.0)) for c in ratios) / total
+    return max(blend, _MODEL_TOKEN_RATIO_MIN)
 
 
 def _derive_tool_name(kind: str, data: dict[str, Any]) -> str | None:
@@ -2484,11 +2504,14 @@ async def read_windowed_events(
     # together with the Layer-2 calibrated coefficients it protects.
     calibrated = any(c != 1.0 for c in coefs.values())
     margin = (1.0 + _WINDOW_SAFETY_MARGIN) if calibrated else 1.0
+    # Two-way guard: calibration may make the conversion larger, never
+    # smaller than neutral.  A low fitted ratio must not inflate retention.
+    effective_ratio = max(1.0, ratio * margin)
 
     # Shrink the effective window by the caller's overhead contribution.
     # Apply R_eff (x margin) to the overhead up-front so the subtraction
     # happens in the same effective space tokens_to_drop operates in.
-    overhead_effective = round(overhead.total * ratio * margin)
+    overhead_effective = round(overhead.total * effective_ratio)
     events_window_max = window_max - overhead_effective
     events_window_min = max(0, window_min - overhead_effective)
     if events_window_max <= 0:
@@ -2497,7 +2520,7 @@ async def read_windowed_events(
             f"exceeds window_max ({window_max}); no budget remains for events"
         )
 
-    total_effective = round(total * ratio * margin)
+    total_effective = round(total * effective_ratio)
     if total_effective <= events_window_max:
         return WindowedEvents(
             events=await queries.read_windowed_context_events(
@@ -2524,7 +2547,7 @@ async def read_windowed_events(
             omission=None,
         )
 
-    drop = math.ceil(drop_effective / (ratio * margin))
+    drop = math.ceil(drop_effective / effective_ratio)
 
     # Never drop the entire window: the window must keep a non-empty tail.
     # Here ``events_window_min`` can clamp to 0 when overhead exceeds

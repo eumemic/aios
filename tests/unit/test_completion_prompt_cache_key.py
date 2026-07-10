@@ -104,7 +104,7 @@ async def test_stream_litellm_openai_path_sends_prompt_cache_key(
     monkeypatch.setattr(
         litellm,
         "stream_chunk_builder",
-        lambda chunks: {
+        lambda chunks, **_kwargs: {
             "usage": {},
             "choices": [{"message": {"role": "assistant", "content": ""}}],
         },

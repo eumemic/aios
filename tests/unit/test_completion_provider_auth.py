@@ -169,7 +169,7 @@ async def test_stream_litellm_also_injects_auth(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         litellm,
         "stream_chunk_builder",
-        lambda chunks: {
+        lambda chunks, **_kwargs: {
             "usage": {},
             "choices": [{"message": {"role": "assistant", "content": ""}}],
         },
