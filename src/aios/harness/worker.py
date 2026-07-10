@@ -342,6 +342,7 @@ async def worker_main() -> None:
     tool_broker: ToolBroker | None = None
     procrastinate_opened = False
     sweep_task: asyncio.Task[None] | None = None
+    invariant_sweep_task: asyncio.Task[None] | None = None
     interrupt_task: asyncio.Task[None] | None = None
     mcp_evict_task: asyncio.Task[None] | None = None
     github_clone_breaker_clear_task: asyncio.Task[None] | None = None
@@ -549,6 +550,12 @@ async def worker_main() -> None:
         )
         _supervise(sweep_task, latch=supervised_latch, fatal=supervised_failure)
 
+        invariant_sweep_task = asyncio.create_task(
+            _periodic_invariant_sweep(pool, interval=settings.invariant_sweep_interval_seconds),
+            name="periodic_invariant_sweep",
+        )
+        _supervise(invariant_sweep_task, latch=supervised_latch, fatal=supervised_failure)
+
         interrupt_task = asyncio.create_task(
             _run_interrupt_listener(settings.db_url, inflight_tool_registry, pool),
             name="interrupt_listener",
@@ -648,6 +655,8 @@ async def worker_main() -> None:
             await _cancel_and_drain(heartbeat_task)
         if sweep_task is not None:
             await _cancel_and_drain(sweep_task)
+        if invariant_sweep_task is not None:
+            await _cancel_and_drain(invariant_sweep_task)
         if interrupt_task is not None:
             await _cancel_and_drain(interrupt_task)
         if mcp_evict_task is not None:
@@ -765,6 +774,22 @@ async def _periodic_heartbeat(*, interval: int = _HEARTBEAT_INTERVAL_SECONDS) ->
             # can investigate.
             log.warning("heartbeat.touch_failed", path=str(_HEARTBEAT_FILE), error=str(e))
         await asyncio.sleep(interval)
+
+
+async def _periodic_invariant_sweep(pool: asyncpg.Pool[Any], *, interval: int) -> None:
+    """Run C5 independently at its deliberately low cadence."""
+    from aios.harness.invariant_sweep import sweep_session_invariants
+
+    invariant_log = get_logger("aios.worker.invariant_sweep")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            result = await sweep_session_invariants(pool)
+            invariant_log.info(
+                "invariant_sweep.complete", selected=result.selected, archived=result.archived
+            )
+        except Exception:
+            invariant_log.exception("invariant_sweep.failed")
 
 
 async def _periodic_sweep(
