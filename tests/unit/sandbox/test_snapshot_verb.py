@@ -44,6 +44,7 @@ class _FakeDocker:
         self.container_labels: dict[str, str] = {}
         self.images: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
+        self.cli_timeouts: list[tuple[list[str], float]] = []
         self.pipelines: list[tuple[list[str], list[str]]] = []
         # (stall_timeout_s, max_timeout_s) each flatten ran with — lets a test
         # assert the pipeline uses the config-driven progress deadlines, not a
@@ -52,6 +53,7 @@ class _FakeDocker:
 
     async def cli(self, argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
         self.calls.append(argv)
+        self.cli_timeouts.append((argv, timeout_s))
         sub = argv[1]
         if sub == "stop":
             return 0, b"cid\n", b""
@@ -222,6 +224,19 @@ class TestLineageGate:
 # ── flatten triggers ─────────────────────────────────────────────────────────
 
 
+class TestSnapshotTimeoutBudget:
+    @pytest.mark.asyncio
+    async def test_large_commit_uses_size_derived_budget(self, fake_docker: _FakeDocker) -> None:
+        fake_docker.size_rw = 12_000_000_000
+        await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        commit_timeout = next(
+            timeout for argv, timeout in fake_docker.cli_timeouts if argv[1] == "commit"
+        )
+        assert commit_timeout == 240.0
+
+
 class TestFlattenTriggers:
     @pytest.mark.asyncio
     async def test_over_budget_flattens_not_commits(self, fake_docker: _FakeDocker) -> None:
@@ -357,16 +372,10 @@ class TestFlattenDiskGate:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("size_rw", [6_000_000_000, 200_000_000_000])
-    async def test_large_corpse_flatten_deadlines_are_size_independent(
+    async def test_large_corpse_flatten_uses_size_derived_deadline(
         self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch, size_rw: int
     ) -> None:
-        """The layer that USED to compute the timeout (``DockerBackend.snapshot``)
-        must no longer derive it from size. A >5 GB corpse — and a 200 GB one —
-        both flatten with the SAME config-driven stall/absolute deadlines; the
-        retired ``floor + bytes*ns_per_byte`` formula is gone, so there is no
-        size-scaled kill for a large corpse (the arithmetic that bricked
-        salvage). Byte-stream relay through the real pump is proven separately
-        in ``test_subprocess.py`` (large-progressing-stream test)."""
+        """Flatten receives the same SizeRw-derived snapshot budget as commit."""
         fake_docker.size_rw = size_rw
         _set_free_disk(monkeypatch, 2 * 1024**5)  # 2 PiB — over required for any size here
         out = await DockerBackend().snapshot(
@@ -378,8 +387,7 @@ class TestFlattenDiskGate:
         assert out.kind == "flattened"
         assert fake_docker.pipelines, "a large corpse must flatten via the pipeline"
         settings = get_settings()
-        # Deadlines are the CONSTANT config values, identical across the 6 GB and
-        # 200 GB cases — i.e. not derived from size (the killed regression).
+        budget = max(60.0, size_rw * 20e-9)
         assert fake_docker.pipeline_timeouts == [
-            (settings.sandbox_pipeline_stall_seconds, settings.sandbox_pipeline_max_seconds)
+            (min(settings.sandbox_pipeline_stall_seconds, budget), budget)
         ]

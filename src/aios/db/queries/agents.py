@@ -287,8 +287,12 @@ async def update_agent(
         # alone, set at-or-below the current ``window_min``) only
         # produces an invalid pair AFTER the merge, so the check has to
         # live on the resolved values rather than the input kwargs.
-        # Without this, the row commits and the next session step
-        # ``ZeroDivisionError``s in :func:`aios.harness.tokens.tokens_to_drop`.
+        # A stored band must have positive width (``window_min == window_max``
+        # is zero snap hysteresis — every overflow trims to exactly
+        # ``window_max`` with no chunking). :func:`aios.harness.tokens.tokens_to_drop`
+        # itself tolerates a collapsed band at runtime (the overflow shrink
+        # ladder can derive one from a valid config), so this is a
+        # config-quality constraint, not crash-prevention.
         raise ValidationError(
             "window_min must be strictly less than window_max",
             detail={"window_min": new_wmin, "window_max": new_wmax},

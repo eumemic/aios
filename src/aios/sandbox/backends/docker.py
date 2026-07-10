@@ -74,6 +74,16 @@ _CONTAINER_TIMEOUT_EXIT_CODE = 137
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+# Snapshot operations legitimately scale with the corpse writable layer. Keep
+# metadata/management calls on the blanket Docker CLI bound, but budget the
+# data-moving commit/export/import work by SizeRw so large corpses converge.
+_SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
+_SNAPSHOT_TIMEOUT_NS_PER_BYTE = 20e-9
+
+
+def _snapshot_timeout_s(size_rw: int | None) -> float:
+    return max(_SNAPSHOT_TIMEOUT_FLOOR_S, (size_rw or 0) * _SNAPSHOT_TIMEOUT_NS_PER_BYTE)
+
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
     """Decode ``raw`` as UTF-8 (with replacement) and truncate to ``max_bytes``.
@@ -584,10 +594,12 @@ class DockerBackend:
                 raise SandboxBackendError(
                     f"flatten deferred: {free} free bytes, {required} required"
                 )
-            return await self._flatten(sandbox_id, tag, labels)
-        # Commit remains on the management-call bound; only flatten needs the
-        # long-running progress-aware pipeline.
-        return await self._commit(sandbox_id, tag, env_keys, base_ref, timeout_s=30.0)
+            return await self._flatten(
+                sandbox_id, tag, labels, timeout_s=_snapshot_timeout_s(size_rw)
+            )
+        return await self._commit(
+            sandbox_id, tag, env_keys, base_ref, timeout_s=_snapshot_timeout_s(size_rw)
+        )
 
     async def _commit(
         self,
@@ -632,6 +644,8 @@ class DockerBackend:
         sandbox_id: str,
         tag: str,
         labels: dict[str, str],
+        *,
+        timeout_s: float,
     ) -> SnapshotOutcome:
         """``docker export | docker import`` — collapse the chain to one layer.
 
@@ -670,8 +684,8 @@ class DockerBackend:
         await run_docker_pipeline(
             ["docker", "export", sandbox_id],
             consumer,
-            stall_timeout_s=settings.sandbox_pipeline_stall_seconds,
-            max_timeout_s=settings.sandbox_pipeline_max_seconds,
+            stall_timeout_s=min(settings.sandbox_pipeline_stall_seconds, timeout_s),
+            max_timeout_s=timeout_s,
         )
         new = await self._inspect_image_fields(tag)
         if new is None:
