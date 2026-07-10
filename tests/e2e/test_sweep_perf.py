@@ -37,6 +37,7 @@ from aios.harness.sweep import (
     FAST_PATH_PENDING_WORK_SQL,
     GHOST_ASST_SQL,
     GHOST_SPAN_START_SQL,
+    OPEN_CANDIDATES_ASST_SQL,
     REFERENCED_ASST_BATCH_SQL,
     UNREACTED_ROWS_SQL,
 )
@@ -501,6 +502,28 @@ class TestNoCorrelatedSubplanOverEvents:
             f"(migration 0066), not an event-log subquery. See #840."
         )
 
+    async def test_open_candidates_asst_is_not_n_plus_1(
+        self, seeded_pool: asyncpg.Pool[Any]
+    ) -> None:
+        """The empty-unreacted/no-in-flight dispatch-narrowing branch runs
+        ``OPEN_CANDIDATES_ASST_SQL`` on every periodic sweep that reaches it.
+        Keep its ``open_tool_call_count`` gate a maintained-scalar join rather
+        than a per-session event-log derivation."""
+        session_ids = [
+            *(f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)),
+            *(f"sess_tc_{i:03d}" for i in range(_N_TC_SESSIONS)),
+            "sess_tc_deep",
+            "sess_tc_open",
+        ]
+        plan = await _explain(seeded_pool, OPEN_CANDIDATES_ASST_SQL, session_ids)
+        found = find_subplans_over_events(plan)
+        assert not found, (
+            f"N+1 regression in _filter_incomplete_batches empty_no_inflight "
+            f"dispatch narrowing: {len(found)} correlated subplan(s) over events. "
+            f"OPEN_CANDIDATES_ASST_SQL must use the maintained "
+            f"sessions.open_tool_call_count scalar, not an event-log subquery."
+        )
+
     async def test_unharvested_park_scan_uses_index_not_seq_scan(
         self, seeded_pool: asyncpg.Pool[Any]
     ) -> None:
@@ -555,6 +578,55 @@ class TestSweepQueryBudget:
         # budget is sized to the plan *shape*, not the exact event count, so it
         # won't go stale as the fixture grows); the pre-fix N+1 path burnt ~1.8M.
         assert hits < 50_000, f"candidate_rows uses {hits} buffer hits — N+1 regression?"
+
+    async def test_open_candidates_asst_buffer_budget(self, seeded_pool: asyncpg.Pool[Any]) -> None:
+        """Exercise the exact assistant fetch used by ``empty_no_inflight``
+        against a mixed candidate set containing deep resolved history and one
+        genuinely open call. Two invariants, both required:
+
+        - **Cardinality (correctness)** — the scalar gate
+          (``s.open_tool_call_count > 0``) must suppress every fully-resolved
+          session, so the query returns rows ONLY for ``sess_tc_open``. Without
+          this assertion the budget check is a HOLLOW fence: deleting the gate
+          leaks all 500 assistant rows of the resolved ``sess_tc_deep`` bait
+          into the result yet stays ~141x under the buffer budget, so the budget
+          alone cannot ring on the exact regression (gate deletion) it exists to
+          catch. Mirrors ``TestGhostAsstSweepBounded``'s exact-set fence for the
+          structurally-identical ``GHOST_ASST_SQL``.
+        - **Buffer budget (perf)** — buffer work stays linear, a backstop for an
+          N+1/unbounded plan-choice regression even while the gate is intact.
+        """
+        session_ids = [
+            *(f"sess_perf_{i:03d}" for i in range(_N_SESSIONS)),
+            *(f"sess_tc_{i:03d}" for i in range(_N_TC_SESSIONS)),
+            "sess_tc_deep",
+            "sess_tc_open",
+        ]
+        async with seeded_pool.acquire() as conn:
+            # Cardinality first: the scalar gate suppresses every fully-resolved
+            # session, so only the genuinely-open one survives. With the gate
+            # removed, the resolved/deep bait sessions leak into the result set
+            # and this assertion fails — as it must.
+            rows = await conn.fetch(OPEN_CANDIDATES_ASST_SQL, session_ids)
+            returned = {r["session_id"] for r in rows}
+            assert returned == {"sess_tc_open"}, (
+                f"OPEN_CANDIDATES_ASST_SQL must return rows ONLY for sessions "
+                f"with open_tool_call_count > 0; expected {{'sess_tc_open'}}, got "
+                f"{returned}. Resolved/deep bait sessions leaking in means the "
+                f"scalar gate was dropped."
+            )
+
+            result = await conn.fetchval(
+                f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {OPEN_CANDIDATES_ASST_SQL}",
+                session_ids,
+            )
+        if isinstance(result, str):
+            result = json.loads(result)
+        hits = _total_buffer_hits(result[0]["Plan"])
+        assert hits < 50_000, (
+            f"empty_no_inflight OPEN_CANDIDATES_ASST_SQL uses {hits} buffer hits "
+            f"— unbounded/N+1 regression?"
+        )
 
     async def test_list_sessions_status_derivation_budget(
         self, seeded_pool: asyncpg.Pool[Any]
