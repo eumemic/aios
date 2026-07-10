@@ -56,6 +56,7 @@ from aios.services.sessions import (
     AskNewSession,
     create_child_session,
     fail_open_child_requests_conn,
+    seed_outbound_cancel_conn,
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
@@ -237,13 +238,18 @@ async def _resolve_agent_call(
     if now - started_at < deadline:
         return None  # pending, within deadline
     with contextlib.suppress(NotFoundError):
-        await db_queries.write_response_if_absent(
-            conn,
-            child_id,
-            account_id=account_id,
-            request_id=request_id,
-            outcome=Err(error={"kind": "timeout"}),
-        )
+        async with conn.transaction():
+            wrote = await db_queries.write_response_if_absent(
+                conn,
+                child_id,
+                account_id=account_id,
+                request_id=request_id,
+                outcome=Err(error={"kind": "timeout"}),
+            )
+            if wrote and get_settings().cancel_cascade_enabled:
+                await db_queries.insert_session_cancel_marker(
+                    conn, session_id=child_id, request_id=request_id, account_id=account_id
+                )
     resolved = await db_queries.derive_response(
         conn, child_id, account_id=account_id, request_id=request_id
     )
@@ -1480,6 +1486,7 @@ async def _commit_terminal_and_dispatch(
     rows the periodic sweep re-defers; never a silently dropped event fire.
     """
     fires: list[db_queries.TriggerFireRef] = []
+    cascade_children: list[db_queries.ChildNode] = []
     # The CALLER run to answer, or None — a run servicing a RUN caller (single-sourced so
     # the durable signal-write and the prompt wake below can never desync on the gate).
     run_caller_id = (
@@ -1508,6 +1515,13 @@ async def _commit_terminal_and_dispatch(
         # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
+        )
+        cascade_children = (
+            await seed_outbound_cancel_conn(
+                conn, caller_kind="run", caller_id=run.id, account_id=run.account_id
+            )
+            if inserted is not None
+            else []
         )
         # Durable run-caller wake (C4/C5): a run answering a RUN caller writes a
         # ``child_done`` signal into the CALLER's signal side-table (never its journal —
@@ -1545,6 +1559,12 @@ async def _commit_terminal_and_dispatch(
     if inserted is not None and run_caller_id is not None:
         with contextlib.suppress(Exception):
             await defer_run_wake(run_caller_id, batch=True)
+    for child in cascade_children:
+        if child.kind == "run":
+            await defer_run_wake(child.id, batch=True)
+        else:
+            # Durable marker sweep is the backstop; session prompt wake needs a pool.
+            pass
     for fire in fires:
         try:
             await defer_trigger_fire(fire.trigger_id, fire.trigger_run_id)

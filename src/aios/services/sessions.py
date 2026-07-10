@@ -1492,6 +1492,71 @@ async def respond_to_request_conn(
     )
 
 
+# Outcomes written by a party withdrawing an edge rather than by its servicer.
+# Unknown future error kinds intentionally classify as fulfilled/graceful.
+REVOCATION_KINDS: frozenset[str] = frozenset(
+    {"cancelled", "timeout", "child_gone", "engine_semantics_changed", "nondeterministic_replay"}
+)
+
+
+async def _open_awaited_children(
+    conn: asyncpg.Connection[Any], *, caller_kind: str, caller_id: str, account_id: str
+) -> list[queries.ChildNode]:
+    """Return live children backed by a still-open awaited edge (never FK-only rows)."""
+    result: list[queries.ChildNode] = []
+    for child in await queries.children_of(
+        conn, caller_kind=caller_kind, caller_id=caller_id, account_id=account_id
+    ):
+        if not child.awaited or child.request_id is None:
+            continue
+        if child.kind == "session":
+            row = await conn.fetchrow(
+                "SELECT archived_at FROM sessions WHERE id=$1 AND account_id=$2",
+                child.id,
+                account_id,
+            )
+            if row is None or row["archived_at"] is not None:
+                continue
+            if (
+                await queries.read_request_response(
+                    conn, child.id, account_id=account_id, request_id=child.request_id
+                )
+                is not None
+            ):
+                continue
+        else:
+            status = await conn.fetchval(
+                "SELECT status FROM wf_runs WHERE id=$1 AND account_id=$2", child.id, account_id
+            )
+            if status is None or status in {"completed", "errored", "cancelled"}:
+                continue
+        result.append(child)
+    return result
+
+
+async def seed_outbound_cancel_conn(
+    conn: asyncpg.Connection[Any], *, caller_kind: str, caller_id: str, account_id: str
+) -> list[queries.ChildNode]:
+    """Seed cancellation carriers for the caller's open owned edges."""
+    if not get_settings().cancel_cascade_enabled:
+        return []
+    seeded: list[queries.ChildNode] = []
+    for child in await _open_awaited_children(
+        conn, caller_kind=caller_kind, caller_id=caller_id, account_id=account_id
+    ):
+        if child.kind == "run":
+            await wf_queries.insert_run_signal(
+                conn, run_id=child.id, call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY, kind="cancel"
+            )
+        else:
+            assert child.request_id is not None
+            await queries.insert_session_cancel_marker(
+                conn, session_id=child.id, request_id=child.request_id, account_id=account_id
+            )
+        seeded.append(child)
+    return seeded
+
+
 async def harvest_session_cancel_markers(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> bool:
@@ -1543,30 +1608,24 @@ async def harvest_session_cancel_markers(
             await queries.mark_session_cancel_marker_harvested(
                 conn, session_id=session_id, request_id=marker.request_id
             )
-        # §2.3: propagate ONLY when no awaited inbound survives (over-cancel-safe). A child
-        # marker is a side-table write keyed by the CHILD id — never its log — so the child
-        # harvests its own exit under its own lock (the single-writer invariant).
+        # Propagation is ownership-gated: only edge-created or explicitly ephemeral
+        # sessions may tear down a subtree. Bare parent_run_id is not ownership.
         if not await queries.get_open_request_ids(conn, session_id, account_id=account_id):
-            for child in await queries.children_of(
-                conn, caller_kind="session", caller_id=session_id, account_id=account_id
-            ):
-                if not child.awaited:
-                    continue  # a Tell child is detached — an exit never crosses
-                if child.kind == "run":
-                    await wf_queries.insert_run_signal(
-                        conn,
-                        run_id=child.id,
-                        call_key=wf_queries.CANCEL_SIGNAL_CALL_KEY,
-                        kind="cancel",
-                    )
-                elif child.request_id is not None:
-                    await queries.insert_session_cancel_marker(
-                        conn,
-                        session_id=child.id,
-                        request_id=child.request_id,
-                        account_id=account_id,
-                    )
-                propagated.append(child)
+            owned = bool(
+                await conn.fetchval(
+                    "SELECT archive_when_idle OR EXISTS ("
+                    "SELECT 1 FROM events e WHERE e.session_id=sessions.id "
+                    "AND e.kind='lifecycle' AND e.data->>'event'='request_opened' "
+                    "AND COALESCE((e.data->>'awaited')::bool, true)) "
+                    "FROM sessions WHERE id=$1 AND account_id=$2",
+                    session_id,
+                    account_id,
+                )
+            )
+            if owned:
+                propagated = await seed_outbound_cancel_conn(
+                    conn, caller_kind="session", caller_id=session_id, account_id=account_id
+                )
     # AFTER commit: re-resolve each cancelled caller, and prompt each marked child to run its
     # own leaf (the C2 sweep / the run cancel-signal clause is the durable backstop).
     for write in wakes:
@@ -2072,7 +2131,11 @@ async def archive_session(
     # of waiting out the 1h agent deadline. Enrich vault_ids / resources / triggers
     # so the API response shape matches GET /sessions/{id}; the lists are read
     # post-update to surface any concurrent mutation that committed before archive.
+    propagated: list[queries.ChildNode] = []
     async with pool.acquire() as conn, conn.transaction():
+        propagated = await seed_outbound_cancel_conn(
+            conn, caller_kind="session", caller_id=session_id, account_id=account_id
+        )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
@@ -2092,6 +2155,11 @@ async def archive_session(
     await pool.execute("SELECT pg_notify($1, $2)", f"events_{session_id}", EVENTS_ARCHIVED_NOTIFY)
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
+    for child in propagated:
+        if child.kind == "run":
+            await defer_run_wake(child.id, batch=True)
+        else:
+            await defer_wake(pool, child.id, cause="cancel", account_id=account_id)
     return session
 
 
