@@ -232,6 +232,13 @@ class SandboxRegistry:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
+        # Consecutive salvage failures keyed by full corpse id. The value is
+        # ``(owning_session_id, failures, alarmed)`` — the owning session is
+        # stored so a salvage pass for one session only reconciles/clears its
+        # OWN entries (``list_managed`` is session-filtered, so a session-A
+        # pass must never GC session-B's open-breaker entry). ``alarmed``
+        # records whether the one-shot operator wake has been emitted.
+        self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
@@ -952,19 +959,81 @@ class SandboxRegistry:
         refs = await self._backend.list_managed(
             instance_id=settings.instance_id, session_id=session_id
         )
+        # GC only THIS session's stale counters. ``present`` is session-local
+        # (``list_managed`` was filtered to ``session_id``), so we must never
+        # reconcile it against other sessions' entries — doing so would clear a
+        # different session's open breaker and let it retry the expensive
+        # flatten and re-emit its "one-shot" alert.
+        present = {ref.sandbox_id for ref in refs}
+        for corpse_id, (owner, _failures, _alarmed) in list(self._salvage_failures.items()):
+            if owner == session_id and corpse_id not in present:
+                self._salvage_failures.pop(corpse_id, None)
         for ref in refs:
+            _owner, failures, alarmed = self._salvage_failures.get(
+                ref.sandbox_id, (session_id, 0, False)
+            )
+            if failures >= settings.sandbox_salvage_breaker_threshold:
+                # Already tripped by a prior attempt — suppress the salvage
+                # retry entirely. Still (re)fire the one-shot alert if a prior
+                # transition failed to write it, so a lost wake is recovered.
+                alarmed = await self._alarm_salvage_breaker_once(
+                    session_id, ref.sandbox_id, failures, alarmed
+                )
+                self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
+                raise SandboxBackendError(
+                    f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
+                    "refusing to provision over unrecovered state"
+                )
             removable = await self._snapshot_and_record(
                 session_id,
                 ref.sandbox_id,
                 disk_limit_bytes=settings.sandbox_snapshot_budget_bytes,
             )
             if not removable:
+                failures += 1
+                if failures >= settings.sandbox_salvage_breaker_threshold:
+                    alarmed = await self._alarm_salvage_breaker_once(
+                        session_id, ref.sandbox_id, failures, alarmed
+                    )
+                self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
                 raise SandboxBackendError(
                     f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
                     "failed (snapshot or pointer write); refusing to provision over "
                     "unrecovered state"
                 )
+            self._salvage_failures.pop(ref.sandbox_id, None)
             await self._backend.force_remove(ref.sandbox_id)
+
+    async def _alarm_salvage_breaker_once(
+        self, session_id: str, corpse_id: str, failures: int, alarmed: bool
+    ) -> bool:
+        """Emit the one-shot operator wake for an open salvage breaker.
+
+        Returns the (possibly newly-``True``) ``alarmed`` flag. It only flips
+        to ``True`` after the channel-less wake write lands, so a failed write
+        stays ``False`` and is retried on the next provision attempt of this
+        still-present corpse rather than being silently dropped.
+        """
+        if alarmed:
+            return True
+        log.error(
+            "sandbox.salvage_breaker_open",
+            session_id=session_id,
+            container_id=corpse_id[:12],
+            failures=failures,
+        )
+        try:
+            await self._alert_operator(
+                session_id,
+                f"Sandbox salvage breaker OPEN for corpse {corpse_id[:12]}: "
+                f"{failures} consecutive salvage failures. Provisioning for this "
+                "session is fail-closed until the corpse is recovered or cleared.",
+                cause="sandbox.salvage_breaker_open",
+            )
+        except Exception as err:
+            log.warning("sandbox.salvage_breaker_alert_failed", error=str(err))
+            return False
+        return True
 
     async def _reconcile_pointer_from_local(self, session_id: str) -> None:
         """First-commit crash heal (§5.3): if the canonical tag exists locally,
@@ -1090,6 +1159,31 @@ class SandboxRegistry:
             session_id,
             "lifecycle",
             {"event": event, **payload},
+            account_id=account_id,
+        )
+
+    async def _alert_operator(self, session_id: str, content: str, *, cause: str) -> None:
+        """Surface a channel-less operator alert that ACTIVELY wakes the session.
+
+        Unlike :meth:`_append_fs_event` — a non-stimulus ``lifecycle`` notice
+        that advances no stimulus seq and so is read only on some *future*
+        wake — this uses the platform's ``Tell(ExistingSession)`` writer: a
+        user-role message plus a deferred wake, opening no response obligation.
+        Used for detection-hole alerts (e.g. the salvage breaker opening) that
+        must reach an operator promptly rather than sit unread until an
+        unrelated wake. Raises on write failure so the caller can leave the
+        one-shot un-alarmed and retry on the next occurrence.
+        """
+        from aios.harness import runtime
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        await sessions_service.tell_existing_session(
+            pool,
+            session_id,
+            content=content,
+            cause=cause,
             account_id=account_id,
         )
 

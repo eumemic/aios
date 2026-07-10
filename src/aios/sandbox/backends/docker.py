@@ -21,7 +21,9 @@ expected to run arbitrary shell inside the sandbox.
 from __future__ import annotations
 
 import json
+import shutil
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import (
     run_docker_cli,
@@ -71,16 +73,6 @@ _CONTAINER_TIMEOUT_EXIT_CODE = 137
 # the kernel overlayfs lower-layer max so a budget-less session can't grow
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
-
-# Constant floor + per-byte budget for the commit/flatten/export timeout,
-# derived from the writable-layer ``SizeRw`` already read in the snapshot
-# sequence. A fixed timeout would turn a genuinely huge writable layer into
-# a permanent-brick retry loop (commit times out -> corpse retained ->
-# salvage times out -> forever); a size-derived bound fires only on a
-# genuinely hung daemon, never merely on size. ~10x a conservative
-# 50 MB/s measured commit throughput => 20 ns/byte.
-_SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
-_SNAPSHOT_TIMEOUT_NS_PER_BYTE = 20e-9
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -576,14 +568,26 @@ class DockerBackend:
             flatten_if_unique_bytes_over is not None
             and projected_unique > flatten_if_unique_bytes_over
         )
-        # Timeout scales with the bytes the daemon must move (resulting image
-        # for commit; whole rootfs for export) so a huge layer never wedges
-        # the worker in a permanent retry loop, while a hung daemon still trips.
-        timeout_s = _SNAPSHOT_TIMEOUT_FLOOR_S + (parent_size + rw) * _SNAPSHOT_TIMEOUT_NS_PER_BYTE
-
         if parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget:
-            return await self._flatten(sandbox_id, tag, labels, timeout_s=timeout_s)
-        return await self._commit(sandbox_id, tag, env_keys, base_ref, timeout_s=timeout_s)
+            estimate = parent_size + rw
+            settings = get_settings()
+            free = shutil.disk_usage("/").free
+            required = int(estimate * 1.75) + settings.sandbox_flatten_disk_floor_bytes
+            if free < required:
+                log.warning(
+                    "sandbox.flatten_deferred_disk",
+                    container_id=sandbox_id[:12],
+                    free_disk=free,
+                    required_disk=required,
+                    tar_estimate=estimate,
+                )
+                raise SandboxBackendError(
+                    f"flatten deferred: {free} free bytes, {required} required"
+                )
+            return await self._flatten(sandbox_id, tag, labels)
+        # Commit remains on the management-call bound; only flatten needs the
+        # long-running progress-aware pipeline.
+        return await self._commit(sandbox_id, tag, env_keys, base_ref, timeout_s=30.0)
 
     async def _commit(
         self,
@@ -628,8 +632,6 @@ class DockerBackend:
         sandbox_id: str,
         tag: str,
         labels: dict[str, str],
-        *,
-        timeout_s: float,
     ) -> SnapshotOutcome:
         """``docker export | docker import`` — collapse the chain to one layer.
 
@@ -664,7 +666,13 @@ class DockerBackend:
         for change in changes:
             consumer.extend(["--change", change])
         consumer.extend(["-", tag])
-        await run_docker_pipeline(["docker", "export", sandbox_id], consumer, timeout_s=timeout_s)
+        settings = get_settings()
+        await run_docker_pipeline(
+            ["docker", "export", sandbox_id],
+            consumer,
+            stall_timeout_s=settings.sandbox_pipeline_stall_seconds,
+            max_timeout_s=settings.sandbox_pipeline_max_seconds,
+        )
         new = await self._inspect_image_fields(tag)
         if new is None:
             raise SandboxBackendError(f"flattened image {tag} not found after import")

@@ -198,6 +198,26 @@ class Settings(BaseSettings):
         "applies). Per-environment overridable via "
         "``EnvironmentConfig.snapshot_budget_bytes``.",
     )
+    sandbox_pipeline_stall_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="Maximum interval without bytes moving through a Docker flatten pipeline.",
+    )
+    sandbox_pipeline_max_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description="Absolute backstop for a Docker flatten pipeline.",
+    )
+    sandbox_salvage_breaker_threshold: int = Field(
+        default=3,
+        ge=1,
+        description="Consecutive failures of one corpse before salvage retries are suppressed.",
+    )
+    sandbox_flatten_disk_floor_bytes: int = Field(
+        default=15 * 1024 * 1024 * 1024,
+        ge=0,
+        description="Free disk retained in addition to the estimated transient flatten cost.",
+    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
