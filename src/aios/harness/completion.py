@@ -617,13 +617,28 @@ def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
     ``prompt_tokens_details.cached_tokens``.
     """
     prompt_details = raw.get("prompt_tokens_details") or {}
-    cache_read = raw.get("cache_read_input_tokens") or prompt_details.get("cached_tokens") or 0
-    return {
-        "input_tokens": raw.get("prompt_tokens") or 0,
-        "output_tokens": raw.get("completion_tokens") or 0,
-        "cache_read_input_tokens": cache_read,
-        "cache_creation_input_tokens": raw.get("cache_creation_input_tokens") or 0,
-    }
+    usage: dict[str, int] = {}
+    # Missing usage is unknown, not zero.  In particular, streaming providers
+    # may omit the terminal usage trailer; persisting a fabricated zero makes
+    # that success span look calibration-eligible.
+    if raw.get("prompt_tokens") is not None:
+        usage["input_tokens"] = int(raw["prompt_tokens"])
+    if raw.get("completion_tokens") is not None:
+        usage["output_tokens"] = int(raw["completion_tokens"])
+    cache_read = raw.get("cache_read_input_tokens")
+    if cache_read is None:
+        cache_read = prompt_details.get("cached_tokens")
+    if cache_read is not None:
+        usage["cache_read_input_tokens"] = int(cache_read)
+    cache_creation = raw.get("cache_creation_input_tokens")
+    if cache_creation is not None:
+        usage["cache_creation_input_tokens"] = int(cache_creation)
+    # Once a real usage object contains token totals, absent optional cache
+    # breakdowns are genuine zeroes.  An entirely absent trailer remains {}.
+    if usage:
+        usage.setdefault("cache_read_input_tokens", 0)
+        usage.setdefault("cache_creation_input_tokens", 0)
+    return usage
 
 
 def _build_litellm_kwargs(
@@ -645,6 +660,9 @@ def _build_litellm_kwargs(
     if stream:
         kwargs["stream"] = True
         kwargs["stream_timeout"] = _STREAM_INTER_CHUNK_TIMEOUT_S
+        # LiteLLM translates this for providers which expose streaming usage
+        # and drops it for adapters which do not.
+        kwargs["stream_options"] = {"include_usage": True}
     if tools:
         kwargs["tools"] = tools
     if auth is not None:
@@ -829,7 +847,9 @@ async def stream_litellm(
                     usage: dict[str, int] = {}
                     cost: float | None = None
                     if chunks:
-                        partial_assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
+                        partial_assembled: Any = litellm.stream_chunk_builder(
+                            chunks=chunks, messages=messages
+                        )
                         if partial_assembled is not None:
                             _, usage, cost, _ = _unpack_litellm_response(
                                 partial_assembled, source="stream_chunk_builder"
@@ -869,7 +889,7 @@ async def stream_litellm(
         with contextlib.suppress(Exception):
             await response.aclose()
 
-    assembled: Any = litellm.stream_chunk_builder(chunks=chunks)
+    assembled: Any = litellm.stream_chunk_builder(chunks=chunks, messages=messages)
     # ``litellm.stream_chunk_builder(chunks=[])`` returns ``None`` rather
     # than raising, so a provider that closes the connection without
     # emitting any chunks (Bedrock cold start, OpenRouter mid-handshake

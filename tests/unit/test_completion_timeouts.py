@@ -232,7 +232,7 @@ async def test_stream_litellm_long_ttft_succeeds_when_inter_chunk_is_fast(
     monkeypatch.setattr(
         litellm,
         "stream_chunk_builder",
-        lambda chunks: {
+        lambda chunks, **_kwargs: {
             "usage": {},
             "choices": [{"message": {"role": "assistant", "content": "hello"}}],
         },
@@ -274,7 +274,7 @@ async def test_stream_litellm_passes_timeout_kwargs(
     monkeypatch.setattr(
         litellm,
         "stream_chunk_builder",
-        lambda chunks: {
+        lambda chunks, **_kwargs: {
             "usage": {},
             "choices": [{"message": {"role": "assistant", "content": ""}}],
         },
@@ -496,7 +496,7 @@ async def test_stream_litellm_closes_stream_on_normal_drain(
     monkeypatch.setattr(
         litellm,
         "stream_chunk_builder",
-        lambda chunks: {
+        lambda chunks, **_kwargs: {
             "usage": {},
             "choices": [{"message": {"role": "assistant", "content": "hello"}}],
         },

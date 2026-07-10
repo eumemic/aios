@@ -135,9 +135,8 @@ class TestModelTokenClassRatios:
         * Excludes rows lacking ``local_tokens_by_class`` (zero backfill;
           self-heals as new spans accumulate).
         * Bounds the scan to the most recent N spans via
-          ``ORDER BY seq DESC LIMIT $2`` (issue #1711), riding migration
-          0024's ``seq DESC`` partial index instead of an unbounded
-          lifetime scan on the step hot path.
+          ``ORDER BY created_at DESC LIMIT $2`` (issue #1711); ``seq`` is
+          session-local and cannot rank rows across sessions.
         """
         conn = _mock_conn([])
         await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
@@ -146,7 +145,7 @@ class TestModelTokenClassRatios:
         assert "cache_read_input_tokens" not in sql
         assert "cache_creation_input_tokens" not in sql
         assert "data ? 'local_tokens_by_class'" in sql
-        assert "ORDER BY seq DESC" in sql
+        assert "ORDER BY created_at DESC" in sql
         assert "LIMIT $2" in sql
 
     @pytest.mark.asyncio
@@ -162,7 +161,7 @@ class TestModelTokenClassRatios:
         conn = _mock_conn([])
         await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
         sql = conn.fetch.await_args.args[0]
-        assert "(data->'model_usage'->>'input_tokens')::bigint > 0" in sql
+        assert "input_tokens') ~ '^[0-9]+$'" in sql
 
     @pytest.mark.asyncio
     async def test_fetch_bound_to_sample_limit_constant(self) -> None:
@@ -197,11 +196,11 @@ class TestModelTokenClassRatios:
 
     @pytest.mark.asyncio
     async def test_recency_honored_recent_rows_drive_fit(self) -> None:
-        """Recency: the DB returns the most recent N (``ORDER BY seq DESC
+        """Recency: the DB returns the most recent N (``ORDER BY created_at DESC
         LIMIT``); a deliberately skewed *old* tail beyond N is never fetched,
         so the fit reflects only the recent regime.
 
-        The mock stands in for the DB's ``ORDER BY seq DESC LIMIT $2`` seek:
+        The mock stands in for the DB's ``ORDER BY created_at DESC LIMIT $2``:
         it returns exactly the recent-N slice, and the assertion proves the
         old tail (a wildly different coefficient regime) does not move the
         fit — i.e. the bound is honored, not silently ignored."""
@@ -209,7 +208,7 @@ class TestModelTokenClassRatios:
         old_skew = {"text": 8.0, "tool_result": 8.0, "thinking": 8.0}
         recent_rows = _linear_rows(recent, n=_MODEL_TOKEN_RATIO_SAMPLE_LIMIT)
         old_rows = _linear_rows(old_skew, n=500)
-        # The DB, honoring ORDER BY seq DESC LIMIT, hands back only the recent N.
+        # The DB, honoring global created_at recency, hands back only the recent N.
         conn = _mock_conn(recent_rows)
         recent_only_fit = await model_token_class_ratios(
             conn, "model-recent", account_id="acc_test_stub"
@@ -360,6 +359,9 @@ class TestBlendedREff:
     def test_empty_composition_falls_back_to_mean(self) -> None:
         coefs = {"text": 2.0, "tool_result": 1.0, "thinking": 3.0}
         assert blended_r_eff(coefs, {}) == pytest.approx(2.0)
+
+    def test_blend_has_scalar_floor(self) -> None:
+        assert blended_r_eff({"text": 0.1}, {"text": 100.0}) == 0.5
 
     def test_neutral_coefs_blend_to_one(self) -> None:
         # The acceptance-#5 fence: all-1.0 coefficients ⇒ R_eff == 1.0 for any

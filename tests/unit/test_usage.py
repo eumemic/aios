@@ -93,12 +93,7 @@ class TestNormalizeUsage:
 
     def test_empty_dict(self) -> None:
         result = _normalize_usage({})
-        assert result == {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-        }
+        assert result == {}
 
     def test_none_values_treated_as_zero(self) -> None:
         raw = {
@@ -107,12 +102,7 @@ class TestNormalizeUsage:
             "prompt_tokens_details": None,
         }
         result = _normalize_usage(raw)
-        assert result == {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-        }
+        assert result == {}
 
     def test_model_dump_flattened_prompt_tokens_details(self) -> None:
         """Regression: model_dump() flattens Pydantic objects to dicts with extra keys."""

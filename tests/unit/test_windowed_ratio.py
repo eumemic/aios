@@ -225,9 +225,8 @@ async def test_ratio_above_1_drops_more(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_ratio_below_1_drops_fewer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A calibrated R_eff=0.5 deflates total_effective below window_max -> no
-    drop, even after the x1.3 calibrated safety margin (0.5*1.3=0.65)."""
+async def test_ratio_below_1_never_inflates_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sub-neutral calibration cannot enlarge the retained window."""
     account_id = "acc_test_stub"
     monkeypatch.setattr(
         queries,
@@ -248,10 +247,10 @@ async def test_ratio_below_1_drops_fewer(monkeypatch: pytest.MonkeyPatch) -> Non
         overhead_local=0,
         account_id=account_id,
     )
-    # total_effective = round(3000*0.5*1.3) = 1950 < 2000 -> no drop -> fallback.
-    assert result.events == _FALLBACK_SENTINEL
-    assert result.omission is None
-    assert not conn.fetch_calls
+    # The two-way margin clamps the conversion to neutral, so a low fit can
+    # never inflate retention; this 3000-token slate must still be windowed.
+    assert result.events != _FALLBACK_SENTINEL
+    assert conn.fetch_calls
 
 
 # ─── omission metadata (#738) ────────────────────────────────────────────────

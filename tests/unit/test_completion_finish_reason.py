@@ -98,7 +98,7 @@ class _FakeStream:
 def _clobbered_builder(finish_reason: str) -> Any:
     """A ``stream_chunk_builder`` stand-in returning a given assembled
     ``finish_reason`` — used to simulate litellm's last-wins clobber."""
-    return lambda chunks: {
+    return lambda chunks, **_kwargs: {
         "usage": {},
         "choices": [
             {"message": {"role": "assistant", "content": ""}, "finish_reason": finish_reason}
