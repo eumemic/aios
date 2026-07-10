@@ -9,11 +9,25 @@ and the env-keys scrub are all exercised without a real daemon.
 from __future__ import annotations
 
 import json
+from collections import namedtuple
 from typing import Any
 
 import pytest
 
+from aios.config import get_settings
+from aios.sandbox.backends.base import SandboxBackendError
 from aios.sandbox.backends.docker import _FLATTEN_DEPTH_CEILING, DockerBackend
+
+_Usage = namedtuple("_Usage", ["total", "used", "free"])
+
+
+def _set_free_disk(monkeypatch: pytest.MonkeyPatch, free_bytes: int) -> None:
+    """Pin ``shutil.disk_usage(...).free`` the flatten disk-gate reads, so the
+    gate is deterministic instead of depending on the host/runner's real disk."""
+    monkeypatch.setattr(
+        "aios.sandbox.backends.docker.shutil.disk_usage",
+        lambda _path: _Usage(total=free_bytes * 2, used=free_bytes, free=free_bytes),
+    )
 
 
 class _FakeDocker:
@@ -31,6 +45,10 @@ class _FakeDocker:
         self.images: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
         self.pipelines: list[tuple[list[str], list[str]]] = []
+        # (stall_timeout_s, max_timeout_s) each flatten ran with — lets a test
+        # assert the pipeline uses the config-driven progress deadlines, not a
+        # size-scaled timeout.
+        self.pipeline_timeouts: list[tuple[float, float]] = []
 
     async def cli(self, argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
         self.calls.append(argv)
@@ -70,6 +88,7 @@ class _FakeDocker:
         max_timeout_s: float,
     ) -> tuple[int, bytes, bytes]:
         self.pipelines.append((producer, consumer))
+        self.pipeline_timeouts.append((stall_timeout_s, max_timeout_s))
         tag = consumer[-1]
         self.images[tag] = {
             "id": "flattened",
@@ -85,6 +104,9 @@ def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
     fd = _FakeDocker()
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fd.cli)
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_pipeline", fd.pipeline)
+    # Default to abundant free disk so flatten-path tests are deterministic;
+    # the disk-gate tests override this explicitly.
+    _set_free_disk(monkeypatch, 1024**4)  # 1 TiB
     return fd
 
 
@@ -305,3 +327,53 @@ class TestFlattenConfigRestore:
         assert "aios.base_image=ghcr.io/eumemic/aios-sandbox:latest" in joined
         # PATH is NOT restored.
         assert "ENV PATH=" not in joined
+
+
+# ── flatten disk-admission gate + the >5 GB salvage regime ───────────────────
+
+
+class TestFlattenDiskGate:
+    """The flatten path first checks free disk against the estimated transient
+    ``docker export`` tar cost plus a floor, and DEFERS (raises, corpse
+    retained) rather than fail mid-write into a half-baked image. The deferral
+    is what the salvage breaker counts. With sufficient disk the flatten runs
+    on the progress-aware pipeline — the fix for the size regime the old
+    size-scaled timeout could never satisfy."""
+
+    @pytest.mark.asyncio
+    async def test_flatten_deferred_when_disk_below_required(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_docker.size_rw = 6_000_000_000  # 6 GB writable layer → over budget
+        _set_free_disk(monkeypatch, 1_000_000_000)  # only 1 GB free
+        with pytest.raises(SandboxBackendError, match="flatten deferred"):
+            await DockerBackend().snapshot(
+                "cid",
+                "tag:latest",
+                empty_floor_bytes=8192,
+                flatten_if_unique_bytes_over=4 * 1024 * 1024 * 1024,
+            )
+        assert not fake_docker.pipelines, "a deferred flatten must never start the pipeline"
+
+    @pytest.mark.asyncio
+    async def test_over_5gb_flattens_via_progress_pipeline(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A >5 GB writable layer — arithmetically impossible for the retired
+        size-scaled timeout — flattens through the pipeline with the
+        config-driven stall + absolute deadlines (independent of size)."""
+        fake_docker.size_rw = 6_000_000_000  # 6 GB
+        _set_free_disk(monkeypatch, 100 * 1024**3)  # 100 GiB — well over required
+        out = await DockerBackend().snapshot(
+            "cid",
+            "tag:latest",
+            empty_floor_bytes=8192,
+            flatten_if_unique_bytes_over=4 * 1024 * 1024 * 1024,
+        )
+        assert out.kind == "flattened"
+        assert fake_docker.pipelines, "the >5 GB corpse must flatten via the pipeline"
+        settings = get_settings()
+        # Progress-based deadlines, NOT a per-byte size-scaled timeout.
+        assert fake_docker.pipeline_timeouts == [
+            (settings.sandbox_pipeline_stall_seconds, settings.sandbox_pipeline_max_seconds)
+        ]

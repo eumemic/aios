@@ -962,12 +962,13 @@ class SandboxRegistry:
         for ref in refs:
             failures, alarmed = self._salvage_failures.get(ref.sandbox_id, (0, False))
             if failures >= settings.sandbox_salvage_breaker_threshold:
-                log.warning(
-                    "sandbox.salvage_breaker_open",
-                    session_id=session_id,
-                    container_id=ref.sandbox_id[:12],
-                    failures=failures,
+                # Already tripped by a prior attempt — suppress the salvage
+                # retry entirely. Still (re)fire the one-shot alert if a prior
+                # transition failed to write it, so a lost wake is recovered.
+                alarmed = await self._alarm_salvage_breaker_once(
+                    session_id, ref.sandbox_id, failures, alarmed
                 )
+                self._salvage_failures[ref.sandbox_id] = (failures, alarmed)
                 raise SandboxBackendError(
                     f"salvage breaker open for corpse {ref.sandbox_id[:12]}; "
                     "refusing to provision over unrecovered state"
@@ -979,23 +980,11 @@ class SandboxRegistry:
             )
             if not removable:
                 failures += 1
-                opened = failures >= settings.sandbox_salvage_breaker_threshold
-                self._salvage_failures[ref.sandbox_id] = (failures, alarmed or opened)
-                if opened and not alarmed:
-                    log.error(
-                        "sandbox.salvage_breaker_open",
-                        session_id=session_id,
-                        container_id=ref.sandbox_id[:12],
-                        failures=failures,
+                if failures >= settings.sandbox_salvage_breaker_threshold:
+                    alarmed = await self._alarm_salvage_breaker_once(
+                        session_id, ref.sandbox_id, failures, alarmed
                     )
-                    try:
-                        await self._append_fs_event(
-                            session_id,
-                            "sandbox.salvage_breaker_open",
-                            {"container_id": ref.sandbox_id[:12], "failures": failures},
-                        )
-                    except Exception as err:
-                        log.warning("sandbox.salvage_breaker_alert_failed", error=str(err))
+                self._salvage_failures[ref.sandbox_id] = (failures, alarmed)
                 raise SandboxBackendError(
                     f"salvage of corpse {ref.sandbox_id[:12]} for session {session_id} "
                     "failed (snapshot or pointer write); refusing to provision over "
@@ -1003,6 +992,37 @@ class SandboxRegistry:
                 )
             self._salvage_failures.pop(ref.sandbox_id, None)
             await self._backend.force_remove(ref.sandbox_id)
+
+    async def _alarm_salvage_breaker_once(
+        self, session_id: str, corpse_id: str, failures: int, alarmed: bool
+    ) -> bool:
+        """Emit the one-shot operator wake for an open salvage breaker.
+
+        Returns the (possibly newly-``True``) ``alarmed`` flag. It only flips
+        to ``True`` after the channel-less wake write lands, so a failed write
+        stays ``False`` and is retried on the next provision attempt of this
+        still-present corpse rather than being silently dropped.
+        """
+        if alarmed:
+            return True
+        log.error(
+            "sandbox.salvage_breaker_open",
+            session_id=session_id,
+            container_id=corpse_id[:12],
+            failures=failures,
+        )
+        try:
+            await self._alert_operator(
+                session_id,
+                f"Sandbox salvage breaker OPEN for corpse {corpse_id[:12]}: "
+                f"{failures} consecutive salvage failures. Provisioning for this "
+                "session is fail-closed until the corpse is recovered or cleared.",
+                cause="sandbox.salvage_breaker_open",
+            )
+        except Exception as err:
+            log.warning("sandbox.salvage_breaker_alert_failed", error=str(err))
+            return False
+        return True
 
     async def _reconcile_pointer_from_local(self, session_id: str) -> None:
         """First-commit crash heal (§5.3): if the canonical tag exists locally,
@@ -1128,6 +1148,31 @@ class SandboxRegistry:
             session_id,
             "lifecycle",
             {"event": event, **payload},
+            account_id=account_id,
+        )
+
+    async def _alert_operator(self, session_id: str, content: str, *, cause: str) -> None:
+        """Surface a channel-less operator alert that ACTIVELY wakes the session.
+
+        Unlike :meth:`_append_fs_event` — a non-stimulus ``lifecycle`` notice
+        that advances no stimulus seq and so is read only on some *future*
+        wake — this uses the platform's ``Tell(ExistingSession)`` writer: a
+        user-role message plus a deferred wake, opening no response obligation.
+        Used for detection-hole alerts (e.g. the salvage breaker opening) that
+        must reach an operator promptly rather than sit unread until an
+        unrelated wake. Raises on write failure so the caller can leave the
+        one-shot un-alarmed and retry on the next occurrence.
+        """
+        from aios.harness import runtime
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        await sessions_service.tell_existing_session(
+            pool,
+            session_id,
+            content=content,
+            cause=cause,
             account_id=account_id,
         )
 

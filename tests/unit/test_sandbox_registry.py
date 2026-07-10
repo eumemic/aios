@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aios.config import get_settings
 from aios.db.queries import EnvVarCredentialEcho
 from aios.harness import runtime
 from aios.ids import VAULT_CREDENTIAL
@@ -31,7 +32,9 @@ from aios.models.environments import UnrestrictedNetworking
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
 from aios.sandbox.backends.base import (
     CommandResult,
+    ManagedSandboxRef,
     Mount,
+    SandboxBackendError,
     SandboxHandle,
     SandboxSpec,
 )
@@ -1403,3 +1406,184 @@ class TestRunSandboxLifecycle:
 
         registry.release.assert_awaited_once_with("sess_01TEST")
         registry.release_run.assert_not_awaited()
+
+
+class TestSalvageBreaker:
+    """The salvage circuit breaker (flatten-brick fix): consecutive salvage
+    failures of one corpse suppress further retries, and the transition to
+    open fires a ONE-SHOT channel-less operator wake — persisted alarmed only
+    after the wake write lands, so a lost wake is retried, not dropped.
+    """
+
+    def _corpse_ref(
+        self, session_id: str, sandbox_id: str = "corpse0123456789"
+    ) -> ManagedSandboxRef:
+        return ManagedSandboxRef(sandbox_id=sandbox_id, session_id=session_id, running=False)
+
+    def _snapshot_count(self, backend: FakeBackend) -> int:
+        return sum(1 for verb, _ in backend.calls if verb == "snapshot")
+
+    async def test_breaker_opens_after_threshold_and_alerts_once(self) -> None:
+        backend = FakeBackend()
+        session_id = "sess_brk"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        alert = AsyncMock()
+        registry._alert_operator = alert  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+
+        # Sub-threshold failures keep retrying the salvage (a snapshot attempt
+        # each) and never alert.
+        for _ in range(threshold - 1):
+            with pytest.raises(SandboxBackendError, match="failed"):
+                await registry._salvage_session_corpses(session_id)
+        assert alert.await_count == 0
+        assert self._snapshot_count(backend) == threshold - 1
+
+        # The threshold-th failure opens the breaker and fires the one-shot.
+        with pytest.raises(SandboxBackendError, match="failed"):
+            await registry._salvage_session_corpses(session_id)
+        assert alert.await_count == 1
+        assert self._snapshot_count(backend) == threshold
+
+        # Once open, provisioning is suppressed: NO further snapshot attempt
+        # and NO re-alert.
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses(session_id)
+        assert alert.await_count == 1
+        assert self._snapshot_count(backend) == threshold  # unchanged
+
+    async def test_breaker_alert_retries_when_wake_write_fails(self) -> None:
+        """A failed wake write must leave the one-shot un-alarmed so the next
+        provision retries it — the ``alarmed``-after-success ordering."""
+        backend = FakeBackend()
+        session_id = "sess_retry"
+        backend.managed = [self._corpse_ref(session_id)]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+
+        attempts: list[str] = []
+
+        async def _flaky_alert(session_id: str, content: str, *, cause: str) -> None:
+            attempts.append(cause)
+            if len(attempts) == 1:
+                raise RuntimeError("wake write failed")
+
+        registry._alert_operator = _flaky_alert  # type: ignore[method-assign]
+
+        # Drive to the transition; the alert is attempted once and fails.
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses(session_id)
+        assert len(attempts) == 1
+
+        # Breaker now open: the suppressed pass retries the lost wake, which
+        # lands this time.
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses(session_id)
+        assert len(attempts) == 2
+
+        # Alarmed now persisted → no further re-fire.
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses(session_id)
+        assert len(attempts) == 2
+
+    async def test_successful_salvage_resets_failure_counter(self) -> None:
+        backend = FakeBackend()
+        session_id = "sess_reset"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        registry._alert_operator = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(SandboxBackendError):
+            await registry._salvage_session_corpses(session_id)
+        assert registry._salvage_failures[ref.sandbox_id][0] == 1
+
+        # A subsequent SUCCESSFUL salvage clears the counter and removes the corpse.
+        backend.snapshot_raises = False
+        await registry._salvage_session_corpses(session_id)
+        assert ref.sandbox_id not in registry._salvage_failures
+        assert ("force_remove", {"sandbox_id": ref.sandbox_id}) in backend.calls
+
+    async def test_counter_cleared_when_corpse_disappears(self) -> None:
+        backend = FakeBackend()
+        session_id = "sess_gone"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        registry._alert_operator = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(SandboxBackendError):
+            await registry._salvage_session_corpses(session_id)
+        assert ref.sandbox_id in registry._salvage_failures
+
+        # Corpse removed out of band → the stale counter is GC'd on the next pass.
+        backend.managed = []
+        await registry._salvage_session_corpses(session_id)
+        assert ref.sandbox_id not in registry._salvage_failures
+
+    async def test_disk_deferral_counts_toward_breaker(self) -> None:
+        """A flatten deferred for insufficient disk surfaces as a snapshot
+        ``SandboxBackendError`` → ``removable=False`` → increments the breaker
+        exactly like any other salvage failure (no silent bypass)."""
+
+        class _DiskDeferBackend(FakeBackend):
+            async def snapshot(
+                self,
+                sandbox_id: str,
+                tag: str,
+                *,
+                empty_floor_bytes: int,
+                flatten_if_unique_bytes_over: int | None,
+            ) -> Any:
+                self.calls.append(("snapshot", {"sandbox_id": sandbox_id, "tag": tag}))
+                raise SandboxBackendError("flatten deferred: 1000 free bytes, 999999999 required")
+
+        backend = _DiskDeferBackend()
+        session_id = "sess_disk"
+        backend.managed = [self._corpse_ref(session_id)]
+        registry = SandboxRegistry(backend=backend)
+        alert = AsyncMock()
+        registry._alert_operator = alert  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses(session_id)
+        assert alert.await_count == 1
+        assert self._snapshot_count(backend) == threshold
+        with pytest.raises(SandboxBackendError, match="breaker open"):
+            await registry._salvage_session_corpses(session_id)
+
+    async def test_alert_operator_uses_tell_existing_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The operator alert must go through the platform's channel-less
+        ``Tell(ExistingSession)`` writer (user message + deferred wake), NOT
+        a non-stimulus lifecycle event that only surfaces on some future wake."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        tell = AsyncMock()
+        monkeypatch.setattr("aios.services.sessions.tell_existing_session", tell)
+        monkeypatch.setattr(
+            "aios.services.sessions.load_session_account_id",
+            AsyncMock(return_value="acct_x"),
+        )
+
+        await registry._alert_operator(
+            "sess_1", "salvage breaker OPEN", cause="sandbox.salvage_breaker_open"
+        )
+
+        tell.assert_awaited_once()
+        call = tell.await_args
+        assert call is not None
+        assert call.args[1] == "sess_1"
+        assert call.kwargs["content"] == "salvage breaker OPEN"
+        assert call.kwargs["cause"] == "sandbox.salvage_breaker_open"
+        assert call.kwargs["account_id"] == "acct_x"

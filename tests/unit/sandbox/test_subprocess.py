@@ -23,6 +23,7 @@ import pytest
 
 from aios.sandbox import _subprocess
 from aios.sandbox._subprocess import run_docker_pipeline, run_subprocess_with_timeout
+from aios.sandbox.backends.base import SandboxBackendError
 
 
 class _WedgedProc:
@@ -156,3 +157,177 @@ async def test_pipeline_outer_cancel_kills_and_closes_both(
     assert consumer._transport.kill.called
     producer._transport.close.assert_called_once()
     consumer._transport.close.assert_called_once()
+
+
+# ── progress-based deadlines (the flatten-brick fix) ─────────────────────────
+#
+# The flatten pipeline (``docker export | docker import``) replaced a single
+# size-scaled timeout — which a genuinely large writable layer could never
+# beat, permanently bricking salvage — with two progress-based deadlines: a
+# per-op *stall* bound (no bytes moving) and an *absolute* ceiling on the whole
+# relay. BOTH the read side (producer withholding bytes) AND the write side
+# (consumer refusing to drain them) must be under those deadlines, or a wedged
+# ``docker import`` fills the pipe and the relay hangs forever with neither
+# deadline able to fire.
+
+
+def _pipe_proc() -> _WedgedProc:
+    """A pipeline child stub: real ``_transport``/``kill`` coupling (reused
+    from ``_WedgedProc``) plus per-stream mocks the caller fills in."""
+    proc = _WedgedProc()
+    proc.returncode = 0
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.close = MagicMock()
+    proc.stdin.drain = AsyncMock()
+    proc.stdin.wait_closed = AsyncMock()
+    proc.stdout = MagicMock()
+    proc.stdout.read = AsyncMock(return_value=b"")
+    proc.stderr = MagicMock()
+    proc.stderr.read = AsyncMock(return_value=b"")
+    proc.wait = AsyncMock(return_value=0)  # type: ignore[attr-defined]
+    return proc
+
+
+def _spawn_pair(
+    monkeypatch: pytest.MonkeyPatch, producer: _WedgedProc, consumer: _WedgedProc
+) -> None:
+    spawned = iter((producer, consumer))
+
+    async def _fake_spawn(*_argv: Any, **_kwargs: Any) -> _WedgedProc:
+        return next(spawned)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+
+
+async def test_pipeline_consumer_backpressure_trips_write_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A consumer that stops draining must trip the stall deadline on the
+    WRITE side, not hang.
+
+    This is the regression that exposes the half-fixed brick: the producer
+    keeps yielding bytes (reads succeed), but ``docker import`` stops
+    consuming stdin, so ``drain()`` blocks on backpressure. If only the read
+    side is bounded, the whole pipeline wedges forever. The outer
+    ``wait_for`` guard turns a re-introduced unbounded ``drain()`` into a
+    loud failure instead of a suite hang."""
+    producer = _pipe_proc()
+    producer.stdout.read = AsyncMock(return_value=b"x" * (1024 * 1024))  # never EOF
+    consumer = _pipe_proc()
+
+    async def _never_drains() -> None:
+        await asyncio.sleep(3600)
+
+    consumer.stdin.drain = AsyncMock(side_effect=_never_drains)
+    _spawn_pair(monkeypatch, producer, consumer)
+
+    with pytest.raises(SandboxBackendError) as excinfo:
+        await asyncio.wait_for(
+            run_docker_pipeline(
+                ["docker", "export", "x"],
+                ["docker", "import", "-", "tag"],
+                stall_timeout_s=0.05,
+                max_timeout_s=5.0,
+            ),
+            timeout=5.0,
+        )
+
+    assert "write stalled" in str(excinfo.value)
+    # Both children SIGKILLed on the timeout unwind.
+    assert producer._transport.kill.called
+    assert consumer._transport.kill.called
+
+
+async def test_pipeline_slow_but_moving_data_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Data that moves in small increments — each read/drain under the stall
+    bound but their sum well over it — must NOT trip the stall deadline:
+    every completed op resets the stall clock. Total relay time (~0.15s) far
+    exceeds the 0.05s stall bound, yet the pipeline completes."""
+    chunks = iter([b"a" * 1000, b"b" * 1000, b"c" * 1000, b"d" * 1000, b""])
+
+    async def _slow_read(_n: int) -> bytes:
+        await asyncio.sleep(0.03)  # < stall bound; genuine progress each time
+        return next(chunks)
+
+    producer = _pipe_proc()
+    producer.stdout.read = _slow_read
+    consumer = _pipe_proc()
+    consumer.stdout.read = AsyncMock(return_value=b"sha256:imported\n")
+    _spawn_pair(monkeypatch, producer, consumer)
+
+    rc, out, _err = await run_docker_pipeline(
+        ["docker", "export", "x"],
+        ["docker", "import", "-", "tag"],
+        stall_timeout_s=0.05,
+        max_timeout_s=5.0,
+    )
+
+    assert rc == 0
+    assert out == b"sha256:imported\n"
+    assert consumer.stdin.write.call_count == 4  # four non-empty chunks relayed
+    consumer.stdin.close.assert_called_once()  # write side closed on EOF
+
+
+async def test_pipeline_post_eof_finalization_exempt_from_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After EOF the consumer may legitimately spend a long time finalizing
+    the import; only the ABSOLUTE ceiling applies then, never the (short)
+    stall bound. A finalize that outlasts the stall bound but beats the
+    ceiling must still succeed."""
+    producer = _pipe_proc()  # immediate EOF (default read → b"")
+    consumer = _pipe_proc()
+
+    async def _slow_finalize() -> int:
+        await asyncio.sleep(0.15)  # > stall bound (0.05), < ceiling (5.0)
+        return 0
+
+    producer.wait = _slow_finalize  # type: ignore[attr-defined]
+    consumer.wait = _slow_finalize  # type: ignore[attr-defined]
+    consumer.stdout.read = AsyncMock(return_value=b"sha256:imported\n")
+    _spawn_pair(monkeypatch, producer, consumer)
+
+    rc, out, _err = await run_docker_pipeline(
+        ["docker", "export", "x"],
+        ["docker", "import", "-", "tag"],
+        stall_timeout_s=0.05,
+        max_timeout_s=5.0,
+    )
+
+    assert rc == 0
+    assert out == b"sha256:imported\n"
+
+
+async def test_pipeline_finalization_bounded_by_absolute_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-EOF finalize is stall-exempt but NOT unbounded: a consumer
+    that never exits must still trip the absolute ceiling."""
+    producer = _pipe_proc()  # immediate EOF
+
+    async def _never_exits() -> int:
+        await asyncio.sleep(3600)  # outlives the (tiny) absolute ceiling
+        return 0  # unreachable; satisfies the return type
+
+    consumer = _pipe_proc()
+    consumer.wait = _never_exits  # type: ignore[attr-defined]
+    producer.wait = _never_exits  # type: ignore[attr-defined]
+    _spawn_pair(monkeypatch, producer, consumer)
+
+    with pytest.raises(SandboxBackendError) as excinfo:
+        await asyncio.wait_for(
+            run_docker_pipeline(
+                ["docker", "export", "x"],
+                ["docker", "import", "-", "tag"],
+                stall_timeout_s=5.0,
+                max_timeout_s=0.1,
+            ),
+            timeout=5.0,
+        )
+
+    assert "timed out" in str(excinfo.value)
+    assert producer._transport.kill.called
+    assert consumer._transport.kill.called

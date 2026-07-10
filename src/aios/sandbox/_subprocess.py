@@ -140,27 +140,58 @@ async def run_docker_pipeline(
             raise SandboxBackendError(f"failed to launch docker pipeline: {host_err}") from host_err
         assert producer.stdout is not None and consumer.stdin is not None
 
+        def _stall_deadline() -> float:
+            """Per-operation timeout: the stall bound, tightened so a single
+            wait can never overshoot the absolute ceiling. Raises the
+            absolute-ceiling ``TimeoutError`` when the ceiling has already
+            passed (evaluated *outside* the per-op ``wait_for`` so the two
+            deadline classes stay distinguishable in the surfaced error)."""
+            remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
+            if remaining <= 0:
+                raise TimeoutError("absolute ceiling")
+            return min(stall_timeout_s, remaining)
+
         async def _pump(
             producer_stdout: asyncio.StreamReader, consumer_stdin: asyncio.StreamWriter
         ) -> int:
+            # Every await that can block on a peer — the producer withholding
+            # bytes (read) OR the consumer refusing to accept them (write /
+            # drain / final flush) — is bounded by the SAME stall+absolute
+            # pair. A read or drain that completes is progress and opens a
+            # fresh stall window for the next op; the absolute ceiling caps the
+            # whole relay. Bounding only the read side leaves the brick
+            # half-fixed: a consumer that stops draining (a wedged
+            # ``docker import``) fills the OS pipe, the writer's buffer grows
+            # past its high-water mark, and ``drain()`` blocks forever with
+            # neither deadline able to fire.
             moved = 0
             while True:
-                remaining = max_timeout_s - (asyncio.get_running_loop().time() - started)
-                if remaining <= 0:
-                    raise TimeoutError("absolute ceiling")
+                read_timeout = _stall_deadline()
                 try:
                     chunk = await asyncio.wait_for(
-                        producer_stdout.read(1024 * 1024), timeout=min(stall_timeout_s, remaining)
+                        producer_stdout.read(1024 * 1024), timeout=read_timeout
                     )
                 except TimeoutError as err:
-                    raise TimeoutError("stream stalled") from err
+                    raise TimeoutError("read stalled") from err
                 if not chunk:
+                    # EOF: flush and close the write side under the same
+                    # deadlines, so a consumer that stops reading during the
+                    # final flush can't wedge here either.
                     consumer_stdin.close()
-                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                        await consumer_stdin.wait_closed()
+                    close_timeout = _stall_deadline()
+                    try:
+                        await asyncio.wait_for(consumer_stdin.wait_closed(), timeout=close_timeout)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    except TimeoutError as err:
+                        raise TimeoutError("close stalled") from err
                     return moved
                 consumer_stdin.write(chunk)
-                await consumer_stdin.drain()
+                drain_timeout = _stall_deadline()
+                try:
+                    await asyncio.wait_for(consumer_stdin.drain(), timeout=drain_timeout)
+                except TimeoutError as err:
+                    raise TimeoutError("write stalled") from err
                 moved += len(chunk)
 
         prod_err_task = asyncio.create_task(producer.stderr.read())  # type: ignore[union-attr]
