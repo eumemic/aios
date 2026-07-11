@@ -22,9 +22,7 @@ not goal-named duplicates — are the canonical verbs of record:
   stays open) and ``error(request_id=<goal_id>, message=…)`` abandons it.
 * **LIST** open goals → ``list_obligations`` (origin=self) and/or ``list_calls``
   (origin=self) — the general open-obligation enumeration filtered to self-caller
-  edges. (``list_obligations``/``list_calls`` arrive with epic children #6/#3; until
-  then the legacy ``list_goals`` shim below still enumerates the same self-caller
-  set.)
+  edges.
 * **DROP/CANCEL** a goal → ``cancel_call`` (caller authority, by ``tool_call_id``;
   epic child #5). There is no ``cancel_goal``.
 
@@ -67,11 +65,6 @@ the gate):
   ``goal_id`` (the ``request_id`` of the opened edge). Enforces the per-session
   open-goal admission cap (``Settings.session_open_goals_max``) with a clear error
   on exceed.
-* ``list_goals()`` — legacy enumeration of the session's OPEN self-goals (the
-  open-obligation set filtered to self-caller edges), each with ``goal_id``,
-  ``goal`` text, and ``age``. This folds into ``list_obligations``/``list_calls``
-  (origin=self) under epic child #3; it is retained here only until that lands.
-
 Unlike the parking ``call_*`` builtins, ``create_goal`` does NOT park on the
 edge — a self-goal's servicer IS the session, so parking would deadlock. The tool
 opens the edge and returns immediately; the quiescence guard (not a park) is what
@@ -82,7 +75,6 @@ All register ``transport="agent_tool"`` (model-only; the CLI broker refuses them
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,7 +83,6 @@ from pydantic import ValidationError as PydanticValidationError
 from aios.config import get_settings
 from aios.db import queries
 from aios.harness import runtime
-from aios.harness.obligations import _format_age
 from aios.models.sessions import Obligation
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail
@@ -121,10 +112,6 @@ class _CreateGoalArgs(BaseModel):
         "a contract fixed up front, not prose. There is no schemaless goal — every "
         "goal declares a checkable completion contract.",
     )
-
-
-class _ListGoalsArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
@@ -213,27 +200,6 @@ async def create_goal_handler(
     }
 
 
-async def list_goals_handler(
-    session_id: str, arguments: dict[str, Any]
-) -> dict[str, Any] | ToolResult:
-    """Enumerate the session's OPEN self-goals (oldest-first), each with
-    ``goal_id``, ``goal`` text (the request summary), and a terse ``age``."""
-    pool = runtime.require_pool()
-    account_id = await sessions_service.load_session_account_id(pool, session_id)
-    _parse(_ListGoalsArgs, arguments)  # reject smuggled keys
-    open_goals = await _open_self_goals(pool, session_id, account_id=account_id)
-    now = datetime.now(UTC)
-    goals = [
-        {
-            "goal_id": o.request_id,
-            "goal": o.summary or "",
-            "age": _format_age(o.opened_at, now),
-        }
-        for o in open_goals
-    ]
-    return {"goals": goals}
-
-
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_GOAL_DESCRIPTION = (
@@ -252,12 +218,6 @@ CREATE_GOAL_DESCRIPTION = (
     "declare a checkable 'done' up front, then you can't quiesce until a conforming "
     "result proves it."
 )
-LIST_GOALS_DESCRIPTION = (
-    "List your open self-goals (the goals you've pinned with create_goal that you "
-    "haven't yet closed), each with its goal_id, goal text, and age. Close a goal by "
-    "answering it with `return(request_id=<goal_id>, value=...)` (done) or "
-    "`error(request_id=<goal_id>, message=...)` (abandoned)."
-)
 
 
 def _register() -> None:
@@ -266,13 +226,6 @@ def _register() -> None:
         description=CREATE_GOAL_DESCRIPTION,
         parameters_schema=_CreateGoalArgs.model_json_schema(),
         handler=create_goal_handler,
-        transport="agent_tool",
-    )
-    registry.register(
-        name="list_goals",
-        description=LIST_GOALS_DESCRIPTION,
-        parameters_schema=_ListGoalsArgs.model_json_schema(),
-        handler=list_goals_handler,
         transport="agent_tool",
     )
 

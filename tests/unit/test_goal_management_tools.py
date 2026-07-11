@@ -14,7 +14,7 @@ These stub the worker pool + services so they need no live Postgres. They cover:
   is rejected by the tool schema before the handler runs (#1512: no schemaless goal).
 * **admission cap** — at/over the per-session open-goal cap ``create_goal`` returns
   a clear error and opens no edge.
-* **list_goals** filters the open-obligation set to self-caller goals only.
+* **list_goals retirement** — the redundant goal-specific list verb is absent.
 * **closing a self-goal goes through the general ``return``/``error`` verbs** —
   ``complete_goal``/``fail_goal`` are retired (#1518). A self-goal IS an owed
   obligation, so ``return(request_id=<goal_id>, value=…)`` closes it (its persisted
@@ -184,30 +184,13 @@ async def test_create_goal_cap_ignores_foreign_obligations(monkeypatch: Any) -> 
     inv.assert_awaited_once()
 
 
-# ─── list_goals ──────────────────────────────────────────────────────────────
+# ─── retired list verb (#1519) ──────────────────────────────────────────────
 
 
-async def test_list_goals_filters_to_self_goals(monkeypatch: Any) -> None:
-    _stub_open_obligations(
-        monkeypatch,
-        [
-            _self_goal("g1", summary="goal one"),
-            _foreign("a1"),
-            _self_goal("g2", summary="goal two"),
-        ],
-    )
-    out = await invoke_builtin(_SELF, "list_goals", {})
-    assert isinstance(out, dict)
-    ids = [g["goal_id"] for g in out["goals"]]
-    assert ids == ["g1", "g2"]
-    assert out["goals"][0]["goal"] == "goal one"
-    assert "age" in out["goals"][0]
+def test_list_goals_no_longer_registered() -> None:
+    from aios.tools.registry import registry
 
-
-async def test_list_goals_empty(monkeypatch: Any) -> None:
-    _stub_open_obligations(monkeypatch, [_foreign("a1")])
-    out = await invoke_builtin(_SELF, "list_goals", {})
-    assert out == {"goals": []}
+    assert not registry.has("list_goals")
 
 
 # ─── retired close verbs (#1518) ─────────────────────────────────────────────
@@ -245,9 +228,9 @@ def test_create_goal_is_registered_with_required_output_schema() -> None:
     "name",
     ["set_goal", "cancel_goal", "update_goal", "complete_goal", "fail_goal"],
 )
-def test_no_goal_named_verb_other_than_create_and_list(name: str) -> None:
+def test_no_other_goal_named_verbs(name: str) -> None:
     """#1523 terminology of record: the ONLY goal-named verbs are ``create_goal``
-    (the reflexive-OPEN verb) and — until child #3 retires it — ``list_goals``.
+    (the reflexive-OPEN verb); ``list_goals`` is retired by #1519.
     #1414's proposed ``set_goal``/``cancel_goal`` naming is explicitly DECLINED:
     a goal close is ``return``/``error``, a goal list is ``list_obligations`` /
     ``list_calls`` (origin=self), a goal drop is ``cancel_call`` (#5). No
