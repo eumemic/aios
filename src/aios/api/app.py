@@ -19,7 +19,6 @@ from fastapi.routing import APIRoute
 
 from aios.api.deps import require_bearer_auth
 from aios.api.middleware import RequestLoggingMiddleware
-from aios.api.strict_query_params import reject_unknown_query_params
 from aios.api.routers import (
     accounts,
     agents,
@@ -38,6 +37,7 @@ from aios.api.routers import (
     vaults,
     workflows,
 )
+from aios.api.strict_query_params import reject_unknown_query_params
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db.pool import create_pool
