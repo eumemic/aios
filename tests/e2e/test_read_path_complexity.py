@@ -884,14 +884,34 @@ _SQL_LIFECYCLE_ARM = (
     "ORDER BY seq ASC"
 )
 
+# Either partial index serves the lifecycle arm index-only (no seq scan, no
+# ``kind`` heap-filter): migration 0135's generic
+# ``events_session_lifecycle_seq_idx`` (``WHERE kind='lifecycle'``) or migration
+# 0145's strictly-narrower ``events_session_model_visible_lifecycle_seq_idx``
+# (same ``(session_id, seq)`` columns but the additional
+# ``AND data->>'event' IN (<MODEL_VISIBLE_LIFECYCLE_EVENTS>)`` predicate — a
+# subset of lifecycle rows, not byte-redundant). The planner correctly PREFERS
+# 0145's index here because it matches the query's own
+# ``data->>'event' = ANY($3)`` allowlist and scans far fewer rows. The invariant
+# this gate guards is "index-served, not a whole-session heap-filter", which
+# holds for either.
+_LIFECYCLE_ARM_SERVING_INDEXES = frozenset(
+    {
+        "events_session_lifecycle_seq_idx",
+        "events_session_model_visible_lifecycle_seq_idx",
+    }
+)
+
 
 @needs_docker
 class TestLifecycleArmPlanShapeGate:
     """The lifecycle arm of ``read_windowed_context_events`` (``drop=None``
-    variant) must plan as an index scan on ``events_session_lifecycle_seq_idx``
-    — no residual ``Filter: (kind = 'lifecycle')`` over an unbounded scan.
-    RED on master (no partial index; heap-filters the whole session slate),
-    GREEN after migration 0135."""
+    variant) must plan as an index scan on a lifecycle-serving partial index
+    (0135's ``events_session_lifecycle_seq_idx`` or, once 0145 lands, the
+    strictly-narrower ``events_session_model_visible_lifecycle_seq_idx`` the
+    planner then prefers) — no residual ``Filter: (kind = 'lifecycle')`` over an
+    unbounded scan. RED on master (no partial index; heap-filters the whole
+    session slate), GREEN after migration 0135."""
 
     async def test_lifecycle_arm_uses_partial_index(
         self, lifecycle_seeded_pool: asyncpg.Pool[Any]
@@ -929,12 +949,14 @@ class TestLifecycleArmPlanShapeGate:
             filt = str(scan.get("Filter", ""))
             assert "kind" not in filt, (
                 f"lifecycle arm still heap-filters kind over an unbounded scan "
-                f"(missing events_session_lifecycle_seq_idx?): {scan}"
+                f"(missing a lifecycle-serving partial index "
+                f"{sorted(_LIFECYCLE_ARM_SERVING_INDEXES)}?): {scan}"
             )
 
         index_names = {n.get("Index Name") for n in nodes if n.get("Index Name")}
-        assert "events_session_lifecycle_seq_idx" in index_names, (
-            f"plan does not use events_session_lifecycle_seq_idx; scan nodes: "
+        assert index_names & _LIFECYCLE_ARM_SERVING_INDEXES, (
+            f"plan does not use a lifecycle-arm serving index "
+            f"({sorted(_LIFECYCLE_ARM_SERVING_INDEXES)}); scan nodes: "
             f"{[(n.get('Node Type'), n.get('Index Name')) for n in events_scans]}"
         )
 
