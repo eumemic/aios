@@ -13,11 +13,11 @@ def _client() -> TestClient:
     async def items(
         direction: Annotated[str, Query(alias="dir")] = "forward",
         channel: Annotated[list[str] | None, Query()] = None,
-    ) -> dict:
+    ) -> dict[str, object]:
         return {"direction": direction, "channel": channel}
 
     @app.post("/v1/triggers/ingest/{token}")
-    async def ingest(token: str, request: Request) -> dict:
+    async def ingest(token: str, request: Request) -> dict[str, str]:
         return {"token": token}
 
     return TestClient(app)
