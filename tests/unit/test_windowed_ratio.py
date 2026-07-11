@@ -161,7 +161,7 @@ async def test_no_cumulative_falls_back_to_full_read() -> None:
 async def test_insufficient_ratio_1_matches_today() -> None:
     """Load-bearing backward-compatibility fence.  Do not delete.
 
-    While model_token_ratio has too few samples (or on a model the
+    While calibration has too few samples (or on a model the
     DB has never seen), it returns 1.0 and ``read_windowed_events`` must behave
     byte-identically to the pre-ratio chunked-snap algorithm — otherwise
     the "gradual rollout" rollout property breaks.  This test pins that.

@@ -620,7 +620,7 @@ def render_user_event(
     the optional vision policy inputs ``model`` / ``session_id``.
     ``build_messages`` threads vision policy through; the append-time
     token counter in ``queries.append_event`` does not (and pays a small
-    under-count per inlined image, absorbed by ``model_token_ratio``
+    under-count per inlined image, absorbed by ``model_token_class_ratios``
     calibration).
 
     Every user message carries a ``received`` envelope field (the absolute

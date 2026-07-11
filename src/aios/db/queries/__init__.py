@@ -471,7 +471,6 @@ from .environments import (  # noqa: E402
     update_environment,
 )
 from .events import (  # noqa: E402
-    _clear_model_token_class_ratios_cache,
     _clear_model_token_ratio_cache,
     _derive_is_error,
     _derive_sender_name,
@@ -502,7 +501,6 @@ from .events import (  # noqa: E402
     list_unresolved_tool_calls_batch,
     lookup_tool_name_by_call_id,
     model_token_class_ratios,
-    model_token_ratio,
     precompute_event_append,
     read_events,
     read_message_events,
@@ -741,7 +739,6 @@ __all__ = [
     "_allocate_version_seq",
     "_archive_scoped",
     "_build_set_assignments",
-    "_clear_model_token_class_ratios_cache",
     "_clear_model_token_ratio_cache",
     "_derive_is_error",
     "_derive_sender_name",
@@ -958,7 +955,6 @@ __all__ = [
     "mark_management_call_resolved",
     "mark_session_cancel_marker_harvested",
     "model_token_class_ratios",
-    "model_token_ratio",
     "notify_connection_change",
     "notify_management_call_dispatch",
     "notify_management_call_result",

@@ -1,4 +1,4 @@
-"""E2E tests for :func:`aios.db.queries.model_token_ratio` against a real
+"""E2E tests for :func:`aios.db.queries.model_token_class_ratios` against a real
 Postgres with migration 0024's partial index applied.
 
 Unlike the mock-based unit tests in ``tests/unit/test_model_token_ratio.py``
@@ -27,6 +27,11 @@ from aios.services import sessions as sessions_service
 from tests.e2e.harness import Harness
 
 
+def _mean_ratio(ratios: dict[str, float]) -> float:
+    """Return the unweighted coefficient mean for uniform compositions."""
+    return sum(ratios.values()) / len(ratios)
+
+
 def _by_class(local_tokens: int) -> dict[str, float]:
     """Spread a model-neutral ``local_tokens`` total evenly across every
     content class, as a stand-in for the ``local_tokens_by_class`` vector that
@@ -37,8 +42,7 @@ def _by_class(local_tokens: int) -> dict[str, float]:
     ``litellm`` calls, so in production the per-class slices each carry their
     own framing overhead and ``sum(by_class.values()) >= local_tokens`` (the
     implementation deliberately does NOT enforce equality). The even spread
-    used here happens to sum back to ``local_tokens`` only so the scalar
-    shim's unweighted mean reproduces ``input/local`` for these SQL-path
+    used here happens to sum back to ``local_tokens`` only so the class-ratio reader's unweighted coefficient mean reproduces ``input/local`` for these SQL-path
     assertions; the per-class ridge fit (#1609) does not depend on that.
     """
     per = local_tokens / len(CONTENT_CLASSES)
@@ -112,7 +116,11 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            assert await queries.model_token_ratio(conn, model, account_id=account_id) == 1.0
+            assert set(
+                (
+                    await queries.model_token_class_ratios(conn, model, account_id=account_id)
+                ).values()
+            ) == {1.0}
 
     async def test_min_samples_returns_mean_ratio(self, harness: Harness) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
@@ -123,8 +131,8 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
-        assert ratio == pytest.approx(1.5, abs=0.005)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.005)
 
     async def test_ignores_cache_breakdown_fields(self, harness: Harness) -> None:
         """LiteLLM normalizes Anthropic's usage to the OpenAI convention:
@@ -149,10 +157,10 @@ class TestModelTokenRatioSQL:
                 cache_creation=40,
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
         # per-span ratio = input_tokens/local_tokens = 150/100 (cache_* ignored).
         # ratio = 150/100 = 1.5.
-        assert ratio == pytest.approx(1.5, abs=0.005)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.005)
 
     async def test_excludes_error_spans(self, harness: Harness) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
@@ -165,8 +173,8 @@ class TestModelTokenRatioSQL:
         for _ in range(30):
             await _seed_error_span(harness, session.id)
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
-        assert ratio == pytest.approx(1.5, abs=0.005)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.005)
 
     async def test_partitions_by_model_string(self, harness: Harness) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
@@ -182,10 +190,10 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model_b, local_tokens=100, input_tokens=120
             )
         async with harness._pool.acquire() as conn:
-            ratio_a = await queries.model_token_ratio(conn, model_a, account_id=account_id)
-            ratio_b = await queries.model_token_ratio(conn, model_b, account_id=account_id)
-        assert ratio_a == pytest.approx(1.5, abs=0.005)
-        assert ratio_b == pytest.approx(1.2, abs=0.005)
+            ratio_a = await queries.model_token_class_ratios(conn, model_a, account_id=account_id)
+            ratio_b = await queries.model_token_class_ratios(conn, model_b, account_id=account_id)
+        assert _mean_ratio(ratio_a) == pytest.approx(1.5, abs=0.005)
+        assert _mean_ratio(ratio_b) == pytest.approx(1.2, abs=0.005)
 
     async def test_cross_session_aggregation(self, harness: Harness) -> None:
         """Ratio pools spans across every session in the DB for a given
@@ -204,8 +212,8 @@ class TestModelTokenRatioSQL:
                 harness, session_b.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
-        assert ratio == pytest.approx(1.5, abs=0.005)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.005)
 
     async def test_ridge_fit_is_magnitude_weighted(self, harness: Harness) -> None:
         """The per-class ridge fit (#1609) is a least-squares regression of
@@ -228,15 +236,15 @@ class TestModelTokenRatioSQL:
         )
 
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(
+            ratio = await queries.model_token_class_ratios(
                 conn, model, k_bucket=0.001, account_id=account_id
             )
 
         # The 10k-local span (ratio 2.0) swamps the four 100-local spans
         # (ratio 1.0) in the least-squares fit, so the coefficient — and
-        # hence the scalar shim's mean — sits at ~2.0, NOT the old
+        # hence the coefficients' mean — sits at ~2.0, NOT the old
         # unweighted 1.2.
-        assert ratio == pytest.approx(2.0, abs=0.01)
+        assert _mean_ratio(ratio) == pytest.approx(2.0, abs=0.01)
 
     async def test_lifetime_aggregate_retains_old_samples(self, harness: Harness) -> None:
         """Below the sample limit, all historical calibration samples for the
@@ -259,9 +267,10 @@ class TestModelTokenRatioSQL:
         async with harness._pool.acquire() as conn:
             # Use a narrow bucket here to isolate lifetime aggregation:
             # mean_ratio = mean([2.0] * 30 + [1.5] * 30) = 1.75.
-            assert await queries.model_token_ratio(
+            ratios = await queries.model_token_class_ratios(
                 conn, model, k_bucket=0.001, account_id=account_id
-            ) == pytest.approx(1.75)
+            )
+            assert _mean_ratio(ratios) == pytest.approx(1.75)
 
     async def test_bucket_shrinks_as_sample_count_grows(self, harness: Harness) -> None:
         """With the same underlying ratio distribution, standard-error
@@ -274,7 +283,9 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=input_tokens
             )
         async with harness._pool.acquire() as conn:
-            coarse_ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+            coarse_ratio = await queries.model_token_class_ratios(
+                conn, model, account_id=account_id
+            )
 
         for _ in range(3):
             await _seed_valid_span(
@@ -286,9 +297,11 @@ class TestModelTokenRatioSQL:
 
         queries._clear_model_token_ratio_cache()
         async with harness._pool.acquire() as conn:
-            tighter_ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
+            tighter_ratio = await queries.model_token_class_ratios(
+                conn, model, account_id=account_id
+            )
 
-        assert abs(tighter_ratio - 1.5) < abs(coarse_ratio - 1.5)
+        assert abs(_mean_ratio(tighter_ratio) - 1.5) < abs(_mean_ratio(coarse_ratio) - 1.5)
 
     async def test_zero_local_tokens_excluded(self, harness: Harness) -> None:
         """The WHERE clause filters ``(data->>'local_tokens')::bigint > 0``
@@ -308,8 +321,8 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
-        assert ratio == pytest.approx(1.5, abs=0.005)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.005)
 
     async def test_zero_input_usage_and_decimal_values_are_excluded(self, harness: Harness) -> None:
         """Real-Postgres discriminator: zero usage is poison, while a future
@@ -334,8 +347,8 @@ class TestModelTokenRatioSQL:
             input_tokens=150.5,  # type: ignore[arg-type]
         )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(conn, model, account_id=account_id)
-        assert ratio == pytest.approx(1.5, abs=0.01)
+            ratio = await queries.model_token_class_ratios(conn, model, account_id=account_id)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.01)
 
     async def test_recency_bound_honors_recent_spans(self, harness: Harness) -> None:
         """Recency honored (issue #1711): seed MORE than the sample limit,
@@ -357,12 +370,12 @@ class TestModelTokenRatioSQL:
                 harness, session.id, model=model, local_tokens=100, input_tokens=150
             )
         async with harness._pool.acquire() as conn:
-            ratio = await queries.model_token_ratio(
+            ratio = await queries.model_token_class_ratios(
                 conn, model, k_bucket=0.001, account_id=account_id
             )
         # Only the recent (1.5) spans are in-window; the 4.0 tail is excluded
         # by the LIMIT, so the fit lands at the recent regime, not a blend.
-        assert ratio == pytest.approx(1.5, abs=0.02)
+        assert _mean_ratio(ratio) == pytest.approx(1.5, abs=0.02)
 
     async def test_recency_fetch_is_a_bounded_index_scan(self, harness: Harness) -> None:
         """Perf guard (issue #1711 / #1798): the ``ORDER BY created_at DESC,

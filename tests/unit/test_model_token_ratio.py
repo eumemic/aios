@@ -3,9 +3,7 @@
 ``model_token_class_ratios`` generalizes the old single lifetime scalar
 ``R`` into a ridge-fit coefficient dict over
 :data:`aios.harness.tokens.CONTENT_CLASSES`; ``blended_r_eff`` collapses
-that dict to the one composition-weighted number the windower consumes;
-``model_token_ratio`` survives as a deprecated scalar shim (unweighted
-mean of the coefficients) for legacy call sites.
+that dict to the one composition-weighted number the windower consumes.
 
 The SQL itself — partial-index coverage, JSON extraction, is_error
 filter, model-string partitioning — is exercised against a real Postgres
@@ -26,7 +24,6 @@ from aios.db.queries import (
     _clear_model_token_ratio_cache,
     blended_r_eff,
     model_token_class_ratios,
-    model_token_ratio,
 )
 from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT, _fit_class_ratios
 from aios.harness.tokens import CONTENT_CLASSES
@@ -375,31 +372,3 @@ class TestBlendedREff:
         light = {"text": 900.0, "thinking": 100.0}
         heavy = {"text": 100.0, "thinking": 900.0}
         assert blended_r_eff(coefs, heavy) > blended_r_eff(coefs, light)
-
-
-class TestScalarShim:
-    @pytest.mark.asyncio
-    async def test_shim_returns_mean_of_coefficients(self) -> None:
-        true = {"text": 2.0, "tool_result": 1.4, "thinking": 3.0}
-        conn = _mock_conn(_linear_rows(true, n=40))
-        ratios = await model_token_class_ratios(conn, "model-x", account_id="acc_test_stub")
-        _clear_model_token_ratio_cache()
-        conn2 = _mock_conn(_linear_rows(true, n=40))
-        scalar = await model_token_ratio(conn2, "model-x", account_id="acc_test_stub")
-        expected = sum(ratios.values()) / len(ratios)
-        assert scalar == pytest.approx(max(expected, 0.5))
-
-    @pytest.mark.asyncio
-    async def test_shim_neutral_below_threshold(self) -> None:
-        conn = _mock_conn(_linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=3))
-        # All-neutral coefs ⇒ mean 1.0 (above the 0.5 clamp).
-        assert await model_token_ratio(
-            conn, "model-x", account_id="acc_test_stub"
-        ) == pytest.approx(1.0)
-
-    @pytest.mark.asyncio
-    async def test_shim_min_clamp(self) -> None:
-        # Coefs fit near zero ⇒ mean below 0.5 ⇒ clamped up to the historical
-        # scalar floor (a degenerate, near-empty-prompt relationship).
-        conn = _mock_conn(_linear_rows({"text": 0.01, "tool_result": 0.01, "thinking": 0.01}, n=20))
-        assert await model_token_ratio(conn, "model-x", account_id="acc_test_stub") >= 0.5
