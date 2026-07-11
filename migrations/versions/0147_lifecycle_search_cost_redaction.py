@@ -35,10 +35,16 @@ _USAGE_COUNTER_KEYS = ("cumulative_tokens", "cumulative_class_mass")
 def _replace_view(redacted_keys: tuple[str, ...]) -> None:
     keys = ",".join(f"'{key}'" for key in redacted_keys)
     detail = f"(data - ARRAY[{keys}])::text"
+    # Match migration 0144's UTF-8-safe cap.  Cutting the encoded bytea at an
+    # arbitrary byte boundary can split a multibyte character, and the marker
+    # must be included in the 8 KiB budget.
+    marker = "…[truncated]"
+    payload = 8192 - len(marker.encode())
     capped = (
         f"CASE WHEN octet_length({detail}) <= 8192 THEN {detail} "
-        f"ELSE convert_from(substring(convert_to({detail}, 'UTF8') FROM 1 FOR 8192), 'UTF8') "
-        "|| '…[truncated]' END"
+        f"ELSE left({detail}, {payload} - greatest(0, "
+        f"octet_length(left({detail}, {payload})) - {payload})) "
+        f"|| '{marker}' END"
     )
     op.execute(f"""
     CREATE OR REPLACE VIEW lifecycle_search AS
