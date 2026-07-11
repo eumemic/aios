@@ -4,7 +4,7 @@ DB-backed (testcontainer Postgres). These drive the REAL service/query path —
 ``create_goal`` opening a self-referential awaited obligation via
 ``sessions_service.invoke`` (#1414 self-goal) carrying the REQUIRED ``output_schema``
 on its ``request_opened`` frame, and the general ``return`` / ``error`` answer verbs
-writing the ``request_response`` half via ``respond_to_request`` — and assert the
+writing the ``request_response`` via ``respond_to_request`` — and assert the
 acceptance criteria against the same open-obligation queries the quiescence guard
 and the obligations tail block read:
 
@@ -13,7 +13,7 @@ and the obligations tail block read:
   the quiescence guard holds the session (it cannot go idle) until it's closed —
   and persists its ``output_schema`` on the trusted ``request_opened`` edge
   (``get_request_output_schema``), the same way ``call_*`` carry it (#1512);
-* ``list_goals`` enumerates exactly the open self-goals;
+* ``list_obligations`` enumerates open self-goals through the general obligations view;
 * a self-goal is closed through the general source-agnostic verbs (#1518: the
   self-only ``complete_goal``/``fail_goal`` are retired). ``return`` validates its
   ``value`` against that persisted schema servicer-side — a conforming value drains
@@ -141,7 +141,7 @@ async def test_create_goal_opens_holding_self_obligation(
     assert persisted == _SCHEMA
 
 
-async def test_list_goals_enumerates_open_self_goals(
+async def test_list_obligations_enumerates_open_self_goals(
     pool_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
     _pool, _account, session_id = pool_session
@@ -156,11 +156,22 @@ async def test_list_goals_enumerates_open_self_goals(
         )
     )
 
-    out = await invoke_builtin(session_id, "list_goals", {})
+    out = await invoke_builtin(session_id, "list_obligations", {})
     assert isinstance(out, dict)
-    ids = [g["goal_id"] for g in out["goals"]]
-    assert ids == [g1, g2]  # oldest-first
-    assert out["goals"][0]["goal"]  # carries the summary text
+    # The general obligations view can also contain the fixture's incoming API
+    # request, so select the self-goal rows rather than assuming every row is a goal.
+    # Parallel CI can assign equal database timestamps to back-to-back opens, so
+    # select by identity and avoid coupling this test to tie ordering. Keep the
+    # origin assertions on the selected rows so this still proves self-goal labeling.
+    goal_ids = {g1, g2}
+    by_id = {row["request_id"]: row for row in out["obligations"] if row["request_id"] in goal_ids}
+    assert set(by_id) == goal_ids
+    assert by_id[g1]["origin"] == "self"
+    # create_goal invokes the session with a structured {"goal": ...} input, so
+    # the shared obligation summary is its JSON preview rather than bare goal text.
+    assert "goal one" in by_id[g1]["summary"]
+    assert by_id[g2]["origin"] == "self"
+    assert "goal two" in by_id[g2]["summary"]
 
 
 async def test_return_closes_self_goal_with_schema_gate(

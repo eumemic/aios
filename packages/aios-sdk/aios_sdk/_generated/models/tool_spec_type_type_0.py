@@ -21,7 +21,6 @@ class ToolSpecTypeType0(str, Enum):
     HTTP_REQUEST = "http_request"
     LIST_ACCOUNT_TRIGGERS = "list_account_triggers"
     LIST_AGENTS = "list_agents"
-    LIST_GOALS = "list_goals"
     LIST_OBLIGATIONS = "list_obligations"
     LIST_RELATED_SESSIONS = "list_related_sessions"
     LIST_RUNS = "list_runs"

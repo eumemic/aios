@@ -62,7 +62,6 @@ BuiltinToolType = Literal[
     "get_agent",
     "list_agents",
     "create_goal",
-    "list_goals",
     "list_obligations",
     "stop_task",
     "list_tasks",
