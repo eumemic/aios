@@ -12,6 +12,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.actors import Actor
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _archive_scoped,
@@ -35,7 +36,6 @@ from aios.ids import (
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import (
     Access,
-    Actor,
     ActorType,
     Memory,
     MemoryPrefix,

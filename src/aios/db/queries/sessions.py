@@ -15,6 +15,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.actors import actor_columns, actor_from_row
 from aios.db import queries
 from aios.db.queries import (
     _archive_scoped,
@@ -171,6 +172,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
             cache_read_input_tokens=row["cache_read_input_tokens"],
             cache_creation_input_tokens=row["cache_creation_input_tokens"],
         ),
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -244,9 +246,9 @@ async def insert_session(
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env,
                 focal_channel, focal_locked, account_id, archive_when_idle,
-                outbound_suppression
+                outbound_suppression, created_by_type, created_by_ref
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
             RETURNING *
             """,
             new_id,
@@ -262,6 +264,7 @@ async def insert_session(
             account_id,
             archive_when_idle,
             outbound_suppression,
+            *actor_columns(),
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

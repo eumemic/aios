@@ -17,6 +17,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from aios.actors import Actor
 from aios.models.environments import HOSTNAME_RE
 from aios.sandbox.env_keys import (
     RESERVED_SANDBOX_ENV_KEYS as _RESERVED_SANDBOX_ENV_KEYS,
@@ -199,6 +200,7 @@ class Vault(BaseModel):
     id: str
     display_name: str
     metadata: dict[str, Any]
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

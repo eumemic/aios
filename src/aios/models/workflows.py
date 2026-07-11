@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aios.actors import Actor
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -71,6 +72,7 @@ class Workflow(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

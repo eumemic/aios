@@ -14,6 +14,7 @@ from typing import Any, NamedTuple, NoReturn
 import asyncpg
 from pydantic import TypeAdapter
 
+from aios.actors import actor_from_row
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _escape_like,
@@ -310,6 +311,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         session_template_id=row["binding_session_template_id"],
         metadata=row["metadata"],
         secrets_set=row["secrets_ciphertext"] is not None,
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         attached_at=row["binding_created_at"],
         updated_at=row["updated_at"],

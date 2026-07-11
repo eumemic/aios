@@ -11321,8 +11321,7 @@
         "required": [
           "type"
         ],
-        "title": "Actor",
-        "description": "``created_by`` / ``redacted_by`` shape on memory versions."
+        "title": "Actor"
       },
       "Agent": {
         "properties": {
@@ -11411,6 +11410,16 @@
             ],
             "title": "Preempt Policy",
             "default": "wait"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -12212,6 +12221,16 @@
             "title": "Secrets Set",
             "default": false
           },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -12614,6 +12633,16 @@
           },
           "config": {
             "$ref": "#/components/schemas/EnvironmentConfig"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -16018,6 +16047,16 @@
             "type": "array",
             "title": "Triggers"
           },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -16913,6 +16952,16 @@
           "latest_version": {
             "type": "integer",
             "title": "Latest Version"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -18296,6 +18345,16 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",
@@ -19787,6 +19846,16 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string",

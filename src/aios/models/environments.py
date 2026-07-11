@@ -21,6 +21,8 @@ from pydantic import (
     model_validator,
 )
 
+from aios.actors import Actor
+
 # ── networking config ─────────────────────────────────────────────────────────
 
 # Hostname: RFC 952 / RFC 1123 labels joined by dots.  Only characters that
@@ -227,5 +229,6 @@ class Environment(BaseModel):
     id: str
     name: str
     config: EnvironmentConfig
+    created_by: Actor | None = None
     created_at: datetime
     archived_at: datetime | None = None

@@ -11,6 +11,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.actor import Actor
     from ..models.allow_all import AllowAll
     from ..models.allow_list import AllowList
     from ..models.connection_metadata import ConnectionMetadata
@@ -53,6 +54,7 @@ class Connection:
             session_id (None | str | Unset):
             session_template_id (None | str | Unset):
             secrets_set (bool | Unset):  Default: False.
+            created_by (Actor | None | Unset):
             attached_at (datetime.datetime | None | Unset):
             archived_at (datetime.datetime | None | Unset):
             inbound_policy (AllowAll | AllowList | DenyAll | None | Unset):
@@ -73,6 +75,7 @@ class Connection:
     session_id: None | str | Unset = UNSET
     session_template_id: None | str | Unset = UNSET
     secrets_set: bool | Unset = False
+    created_by: Actor | None | Unset = UNSET
     attached_at: datetime.datetime | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     inbound_policy: AllowAll | AllowList | DenyAll | None | Unset = UNSET
@@ -80,6 +83,7 @@ class Connection:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.actor import Actor
         from ..models.allow_all import AllowAll
         from ..models.allow_list import AllowList
         from ..models.deny_all import DenyAll
@@ -109,6 +113,14 @@ class Connection:
             session_template_id = self.session_template_id
 
         secrets_set = self.secrets_set
+
+        created_by: dict[str, Any] | None | Unset
+        if isinstance(self.created_by, Unset):
+            created_by = UNSET
+        elif isinstance(self.created_by, Actor):
+            created_by = self.created_by.to_dict()
+        else:
+            created_by = self.created_by
 
         attached_at: None | str | Unset
         if isinstance(self.attached_at, Unset):
@@ -166,6 +178,8 @@ class Connection:
             field_dict["session_template_id"] = session_template_id
         if secrets_set is not UNSET:
             field_dict["secrets_set"] = secrets_set
+        if created_by is not UNSET:
+            field_dict["created_by"] = created_by
         if attached_at is not UNSET:
             field_dict["attached_at"] = attached_at
         if archived_at is not UNSET:
@@ -179,6 +193,7 @@ class Connection:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.actor import Actor
         from ..models.allow_all import AllowAll
         from ..models.allow_list import AllowList
         from ..models.connection_metadata import ConnectionMetadata
@@ -218,6 +233,23 @@ class Connection:
         )
 
         secrets_set = d.pop("secrets_set", UNSET)
+
+        def _parse_created_by(data: object) -> Actor | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                created_by_type_0 = Actor.from_dict(data)
+
+                return created_by_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(Actor | None | Unset, data)
+
+        created_by = _parse_created_by(d.pop("created_by", UNSET))
 
         def _parse_attached_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -329,6 +361,7 @@ class Connection:
             session_id=session_id,
             session_template_id=session_template_id,
             secrets_set=secrets_set,
+            created_by=created_by,
             attached_at=attached_at,
             archived_at=archived_at,
             inbound_policy=inbound_policy,

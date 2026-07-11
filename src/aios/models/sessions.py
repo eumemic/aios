@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from aios.actors import Actor
 from aios.models.events import Event
 from aios.models.github_repositories import (
     MAX_REPOS_PER_SESSION,
@@ -423,6 +424,7 @@ class Session(BaseModel):
     usage: SessionUsage = Field(default_factory=SessionUsage)
     resources: list[SessionResourceEcho] = Field(default_factory=list)
     triggers: list[TriggerEcho] = Field(default_factory=list)
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None

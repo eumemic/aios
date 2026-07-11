@@ -14,6 +14,7 @@ from typing import Any, NamedTuple, cast
 
 import asyncpg
 
+from aios.actors import actor_columns, actor_from_row
 from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _build_set_assignments,
@@ -42,6 +43,7 @@ def _row_to_vault(row: asyncpg.Record) -> Vault:
         id=row["id"],
         display_name=row["display_name"],
         metadata=metadata,
+        created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -59,14 +61,15 @@ async def insert_vault(
     metadata_json = json.dumps(metadata)
     row = await conn.fetchrow(
         """
-        INSERT INTO vaults (id, display_name, metadata, account_id)
-        VALUES ($1, $2, $3::jsonb, $4)
+        INSERT INTO vaults (id, display_name, metadata, account_id, created_by_type, created_by_ref)
+        VALUES ($1, $2, $3::jsonb, $4, $5, $6)
         RETURNING *
         """,
         new_id,
         display_name,
         metadata_json,
         account_id,
+        *actor_columns(),
     )
     assert row is not None
     return _row_to_vault(row)

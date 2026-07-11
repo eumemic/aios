@@ -14,8 +14,7 @@ T = TypeVar("T", bound="Actor")
 
 @_attrs_define
 class Actor:
-    """``created_by`` / ``redacted_by`` shape on memory versions.
-
+    """
     Attributes:
         type_ (ActorType):
         api_key_id (None | str | Unset):
