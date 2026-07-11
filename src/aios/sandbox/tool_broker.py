@@ -62,6 +62,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from aios.errors import AiosError
+from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 from aios.logging import get_logger
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools
 from aios.models.agents import (
@@ -450,7 +451,9 @@ class ToolBroker:
 
     # ── built-in routes ───────────────────────────────────────────────────
 
-    async def _resolve_builtin(self, request: Request) -> tuple[str, str, ToolSpec] | Response:
+    async def _resolve_builtin(
+        self, request: Request, arguments: dict[str, Any] | None = None
+    ) -> tuple[str, str, ToolSpec] | Response:
         """Resolve (session_id, name, spec) for a built-in route.
 
         Returns an error ``Response`` with a diagnostic message if the
@@ -467,8 +470,9 @@ class ToolBroker:
         spec = _find_builtin_spec(agent.tools, name)
         if spec is None or not spec.enabled:
             return _err(404, f"tool {name!r} is not declared on this agent")
-        if not _builtin_cli_eligible(spec):
-            transport = spec.transport or registry.get(spec.type).transport
+        transport = effective_transport(name, agent.tools)
+        disposition = classify_tool_call(name, arguments, agent, confirmation_resolved=False)
+        if transport not in ("cli", "both") or disposition is not ToolDisposition.IMMEDIATE:
             if transport not in ("cli", "both"):
                 return _err(
                     403,
@@ -506,7 +510,7 @@ class ToolBroker:
         if not isinstance(arguments, dict):
             return _err(400, 'request body must contain {"arguments": <object>}')
 
-        resolved = await self._resolve_builtin(request)
+        resolved = await self._resolve_builtin(request, arguments)
         if isinstance(resolved, Response):
             return resolved
         session_id, name, _spec = resolved

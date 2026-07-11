@@ -22,6 +22,9 @@ import pytest
 from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
     AgentBinding,
+    HttpPermissionPolicy,
+    HttpRouteSpec,
+    HttpServerSpec,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -39,6 +42,7 @@ def _agent(
     *,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> StepSurface:
     return StepSurface(
         model="test/dummy",
@@ -46,7 +50,7 @@ def _agent(
         tools=tools or [],
         skills=[],
         mcp_servers=mcp_servers or [],
-        http_servers=[],
+        http_servers=http_servers or [],
         litellm_extra={},
         window_min=1000,
         window_max=100000,
@@ -406,6 +410,34 @@ class TestBuiltinInvoke:
                 )
         assert r.status_code == 403
         assert "not CLI-reachable" in r.json()["error"]
+
+    async def test_route_refined_always_ask_403(self, broker: ToolBroker) -> None:
+        broker.register_session("sess_X", "s")
+        agent = _agent(
+            tools=[ToolSpec(type="http_request", permission="always_allow")],
+            http_servers=[
+                HttpServerSpec(
+                    name="api",
+                    base_url="https://api.example.com",
+                    routes=[
+                        HttpRouteSpec(
+                            path_pattern="/sensitive",
+                            permission_policy=HttpPermissionPolicy(type="always_ask"),
+                        )
+                    ],
+                )
+            ],
+        )
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "http_request"),
+                    json={
+                        "arguments": {"server_ref": "api", "path": "/sensitive", "method": "GET"}
+                    },
+                )
+        assert r.status_code == 403
+        assert "always_ask" in r.json()["error"]
 
     async def test_always_ask_403(self, broker: ToolBroker) -> None:
         broker.register_session("sess_X", "s")
