@@ -19,6 +19,7 @@ from fastapi.routing import APIRoute
 
 from aios.api.deps import require_bearer_auth
 from aios.api.middleware import RequestLoggingMiddleware
+from aios.api.strict_query_params import reject_unknown_query_params
 from aios.api.routers import (
     accounts,
     agents,
@@ -155,6 +156,7 @@ def create_app() -> FastAPI:
         description="Open-source agent runtime: Postgres-backed sessions, "
         "Docker sandbox, any LiteLLM model.",
         lifespan=lifespan,
+        dependencies=[Depends(reject_unknown_query_params)],
         # One schema per Pydantic model (not a Foo-Input / Foo-Output pair).
         # We use distinct ``Foo`` / ``FooCreate`` / ``FooUpdate`` types instead
         # of the read-only-field split, and the hyphenated split-schema names
