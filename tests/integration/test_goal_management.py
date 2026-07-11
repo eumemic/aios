@@ -158,9 +158,10 @@ async def test_list_obligations_enumerates_open_self_goals(
 
     out = await invoke_builtin(session_id, "list_obligations", {})
     assert isinstance(out, dict)
-    rows = out["obligations"]
+    # The general obligations view can also contain the fixture's incoming API
+    # request, so select the self-goal rows rather than assuming every row is a goal.
+    rows = [row for row in out["obligations"] if row["origin"] == "self"]
     assert [row["request_id"] for row in rows] == [g1, g2]  # oldest-first
-    assert all(row["origin"] == "self" for row in rows)
     assert rows[0]["summary"] == "goal one"
 
 
@@ -238,7 +239,7 @@ async def test_return_refuses_unknown_request_id(
 
     err = await invoke_builtin(
         session_id, "error", {"request_id": "req_does_not_exist", "message": "nope"}
-    )
+   )
     assert isinstance(err, ToolResult)
     assert err.is_error
     assert await _open_ids(pool, session_id) == [goal_id]
@@ -271,7 +272,7 @@ async def test_open_goal_cap_enforced(
 
     # Freeing a slot re-admits (concurrency cap, not a lifetime budget). The goal is
     # closed through the general `return` verb (#1518: complete_goal is retired).
-    with mock.patch("aios.tools.goal_management.get_settings") as gs:
+    with mock.patch("aios.tools.goal_management.get_settings") as gs 
         gs.return_value = mock.Mock(session_open_goals_max=2)
         await invoke_builtin(
             session_id, "return", {"request_id": a["goal_id"], "value": {"shipped": True}}
