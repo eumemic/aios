@@ -692,6 +692,8 @@ async def list_events(
     pool: PoolDep,
     account_id: AccountIdDep,
     cursor: str | None = None,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
+    before_seq: Annotated[int | None, Query(ge=0)] = None,
     # First-page direction (this endpoint only): ``forward`` reads
     # chronologically (ASC); ``backward`` loads the newest-first tail (DESC) for
     # chat UIs paging into the past on scroll-up. Ignored on ``?cursor=`` pages.
@@ -711,7 +713,8 @@ async def list_events(
     """List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    exclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /
+    ``?error_only=`` / ``?channel=`` (repeatable, OR) /
     ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
@@ -722,6 +725,10 @@ async def list_events(
     channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
     the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
     response includes ``channel`` + ``orig_channel`` on each item.
+
+    Audit readers should persist a processed-through sequence watermark, resume
+    with ``after_seq``, and assert that returned sequence numbers provide gapless
+    coverage of the requested frozen window as their client-side completeness gate.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a "session reset"
     — it only means no events match this page (e.g. a forward read past the
@@ -745,6 +752,8 @@ async def list_events(
             "channel": channel,
             "chat_type": chat_type,
             "limit": limit,
+            "after_seq": after_seq,
+            "before_seq": before_seq,
             "dir": direction if direction != "forward" else None,
         },
     )
@@ -757,10 +766,12 @@ async def list_events(
         channel = st.filters.get("channel") or None
         chat_type = st.filters.get("chat_type")
         seq = cursor_as_int(st.cursor)
-        after_seq, before = (seq, None) if direction == "forward" else (0, seq)
+        lower_bound = int(st.filters.get("after_seq") or 0)
+        upper_bound = st.filters.get("before_seq")
+        after_seq, before = (seq, upper_bound) if direction == "forward" else (lower_bound, seq)
     else:
         error_only = bool(error_only)
-        after_seq, before = 0, None
+        after_seq, before = after_seq or 0, before_seq
     page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
     # Fetch one extra row to derive has_more without a separate COUNT query.
     rows = await service.read_events(
@@ -786,6 +797,8 @@ async def list_events(
             "error_only": error_only,
             "channel": channel,
             "chat_type": chat_type,
+            "after_seq": lower_bound if st is not None else after_seq,
+            "before_seq": upper_bound if st is not None else before,
         },
     )
 

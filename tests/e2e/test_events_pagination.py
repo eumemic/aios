@@ -145,6 +145,24 @@ class TestForwardPagination:
         assert len(seqs) == len(set(seqs))
 
 
+class TestSequenceAnchoredPagination:
+    async def test_after_seq_walks_forward_from_exclusive_anchor(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        assert await _walk(
+            http_client, session_with_events, {"after_seq": 2, "limit": 2}
+        ) == [3, 4, 5]
+
+    async def test_bounded_window_is_preserved_across_pages(
+        self, http_client: httpx.AsyncClient, session_with_events: str
+    ) -> None:
+        assert await _walk(
+            http_client,
+            session_with_events,
+            {"after_seq": 1, "before_seq": 5, "limit": 2},
+        ) == [2, 3, 4]
+
+
 class TestLimitValidation:
     """limit > 500 must return 422; limit = 500 must be accepted."""
 
