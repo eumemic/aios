@@ -558,7 +558,7 @@ async def get_request_deadline(
     conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
 ) -> datetime | None:
     """Return the trusted caller wall-clock deadline for an obligation, if bounded."""
-    return await conn.fetchval(
+    value: datetime | None = await conn.fetchval(
         "SELECT CASE WHEN (data->>'deadline_seconds') ~ '^[0-9]+([.][0-9]+)?$' "
         "THEN created_at + ((data->>'deadline_seconds')::double precision * interval '1 second') "
         "END FROM events WHERE session_id=$1 AND kind='lifecycle' "
@@ -567,13 +567,14 @@ async def get_request_deadline(
         session_id,
         request_id,
     )
+    return value
 
 
 async def get_request_deferred_until(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
 ) -> datetime | None:
     """Latest persisted snooze deadline for an obligation."""
-    return await conn.fetchval(
+    value: datetime | None = await conn.fetchval(
         "SELECT (data->>'until')::timestamptz FROM events WHERE session_id=$1 AND account_id=$2 "
         "AND kind='lifecycle' AND data->>'event'='request_deferred' "
         "AND data->>'request_id'=$3 ORDER BY seq DESC LIMIT 1",
@@ -581,6 +582,7 @@ async def get_request_deferred_until(
         account_id,
         request_id,
     )
+    return value
 
 
 async def get_open_obligations(
