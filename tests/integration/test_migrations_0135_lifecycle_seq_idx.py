@@ -48,6 +48,18 @@ from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 _INDEX_NAME = "events_session_lifecycle_seq_idx"
 
+# Migration 0145 adds a strictly-narrower partial index over the SAME
+# ``(session_id, seq)`` columns but with the additional
+# ``AND data->>'event' IN (<MODEL_VISIBLE_LIFECYCLE_EVENTS>)`` predicate — the
+# model-visible subset the lifecycle arm actually queries. It is not
+# byte-redundant with 0135's generic index (its predicate is a strict subset),
+# and the planner correctly PREFERS it for this query because it matches the
+# query's own ``data->>'event' = ANY($3)`` allowlist and scans far fewer rows.
+# Either partial index serves the lifecycle arm index-only (no seq scan, no
+# ``kind`` heap-filter), which is the invariant this test guards.
+_MODEL_VISIBLE_INDEX_NAME = "events_session_model_visible_lifecycle_seq_idx"
+_LIFECYCLE_ARM_SERVING_INDEXES = frozenset({_INDEX_NAME, _MODEL_VISIBLE_INDEX_NAME})
+
 # A minimal account/agent/env/session chain, then many lifecycle rows so a
 # real planner (not a 1-row toy table) has a reason to seek rather than scan.
 _N_EVENTS = 10_000  # total slate; ~1/5 lifecycle, ~4/5 message
@@ -249,11 +261,13 @@ def test_lifecycle_arm_uses_index_not_seq_scan(postgres: object) -> None:
         filt = str(scan.get("Filter", ""))
         assert "kind" not in filt, (
             f"lifecycle arm still heap-filters kind over an unbounded scan "
-            f"(missing {_INDEX_NAME}?): {scan}"
+            f"(missing a lifecycle-serving partial index "
+            f"{sorted(_LIFECYCLE_ARM_SERVING_INDEXES)}?): {scan}"
         )
 
     index_names = {n.get("Index Name") for n in nodes if n.get("Index Name")}
-    assert _INDEX_NAME in index_names, (
-        f"plan does not use {_INDEX_NAME}; scan nodes: "
+    assert index_names & _LIFECYCLE_ARM_SERVING_INDEXES, (
+        f"plan does not use a lifecycle-arm serving index "
+        f"({sorted(_LIFECYCLE_ARM_SERVING_INDEXES)}); scan nodes: "
         f"{[(n.get('Node Type'), n.get('Index Name')) for n in events_scans]}"
     )
