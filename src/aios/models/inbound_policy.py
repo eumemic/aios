@@ -17,7 +17,7 @@ Members
 * ``AllowList`` — only the listed ``chat_ids`` are admitted; an empty list is
   rejected at validation time (422), never a silent deny-all.
 * ``DenyAll`` — explicit fail-closed; the **server default** when the column is
-  NULL (resolved in :mod:`aios.db.queries.inbound_policy`).
+  NULL (resolved by :func:`effective_inbound_policy`).
 
 The ``InboundPolicyReplace`` union is the required-on-update variant: a partial
 update that omits ``AllowList.chat_ids`` must 422 rather than silently widening.
@@ -66,6 +66,13 @@ InboundPolicy = Annotated[
     Field(discriminator="kind"),
 ]
 """Discriminated union over ``kind`` — the stored / read-model shape."""
+
+
+def effective_inbound_policy(stored: InboundPolicy | None) -> InboundPolicy:
+    """Apply the fail-closed default when no policy is stored."""
+    if stored is None:
+        return DenyAll()
+    return stored
 
 
 class InboundPolicyReplace(RootModel[InboundPolicy]):

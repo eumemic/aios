@@ -19,7 +19,6 @@ from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _escape_like,
 )
-from aios.db.queries.inbound_policy import effective_inbound_policy
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -31,7 +30,7 @@ from aios.ids import (
 )
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.connectors import ConnectorCapabilities
-from aios.models.inbound_policy import InboundPolicy
+from aios.models.inbound_policy import InboundPolicy, effective_inbound_policy
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # Discriminated-union adapter for the ``connections.inbound_policy`` jsonb
@@ -318,8 +317,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         archived_at=row["archived_at"],
         inbound_policy=inbound_policy,
         # Server-derived echo: NULL column → the fail-closed ``DenyAll``
-        # default (same rule the gate's ``resolve_effective_inbound_policy``
-        # applies), defined once in ``effective_inbound_policy``.
+        # fail-closed default defined beside the policy model.
         inbound_policy_effective=effective_inbound_policy(inbound_policy),
     )
 

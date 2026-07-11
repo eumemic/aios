@@ -195,6 +195,7 @@ def _connection() -> Connection:
         updated_at=now,
         archived_at=None,
         inbound_policy=AllowAll(),
+        inbound_policy_effective=AllowAll(),
     )
 
 
@@ -230,10 +231,6 @@ async def test_over_budget_drops_before_resolution_and_side_effects() -> None:
 
     with (
         patch("aios.services.inbound.queries.get_connection", get_connection),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", check_budget),
         patch("aios_connectors.resolver.resolve_target_session", resolve_target_session),
         patch("aios.services.inbound.stage_inbound_attachments", stage),
@@ -271,10 +268,6 @@ async def test_within_budget_passes_into_resolution() -> None:
 
     with (
         patch("aios.services.inbound.queries.get_connection", get_connection),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", check_budget),
         patch("aios_connectors.resolver.resolve_target_session", resolve_target_session),
     ):

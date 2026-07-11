@@ -6,7 +6,7 @@ woke the model, with no predicate asking "is this sender allowed to talk to
 this agent." This suite pins the gate inserted into ``handle_inbound``:
 
 * the pure ``_admits`` predicate over the discriminated policy union;
-* the resolve query's NULL→server-default ``DenyAll`` (fail-closed);
+* the connection read model's NULL→server-default ``DenyAll`` (fail-closed);
 * the gate dropping an unadmitted sender BEFORE any side effect (no
   ``resolve_target_session``, no attachment staging, no ``append_event``, no
   ``defer_wake``) — the *fresh-connection* and *single_session* acceptance
@@ -25,10 +25,9 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from aios.api.routers.connectors import _inbound_drop_error
-from aios.db.queries.inbound_policy import resolve_effective_inbound_policy
 from aios.errors import ValidationError
 from aios.models.connections import Connection
-from aios.models.inbound_policy import AllowAll, AllowList, DenyAll
+from aios.models.inbound_policy import AllowAll, AllowList, DenyAll, effective_inbound_policy
 from aios.services.inbound import (
     InboundDrop,
     InboundResult,
@@ -71,9 +70,6 @@ def test_allow_list_empty_is_rejected() -> None:
         AllowList(chat_ids=[])
 
 
-# ─── resolve_effective_inbound_policy: NULL → server default DenyAll ──────────
-
-
 def _connection(*, inbound_policy: Any = None, archived_at: Any = None) -> Connection:
     now = datetime.now(UTC)
     return Connection(
@@ -89,24 +85,8 @@ def _connection(*, inbound_policy: Any = None, archived_at: Any = None) -> Conne
         updated_at=now,
         archived_at=archived_at,
         inbound_policy=inbound_policy,
+        inbound_policy_effective=effective_inbound_policy(inbound_policy),
     )
-
-
-async def test_resolve_null_policy_is_deny_all() -> None:
-    conn = _connection(inbound_policy=None)
-    policy = await resolve_effective_inbound_policy(
-        MagicMock(), connection=conn, account_id="acc_1"
-    )
-    assert isinstance(policy, DenyAll)
-
-
-async def test_resolve_passes_through_stored_policy() -> None:
-    stored = AllowList(chat_ids=["op_chat"])
-    conn = _connection(inbound_policy=stored)
-    policy = await resolve_effective_inbound_policy(
-        MagicMock(), connection=conn, account_id="acc_1"
-    )
-    assert policy is stored
 
 
 # ─── router status mapping: denied_by_policy → 422 ───────────────────────────

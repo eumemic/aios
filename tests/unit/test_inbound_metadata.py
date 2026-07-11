@@ -371,6 +371,7 @@ async def _drive_inbound_to_wake(
         # debounce-path inbound through to ``defer_wake``; this test exercises
         # the wake-debounce branch, not the admission gate.
         inbound_policy=AllowAll(),
+        inbound_policy_effective=AllowAll(),
     )
 
     async def fake_get_connection(*_args: Any, **_kwargs: Any) -> Connection:
