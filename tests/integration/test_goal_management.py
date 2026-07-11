@@ -13,7 +13,7 @@ and the obligations tail block read:
   the quiescence guard holds the session (it cannot go idle) until it's closed —
   and persists its ``output_schema`` on the trusted ``request_opened`` edge
   (``get_request_output_schema``), the same way ``call_*`` carry it (#1512);
-* ``list_goals`` enumerates exactly the open self-goals;
+* ``list_obligations`` enumerates open self-goals through the general obligations view;
 * a self-goal is closed through the general source-agnostic verbs (#1518: the
   self-only ``complete_goal``/``fail_goal`` are retired). ``return`` validates its
   ``value`` against that persisted schema servicer-side — a conforming value drains
@@ -141,7 +141,7 @@ async def test_create_goal_opens_holding_self_obligation(
     assert persisted == _SCHEMA
 
 
-async def test_list_goals_enumerates_open_self_goals(
+async def test_list_obligations_enumerates_open_self_goals(
     pool_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
     _pool, _account, session_id = pool_session
@@ -156,11 +156,12 @@ async def test_list_goals_enumerates_open_self_goals(
         )
     )
 
-    out = await invoke_builtin(session_id, "list_goals", {})
+    out = await invoke_builtin(session_id, "list_obligations", {})
     assert isinstance(out, dict)
-    ids = [g["goal_id"] for g in out["goals"]]
-    assert ids == [g1, g2]  # oldest-first
-    assert out["goals"][0]["goal"]  # carries the summary text
+    rows = out["obligations"]
+    assert [row["request_id"] for row in rows] == [g1, g2]  # oldest-first
+    assert all(row["origin"] == "self" for row in rows)
+    assert rows[0]["summary"] == "goal one"
 
 
 async def test_return_closes_self_goal_with_schema_gate(
