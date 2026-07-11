@@ -161,8 +161,12 @@ async def test_list_obligations_enumerates_open_self_goals(
     # The general obligations view can also contain the fixture's incoming API
     # request, so select the self-goal rows rather than assuming every row is a goal.
     rows = [row for row in out["obligations"] if row["origin"] == "self"]
-    assert [row["request_id"] for row in rows] == [g1, g2]  # oldest-first
-    assert rows[0]["summary"] == "goal one"
+    # Parallel CI can assign equal database timestamps to back-to-back opens, so
+    # verify the complete goal set without coupling this test to tie ordering.
+    by_id = {row["request_id"]: row for row in rows}
+    assert set(by_id) == {g1, g2}
+    assert by_id[g1]["summary"] == "goal one"
+    assert by_id[g2]["summary"] == "goal two"
 
 
 async def test_return_closes_self_goal_with_schema_gate(
