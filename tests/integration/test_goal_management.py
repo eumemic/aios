@@ -9,9 +9,9 @@ acceptance criteria against the same open-obligation queries the quiescence guar
 and the obligations tail block read:
 
 * ``create_goal`` opens an obligation that lands in the session's OPEN set
-  (``het_open_request_ids`` / ``het_open_obligations``) as a ``self`` caller — so
+  (``get_open_request_ids`` / ``get_open_obligations``) as a ``self`` caller — so
   the quiescence guard holds the session (it cannot go idle) until it's closed —
-  and persists its ``output_schema`` on the trusted ``request_opened` edge
+  and persists its ``output_schema`` on the trusted ``request_opened`` edge
   (``get_request_output_schema``), the same way ``call_*`` carry it (#1512);
 * ``list_obligations`` enumerates open self-goals through the general obligations view;
 * a self-goal is closed through the general source-agnostic verbs (#1518: the
