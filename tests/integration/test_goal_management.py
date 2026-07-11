@@ -167,9 +167,11 @@ async def test_list_obligations_enumerates_open_self_goals(
     by_id = {row["request_id"]: row for row in out["obligations"] if row["request_id"] in goal_ids}
     assert set(by_id) == goal_ids
     assert by_id[g1]["origin"] == "self"
-    assert by_id[g1]["summary"] == "goal one"
+    # create_goal invokes the session with a structured {"goal": ...} input, so
+    # the shared obligation summary is its JSON preview rather than bare goal text.
+    assert "goal one" in by_id[g1]["summary"]
     assert by_id[g2]["origin"] == "self"
-    assert by_id[g2]["summary"] == "goal two"
+    assert "goal two" in by_id[g2]["summary"]
 
 
 async def test_return_closes_self_goal_with_schema_gate(
