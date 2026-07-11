@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -576,7 +577,9 @@ async def get_request_deferred_until(
         "SELECT (data->>'until')::timestamptz FROM events WHERE session_id=$1 AND account_id=$2 "
         "AND kind='lifecycle' AND data->>'event'='request_deferred' "
         "AND data->>'request_id'=$3 ORDER BY seq DESC LIMIT 1",
-        session_id, account_id, request_id,
+        session_id,
+        account_id,
+        request_id,
     )
 
 

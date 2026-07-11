@@ -35,9 +35,7 @@ async def defer_obligation_handler(
         open_ids = await queries.get_open_request_ids(conn, session_id, account_id=account_id)
         if args.request_id not in open_ids:
             raise ToolBail("unknown_request: request_id is not an open obligation of this session")
-        deadline = await queries.get_request_deadline(
-            conn, session_id, request_id=args.request_id
-        )
+        deadline = await queries.get_request_deadline(conn, session_id, request_id=args.request_id)
         if deadline is not None and until > deadline:
             raise ToolBail(
                 f"defer_exceeds_caller_deadline: requested until {until.isoformat()} "
