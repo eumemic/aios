@@ -268,18 +268,6 @@
       "configs": null
     },
     {
-      "type": "list_goals",
-      "name": null,
-      "description": null,
-      "input_schema": null,
-      "enabled": true,
-      "permission": null,
-      "transport": null,
-      "mcp_server_name": null,
-      "default_config": null,
-      "configs": null
-    },
-    {
       "type": "list_obligations",
       "name": null,
       "description": null,
