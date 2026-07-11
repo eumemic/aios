@@ -1,4 +1,5 @@
 """Temporarily suppress quiescence nudges for one open obligation."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -47,9 +48,17 @@ async def defer_obligation_handler(
             account_id=account_id,
             session_id=session_id,
             kind="lifecycle",
-            data={"event": "request_deferred", "request_id": args.request_id, "until": until.isoformat()},
+            data={
+                "event": "request_deferred",
+                "request_id": args.request_id,
+                "until": until.isoformat(),
+            },
         )
-    return {"status": "deferred", "request_id": args.request_id, "deferred_until": until.isoformat()}
+    return {
+        "status": "deferred",
+        "request_id": args.request_id,
+        "deferred_until": until.isoformat(),
+    }
 
 
 DESCRIPTION = (
