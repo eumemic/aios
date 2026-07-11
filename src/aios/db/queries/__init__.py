@@ -599,6 +599,8 @@ from .sessions import (  # noqa: E402
     get_open_obligations,
     get_open_obligations_batch,
     get_open_request_ids,
+    get_request_deadline,
+    get_request_deferred_until,
     get_request_caller,
     get_request_output_schema,
     get_session,

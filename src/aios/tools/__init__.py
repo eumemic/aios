@@ -21,6 +21,7 @@ from __future__ import annotations
 # matches the agent-tools declaration order for readability.
 from aios.tools import agent_management as _agent_management  # noqa: F401
 from aios.tools import bash as _bash  # noqa: F401
+from aios.tools import defer_obligation as _defer_obligation  # noqa: F401
 from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import goal_management as _goal_management  # noqa: F401
