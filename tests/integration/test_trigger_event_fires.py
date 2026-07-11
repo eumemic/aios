@@ -912,8 +912,20 @@ async def test_wake_session_fire_delivers_to_named_target(
     assert lineage[0]["wake_depth"] == 1  # trigger root is depth 0
     assert lineage[0]["wake_source_session_id"] == f"trigger:{tid}"
 
-    # The OWNER session got nothing — not a self-wake.
-    assert await _events_of(pool, owner.id) == []
+    # The OWNER session got only its own #1845 trigger-lifecycle bookkeeping —
+    # the ``trigger_enabled`` receipt from ``add_trigger`` and the
+    # ``trigger_fired`` receipt from this fire, both on the OWNING session's
+    # event log — and NOT the wake delivery itself. Not a self-wake: no user
+    # message and no ``wake_lineage`` span ever land on the owner.
+    owner_events = await _events_of(pool, owner.id)
+    assert [e["data"]["event"] for e in owner_events if e["kind"] == "lifecycle"] == [
+        "trigger_enabled",
+        "trigger_fired",
+    ]
+    assert not any(e["data"].get("role") == "user" for e in owner_events)
+    assert not any(
+        e["kind"] == "span" and e["data"].get("event") == "wake_lineage" for e in owner_events
+    )
     # The wake was actually scheduled on the target.
     deferred.assert_awaited_once()
 
