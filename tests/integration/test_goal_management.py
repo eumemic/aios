@@ -4,14 +4,14 @@ DB-backed (testcontainer Postgres). These drive the REAL service/query path —
 ``create_goal`` opening a self-referential awaited obligation via
 ``sessions_service.invoke`` (#1414 self-goal) carrying the REQUIRED ``output_schema``
 on its ``request_opened`` frame, and the general ``return`` / ``error`` answer verbs
-writing the ``request_response`` half via ``respond_to_request`` — and assert the
+writing the ``request_response`` via ``respond_to_request`` — and assert the
 acceptance criteria against the same open-obligation queries the quiescence guard
 and the obligations tail block read:
 
 * ``create_goal`` opens an obligation that lands in the session's OPEN set
-  (``get_open_request_ids`` / ``get_open_obligations``) as a ``self`` caller — so
+  (``het_open_request_ids`` / ``het_open_obligations``) as a ``self`` caller — so
   the quiescence guard holds the session (it cannot go idle) until it's closed —
-  and persists its ``output_schema`` on the trusted ``request_opened`` edge
+  and persists its ``output_schema`` on the trusted ``request_opened` edge
   (``get_request_output_schema``), the same way ``call_*`` carry it (#1512);
 * ``list_obligations`` enumerates open self-goals through the general obligations view;
 * a self-goal is closed through the general source-agnostic verbs (#1518: the
@@ -239,7 +239,7 @@ async def test_return_refuses_unknown_request_id(
 
     err = await invoke_builtin(
         session_id, "error", {"request_id": "req_does_not_exist", "message": "nope"}
-   )
+    )
     assert isinstance(err, ToolResult)
     assert err.is_error
     assert await _open_ids(pool, session_id) == [goal_id]
@@ -272,7 +272,7 @@ async def test_open_goal_cap_enforced(
 
     # Freeing a slot re-admits (concurrency cap, not a lifetime budget). The goal is
     # closed through the general `return` verb (#1518: complete_goal is retired).
-    with mock.patch("aios.tools.goal_management.get_settings") as gs 
+    with mock.patch("aios.tools.goal_management.get_settings") as gs:
         gs.return_value = mock.Mock(session_open_goals_max=2)
         await invoke_builtin(
             session_id, "return", {"request_id": a["goal_id"], "value": {"shipped": True}}
