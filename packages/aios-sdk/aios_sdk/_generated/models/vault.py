@@ -11,6 +11,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.actor import Actor
     from ..models.vault_metadata import VaultMetadata
 
 
@@ -27,6 +28,7 @@ class Vault:
         metadata (VaultMetadata):
         created_at (datetime.datetime):
         updated_at (datetime.datetime):
+        created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -35,10 +37,13 @@ class Vault:
     metadata: VaultMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.actor import Actor
+
         id = self.id
 
         display_name = self.display_name
@@ -48,6 +53,14 @@ class Vault:
         created_at = self.created_at.isoformat()
 
         updated_at = self.updated_at.isoformat()
+
+        created_by: dict[str, Any] | None | Unset
+        if isinstance(self.created_by, Unset):
+            created_by = UNSET
+        elif isinstance(self.created_by, Actor):
+            created_by = self.created_by.to_dict()
+        else:
+            created_by = self.created_by
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -68,6 +81,8 @@ class Vault:
                 "updated_at": updated_at,
             }
         )
+        if created_by is not UNSET:
+            field_dict["created_by"] = created_by
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -75,6 +90,7 @@ class Vault:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.actor import Actor
         from ..models.vault_metadata import VaultMetadata
 
         d = dict(src_dict)
@@ -87,6 +103,23 @@ class Vault:
         created_at = isoparse(d.pop("created_at"))
 
         updated_at = isoparse(d.pop("updated_at"))
+
+        def _parse_created_by(data: object) -> Actor | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                created_by_type_0 = Actor.from_dict(data)
+
+                return created_by_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(Actor | None | Unset, data)
+
+        created_by = _parse_created_by(d.pop("created_by", UNSET))
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -111,6 +144,7 @@ class Vault:
             metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,
+            created_by=created_by,
             archived_at=archived_at,
         )
 

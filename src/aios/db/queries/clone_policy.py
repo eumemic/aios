@@ -257,6 +257,16 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "outbound_suppression": Arm.COPY,
     "tools_vocab_epoch": Arm.COPY,
     "open_request_scan_floor": Arm.RESET_DEFAULT,
+    # created_by provenance (migration 0146): a clone is a new resource born
+    # from the clone operation, not the parent's original creator. RESET_DEFAULT
+    # (→ NULL) rather than COPY — copying the parent's creator would MISATTRIBUTE
+    # the clone (a provenance lie), and this table's posture is never to carry
+    # authority/lineage through a clone (cf. parent_run_id / origin resets above).
+    # NULL satisfies the created_by CHECK (both-NULL clause). clone_session's
+    # INSERT … SELECT does not thread the current actor, so unattributed is the
+    # honest record here.
+    "created_by_type": Arm.RESET_DEFAULT,
+    "created_by_ref": Arm.RESET_DEFAULT,
 }
 
 
@@ -368,6 +378,12 @@ TRIGGERS_POLICY: dict[str, Arm] = {
     "action": Arm.COPY,
     "environment_id": Arm.COPY,
     "ingest_token_hash": Arm.MINT_INGEST_TOKEN,
+    # created_by provenance (migration 0146): RESET_DEFAULT for the same reason
+    # as sessions — the clone is a new resource, not created by the parent's
+    # original creator; NULL (unattributed) beats a misattributing COPY and
+    # satisfies the created_by CHECK's both-NULL clause.
+    "created_by_type": Arm.RESET_DEFAULT,
+    "created_by_ref": Arm.RESET_DEFAULT,
 }
 
 

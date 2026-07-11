@@ -88,6 +88,8 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "window_min": 1,
         "window_max": 10,
         "preempt_policy": "wait",
+        "created_by_type": None,
+        "created_by_ref": None,
         "created_at": now,
         "updated_at": now,
         "archived_at": None,

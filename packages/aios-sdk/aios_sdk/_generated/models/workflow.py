@@ -11,6 +11,7 @@ from dateutil.parser import isoparse
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.actor import Actor
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
@@ -40,6 +41,7 @@ class Workflow:
         tools (list[ToolSpec] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
+        created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -57,10 +59,12 @@ class Workflow:
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
+    created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.actor import Actor
         from ..models.workflow_input_schema_type_0 import WorkflowInputSchemaType0
         from ..models.workflow_output_schema_type_0 import WorkflowOutputSchemaType0
 
@@ -127,6 +131,14 @@ class Workflow:
                 http_servers_item = http_servers_item_data.to_dict()
                 http_servers.append(http_servers_item)
 
+        created_by: dict[str, Any] | None | Unset
+        if isinstance(self.created_by, Unset):
+            created_by = UNSET
+        elif isinstance(self.created_by, Actor):
+            created_by = self.created_by.to_dict()
+        else:
+            created_by = self.created_by
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -162,6 +174,8 @@ class Workflow:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if created_by is not UNSET:
+            field_dict["created_by"] = created_by
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -169,6 +183,7 @@ class Workflow:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.actor import Actor
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
@@ -273,6 +288,23 @@ class Workflow:
 
                 http_servers.append(http_servers_item)
 
+        def _parse_created_by(data: object) -> Actor | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                created_by_type_0 = Actor.from_dict(data)
+
+                return created_by_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(Actor | None | Unset, data)
+
+        created_by = _parse_created_by(d.pop("created_by", UNSET))
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -305,6 +337,7 @@ class Workflow:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            created_by=created_by,
             archived_at=archived_at,
         )
 

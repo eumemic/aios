@@ -19,6 +19,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aios.actors import Actor
 from aios.models._paths import ABSOLUTE_PATH_PATTERN, check_no_traversal_segments
 
 MAX_CONTENT_BYTES = 102400
@@ -156,14 +157,10 @@ class MemoryPrefix(BaseModel):
 
 
 # ── Memory version ────────────────────────────────────────────────────────
-
-
-class Actor(BaseModel):
-    """``created_by`` / ``redacted_by`` shape on memory versions."""
-
-    type: ActorType
-    api_key_id: str | None = None
-    session_id: str | None = None
+#
+# ``created_by`` / ``redacted_by`` use the shared ``aios.actors.Actor`` model
+# (identical shape); a formerly-duplicated local ``Actor`` collided with it in
+# OpenAPI codegen (both titled "Actor"), dropping the memory-version SDK models.
 
 
 class MemoryVersion(BaseModel):

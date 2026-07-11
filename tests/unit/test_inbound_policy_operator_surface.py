@@ -197,6 +197,8 @@ async def test_set_connection_inbound_policy_writes_jsonb_param() -> None:
         "external_account_id": "+1",
         "metadata": {},
         "secrets_ciphertext": None,
+        "created_by_type": None,
+        "created_by_ref": None,
         "created_at": now,
         "updated_at": now,
         "archived_at": None,
