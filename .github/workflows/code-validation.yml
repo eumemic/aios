@@ -407,18 +407,16 @@ jobs:
           }
 
       - name: E2E tests (non-docker shard)
-        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
-        # runners.  Default ``load`` dist (not ``loadfile``): the
+        # Use two workers here: each worker starts its own Postgres
+        # testcontainer, and four concurrent database containers can exhaust
+        # runner resources during startup. Default ``load`` dist (not
+        # ``loadfile``): the
         # non-docker set has no module-scoped fixtures — the only one in
         # tests/e2e lives in docker-marked test_memory_cross_session_sync.
         # Each worker spins its own session-scoped testcontainer Postgres,
-        # so there is no cross-worker DB state at all.  Measured locally:
-        # 141 s serial → 44 s at ``-n 4``.
+        # so there is no cross-worker DB state at all.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
-        run: |
-          # Retry once to absorb transient testcontainer startup failures.
-          uv run pytest tests/e2e -q -m "not docker" -n 4 || \
-            uv run pytest tests/e2e -q -m "not docker" -n 4
+        run: uv run pytest tests/e2e -q -m "not docker" -n 2
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
