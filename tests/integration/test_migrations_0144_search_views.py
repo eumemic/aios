@@ -94,6 +94,8 @@ _SENTINEL_FROZEN = "sentinel_frozen_surface_zzz"
 _SENTINEL_SCHEMA = "sentinel_output_schema_zzz"
 _SENTINEL_VAULT = "vlt_sentinel_zzz"
 _SENTINEL_ENV = "env_sentinel_zzz"
+_SENTINEL_CUMULATIVE_TOKENS = 161803398874
+_SENTINEL_CUMULATIVE_CLASS_MASS = "sentinel_cumulative_class_mass_zzz"
 # Positive control: a NON-redacted lifecycle payload key that MUST survive
 # into detail_text (proves the leak assertions are not vacuously passing
 # against an empty rendering).
@@ -323,6 +325,8 @@ _EVENTS: list[
             "output_schema": {"marker": _SENTINEL_SCHEMA},
             "vault_ids": [_SENTINEL_VAULT],
             "environment_id": _SENTINEL_ENV,
+            "cumulative_tokens": _SENTINEL_CUMULATIVE_TOKENS,
+            "cumulative_class_mass": {"marker": _SENTINEL_CUMULATIVE_CLASS_MASS},
             "custom_note": _VISIBLE_DETAIL,
         },
         None,
@@ -488,6 +492,8 @@ _LEAK_SENTINELS = (
     _SENTINEL_SCHEMA,
     _SENTINEL_VAULT,
     _SENTINEL_ENV,
+    str(_SENTINEL_CUMULATIVE_TOKENS),
+    _SENTINEL_CUMULATIVE_CLASS_MASS,
 )
 
 
