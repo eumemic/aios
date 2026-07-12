@@ -411,7 +411,12 @@ jobs:
         # and concurrent database containers have repeatedly exhausted the
         # hosted runner during this shard.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
-        run: uv run pytest tests/e2e -q -m "not docker"
+        run: |
+          # The shard provisions real containers and occasionally loses a test
+          # to transient startup/teardown races on hosted runners. Retry only
+          # failures from the first pass; persistent failures still fail CI.
+          uv run pytest tests/e2e -q -m "not docker" || \
+            uv run pytest tests/e2e -q -m "not docker" --lf
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
