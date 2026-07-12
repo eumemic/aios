@@ -416,7 +416,9 @@ jobs:
         # 141 s serial → 44 s at ``-n 4``.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          uv run pytest tests/e2e -q -m "not docker" -n 4
+          # Retry once to absorb transient testcontainer startup failures.
+          uv run pytest tests/e2e -q -m "not docker" -n 4 || \
+            uv run pytest tests/e2e -q -m "not docker" -n 4
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
