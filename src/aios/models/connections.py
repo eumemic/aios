@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.actors import Actor
 from aios.models.inbound_policy import DenyAll, InboundPolicy
 
 ConnectionMode = Literal["detached", "single_session", "per_chat"]
@@ -138,6 +139,7 @@ class Connection(BaseModel):
     session_template_id: str | None = None
     metadata: dict[str, Any]
     secrets_set: bool = False
+    created_by: Actor | None = None
     created_at: datetime
     attached_at: datetime | None = None
     updated_at: datetime

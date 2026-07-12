@@ -35,7 +35,7 @@ class MemoryVersion:
             memory_store_id (str):
             memory_id (str):
             operation (MemoryVersionOperation):
-            created_by (Actor): ``created_by`` / ``redacted_by`` shape on memory versions.
+            created_by (Actor):
             created_at (datetime.datetime):
             type_ (Literal['memory_version'] | Unset):  Default: 'memory_version'.
             path (None | str | Unset):

@@ -14,6 +14,7 @@ from fastapi import Depends, Header, Request
 from procrastinate import App as ProcrastinateApp
 from structlog.contextvars import bind_contextvars
 
+from aios.actors import set_api_actor
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.errors import UnauthorizedError
@@ -75,6 +76,7 @@ async def require_bearer_auth(
     if result is None:
         raise UnauthorizedError("invalid api key")
     account, key_id = result
+    set_api_actor(key_id)
     # Bind account_id onto the request's contextvars so every downstream log line
     # — the request-logging middleware, the exception handlers — can attribute the
     # request to its tenant. No clear here: Starlette runs each request in its own

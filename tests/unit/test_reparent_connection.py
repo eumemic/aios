@@ -321,6 +321,8 @@ class TestReparentConnection:
                 # query layer sees a dict here (was the raw "{}" text pre-codec).
                 "metadata": {},
                 "secrets_ciphertext": None,
+                "created_by_type": None,
+                "created_by_ref": None,
                 "created_at": _NOW,
                 "updated_at": _NOW,
                 "archived_at": None,

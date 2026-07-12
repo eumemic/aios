@@ -16,6 +16,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from aios.actors import Actor
+
 # ── Agent skill reference ──────────────────────────────────────────────────
 
 
@@ -80,6 +82,7 @@ class Skill(BaseModel):
     id: str
     display_title: str
     latest_version: int
+    created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
