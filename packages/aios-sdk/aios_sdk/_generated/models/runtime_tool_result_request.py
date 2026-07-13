@@ -96,8 +96,10 @@ class RuntimeToolResultRequest:
                 content_type_1 = []
                 _content_type_1 = data
                 for content_type_1_item_data in _content_type_1:
-                    content_type_1_item = RuntimeToolResultRequestContentType1Item.from_dict(
-                        content_type_1_item_data
+                    content_type_1_item = (
+                        RuntimeToolResultRequestContentType1Item.from_dict(
+                            content_type_1_item_data
+                        )
                     )
 
                     content_type_1.append(content_type_1_item)
