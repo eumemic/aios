@@ -160,7 +160,7 @@ async def test_concurrent_same_key_dispatches_reserve_atomically(monkeypatch: An
     refusals = await asyncio.gather(first, second)
 
     assert successes == ["tc_1"]
-    assert refusals == [None, "quota_exceeded: matrix_send 1/1 per hour"]
+    assert tuple(refusals) == (None, "quota_exceeded: matrix_send 1/1 per hour")
     assert len(set(conn.lock_keys)) == 1
 
 
