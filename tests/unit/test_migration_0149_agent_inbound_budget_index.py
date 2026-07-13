@@ -8,7 +8,7 @@ MIGRATION = (
     Path(__file__).parents[2]
     / "migrations"
     / "versions"
-    / "0148_events_agent_inbound_budget_index.py"
+    / "0149_events_agent_inbound_budget_index.py"
 )
 
 
