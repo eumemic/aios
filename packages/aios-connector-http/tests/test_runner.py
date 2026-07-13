@@ -206,9 +206,7 @@ class TestFireAndForget:
         assert probe._tools["shout"].fire_and_forget is False
         assert probe._tools["say_struct"].fire_and_forget is False
 
-    async def test_successful_fire_and_forget_posts_result(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_successful_fire_and_forget_posts_result(self, probe: _ProbeConnector) -> None:
         # #1919: the delivery ack is posted like any other result — no
         # wake-suppression flag on the wire; the session wakes to react.
         await probe.dispatch_call(
@@ -1142,6 +1140,7 @@ class TestPostToolResultSerialization:
         )
         assert len(captured) == 1
         assert captured[0]["content"] == "hello"
+
 
 class TestWaitConnectionServed:
     async def test_times_out_if_connection_never_added(self) -> None:
