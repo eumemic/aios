@@ -243,7 +243,6 @@ class _PathConsumer(HttpConnector):
         tool_call_id: str,
         content: Any,
         is_error: bool = False,
-        no_reaction: bool = False,
     ) -> None:
         del client
         self.tool_results.append(
@@ -253,7 +252,6 @@ class _PathConsumer(HttpConnector):
                 "tool_call_id": tool_call_id,
                 "content": content,
                 "is_error": is_error,
-                "no_reaction": no_reaction,
             }
         )
 

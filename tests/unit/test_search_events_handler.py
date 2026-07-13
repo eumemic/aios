@@ -10,10 +10,26 @@ import pytest
 from aios.tools.invoke import ToolBail
 from aios.tools.search_events import (
     MAX_ROWS,
+    SEARCH_EVENTS_DESCRIPTION,
     _format_results,
     _validate_sql,
     search_events_handler,
 )
+
+
+class TestSearchEventsDescription:
+    def test_names_search_views_help_columns(self) -> None:
+        assert (
+            "search_views_help columns: (relation_name, column_name, data_type, "
+            "semantics, example_sql)" in SEARCH_EVENTS_DESCRIPTION
+        )
+
+    def test_explains_oversized_args_manifest_entries(self) -> None:
+        assert "args_len > 16384" in SEARCH_EVENTS_DESCRIPTION
+        assert "hash-only manifest entries" in SEARCH_EVENTS_DESCRIPTION
+        assert "work artifact" in SEARCH_EVENTS_DESCRIPTION
+        assert "operator events API" in SEARCH_EVENTS_DESCRIPTION
+
 
 # ─── SQL Validation ──────────────────────────────────────────────────────────
 

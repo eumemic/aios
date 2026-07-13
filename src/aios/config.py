@@ -203,11 +203,6 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum interval without bytes moving through a Docker flatten pipeline.",
     )
-    sandbox_pipeline_max_seconds: float = Field(
-        default=3600.0,
-        gt=0,
-        description="Absolute backstop for a Docker flatten pipeline.",
-    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,
@@ -788,6 +783,16 @@ class Settings(BaseSettings):
         "enforces message-rate only; the token/cost variant is a "
         "strictly-additive extension of the same window query (see #1504 "
         "Out of scope).",
+    )
+    inbound_rate_agent_window_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Rolling-window length for the per-agent inbound budget. 0 disables it.",
+    )
+    inbound_rate_agent_max_per_window: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum inference-bearing inbounds per agent window. 0 disables it.",
     )
     inbound_rate_max_per_window: int = Field(
         default=0,

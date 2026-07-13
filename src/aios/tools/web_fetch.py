@@ -28,12 +28,10 @@ import asyncio
 import re
 from typing import Any
 
-import httpx
-
 from aios.errors import AiosError
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import registry
-from aios.tools.tavily import WebToolError, tavily_request
+from aios.tools.tavily import tavily_request
 from aios.tools.url_safety import is_safe_url
 
 
@@ -105,26 +103,6 @@ async def web_fetch_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         if len(raw) > _MAX_CONTENT_CHARS:
             out["truncated"] = True
         return out
-    except WebToolError:
-        # Already a client-class AiosError (status 400): re-raise so the single
-        # writer classifies it as a clean refusal, not a sandbox-evicting failure.
-        raise
-    except httpx.HTTPStatusError as exc:
-        # A non-2xx from Tavily/upstream is an EXPECTED failure the model reads and
-        # retries — raise ToolBail (a benign refusal), NOT the raw httpx error, which
-        # _classify_tool_error would treat as an internal failure and evict the sandbox.
-        raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
-    except httpx.TimeoutException as exc:
-        raise ToolBail("Request timed out fetching URL") from exc
-    except httpx.HTTPError as exc:
-        # The broader transport-error family — ConnectError / ReadError /
-        # RemoteProtocolError / PoolTimeout — is an EXPECTED benign network blip,
-        # not an internal fault. Catch it as broadly as ``http_request`` does
-        # (``httpx.HTTPError`` is the base of every httpx transport/protocol error)
-        # so a transient Tavily/upstream connection fault becomes a ToolBail the
-        # model reads, NOT a raw httpx error that _classify_tool_error would treat
-        # as internal → evict the sandbox on a benign failure (aios#1697).
-        raise ToolBail(f"HTTP transport error fetching URL: {type(exc).__name__}: {exc}") from exc
     except (KeyError, IndexError) as exc:
         raise ToolBail("No content returned for URL") from exc
 
