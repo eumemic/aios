@@ -70,6 +70,7 @@ from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
 from aios.services.inbound_budget import (
     check_inbound_budget,
+    check_inbound_budget_agent,
     check_inbound_budget_session,
     inbound_orig_channel,
 )
@@ -769,6 +770,17 @@ async def post_runtime_session_lifecycle(
             "inbound rate budget exceeded for this session",
             detail={"drop_reason": "rate_limited", "session_id": body.session_id},
         )
+    if (
+        body.wake
+        and connection.session_id is not None
+        and not await check_inbound_budget_agent(
+            pool, account_id=account_id, session_id=body.session_id
+        )
+    ):
+        raise RateLimitedError(
+            "inbound agent rate budget exceeded",
+            detail={"drop_reason": "rate_limited", "session_id": body.session_id},
+        )
     if body.wake:
         # Stamp the wake intent that fired the ``defer_wake`` so the budget's
         # session-grain window can meter this inference-bearing write (#1558).
@@ -895,6 +907,15 @@ async def post_runtime_chat_lifecycle(
                 "connection_id": body.connection_id,
                 "chat_id": body.chat_id,
             },
+        )
+    if (
+        body.wake
+        and connection.session_id is not None
+        and not await check_inbound_budget_agent(pool, account_id=account_id, session_id=session_id)
+    ):
+        raise RateLimitedError(
+            "inbound agent rate budget exceeded",
+            detail={"drop_reason": "rate_limited", "session_id": session_id},
         )
     # On the wake-bearing path, stamp the wake intent AND the per-counterparty
     # ``orig_channel`` key so the chat-grain budget window counts this

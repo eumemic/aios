@@ -784,6 +784,16 @@ class Settings(BaseSettings):
         "strictly-additive extension of the same window query (see #1504 "
         "Out of scope).",
     )
+    inbound_rate_agent_window_seconds: int = Field(
+        default=0,
+        ge=0,
+        description="Rolling-window length for the per-agent inbound budget. 0 disables it.",
+    )
+    inbound_rate_agent_max_per_window: int = Field(
+        default=0,
+        ge=0,
+        description="Maximum inference-bearing inbounds per agent window. 0 disables it.",
+    )
     inbound_rate_max_per_window: int = Field(
         default=0,
         ge=0,
