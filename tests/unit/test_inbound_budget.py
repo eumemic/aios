@@ -38,6 +38,7 @@ from aios.services.inbound import (
 )
 from aios.services.inbound_budget import (
     check_inbound_budget,
+    check_inbound_budget_agent,
     check_inbound_budget_session,
     inbound_orig_channel,
 )
@@ -86,6 +87,19 @@ async def test_disabled_by_default_admits_without_query() -> None:
             is True
         )
     pool.acquire.assert_not_called()
+
+
+async def test_agent_budget_disabled_without_query() -> None:
+    pool = MagicMock()
+    pool.acquire = MagicMock(side_effect=AssertionError("must not query"))
+    settings = get_settings().model_copy(
+        update={
+            "inbound_rate_agent_window_seconds": 0,
+            "inbound_rate_agent_max_per_window": 0,
+        }
+    )
+    with patch.object(inbound_budget, "get_settings", return_value=settings):
+        assert await check_inbound_budget_agent(pool, account_id="acc_1", session_id="ses_1")
 
 
 async def test_threshold_zero_disables_even_with_window_set() -> None:

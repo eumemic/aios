@@ -28,7 +28,7 @@ from aios.api.routers.connectors import _inbound_drop_error
 from aios.db.queries.inbound_policy import resolve_effective_inbound_policy
 from aios.errors import ValidationError
 from aios.models.connections import Connection
-from aios.models.inbound_policy import AllowAll, AllowList, DenyAll
+from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll
 from aios.services.inbound import (
     InboundDrop,
     InboundResult,
@@ -40,26 +40,43 @@ from aios.services.inbound import (
 
 
 def test_admits_allow_all() -> None:
-    assert _admits(AllowAll(), "anyone") is True
+    assert _admits(AllowAll(), "anyone", "@sender:example.org") is True
+
+
+def test_admits_allow_senders_member() -> None:
+    assert _admits(AllowSenders(sender_ids=["@sender:example.org"]), "chat", "@sender:example.org")
+
+
+def test_admits_allow_senders_non_member() -> None:
+    assert not _admits(
+        AllowSenders(sender_ids=["@other:example.org"]), "chat", "@sender:example.org"
+    )
+
+
+def test_allow_senders_validation() -> None:
+    with pytest.raises(PydanticValidationError):
+        AllowSenders(sender_ids=[])
+    with pytest.raises(PydanticValidationError):
+        AllowSenders(sender_ids=["@sender:example.org"], unexpected=True)  # type: ignore[call-arg]
 
 
 def test_admits_allow_list_member() -> None:
-    assert _admits(AllowList(chat_ids=["a", "b"]), "b") is True
+    assert _admits(AllowList(chat_ids=["a", "b"]), "b", "sender") is True
 
 
 def test_admits_allow_list_non_member() -> None:
-    assert _admits(AllowList(chat_ids=["a", "b"]), "stranger") is False
+    assert _admits(AllowList(chat_ids=["a", "b"]), "stranger", "sender") is False
 
 
 def test_admits_allow_list_slash_bearing_chat_id() -> None:
     # A Signal group id contains '/'. It must be admitted intact — the backfill
     # keeps the whole remainder rather than truncating at the third '/' segment.
     group_id = "group/abc123=="
-    assert _admits(AllowList(chat_ids=[group_id]), group_id) is True
+    assert _admits(AllowList(chat_ids=[group_id]), group_id, "sender") is True
 
 
 def test_admits_deny_all() -> None:
-    assert _admits(DenyAll(), "anyone") is False
+    assert _admits(DenyAll(), "anyone", "sender") is False
 
 
 # ─── AllowList validation ────────────────────────────────────────────────────
