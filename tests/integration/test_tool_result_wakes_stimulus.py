@@ -1,40 +1,34 @@
-"""Integration suite for the fire-and-forget (``no_reaction``) tool-result wake fix.
+"""Integration suite for the every-tool-result-is-a-stimulus wake behavior (#1919).
 
-The bug
--------
+Background
+----------
 A session runs one agent across connector channels. When the model calls a
 message-delivery tool (``signal_send`` / ``signal_react`` and the telegram /
 whatsapp equivalents), the connector runtime executes it and POSTs the result
 (``{"sent_at_ms": N}``) to ``POST /v1/connectors/runtime/tool-results``. The
 intake unconditionally ``defer_wake``\\ s, and the wake gate counts the
-``role='tool'`` result as new unreacted stimulus — so the session RE-INFERS to
-react to its own delivery confirmation. There is nothing to react to; a
-less-disciplined model RE-SENDS the same message (the duplicate-send loop).
+``role='tool'`` result as new unreacted stimulus — so the session wakes and the
+model gets a turn to react to the completion.
 
-The fix
--------
-The connector declares the tool fire-and-forget; on a *successful* result the
-runner sets ``no_reaction=true`` on the POST. The intake computes
-``no_reaction = body.no_reaction AND NOT body.is_error`` and, when true, appends
-the result WITH ``data['no_reaction']=true`` (so the model still sees it) but
-SKIPS ``defer_wake``. ``append_event`` then treats a ``no_reaction`` tool result
-as a NON-stimulus (it does not bump ``last_stimulus_seq``), and the sweep's
-``UNREACTED_ROWS_SQL`` excludes the marked row. Both layers agree, so the
-session settles instead of re-inferring.
+#1398/#1121/#1489 briefly special-cased this: a connector declared the tool
+fire-and-forget, the runner POSTed ``no_reaction=true`` on success, and both the
+scalar gate (``last_stimulus_seq``) and the sweep excluded the marked row so the
+session settled idle. That suppression existed to placate a dumber model that
+re-sent on a bare delivery ack. #1919 removed it: **every tool result is a
+stimulus.** The loop is the model's responsibility to avoid; the cost of a
+spurious "anything else?" wake is cheap, silent idle is not.
 
 What this suite pins
 --------------------
-- ``append_tool_result(no_reaction=True)`` stamps ``data['no_reaction']=true``
-  and does NOT advance ``last_stimulus_seq`` → the session is NOT a wake
-  candidate (loop closed).
-- A FAILED send (``is_error=True``) still wakes — the marker is never stamped
-  on the error path (the intake AND-gates with ``not is_error``).
-- A non-fire-and-forget result (``no_reaction=False``) still wakes.
-- An UNMARKED result (historical / not-yet-redeployed connector) still wakes
-  exactly as before (backward-compat: missing key → counts as stimulus).
-- A co-pending REAL user message still wakes even when a fire-and-forget result
-  is also unreacted (no false negative).
-- The model still SEES the result in the log (it stays appended).
+- A lone successful ``signal_send`` delivery result IS a stimulus: it advances
+  ``last_stimulus_seq``, leaves the session ACTIVE, and the sweep wakes it.
+- A FAILED send wakes (as every result does), so the model can recover.
+- A non-delivery result (``bash`` etc.) wakes.
+- A historical row carrying an inert ``data['no_reaction']=true`` marker (from
+  before the removal) now wakes too — ``is_stimulus`` no longer reads the key.
+- A fire-and-forget send completing a MIXED batch wakes: the intake always
+  ``defer_wake``\\ s and the gate sees the unreacted real sibling.
+- The model SEES every result in the log (it stays appended).
 """
 
 from __future__ import annotations
@@ -94,7 +88,11 @@ async def _status(pool: asyncpg.Pool[Any], session_id: str, account_id: str) -> 
 
 
 async def _result_marker(pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str) -> Any:
-    """Return ``data->>'no_reaction'`` for the tool-result row, or None."""
+    """Return ``data->>'no_reaction'`` for the tool-result row, or None.
+
+    ``no_reaction`` is no longer written by any code path; this reads the raw
+    JSONB only so the legacy-inert-marker test can prove a historical value is
+    present-but-ignored."""
     async with pool.acquire() as conn:
         return await conn.fetchval(
             "SELECT data->>'no_reaction' FROM events "
@@ -113,18 +111,18 @@ async def pool_account_session(
     declares a tool the parent ``tool_calls`` entry can resolve a name from."""
     pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
     try:
-        account_id = "acc_no_reaction"
+        account_id = "acc_tool_stimulus"
         async with pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
                 "VALUES ($1, NULL, TRUE, $2)",
                 account_id,
-                "no-reaction",
+                "tool-stimulus",
             )
         _agent, _env, session = await seed_agent_env_session(
             pool,
             account_id=account_id,
-            prefix="no-reaction",
+            prefix="tool-stimulus",
             tools=[ToolSpec(type="bash")],
         )
         yield pool, account_id, session.id
@@ -138,7 +136,6 @@ async def _drive_one_send_turn(
     session_id: str,
     *,
     tool_call_id: str,
-    no_reaction: bool,
     is_error: bool = False,
 ) -> None:
     """User → assistant(tool_call) → reacted → tool result. Mirrors the live
@@ -160,9 +157,7 @@ async def _drive_one_send_turn(
             kind="message",
             data=_assistant([tool_call_id], reacting_to=1),
         )
-    # The connector POSTs the result. ``append_tool_result`` is the shared
-    # intake target; ``no_reaction`` is what the API handler computes
-    # (``body.no_reaction AND NOT body.is_error``).
+    # The connector POSTs the result. ``append_tool_result`` is the shared intake.
     async with pool.acquire() as conn:
         await sessions_service.append_tool_result(
             conn,
@@ -171,84 +166,76 @@ async def _drive_one_send_turn(
             tool_call_id=tool_call_id,
             content='{"sent_at_ms": 123}',
             is_error=is_error,
-            no_reaction=no_reaction,
         )
 
 
-class TestFireAndForgetSettles:
-    async def test_successful_fire_and_forget_does_not_wake(
+class TestEveryToolResultWakes:
+    async def test_lone_successful_send_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
+        """A lone ``signal_send`` delivery ack IS a stimulus (#1919): it advances
+        the scalar gate past the reacted watermark, leaves the session ACTIVE,
+        and the sweep wakes it so the model gets a turn to react."""
         pool, account_id, session_id = pool_account_session
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_send", no_reaction=True
-        )
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_send")
 
-        # The result is appended WITH the marker — the model still sees it.
-        assert await _result_marker(pool, session_id, "tc_send") == "true"
+        # The result is appended (the model sees it) with no suppression marker.
+        assert await _result_marker(pool, session_id, "tc_send") is None
 
-        # The marker keeps the result from counting as a stimulus: the scalar
-        # gate (last_stimulus_seq) does not advance past the reacted watermark.
+        # The result counts as a stimulus: the scalar gate advances past the
+        # reacted watermark (seq 1), so there is unreacted work.
         scalars = await _scalars(pool, session_id)
-        assert scalars["last_stimulus_seq"] <= scalars["last_reacted_seq"]
-        assert await _status(pool, session_id, account_id) == "idle"
+        assert scalars["last_stimulus_seq"] > scalars["last_reacted_seq"]
+        assert await _status(pool, session_id, account_id) == "active"
 
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
-        assert session_id not in needs, (
-            "a successful fire-and-forget delivery confirmation must NOT wake the "
-            "session — that is the duplicate-send loop"
+        assert session_id in needs, (
+            "a lone signal_send delivery result must wake the session — every "
+            "tool result is a stimulus (#1919)"
         )
 
-    async def test_failed_send_still_wakes(
+    async def test_failed_send_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, account_id, session_id = pool_account_session
-        # The intake AND-gates ``no_reaction`` with ``not is_error``; a failure
-        # arrives with no_reaction already False (the runner's error branches
-        # never set it). Pass no_reaction=False to model that.
         await _drive_one_send_turn(
             pool,
             account_id,
             session_id,
             tool_call_id="tc_fail",
-            no_reaction=False,
             is_error=True,
         )
 
-        assert await _result_marker(pool, session_id, "tc_fail") is None
         assert await _status(pool, session_id, account_id) == "active"
 
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs, "a FAILED send must wake so the model can recover"
 
-    async def test_non_fire_and_forget_result_still_wakes(
+    async def test_non_delivery_result_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
         pool, account_id, session_id = pool_account_session
         # A list/get/edit-style tool result carries data the model must consume.
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_list", no_reaction=False
-        )
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_list")
 
-        assert await _result_marker(pool, session_id, "tc_list") is None
         assert await _status(pool, session_id, account_id) == "active"
 
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs
 
-    async def test_unmarked_result_wakes_backward_compat(
+    async def test_legacy_no_reaction_marker_is_inert_and_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
-        """A historical event / not-yet-redeployed connector omits the field.
-        ``append_event`` sees no ``no_reaction`` key → stimulus → wakes; the
-        sweep's ``IS DISTINCT FROM 'true'`` is NULL-safe → row still counts."""
+        """A historical row still carrying ``data['no_reaction']=true`` (written
+        before #1919) now wakes exactly like any other result: ``is_stimulus``
+        no longer reads the key and the sweep no longer excludes the row."""
         pool, account_id, session_id = pool_account_session
         async with pool.acquire() as conn:
             await queries.append_event(
@@ -263,10 +250,10 @@ class TestFireAndForgetSettles:
                 account_id=account_id,
                 session_id=session_id,
                 kind="message",
-                data=_assistant(["tc_old"], reacting_to=1),
+                data=_assistant(["tc_legacy"], reacting_to=1),
             )
-            # Append the tool-result event directly with NO no_reaction key —
-            # exactly what a pre-fix / historical row looks like.
+            # Append the tool-result event directly WITH a legacy no_reaction
+            # marker — exactly what a pre-#1919 row on disk looks like.
             await queries.append_event(
                 conn,
                 account_id=account_id,
@@ -274,31 +261,32 @@ class TestFireAndForgetSettles:
                 kind="message",
                 data={
                     "role": "tool",
-                    "tool_call_id": "tc_old",
-                    "content": "ok",
+                    "tool_call_id": "tc_legacy",
+                    "content": '{"sent_at_ms": 1}',
                     "name": "signal_send",
+                    "no_reaction": True,
                 },
             )
 
-        assert await _result_marker(pool, session_id, "tc_old") is None
+        # The marker is still on the row (we never rewrite history) …
+        assert await _result_marker(pool, session_id, "tc_legacy") == "true"
+        # … but it is inert: the row counts as a stimulus and the session wakes.
         assert await _status(pool, session_id, account_id) == "active"
 
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
-        assert session_id in needs
+        assert session_id in needs, (
+            "a historical no_reaction-marked row must now count as a stimulus — "
+            "the marker is inert after #1919"
+        )
 
-    async def test_copending_user_message_still_wakes(
+    async def test_copending_user_message_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
     ) -> None:
-        """A real user message landing alongside the fire-and-forget result
-        must still wake — the user stimulus is independent of the ack."""
+        """A real user message landing alongside a delivery result still wakes."""
         pool, account_id, session_id = pool_account_session
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_send", no_reaction=True
-        )
-        # The fire-and-forget result alone settled the session; now a real user
-        # message arrives.
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_send")
         async with pool.acquire() as conn:
             await queries.append_event(
                 conn,
@@ -339,19 +327,17 @@ async def _bind_connection(pool: asyncpg.Pool[Any], account_id: str, session_id:
 
 
 class TestMixedBatchWake:
-    async def test_no_reaction_completing_mixed_batch_still_wakes(
+    async def test_send_completing_mixed_batch_wakes(
         self,
         pool_account_session: tuple[asyncpg.Pool[Any], str, str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A turn emits BOTH a real builtin (``bash``) AND a fire-and-forget connector
-        send. The real result lands first (unreacted; batch still incomplete), then the
-        ``no_reaction`` send result lands LAST via the connector-runtime intake, COMPLETING
-        the batch. The session now has an unreacted real result and must be woken — but the
-        intake's ``no_reaction`` wake-skip drops the wake, stranding the real result until
-        the 30s periodic sweep (~30s of dead air). The wake decision belongs to the gate
-        (which excludes the ``no_reaction`` row), not this intake site, which cannot see the
-        in-flight real sibling."""
+        """A turn emits BOTH a real builtin (``bash``) AND a connector send. The
+        real result lands first (unreacted; batch still incomplete), then the
+        send result lands LAST via the connector-runtime intake, COMPLETING the
+        batch. The intake always ``defer_wake``\\ s and the gate sees the
+        unreacted real sibling, so the session wakes immediately — never stranded
+        until the 30s periodic sweep."""
         pool, account_id, session_id = pool_account_session
         connection_id = await _bind_connection(pool, account_id, session_id)
 
@@ -396,11 +382,10 @@ class TestMixedBatchWake:
                 tool_call_id="tc_real",
                 content="file1\nfile2",
                 is_error=False,
-                no_reaction=False,
             )
 
-        # The fire-and-forget send result lands LAST, through the connector-runtime
-        # intake — the site whose wake decision is under test.
+        # The send result lands LAST, through the connector-runtime intake — the
+        # site whose wake decision is under test.
         defer_wake_mock = AsyncMock()
         monkeypatch.setattr(connectors_router, "defer_wake", defer_wake_mock)
         auth = ("runtime-token", _CONNECTOR, account_id, None)
@@ -411,22 +396,19 @@ class TestMixedBatchWake:
                 tool_call_id="tc_send",
                 content='{"sent_at_ms": 1}',
                 is_error=False,
-                no_reaction=True,
             ),
             pool,
             auth,
         )
 
         # The gate agrees there is work: the real bash result is unreacted and the
-        # batch is now complete (this assertion holds on buggy code too — the gate is
-        # correct; the bug is the missing wake to act on it).
+        # batch is now complete.
         registry = InflightToolRegistry()
         needs = await find_sessions_needing_inference(pool, registry, session_id=session_id)
         assert session_id in needs
 
-        # The intake MUST enqueue a wake. Skipping it on no_reaction stranded the real
-        # sibling until the periodic sweep — the bug.
+        # The intake always enqueues a wake now — nothing is stranded.
         assert defer_wake_mock.called, (
-            "a no_reaction result completing a mixed batch with an unreacted real "
-            "sibling must wake the session, not strand it until the 30s periodic sweep"
+            "a result completing a mixed batch with an unreacted real sibling must "
+            "wake the session, not strand it until the 30s periodic sweep"
         )

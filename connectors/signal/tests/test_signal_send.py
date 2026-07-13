@@ -151,12 +151,11 @@ async def test_signal_send_dispatch_resolves_sandbox_path(
 
     sent_params = connector._daemon.rpc.call.call_args.args[1]  # type: ignore[union-attr]
     assert sent_params["attachments"] == [str(ws / "cat.jpg")]
-    # ``signal_send`` is fire-and-forget: a successful dispatch flags
-    # ``no_reaction`` so the delivery ack doesn't wake the session. The
-    # success path leaves ``is_error`` at its default (not passed), so only
-    # ``no_reaction`` is asserted here.
+    # ``signal_send`` posts its delivery ack like any other result (#1919):
+    # there is no ``no_reaction`` suppression flag on the wire, and the success
+    # path leaves ``is_error`` at its default (not passed).
     assert len(captured) == 1
-    assert captured[0]["no_reaction"] is True
+    assert "no_reaction" not in captured[0]
 
 
 async def test_signal_send_dispatch_traversal_returns_error_result(
@@ -181,7 +180,6 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
         tool_call_id: str,
         content: Any,
         is_error: bool = False,
-        no_reaction: bool = False,
     ) -> None:
         del client
         captured.append(
@@ -191,7 +189,6 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
                 "tool_call_id": tool_call_id,
                 "content": content,
                 "is_error": is_error,
-                "no_reaction": no_reaction,
             }
         )
 
@@ -212,9 +209,6 @@ async def test_signal_send_dispatch_traversal_returns_error_result(
     connector._daemon.rpc.call.assert_not_awaited()  # type: ignore[union-attr]
     assert len(captured) == 1
     assert captured[0]["is_error"] is True
-    # A FAILED fire-and-forget send must still wake — the error branch never
-    # sets ``no_reaction`` (it AND-gates with ``not is_error`` at the intake).
-    assert captured[0]["no_reaction"] is False
 
 
 # ── quote / reply ─────────────────────────────────────────────────────

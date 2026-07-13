@@ -15820,11 +15820,6 @@
             "type": "boolean",
             "title": "Is Error",
             "default": false
-          },
-          "no_reaction": {
-            "type": "boolean",
-            "title": "No Reaction",
-            "default": false
           }
         },
         "type": "object",
