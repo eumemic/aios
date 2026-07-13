@@ -7,6 +7,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.list_response_session import ListResponseSession
+from ...models.list_sessions_order_by_type_0 import ListSessionsOrderByType0
 from ...models.list_sessions_status_type_0 import ListSessionsStatusType0
 from ...types import UNSET, Response, Unset
 
@@ -17,6 +18,7 @@ def _get_kwargs(
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    order_by: ListSessionsOrderByType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -55,6 +57,15 @@ def _get_kwargs(
     else:
         json_parent_run_id = parent_run_id
     params["parent_run_id"] = json_parent_run_id
+
+    json_order_by: None | str | Unset
+    if isinstance(order_by, Unset):
+        json_order_by = UNSET
+    elif isinstance(order_by, ListSessionsOrderByType0):
+        json_order_by = order_by.value
+    else:
+        json_order_by = order_by
+    params["order_by"] = json_order_by
 
     json_limit: int | None | Unset
     if isinstance(limit, Unset):
@@ -112,6 +123,7 @@ def sync_detailed(
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    order_by: ListSessionsOrderByType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -131,6 +143,7 @@ def sync_detailed(
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
+        order_by (ListSessionsOrderByType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -147,6 +160,7 @@ def sync_detailed(
         agent_id=agent_id,
         status=status,
         parent_run_id=parent_run_id,
+        order_by=order_by,
         limit=limit,
         authorization=authorization,
     )
@@ -165,6 +179,7 @@ def sync(
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    order_by: ListSessionsOrderByType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -184,6 +199,7 @@ def sync(
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
+        order_by (ListSessionsOrderByType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -201,6 +217,7 @@ def sync(
         agent_id=agent_id,
         status=status,
         parent_run_id=parent_run_id,
+        order_by=order_by,
         limit=limit,
         authorization=authorization,
     ).parsed
@@ -213,6 +230,7 @@ async def asyncio_detailed(
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    order_by: ListSessionsOrderByType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -232,6 +250,7 @@ async def asyncio_detailed(
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
+        order_by (ListSessionsOrderByType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -248,6 +267,7 @@ async def asyncio_detailed(
         agent_id=agent_id,
         status=status,
         parent_run_id=parent_run_id,
+        order_by=order_by,
         limit=limit,
         authorization=authorization,
     )
@@ -264,6 +284,7 @@ async def asyncio(
     agent_id: None | str | Unset = UNSET,
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
+    order_by: ListSessionsOrderByType0 | None | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -283,6 +304,7 @@ async def asyncio(
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
+        order_by (ListSessionsOrderByType0 | None | Unset):
         limit (int | None | Unset):
         authorization (None | str | Unset):
 
@@ -301,6 +323,7 @@ async def asyncio(
             agent_id=agent_id,
             status=status,
             parent_run_id=parent_run_id,
+            order_by=order_by,
             limit=limit,
             authorization=authorization,
         )

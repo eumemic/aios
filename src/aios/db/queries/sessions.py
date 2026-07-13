@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -21,7 +22,6 @@ from aios.db.queries import (
     _archive_scoped,
     _build_set_assignments,
     _get_scoped,
-    _list_scoped,
     open_request_anti_join,
 )
 from aios.db.queries.clone_policy import (
@@ -51,6 +51,7 @@ from aios.models.sessions import (
     Obligation,
     Outcome,
     Session,
+    SessionOrderBy,
     SessionStatus,
     SessionUsage,
 )
@@ -1312,8 +1313,9 @@ async def list_sessions(
     agent_id: str | None = None,
     status: SessionStatus | None = None,
     parent_run_id: str | None = None,
+    order_by: SessionOrderBy = "created_at",
     limit: int = 50,
-    after: str | None = None,
+    after: tuple[datetime | None, str] | None = None,
 ) -> list[Session]:
     """Keyset-paginated session list with derived ``status`` ({active, idle}).
 
@@ -1340,28 +1342,49 @@ async def list_sessions(
     returns exactly the archived rows.
     """
     include_archived = parent_run_id is not None or status == "archived"
-    return await _list_scoped(
-        conn,
-        table="sessions",
-        account_id=account_id,
-        row=_row_to_session,
-        limit=limit,
-        after=after,
-        include_archived=include_archived,
-        filters=[
-            ("agent_id", agent_id),
-            (f"({_SESSION_STATUS_EXPR})", status),
-            ("parent_run_id", parent_run_id),
-        ],
-        # last_event_at: timestamp of the session's newest event. ``ORDER BY
-        # seq DESC LIMIT 1`` rides the (session_id, seq) index — O(log n) even
-        # for huge sessions (unlike MAX(created_at), which has no index).
-        extra_select=(
-            f"({_SESSION_STATUS_EXPR}) AS status, "
-            "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
-            "ORDER BY e.seq DESC LIMIT 1) AS last_event_at"
-        ),
+    args: list[Any] = [account_id]
+    where = ["sessions.account_id = $1"]
+    if not include_archived:
+        where.append("sessions.archived_at IS NULL")
+    for column, value in (
+        ("sessions.agent_id", agent_id),
+        ("sessions.status", status),
+        ("sessions.parent_run_id", parent_run_id),
+    ):
+        if value is not None:
+            args.append(value)
+            where.append(f"{column} = ${len(args)}")
+
+    order_expression = {
+        "created_at": "sessions.created_at",
+        "updated_at": "sessions.updated_at",
+        "last_event_at": "sessions.last_event_at",
+    }[order_by]
+    if after is not None:
+        anchor, anchor_id = after
+        if anchor is None:
+            args.append(anchor_id)
+            where.append(f"{order_expression} IS NULL AND sessions.id < ${len(args)}")
+        else:
+            args.extend((anchor, anchor_id))
+            anchor_arg, id_arg = len(args) - 1, len(args)
+            null_tail = f" OR {order_expression} IS NULL" if order_by == "last_event_at" else ""
+            where.append(
+                f"({order_expression} < ${anchor_arg} OR "
+                f"({order_expression} = ${anchor_arg} AND sessions.id < ${id_arg})"
+                f"{null_tail})"
+            )
+    args.append(limit)
+    sql = (
+        "WITH sessions_page AS (SELECT sessions.*, "
+        f"({_SESSION_STATUS_EXPR}) AS status, "
+        "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
+        "ORDER BY e.seq DESC LIMIT 1) AS last_event_at FROM sessions) "
+        "SELECT * FROM sessions_page AS sessions WHERE "
+        f"{' AND '.join(where)} ORDER BY {order_expression} DESC NULLS LAST, "
+        f"sessions.id DESC LIMIT ${len(args)}"
     )
+    return [_row_to_session(record) for record in await conn.fetch(sql, *args)]
 
 
 async def lock_active_session_for_update(
