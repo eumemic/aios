@@ -78,7 +78,6 @@ def test_underscore_and_nonfunc_names_reexported() -> None:
         "_derive_is_error",
         "_derive_sender_name",
         "_clear_model_token_ratio_cache",
-        "model_token_ratio",
         "reparent_connection",
         "get_session_bare",
         "get_session_vault_ids",
@@ -121,7 +120,7 @@ def test_internal_callers_route_patched_fns_through_package() -> None:
     # retained-window range scan calls ``read_windowed_context_events`` bare on
     # purpose, so the fallback stub does not intercept it — that bare call is not
     # asserted here.)  Since #1609 the per-content-class calibration replaced the
-    # legacy scalar ``model_token_ratio``; the windowing path now routes through
+    # removed scalar reader; the windowing path now routes through
     # ``model_token_class_ratios`` (which the windowed-ratio tests patch).
     windowed_src = inspect.getsource(events.read_windowed_events)
     assert "queries.read_windowed_context_events(" in windowed_src

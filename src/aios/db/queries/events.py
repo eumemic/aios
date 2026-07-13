@@ -259,12 +259,6 @@ def _clear_model_token_ratio_cache() -> None:
     _model_token_ratio_cache.clear()
 
 
-# Back-compat alias: the package re-exports the per-class names, but keep the
-# old private clearer name working for any in-tree caller / test that imported
-# it directly.
-_clear_model_token_class_ratios_cache = _clear_model_token_ratio_cache
-
-
 def _neutral_class_ratios() -> dict[str, float]:
     """The all-1.0 coefficient dict — reduces the windower to today's
     byte-identical model-neutral behavior (issue #1609 acceptance #5)."""
@@ -610,31 +604,6 @@ def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
         c = max(_MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
         out[classes[j]] = c
     return out
-
-
-# Back-compat scalar wrapper: a few call sites / tests still want a single
-# blended R.  Re-derive it from the per-class dict against a uniform class
-# mix (every class weighted equally) so the contract is "the average of the
-# fitted coefficients".  Real windowing weights by the actual composition
-# (see ``blended_r_eff``); this uniform default is only for the legacy
-# scalar shape.
-async def model_token_ratio(
-    conn: asyncpg.Connection[Any],
-    model: str,
-    *,
-    account_id: str,
-    k_bucket: float = 2.0,
-) -> float:
-    """Deprecated scalar shim over :func:`model_token_class_ratios`.
-
-    Returns the unweighted mean of the fitted per-class coefficients,
-    clamped to the scalar's historical ``0.5`` lower bound.  Prefer
-    :func:`model_token_class_ratios` + :func:`blended_r_eff`; this exists
-    so legacy scalar call sites keep compiling during the #1609 rollout.
-    """
-    ratios = await model_token_class_ratios(conn, model, account_id=account_id, k_bucket=k_bucket)
-    mean = sum(ratios.values()) / len(ratios)
-    return max(mean, _MODEL_TOKEN_RATIO_MIN)
 
 
 def blended_r_eff(ratios: dict[str, float], local_by_class: dict[str, float]) -> float:
@@ -1309,7 +1278,7 @@ async def append_event(
     counted against the focal read BEFORE the lock, so if a ``switch_channel``
     commits between that pre-read and the lock, the token count MAY reflect
     the pre-switch focal — an acceptable, bounded drift in the same class as
-    the documented vision/tz drifts below (absorbed by ``model_token_ratio``
+    the documented vision/tz drifts below (absorbed by ``model_token_class_ratios``
     calibration).  The STORED ``focal_channel_at_arrival`` is always the
     locked RETURNING value, never the pre-read.
     """
@@ -1474,7 +1443,7 @@ async def append_event(
         # ``model``/``session_id`` and in the default UTC zone, so inlined
         # images undercount by ~55 LiteLLM tokens each and a non-UTC account's
         # envelope is a few tokens narrower than build time.  Both drifts are
-        # bounded and absorbed by ``model_token_ratio`` calibration in
+        # bounded and absorbed by ``model_token_class_ratios`` calibration in
         # :func:`read_windowed_events` (see PR #218); exact matching is
         # impossible anyway, since a later tz/vision change re-renders history.
         # cumulative_messages / cumulative_*_mass extend the SAME append-time
@@ -2419,9 +2388,9 @@ async def read_windowed_events(
     ~18 % low on Sonnet 4.6, ~34 % low on Opus 4.7.  This function
     corrects for that at read time: ``window_min`` / ``window_max`` are
     interpreted as provider tokens, ``total_effective = total_local * R``
-    where ``R = model_token_ratio(model)``, and the drop boundary is
+    where ``R`` is the composition-weighted class ratio, and the drop boundary is
     translated back to local units for the ``cumulative_tokens`` index
-    scan.  When the model has fewer than ``model_token_ratio``'s sample
+    scan.  When the model has fewer than ``model_token_class_ratios``' sample
     threshold, ``R`` is ``1.0`` and the math reduces to the plain
     chunked-snap algorithm.
 
@@ -2442,7 +2411,7 @@ async def read_windowed_events(
     Prefix-cache invariant: the plain chunked-snap algorithm gave a
     *strict* guarantee of byte-identical prompt prefix within a snap
     chunk.  With the ratio correction this remains stable in practice
-    because :func:`model_token_ratio` uses a lifetime aggregate and
+    because :func:`model_token_class_ratios` uses a lifetime aggregate and
     standard-error bucketing, so mature calibrations do not drift on every
     new sample.  Early calibrations are coarse by design and converge as
     the sample count grows.
