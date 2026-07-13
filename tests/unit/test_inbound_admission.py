@@ -28,7 +28,7 @@ from aios.api.routers.connectors import _inbound_drop_error
 from aios.db.queries.inbound_policy import resolve_effective_inbound_policy
 from aios.errors import ValidationError
 from aios.models.connections import Connection
-from aios.models.inbound_policy import AllowAll, AllowList, DenyAll
+from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll
 from aios.services.inbound import (
     InboundDrop,
     InboundResult,
@@ -40,26 +40,43 @@ from aios.services.inbound import (
 
 
 def test_admits_allow_all() -> None:
-    assert _admits(AllowAll(), "anyone") is True
+    assert _admits(AllowAll(), "anyone", "@sender:example.org") is True
+
+
+def test_admits_allow_senders_member() -> None:
+    assert _admits(AllowSenders(sender_ids=["@sender:example.org"]), "chat", "@sender:example.org")
+
+
+def test_admits_allow_senders_non_member() -> None:
+    assert not _admits(
+        AllowSenders(sender_ids=["@other:example.org"]), "chat", "@sender:example.org"
+    )
+
+
+def test_allow_senders_validation() -> None:
+    with pytest.raises(PydanticValidationError):
+        AllowSenders(sender_ids=[])
+    with pytest.raises(PydanticValidationError):
+        AllowSenders(sender_ids=["@sender:example.org"], unexpected=True)  # type: ignore[call-arg]
 
 
 def test_admits_allow_list_member() -> None:
-    assert _admits(AllowList(chat_ids=["a", "b"]), "b") is True
+    assert _admits(AllowList(chat_ids=["a", "b"]), "b", "sender") is True
 
 
 def test_admits_allow_list_non_member() -> None:
-    assert _admits(AllowList(chat_ids=["a", "b"]), "stranger") is False
+    assert _admits(AllowList(chat_ids=["a", "b"]), "stranger", "sender") is False
 
 
 def test_admits_allow_list_slash_bearing_chat_id() -> None:
     # A Signal group id contains '/'. It must be admitted intact — the backfill
     # keeps the whole remainder rather than truncating at the third '/' segment.
     group_id = "group/abc123=="
-    assert _admits(AllowList(chat_ids=[group_id]), group_id) is True
+    assert _admits(AllowList(chat_ids=[group_id]), group_id, "sender") is True
 
 
 def test_admits_deny_all() -> None:
-    assert _admits(DenyAll(), "anyone") is False
+    assert _admits(DenyAll(), "anyone", "sender") is False
 
 
 # ─── AllowList validation ────────────────────────────────────────────────────
@@ -257,3 +274,63 @@ async def test_allowed_sender_passes_gate_into_resolution() -> None:
     # The slash-bearing admitted chat_id reached resolution.
     spies["resolve_target_session"].assert_awaited_once()
     assert result.drop_reason is InboundDrop.DETACHED
+
+
+@pytest.mark.parametrize("sender", [{"id": "intruder"}, {}])
+async def test_allow_senders_denies_unlisted_content_or_invite_without_effects(
+    sender: dict[str, str],
+) -> None:
+    patches, spies = _patch_gate_side_effects(AllowSenders(sender_ids=["operator"]))
+    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        result = await handle_inbound(
+            _fake_pool(),
+            account_id="acc_1",
+            connection_id="conn_1",
+            event_id="evt_denied",
+            chat_id="shared-chat",
+            sender=sender,
+            content="invite" if not sender else "content",
+        )
+    assert result.drop_reason is InboundDrop.DENIED_BY_POLICY
+    for spy in spies.values():
+        spy.assert_not_called()
+
+
+async def test_allow_senders_member_is_appended_and_woken() -> None:
+    from aios_connectors.resolver import ResolveResult
+
+    append = AsyncMock(return_value=True)
+    wake = AsyncMock()
+    with (
+        patch(
+            "aios.services.inbound.queries.get_connection",
+            AsyncMock(
+                return_value=_connection(inbound_policy=AllowSenders(sender_ids=["operator"]))
+            ),
+        ),
+        patch(
+            "aios.services.inbound.queries.resolve_effective_inbound_policy",
+            AsyncMock(return_value=AllowSenders(sender_ids=["operator"])),
+        ),
+        patch("aios.services.inbound.check_inbound_budget", AsyncMock(return_value=True)),
+        patch("aios.services.inbound.check_inbound_budget_agent", AsyncMock(return_value=True)),
+        patch(
+            "aios_connectors.resolver.resolve_target_session",
+            AsyncMock(return_value=ResolveResult(session_id="ses_bound", drop=None)),
+        ),
+        patch("aios.services.inbound.stage_inbound_attachments", AsyncMock(return_value=([], []))),
+        patch("aios.services.inbound._append_with_dedup", append),
+        patch("aios.services.inbound.defer_wake", wake),
+    ):
+        result = await handle_inbound(
+            _fake_pool(),
+            account_id="acc_1",
+            connection_id="conn_1",
+            event_id="evt_allowed",
+            chat_id="shared-chat",
+            sender={"id": "operator"},
+            content="hello",
+        )
+    assert result.drop_reason is None
+    append.assert_awaited_once()
+    wake.assert_awaited_once()

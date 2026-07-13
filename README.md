@@ -521,7 +521,7 @@ A connection binds one platform account to a routing target — a single long-li
 | POST | `/v1/connections/{id}/reparent` | Atomically move a connection (id-preserving) to another account. |
 | POST | `/v1/connectors/runtime/inbound` | Connector posts an inbound user message (multipart; idempotent on `event_id`). |
 | GET | `/v1/connectors/runtime/calls` | SSE of pending custom tool calls for the connector type. |
-| POST | `/v1/connectors/runtime/tool-results` | Submit an outbound tool result (carries `no_reaction` for fire-and-forget). |
+| POST | `/v1/connectors/runtime/tool-results` | Submit an outbound tool result (always a stimulus — the session wakes to react). |
 | GET | `/v1/connectors/runtime/secrets` | The only decryption path for a connection's secrets. |
 | PUT | `/v1/connectors/{connector}/tools_schema` \| `/capabilities` | Connector publishes its derived tool catalog / typed capability descriptor (root-only). |
 | POST | `/v1/connectors/signal/register\|verify\|profile` | Operator-facing Signal provisioning. |

@@ -54,6 +54,14 @@ class AllowList(BaseModel):
     chat_ids: list[str] = Field(min_length=1)
 
 
+class AllowSenders(BaseModel):
+    """Admit only canonical connector-supplied sender identifiers."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["allow_senders"] = "allow_senders"
+    sender_ids: list[str] = Field(min_length=1)
+
+
 class DenyAll(BaseModel):
     """Explicit fail-closed — admit no one. The server default."""
 
@@ -62,7 +70,7 @@ class DenyAll(BaseModel):
 
 
 InboundPolicy = Annotated[
-    AllowAll | AllowList | DenyAll,
+    AllowAll | AllowList | AllowSenders | DenyAll,
     Field(discriminator="kind"),
 ]
 """Discriminated union over ``kind`` — the stored / read-model shape."""
