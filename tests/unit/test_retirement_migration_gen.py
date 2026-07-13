@@ -8,7 +8,7 @@ Docker:
 * all three migrations are generated in chain order on top of a given head;
 * the backfill is EXISTS-pre-checked, batched on high-cardinality surfaces,
   re-runnable, and stamps the epoch;
-* the contract stamps the ledger and carries the in-transaction abort-on-nonzero
+* the contract carries the in-transaction abort-on-nonzero
   guard;
 * every emitted file is valid Python that declares the linear chain pointers and
   matches the 0116/0120 shape;
@@ -30,7 +30,6 @@ from aios.retirements import Retirement
 from aios.retirements.migration_gen import (
     EPOCH_COLUMN,
     HIGH_CARDINALITY_TABLES,
-    LEDGER_TABLE,
     GeneratedChain,
     current_head,
     generate,
@@ -116,21 +115,10 @@ def test_downgrade_is_a_noop_forward_only(retirement: Retirement) -> None:
 # ── Expand ────────────────────────────────────────────────────────────────────
 
 
-def test_expand_inserts_ledger_rows_and_no_data_change() -> None:
-    chain = _chain(LEGACY_BUILTIN_RENAMES)
-    src = chain.expand.source
-    assert f"INSERT INTO {LEDGER_TABLE}" in src
-    assert "phase" in src and "'expand'" in src
-    assert "contract_rev" in src and "NULL" in src
-    # sla_days carried from the descriptor.
-    assert str(LEGACY_BUILTIN_RENAMES.sla_days) in src
-    # One ledger row per token.
-    for token in LEGACY_BUILTIN_RENAMES.tokens:
-        assert f"'{token}'" in src
-    # Re-runnable insert.
-    assert "ON CONFLICT" in src and "DO NOTHING" in src
-    # No data UPDATE on tool surfaces in expand.
-    assert "UPDATE agents" not in src
+def test_expand_is_a_genuine_noop_without_ledger_dml() -> None:
+    src = _chain(LEGACY_BUILTIN_RENAMES).expand.source
+    assert "retirement_ledger" not in src
+    assert "op.execute" not in src
     assert "jsonb_set" not in src
 
 
@@ -215,14 +203,11 @@ def test_backfill_creates_and_drops_its_transform_function() -> None:
 # ── Contract ──────────────────────────────────────────────────────────────────
 
 
-def test_contract_stamps_ledger_contract_rev() -> None:
-    chain = _chain(LEGACY_BUILTIN_RENAMES)
-    src = chain.contract.source
-    assert f"UPDATE {LEDGER_TABLE}" in src
-    assert f"contract_rev = '{chain.contract.revision}'" in src
-    assert "phase = 'contract'" in src
-    for token in LEGACY_BUILTIN_RENAMES.tokens:
-        assert f"'{token}'" in src
+def test_contract_has_no_ledger_dml() -> None:
+    src = _chain(LEGACY_BUILTIN_RENAMES).contract.source
+    assert "retirement_ledger" not in src
+    assert "contract_rev =" not in src
+    assert "phase = 'contract'" not in src
 
 
 def test_contract_has_in_transaction_abort_on_nonzero_guard() -> None:
@@ -236,8 +221,8 @@ def test_contract_has_in_transaction_abort_on_nonzero_guard() -> None:
     # contract rev on abort).
     assert "RAISE EXCEPTION" in src
     assert "residue > 0" in src
-    # The guard runs BEFORE the ledger stamp (belt before the contract is recorded).
-    assert src.index("RAISE EXCEPTION") < src.index(f"UPDATE {LEDGER_TABLE}")
+    # The guard remains the final load-bearing operation in upgrade().
+    assert src.index("RAISE EXCEPTION") < src.index("def downgrade")
 
 
 def test_contract_guard_references_the_backfill_revision() -> None:

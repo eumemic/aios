@@ -6,9 +6,8 @@ descriptor (declared as data in :mod:`aios.retirements.registry`, #1573), it
 emits the **three lifecycle migrations** so each new retirement is a
 fill-in-the-descriptor exercise, not three hand-written migrations:
 
-1. **Expand** (rev ``N``) — no-op on data; inserts the descriptor's ledger row
-   (``phase = 'expand'``, ``contract_rev = NULL``, ``sla_days``). This is the
-   span during which the registry-driven read-tolerance shim
+1. **Expand** (rev ``N``) — a genuine no-op. This is the span during which
+   the registry-driven read-tolerance shim
    (:func:`aios.retirements.registry.tolerated_rename_map`, gated on
    ``contract_rev IS NULL``) keeps remapping the retired tokens on read.
 
@@ -24,10 +23,7 @@ fill-in-the-descriptor exercise, not three hand-written migrations:
    ``tools_vocab_epoch = N+1`` on each rewritten surface (the epoch column is the
    additive #1576 migration; the live exercise sequences it before this runs).
 
-3. **Contract** (rev ``N+2``) — stamps the ledger row's ``contract_rev = N+2``
-   (which removes the descriptor's tokens from the read-tolerance map: the shim
-   stops remapping and a stale legacy value would then correctly fail
-   validation) and carries the in-transaction **abort-guard**: a residue scan
+3. **Contract** (rev ``N+2``) — carries the in-transaction **abort-guard**: a residue scan
    over every surface that, on finding *any* unmigrated row, raises inside the
    migration transaction. Because the raise is in-transaction,
    ``alembic_version`` never advances to ``N+2`` (the contract rev), so the boot
@@ -47,23 +43,6 @@ This module is pure (no DB, no Docker): it reads the descriptor and the on-disk
 migration ladder and returns file contents as strings. ``bin/aios-retire`` is a
 thin CLI over :func:`generate`.
 
-Ledger schema contract
-----------------------
-The generated migrations read/write a ``retirement_ledger`` table — the
-boot-gate's source of truth (#1575) — with at least these columns::
-
-    domain        text     -- the retirement's domain
-    token         text     -- one row per retired token
-    phase         text     -- 'expand' then 'contract'
-    contract_rev  text     -- NULL until the contract migration stamps it
-    sla_days      integer  -- teardown grace after contract_rev runs everywhere
-
-The expand migration inserts one row per token (``phase='expand'``,
-``contract_rev=NULL``); the contract migration updates those rows to
-``phase='contract'``, ``contract_rev=<N+2>``. The ledger table itself is created
-by the registry/boot-gate issue (#1575); this generator only writes rows. The
-``INSERT`` is ``ON CONFLICT DO NOTHING`` and the ``UPDATE`` is idempotent so a
-re-run of either migration is a no-op.
 """
 
 from __future__ import annotations
@@ -87,9 +66,6 @@ HIGH_CARDINALITY_TABLES: frozenset[str] = frozenset({"wf_runs", "agent_versions"
 #: small enough to keep each statement short, large enough to keep the loop
 #: count sane on a big table.
 DEFAULT_BATCH_SIZE = 5000
-
-#: The ledger table the boot-gate (#1575) owns; this generator only writes rows.
-LEDGER_TABLE = "retirement_ledger"
 
 #: The epoch column the backfill stamps (additive migration #1576).
 EPOCH_COLUMN = "tools_vocab_epoch"
@@ -267,47 +243,25 @@ depends_on: str | Sequence[str] | None = None
 
 
 def build_expand(retirement: Retirement, revision: str, down_revision: str) -> str:
-    """Source for the expand migration: insert the ledger row(s), no data edit."""
+    """Source for the expand migration: a genuine no-op."""
 
-    rows = ",\n".join(
-        "            ("
-        f"{_quote_sql_str(retirement.domain)}, {_quote_sql_str(tok)}, "
-        f"'expand', NULL, {int(retirement.sla_days)})"
-        for tok in retirement.tokens
-    )
     header = _module_header(
-        f"Expand: open the {retirement.domain!r} retirement ledger (no data change).",
+        f"Expand: open the {retirement.domain!r} retirement span (no data change).",
         revision,
         down_revision,
-        "No-op on data. Inserts one ``retirement_ledger`` row per retired token with\n"
-        "``phase='expand'``, ``contract_rev=NULL``, and the descriptor's ``sla_days``.\n"
-        "While these rows have ``contract_rev IS NULL`` the registry-driven read-\n"
-        "tolerance shim keeps remapping the tokens on read; the contract migration\n"
-        "(rev N+2) stamps ``contract_rev`` to close that span. ``ON CONFLICT DO\n"
-        "NOTHING`` makes the insert re-runnable.",
+        "No-op on persisted data. The registry-driven read-tolerance shim does the live work.",
     )
-    return f'''{header}
-
-# (domain, token, phase, contract_rev, sla_days) — one row per retired token.
-_LEDGER_ROWS_SQL = """
-    INSERT INTO {LEDGER_TABLE} (domain, token, phase, contract_rev, sla_days)
-    VALUES
-{rows}
-    ON CONFLICT (domain, token) DO NOTHING
-"""
+    return f"""{header}
 
 
 def upgrade() -> None:
-    # Expand is a no-op on persisted data: it only records that this retirement
-    # has entered its expand span. The read-tolerance shim does the live work.
-    op.execute(_LEDGER_ROWS_SQL)
+    pass
 
 
 def downgrade() -> None:
-    # Forward-only lifecycle: removing the ledger row would re-open a span the
-    # backfill/contract may already have closed. Nothing to reverse.
+    # Forward-only lifecycle. Nothing to reverse.
     pass
-'''
+"""
 
 
 def _backfill_statement(surface: Surface, retirement: Retirement, fn: str, revision: str) -> str:
@@ -401,26 +355,18 @@ def _contract_residue_predicate(retirement: Retirement) -> str:
 
 
 def build_contract(retirement: Retirement, revision: str, down_revision: str) -> str:
-    """Source for the contract migration: stamp the ledger + in-txn abort-guard."""
+    """Source for the contract migration: an in-transaction abort-guard."""
 
     residue = _contract_residue_predicate(retirement)
     header = _module_header(
-        f"Contract: close the {retirement.domain!r} retirement (stamp ledger + abort-guard).",
+        f"Contract: guard the {retirement.domain!r} retirement contract.",
         revision,
         down_revision,
-        "Stamps the ledger rows ``phase='contract'``, ``contract_rev=<this rev>`` —\n"
-        "which drops the descriptor's tokens out of the read-tolerance map, so the\n"
-        "shim stops remapping them and a stale legacy value would then correctly\n"
-        "fail validation. Carries the in-transaction **abort-guard**: a residue scan\n"
+        "Carries the in-transaction **abort-guard**: a residue scan\n"
         "over every surface that RAISES on any unmigrated row. Because the raise is\n"
         "in-transaction the migration aborts and ``alembic_version`` never reaches\n"
         "this contract rev, so the boot gate (#1575) holds the line. The guard is a\n"
         "belt over the backfill's braces.",
-    )
-    update_rows = (
-        f"UPDATE {LEDGER_TABLE} SET phase = 'contract', contract_rev = '{revision}'\n"
-        f"        WHERE domain = {_quote_sql_str(retirement.domain)}\n"
-        f"          AND token IN ({_token_list_sql(retirement)})"
     )
     return f'''{header}
 
@@ -430,7 +376,7 @@ def upgrade() -> None:
     # retired token. The backfill (rev N+1) should have left zero residue; a row
     # written between backfill and contract, or missed by a surface bug, MUST
     # abort here rather than silently contract. On abort, alembic_version never
-    # advances to this contract rev, so the boot gate (#1575) keeps the shim.
+    # advances to this contract rev, so the descriptor-based boot gate (#1575) holds.
     op.execute("""
         DO $guard$
         DECLARE
@@ -449,14 +395,10 @@ def upgrade() -> None:
         $guard$;
     """)
 
-    # Braces held: stamp the ledger. Idempotent (re-running sets the same values).
-    op.execute("""
-        {update_rows}
-    """)
 
 
 def downgrade() -> None:
-    # Forward-only: un-stamping contract_rev would re-open a closed retirement.
+    # Forward-only lifecycle. Nothing to reverse.
     pass
 '''
 
