@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from aios.services import outbound_tool_quota
 
@@ -73,13 +76,119 @@ async def test_denied_retries_do_not_extend_rolling_window(monkeypatch: Any) -> 
             pool, "ses_1", "matrix_invite"
         )
         assert refusal is not None
-        refusal_times.append(now)  # These persisted tool results are deliberately uncounted.
+        refusal_times.append(now)
 
     now = 71
     assert (
         await outbound_tool_quota.check_outbound_tool_quota(pool, "ses_1", "matrix_invite") is None
     )
     assert refusal_times == [30, 40, 50]
+
+
+class _FakeAcquire:
+    def __init__(self, conn: Any) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> Any:
+        return self.conn
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class _FakeTransaction:
+    def __init__(self, lock: asyncio.Lock) -> None:
+        self.lock = lock
+
+    async def __aenter__(self) -> None:
+        await self.lock.acquire()
+
+    async def __aexit__(self, *_args: Any) -> None:
+        self.lock.release()
+
+
+class _FakeQuotaConnection:
+    def __init__(self, successes: list[str]) -> None:
+        self.successes = successes
+        self.lock = asyncio.Lock()
+        self.lock_keys: list[str] = []
+
+    def transaction(self) -> _FakeTransaction:
+        return _FakeTransaction(self.lock)
+
+    async def execute(self, sql: str, key: str) -> None:
+        assert "pg_advisory_xact_lock" in sql
+        self.lock_keys.append(key)
+
+    async def fetchval(self, *_args: Any) -> int:
+        return len(self.successes)
+
+
+class _FakePool:
+    def __init__(self, conn: _FakeQuotaConnection) -> None:
+        self.conn = conn
+
+    def acquire(self) -> _FakeAcquire:
+        return _FakeAcquire(self.conn)
+
+
+async def test_concurrent_same_key_dispatches_reserve_atomically(monkeypatch: Any) -> None:
+    """Two simultaneous admissions at cap=1 publish at most one success."""
+    monkeypatch.setattr(
+        outbound_tool_quota,
+        "get_settings",
+        lambda: SimpleNamespace(outbound_tool_quotas={"matrix_send": (3600, 1)}),
+    )
+    successes: list[str] = []
+    conn = _FakeQuotaConnection(successes)
+    pool = _FakePool(conn)
+    entered = asyncio.Event()
+
+    async def dispatch(call_id: str) -> str | None:
+        async with outbound_tool_quota.outbound_tool_quota_reservation(
+            pool, "ses_1", "matrix_send"
+        ) as refusal:
+            if refusal is None:
+                entered.set()
+                await asyncio.sleep(0)
+                successes.append(call_id)  # successful result/span publication
+            return refusal
+
+    first = asyncio.create_task(dispatch("tc_1"))
+    await entered.wait()
+    second = asyncio.create_task(dispatch("tc_2"))
+    refusals = await asyncio.gather(first, second)
+
+    assert successes == ["tc_1"]
+    assert refusals == [None, "quota_exceeded: matrix_send 1/1 per hour"]
+    assert len(set(conn.lock_keys)) == 1
+
+
+async def test_failed_publication_releases_reservation_without_consuming_quota(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        outbound_tool_quota,
+        "get_settings",
+        lambda: SimpleNamespace(outbound_tool_quotas={"matrix_send": (3600, 1)}),
+    )
+    successes: list[str] = []
+    pool = _FakePool(_FakeQuotaConnection(successes))
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        async with outbound_tool_quota.outbound_tool_quota_reservation(
+            pool, "ses_1", "matrix_send"
+        ) as refusal:
+            assert refusal is None
+            raise RuntimeError("publish failed")
+
+    async with outbound_tool_quota.outbound_tool_quota_reservation(
+        pool, "ses_1", "matrix_send"
+    ) as refusal:
+        assert refusal is None
+        successes.append("tc_retry")
+
+    assert successes == ["tc_retry"]
 
 
 async def test_different_verb_is_disabled_without_query(monkeypatch: Any) -> None:
