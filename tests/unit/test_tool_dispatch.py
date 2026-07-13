@@ -605,6 +605,28 @@ class TestParentChannelThreading:
         )
         monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
 
+    async def test_quota_refusal_never_invokes_tool_and_is_model_visible(
+        self, monkeypatch: Any
+    ) -> None:
+        self._stub_lifecycle_deps(monkeypatch)
+        invoke = AsyncMock()
+        append_error = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke)
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_error)
+        monkeypatch.setattr(
+            "aios.services.outbound_tool_quota.check_outbound_tool_quota",
+            AsyncMock(return_value="quota_exceeded: telegram_send 100/100 per hour"),
+        )
+
+        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+
+        invoke.assert_not_awaited()
+        assert append_error.await_args is not None
+        assert append_error.await_args.kwargs["error"] == (
+            "quota_exceeded: telegram_send 100/100 per hour"
+        )
+
     async def test_execute_tool_async_threads_parent_channel(self, monkeypatch: Any) -> None:
         from aios.tools.registry import ToolResult
 

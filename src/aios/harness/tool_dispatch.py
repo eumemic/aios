@@ -561,6 +561,11 @@ async def _execute_tool_async(
         log_prefix="tool",
         on_exception=_evict_session_container,
     ) as tc:
+        from aios.services.outbound_tool_quota import check_outbound_tool_quota
+
+        refusal = await check_outbound_tool_quota(pool, session_id, tc.name)
+        if refusal is not None:
+            raise ToolBail(refusal)
         result = await invoke_builtin(session_id, tc.name, tc.raw_args, tool_call_id=tc.call_id)
         event_data = _shape_tool_result(tc, result)
         tc.bound_log.info("tool.completed")
@@ -1020,6 +1025,11 @@ async def _execute_mcp_tool_async(
         account_id=account_id,
         log_prefix="mcp_tool",
     ) as tc:
+        from aios.services.outbound_tool_quota import check_outbound_tool_quota
+
+        refusal = await check_outbound_tool_quota(pool, session_id, tc.name)
+        if refusal is not None:
+            raise ToolBail(refusal)
         arguments = parse_arguments(tc.raw_args)
         if arguments is None:
             raise ToolBail("arguments were not valid JSON")
