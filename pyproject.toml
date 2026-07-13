@@ -89,6 +89,7 @@ dev = [
     # Reference + production connectors — e2e tests import each
     # connector's runner directly to drive multi-connection routing.
     "aios-echo-http",
+    "aios-matrix",
     "aios-signal",
     "aios-slack",
     "aios-sms",
@@ -110,6 +111,7 @@ packages = ["src/aios", "src/aios_connectors"]
 [tool.uv.workspace]
 members = [
     "connectors/echo-http",
+    "connectors/matrix",
     "connectors/signal",
     "connectors/slack",
     "connectors/sms",
@@ -125,6 +127,7 @@ members = [
 [tool.uv.sources]
 aios-connector-http = { workspace = true }
 aios-echo-http = { workspace = true }
+aios-matrix = { workspace = true }
 aios-sdk = { workspace = true }
 aios-signal = { workspace = true }
 aios-slack = { workspace = true }
