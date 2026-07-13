@@ -178,9 +178,7 @@ class TestEveryToolResultWakes:
         the scalar gate past the reacted watermark, leaves the session ACTIVE,
         and the sweep wakes it so the model gets a turn to react."""
         pool, account_id, session_id = pool_account_session
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_send"
-        )
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_send")
 
         # The result is appended (the model sees it) with no suppression marker.
         assert await _result_marker(pool, session_id, "tc_send") is None
@@ -223,9 +221,7 @@ class TestEveryToolResultWakes:
     ) -> None:
         pool, account_id, session_id = pool_account_session
         # A list/get/edit-style tool result carries data the model must consume.
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_list"
-        )
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_list")
 
         assert await _status(pool, session_id, account_id) == "active"
 
@@ -290,9 +286,7 @@ class TestEveryToolResultWakes:
     ) -> None:
         """A real user message landing alongside a delivery result still wakes."""
         pool, account_id, session_id = pool_account_session
-        await _drive_one_send_turn(
-            pool, account_id, session_id, tool_call_id="tc_send"
-        )
+        await _drive_one_send_turn(pool, account_id, session_id, tool_call_id="tc_send")
         async with pool.acquire() as conn:
             await queries.append_event(
                 conn,
