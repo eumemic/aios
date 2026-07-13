@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from aios.models.agents import AgentCreate, AgentUpdate, HttpRouteSpec
+from aios.models.agents import AgentCreate, AgentUpdate, HttpRouteSpec, McpServerSpec
 
 
 def _http_server(name: str, base_url: str) -> dict[str, str]:
@@ -144,6 +144,21 @@ class TestAgentCreateDuplicateIngressInvariants:
             AgentCreate.model_validate(
                 {"name": "agent", "model": "gpt-4", "tools": [toolset, toolset]}
             )
+
+    def test_mcp_server_rejects_loopback_url(self) -> None:
+        with pytest.raises(ValidationError, match="private or runtime-local host"):
+            McpServerSpec(name="local", url="http://127.0.0.1:8080/mcp")
+
+    def test_mcp_server_rejects_runtime_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AIOS_URL", "https://runtime.example/v1")
+        with pytest.raises(ValidationError, match="private or runtime-local host"):
+            McpServerSpec(name="self", url="https://runtime.example/mcp")
+
+    def test_mcp_server_private_host_can_be_explicitly_allowlisted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AIOS_TARGET_URL_ALLOW_HOSTS", "127.0.0.1")
+        assert McpServerSpec(name="dev", url="http://127.0.0.1:9000/mcp").url.endswith("/mcp")
 
     def test_rejects_duplicate_mcp_server_name(self) -> None:
         with pytest.raises(ValidationError, match=r"duplicate mcp server name 'gh'"):

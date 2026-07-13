@@ -1685,6 +1685,7 @@ async def _run_session_step_body(
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
         unknown_mcp: list[dict[str, Any]] = []
+        blocked_mcp: list[dict[str, Any]] = []
 
         for tc in offered_calls:
             kind = _classify_tool_call(tc, agent, mcp_server_map)
@@ -1696,8 +1697,10 @@ async def _run_session_step_body(
                 needs_confirm.append(tc)
             elif kind == "custom":
                 custom.append(tc)
-            else:  # "unknown_mcp"
+            elif kind == "unknown_mcp":
                 unknown_mcp.append(tc)
+            else:  # "mcp_blocked"
+                blocked_mcp.append(tc)
 
         if immediate:
             launch_tool_calls(
@@ -1720,6 +1723,20 @@ async def _run_session_step_body(
         # event for them.  Routing them to immediate dispatch lets the
         # model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
+        if blocked_mcp:
+            # Route disabled / CLI-only model calls to the MCP dispatcher's
+            # existing typed "server not found" error path without contacting
+            # the declared server.
+            launch_mcp_tool_calls(
+                pool,
+                session_id,
+                blocked_mcp,
+                {},
+                focal_channel=session.focal_channel,
+                account_id=account_id,
+                parent_focal_at_arrival=parent_focal,
+            )
+
         if immediate_mcp:
             launch_mcp_tool_calls(
                 pool,
@@ -1828,7 +1845,7 @@ def _tc_name(tc: dict[str, Any]) -> str:
 
 
 type ToolDispatchKind = Literal[
-    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
+    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp", "mcp_blocked"
 ]
 
 

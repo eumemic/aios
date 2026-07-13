@@ -107,6 +107,25 @@ class TestTokenEndpointAuth:
         assert "super-secret" not in repr(v)
 
 
+class TestTargetUrlSafety:
+    def test_rejects_loopback_target(self) -> None:
+        with pytest.raises(ValidationError, match="private or runtime-local host"):
+            VaultCredentialCreate(
+                auth_type="bearer",
+                target_url="http://127.0.0.1:8080/mcp",
+                token="secret",
+            )
+
+    def test_rejects_runtime_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AIOS_URL", "https://runtime.example/v1")
+        with pytest.raises(ValidationError, match="private or runtime-local host"):
+            VaultCredentialCreate(
+                auth_type="bearer",
+                target_url="https://runtime.example/mcp",
+                token="secret",
+            )
+
+
 class TestVaultCredentialCreate:
     def test_bearer_header_valid(self) -> None:
         c = VaultCredentialCreate(

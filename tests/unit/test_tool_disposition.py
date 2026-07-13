@@ -191,20 +191,54 @@ class TestMcpBranch:
             == ToolDisposition.MCP_IMMEDIATE
         )
 
-    def test_mcp_default_always_ask_unconfirmed_needs_confirm(self) -> None:
-        # No matching mcp_toolset entry → effective permission defaults to
-        # always_ask.
+    def test_disabled_mcp_tool_is_not_model_callable(self) -> None:
+        agent = _agent(
+            tools=[
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_allow",
+                        "configs": [{"name": "tool", "enabled": False}],
+                    }
+                )
+            ]
+        )
+        assert (
+            classify_tool_call("mcp__srv__tool", "{}", agent, confirmation_resolved=False)
+            == ToolDisposition.MCP_BLOCKED
+        )
+
+    def test_cli_only_mcp_tool_is_not_model_callable(self) -> None:
+        agent = _agent(
+            tools=[
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_allow",
+                        "configs": [{"name": "tool", "transport": "cli"}],
+                    }
+                )
+            ]
+        )
+        assert (
+            classify_tool_call("mcp__srv__tool", "{}", agent, confirmation_resolved=False)
+            == ToolDisposition.MCP_BLOCKED
+        )
+
+    def test_undeclared_mcp_toolset_is_not_model_callable(self) -> None:
         agent = _agent(tools=[])
         assert (
             classify_tool_call("mcp__srv__tool", "{}", agent, confirmation_resolved=False)
-            == ToolDisposition.NEEDS_CONFIRM
+            == ToolDisposition.MCP_BLOCKED
         )
 
-    def test_mcp_always_ask_confirmed_immediate(self) -> None:
+    def test_undeclared_mcp_toolset_stays_blocked_after_confirmation(self) -> None:
         agent = _agent(tools=[])
         assert (
             classify_tool_call("mcp__srv__tool", "{}", agent, confirmation_resolved=True)
-            == ToolDisposition.MCP_IMMEDIATE
+            == ToolDisposition.MCP_BLOCKED
         )
 
     def test_unknown_mcp_server_with_map_unknown_mcp(self) -> None:
@@ -221,8 +255,8 @@ class TestMcpBranch:
             == ToolDisposition.UNKNOWN_MCP
         )
 
-    def test_registered_mcp_server_with_map_not_unknown(self) -> None:
-        agent = _agent(tools=[])
+    def test_registered_enabled_mcp_server_with_map_not_unknown(self) -> None:
+        agent = _agent(tools=[ToolSpec(type="mcp_toolset", mcp_server_name="srv")])
         server = McpServerSpec(name="srv", url="https://x.example")
         assert (
             classify_tool_call(
@@ -235,14 +269,11 @@ class TestMcpBranch:
             == ToolDisposition.NEEDS_CONFIRM
         )
 
-    def test_unknown_mcp_server_without_map_falls_through(self) -> None:
-        # Read/sweep paths carry no server map → the unknown-server case is NOT
-        # distinguished; it resolves through the normal MCP ladder (default
-        # always_ask), preserving those consumers' historical behavior.
+    def test_unknown_mcp_server_without_map_still_enforces_enabled(self) -> None:
         agent = _agent(tools=[])
         assert (
             classify_tool_call("mcp__ghost__tool", "{}", agent, confirmation_resolved=False)
-            == ToolDisposition.NEEDS_CONFIRM
+            == ToolDisposition.MCP_BLOCKED
         )
 
     def test_malformed_mcp_name_with_map_unknown_mcp(self) -> None:
