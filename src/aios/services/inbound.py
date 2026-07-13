@@ -23,14 +23,14 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
-from aios.models.inbound_policy import AllowAll, AllowList, DenyAll, InboundPolicy
+from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll, InboundPolicy
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
     AttachmentStagingError,
     InboundAttachment,
     stage_inbound_attachments,
 )
-from aios.services.inbound_budget import check_inbound_budget
+from aios.services.inbound_budget import check_inbound_budget, check_inbound_budget_agent
 
 # Metadata keys the trusted server-side path writes from request / state.
 # Stripped from connector-supplied ``metadata`` before the merge so a
@@ -84,7 +84,7 @@ class InboundResult(NamedTuple):
     deduped: bool
 
 
-def _admits(policy: InboundPolicy, chat_id: str) -> bool:
+def _admits(policy: InboundPolicy, chat_id: str, sender_id: str | None) -> bool:
     """Pure admission predicate — no I/O.
 
     ``AllowAll`` → always; ``AllowList`` → membership in its set; ``DenyAll``
@@ -95,6 +95,8 @@ def _admits(policy: InboundPolicy, chat_id: str) -> bool:
             return True
         case AllowList():
             return chat_id in set(policy.chat_ids)
+        case AllowSenders():
+            return sender_id in set(policy.sender_ids)
         case DenyAll():
             return False
 
@@ -150,7 +152,7 @@ async def handle_inbound(
     # stranger drops one envelope rather than crash-restarting the connector
     # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
     policy = connection.inbound_policy_effective
-    if not _admits(policy, chat_id):
+    if not _admits(policy, chat_id, sender.get("id")):
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
     # Per-counterparty inbound rate/cost budget (#1504). Admission decides
@@ -194,6 +196,14 @@ async def handle_inbound(
         return InboundResult(None, None, drop, False)
     target_session_id = resolution.session_id
     assert target_session_id is not None
+
+    # The global agent budget is meaningful only for a single-session binding,
+    # where the resolved session is the agent's stable identity. Keep it after
+    # resolution so per-chat bindings (which may spawn in tier 3) are untouched.
+    if connection.session_id is not None and not await check_inbound_budget_agent(
+        pool, account_id=account_id, session_id=target_session_id
+    ):
+        return InboundResult(None, target_session_id, InboundDrop.RATE_LIMITED, False)
 
     try:
         staged_attachments, newly_staged_paths = await stage_inbound_attachments(

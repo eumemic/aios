@@ -434,14 +434,14 @@ class TestSignalMultiConnection:
                     raise AssertionError("tool_result event never persisted")
                 await asyncio.sleep(0.1)
 
-            # ``signal_send`` is fire-and-forget: the successful delivery
-            # confirmation is appended to the session log (the model still
-            # sees it) but must NOT re-wake the session to react to its own
-            # send.  That re-wake was the duplicate-send loop ("same DM
-            # delivered 4x").  Drain any in-flight tool tasks, then assert
-            # the sweep does not consider session A ready for inference.
+            # Every tool result is a stimulus (#1919): the successful
+            # delivery confirmation re-wakes the session so the model gets
+            # its continuation turn (ending the turn is the fixpoint that
+            # terminates the old duplicate-send loop).  Drain any in-flight
+            # tool tasks, then assert the sweep considers session A ready
+            # for inference.
             await harness.wait_for_tools(session_a.id)
-            assert session_a.id not in await harness.sessions_needing_inference(session_a.id)
+            assert session_a.id in await harness.sessions_needing_inference(session_a.id)
         finally:
             connector_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
