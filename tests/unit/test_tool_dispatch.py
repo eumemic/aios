@@ -10,6 +10,8 @@ or a genuine failure (also evicts the sandbox).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
@@ -613,9 +615,13 @@ class TestParentChannelThreading:
         append_error = AsyncMock()
         monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke)
         monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_error)
+
+        @asynccontextmanager
+        async def refuse(*_args: Any, **_kwargs: Any) -> AsyncIterator[str | None]:
+            yield "quota_exceeded: telegram_send 100/100 per hour"
+
         monkeypatch.setattr(
-            "aios.services.outbound_tool_quota.check_outbound_tool_quota",
-            AsyncMock(return_value="quota_exceeded: telegram_send 100/100 per hour"),
+            "aios.services.outbound_tool_quota.outbound_tool_quota_reservation", refuse
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
