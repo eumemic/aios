@@ -222,6 +222,16 @@ def test_contract_has_in_transaction_abort_on_nonzero_guard() -> None:
     # contract rev on abort).
     assert "RAISE EXCEPTION" in src
     assert "residue > 0" in src
+    # The guard remains the only and therefore final operation in upgrade().
+    module = _module(src)
+    (upgrade,) = [
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "upgrade"
+    ]
+    assert len(upgrade.body) == 1
+    assert isinstance(upgrade.body[-1], ast.Expr)
+    assert isinstance(upgrade.body[-1].value, ast.Call)
+    assert ast.unparse(upgrade.body[-1].value.func) == "op.execute"
+    assert "RAISE EXCEPTION" in ast.literal_eval(upgrade.body[-1].value.args[0])
 
 
 def test_contract_guard_references_the_backfill_revision() -> None:
