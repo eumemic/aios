@@ -33,7 +33,8 @@ async def check_outbound_tool_quota(
     """Return a model-visible refusal when the configured rolling cap is full.
 
     No configured entry means no pool acquisition and no query. The query counts
-    persisted tool results, which are one-for-one with completed dispatches.
+    successful tool completion spans. Refusals and pre-invocation failures have
+    ``is_error=true`` and cannot consume or extend quota capacity.
     """
     quotas = get_settings().outbound_tool_quotas
     quota_name = _quota_key(dispatched_name)
@@ -51,7 +52,9 @@ async def check_outbound_tool_quota(
             FROM events
             WHERE session_id = $1
               AND tool_name = $2
-              AND role = 'tool'
+              AND kind = 'span'
+              AND data->>'event' = 'tool_execute_end'
+              AND data->>'is_error' = 'false'
               AND created_at > now() - make_interval(secs => $3::bigint)
             """,
             session_id,
