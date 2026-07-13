@@ -885,10 +885,7 @@ async def find_and_repair_ghosts(
         surface = agent_surface_by_session.get(c.session_id, _EMPTY_SURFACE)
         if _was_dispatched(c, confirmed, surface):
             ghosts.append(c)
-        elif (
-            _is_client_result_pending(c.tool_name, surface.tools)
-            and c.created_at < abandoned_cutoff
-        ):
+        elif _is_client_result_pending(c.tool_name, surface) and c.created_at < abandoned_cutoff:
             # Not dispatched AND client-result-pending AND older than the bound:
             # the client disconnected and will never return a result. Without
             # resolving it, the call's open_tool_call_count contribution keeps
@@ -1187,29 +1184,23 @@ def _was_dispatched(
     return disposition not in (ToolDisposition.NEEDS_CONFIRM, ToolDisposition.CUSTOM)
 
 
-def _is_client_result_pending(name: str, agent_tools: list[ToolSpec]) -> bool:
-    """True if ``name`` is a CLIENT-result-pending tool.
+def _is_client_result_pending(name: str, surface: _SweepAgentSurface) -> bool:
+    """True when the classifier says the call awaits a CLIENT result.
 
-    A client-result-pending tool is one the harness never dispatches because
-    the *client* executes it and returns the result — the non-MCP,
-    not-in-registry branch of :func:`_was_dispatched` (a custom tool, or a tool
-    the model emitted under a bare name the harness can't resolve to a registry
-    entry or an MCP toolset). When the client disconnects, such a call sits
-    unresolved forever; the abandoned-client-call repair (#752) errors it past
-    an age bound.
-
-    Deliberately NARROW — it must EXCLUDE confirmation-pending calls
-    (``always_ask`` registered tools, or non-``always_allow`` MCP tools, awaiting
-    a ``tool_confirmed`` event). Those wait on the USER, not a client, and
-    erroring them would kill a slow human-in-the-loop confirmation. Both
-    excluded classes are reached only when ``is_mcp_tool_name`` is true or
-    ``registry.has`` is true, so testing the negation of both is exactly the
-    client-result-pending set.
+    Confirmation-pending calls classify as ``NEEDS_CONFIRM`` and remain parked
+    for the user rather than being errored by abandoned-client-call repair.
     """
-    from aios.models.agents import is_mcp_tool_name
-    from aios.tools.registry import registry
+    from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 
-    return not is_mcp_tool_name(name) and not registry.has(name)
+    return (
+        classify_tool_call(
+            name,
+            None,
+            surface,  # type: ignore[arg-type]  # duck-typed: classifier reads .tools/.http_servers
+            confirmation_resolved=False,
+        )
+        is ToolDisposition.CUSTOM
+    )
 
 
 # ─── sessions needing inference ──────────────────────────────────────────────
