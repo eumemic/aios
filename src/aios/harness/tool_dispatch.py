@@ -553,17 +553,20 @@ async def _execute_tool_async(
     only the event-append + sweep + sandbox eviction are model-path
     specific (wrapped here by :func:`_tool_lifecycle`).
     """
-    async with _tool_lifecycle(
-        pool,
-        session_id,
-        call,
-        account_id=account_id,
-        log_prefix="tool",
-        on_exception=_evict_session_container,
-    ) as tc:
-        from aios.services.outbound_tool_quota import check_outbound_tool_quota
+    from aios.services.outbound_tool_quota import outbound_tool_quota_reservation
 
-        refusal = await check_outbound_tool_quota(pool, session_id, tc.name)
+    name = (call.get("function") or {}).get("name") or ""
+    async with (
+        outbound_tool_quota_reservation(pool, session_id, name) as refusal,
+        _tool_lifecycle(
+            pool,
+            session_id,
+            call,
+            account_id=account_id,
+            log_prefix="tool",
+            on_exception=_evict_session_container,
+        ) as tc,
+    ):
         if refusal is not None:
             raise ToolBail(refusal)
         result = await invoke_builtin(session_id, tc.name, tc.raw_args, tool_call_id=tc.call_id)
@@ -1018,88 +1021,112 @@ async def _execute_mcp_tool_async(
     emission-time — a concurrent ``switch_channel`` in the same
     assistant batch does not race this injection.
     """
-    async with _tool_lifecycle(
-        pool,
-        session_id,
-        call,
-        account_id=account_id,
-        log_prefix="mcp_tool",
-    ) as tc:
-        from aios.services.outbound_tool_quota import check_outbound_tool_quota
+    from aios.services.outbound_tool_quota import outbound_tool_quota_reservation
 
-        refusal = await check_outbound_tool_quota(pool, session_id, tc.name)
-        if refusal is not None:
-            raise ToolBail(refusal)
-        arguments = parse_arguments(tc.raw_args)
-        if arguments is None:
-            raise ToolBail("arguments were not valid JSON")
-
-        try:
-            server_name, tool_name = _parse_mcp_tool_name(tc.name)
-        except ValueError as err:
-            raise ToolBail(str(err)) from err
-
-        from aios.harness.channels import (
-            FOCAL_CHANNEL_META_KEY,
-            SESSION_ID_META_KEY,
-            focal_channel_path,
-        )
-
-        meta: dict[str, Any] = {SESSION_ID_META_KEY: session_id}
-        suffix = focal_channel_path(focal_channel)
-        if suffix is not None:
-            meta[FOCAL_CHANNEL_META_KEY] = suffix
-
-        spec = mcp_server_map.get(server_name)
-        if spec is None:
-            raise ToolBail(f"MCP server {server_name!r} not found")
-        url = spec.url
-
-        # Outbound suppression (#710): MCP is default-deny. When the session is
-        # in suppression mode, every MCP call is intercepted (synthesized
-        # success + audit event) unless the per-tool ``read_allow`` opt-in
-        # marks it a known-safe read. Same decision the sandbox CLI broker
-        # makes — both consult ``mcp_tool_suppressed``.
-        from aios.services import outbound_suppression as suppression_service
-
-        if await _mcp_call_suppressed(pool, session_id, account_id, tc.name):
-            await suppression_service.record_mcp_suppression(
-                pool,
-                session_id,
-                account_id=account_id,
-                server_name=server_name,
-                tool_name=tool_name,
-                arguments=arguments,
-            )
-            result = suppression_service.mcp_synthesized_result()
-        else:
-            from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
-
-            crypto_box = runtime.require_crypto_box()
-            vault_id, headers = await resolve_auth_for_target_url(
-                pool, crypto_box, session_id, url, account_id=account_id
-            )
-            result = await call_mcp_tool(
-                url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
-            )
-
-        mcp_is_error = "error" in result
-        event_data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tc.call_id,
-            "name": tc.name,
-            "content": json.dumps(result, ensure_ascii=False),
-        }
-        if mcp_is_error:
-            event_data["is_error"] = True
-            tc.is_error = True
-
-        tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
-        await _append_tool_result_event(
+    name = (call.get("function") or {}).get("name") or ""
+    async with (
+        outbound_tool_quota_reservation(pool, session_id, name) as refusal,
+        _tool_lifecycle(
             pool,
             session_id,
-            tc.call_id,
-            event_data,
+            call,
             account_id=account_id,
-            tool_parent_channel=parent_focal_at_arrival,
+            log_prefix="mcp_tool",
+        ) as tc,
+    ):
+        if refusal is not None:
+            raise ToolBail(refusal)
+        await _execute_mcp_tool_reserved(
+            pool,
+            session_id,
+            tc,
+            mcp_server_map,
+            account_id=account_id,
+            focal_channel=focal_channel,
+            parent_focal_at_arrival=parent_focal_at_arrival,
         )
+
+
+async def _execute_mcp_tool_reserved(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tc: _ToolCall,
+    mcp_server_map: dict[str, McpServerSpec],
+    *,
+    account_id: str,
+    focal_channel: str | None,
+    parent_focal_at_arrival: str | None | EllipsisType,
+) -> None:
+    arguments = parse_arguments(tc.raw_args)
+    if arguments is None:
+        raise ToolBail("arguments were not valid JSON")
+
+    try:
+        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+    except ValueError as err:
+        raise ToolBail(str(err)) from err
+
+    from aios.harness.channels import (
+        FOCAL_CHANNEL_META_KEY,
+        SESSION_ID_META_KEY,
+        focal_channel_path,
+    )
+
+    meta: dict[str, Any] = {SESSION_ID_META_KEY: session_id}
+    suffix = focal_channel_path(focal_channel)
+    if suffix is not None:
+        meta[FOCAL_CHANNEL_META_KEY] = suffix
+
+    spec = mcp_server_map.get(server_name)
+    if spec is None:
+        raise ToolBail(f"MCP server {server_name!r} not found")
+    url = spec.url
+
+    # Outbound suppression (#710): MCP is default-deny. When the session is
+    # in suppression mode, every MCP call is intercepted (synthesized
+    # success + audit event) unless the per-tool ``read_allow`` opt-in
+    # marks it a known-safe read. Same decision the sandbox CLI broker
+    # makes — both consult ``mcp_tool_suppressed``.
+    from aios.services import outbound_suppression as suppression_service
+
+    if await _mcp_call_suppressed(pool, session_id, account_id, tc.name):
+        await suppression_service.record_mcp_suppression(
+            pool,
+            session_id,
+            account_id=account_id,
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        result = suppression_service.mcp_synthesized_result()
+    else:
+        from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
+
+        crypto_box = runtime.require_crypto_box()
+        vault_id, headers = await resolve_auth_for_target_url(
+            pool, crypto_box, session_id, url, account_id=account_id
+        )
+        result = await call_mcp_tool(
+            url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
+        )
+
+    mcp_is_error = "error" in result
+    event_data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tc.call_id,
+        "name": tc.name,
+        "content": json.dumps(result, ensure_ascii=False),
+    }
+    if mcp_is_error:
+        event_data["is_error"] = True
+        tc.is_error = True
+
+    tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
+    await _append_tool_result_event(
+        pool,
+        session_id,
+        tc.call_id,
+        event_data,
+        account_id=account_id,
+        tool_parent_channel=parent_focal_at_arrival,
+    )
