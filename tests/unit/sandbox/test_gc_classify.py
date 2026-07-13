@@ -1,11 +1,11 @@
 """Table-driven coverage for the GC retain-rule classifier (durable session
 sandboxes, §5.5). ``_classify_images`` is pure, so it needs no Docker or DB.
 
-The single rule: an image is RETAINED iff it is the canonical tag of an
-existing session whose last activity is within the TTL. Everything else
-managed-and-mine is removed — crash/flatten residue, deleted sessions (the
-delete hook), and dormant sessions (flagged ``retention_ttl``). Untagged
-interiors of live chains are skipped structurally.
+The single rule: an image is RETAINED iff it is the canonical tag of a
+non-archived session whose last activity is within the TTL. Everything else
+managed-and-mine is removed — archived snapshots immediately, crash/flatten
+residue, deleted sessions (the delete hook), and dormant live sessions (flagged
+``retention_ttl``). Untagged interiors of live chains are skipped structurally.
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ def test_structural_parent_skip_excludes_live_chain_interior() -> None:
     assert out["img_leaf"] == ("retain", "live")
 
 
-def test_archived_session_within_ttl_is_retained() -> None:
-    """Archived sessions follow the same dormancy rule (unarchive exists)."""
+def test_archived_session_within_ttl_is_removed_immediately() -> None:
+    """Archived sessions are terminal, so their snapshots bypass the TTL."""
     img = _image(image_id="img_a", session_id="sess_a", canonical=True)
     state = SessionSnapshotState(
         session_id="sess_a",
@@ -117,7 +117,7 @@ def test_archived_session_within_ttl_is_retained() -> None:
         snapshot_bytes=1,
     )
     out = _classify([img], {"sess_a": state})
-    assert out["img_a"] == ("retain", "live")
+    assert out["img_a"] == ("remove", "archived")
 
 
 def test_missing_dormancy_probe_is_not_dormant() -> None:

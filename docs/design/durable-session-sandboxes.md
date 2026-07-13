@@ -413,20 +413,19 @@ crash windows content-equal no-ops.
 `start_gc(pool, ...)` — background loop, hourly tick, immediate first tick at boot:
 
 1. **Corpse pass** — per corpse, under `_lock_for(session_id)`: **consult the retain rule
-   first** (a deleted or TTL-expired session's corpse is removed *without* paying the
-   commit), then salvage (lineage-gated) and remove.
+   first** (an archived, deleted, or TTL-expired session's corpse is removed *without*
+   paying the commit), then salvage (lineage-gated) and remove.
 2. **Image pass** — `docker images -a` (with `--filter label=aios.managed`); the `-a` is
    load-bearing: untagged crash residue is invisible without it (verified). Untagged
    interiors of live chains are skipped **structurally** — exclude any image that is the
    `.Parent` of another listed image — rather than leaning on rmi-refusal churn. Then the
-   single rule: **an image is retained iff it is the canonical tag of an existing session
-   whose last activity is within the TTL** (`sandbox_snapshot_ttl_seconds`, default 30
-   days, keyed on session dormancy via the `(session_id, last_event_seq)` event row — a
-   point probe, not `MAX(events.created_at)`). Everything else managed-and-mine is
-   removed: crash residue, flatten leftovers, deleted sessions (this *is* the delete
-   hook — ≤1 h lag), and dormant sessions (the latter with a model-visible
-   `sandbox_fs_expired {reason: "retention_ttl"}` event). Archived sessions follow the
-   same dormancy rule (unarchive exists; immediate deletion would strand it).
+   single rule: **an image is retained iff it is the canonical tag of a non-archived
+   session whose last activity is within the TTL** (`sandbox_snapshot_ttl_seconds`,
+   default 30 days, keyed on session dormancy via the `(session_id, last_event_seq)` event
+   row — a point probe, not `MAX(events.created_at)`). Everything else managed-and-mine
+   is removed: archived-session snapshots immediately, crash residue, flatten leftovers,
+   deleted sessions (this *is* the delete hook — ≤1 h lag), and dormant live sessions
+   (the latter with a model-visible `sandbox_fs_expired {reason: "retention_ttl"}` event).
 3. **Pool-budget pass** — if this host's snapshot total exceeds
    `sandbox_snapshot_pool_bytes` (§5.7), evict **most-dormant sessions first** (by the
    same `last_event_at` the tick already fetched — *not* image `.Created`, which

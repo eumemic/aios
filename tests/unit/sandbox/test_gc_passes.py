@@ -39,11 +39,11 @@ def fake_pool() -> Iterator[None]:
         runtime.pool = prev
 
 
-def _state(session_id: str, *, dormant: bool) -> SessionSnapshotState:
+def _state(session_id: str, *, dormant: bool, archived: bool = False) -> SessionSnapshotState:
     return SessionSnapshotState(
         session_id=session_id,
         account_id="acct",
-        archived=False,
+        archived=archived,
         last_event_at=_NOW - timedelta(days=40 if dormant else 1),
         snapshot_ref=snapshot_tag(get_settings().instance_id, session_id),
         snapshot_host=get_settings().instance_id,
@@ -96,6 +96,30 @@ async def test_corpse_pass_salvages_session_that_woke_since_tick_start(
     assert any(c[0] == "snapshot" for c in backend.calls), (
         "a session that woke since the tick-start load must have its corpse salvaged"
     )
+
+
+@pytest.mark.asyncio
+async def test_corpse_pass_drops_archived_session_without_commit(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An archived session's corpse is dropped even when its activity is recent."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    container = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
+    fresh = AsyncMock()
+    monkeypatch.setattr(registry, "_fresh_session_state", fresh)
+
+    await registry._gc_corpse_pass(
+        [container],
+        {"sess_x": _state("sess_x", dormant=False, archived=True)},
+        _NOW,
+        get_settings(),
+        get_settings().instance_id,
+    )
+
+    assert not any(c[0] == "snapshot" for c in backend.calls)
+    assert any(c[0] == "force_remove" for c in backend.calls)
+    fresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio

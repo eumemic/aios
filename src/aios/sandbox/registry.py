@@ -126,7 +126,7 @@ class SessionSnapshotState:
 
 
 _GcVerdict = Literal["retain", "remove"]
-_GcReason = Literal["live", "retention_ttl", "deleted", "residue"]
+_GcReason = Literal["live", "archived", "retention_ttl", "deleted", "residue"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,8 +144,8 @@ class GcImageVerdict:
 def _is_session_dormant(state: SessionSnapshotState, now: datetime, ttl_seconds: int) -> bool:
     """A session is dormant iff its last activity is older than the TTL.
 
-    Archived sessions follow the same rule (unarchive exists; immediate
-    deletion would strand it). A missing dormancy probe reads as *not* dormant.
+    A missing activity probe reads as *not* dormant. Archived-session eviction
+    is a separate fast-path in the corpse and image retention classifiers.
     """
     if state.last_event_at is None:
         return False
@@ -162,11 +162,12 @@ def _classify_images(
 ) -> list[GcImageVerdict]:
     """Pure retain-rule classifier for the GC image pass (§5.5), table-driven.
 
-    The single rule: **an image is retained iff it is the canonical tag of an
-    existing session whose last activity is within the TTL.** Everything else
-    managed-and-mine is removed — crash residue, flatten leftovers, deleted
-    sessions (the delete hook), and dormant sessions (the latter flagged
-    ``retention_ttl`` so the caller emits ``sandbox_fs_expired``).
+    The single rule: **an image is retained iff it is the canonical tag of a
+    non-archived session whose last activity is within the TTL.** Everything
+    else managed-and-mine is removed — archived sessions immediately, crash
+    residue, flatten leftovers, deleted sessions (the delete hook), and dormant
+    live sessions (the latter flagged ``retention_ttl`` so the caller emits
+    ``sandbox_fs_expired``).
 
     Untagged interiors of *live* chains are skipped **structurally** — any
     image that is the ``.Parent`` of another listed image is excluded (the
@@ -187,9 +188,14 @@ def _classify_images(
         removal_ref = canonical_tag if (is_canonical and canonical_tag) else img.image_id
         state = states.get(sid) if sid else None
 
-        if is_canonical and state is not None and not _is_session_dormant(state, now, ttl_seconds):
-            verdict: _GcVerdict = "retain"
-            reason: _GcReason = "live"
+        if is_canonical and state is not None and state.archived:
+            verdict: _GcVerdict = "remove"
+            reason: _GcReason = "archived"
+        elif (
+            is_canonical and state is not None and not _is_session_dormant(state, now, ttl_seconds)
+        ):
+            verdict = "retain"
+            reason = "live"
         elif is_canonical and state is not None:
             verdict, reason = "remove", "retention_ttl"  # dormant → emit expired event
         elif is_canonical and state is None:
@@ -1720,13 +1726,17 @@ class SandboxRegistry:
                 # ── session corpse: retain rule + under-lock dormancy re-verify ──
                 ttl = settings.sandbox_snapshot_ttl_seconds
                 state = states.get(sid)
-                keep_fs = state is not None and not _is_session_dormant(state, now, ttl)
-                if not keep_fs:
+                archived = state is not None and state.archived
+                keep_fs = (
+                    state is not None and not archived and not _is_session_dormant(state, now, ttl)
+                )
+                if not keep_fs and not archived:
                     # Drop candidate (deleted/dormant per the tick-start snapshot)
                     # — re-verify dormancy under the lock (§5.5). A session that
                     # woke since the load must be salvaged, not dropped without a
-                    # commit. (Only the drop direction can be wrong: a session
-                    # can't grow MORE dormant within one tick.)
+                    # commit. Archived sessions are terminal and bypass this TTL
+                    # re-check. (Only the live drop direction can be wrong: a
+                    # session can't grow MORE dormant within one tick.)
                     fresh = await self._fresh_session_state(sid)
                     keep_fs = fresh is not None and not _is_session_dormant(fresh, now, ttl)
                 if keep_fs:
