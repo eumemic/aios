@@ -284,6 +284,35 @@ class TestBuiltinInvoke:
         assert r.status_code == 200
         assert r.json() == {"content": "hello"}
 
+    async def test_route_refined_always_ask_is_refused(
+        self, broker: ToolBroker, hijack_tool: Any
+    ) -> None:
+        async def handler(_session_id: str, _arguments: dict[str, Any]) -> Any:
+            raise AssertionError("route-gated tool must not execute")
+
+        hijack_tool("web_search", handler)
+        tool_def = registry.get("web_search")
+        registry._tools["web_search"] = ToolDefinition(
+            name=tool_def.name,
+            description=tool_def.description,
+            parameters_schema=tool_def.parameters_schema,
+            handler=tool_def.handler,
+            transport=tool_def.transport,
+            classify_permission=lambda args, _agent: (
+                "always_ask" if args.get("protected") else "always_allow"
+            ),
+        )
+        broker.register_session("sess_X", "s")
+        agent = _agent(tools=[ToolSpec(type="web_search")])
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "web_search"),
+                    json={"arguments": {"protected": True}},
+                )
+        assert r.status_code == 403
+        assert "requires confirmation" in r.json()["error"]
+
     async def test_tool_result_is_error(
         self,
         broker: ToolBroker,

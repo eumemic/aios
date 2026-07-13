@@ -471,14 +471,14 @@ class ToolBroker:
         if spec is None or not spec.enabled:
             return _err(404, f"tool {name!r} is not declared on this agent")
         transport = effective_transport(name, agent.tools)
+        if transport not in ("cli", "both"):
+            return _err(
+                403,
+                f"tool {name!r} is not CLI-reachable on this agent "
+                f"(transport={transport!r}). The model can still call it.",
+            )
         disposition = classify_tool_call(name, arguments, agent, confirmation_resolved=False)
-        if transport not in ("cli", "both") or disposition is not ToolDisposition.IMMEDIATE:
-            if transport not in ("cli", "both"):
-                return _err(
-                    403,
-                    f"tool {name!r} is not CLI-reachable on this agent "
-                    f"(transport={transport!r}). The model can still call it.",
-                )
+        if disposition is ToolDisposition.NEEDS_CONFIRM:
             return _err(
                 403,
                 f"tool {name!r} requires confirmation (always_ask) and is "
