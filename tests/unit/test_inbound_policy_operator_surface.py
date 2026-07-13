@@ -282,6 +282,7 @@ async def test_attach_defaults_inbound_policy_closed(monkeypatch: pytest.MonkeyP
         "aios.services.connections.queries.get_connection", AsyncMock(return_value=conn_obj)
     )
     monkeypatch.setattr("aios.services.connections.queries.notify_connection_change", AsyncMock())
+    monkeypatch.setattr("aios.services.connections.queries.insert_connection_change", AsyncMock())
     monkeypatch.setattr("aios.services.connections._evict_sandbox_for_resource_change", MagicMock())
 
     await svc.attach_connection(pool, "conn_1", session_id="ses_1", account_id="acc_1")

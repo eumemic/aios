@@ -343,6 +343,14 @@ async def attach_connection(
                 conn, connection_id, account_id=account_id
             )
             connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+            await queries.insert_connection_change(
+                conn,
+                account_id=account_id,
+                connector=connection.connector,
+                kind="added",
+                connection_id=connection.id,
+                external_account_id=connection.external_account_id,
+            )
         await queries.notify_connection_change(
             conn,
             connector=connection.connector,
@@ -850,6 +858,14 @@ async def archive_connection(
                     },
                 )
             archived = await queries.archive_connection(conn, connection_id, account_id=account_id)
+            await queries.insert_connection_change(
+                conn,
+                account_id=account_id,
+                connector=archived.connector,
+                kind="removed",
+                connection_id=archived.id,
+                external_account_id=archived.external_account_id,
+            )
         await queries.notify_connection_change(
             conn,
             connector=archived.connector,
