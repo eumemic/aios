@@ -1853,13 +1853,7 @@ async def append_assistant_and_guard_quiescence(
         if await queries.derive_session_status(conn, session_id, account_id=account_id) != "idle":
             return AssistantAppendResult(False, None, focal)
         to_nudge: list[str] = []
-        now = datetime.now(UTC)
         for request_id in open_ids:
-            deferred_until = await queries.get_request_deferred_until(
-                conn, session_id, account_id=account_id, request_id=request_id
-            )
-            if deferred_until is not None and deferred_until > now:
-                continue
             nudges = await queries.count_request_nudges(
                 conn, session_id, account_id=account_id, request_id=request_id
             )

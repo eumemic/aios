@@ -298,11 +298,17 @@ def test_resumable_tools_are_exactly_the_parking_call_builtins() -> None:
     is a tripwire that fails if the derived set changes, forcing a deliberate confirmation
     the change was intended (#1431). A parking tool left ``resumable=False`` would be
     silently error-repaired = re-orphaned on restart; a side-effectful tool wrongly marked
-    ``resumable`` would be re-parked-and-re-read as if pure — a double-execution risk."""
+    ``resumable`` would be re-parked-and-re-read as if pure — a double-execution risk.
+
+    ``defer_obligations`` (#1533) is a deliberate addition: a pure await on the
+    session's own event channel with NO servicer edge, so the resumable branch's
+    ``find_parked_servicer`` lookup returns ``None`` and it lands in the retryable
+    ``launch_lost`` result — the design's crash semantic (a wait is not a side
+    effect; the model just re-defers)."""
     from aios.tools.registry import registry  # ``aios.tools`` imported at module top
 
     assert registry.resumable_tool_names() == frozenset(
-        {"call_session", "call_agent", "call_workflow"}
+        {"call_session", "call_agent", "call_workflow", "defer_obligations"}
     )
     for name in registry.resumable_tool_names():
         assert registry.get(name).transport == "agent_tool"

@@ -12,7 +12,7 @@ class ToolSpecTypeType0(str, Enum):
     CREATE_AGENT = "create_agent"
     CREATE_GOAL = "create_goal"
     CREATE_WORKFLOW = "create_workflow"
-    DEFER_OBLIGATION = "defer_obligation"
+    DEFER_OBLIGATIONS = "defer_obligations"
     EDIT = "edit"
     GET_AGENT = "get_agent"
     GET_RUN = "get_run"

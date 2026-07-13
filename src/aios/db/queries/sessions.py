@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -554,37 +553,6 @@ async def get_open_request_ids(
     return [r["rid"] for r in rows]
 
 
-async def get_request_deadline(
-    conn: asyncpg.Connection[Any], session_id: str, *, request_id: str
-) -> datetime | None:
-    """Return the trusted caller wall-clock deadline for an obligation, if bounded."""
-    value: datetime | None = await conn.fetchval(
-        "SELECT CASE WHEN (data->>'deadline_seconds') ~ '^[0-9]+([.][0-9]+)?$' "
-        "THEN created_at + ((data->>'deadline_seconds')::double precision * interval '1 second') "
-        "END FROM events WHERE session_id=$1 AND kind='lifecycle' "
-        "AND data->>'event'='request_opened' AND data->>'request_id'=$2 "
-        "ORDER BY seq LIMIT 1",
-        session_id,
-        request_id,
-    )
-    return value
-
-
-async def get_request_deferred_until(
-    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str, request_id: str
-) -> datetime | None:
-    """Latest persisted snooze deadline for an obligation."""
-    value: datetime | None = await conn.fetchval(
-        "SELECT (data->>'until')::timestamptz FROM events WHERE session_id=$1 AND account_id=$2 "
-        "AND kind='lifecycle' AND data->>'event'='request_deferred' "
-        "AND data->>'request_id'=$3 ORDER BY seq DESC LIMIT 1",
-        session_id,
-        account_id,
-        request_id,
-    )
-    return value
-
-
 async def get_open_obligations(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> list[Obligation]:
@@ -1044,9 +1012,7 @@ async def reclaim_session_if_idle(
     row = await conn.fetchrow(
         "UPDATE sessions SET archived_at = now(), updated_at = now() "
         f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND NOT {_SESSION_ACTIVE_EXPR} "
-        "AND NOT EXISTS (SELECT 1 FROM events req WHERE "
-        + queries.open_request_anti_join(sid="$1", acct="$2", awaited_only=True)
-        + ") RETURNING id",
+        "RETURNING id",
         session_id,
         account_id,
     )
