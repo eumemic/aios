@@ -16,6 +16,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Mirrors the pre-commit hook's short-circuit: docs-only changes skip
+  # the heavy validation pipeline.  Widened beyond the hook's `.py$`
+  # filter to also catch files that can break the build without
+  # touching a `.py` directly (lint config, pinned deps, sandbox image,
+  # the workflow itself).
   detect:
     runs-on: ubuntu-latest
     outputs:
@@ -24,67 +29,428 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Need both base and head reachable for the diff below.  Aios
+          # is small enough that a full fetch is cheap.
           fetch-depth: 0
+
       - name: Detect build-affecting changes
         id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
         run: |
-          echo "run_checks=true" >> "$GITHUB_OUTPUT"
-          echo "sandbox_changed=false" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+          else
+            base="$PUSH_BEFORE_SHA"
+            head="$PUSH_HEAD_SHA"
+          fi
+
+          # First push to a new branch, force-push from a non-fast-forward,
+          # or any case where `before` is the all-zeros SHA: be conservative
+          # and run the full pipeline AND rebuild the sandbox image (since
+          # we cannot tell whether its inputs changed).
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            echo "No usable base ref — running checks and rebuilding sandbox."
+            echo "run_checks=true" >> "$GITHUB_OUTPUT"
+            echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$base" "$head")
+          echo "Changed files:"
+          echo "$changed"
+          echo
+
+          # Anything that can affect lint / types / tests / sandbox
+          # build / the workflow itself counts as build-affecting.
+          # Everything else (READMEs, LICENSE, prose docs) skips.
+          # ``bin/tool`` is a sandbox-image input (COPY-d by the Dockerfile)
+          # and must invalidate the cheap-skip path alongside the source
+          # tree even though it lives outside ``src/``.
+          # The root ``Dockerfile``, ``compose.yml``, and ``openapi.json``
+          # are included so changes to those files — and to the generated
+          # SDK under ``packages/aios-sdk/aios_sdk/_generated/`` — always
+          # run CI.  ``tests/unit/test_detect_filter_sync.py`` enforces that
+          # this regex stays in sync with all committed generated artifacts.
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$'; then
+            echo "Build-affecting changes detected — running checks."
+            echo "run_checks=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Docs/config-only changes — skipping checks."
+            echo "run_checks=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Sandbox image inputs: anything under ``docker/`` (currently
+          # only ``Dockerfile.sandbox``, but future COPY-source files
+          # added here would also count) plus the ``bin/tool`` binary the
+          # Dockerfile COPYs in.  When none changed, the ``e2e`` job can
+          # pull ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
+          # ``build-sandbox.yml`` after its smoke test passes) instead of
+          # rebuilding from scratch — saves ~29 s per run.
+          if echo "$changed" | grep -qE '^docker/|^bin/tool$'; then
+            echo "Sandbox inputs changed — rebuilding image."
+            echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sandbox inputs unchanged — will pull pre-built image."
+            echo "sandbox_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The four check jobs below run in parallel.  Splitting them off the
+  # previous monolithic ``validate`` job collapses the critical path from
+  # ``sum(lint, mypy, unit, integration, sandbox build, e2e)`` to
+  # ``max(...)``.  Each job pays its own checkout + uv-setup overhead
+  # (~10-15 s), but they pay in parallel.  The setup-uv cache is shared
+  # across jobs by the action.
   lint:
     needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
+
+    env:
+      # ``get_settings()`` is called at module import by code that ruff/mypy
+      # also import (``aios.harness.worker`` → ``procrastinate_app``).  The
+      # URL is never reached — these are static analysis steps — but it
+      # must parse as a valid Postgres DSN for the import to succeed.
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
-      - run: uv run ruff check src tests && uv run ruff format --check src tests
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint (ruff)
+        # ``packages/aios-sdk/aios_sdk`` carries hand-written modules
+        # (``__init__.py``, ``config.py``, ``factory.py``, ``streaming.py``)
+        # alongside the generated ``_generated/`` tree.  Root
+        # ``pyproject.toml`` already excludes ``_generated/`` via
+        # ``extend-exclude`` and ``mypy.overrides``; including the package
+        # here lets ruff and mypy cover the hand-written surface so the
+        # release workflow's ``no re-gate'' assumption is honored.
+        #
+        # The ``connectors/*/src`` trees (signal/slack/sms/telegram/whatsapp)
+        # and ``packages/aios-connector-http/aios_connector_http`` (whose
+        # package lives at the package root, not under ``src/``) are
+        # workspace members whose source had never been linted/typed.  The
+        # echo-http connector has no ``src/`` and is omitted.
+        run: |
+          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+
+      - name: Type check (mypy)
+        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
 
   unit:
     needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
+
+    env:
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
-      - run: uv run pytest tests/unit -q
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Unit tests
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  The suite is xdist-safe by construction: no DB, no
+        # fixed ports (broker tests bind port 0 / mkdtemp UDS paths),
+        # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
+        # Measured locally: 45 s serial → 17 s at ``-n 4``.
+        run: uv run pytest tests/unit -q -n 4
 
   connectors:
     needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
-      - run: uv run pytest connectors -q
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Connector tests
+        # Each connector ``tests/`` dir has its own ``__init__.py`` and no
+        # parent package, so pytest resolves every connector conftest to the
+        # module name ``tests.conftest`` — collecting two in one process is an
+        # ``ImportPathMismatchError``.  The connectors are independent uv
+        # workspace members (own ``pyproject.toml``, own pytest rootdir/
+        # config), so each runs as its own invocation, using its own config.
+        # These are pure unit tests (mocked daemons; no Postgres/Docker/
+        # network), so no ``services:`` block is needed.  Run under ``bash
+        # -e`` (the Actions default), a failing suite aborts the job.
+        run: |
+          uv run pytest connectors/signal/tests -q
+          uv run pytest connectors/slack/tests -q
+          uv run pytest connectors/sms/tests -q
+          uv run pytest connectors/telegram/tests -q
+          uv run pytest connectors/whatsapp/tests -q
+          uv run pytest packages/aios-connector-http/tests -q
+          uv run pytest packages/aios-sdk/tests -q
+
+      - name: Slack connector isolated-install smoke test
+        # ``uv sync --dev`` above resolves the *unified workspace* env, where
+        # aiohttp/websockets are present transitively (aiodocker/litellm root
+        # deps).  That masks a missing dependency in a connector's own
+        # closure — exactly the gap that shipped a Docker image which crashed
+        # at ``import aios_slack`` with ``ModuleNotFoundError: aiohttp``.  This
+        # step installs ONLY the slack closure into a throwaway venv (the same
+        # ``--no-sources`` by-path install the Dockerfile does) and imports the
+        # connector, so a dropped runtime dep fails CI instead of production.
+        run: |
+          uv venv /tmp/slack-isolated
+          uv pip install --python /tmp/slack-isolated/bin/python --no-sources \
+            ./packages/aios-sdk \
+            ./packages/aios-connector-http \
+            ./connectors/slack
+          /tmp/slack-isolated/bin/python -c "import aios_slack.connector"
 
   integration:
     needs: detect
+    if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
+
+    env:
+      # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
+      # import time.  Nothing dials this URL — the tests run against a
+      # per-worker testcontainer Postgres (tests/conftest.py), which is
+      # why this job declares no ``services:`` block.
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
+
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
-      - run: uv run pytest tests/integration -q
 
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Integration tests
+        # Default ``load`` dist: the suite has no shared module-scoped
+        # fixtures (the migration tests boot their own per-test
+        # containers).  Measured locally: 87 s serial → 43 s at ``-n 4``.
+        run: uv run pytest tests/integration -q -n 4
+
+  # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
+  # (added at module scope on the 31 files that use the sandbox image)
+  # run in the ``docker`` shard; everything else in ``non-docker``.  The
+  # non-docker shard skips the sandbox-image step entirely (~30 s saved).
+  # ``fail-fast: false`` so one shard's failure doesn't abort the other.
   e2e:
     needs: detect
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
         shard: [non-docker, docker]
+
+    # Required to ``docker pull`` the sandbox image from GHCR when its
+    # inputs are unchanged.  Read-only; the ``build-sandbox.yml`` workflow
+    # is the only writer.  Only the docker shard actually uses it, but
+    # GHA does not support per-matrix-leg permissions.
+    permissions:
+      contents: read
+      packages: read
+
+    env:
+      # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
+      # import time.  Nothing dials this URL — the tests run against a
+      # per-worker testcontainer Postgres (tests/conftest.py), which is
+      # why this job declares no ``services:`` block.
+      AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
+      AIOS_API_KEY: test-key-for-ci
+      AIOS_VAULT_KEY: 5Uvx6pICqEEpPDl+1f5SrKyXOoQA5j0XcYD590hZH/Y=
+      AIOS_EGRESS_CA_KEY: kBhGwxDFjaYVWHd5Xwa6HlMPwcCNf3cjhMhjd06v50I=
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --dev
-      - name: E2E tests (non-docker shard)
-        if: matrix.shard == 'non-docker'
+      # Matrix jobs whose per-shard names are required status contexts must
+      # gate their *steps*, not the job, so the matrix always expands and
+      # each shard reports a real status even on docs-only PRs — see #683.
+      - name: Skip (docs-only PR — no-op shard)
+        if: needs.detect.outputs.run_checks != 'true'
         run: |
-          for attempt in 1 2 3; do
-            uv run pytest tests/e2e -q -m "not docker" && exit 0
-            echo "::warning::Non-docker E2E attempt ${attempt} failed"
-          done
-          exit 1
+          echo "run_checks=false: ${{ matrix.shard == 'docker' && 'e2e (docker)' || 'e2e (non-docker)' }} is a no-op; reporting success to satisfy branch protection."
+
+      - uses: actions/checkout@v4
+        if: needs.detect.outputs.run_checks == 'true'
+
+      - uses: astral-sh/setup-uv@v4
+        if: needs.detect.outputs.run_checks == 'true'
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        if: needs.detect.outputs.run_checks == 'true'
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        if: needs.detect.outputs.run_checks == 'true'
+        run: uv sync --dev
+
+      - name: Log in to GHCR
+        # Needed only for the ``docker pull`` path below.  When the sandbox
+        # is being rebuilt locally this login is unused but harmless.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull sandbox image from GHCR
+        # ``:smoked`` is set by ``build-sandbox.yml``'s smoke job after the
+        # contract test passes, so PRs never get an unverified image.
+        # Retag under the CI-local ``aios-sandbox:ci`` name the E2E step's
+        # ``AIOS_DOCKER_IMAGE`` env points at — see the build step below
+        # for why a non-GHCR-prefixed tag matters (the
+        # ``test_sandbox_image_contract`` silent-fallback footgun from
+        # PR #670).
+        #
+        # The sanity probes (``image inspect`` + ``which tool``) mirror
+        # the build step's probes: the pulled image must satisfy the
+        # same contract the built one does, otherwise a stale ``:smoked``
+        # (e.g. ``bin/tool`` advanced on master between this PR's base
+        # and the last ``build-sandbox.yml`` publish) would silently
+        # produce a misroute later in the E2E run.
+        #
+        # ``continue-on-error`` lets the next step fall back to a local
+        # build when this fails — GHCR outage, ``:smoked`` not yet
+        # published, fork-PR token cannot read a private package.
+        id: pull_sandbox
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        continue-on-error: true
+        run: |
+          docker pull ghcr.io/eumemic/aios-sandbox:smoked
+          docker tag ghcr.io/eumemic/aios-sandbox:smoked aios-sandbox:ci
+          docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-sandbox:ci which tool || {
+            echo "::error::bin/tool not found in pulled image — :smoked tag is stale relative to HEAD"
+            exit 1
+          }
+
+      - name: Build sandbox image
+        # CI-local tag (no registry prefix) — pairs with the
+        # ``AIOS_DOCKER_IMAGE`` env on the E2E step. The
+        # ``test_sandbox_image_contract`` fixture falls through to
+        # ``docker pull`` if a local lookup fails for any reason; with
+        # the previous ``ghcr.io/eumemic/aios-sandbox:latest`` tag that
+        # silently masked a missed local build by using the stale
+        # registry image instead (PR #670 hit exactly that). A
+        # non-GHCR tag makes the fallback pull fail loudly.
+        #
+        # Post-build sanity probes the daemon's image store and the
+        # one binary the build added; if either is missing the step
+        # fails here rather than letting a silent fallback misroute
+        # later. ``set -euo pipefail`` is the workflow default but
+        # the explicit ``|| exit 1`` after the ``docker run`` makes
+        # the failure mode obvious in the log.
+        #
+        # Fires when the Dockerfile/bin/tool inputs changed (so the pull
+        # path was skipped) OR when the pull path attempted and failed.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && ( needs.detect.outputs.sandbox_changed == 'true' || steps.pull_sandbox.outcome == 'failure' )
+        run: |
+          if [[ "${{ steps.pull_sandbox.outcome }}" == "failure" ]]; then
+            echo "::warning::GHCR pull failed; falling back to local sandbox build"
+          fi
+          docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .
+          docker image inspect aios-sandbox:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-sandbox:ci which tool || {
+            echo "::error::bin/tool not found in built image — build step did not produce expected artifacts"
+            exit 1
+          }
+
+      - name: E2E tests (non-docker shard)
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  Default ``load`` dist (not ``loadfile``): the
+        # non-docker set has no module-scoped fixtures — the only one in
+        # tests/e2e lives in docker-marked test_memory_cross_session_sync.
+        # Each worker spins its own session-scoped testcontainer Postgres,
+        # so there is no cross-worker DB state at all.  Measured locally:
+        # 141 s serial → 44 s at ``-n 4``.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
+        run: |
+          uv run pytest tests/e2e -q -m "not docker" -n 4
+
       - name: E2E tests (docker shard)
-        if: matrix.shard == 'docker'
-        run: uv run pytest tests/e2e -q -m "docker"
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
+        env:
+          AIOS_DOCKER_IMAGE: aios-sandbox:ci
+        # ``-m "docker and not perf"``: the ``perf`` mark is the ADVISORY
+        # wall-clock scaling backstop (#1661) — it is deliberately EXCLUDED
+        # from this gating run because shared-runner jitter can exceed its
+        # ratio threshold even for O(1) reads. The deterministic complexity
+        # gates (plan-shape, rows-returned, registry-completeness) carry only
+        # ``docker`` and run here as required checks, red like a correctness
+        # bug. The advisory ``perf`` tests run in the separate non-blocking
+        # step below (same job, never a required check).
+        run: |
+          uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile
+
+      - name: E2E perf backstop (docker shard, ADVISORY — non-blocking)
+        # The ``perf``-marked scaling backstops (#1661): loud advisory signal,
+        # NEVER a required check. ``continue-on-error: true`` keeps a jitter-
+        # induced ratio breach from failing the required docker shard while
+        # still surfacing the result in the job log. Do NOT promote this step
+        # to a required status context.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
+        continue-on-error: true
+        env:
+          AIOS_DOCKER_IMAGE: aios-sandbox:ci
+        run: |
+          uv run pytest tests/e2e -q -m "docker and perf" -n 4 --dist=loadfile
