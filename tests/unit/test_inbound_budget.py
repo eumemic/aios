@@ -591,3 +591,162 @@ async def test_chat_lifecycle_no_wake_omits_wake_and_orig_channel() -> None:
     assert "wake" not in payload
     assert call.kwargs.get("orig_channel") is None
     check.assert_not_called()
+
+
+async def test_handle_inbound_agent_budget_rejects_before_append_and_wake() -> None:
+    """The agent gate runs after counterparty admission/resolution and before effects."""
+    from aios_connectors.resolver import ResolveResult
+
+    counterparty = AsyncMock(return_value=True)
+    agent = AsyncMock(return_value=False)
+    resolve = AsyncMock(return_value=ResolveResult(session_id="ses_bound", drop=None))
+    append = AsyncMock()
+    wake = AsyncMock()
+    with (
+        patch(
+            "aios.services.inbound.queries.get_connection", AsyncMock(return_value=_connection())
+        ),
+        patch(
+            "aios.services.inbound.queries.resolve_effective_inbound_policy",
+            AsyncMock(return_value=AllowAll()),
+        ),
+        patch("aios.services.inbound.check_inbound_budget", counterparty),
+        patch("aios.services.inbound.check_inbound_budget_agent", agent),
+        patch("aios_connectors.resolver.resolve_target_session", resolve),
+        patch("aios.services.inbound._append_with_dedup", append),
+        patch("aios.services.inbound.defer_wake", wake),
+    ):
+        result = await handle_inbound(
+            _fake_pool(),
+            account_id="acc_1",
+            connection_id="conn_1",
+            event_id="evt_agent",
+            chat_id="peer",
+            sender={"id": "peer"},
+            content="over agent limit",
+        )
+    assert result == InboundResult(None, "ses_bound", InboundDrop.RATE_LIMITED, False)
+    counterparty.assert_awaited_once()
+    resolve.assert_awaited_once()
+    agent.assert_awaited_once_with(
+        _await_args(agent).args[0], account_id="acc_1", session_id="ses_bound"
+    )
+    append.assert_not_called()
+    wake.assert_not_called()
+
+
+async def test_handle_inbound_per_chat_bypasses_agent_budget() -> None:
+    """A per-chat connection has no stable agent session and skips this gate."""
+    from aios_connectors.resolver import ResolveResult
+
+    connection = _connection().model_copy(
+        update={"session_id": None, "session_template_id": "tmpl_1"}
+    )
+    agent = AsyncMock(side_effect=AssertionError("per_chat must bypass agent budget"))
+    stage = AsyncMock(return_value=([], []))
+    append = AsyncMock(return_value=True)
+    wake = AsyncMock()
+    with (
+        patch("aios.services.inbound.queries.get_connection", AsyncMock(return_value=connection)),
+        patch(
+            "aios.services.inbound.queries.resolve_effective_inbound_policy",
+            AsyncMock(return_value=AllowAll()),
+        ),
+        patch("aios.services.inbound.check_inbound_budget", AsyncMock(return_value=True)),
+        patch("aios.services.inbound.check_inbound_budget_agent", agent),
+        patch(
+            "aios_connectors.resolver.resolve_target_session",
+            AsyncMock(return_value=ResolveResult(session_id="ses_chat", drop=None)),
+        ),
+        patch("aios.services.inbound.stage_inbound_attachments", stage),
+        patch("aios.services.inbound._append_with_dedup", append),
+        patch("aios.services.inbound.defer_wake", wake),
+    ):
+        result = await handle_inbound(
+            _fake_pool(),
+            account_id="acc_1",
+            connection_id="conn_1",
+            event_id="evt_chat",
+            chat_id="peer",
+            sender={"id": "peer"},
+            content="allowed",
+        )
+    assert result.drop_reason is None
+    agent.assert_not_called()
+    append.assert_awaited_once()
+    wake.assert_awaited_once()
+
+
+@pytest.mark.parametrize("route", ["session", "chat"])
+async def test_lifecycle_agent_budget_rejects_before_append_and_wake(route: str) -> None:
+    from aios.api.routers.connectors import (
+        RuntimeChatLifecycleRequest,
+        RuntimeSessionLifecycleRequest,
+        post_runtime_chat_lifecycle,
+        post_runtime_session_lifecycle,
+    )
+
+    append = AsyncMock()
+    wake = AsyncMock()
+    common = (
+        patch(
+            "aios.api.routers.connectors.queries.get_connection",
+            AsyncMock(return_value=_connection()),
+        ),
+        patch("aios.api.routers.connectors._check_runtime_scope", MagicMock()),
+        patch("aios.api.routers.connectors._check_runtime_connection_scope", MagicMock()),
+        patch(
+            "aios.api.routers.connectors.check_inbound_budget_session", AsyncMock(return_value=True)
+        ),
+        patch("aios.api.routers.connectors.check_inbound_budget", AsyncMock(return_value=True)),
+        patch(
+            "aios.api.routers.connectors.check_inbound_budget_agent", AsyncMock(return_value=False)
+        ),
+        patch(
+            "aios.api.routers.connectors.queries.is_session_bound_to_connection",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "aios.api.routers.connectors.queries.get_chat_session_row",
+            AsyncMock(return_value=("peer", "ses_bound", datetime.now(UTC))),
+        ),
+        patch("aios.api.routers.connectors.sessions_service.append_event", append),
+        patch("aios.api.routers.connectors.defer_wake", wake),
+    )
+    with (
+        common[0],
+        common[1],
+        common[2],
+        common[3],
+        common[4],
+        common[5],
+        common[6],
+        common[7],
+        common[8],
+        common[9],
+        pytest.raises(RateLimitedError),
+    ):
+        if route == "session":
+            await post_runtime_session_lifecycle(
+                RuntimeSessionLifecycleRequest(
+                    connection_id="conn_1",
+                    session_id="ses_bound",
+                    event="connector_delivery_failed",
+                    wake=True,
+                ),
+                _route_pool(),
+                _runtime_auth(),
+            )
+        else:
+            await post_runtime_chat_lifecycle(
+                RuntimeChatLifecycleRequest(
+                    connection_id="conn_1",
+                    chat_id="peer",
+                    event="connector_delivery_failed",
+                    wake=True,
+                ),
+                _route_pool(),
+                _runtime_auth(),
+            )
+    append.assert_not_called()
+    wake.assert_not_called()

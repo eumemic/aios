@@ -1,6 +1,6 @@
 """Add session-led partial index for the per-agent inbound budget.
 
-Revision ID: 0148
+Revision ID: 0149
 Revises: 0147
 """
 
@@ -10,7 +10,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0148"
+revision: str = "0149"
 down_revision: str = "0147"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
