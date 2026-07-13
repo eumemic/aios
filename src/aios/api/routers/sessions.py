@@ -766,12 +766,21 @@ async def list_events(
         channel = st.filters.get("channel") or None
         chat_type = st.filters.get("chat_type")
         seq = cursor_as_int(st.cursor)
-        lower_bound = int(st.filters.get("after_seq") or 0)
-        upper_bound = st.filters.get("before_seq")
-        after_seq, before = (seq, upper_bound) if direction == "forward" else (lower_bound, seq)
+        window_after = int(st.filters.get("after_seq") or 0)
+        window_before = st.filters.get("before_seq")
     else:
         error_only = bool(error_only)
-        after_seq, before = after_seq or 0, before_seq
+        window_after = after_seq or 0
+        window_before = before_seq
+        seq = window_after if direction == "forward" else window_before
+
+    # Keep the original exclusive window anchors distinct from the moving page
+    # keyset.  In particular, never serialize the current page's ``seq`` back as
+    # an anchor: every cursor in the walk must retain the first request's bounds.
+    if st is not None:
+        after_seq, before = (seq, window_before) if direction == "forward" else (window_after, seq)
+    else:
+        after_seq, before = window_after, window_before
     page_limit = resolve_page_limit(st, limit, default=200, maximum=MAX_EVENT_PAGE_LIMIT)
     # Fetch one extra row to derive has_more without a separate COUNT query.
     rows = await service.read_events(
@@ -797,8 +806,8 @@ async def list_events(
             "error_only": error_only,
             "channel": channel,
             "chat_type": chat_type,
-            "after_seq": lower_bound if st is not None else after_seq,
-            "before_seq": upper_bound if st is not None else before,
+            "after_seq": window_after,
+            "before_seq": window_before,
         },
     )
 
