@@ -110,6 +110,36 @@ if TYPE_CHECKING:
 
 log = get_logger("aios.db.listen")
 
+# Process-local admission limit for route-level SSE listeners. Infrastructure
+# listeners continue to call _connect_listener directly and are not constrained.
+_SSE_SUBSCRIBER_LIMIT = 32
+_sse_subscriber_count = 0
+
+
+class SSESubscriberCapacityError(RuntimeError):
+    """The process has no remaining dedicated SSE listener capacity."""
+
+
+def _reserve_sse_subscriber() -> Callable[[], None]:
+    """Reserve one SSE slot and return an idempotent synchronous releaser."""
+    global _sse_subscriber_count
+    if _sse_subscriber_count >= _SSE_SUBSCRIBER_LIMIT:
+        raise SSESubscriberCapacityError(
+            f"concurrent SSE subscriber limit ({_SSE_SUBSCRIBER_LIMIT}) reached"
+        )
+    _sse_subscriber_count += 1
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        global _sse_subscriber_count
+        if not released:
+            released = True
+            _sse_subscriber_count -= 1
+
+    return release
+
+
 # Sentinel payload fired on ``events_<session_id>`` when a session is archived
 # mid-flight (see :func:`aios.services.sessions.archive_session`). The
 # ``events_`` channel otherwise carries committed-event ids (``evt_…``) and
@@ -155,9 +185,12 @@ class ListenSubscription:
 
     queue: asyncio.Queue[str]
     _conn: asyncpg.Connection[object]
+    _release_capacity: Callable[[], None] | None = None
 
     def terminate(self) -> None:
         self._conn.terminate()
+        if self._release_capacity is not None:
+            self._release_capacity()
 
 
 async def _open_drop_oldest_listener(
@@ -195,7 +228,13 @@ async def _open_drop_oldest_listener(
     Any failure after the initial ``asyncpg.connect`` succeeds will
     ``conn.terminate()`` and re-raise.
     """
-    conn = await _connect_listener(db_url)
+    release_capacity = _reserve_sse_subscriber()
+    try:
+        conn = await _connect_listener(db_url)
+    except BaseException:
+        if release_capacity is not None:
+            release_capacity()
+        raise
     try:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_max)
 
@@ -224,8 +263,10 @@ async def _open_drop_oldest_listener(
             await on_connected(conn)
     except BaseException:
         conn.terminate()
+        if release_capacity is not None:
+            release_capacity()
         raise
-    return ListenSubscription(queue=queue, _conn=conn)
+    return ListenSubscription(queue=queue, _conn=conn, _release_capacity=release_capacity)
 
 
 # Sentinel distinguishing "caller did not pass on_connected, use the default
