@@ -169,6 +169,23 @@ async def test_session_budget_decision(recent: int, threshold: int, expected: bo
     assert got is expected
 
 
+@pytest.mark.parametrize(
+    ("recent", "threshold", "expected"),
+    [(0, 2, True), (1, 2, True), (2, 2, False), (5, 2, False)],
+)
+async def test_agent_budget_decision(recent: int, threshold: int, expected: bool) -> None:
+    pool = _pool_returning_count(recent)
+    settings = get_settings().model_copy(
+        update={
+            "inbound_rate_agent_window_seconds": 3600,
+            "inbound_rate_agent_max_per_window": threshold,
+        }
+    )
+    with patch.object(inbound_budget, "get_settings", return_value=settings):
+        got = await check_inbound_budget_agent(pool, account_id="acc_1", session_id="ses_1")
+    assert got is expected
+
+
 # ─── router status mapping + the non-fatal pin ───────────────────────────────
 
 
