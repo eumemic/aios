@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,32 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     await DockerBackend().create(_spec())
 
     assert _runtime_values(calls[0]) == []
+
+
+async def test_snapshot_resume_rederives_vault_placeholder_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    spec = dataclasses.replace(
+        _spec(),
+        snapshot_image="aios-sbx-snapshot:latest",
+        environment={"GITHUB_TOKEN": "STALE_PLACEHOLDER", "PLAIN": "value"},
+        start_environment={"GITHUB_TOKEN": "CURRENT_PLACEHOLDER"},
+    )
+    await DockerBackend().create(spec)
+
+    env = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--env"]
+    assert "GITHUB_TOKEN=CURRENT_PLACEHOLDER" in env
+    assert "GITHUB_TOKEN=STALE_PLACEHOLDER" not in env
+    assert "PLAIN=value" in env
 
 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

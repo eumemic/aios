@@ -217,8 +217,11 @@ class DockerBackend:
         # Keep stdin open so the container doesn't exit on empty stdin.
         argv.append("--interactive")
 
-        # Environment.
-        for key, value in spec.environment.items():
+        # Environment. Vault placeholders are an explicit start-derived layer
+        # applied last on both cold start and snapshot resume; never allow an
+        # image-carried value for the same key to win after credential recreate.
+        environment = {**spec.environment, **(spec.start_environment or {})}
+        for key, value in environment.items():
             argv.extend(["--env", f"{key}={value}"])
 
         # Resume source: run from the resolved snapshot tag when set

@@ -79,6 +79,10 @@ class SandboxSpec:
     network_policy: NetworkingConfig | None
     host_gateway_alias: str | None
     image: str
+    # Vault placeholders are start-time-derived state. Keeping them separate
+    # from ordinary env makes their fresh override on every create/resume
+    # explicit at the backend boundary.
+    start_environment: dict[str, str] | None = None
     # Resume source (durable session sandboxes): the locally-resolved
     # snapshot tag a resuming session runs from, set by the registry's
     # provision path after it resolves ``sessions.snapshot_ref`` through
