@@ -63,6 +63,16 @@ VALUES
   ('evt_asst', 'sess_a', 4, 'message',
    '{"role": "assistant", "content": "hello"}'::jsonb,
    'assistant', 'acc_root', 'slack/ext1/chat1');
+
+-- Keep the fixture production-shaped now that migration 0148 adds a second
+-- inference-bearing partial index led by session_id. A single-session agent can
+-- receive many counterparties; those rows must make the orig_channel equality
+-- seek genuinely cheaper than scanning the whole agent window and filtering.
+INSERT INTO events (id, session_id, seq, kind, data, role, account_id, orig_channel)
+SELECT 'evt_other_' || n, 'sess_a', n, 'message',
+       '{"role": "user", "content": "other chat"}'::jsonb,
+       'user', 'acc_root', 'slack/ext1/other-' || n
+FROM generate_series(5, 1004) AS n;
 """
 
 # The EXACT ``_count_recent_inbounds`` query (predicate copied verbatim from
@@ -160,6 +170,7 @@ def test_count_query_uses_index_not_seq_scan(postgres: object) -> None:
             # otherwise pick on cost alone, so the plan reflects the index's
             # *applicability* to the predicate (the property #1557 is about),
             # not the planner's row-count heuristics on a 4-row table.
+            await conn.execute("ANALYZE events")
             await conn.execute("SET enable_seqscan = off")
             result = await conn.fetchval(
                 f"EXPLAIN (FORMAT JSON) {_COUNT_SQL}",
