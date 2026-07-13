@@ -203,11 +203,6 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum interval without bytes moving through a Docker flatten pipeline.",
     )
-    sandbox_pipeline_max_seconds: float = Field(
-        default=3600.0,
-        gt=0,
-        description="Absolute backstop for a Docker flatten pipeline.",
-    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,
