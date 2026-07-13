@@ -294,6 +294,8 @@ class HttpConnector:
     # failure doubles it up to ``RECONNECT_BACKOFF_MAX``.
     RECONNECT_BACKOFF_INITIAL: float = 1.0
     RECONNECT_BACKOFF_MAX: float = 60.0
+    # Appservice-style connectors receive credentials via container env.
+    uses_connection_secrets: bool = True
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
@@ -939,15 +941,17 @@ class HttpConnector:
                         # immediate-disconnect loop should still back off
                         # exponentially.  Resetting only on real messages
                         # ensures CI-side flapping doesn't pin us at 1 s.
-                        if not _signalled_ready:
-                            _signalled_ready = True
-                            self._mark_loop_backfilled()
                         continue
                     backoff = 1.0
                     if msg.event != "connection":
                         continue
                     payload = json.loads(msg.data)
                     event = payload.get("event")
+                    if event == "snapshot_complete":
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     connection_id = payload.get("connection_id", "")
                     external_account_id = payload.get("external_account_id", "")
                     if event == "added":
@@ -986,27 +990,30 @@ class HttpConnector:
             # Replay from backfill after reconnect — already running.
             return
         client = self._require_client()
-        response = await _get_runtime_secrets(client=client, connection_id=connection_id)
-        if response.status_code >= 500:
-            raise httpx.HTTPStatusError(
-                f"secrets fetch 5xx for connection {connection_id!r}: "
-                f"{response.status_code} {response.content!r}",
-                request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
-                response=httpx.Response(response.status_code, content=response.content),
-            )
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"secrets fetch 4xx for connection {connection_id!r}: "
-                f"{response.status_code} {response.content!r}"
-            )
-        body = response.parsed
-        if body is None or isinstance(body, HTTPValidationError):
-            raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
-        raw_secrets = body.secrets
-        if isinstance(raw_secrets, Unset):
+        if not self.uses_connection_secrets:
             secrets_map: dict[str, str] = {}
         else:
-            secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+            response = await _get_runtime_secrets(client=client, connection_id=connection_id)
+            if response.status_code >= 500:
+                raise httpx.HTTPStatusError(
+                    f"secrets fetch 5xx for connection {connection_id!r}: "
+                    f"{response.status_code} {response.content!r}",
+                    request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
+                    response=httpx.Response(response.status_code, content=response.content),
+                )
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"secrets fetch 4xx for connection {connection_id!r}: "
+                    f"{response.status_code} {response.content!r}"
+                )
+            body = response.parsed
+            if body is None or isinstance(body, HTTPValidationError):
+                raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
+            raw_secrets = body.secrets
+            if isinstance(raw_secrets, Unset):
+                secrets_map = {}
+            else:
+                secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
         state = _ConnectionState(
             connection_id=connection_id,
             external_account_id=external_account_id,

@@ -1213,6 +1213,63 @@ async def try_record_inbound_ack(
     return row is not None
 
 
+# ─── durable discovery ledger ────────────────────────────────────────────────
+
+
+async def insert_connection_change(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    kind: str,
+    connection_id: str,
+    external_account_id: str,
+) -> int:
+    return int(
+        await conn.fetchval(
+            """INSERT INTO connection_changes
+        (account_id, connector, kind, connection_id, external_account_id)
+        VALUES ($1, $2, $3, $4, $5) RETURNING seq""",
+            account_id,
+            connector,
+            kind,
+            connection_id,
+            external_account_id,
+        )
+    )
+
+
+async def get_connection_change_high_water(conn: asyncpg.Connection[Any]) -> int:
+    return int(await conn.fetchval("SELECT COALESCE(MAX(seq), 0) FROM connection_changes"))
+
+
+async def get_connection_change_floor(conn: asyncpg.Connection[Any]) -> int | None:
+    value = await conn.fetchval("SELECT MIN(seq) FROM connection_changes")
+    return int(value) if value is not None else None
+
+
+async def list_connection_changes(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    after_seq: int,
+    limit: int = 500,
+) -> list[asyncpg.Record]:
+    return list(
+        await conn.fetch(
+            """SELECT seq, kind, connection_id, external_account_id
+        FROM connection_changes
+        WHERE account_id = $1 AND connector = $2 AND seq > $3
+        ORDER BY seq LIMIT $4""",
+            account_id,
+            connector,
+            after_seq,
+            limit,
+        )
+    )
+
+
 # ─── connectors (type catalog) ───────────────────────────────────────────────
 
 
