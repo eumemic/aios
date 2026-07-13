@@ -136,6 +136,28 @@ async def _count_recent_session_inbounds(
     return int(count or 0)
 
 
+async def check_inbound_budget_agent(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    session_id: str,
+) -> bool:
+    """Check the global inbound budget for a single-session agent."""
+    settings = get_settings()
+    threshold = settings.inbound_rate_agent_max_per_window
+    window_seconds = settings.inbound_rate_agent_window_seconds
+    if threshold <= 0 or window_seconds <= 0:
+        return True
+
+    recent = await _count_recent_session_inbounds(
+        pool,
+        account_id=account_id,
+        session_id=session_id,
+        window_seconds=window_seconds,
+    )
+    return recent < threshold
+
+
 async def check_inbound_budget_session(
     pool: asyncpg.Pool[Any],
     *,

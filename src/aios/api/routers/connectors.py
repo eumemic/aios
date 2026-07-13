@@ -70,6 +70,7 @@ from aios.services import sessions as sessions_service
 from aios.services.attachment_staging import InboundAttachment
 from aios.services.inbound_budget import (
     check_inbound_budget,
+    check_inbound_budget_agent,
     check_inbound_budget_session,
 )
 
@@ -265,16 +266,6 @@ class RuntimeToolResultRequest(BaseModel):
     tool_call_id: str
     content: str | list[dict[str, Any]]
     is_error: bool = False
-    # The connector declares (via ``@tool(fire_and_forget=True)``) that a
-    # *successful* result for this tool is a delivery confirmation the model
-    # has nothing to react to (a message send/reaction ack).  When set, the
-    # result is still appended to the log — the model sees it — but the
-    # session is NOT woken to react to its own send (closes the duplicate-send
-    # loop).  A failed result NEVER carries this (the runner only sets it
-    # on the post-success path); the intake also AND-gates it with
-    # ``not is_error`` so a failure always wakes.  Default False keeps a
-    # not-yet-redeployed connector's omitted field behaving exactly as before.
-    no_reaction: bool = False
 
 
 class RuntimeLifecycleRequest(BaseModel):
@@ -778,6 +769,17 @@ async def post_runtime_session_lifecycle(
             "inbound rate budget exceeded for this session",
             detail={"drop_reason": "rate_limited", "session_id": body.session_id},
         )
+    if (
+        body.wake
+        and connection.session_id is not None
+        and not await check_inbound_budget_agent(
+            pool, account_id=account_id, session_id=body.session_id
+        )
+    ):
+        raise RateLimitedError(
+            "inbound agent rate budget exceeded",
+            detail={"drop_reason": "rate_limited", "session_id": body.session_id},
+        )
     if body.wake:
         # Stamp the wake intent that fired the ``defer_wake`` so the budget's
         # session-grain window can meter this inference-bearing write (#1558).
@@ -905,6 +907,15 @@ async def post_runtime_chat_lifecycle(
                 "chat_id": body.chat_id,
             },
         )
+    if (
+        body.wake
+        and connection.session_id is not None
+        and not await check_inbound_budget_agent(pool, account_id=account_id, session_id=session_id)
+    ):
+        raise RateLimitedError(
+            "inbound agent rate budget exceeded",
+            detail={"drop_reason": "rate_limited", "session_id": session_id},
+        )
     # On the wake-bearing path, stamp the wake intent AND the per-counterparty
     # ``orig_channel`` key so the chat-grain budget window counts this
     # inference-bearing write on the same key the inbound path uses (#1558).
@@ -979,25 +990,17 @@ async def post_runtime_tool_result(
                     "connection_id": body.connection_id,
                 },
             )
-        # ``no_reaction`` stamps the row so the wake GATE excludes it: a successful
-        # fire-and-forget result is not itself a stimulus to react to. A failure must
-        # react (so the model can recover), hence AND-gate with ``not is_error``.
-        no_reaction = body.no_reaction and not body.is_error
         event = await sessions_service.append_tool_result(
             conn,
             session_id=body.session_id,
             tool_call_id=body.tool_call_id,
             content=body.content,
             is_error=body.is_error,
-            no_reaction=no_reaction,
             account_id=account_id,
         )
-    # Always append (tool-always-appends-result) and always wake: the wake GATE — not
-    # this intake — decides whether to infer. The gate excludes the ``no_reaction`` row,
-    # so a LONE delivery confirmation makes the woken step re-gate and no-op (settles, no
-    # re-inference on its own ack); but a ``no_reaction`` result COMPLETING a mixed batch
-    # still surfaces the unreacted real sibling, which must run. This intake can't see the
-    # worker's in-flight sibling tasks, so it cannot make that call itself.
+    # Always append (tool-always-appends-result) and always wake: every tool result
+    # is a stimulus, so the woken step runs and the model gets a turn to react to the
+    # completion — including a lone delivery confirmation (it may simply end the turn).
     await defer_wake(pool, body.session_id, cause="connector_tool_result", account_id=account_id)
     return event
 

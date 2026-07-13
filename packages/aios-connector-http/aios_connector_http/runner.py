@@ -154,21 +154,15 @@ def tool(
     at startup via ``PUT /v1/connectors/{connector}/tools_schema``;
     individual connections inherit it from the type catalog.
 
-    ``fire_and_forget`` declares the tool's result a *delivery
-    confirmation* the model has nothing to react to — a message send or
-    reaction whose only output is a ``{"sent_at_ms": N}`` ack.  A
-    *successful* result for such a tool is POSTed with ``no_reaction=true``
-    so aios appends it to the log (the model still sees it) but does NOT
-    wake the session to react to its own send (the duplicate-send loop).
-    A *failed* result always wakes regardless — the runner only sets
-    ``no_reaction`` on the post-success path.  Leave it ``False`` for
-    list/create/get/edit/delete tools whose results carry data the model
-    must consume — and, crucially, for any *precursor* action the model
-    calls before doing more work, such as a "typing…"/presence indicator.
-    Its result is benign, but it is the only thing that would wake the
-    follow-up step; suppressing it strands a typing-only turn idle, never
-    sending (#1121).  Rule of thumb: fire-and-forget iff the turn is *over*
-    after this tool — not merely "the result is uninteresting."
+    ``fire_and_forget`` declares the tool a *delivery* action — a message
+    send or reaction whose only output is a ``{"sent_at_ms": N}`` ack.  It
+    types a mid-dispatch failure as ``delivery_failed`` (#1722) so the model
+    can tell "my send attempt itself errored" from an ordinary tool
+    exception.  It no longer affects the wake decision: every tool result —
+    including a delivery ack — is a stimulus the session wakes to react to,
+    so the standard agentic loop (tool call → result → continue) holds for
+    connector sends too (#1919).  Leave it ``False`` for ordinary
+    list/create/get/edit/delete tools.
     """
 
     def _wrap(f: ToolFn) -> ToolFn:
@@ -1375,10 +1369,9 @@ class HttpConnector:
                 # (or was about to believe) the message was on its way. Typed
                 # ``delivery_failed`` so the model can distinguish "my send
                 # attempt itself errored" from an ordinary tool exception and
-                # decide whether to retry or re-target — it is NEVER silently
-                # dropped: this exception branch always sets ``is_error=True``
-                # below, and fire-and-forget's ``no_reaction`` suppression only
-                # ever applies to the SUCCESS path (see the completion branch).
+                # decide whether to retry or re-target — this exception branch
+                # always sets ``is_error=True`` below, so a failed send is a
+                # clear, typed result the session wakes to react to.
                 error_payload = {"error": str(exc), "code": "delivery_failed"}
                 reason = "delivery_failed"
             else:
@@ -1410,18 +1403,15 @@ class HttpConnector:
         # POSTed in its native list shape below.
         serialized_result = result if isinstance(result, str) else json.dumps(result)
         await self._mark_answered(tool_call_id, serialized_result)
-        # Post-success path only: a fire-and-forget tool's successful result
-        # is a delivery ack the model has nothing to react to, so flag it
-        # ``no_reaction`` to keep aios from waking the session to react to its
-        # own send (the duplicate-send loop).  The error branches above NEVER
-        # set this — a failed send always wakes.
+        # Every tool result is a stimulus (#1919): POST the successful result and
+        # let aios wake the session to react to the completion — including a bare
+        # delivery ack, which the model may simply acknowledge and end the turn.
         await self._post_tool_result(
             client,
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
             content=result,
-            no_reaction=meta.fire_and_forget,
         )
         log.info(
             "connector.tool_call.completed",
@@ -1588,14 +1578,8 @@ class HttpConnector:
         tool_call_id: str,
         content: str | list[dict[str, Any]],
         is_error: bool = False,
-        no_reaction: bool = False,
     ) -> None:
-        """POST one tool result via the generated runtime op.
-
-        ``no_reaction`` marks a successful fire-and-forget result so the
-        intake appends it without waking the session to react.  Only the
-        post-success caller sets it; the error callers leave it False.
-        """
+        """POST one tool result via the generated runtime op."""
         # The generated model's list branch is typed as
         # ``list[RuntimeToolResultRequestContentType1Item]``; that item type is
         # a thin ``additional_properties`` bag whose ``from_dict``/``to_dict``
@@ -1612,7 +1596,6 @@ class HttpConnector:
             tool_call_id=tool_call_id,
             content=body_content,
             is_error=is_error,
-            no_reaction=no_reaction,
         )
         response = await _post_runtime_tool_result(client=client, body=body)
         if response.status_code >= 400:

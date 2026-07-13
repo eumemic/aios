@@ -25,6 +25,7 @@ from .agent_version_litellm_extra import AgentVersionLitellmExtra
 from .agent_version_preempt_policy import AgentVersionPreemptPolicy
 from .allow_all import AllowAll
 from .allow_list import AllowList
+from .allow_senders import AllowSenders
 from .await_response import AwaitResponse
 from .await_response_error_type_0 import AwaitResponseErrorType0
 from .await_response_outcome_type_0 import AwaitResponseOutcomeType0
@@ -368,6 +369,7 @@ __all__ = (
     "AgentVersionPreemptPolicy",
     "AllowAll",
     "AllowList",
+    "AllowSenders",
     "AwaitingToolCall",
     "AwaitingToolCallKind",
     "AwaitResponse",

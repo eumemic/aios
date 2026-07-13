@@ -12,6 +12,12 @@ from pathlib import Path
 import pytest
 
 
+def test_dead_pipeline_max_setting_is_not_exposed() -> None:
+    from aios.config import Settings
+
+    assert "sandbox_pipeline_max_seconds" not in Settings.model_fields
+
+
 def test_workspace_root_must_be_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``AIOS_WORKSPACE_ROOT=./relative`` fails fast at process load.
 

@@ -22,6 +22,9 @@ import pytest
 from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
     AgentBinding,
+    HttpPermissionPolicy,
+    HttpRouteSpec,
+    HttpServerSpec,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -39,6 +42,7 @@ def _agent(
     *,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> StepSurface:
     return StepSurface(
         model="test/dummy",
@@ -46,7 +50,7 @@ def _agent(
         tools=tools or [],
         skills=[],
         mcp_servers=mcp_servers or [],
-        http_servers=[],
+        http_servers=http_servers or [],
         litellm_extra={},
         window_min=1000,
         window_max=100000,
@@ -280,6 +284,35 @@ class TestBuiltinInvoke:
         assert r.status_code == 200
         assert r.json() == {"content": "hello"}
 
+    async def test_route_refined_always_ask_is_refused(
+        self, broker: ToolBroker, hijack_tool: Any
+    ) -> None:
+        async def handler(_session_id: str, _arguments: dict[str, Any]) -> Any:
+            raise AssertionError("route-gated tool must not execute")
+
+        hijack_tool("web_search", handler)
+        tool_def = registry.get("web_search")
+        registry._tools["web_search"] = ToolDefinition(
+            name=tool_def.name,
+            description=tool_def.description,
+            parameters_schema=tool_def.parameters_schema,
+            handler=tool_def.handler,
+            transport=tool_def.transport,
+            classify_permission=lambda args, _agent: (
+                "always_ask" if args.get("protected") else "always_allow"
+            ),
+        )
+        broker.register_session("sess_X", "s")
+        agent = _agent(tools=[ToolSpec(type="web_search")])
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "web_search"),
+                    json={"arguments": {"protected": True}},
+                )
+        assert r.status_code == 403
+        assert "requires confirmation" in r.json()["error"]
+
     async def test_tool_result_is_error(
         self,
         broker: ToolBroker,
@@ -406,6 +439,34 @@ class TestBuiltinInvoke:
                 )
         assert r.status_code == 403
         assert "not CLI-reachable" in r.json()["error"]
+
+    async def test_route_refined_always_ask_403(self, broker: ToolBroker) -> None:
+        broker.register_session("sess_X", "s")
+        agent = _agent(
+            tools=[ToolSpec(type="http_request", permission="always_allow")],
+            http_servers=[
+                HttpServerSpec(
+                    name="api",
+                    base_url="https://api.example.com",
+                    routes=[
+                        HttpRouteSpec(
+                            path_pattern="/sensitive",
+                            permission_policy=HttpPermissionPolicy(type="always_ask"),
+                        )
+                    ],
+                )
+            ],
+        )
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "http_request"),
+                    json={
+                        "arguments": {"server_ref": "api", "path": "/sensitive", "method": "GET"}
+                    },
+                )
+        assert r.status_code == 403
+        assert "always_ask" in r.json()["error"]
 
     async def test_always_ask_403(self, broker: ToolBroker) -> None:
         broker.register_session("sess_X", "s")
