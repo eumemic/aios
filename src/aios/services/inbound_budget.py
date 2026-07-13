@@ -45,6 +45,7 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
+from aios.models.connections import inbound_orig_channel
 
 # The "inference-bearing inbound" shape, defined ONCE and shared by both
 # ``_count_recent_*`` counters (single-source rather than duplicated-by-
@@ -61,16 +62,6 @@ _INFERENCE_BEARING_PREDICATE = """
               (kind = 'message'   AND data->>'role' = 'user')
            OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE)
 """
-
-
-def inbound_orig_channel(connector: str, external_account_id: str, chat_id: str) -> str:
-    """Build the ``orig_channel`` key a ``role=user`` event is stamped with.
-
-    Mirrors ``_append_with_dedup``'s
-    ``f"{connector}/{external_account_id}/{chat_id}"`` so the budget window
-    counts exactly the rows the admitted-inbound append writes.
-    """
-    return f"{connector}/{external_account_id}/{chat_id}"
 
 
 async def _count_recent_inbounds(

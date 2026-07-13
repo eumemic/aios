@@ -28,7 +28,7 @@ import pytest
 from aios.api.routers.connectors import _inbound_drop_error
 from aios.config import Settings, get_settings
 from aios.errors import RateLimitedError
-from aios.models.connections import Connection
+from aios.models.connections import Connection, inbound_orig_channel
 from aios.models.inbound_policy import AllowAll
 from aios.services import inbound_budget
 from aios.services.inbound import (
@@ -39,7 +39,6 @@ from aios.services.inbound import (
 from aios.services.inbound_budget import (
     check_inbound_budget,
     check_inbound_budget_session,
-    inbound_orig_channel,
 )
 from aios_connector_http.runner import _is_fatal_inbound_status
 
