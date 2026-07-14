@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ from aios.sandbox.setup import (
     PACKAGE_REGISTRY_HOSTS,
     apply_network_lockdown,
     apply_secret_egress_dnat,
+    build_egress_dump_script,
     build_egress_refresh_script,
     build_egress_resolve_script,
     install_egress_ca,
@@ -116,11 +118,23 @@ class EgressRefreshState:
 
     credential_hosts: frozenset[str]
     limited_hosts: frozenset[str]
-    networking: object
     proxy_port: int
     proxy_ip: str
     runtime: str | None
     pinned: dict[str, dict[str, int]]
+
+
+# Parses one ``iptables -S OUTPUT`` rule line into the fields the refresh
+# subsystem owns. Matches ONLY the per-host shapes this subsystem installs and
+# refreshes — a single ``-d <ip>`` (iptables normalizes to ``/32``), tcp, and
+# an ACCEPT (filter allow, dport 80/443) or DNAT (nat swap, dport 443 with a
+# ``--to-destination``) verdict. Loopback/conntrack/DNS/policy lines and the
+# extra-host-port proxy ACCEPTs (non-80/443 dports) don't match.
+_EGRESS_RULE_RE = re.compile(
+    r"^-A OUTPUT -d (?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:/32)? -p tcp(?: -m tcp)? "
+    r"--dport (?P<port>\d+) -j (?P<verdict>ACCEPT|DNAT)"
+    r"(?: --to-destination (?P<target_ip>\d{1,3}(?:\.\d{1,3}){3}):(?P<target_port>\d+))?\s*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -648,6 +662,10 @@ class SandboxRegistry:
         Used by the partial-failure cleanup and the dead-handle recycle. Destroy
         errors are warnings (a teardown hiccup must never mask a primary error or
         block a recycle)."""
+        # The run's netns (and its rules) dies with the container — drop the
+        # egress-refresh stamp too, or the 30s sweep lock-cycles a ghost entry
+        # forever and the dict grows unbounded under run churn.
+        self._egress_states.pop(run_id, None)
         secret_proxy = self._secret_proxies.pop(run_id, None)
         if secret_proxy is not None:
             await self._stop_proxy_silently(secret_proxy, run_id, kind="secret_proxy")
@@ -668,13 +686,15 @@ class SandboxRegistry:
         The run-side analog of :meth:`release`, snapshot-free: a run sandbox has no
         durable rootfs, no proxies, and no pointer — so this is a bare
         ``backend.destroy`` + cache eviction + broker-secret drop, none of the
-        session snapshot/pointer/proxy machinery. Pops ``_handles``/``_last_used``
-        but (like ``release``) NOT ``_locks`` — a concurrent
+        session snapshot/pointer/proxy machinery. Pops
+        ``_handles``/``_last_used``/``_egress_states`` but (like ``release``)
+        NOT ``_locks`` — a concurrent
         :meth:`get_or_provision_run` holding the per-owner lock must keep finding it
         in the dict; the bounded one-lock-per-owner leak clears on worker restart.
         """
         handle = self._handles.pop(run_id, None)
         self._last_used.pop(run_id, None)
+        self._egress_states.pop(run_id, None)
         if handle is None:
             secret_proxy = self._secret_proxies.pop(run_id, None)
             if secret_proxy is not None:
@@ -771,22 +791,193 @@ class SandboxRegistry:
                 limited_hosts.update(networking.allowed_hosts)
                 if networking.allow_package_managers:
                     limited_hosts.update(PACKAGE_REGISTRY_HOSTS)
-            resolved = await self._resolve_egress_hosts(
-                handle, set(dnat_hosts) | limited_hosts, plan.spec.runtime
+            await self._stamp_egress_state(
+                handle,
+                credential_hosts=frozenset(dnat_hosts),
+                limited_hosts=frozenset(limited_hosts),
+                fallback_proxy_port=dnat_target[1],
+                runtime=plan.spec.runtime,
             )
-            proxy_ips = await self._resolve_egress_hosts(
-                handle, {WORKER_NETWORK_ALIAS}, plan.spec.runtime
+
+    async def _stamp_egress_state(
+        self,
+        handle: SandboxHandle,
+        *,
+        credential_hosts: frozenset[str],
+        limited_hosts: frozenset[str],
+        fallback_proxy_port: int,
+        runtime: str | None,
+    ) -> None:
+        """Seed the refresh state from the egress rules ACTUALLY installed.
+
+        The apply scripts resolve their hosts in-script (``resolve_ipv4``), so
+        a second stamp-time resolve can diverge from the installed rules under
+        short-TTL/round-robin DNS — leaving ``pinned`` disagreeing with the
+        table: an installed-but-untracked rule that eviction can never remove.
+        So the stamp reads the live rules back (``iptables -S`` / ``-t nat
+        -S``) and seeds ``pinned`` — and the DNAT ``--to-destination`` used
+        for future deletes — from them. A fresh resolve is still taken, but
+        only to ATTRIBUTE installed IPs to hosts; IPs it returns that have no
+        installed rule are NOT seeded (the first sweep tick installs them
+        through the refresh script instead).
+
+        Fail-closed: if the rules can't be read back (or the DNAT target is
+        ambiguous), the session is left UNSWEPT and a warning names it —
+        never a state stamped from unverified data.
+        """
+        resolved = await self._resolve_egress_hosts(
+            handle, set(credential_hosts) | set(limited_hosts), runtime
+        )
+        installed = await self._read_installed_egress_rules(handle, runtime)
+        if installed is None:
+            log.warning(
+                "sandbox.egress_refresh_unswept",
+                owner_id=handle.owner_id,
+                reason="rule_readback_failed",
             )
-            if proxy_ips.get(WORKER_NETWORK_ALIAS):
-                self._egress_states[handle.owner_id] = EgressRefreshState(
-                    credential_hosts=frozenset(dnat_hosts),
-                    limited_hosts=frozenset(limited_hosts),
-                    networking=networking,
-                    proxy_port=dnat_target[1],
-                    proxy_ip=sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0],
-                    runtime=plan.spec.runtime,
-                    pinned={host: {ip: 0 for ip in ips} for host, ips in resolved.items()},
+            return
+        dnat_ips, accept_ips, proxy_targets = installed
+        if len(proxy_targets) == 1:
+            proxy_ip, proxy_port = next(iter(proxy_targets))
+        elif proxy_targets:
+            # Multiple distinct --to-destination targets: the refresh deletes
+            # could only ever match one of them. Refuse to stamp (loudly)
+            # rather than track rules we cannot evict.
+            log.warning(
+                "sandbox.egress_refresh_unswept",
+                owner_id=handle.owner_id,
+                reason="ambiguous_dnat_target",
+                targets=sorted(f"{ip}:{port}" for ip, port in proxy_targets),
+            )
+            return
+        elif credential_hosts:
+            # Credential hosts but no installed DNAT rule: the provision
+            # verify (#984) should have failed before we got here. Leave the
+            # session unswept rather than stamp a proxy target we never saw.
+            log.warning(
+                "sandbox.egress_refresh_unswept",
+                owner_id=handle.owner_id,
+                reason="no_installed_dnat",
+            )
+            return
+        else:
+            # No credential hosts → no DNAT rules to read the proxy from (and
+            # none to refresh). Resolve the alias so limited-host ACCEPT
+            # refresh still runs; on a miss, leave the session unswept.
+            proxy_ips = await self._resolve_egress_hosts(handle, {WORKER_NETWORK_ALIAS}, runtime)
+            if not proxy_ips.get(WORKER_NETWORK_ALIAS):
+                log.warning(
+                    "sandbox.egress_refresh_unswept",
+                    owner_id=handle.owner_id,
+                    reason="proxy_alias_resolve_miss",
                 )
+                return
+            proxy_ip = sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0]
+            proxy_port = fallback_proxy_port
+        self._egress_states[handle.owner_id] = EgressRefreshState(
+            credential_hosts=credential_hosts,
+            limited_hosts=limited_hosts,
+            proxy_port=proxy_port,
+            proxy_ip=proxy_ip,
+            runtime=runtime,
+            pinned=self._seed_pinned_from_installed(
+                resolved,
+                credential_hosts=credential_hosts,
+                limited_hosts=limited_hosts,
+                dnat_ips=dnat_ips,
+                accept_ips=accept_ips,
+            ),
+        )
+
+    async def _read_installed_egress_rules(
+        self, handle: SandboxHandle, runtime: str | None
+    ) -> tuple[set[str], set[str], set[tuple[str, int]]] | None:
+        """Read back the per-host egress rules live in the sandbox netns.
+
+        Returns ``(dnat_ips, accept_ips, proxy_targets)`` — the destination
+        IPs carrying a nat-OUTPUT :443 DNAT, the destination IPs carrying a
+        filter-OUTPUT :80/:443 ACCEPT, and the set of distinct DNAT
+        ``--to-destination`` endpoints — or ``None`` when the read-back
+        sidecar itself failed (the caller leaves the session unswept).
+        """
+        settings = get_settings()
+        result = await self._backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_egress_dump_script(),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
+        )
+        if result.exit_code != 0:
+            return None
+        dnat_ips: set[str] = set()
+        accept_ips: set[str] = set()
+        proxy_targets: set[tuple[str, int]] = set()
+        section = ""
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line in ("=filter=", "=nat="):
+                section = line
+                continue
+            match = _EGRESS_RULE_RE.match(line)
+            if match is None:
+                continue
+            port = int(match.group("port"))
+            if (
+                section == "=nat="
+                and match.group("verdict") == "DNAT"
+                and port == 443
+                and match.group("target_ip") is not None
+            ):
+                dnat_ips.add(match.group("ip"))
+                proxy_targets.add((match.group("target_ip"), int(match.group("target_port"))))
+            elif section == "=filter=" and match.group("verdict") == "ACCEPT" and port in (80, 443):
+                accept_ips.add(match.group("ip"))
+        return dnat_ips, accept_ips, proxy_targets
+
+    @staticmethod
+    def _seed_pinned_from_installed(
+        resolved: dict[str, set[str]],
+        *,
+        credential_hosts: frozenset[str],
+        limited_hosts: frozenset[str],
+        dnat_ips: set[str],
+        accept_ips: set[str],
+    ) -> dict[str, dict[str, int]]:
+        """Attribute the installed rule IPs to hosts, seeding ``pinned``.
+
+        An installed IP is attributed to a host when that host's stamp-time
+        resolution returned it (and the rule shape matches the host's
+        category). Installed IPs NO host's resolution claims (the apply's
+        in-script resolve diverged from the stamp-time one) are attributed to
+        EVERY host of the matching category, so aging can still evict them —
+        the refresh script's idempotent deletes make any over-attributed
+        extra ``-D`` a harmless no-op.
+        """
+        pinned: dict[str, dict[str, int]] = {}
+        claimed_dnat: set[str] = set()
+        claimed_accept: set[str] = set()
+        for host in sorted(credential_hosts | limited_hosts):
+            ips: set[str] = set()
+            fresh = resolved.get(host, set())
+            if host in credential_hosts:
+                hit = fresh & dnat_ips
+                claimed_dnat |= hit
+                ips |= hit
+            if host in limited_hosts:
+                hit = fresh & accept_ips
+                claimed_accept |= hit
+                ips |= hit
+            pinned[host] = dict.fromkeys(sorted(ips), 0)
+        for host, ages in pinned.items():
+            if host in credential_hosts:
+                for ip in sorted(dnat_ips - claimed_dnat):
+                    ages.setdefault(ip, 0)
+            if host in limited_hosts:
+                for ip in sorted(accept_ips - claimed_accept):
+                    ages.setdefault(ip, 0)
+        return pinned
 
     async def _resolve_egress_hosts(
         self, handle: SandboxHandle, hosts: set[str], runtime: str | None
@@ -849,6 +1040,18 @@ class SandboxRegistry:
         )
         if result.exit_code == 0:
             state.pinned = candidate
+        else:
+            # Loud, not silent: `pinned` is deliberately NOT advanced, so the
+            # next tick retries the SAME old→new delta (the refresh script's
+            # idempotent adds/deletes make the retry safe). A repeating
+            # warning here is the operator signal that a session's egress
+            # refresh is wedged.
+            log.warning(
+                "sandbox.egress_refresh_apply_failed",
+                session_id=session_id,
+                exit_code=result.exit_code,
+                stderr=result.stderr[:500],
+            )
 
     async def _refresh_egress_once(self) -> None:
         for session_id, state in list(self._egress_states.items()):
