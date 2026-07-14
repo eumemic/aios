@@ -100,17 +100,17 @@ def test_telegram_connector_subclasses_http_connector() -> None:
     assert expected <= set(c._tools)
 
 
-def test_message_tools_are_fire_and_forget_but_typing_is_not() -> None:
-    """Categorization guard (#1121 review): ``fire_and_forget`` marks a
-    *terminal* delivery confirmation the model needn't react to, so the runtime
-    skips the re-wake (closing the duplicate-send loop). ``telegram_typing`` is
-    a *precursor* the model calls before slow work — it MUST stay a normal
-    (waking) tool, or a typing-only turn settles idle and never sends.
+def test_message_tools_are_delivery_but_typing_is_not() -> None:
+    """Categorization guard (#1121 review): ``delivery`` marks a
+    send or reaction whose body failures receive the typed ``delivery_failed``
+    classification. Every result still wakes the session. ``telegram_typing`` is
+    a precursor rather than a delivery action, so ordinary exceptions retain
+    their generic classification.
     """
     tools = TelegramConnector()._tools
-    assert tools["telegram_send"].fire_and_forget is True
-    assert tools["telegram_react"].fire_and_forget is True
-    assert tools["telegram_typing"].fire_and_forget is False
+    assert tools["telegram_send"].delivery is True
+    assert tools["telegram_react"].delivery is True
+    assert tools["telegram_typing"].delivery is False
 
 
 @pytest.fixture
