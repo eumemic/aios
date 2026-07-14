@@ -107,7 +107,7 @@ ToolFn = Callable[..., Awaitable[Any]]
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
-_TOOL_FAF_ATTR = "__aios_http_tool_fire_and_forget__"
+_TOOL_DELIVERY_ATTR = "__aios_http_tool_delivery__"
 _MGMT_ATTR = "__aios_http_management__"
 
 
@@ -141,7 +141,7 @@ def _is_fatal_inbound_status(status_code: int) -> bool:
 def tool(
     *,
     name: str | None = None,
-    fire_and_forget: bool = False,
+    delivery: bool = False,
 ) -> Callable[[ToolFn], ToolFn]:
     """Decorate a method as a connector tool.
 
@@ -154,7 +154,7 @@ def tool(
     at startup via ``PUT /v1/connectors/{connector}/tools_schema``;
     individual connections inherit it from the type catalog.
 
-    ``fire_and_forget`` declares the tool a *delivery* action — a message
+    ``delivery`` declares the tool a *delivery* action — a message
     send or reaction whose only output is a ``{"sent_at_ms": N}`` ack.  It
     types a mid-dispatch failure as ``delivery_failed`` (#1722) so the model
     can tell "my send attempt itself errored" from an ordinary tool
@@ -167,7 +167,7 @@ def tool(
 
     def _wrap(f: ToolFn) -> ToolFn:
         setattr(f, _TOOL_ATTR, name or f.__name__)
-        setattr(f, _TOOL_FAF_ATTR, fire_and_forget)
+        setattr(f, _TOOL_DELIVERY_ATTR, delivery)
         return f
 
     return _wrap
@@ -189,7 +189,7 @@ class _ToolMeta:
     # opaque ``TypeError: missing required keyword-only argument``.
     required_focal_params: frozenset[str]
     sandbox_params: tuple[tuple[str, str], ...]  # (param_name, "scalar" | "list")
-    fire_and_forget: bool = False
+    delivery: bool = False
 
 
 def management_handler(
@@ -1208,7 +1208,7 @@ class HttpConnector:
         with a typed ``{"code": "channel_unresolved"}`` error result
         instead of running the tool body against garbage state or
         letting it crash with an opaque exception (#1722).  A
-        fire-and-forget tool (send/react) whose body then raises for
+        delivery tool (send/react) whose body then raises for
         any other reason is reported as ``{"code": "delivery_failed"}``
         so the model can distinguish a failed send from an ordinary
         tool bug and retry/re-target — never silently dropped.
@@ -1362,8 +1362,8 @@ class HttpConnector:
                     "connection_id": connection_id,
                 }
                 reason = "connection_state_race"
-            elif meta.fire_and_forget:
-                # #1722: a fire-and-forget tool (a send/react — the turn is
+            elif meta.delivery:
+                # #1722: a delivery tool (a send/react — the turn is
                 # "over" once it runs) that raises mid-dispatch is a connector-side
                 # delivery failure, not a generic tool bug: the model believed
                 # (or was about to believe) the message was on its way. Typed
@@ -1654,13 +1654,13 @@ def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
         kind = _sandbox_path_kind(hint)
         if kind is not None:
             sandbox.append((param_name, kind))
-    fire_and_forget = bool(getattr(fn, _TOOL_FAF_ATTR, False))
+    delivery = bool(getattr(fn, _TOOL_DELIVERY_ATTR, False))
     return _ToolMeta(
         fn=fn,
         focal_params=focal,
         required_focal_params=required_focal,
         sandbox_params=tuple(sandbox),
-        fire_and_forget=fire_and_forget,
+        delivery=delivery,
     )
 
 

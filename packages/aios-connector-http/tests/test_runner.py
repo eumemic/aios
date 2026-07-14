@@ -74,15 +74,15 @@ class _ProbeConnector(HttpConnector):
         self.calls.append(("say_struct", {"n": n}))
         return {"doubled": n * 2}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def deliver(self, *, text: str) -> dict[str, int]:
-        """A fire-and-forget send: its result is a delivery ack."""
+        """A delivery send: its result is a delivery ack."""
         self.calls.append(("deliver", {"text": text}))
         return {"sent_at_ms": 123}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def deliver_boom(self) -> str:
-        """A fire-and-forget send that fails — its error must still wake."""
+        """A delivery send that fails — its error must still wake."""
         self.calls.append(("deliver_boom", {}))
         raise RuntimeError("delivery failed")
 
@@ -192,21 +192,21 @@ class TestDispatch:
         assert r.kwargs["is_error"] is True
 
 
-class TestFireAndForget:
-    """``@tool(fire_and_forget=True)`` marks a delivery action. Its result is
+class TestDelivery:
+    """``@tool(delivery=True)`` marks a delivery action. Its result is
     posted like any other — every tool result is a stimulus (#1919), so there
     is no wake-suppression flag on the wire. The flag only types a mid-dispatch
-    failure as ``delivery_failed`` (see ``TestFireAndForgetDeliveryFailure``)."""
+    failure as ``delivery_failed`` (see ``TestDeliveryFailure``)."""
 
-    async def test_meta_records_fire_and_forget(self, probe: _ProbeConnector) -> None:
+    async def test_meta_records_delivery(self, probe: _ProbeConnector) -> None:
         # The decorator freezes the flag onto the per-tool meta; a plain
         # ``@tool()`` tool stays False.
-        assert probe._tools["deliver"].fire_and_forget is True
-        assert probe._tools["deliver_boom"].fire_and_forget is True
-        assert probe._tools["shout"].fire_and_forget is False
-        assert probe._tools["say_struct"].fire_and_forget is False
+        assert probe._tools["deliver"].delivery is True
+        assert probe._tools["deliver_boom"].delivery is True
+        assert probe._tools["shout"].delivery is False
+        assert probe._tools["say_struct"].delivery is False
 
-    async def test_successful_fire_and_forget_posts_result(self, probe: _ProbeConnector) -> None:
+    async def test_successful_delivery_posts_result(self, probe: _ProbeConnector) -> None:
         # #1919: the delivery ack is posted like any other result — no
         # wake-suppression flag on the wire; the session wakes to react.
         await probe.dispatch_call(
@@ -638,12 +638,12 @@ class TestChannelUnresolved:
         assert r.kwargs["is_error"] is False
 
 
-class TestFireAndForgetDeliveryFailure:
-    """#1722: a fire-and-forget tool (send/react) whose body raises is a
+class TestDeliveryFailure:
+    """#1722: a delivery tool (send/react) whose body raises is a
     connector-side delivery failure — typed ``delivery_failed``, and it
     always wakes (every tool result is a stimulus, #1919)."""
 
-    async def test_fire_and_forget_exception_is_typed_delivery_failed(
+    async def test_delivery_exception_is_typed_delivery_failed(
         self, probe: _ProbeConnector
     ) -> None:
         await probe.dispatch_call(
@@ -661,7 +661,7 @@ class TestFireAndForgetDeliveryFailure:
         assert body["code"] == "delivery_failed"
         assert body["error"] == "delivery failed"
 
-    async def test_non_fire_and_forget_exception_is_not_delivery_failed(
+    async def test_non_delivery_exception_is_not_delivery_failed(
         self, probe: _ProbeConnector
     ) -> None:
         """A regular (non-send) tool's exception keeps the generic shape —
