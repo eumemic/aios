@@ -338,6 +338,55 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
     return lines
 
 
+def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
+    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP."""
+    lines = ["set -e", _RESOLVE_IPV4_FN]
+    for host in sorted(set(hosts)):
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
+    return _RESOLV_PREAMBLE + "\n".join(lines)
+
+
+def build_egress_refresh_script(
+    *,
+    old_ips: dict[str, set[str]],
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+    dnat_target: tuple[str, int],
+) -> str:
+    """Atomically refresh generated egress rules without flushing Docker's tables.
+
+    New rules are appended before superseded rules are deleted.  Every delete is
+    the exact inverse of a rule this subsystem owns; no table restore/flush can
+    disturb Docker's embedded-DNS chains or unrelated policy.
+    """
+    proxy_ip, proxy_port = dnat_target
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
+    for host in sorted(new_ips):
+        added = new_ips[host] - old_ips.get(host, set())
+        for ip in sorted(added):
+            if host in limited_hosts:
+                lines.append(f'"$IPT" -A OUTPUT -d {ip} -p tcp --dport 80 -j ACCEPT')
+                lines.append(f'"$IPT" -A OUTPUT -d {ip} -p tcp --dport 443 -j ACCEPT')
+            if host in credential_hosts:
+                lines.append(
+                    f'"$IPT" -t nat -A OUTPUT -d {ip} -p tcp --dport 443 '
+                    f"-j DNAT --to-destination {proxy_ip}:{proxy_port}"
+                )
+    for host in sorted(old_ips):
+        removed = old_ips[host] - new_ips.get(host, set())
+        for ip in sorted(removed):
+            if host in credential_hosts:
+                lines.append(
+                    f'"$IPT" -t nat -D OUTPUT -d {ip} -p tcp --dport 443 '
+                    f"-j DNAT --to-destination {proxy_ip}:{proxy_port}"
+                )
+            if host in limited_hosts:
+                lines.append(f'"$IPT" -D OUTPUT -d {ip} -p tcp --dport 80 -j ACCEPT')
+                lines.append(f'"$IPT" -D OUTPUT -d {ip} -p tcp --dport 443 -j ACCEPT')
+    return "\n".join(lines)
+
+
 def build_iptables_script(
     allowed_hosts: set[str],
     extra_host_ports: Sequence[tuple[str, int]] = (),

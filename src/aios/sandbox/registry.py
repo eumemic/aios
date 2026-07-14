@@ -57,8 +57,11 @@ from aios.sandbox.backends.base import (
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
+    PACKAGE_REGISTRY_HOSTS,
     apply_network_lockdown,
     apply_secret_egress_dnat,
+    build_egress_refresh_script,
+    build_egress_resolve_script,
     install_egress_ca,
     install_packages,
 )
@@ -103,6 +106,21 @@ _STOP_ALL_TIMEOUT_S = 8.0
 # GC reconciler tick interval (durable session sandboxes, §5.5): hourly, with
 # an immediate first tick at boot (replacing the old boot-time orphan reap).
 _GC_INTERVAL_SECONDS = 3600.0
+_EGRESS_REFRESH_INTERVAL_SECONDS = 30.0
+_EGRESS_EVICT_AFTER_SUCCESSES = 3
+
+
+@dataclass(slots=True)
+class EgressRefreshState:
+    """Provision-stamped inputs and bounded keep-last-good DNS state."""
+
+    credential_hosts: frozenset[str]
+    limited_hosts: frozenset[str]
+    networking: object
+    proxy_port: int
+    proxy_ip: str
+    runtime: str | None
+    pinned: dict[str, dict[str, int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +253,8 @@ class SandboxRegistry:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
+        self._egress_refresh_task: asyncio.Task[None] | None = None
+        self._egress_states: dict[str, EgressRefreshState] = {}
         # Consecutive salvage failures keyed by full corpse id. The value is
         # ``(owning_session_id, failures, alarmed)`` — the owning session is
         # stored so a salvage pass for one session only reconciles/clears its
@@ -745,6 +765,127 @@ class SandboxRegistry:
                 runtime=plan.spec.runtime,
             )
         # else: Unrestricted, no credentials → nothing (today's early return).
+        if dnat_target is not None:
+            limited_hosts: set[str] = set()
+            if isinstance(networking, LimitedNetworking):
+                limited_hosts.update(networking.allowed_hosts)
+                if networking.allow_package_managers:
+                    limited_hosts.update(PACKAGE_REGISTRY_HOSTS)
+            resolved = await self._resolve_egress_hosts(
+                handle, set(dnat_hosts) | limited_hosts, plan.spec.runtime
+            )
+            proxy_ips = await self._resolve_egress_hosts(
+                handle, {WORKER_NETWORK_ALIAS}, plan.spec.runtime
+            )
+            if proxy_ips.get(WORKER_NETWORK_ALIAS):
+                self._egress_states[handle.owner_id] = EgressRefreshState(
+                    credential_hosts=frozenset(dnat_hosts),
+                    limited_hosts=frozenset(limited_hosts),
+                    networking=networking,
+                    proxy_port=dnat_target[1],
+                    proxy_ip=sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0],
+                    runtime=plan.spec.runtime,
+                    pinned={host: {ip: 0 for ip in ips} for host, ips in resolved.items()},
+                )
+
+    async def _resolve_egress_hosts(
+        self, handle: SandboxHandle, hosts: set[str], runtime: str | None
+    ) -> dict[str, set[str]]:
+        settings = get_settings()
+        result = await self._backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_egress_resolve_script(hosts),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+            runtime=runtime,
+        )
+        if result.exit_code != 0:
+            return {}
+        resolved: dict[str, set[str]] = {host: set() for host in hosts}
+        for line in result.stdout.splitlines():
+            host, separator, ip = line.partition(" ")
+            if separator and host in resolved:
+                resolved[host].add(ip)
+        return resolved
+
+    async def _merge_egress_resolutions(
+        self, session_id: str, resolved: dict[str, set[str]]
+    ) -> None:
+        state = self._egress_states[session_id]
+        old = {host: set(ips) for host, ips in state.pinned.items()}
+        candidate = {host: dict(ips) for host, ips in state.pinned.items()}
+        for host, fresh in resolved.items():
+            if not fresh:
+                continue
+            ages = candidate.setdefault(host, {})
+            for ip in list(ages):
+                ages[ip] = 0 if ip in fresh else ages[ip] + 1
+                if ages[ip] >= _EGRESS_EVICT_AFTER_SUCCESSES:
+                    del ages[ip]
+            for ip in fresh:
+                ages[ip] = 0
+        new = {host: set(ips) for host, ips in candidate.items()}
+        if new == old:
+            state.pinned = candidate
+            return
+        handle = self._handles.get(session_id)
+        if handle is None:
+            return
+        settings = get_settings()
+        result = await self._backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_egress_refresh_script(
+                old_ips=old,
+                new_ips=new,
+                credential_hosts=set(state.credential_hosts),
+                limited_hosts=set(state.limited_hosts),
+                dnat_target=(state.proxy_ip, state.proxy_port),
+            ),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+            runtime=state.runtime,
+        )
+        if result.exit_code == 0:
+            state.pinned = candidate
+
+    async def _refresh_egress_once(self) -> None:
+        for session_id, state in list(self._egress_states.items()):
+            lock = self._lock_for(session_id)
+            if lock.locked():
+                continue
+            await lock.acquire()
+            try:
+                handle = self._handles.get(session_id)
+                if handle is not None:
+                    resolved = await self._resolve_egress_hosts(
+                        handle,
+                        set(state.credential_hosts) | set(state.limited_hosts),
+                        state.runtime,
+                    )
+                    await self._merge_egress_resolutions(session_id, resolved)
+            except Exception as err:
+                log.warning("sandbox.egress_refresh_skipped", session_id=session_id, error=str(err))
+            finally:
+                lock.release()
+
+    async def _egress_refresh_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_EGRESS_REFRESH_INTERVAL_SECONDS)
+            await self._refresh_egress_once()
+
+    def start_egress_refresh(self) -> asyncio.Task[None]:
+        if self._egress_refresh_task is None:
+            self._egress_refresh_task = asyncio.create_task(
+                self._egress_refresh_loop(), name="sandbox-egress-refresh"
+            )
+        return self._egress_refresh_task
+
+    def stop_egress_refresh(self) -> None:
+        if self._egress_refresh_task is not None:
+            self._egress_refresh_task.cancel()
+            self._egress_refresh_task = None
 
     async def _stop_proxy_silently(
         self, proxy: GitProxy | SecretEgressProxy, session_id: str, *, kind: str
@@ -1244,6 +1385,7 @@ class SandboxRegistry:
 
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
+        self._egress_states.pop(session_id, None)
         # NOTE: do NOT pop self._locks[session_id] here.  The two
         # release()-callers (``release_if_mounts_changed`` and the
         # idle reaper) wrap this call in ``async with
@@ -1348,6 +1490,7 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         self._last_used.pop(session_id, None)
+        self._egress_states.pop(session_id, None)
         # NOTE: do NOT pop self._locks[session_id] here either — same
         # reason as ``release()``.  A concurrent ``get_or_provision``
         # that is already inside ``async with self._lock_for(sid)``
@@ -1404,6 +1547,7 @@ class SandboxRegistry:
             self._release_tool_broker_secret(h.owner_id)
         self._handles.clear()
         self._last_used.clear()
+        self._egress_states.clear()
         self._locks.clear()
         self._git_proxies.clear()
         self._secret_proxies.clear()
