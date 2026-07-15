@@ -97,6 +97,8 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         workflow_id=row["workflow_id"],
         account_id=row["account_id"],
         environment_id=row["environment_id"],
+        workspace=row.get("workspace_mode", "fresh"),
+        workspace_path=row.get("workspace_path"),
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         depth=row["depth"],
@@ -643,6 +645,8 @@ async def insert_wf_run(
     budget_usd: float | None = None,
     default_child_model: str | None = None,
     depth: int,
+    workspace: str = "fresh",
+    workspace_path: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -671,12 +675,13 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, request_id, caller, request_output_schema,
+                 workspace_mode, workspace_path,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13,
-                    'pending', $14::jsonb,
-                    $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20, $21)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
+                    'pending', $16::jsonb,
+                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -689,6 +694,8 @@ async def insert_wf_run(
             request_id,
             json.dumps(caller) if caller is not None else None,
             json.dumps(request_output_schema) if request_output_schema is not None else None,
+            workspace,
+            workspace_path,
             script,
             script_sha,
             source_version,

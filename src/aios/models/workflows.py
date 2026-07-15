@@ -30,6 +30,8 @@ from aios.models.agents import (
     validate_tools,
 )
 
+WorkspaceMode = Literal["shared", "fresh"]
+
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
     "run_started",
@@ -164,6 +166,8 @@ class WfRun(BaseModel):
     workflow_id: str | None = None
     account_id: str
     environment_id: str  # the run binds to an environment; agent() children inherit it
+    workspace: WorkspaceMode = "fresh"
+    workspace_path: str | None = None
     # Lineage + the vertical depth cap's walk key. Set by nested workflow()
     # launches AND by trigger fires (#819): a run_completion fire threads the
     # completing run's id, a timer fire threads the owner session's own parent
@@ -466,6 +470,10 @@ class WfRunCreate(BaseModel):
         ),
     )
     environment_id: str
+    workspace: WorkspaceMode = Field(
+        default="fresh",
+        description="Workspace mode. HTTP launches default to a fresh run workspace.",
+    )
     version: int | None = Field(
         default=None,
         ge=1,

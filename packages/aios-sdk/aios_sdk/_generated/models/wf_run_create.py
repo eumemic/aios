@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.wf_run_create_workspace import WfRunCreateWorkspace
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -38,6 +39,8 @@ class WfRunCreate:
                 Omit when launching an inline one-shot run.
             inline (InlineScriptBody | None | Unset): Inline-script body for an anonymous one-shot run (T5). Supply EITHER
                 this or `workflow_id` (exactly one). No `workflows` row is created.
+            workspace (WfRunCreateWorkspace | Unset): Workspace mode. HTTP launches default to a fresh run workspace.
+                Default: WfRunCreateWorkspace.FRESH.
             version (int | None | Unset): Optional historical workflow version to run. `None` (default) launches the
                 workflow's CURRENT version. An integer re-runs that specific version: the run snapshots that version's script +
                 declared surface (clamped against the current launcher's authority) and binds `source_version` to it. Launching
@@ -53,6 +56,7 @@ class WfRunCreate:
     environment_id: str
     workflow_id: None | str | Unset = UNSET
     inline: InlineScriptBody | None | Unset = UNSET
+    workspace: WfRunCreateWorkspace | Unset = WfRunCreateWorkspace.FRESH
     version: int | None | Unset = UNSET
     input_: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
@@ -77,6 +81,10 @@ class WfRunCreate:
             inline = self.inline.to_dict()
         else:
             inline = self.inline
+
+        workspace: str | Unset = UNSET
+        if not isinstance(self.workspace, Unset):
+            workspace = self.workspace.value
 
         version: int | None | Unset
         if isinstance(self.version, Unset):
@@ -113,6 +121,8 @@ class WfRunCreate:
             field_dict["workflow_id"] = workflow_id
         if inline is not UNSET:
             field_dict["inline"] = inline
+        if workspace is not UNSET:
+            field_dict["workspace"] = workspace
         if version is not UNSET:
             field_dict["version"] = version
         if input_ is not UNSET:
@@ -159,6 +169,13 @@ class WfRunCreate:
 
         inline = _parse_inline(d.pop("inline", UNSET))
 
+        _workspace = d.pop("workspace", UNSET)
+        workspace: WfRunCreateWorkspace | Unset
+        if isinstance(_workspace, Unset):
+            workspace = UNSET
+        else:
+            workspace = WfRunCreateWorkspace(_workspace)
+
         def _parse_version(data: object) -> int | None | Unset:
             if data is None:
                 return data
@@ -196,6 +213,7 @@ class WfRunCreate:
             environment_id=environment_id,
             workflow_id=workflow_id,
             inline=inline,
+            workspace=workspace,
             version=version,
             input_=input_,
             vault_ids=vault_ids,

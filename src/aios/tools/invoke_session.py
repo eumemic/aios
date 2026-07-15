@@ -49,7 +49,7 @@ re-dispatch. Single-shot is the per-call contract.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -125,6 +125,10 @@ class _CallWorkflowArgs(BaseModel):
         ),
     )
     input: Any = Field(default=None, description="The run input (JSON or a string).")
+    workspace: Literal["shared", "fresh"] = Field(
+        default="shared",
+        description="Share this session workspace live, or use a fresh empty run workspace.",
+    )
     output_schema: dict[str, Any] | None = Field(
         default=None,
         description="Optional JSON Schema the run output must satisfy (validated fail-loud).",
@@ -364,6 +368,7 @@ async def call_workflow_handler(
         parent_run_id=session.parent_run_id,
         vault_ids=args.vault_ids,
         budget_usd=args.budget_usd,
+        workspace=args.workspace,
     )
     return await _park_and_resolve(
         pool,

@@ -9,6 +9,7 @@ from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
 from ..models.wf_run_status import WfRunStatus
+from ..models.wf_run_workspace import WfRunWorkspace
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -55,6 +56,8 @@ class WfRun:
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
             workflow_id (None | str | Unset):
+            workspace (WfRunWorkspace | Unset):  Default: WfRunWorkspace.FRESH.
+            workspace_path (None | str | Unset):
             parent_run_id (None | str | Unset):
             launcher_session_id (None | str | Unset):
             depth (int | Unset):  Default: 0.
@@ -85,6 +88,8 @@ class WfRun:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     workflow_id: None | str | Unset = UNSET
+    workspace: WfRunWorkspace | Unset = WfRunWorkspace.FRESH
+    workspace_path: None | str | Unset = UNSET
     parent_run_id: None | str | Unset = UNSET
     launcher_session_id: None | str | Unset = UNSET
     depth: int | Unset = 0
@@ -136,6 +141,16 @@ class WfRun:
             workflow_id = UNSET
         else:
             workflow_id = self.workflow_id
+
+        workspace: str | Unset = UNSET
+        if not isinstance(self.workspace, Unset):
+            workspace = self.workspace.value
+
+        workspace_path: None | str | Unset
+        if isinstance(self.workspace_path, Unset):
+            workspace_path = UNSET
+        else:
+            workspace_path = self.workspace_path
 
         parent_run_id: None | str | Unset
         if isinstance(self.parent_run_id, Unset):
@@ -252,6 +267,10 @@ class WfRun:
         )
         if workflow_id is not UNSET:
             field_dict["workflow_id"] = workflow_id
+        if workspace is not UNSET:
+            field_dict["workspace"] = workspace
+        if workspace_path is not UNSET:
+            field_dict["workspace_path"] = workspace_path
         if parent_run_id is not UNSET:
             field_dict["parent_run_id"] = parent_run_id
         if launcher_session_id is not UNSET:
@@ -329,6 +348,22 @@ class WfRun:
             return cast(None | str | Unset, data)
 
         workflow_id = _parse_workflow_id(d.pop("workflow_id", UNSET))
+
+        _workspace = d.pop("workspace", UNSET)
+        workspace: WfRunWorkspace | Unset
+        if isinstance(_workspace, Unset):
+            workspace = UNSET
+        else:
+            workspace = WfRunWorkspace(_workspace)
+
+        def _parse_workspace_path(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        workspace_path = _parse_workspace_path(d.pop("workspace_path", UNSET))
 
         def _parse_parent_run_id(data: object) -> None | str | Unset:
             if data is None:
@@ -509,6 +544,8 @@ class WfRun:
             created_at=created_at,
             updated_at=updated_at,
             workflow_id=workflow_id,
+            workspace=workspace,
+            workspace_path=workspace_path,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             depth=depth,

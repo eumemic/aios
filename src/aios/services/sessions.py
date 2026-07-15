@@ -430,6 +430,7 @@ class AskNewSession:
     output_schema: dict[str, Any] | None = None
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
+    workspace_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -456,6 +457,7 @@ class TellNewSession:
     input: Any
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
+    workspace_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -595,6 +597,7 @@ async def create_child_session(
             mcp_servers=stim.surface.mcp_servers,
             http_servers=stim.surface.http_servers,
             litellm_extra=stim.litellm_extra or {},
+            workspace_path=stim.workspace_path,
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request

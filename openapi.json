@@ -19233,6 +19233,26 @@
             "type": "string",
             "title": "Environment Id"
           },
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "fresh"
+            ],
+            "title": "Workspace",
+            "default": "fresh"
+          },
+          "workspace_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Path"
+          },
           "parent_run_id": {
             "anyOf": [
               {
@@ -19466,6 +19486,16 @@
           "environment_id": {
             "type": "string",
             "title": "Environment Id"
+          },
+          "workspace": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "fresh"
+            ],
+            "title": "Workspace",
+            "description": "Workspace mode. HTTP launches default to a fresh run workspace.",
+            "default": "fresh"
           },
           "version": {
             "anyOf": [

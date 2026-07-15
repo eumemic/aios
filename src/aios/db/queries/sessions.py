@@ -292,6 +292,7 @@ async def insert_child_session(
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
     litellm_extra: dict[str, Any] | None = None,
+    workspace_path: str | None = None,
 ) -> Session | None:
     """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
 
@@ -312,7 +313,7 @@ async def insert_child_session(
     The caller delivers the agent input and copies the run's vaults in the same
     transaction.
     """
-    workspace_path = _default_workspace_path(account_id, session_id)
+    workspace_path = workspace_path or _default_workspace_path(account_id, session_id)
     try:
         row = await conn.fetchrow(
             """

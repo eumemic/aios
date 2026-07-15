@@ -12,7 +12,12 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
-from aios.db.queries import get_environment, get_session_bare, get_session_vault_ids
+from aios.db.queries import (
+    get_environment,
+    get_session_bare,
+    get_session_vault_ids,
+    get_session_workspace_path,
+)
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     AiosError,
@@ -22,6 +27,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.ids import WORKFLOW_RUN, make_id
 from aios.jobs.app import defer_run_wake
 from aios.models.agents import (
     HttpServerRef,
@@ -187,6 +193,7 @@ async def create_run(
     version: int | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
+    workspace: str = "fresh",
 ) -> WfRun:
     """Create a run that snapshots a script, then wake it.
 
@@ -274,6 +281,7 @@ async def create_run(
             "(an inline run has no workflow version history)",
         )
     requested = list(vault_ids or [])
+    effective_run_id = run_id or make_id(WORKFLOW_RUN)
     # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
     # #835: the launcher's effective surface is read INSIDE the run transaction (below),
     # threading `conn` into load_for_session — the same consistency point as the vault
@@ -311,6 +319,17 @@ async def create_run(
             )
             launcher_surface = surface_of(launcher_agent)
             run_default_child_model = launcher_agent.model
+            workspace_path = (
+                await get_session_workspace_path(conn, launcher_session_id, account_id=account_id)
+                if workspace == "shared"
+                else None
+            )
+        else:
+            workspace_path = None
+        if workspace == "fresh":
+            workspace_path = str(
+                (get_settings().workspace_root / account_id / "_runs" / effective_run_id).resolve()
+            )
         source_version: int | None
         if inline is not None:
             # ── inline-script arm (T5, #1466) ──────────────────────────────────
@@ -454,7 +473,9 @@ async def create_run(
             account_id=account_id,
             workflow_id=workflow_id,
             environment_id=environment_id,
-            run_id=run_id,
+            workspace=workspace,
+            workspace_path=workspace_path,
+            run_id=effective_run_id,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             request_id=request_id,
