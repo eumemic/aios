@@ -86,14 +86,12 @@ async def defer_obligations_handler(
     1. Parse + clamp via the shared ``schedule_wake._resolve_fire_at`` (the
        ``>= 1`` floor, the ceiling, the typed error) and convert the absolute
        fire time back to a remaining-seconds timeout.
-    2. Subscribe to the session's own event channel BEFORE reading the baseline
-       (the LISTEN-before-read invariant: a stimulus landing between the
-       baseline read and the park is already queued, so it can't be missed).
-    3. Capture ``baseline = last_stimulus_seq`` — inbound stimuli only, so the
-       wait wakes on a real message, not the span bookkeeping this very step
-       writes (the channel NOTIFYs on *every* append).
-    4. ``await_completion`` until ``last_stimulus_seq > baseline`` or the
-       remaining duration elapses.
+    2. Capture ``baseline = last_stimulus_seq`` before subscribing — inbound
+       stimuli only, so the wait wakes on a real message, not span bookkeeping.
+    3. Subscribe to the session's event channel. ``await_completion`` performs
+       an immediate catch-up read before blocking on notifications, closing the
+       baseline-to-LISTEN gap without absorbing a queued stimulus into baseline.
+    4. Wait until ``last_stimulus_seq > baseline`` or the duration elapses.
     """
     try:
         args = _DeferObligationsArgs.model_validate(arguments)
@@ -114,6 +112,11 @@ async def defer_obligations_handler(
             wm = await queries.read_session_watermarks(conn, session_id, account_id=account_id)
             return wm[1] if wm is not None else 0  # last_stimulus_seq
 
+    # Read the watermark before LISTEN.  A stimulus in the subsequent setup gap
+    # is observed by await_completion's immediate catch-up read; a later one is
+    # covered by LISTEN.  Reading baseline after LISTEN would absorb the former.
+    baseline = await _read_last_stimulus_seq()
+
     # ``on_connected=None`` deliberately OMITS the #81 subscriber advisory lock:
     # this park consumes only the stimulus watermark, never streaming deltas —
     # same stance as ``await_session`` / ``open_listen_for_run_events``.
@@ -121,7 +124,6 @@ async def defer_obligations_handler(
         get_settings().db_url, session_id, on_connected=None
     )
     try:
-        baseline = await _read_last_stimulus_seq()
         last_seq = await await_completion(
             subscription.queue,
             read_state=_read_last_stimulus_seq,

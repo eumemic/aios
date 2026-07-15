@@ -40,6 +40,7 @@ import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.db import queries
+from aios.db.listen import open_listen_for_events as real_open_listen_for_events
 from aios.db.pool import create_pool
 from aios.harness import runtime
 from aios.harness.inflight_tool_registry import InflightToolRegistry
@@ -274,6 +275,40 @@ async def test_inbound_stimulus_resolves_early(
 
     results = await _wait_for_result(pool, sid, "tc_stim", deadline_seconds=15)
     assert len(results) == 1  # exactly one tool-role event — no parallel re-launch
+    assert results[0].get("is_error") is not True
+    assert json.loads(results[0]["content"]) == {"deferred": True, "resolved": "stimulus"}
+
+
+async def test_stimulus_between_baseline_and_listen_is_not_lost(
+    env: tuple[asyncpg.Pool[Any], str], monkeypatch: Any
+) -> None:
+    """A stimulus in the baseline-to-LISTEN setup gap is caught by the
+    immediate state re-read, even though the new subscription cannot receive
+    its already-committed notification."""
+    pool, account_id = env
+    sid = await _seed_session(pool, "setup-gap")
+
+    async def _stimulate_then_listen(*args: Any, **kwargs: Any) -> Any:
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id=account_id,
+                session_id=sid,
+                kind="message",
+                data={"role": "user", "content": "arrived before LISTEN"},
+            )
+        return await real_open_listen_for_events(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "aios.tools.defer_obligations.open_listen_for_events", _stimulate_then_listen
+    )
+
+    call = _defer_call("tc_setup_gap", 600)
+    await _append_defer_turn(pool, sid, call)
+    launch_tool_calls(pool, sid, [call], account_id=account_id)
+
+    results = await _wait_for_result(pool, sid, "tc_setup_gap", deadline_seconds=15)
+    assert len(results) == 1
     assert results[0].get("is_error") is not True
     assert json.loads(results[0]["content"]) == {"deferred": True, "resolved": "stimulus"}
 
