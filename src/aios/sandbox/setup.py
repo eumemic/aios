@@ -338,6 +338,91 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
     return lines
 
 
+def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
+    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP."""
+    lines = ["set -e", _RESOLVE_IPV4_FN]
+    for host in sorted(set(hosts)):
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
+    return _RESOLV_PREAMBLE + "\n".join(lines)
+
+
+def build_egress_refresh_script(
+    *,
+    old_ips: dict[str, set[str]],
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+    dnat_target: tuple[str, int],
+) -> str:
+    """Atomically refresh generated egress rules without flushing Docker's tables.
+
+    New rules are appended before superseded rules are deleted.  Every delete is
+    the exact inverse of a rule this subsystem owns; no table restore/flush can
+    disturb Docker's embedded-DNS chains or unrelated policy.
+
+    Every operation is **idempotent** so a retried old→new delta never wedges
+    under ``set -e`` and never accumulates duplicate rules: adds are guarded by
+    an ``iptables -C`` existence check (append only when absent), and deletes
+    tolerate an already-absent rule (``-D … || true``). A genuine ``-A``
+    failure still aborts the script loudly (nonzero exit) so the caller keeps
+    its last-good ``pinned`` state and retries the same delta next tick.
+    """
+
+    def _add(table_flag: str, rule: str) -> str:
+        # Append-if-absent: -C exits 0 when the rule exists (skip the -A),
+        # nonzero otherwise (2>/dev/null silences its "Bad rule" noise).
+        return f'"$IPT"{table_flag} -C OUTPUT {rule} 2>/dev/null || "$IPT"{table_flag} -A OUTPUT {rule}'
+
+    def _delete(table_flag: str, rule: str) -> str:
+        # Delete-if-present: an already-absent rule must never abort the
+        # script (set -e) — the delta may be a retry of a partial apply.
+        return f'"$IPT"{table_flag} -D OUTPUT {rule} 2>/dev/null || true'
+
+    proxy_ip, proxy_port = dnat_target
+    # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
+    # DNAT shape so -C/-D match the installed rules exactly.
+    dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
+    for host in sorted(new_ips):
+        added = new_ips[host] - old_ips.get(host, set())
+        for ip in sorted(added):
+            if host in limited_hosts:
+                lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+            if host in credential_hosts:
+                lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
+    for host in sorted(old_ips):
+        removed = old_ips[host] - new_ips.get(host, set())
+        for ip in sorted(removed):
+            if host in credential_hosts:
+                lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
+            if host in limited_hosts:
+                lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+                lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    return "\n".join(lines)
+
+
+def build_egress_dump_script() -> str:
+    """Dump the netns's live OUTPUT rules (filter + nat) with section markers.
+
+    Run at provision time, AFTER the apply sidecar, so the refresh state's
+    ``pinned`` set can be seeded from the rules **actually installed** rather
+    than from a second DNS resolve that may diverge from the apply script's
+    own in-script ``resolve_ipv4`` (short-TTL/round-robin DNS). Read-only —
+    never mutates the tables.
+    """
+    return "\n".join(
+        [
+            "set -e",
+            _IPTABLES_BACKEND_SELECT,
+            "echo '=filter='",
+            '"$IPT" -S OUTPUT',
+            "echo '=nat='",
+            '"$IPT" -t nat -S OUTPUT',
+        ]
+    )
+
+
 def build_iptables_script(
     allowed_hosts: set[str],
     extra_host_ports: Sequence[tuple[str, int]] = (),
