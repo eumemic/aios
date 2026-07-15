@@ -3272,7 +3272,7 @@
           "sessions"
         ],
         "summary": "List Events",
-        "description": "List a session's events by sequence number.\n\nFirst page: ``?dir=forward|backward`` (default forward) + optional\n``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /\n``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:\n``?cursor=<next_cursor>`` \u2014 the token carries direction and filters, so no\nother params are accepted alongside it. ``forward`` walks oldest\u2192newest;\n``backward`` loads the newest-first tail and pages into the past.\n\nChannel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose\nresolved ``channel == C`` (including the outbound tool-RESULT rows for that\nchannel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on\nthe channel address (UUID/numeric \u21d2 dm, base64/negative \u21d2 group). The\nresponse includes ``channel`` + ``orig_channel`` on each item.\n\nTransient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"\n\u2014 it only means no events match this page (e.g. a forward read past the\ncurrent tail, or back-to-back polls racing the writer under load). Page by\n``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.\n\nSchema (#1140): each item is a session event ``{kind, data, seq}``\n(``kind`` \u2208 message/lifecycle/span/interrupt) \u2014 a DIFFERENT shape from a\n*run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See\n``docs/reference/run-observability.md``.",
+        "description": "List a session's events by sequence number.\n\nFirst page: ``?dir=forward|backward`` (default forward) + optional\nexclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /\n``?error_only=`` / ``?channel=`` (repeatable, OR) /\n``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:\n``?cursor=<next_cursor>`` \u2014 the token carries direction and filters, so no\nother params are accepted alongside it. ``forward`` walks oldest\u2192newest;\n``backward`` loads the newest-first tail and pages into the past.\n\nChannel/chat_type filter (#1613): ``?channel=C`` returns ONLY events whose\nresolved ``channel == C`` (including the outbound tool-RESULT rows for that\nchannel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on\nthe channel address (UUID/numeric \u21d2 dm, base64/negative \u21d2 group). The\nresponse includes ``channel`` + ``orig_channel`` on each item.\n\nAudit readers should persist a processed-through sequence watermark, resume\nwith ``after_seq``, and assert that returned sequence numbers provide gapless\ncoverage of the requested frozen window as their client-side completeness gate.\n\nTransient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"\n\u2014 it only means no events match this page (e.g. a forward read past the\ncurrent tail, or back-to-back polls racing the writer under load). Page by\n``seq`` and treat an empty page as \"nothing new yet,\" not as a cleared log.\n\nSchema (#1140): each item is a session event ``{kind, data, seq}``\n(``kind`` \u2208 message/lifecycle/span/interrupt) \u2014 a DIFFERENT shape from a\n*run* event (``{type, payload, seq}`` on ``/v1/runs/{id}/events``). See\n``docs/reference/run-observability.md``.",
         "operationId": "list_session_events",
         "parameters": [
           {
@@ -3298,6 +3298,40 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Seq"
+            }
+          },
+          {
+            "name": "before_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Seq"
             }
           },
           {
