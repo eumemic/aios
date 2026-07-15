@@ -1,12 +1,15 @@
 """Persist workflow workspace mode and live bind pointer.
 
-Revision ID: 0150
+Revision ID: 0151
 Revises: 0149
 """
 from __future__ import annotations
+
 from collections.abc import Sequence
+
 from alembic import op
-revision: str = "0150"
+
+revision: str = "0151"
 down_revision: str = "0149"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

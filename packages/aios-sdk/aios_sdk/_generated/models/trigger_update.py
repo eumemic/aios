@@ -73,13 +73,7 @@ class TriggerUpdate:
         source: dict[str, Any] | None | Unset
         if isinstance(self.source, Unset):
             source = UNSET
-        elif isinstance(self.source, CronSource):
-            source = self.source.to_dict()
-        elif isinstance(self.source, OneShotSource):
-            source = self.source.to_dict()
-        elif isinstance(self.source, RunCompletionSourceReplace):
-            source = self.source.to_dict()
-        elif isinstance(self.source, ExternalEventSource):
+        elif isinstance(self.source, CronSource) or isinstance(self.source, OneShotSource) or isinstance(self.source, RunCompletionSourceReplace) or isinstance(self.source, ExternalEventSource):
             source = self.source.to_dict()
         else:
             source = self.source
@@ -87,13 +81,7 @@ class TriggerUpdate:
         action: dict[str, Any] | None | Unset
         if isinstance(self.action, Unset):
             action = UNSET
-        elif isinstance(self.action, SandboxCommandActionReplace):
-            action = self.action.to_dict()
-        elif isinstance(self.action, WakeOwnerAction):
-            action = self.action.to_dict()
-        elif isinstance(self.action, WakeSessionAction):
-            action = self.action.to_dict()
-        elif isinstance(self.action, WorkflowActionReplace):
+        elif isinstance(self.action, SandboxCommandActionReplace) or isinstance(self.action, WakeOwnerAction) or isinstance(self.action, WakeSessionAction) or isinstance(self.action, WorkflowActionReplace):
             action = self.action.to_dict()
         else:
             action = self.action

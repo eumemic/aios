@@ -32,11 +32,7 @@ def _get_kwargs(
         ),
     }
 
-    if isinstance(body, AllowAll):
-        _kwargs["json"] = body.to_dict()
-    elif isinstance(body, AllowList):
-        _kwargs["json"] = body.to_dict()
-    elif isinstance(body, AllowSenders):
+    if isinstance(body, AllowAll) or isinstance(body, AllowList) or isinstance(body, AllowSenders):
         _kwargs["json"] = body.to_dict()
     else:
         _kwargs["json"] = body.to_dict()
