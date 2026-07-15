@@ -145,7 +145,13 @@ class Connection:
         inbound_policy: dict[str, Any] | None | Unset
         if isinstance(self.inbound_policy, Unset):
             inbound_policy = UNSET
-        elif isinstance(self.inbound_policy, AllowAll) or isinstance(self.inbound_policy, AllowList) or isinstance(self.inbound_policy, AllowSenders) or isinstance(self.inbound_policy, DenyAll):
+        elif isinstance(self.inbound_policy, AllowAll):
+            inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, AllowList):
+            inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, AllowSenders):
+            inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, DenyAll):
             inbound_policy = self.inbound_policy.to_dict()
         else:
             inbound_policy = self.inbound_policy
@@ -153,7 +159,11 @@ class Connection:
         inbound_policy_effective: dict[str, Any] | Unset
         if isinstance(self.inbound_policy_effective, Unset):
             inbound_policy_effective = UNSET
-        elif isinstance(self.inbound_policy_effective, AllowAll) or isinstance(self.inbound_policy_effective, AllowList) or isinstance(self.inbound_policy_effective, AllowSenders):
+        elif isinstance(self.inbound_policy_effective, AllowAll):
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+        elif isinstance(self.inbound_policy_effective, AllowList):
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+        elif isinstance(self.inbound_policy_effective, AllowSenders):
             inbound_policy_effective = self.inbound_policy_effective.to_dict()
         else:
             inbound_policy_effective = self.inbound_policy_effective.to_dict()

@@ -85,13 +85,21 @@ class TriggerCreated:
         name = self.name
 
         source: dict[str, Any]
-        if isinstance(self.source, CronSource) or isinstance(self.source, OneShotSource) or isinstance(self.source, RunCompletionSource):
+        if isinstance(self.source, CronSource):
+            source = self.source.to_dict()
+        elif isinstance(self.source, OneShotSource):
+            source = self.source.to_dict()
+        elif isinstance(self.source, RunCompletionSource):
             source = self.source.to_dict()
         else:
             source = self.source.to_dict()
 
         action: dict[str, Any]
-        if isinstance(self.action, SandboxCommandAction) or isinstance(self.action, WakeOwnerAction) or isinstance(self.action, WakeSessionAction):
+        if isinstance(self.action, SandboxCommandAction):
+            action = self.action.to_dict()
+        elif isinstance(self.action, WakeOwnerAction):
+            action = self.action.to_dict()
+        elif isinstance(self.action, WakeSessionAction):
             action = self.action.to_dict()
         else:
             action = self.action.to_dict()

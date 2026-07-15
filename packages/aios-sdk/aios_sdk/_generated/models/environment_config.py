@@ -82,7 +82,9 @@ class EnvironmentConfig:
         networking: dict[str, Any] | None | Unset
         if isinstance(self.networking, Unset):
             networking = UNSET
-        elif isinstance(self.networking, UnrestrictedNetworking) or isinstance(self.networking, LimitedNetworking):
+        elif isinstance(self.networking, UnrestrictedNetworking):
+            networking = self.networking.to_dict()
+        elif isinstance(self.networking, LimitedNetworking):
             networking = self.networking.to_dict()
         else:
             networking = self.networking

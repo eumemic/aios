@@ -124,7 +124,11 @@ class VaultCredentialCreate:
         token_endpoint_auth: dict[str, Any] | None | Unset
         if isinstance(self.token_endpoint_auth, Unset):
             token_endpoint_auth = UNSET
-        elif isinstance(self.token_endpoint_auth, TokenEndpointAuthNone) or isinstance(self.token_endpoint_auth, TokenEndpointAuthBasic) or isinstance(self.token_endpoint_auth, TokenEndpointAuthPost):
+        elif isinstance(self.token_endpoint_auth, TokenEndpointAuthNone):
+            token_endpoint_auth = self.token_endpoint_auth.to_dict()
+        elif isinstance(self.token_endpoint_auth, TokenEndpointAuthBasic):
+            token_endpoint_auth = self.token_endpoint_auth.to_dict()
+        elif isinstance(self.token_endpoint_auth, TokenEndpointAuthPost):
             token_endpoint_auth = self.token_endpoint_auth.to_dict()
         else:
             token_endpoint_auth = self.token_endpoint_auth
