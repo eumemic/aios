@@ -23,6 +23,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
+from aios.models.connections import inbound_orig_channel
 from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll, InboundPolicy
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
@@ -306,7 +307,7 @@ async def _append_with_dedup(
     txn back via :class:`_DedupRollback`.  Returns True on first-append,
     False on dedup hit.
     """
-    channel = f"{connector}/{external_account_id}/{chat_id}"
+    channel = inbound_orig_channel(connector, external_account_id, chat_id)
     sender_name = sender.get("display_name")
     metadata: dict[str, Any] = {}
     if connector_metadata is not None:
