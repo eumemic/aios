@@ -991,19 +991,10 @@ async def get_session_github_repo(
     *,
     account_id: str,
 ) -> GithubRepositoryResourceEcho:
-    row = await conn.fetchrow(
-        "SELECT * FROM session_github_repositories "
-        "WHERE session_id = $1 AND id = $2 AND account_id = $3",
-        session_id,
-        resource_id,
-        account_id,
+    echo, _ = await get_session_github_repo_with_blob(
+        conn, session_id, resource_id, account_id=account_id
     )
-    if row is None:
-        raise NotFoundError(
-            f"github_repository resource {resource_id} not found on session {session_id}",
-            detail={"session_id": session_id, "resource_id": resource_id},
-        )
-    return _row_to_github_repo_echo(row)
+    return echo
 
 
 async def get_session_github_repo_with_blob(

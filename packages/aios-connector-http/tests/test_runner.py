@@ -74,15 +74,15 @@ class _ProbeConnector(HttpConnector):
         self.calls.append(("say_struct", {"n": n}))
         return {"doubled": n * 2}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def deliver(self, *, text: str) -> dict[str, int]:
-        """A fire-and-forget send: its result is a delivery ack."""
+        """A delivery send: its result is a delivery ack."""
         self.calls.append(("deliver", {"text": text}))
         return {"sent_at_ms": 123}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def deliver_boom(self) -> str:
-        """A fire-and-forget send that fails — its error must still wake."""
+        """A delivery send that fails — its error must still wake."""
         self.calls.append(("deliver_boom", {}))
         raise RuntimeError("delivery failed")
 
@@ -95,7 +95,6 @@ class _ProbeConnector(HttpConnector):
         tool_call_id: str,
         content: str | list[dict[str, Any]],
         is_error: bool = False,
-        no_reaction: bool = False,
     ) -> None:
         del client
         self.results.append(
@@ -105,7 +104,6 @@ class _ProbeConnector(HttpConnector):
                 tool_call_id=tool_call_id,
                 content=content,
                 is_error=is_error,
-                no_reaction=no_reaction,
             )
         )
 
@@ -194,20 +192,23 @@ class TestDispatch:
         assert r.kwargs["is_error"] is True
 
 
-class TestFireAndForget:
-    """``@tool(fire_and_forget=True)`` → ``no_reaction`` on the SUCCESS POST."""
+class TestDelivery:
+    """``@tool(delivery=True)`` marks a delivery action. Its result is
+    posted like any other — every tool result is a stimulus (#1919), so there
+    is no wake-suppression flag on the wire. The flag only types a mid-dispatch
+    failure as ``delivery_failed`` (see ``TestDeliveryFailure``)."""
 
-    async def test_meta_records_fire_and_forget(self, probe: _ProbeConnector) -> None:
+    async def test_meta_records_delivery(self, probe: _ProbeConnector) -> None:
         # The decorator freezes the flag onto the per-tool meta; a plain
         # ``@tool()`` tool stays False.
-        assert probe._tools["deliver"].fire_and_forget is True
-        assert probe._tools["deliver_boom"].fire_and_forget is True
-        assert probe._tools["shout"].fire_and_forget is False
-        assert probe._tools["say_struct"].fire_and_forget is False
+        assert probe._tools["deliver"].delivery is True
+        assert probe._tools["deliver_boom"].delivery is True
+        assert probe._tools["shout"].delivery is False
+        assert probe._tools["say_struct"].delivery is False
 
-    async def test_successful_fire_and_forget_sets_no_reaction(
-        self, probe: _ProbeConnector
-    ) -> None:
+    async def test_successful_delivery_posts_result(self, probe: _ProbeConnector) -> None:
+        # #1919: the delivery ack is posted like any other result — no
+        # wake-suppression flag on the wire; the session wakes to react.
         await probe.dispatch_call(
             {
                 "connection_id": "conn_1",
@@ -219,43 +220,9 @@ class TestFireAndForget:
         )
         r = probe.results[0]
         assert r.kwargs["is_error"] is False
-        assert r.kwargs["no_reaction"] is True
-        # The result content (the delivery ack) is still posted — the model sees it.
+        assert "no_reaction" not in r.kwargs
+        # The result content (the delivery ack) is posted — the model sees it.
         assert json.loads(r.kwargs["content"]) == {"sent_at_ms": 123}
-
-    async def test_failed_fire_and_forget_does_not_set_no_reaction(
-        self, probe: _ProbeConnector
-    ) -> None:
-        # A failure goes through the error branch, which never passes
-        # ``no_reaction`` — so a failed send still wakes.
-        await probe.dispatch_call(
-            {
-                "connection_id": "conn_1",
-                "tool_call_id": "call_db",
-                "session_id": "sess_db",
-                "name": "deliver_boom",
-                "arguments": "{}",
-            }
-        )
-        r = probe.results[0]
-        assert r.kwargs["is_error"] is True
-        assert r.kwargs["no_reaction"] is False
-
-    async def test_non_fire_and_forget_success_does_not_set_no_reaction(
-        self, probe: _ProbeConnector
-    ) -> None:
-        await probe.dispatch_call(
-            {
-                "connection_id": "conn_1",
-                "tool_call_id": "call_s",
-                "session_id": "sess_s",
-                "name": "shout",
-                "arguments": json.dumps({"text": "hi"}),
-            }
-        )
-        r = probe.results[0]
-        assert r.kwargs["is_error"] is False
-        assert r.kwargs["no_reaction"] is False
 
 
 class TestToolCollection:
@@ -346,7 +313,6 @@ class _IdempotencyConnector(_ProbeConnector):
         tool_call_id: str,
         content: str | list[dict[str, Any]],
         is_error: bool = False,
-        no_reaction: bool = False,
     ) -> None:
         self.post_attempts += 1
         if self.fail_posts > 0:
@@ -359,7 +325,6 @@ class _IdempotencyConnector(_ProbeConnector):
             tool_call_id=tool_call_id,
             content=content,
             is_error=is_error,
-            no_reaction=no_reaction,
         )
 
 
@@ -673,12 +638,12 @@ class TestChannelUnresolved:
         assert r.kwargs["is_error"] is False
 
 
-class TestFireAndForgetDeliveryFailure:
-    """#1722: a fire-and-forget tool (send/react) whose body raises is a
+class TestDeliveryFailure:
+    """#1722: a delivery tool (send/react) whose body raises is a
     connector-side delivery failure — typed ``delivery_failed``, and it
-    always wakes (no_reaction is never set on the error path)."""
+    always wakes (every tool result is a stimulus, #1919)."""
 
-    async def test_fire_and_forget_exception_is_typed_delivery_failed(
+    async def test_delivery_exception_is_typed_delivery_failed(
         self, probe: _ProbeConnector
     ) -> None:
         await probe.dispatch_call(
@@ -692,12 +657,11 @@ class TestFireAndForgetDeliveryFailure:
         )
         r = probe.results[0]
         assert r.kwargs["is_error"] is True
-        assert r.kwargs["no_reaction"] is False
         body = json.loads(r.kwargs["content"])
         assert body["code"] == "delivery_failed"
         assert body["error"] == "delivery failed"
 
-    async def test_non_fire_and_forget_exception_is_not_delivery_failed(
+    async def test_non_delivery_exception_is_not_delivery_failed(
         self, probe: _ProbeConnector
     ) -> None:
         """A regular (non-send) tool's exception keeps the generic shape —
@@ -1176,32 +1140,6 @@ class TestPostToolResultSerialization:
         )
         assert len(captured) == 1
         assert captured[0]["content"] == "hello"
-
-    async def test_no_reaction_serializes_on_the_wire(self) -> None:
-        """``no_reaction=True`` reaches the POST body via the generated model."""
-        client, captured = self._client_capturing_body()
-        await HttpConnector._post_tool_result(
-            client,
-            connection_id="conn_1",
-            session_id="sess_1",
-            tool_call_id="call_1",
-            content="hello",
-            no_reaction=True,
-        )
-        assert len(captured) == 1
-        assert captured[0]["no_reaction"] is True
-
-    async def test_no_reaction_default_false_on_the_wire(self) -> None:
-        client, captured = self._client_capturing_body()
-        await HttpConnector._post_tool_result(
-            client,
-            connection_id="conn_1",
-            session_id="sess_1",
-            tool_call_id="call_1",
-            content="hello",
-        )
-        assert len(captured) == 1
-        assert captured[0]["no_reaction"] is False
 
 
 class TestWaitConnectionServed:

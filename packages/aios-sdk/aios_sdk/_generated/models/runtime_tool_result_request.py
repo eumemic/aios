@@ -31,7 +31,6 @@ class RuntimeToolResultRequest:
             tool_call_id (str):
             content (list[RuntimeToolResultRequestContentType1Item] | str):
             is_error (bool | Unset):  Default: False.
-            no_reaction (bool | Unset):  Default: False.
     """
 
     connection_id: str
@@ -39,7 +38,6 @@ class RuntimeToolResultRequest:
     tool_call_id: str
     content: list[RuntimeToolResultRequestContentType1Item] | str
     is_error: bool | Unset = False
-    no_reaction: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -61,8 +59,6 @@ class RuntimeToolResultRequest:
 
         is_error = self.is_error
 
-        no_reaction = self.no_reaction
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -75,8 +71,6 @@ class RuntimeToolResultRequest:
         )
         if is_error is not UNSET:
             field_dict["is_error"] = is_error
-        if no_reaction is not UNSET:
-            field_dict["no_reaction"] = no_reaction
 
         return field_dict
 
@@ -119,15 +113,12 @@ class RuntimeToolResultRequest:
 
         is_error = d.pop("is_error", UNSET)
 
-        no_reaction = d.pop("no_reaction", UNSET)
-
         runtime_tool_result_request = cls(
             connection_id=connection_id,
             session_id=session_id,
             tool_call_id=tool_call_id,
             content=content,
             is_error=is_error,
-            no_reaction=no_reaction,
         )
 
         runtime_tool_result_request.additional_properties = d

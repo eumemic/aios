@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.actor import Actor
     from ..models.allow_all import AllowAll
     from ..models.allow_list import AllowList
+    from ..models.allow_senders import AllowSenders
     from ..models.connection_metadata import ConnectionMetadata
     from ..models.deny_all import DenyAll
 
@@ -57,9 +58,9 @@ class Connection:
             created_by (Actor | None | Unset):
             attached_at (datetime.datetime | None | Unset):
             archived_at (datetime.datetime | None | Unset):
-            inbound_policy (AllowAll | AllowList | DenyAll | None | Unset):
-            inbound_policy_effective (AllowAll | AllowList | DenyAll | Unset): Server-derived, read-only echo of the
-                *effective* inbound-admission policy: the stored ``inbound_policy`` union member, or the server default
+            inbound_policy (AllowAll | AllowList | AllowSenders | DenyAll | None | Unset):
+            inbound_policy_effective (AllowAll | AllowList | AllowSenders | DenyAll | Unset): Server-derived, read-only echo
+                of the *effective* inbound-admission policy: the stored ``inbound_policy`` union member, or the server default
                 ``DenyAll`` (fail-closed) when the column is NULL. Lets an operator see both the fail-open (``allow_all``) and
                 fail-closed (``deny_all`` / ``allow_list``) posture on create / get / list without a second round-trip. **Never
                 an input** — it is rejected on the ``ConnectionCreate`` write model; set the policy via ``PUT
@@ -78,14 +79,17 @@ class Connection:
     created_by: Actor | None | Unset = UNSET
     attached_at: datetime.datetime | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
-    inbound_policy: AllowAll | AllowList | DenyAll | None | Unset = UNSET
-    inbound_policy_effective: AllowAll | AllowList | DenyAll | Unset = UNSET
+    inbound_policy: AllowAll | AllowList | AllowSenders | DenyAll | None | Unset = UNSET
+    inbound_policy_effective: AllowAll | AllowList | AllowSenders | DenyAll | Unset = (
+        UNSET
+    )
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.actor import Actor
         from ..models.allow_all import AllowAll
         from ..models.allow_list import AllowList
+        from ..models.allow_senders import AllowSenders
         from ..models.deny_all import DenyAll
 
         id = self.id
@@ -145,6 +149,8 @@ class Connection:
             inbound_policy = self.inbound_policy.to_dict()
         elif isinstance(self.inbound_policy, AllowList):
             inbound_policy = self.inbound_policy.to_dict()
+        elif isinstance(self.inbound_policy, AllowSenders):
+            inbound_policy = self.inbound_policy.to_dict()
         elif isinstance(self.inbound_policy, DenyAll):
             inbound_policy = self.inbound_policy.to_dict()
         else:
@@ -156,6 +162,8 @@ class Connection:
         elif isinstance(self.inbound_policy_effective, AllowAll):
             inbound_policy_effective = self.inbound_policy_effective.to_dict()
         elif isinstance(self.inbound_policy_effective, AllowList):
+            inbound_policy_effective = self.inbound_policy_effective.to_dict()
+        elif isinstance(self.inbound_policy_effective, AllowSenders):
             inbound_policy_effective = self.inbound_policy_effective.to_dict()
         else:
             inbound_policy_effective = self.inbound_policy_effective.to_dict()
@@ -196,6 +204,7 @@ class Connection:
         from ..models.actor import Actor
         from ..models.allow_all import AllowAll
         from ..models.allow_list import AllowList
+        from ..models.allow_senders import AllowSenders
         from ..models.connection_metadata import ConnectionMetadata
         from ..models.deny_all import DenyAll
 
@@ -287,7 +296,7 @@ class Connection:
 
         def _parse_inbound_policy(
             data: object,
-        ) -> AllowAll | AllowList | DenyAll | None | Unset:
+        ) -> AllowAll | AllowList | AllowSenders | DenyAll | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -311,18 +320,28 @@ class Connection:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                inbound_policy_type_0_type_2 = DenyAll.from_dict(data)
+                inbound_policy_type_0_type_2 = AllowSenders.from_dict(data)
 
                 return inbound_policy_type_0_type_2
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(AllowAll | AllowList | DenyAll | None | Unset, data)
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_type_0_type_3 = DenyAll.from_dict(data)
+
+                return inbound_policy_type_0_type_3
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(
+                AllowAll | AllowList | AllowSenders | DenyAll | None | Unset, data
+            )
 
         inbound_policy = _parse_inbound_policy(d.pop("inbound_policy", UNSET))
 
         def _parse_inbound_policy_effective(
             data: object,
-        ) -> AllowAll | AllowList | DenyAll | Unset:
+        ) -> AllowAll | AllowList | AllowSenders | DenyAll | Unset:
             if isinstance(data, Unset):
                 return data
             try:
@@ -341,11 +360,19 @@ class Connection:
                 return inbound_policy_effective_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                inbound_policy_effective_type_2 = AllowSenders.from_dict(data)
+
+                return inbound_policy_effective_type_2
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
             if not isinstance(data, dict):
                 raise TypeError()
-            inbound_policy_effective_type_2 = DenyAll.from_dict(data)
+            inbound_policy_effective_type_3 = DenyAll.from_dict(data)
 
-            return inbound_policy_effective_type_2
+            return inbound_policy_effective_type_3
 
         inbound_policy_effective = _parse_inbound_policy_effective(
             d.pop("inbound_policy_effective", UNSET)

@@ -491,7 +491,7 @@ A connection binds one platform account to a routing target — a single long-li
 - **Bare assistant text is internal monologue** — channels are reachable *only* via outbound tools, so "what the user saw" is exactly the set of outbound tool calls — a clean audit boundary.
 - **Three routing modes from one bindings table** — `detached` / `single_session` / `per_chat`, with a three-tier resolver (chat-sessions ledger → routing-rule prefix demux → bindings.mode fallback). At-most-one-active-binding is a schema invariant.
 - **Idempotent both ways** — inbound dedups on a client `event_id` inside the append transaction; outbound persists each result between the side-effecting send and the result POST (an answered-spool), so a send-succeeded/POST-failed window re-POSTs rather than re-sends.
-- **`fire_and_forget` results** — a send ack appends to the log but does **not** wake the session — the keystone that stops an agent infinitely reacting to its own outbound message (a failed result always wakes).
+- **Delivery results are stimuli** — send acknowledgements and failures both append to the log and wake the session, just like every other tool result. Delivery tools differ only in typing body exceptions as `delivery_failed`.
 - **Encrypted per-connection secrets** — platform credentials are encrypted under a per-account subkey, write-only on the operator surface (`secrets_set: bool`), decryptable only by a connector holding a runtime token for that type.
 
 ### Connector roster
@@ -521,7 +521,7 @@ A connection binds one platform account to a routing target — a single long-li
 | POST | `/v1/connections/{id}/reparent` | Atomically move a connection (id-preserving) to another account. |
 | POST | `/v1/connectors/runtime/inbound` | Connector posts an inbound user message (multipart; idempotent on `event_id`). |
 | GET | `/v1/connectors/runtime/calls` | SSE of pending custom tool calls for the connector type. |
-| POST | `/v1/connectors/runtime/tool-results` | Submit an outbound tool result (carries `no_reaction` for fire-and-forget). |
+| POST | `/v1/connectors/runtime/tool-results` | Submit an outbound tool result (always a stimulus — the session wakes to react). |
 | GET | `/v1/connectors/runtime/secrets` | The only decryption path for a connection's secrets. |
 | PUT | `/v1/connectors/{connector}/tools_schema` \| `/capabilities` | Connector publishes its derived tool catalog / typed capability descriptor (root-only). |
 | POST | `/v1/connectors/signal/register\|verify\|profile` | Operator-facing Signal provisioning. |

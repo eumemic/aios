@@ -1304,15 +1304,10 @@ async def append_event(
     # (the error latch) — an unreacted tool result keeps the session active, but
     # must NOT clear an error. See ``_SESSION_ACTIVE_EXPR``.
     #
-    # A fire-and-forget tool result (``data['no_reaction'] == True``, stamped by
-    # ``append_tool_result`` for a connector that declared the tool
-    # fire-and-forget) is a delivery confirmation the model has nothing to react
-    # to — it is NOT a stimulus, so it must not bump ``last_stimulus_seq`` and
-    # make the session a wake candidate (the duplicate-send loop). The result is
-    # still appended (the model sees it); only the wake decision excludes it.
-    # ``data.get`` is missing → falsy on every historical/unmarked result, so
-    # those keep counting as stimulus exactly as before (backward-compat).
-    is_stimulus = kind == "message" and role != "assistant" and not data.get("no_reaction")
+    # Every tool result is a stimulus: the session wakes and the model gets a
+    # turn to react to any tool completion (including a ``signal_send`` delivery
+    # ack), restoring the standard agentic loop (tool call → result → continue).
+    is_stimulus = kind == "message" and role != "assistant"
     # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
     # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
     # ``data`` (type ``Any``), which cannot bind to the write literal — see the

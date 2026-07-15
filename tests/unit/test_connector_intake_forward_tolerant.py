@@ -15,9 +15,9 @@ The fix
 -------
 The connector-runtime intake models are made **forward-tolerant**
 (``extra="ignore"``): an unknown extra field is silently dropped, the known
-fields still validate and process. This is the forward half of the symmetry
-#1398 established backward (a *newer* api defaulting ``no_reaction`` for an
-*older* connector that omits it).
+fields still validate and process. This is the forward half of the connector→api
+deploy-skew symmetry (the backward half: a newer api defaulting an omitted field
+for an older connector).
 
 What this suite pins
 --------------------
@@ -25,8 +25,9 @@ What this suite pins
   field (no ``ValidationError``) and parses the known fields normally.
 - The unknown field is dropped (``extra="ignore"`` semantics) — it does not
   leak onto the model.
-- The existing backward-compat behaviour (``no_reaction`` omitted → default
-  ``False``) is unchanged.
+- A connector still sending a since-retired field (e.g. ``no_reaction``, removed
+  in #1919) is harmless: it is ignored, not retained, exactly like any other
+  unknown field.
 """
 
 from __future__ import annotations
@@ -91,6 +92,9 @@ class TestRuntimeToolResultRequest:
     """The intake that 422'd in the incident — pinned directly."""
 
     def test_tool_result_accepts_unknown_field(self) -> None:
+        # ``no_reaction`` was removed in #1919; a connector still POSTing it
+        # mid-rollout is exactly the forward-skew case — it must be ignored,
+        # not 422'd or retained, alongside any other unknown field.
         parsed = RuntimeToolResultRequest.model_validate(
             {
                 "connection_id": "conn_1",
@@ -104,18 +108,6 @@ class TestRuntimeToolResultRequest:
             }
         )
         assert parsed.connection_id == "conn_1"
-        assert parsed.no_reaction is True
+        assert not hasattr(parsed, "no_reaction")
         assert not hasattr(parsed, "future_field")
-
-    def test_no_reaction_backward_compat_default_unchanged(self) -> None:
-        """An older connector that OMITS ``no_reaction`` still defaults False —
-        the backward half of the symmetry (#1398) is untouched."""
-        parsed = RuntimeToolResultRequest.model_validate(
-            {
-                "connection_id": "conn_1",
-                "session_id": "sess_1",
-                "tool_call_id": "tc_1",
-                "content": "ok",
-            }
-        )
-        assert parsed.no_reaction is False
+        assert "no_reaction" not in parsed.model_dump()
