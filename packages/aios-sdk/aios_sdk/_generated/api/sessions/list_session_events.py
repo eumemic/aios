@@ -20,6 +20,8 @@ def _get_kwargs(
     session_id: str,
     *,
     cursor: None | str | Unset = UNSET,
+    after_seq: int | None | Unset = UNSET,
+    before_seq: int | None | Unset = UNSET,
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
@@ -40,6 +42,20 @@ def _get_kwargs(
     else:
         json_cursor = cursor
     params["cursor"] = json_cursor
+
+    json_after_seq: int | None | Unset
+    if isinstance(after_seq, Unset):
+        json_after_seq = UNSET
+    else:
+        json_after_seq = after_seq
+    params["after_seq"] = json_after_seq
+
+    json_before_seq: int | None | Unset
+    if isinstance(before_seq, Unset):
+        json_before_seq = UNSET
+    else:
+        json_before_seq = before_seq
+    params["before_seq"] = json_before_seq
 
     json_dir_: str | Unset = UNSET
     if not isinstance(dir_, Unset):
@@ -138,6 +154,8 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     cursor: None | str | Unset = UNSET,
+    after_seq: int | None | Unset = UNSET,
+    before_seq: int | None | Unset = UNSET,
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
@@ -151,7 +169,8 @@ def sync_detailed(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    exclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /
+    ``?error_only=`` / ``?channel=`` (repeatable, OR) /
     ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
@@ -162,6 +181,10 @@ def sync_detailed(
     channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
     the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
     response includes ``channel`` + ``orig_channel`` on each item.
+
+    Audit readers should persist a processed-through sequence watermark, resume
+    with ``after_seq``, and assert that returned sequence numbers provide gapless
+    coverage of the requested frozen window as their client-side completeness gate.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -176,6 +199,8 @@ def sync_detailed(
     Args:
         session_id (str):
         cursor (None | str | Unset):
+        after_seq (int | None | Unset):
+        before_seq (int | None | Unset):
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
@@ -195,6 +220,8 @@ def sync_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         cursor=cursor,
+        after_seq=after_seq,
+        before_seq=before_seq,
         dir_=dir_,
         kind=kind,
         error_only=error_only,
@@ -216,6 +243,8 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     cursor: None | str | Unset = UNSET,
+    after_seq: int | None | Unset = UNSET,
+    before_seq: int | None | Unset = UNSET,
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
@@ -229,7 +258,8 @@ def sync(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    exclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /
+    ``?error_only=`` / ``?channel=`` (repeatable, OR) /
     ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
@@ -240,6 +270,10 @@ def sync(
     channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
     the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
     response includes ``channel`` + ``orig_channel`` on each item.
+
+    Audit readers should persist a processed-through sequence watermark, resume
+    with ``after_seq``, and assert that returned sequence numbers provide gapless
+    coverage of the requested frozen window as their client-side completeness gate.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -254,6 +288,8 @@ def sync(
     Args:
         session_id (str):
         cursor (None | str | Unset):
+        after_seq (int | None | Unset):
+        before_seq (int | None | Unset):
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
@@ -274,6 +310,8 @@ def sync(
         session_id=session_id,
         client=client,
         cursor=cursor,
+        after_seq=after_seq,
+        before_seq=before_seq,
         dir_=dir_,
         kind=kind,
         error_only=error_only,
@@ -289,6 +327,8 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     cursor: None | str | Unset = UNSET,
+    after_seq: int | None | Unset = UNSET,
+    before_seq: int | None | Unset = UNSET,
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
@@ -302,7 +342,8 @@ async def asyncio_detailed(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    exclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /
+    ``?error_only=`` / ``?channel=`` (repeatable, OR) /
     ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
@@ -313,6 +354,10 @@ async def asyncio_detailed(
     channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
     the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
     response includes ``channel`` + ``orig_channel`` on each item.
+
+    Audit readers should persist a processed-through sequence watermark, resume
+    with ``after_seq``, and assert that returned sequence numbers provide gapless
+    coverage of the requested frozen window as their client-side completeness gate.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -327,6 +372,8 @@ async def asyncio_detailed(
     Args:
         session_id (str):
         cursor (None | str | Unset):
+        after_seq (int | None | Unset):
+        before_seq (int | None | Unset):
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
@@ -346,6 +393,8 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         cursor=cursor,
+        after_seq=after_seq,
+        before_seq=before_seq,
         dir_=dir_,
         kind=kind,
         error_only=error_only,
@@ -365,6 +414,8 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     cursor: None | str | Unset = UNSET,
+    after_seq: int | None | Unset = UNSET,
+    before_seq: int | None | Unset = UNSET,
     dir_: ListSessionEventsDir | Unset = ListSessionEventsDir.FORWARD,
     kind: ListSessionEventsKindType0 | None | Unset = UNSET,
     error_only: bool | None | Unset = UNSET,
@@ -378,7 +429,8 @@ async def asyncio(
      List a session's events by sequence number.
 
     First page: ``?dir=forward|backward`` (default forward) + optional
-    ``?kind=`` / ``?error_only=`` / ``?channel=`` (repeatable, OR) /
+    exclusive ``?after_seq=`` / ``?before_seq=`` window bounds, ``?kind=`` /
+    ``?error_only=`` / ``?channel=`` (repeatable, OR) /
     ``?chat_type=dm|group`` + ``?limit=``. Subsequent pages:
     ``?cursor=<next_cursor>`` — the token carries direction and filters, so no
     other params are accepted alongside it. ``forward`` walks oldest→newest;
@@ -389,6 +441,10 @@ async def asyncio(
     channel); multiple ``?channel=`` are OR'd. ``?chat_type=`` post-filters on
     the channel address (UUID/numeric ⇒ dm, base64/negative ⇒ group). The
     response includes ``channel`` + ``orig_channel`` on each item.
+
+    Audit readers should persist a processed-through sequence watermark, resume
+    with ``after_seq``, and assert that returned sequence numbers provide gapless
+    coverage of the requested frozen window as their client-side completeness gate.
 
     Transient-empty (#1140): an empty ``items`` list is NOT a \"session reset\"
     — it only means no events match this page (e.g. a forward read past the
@@ -403,6 +459,8 @@ async def asyncio(
     Args:
         session_id (str):
         cursor (None | str | Unset):
+        after_seq (int | None | Unset):
+        before_seq (int | None | Unset):
         dir_ (ListSessionEventsDir | Unset):  Default: ListSessionEventsDir.FORWARD.
         kind (ListSessionEventsKindType0 | None | Unset):
         error_only (bool | None | Unset):
@@ -424,6 +482,8 @@ async def asyncio(
             session_id=session_id,
             client=client,
             cursor=cursor,
+            after_seq=after_seq,
+            before_seq=before_seq,
             dir_=dir_,
             kind=kind,
             error_only=error_only,
