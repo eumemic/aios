@@ -152,9 +152,7 @@ async def handle_inbound(
     # (fail-closed). The denial maps to HTTP 422 in the router so a denied
     # stranger drops one envelope rather than crash-restarting the connector
     # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
-    policy = await queries.resolve_effective_inbound_policy(
-        pool, connection=connection, account_id=account_id
-    )
+    policy = connection.inbound_policy_effective
     if not _admits(policy, chat_id, sender.get("id")):
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 

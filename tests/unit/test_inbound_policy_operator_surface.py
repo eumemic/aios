@@ -24,13 +24,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from aios.db.queries.inbound_policy import effective_inbound_policy
 from aios.models.connections import Connection, ConnectionCreate
 from aios.models.inbound_policy import (
     AllowAll,
     AllowList,
     DenyAll,
     InboundPolicyReplace,
+    effective_inbound_policy,
 )
 
 _REPLACE = TypeAdapter(InboundPolicyReplace)

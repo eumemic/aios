@@ -512,9 +512,6 @@ from .events import (  # noqa: E402
 from .files import (  # noqa: E402
     insert_file,
 )
-from .inbound_policy import (  # noqa: E402
-    resolve_effective_inbound_policy,
-)
 from .memory_stores import (  # noqa: E402
     _allocate_version_seq,
     acquire_session_resources_lock,
@@ -987,7 +984,6 @@ __all__ = [
     "reparent_connection",
     "replace_event_data",
     "resolve_account_by_path",
-    "resolve_effective_inbound_policy",
     "resolve_effective_sandbox_snapshot_bytes",
     "resolve_effective_spend_limit_usd",
     "resolve_effective_timezone",

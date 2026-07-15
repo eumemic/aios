@@ -225,6 +225,7 @@ def _connection() -> Connection:
         updated_at=now,
         archived_at=None,
         inbound_policy=AllowAll(),
+        inbound_policy_effective=AllowAll(),
     )
 
 
@@ -260,10 +261,6 @@ async def test_over_budget_drops_before_resolution_and_side_effects() -> None:
 
     with (
         patch("aios.services.inbound.queries.get_connection", get_connection),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", check_budget),
         patch("aios_connectors.resolver.resolve_target_session", resolve_target_session),
         patch("aios.services.inbound.stage_inbound_attachments", stage),
@@ -301,10 +298,6 @@ async def test_within_budget_passes_into_resolution() -> None:
 
     with (
         patch("aios.services.inbound.queries.get_connection", get_connection),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", check_budget),
         patch("aios_connectors.resolver.resolve_target_session", resolve_target_session),
     ):
@@ -605,10 +598,6 @@ async def test_handle_inbound_agent_budget_rejects_before_append_and_wake() -> N
         patch(
             "aios.services.inbound.queries.get_connection", AsyncMock(return_value=_connection())
         ),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", counterparty),
         patch("aios.services.inbound.check_inbound_budget_agent", agent),
         patch("aios_connectors.resolver.resolve_target_session", resolve),
@@ -647,10 +636,6 @@ async def test_handle_inbound_per_chat_bypasses_agent_budget() -> None:
     wake = AsyncMock()
     with (
         patch("aios.services.inbound.queries.get_connection", AsyncMock(return_value=connection)),
-        patch(
-            "aios.services.inbound.queries.resolve_effective_inbound_policy",
-            AsyncMock(return_value=AllowAll()),
-        ),
         patch("aios.services.inbound.check_inbound_budget", AsyncMock(return_value=True)),
         patch("aios.services.inbound.check_inbound_budget_agent", agent),
         patch(
