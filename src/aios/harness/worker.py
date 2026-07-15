@@ -492,6 +492,8 @@ async def worker_main() -> None:
             idle_timeout=settings.container_idle_timeout_seconds
         )
         _supervise(sandbox_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+        egress_refresh_task = sandbox_registry.start_egress_refresh()
+        _supervise(egress_refresh_task, latch=supervised_latch, fatal=supervised_failure)
         mcp_reaper_task = mcp_session_pool.start_reaper(
             idle_timeout=settings.mcp_pool_idle_timeout_seconds
         )
@@ -668,6 +670,7 @@ async def worker_main() -> None:
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()
+            sandbox_registry.stop_egress_refresh()
         if inflight_tool_registry is not None:
             await inflight_tool_registry.shutdown()
         if sandbox_registry is not None:
