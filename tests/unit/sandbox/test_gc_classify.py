@@ -10,6 +10,7 @@ interiors of live chains are skipped structurally.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from aios.sandbox.backends.base import SESSION_LABEL_KEY, ManagedImage
@@ -49,7 +50,7 @@ def _state(session_id: str, *, dormant: bool) -> SessionSnapshotState:
     return SessionSnapshotState(
         session_id=session_id,
         account_id="acct",
-        archived=False,
+        archived_at=None,
         last_event_at=last,
         snapshot_ref=snapshot_tag(_HOST, session_id),
         snapshot_host=_HOST,
@@ -60,20 +61,22 @@ def _state(session_id: str, *, dormant: bool) -> SessionSnapshotState:
 def _classify(
     images: list[ManagedImage], states: dict[str, SessionSnapshotState]
 ) -> dict[str, tuple[str, str]]:
-    verdicts = _classify_images(images, states, now=_NOW, ttl_seconds=_TTL, this_host=_HOST)
+    verdicts = _classify_images(
+        images, states, now=_NOW, archive_grace_seconds=86400, this_host=_HOST
+    )
     return {v.image.image_id: (v.verdict, v.reason) for v in verdicts}
 
 
 def test_live_canonical_is_retained() -> None:
     img = _image(image_id="img_a", session_id="sess_a", canonical=True)
     out = _classify([img], {"sess_a": _state("sess_a", dormant=False)})
-    assert out["img_a"] == ("retain", "live")
+    assert out["img_a"] == ("retain", "protected_live")
 
 
-def test_dormant_canonical_is_removed_with_ttl_reason() -> None:
+def test_dormant_canonical_is_protected() -> None:
     img = _image(image_id="img_a", session_id="sess_a", canonical=True)
     out = _classify([img], {"sess_a": _state("sess_a", dormant=True)})
-    assert out["img_a"] == ("remove", "retention_ttl")
+    assert out["img_a"] == ("retain", "protected_live")
 
 
 def test_deleted_session_canonical_is_removed_no_event() -> None:
@@ -101,7 +104,7 @@ def test_structural_parent_skip_excludes_live_chain_interior() -> None:
     interior = _image(image_id="img_interior", session_id="sess_a", canonical=False)
     out = _classify([leaf, interior], {"sess_a": _state("sess_a", dormant=False)})
     assert "img_interior" not in out, "live-chain interior must be skipped, not classified"
-    assert out["img_leaf"] == ("retain", "live")
+    assert out["img_leaf"] == ("retain", "protected_live")
 
 
 def test_archived_session_within_ttl_is_retained() -> None:
@@ -110,14 +113,14 @@ def test_archived_session_within_ttl_is_retained() -> None:
     state = SessionSnapshotState(
         session_id="sess_a",
         account_id="acct",
-        archived=True,
+        archived_at=_NOW - timedelta(hours=12),
         last_event_at=_NOW - timedelta(days=1),
         snapshot_ref=snapshot_tag(_HOST, "sess_a"),
         snapshot_host=_HOST,
         snapshot_bytes=1,
     )
     out = _classify([img], {"sess_a": state})
-    assert out["img_a"] == ("retain", "live")
+    assert out["img_a"] == ("retain", "archive_grace")
 
 
 def test_missing_dormancy_probe_is_not_dormant() -> None:
@@ -127,11 +130,36 @@ def test_missing_dormancy_probe_is_not_dormant() -> None:
     state = SessionSnapshotState(
         session_id="sess_a",
         account_id="acct",
-        archived=False,
+        archived_at=None,
         last_event_at=None,
         snapshot_ref=snapshot_tag(_HOST, "sess_a"),
         snapshot_host=_HOST,
         snapshot_bytes=1,
     )
     out = _classify([img], {"sess_a": state})
-    assert out["img_a"] == ("retain", "live")
+    assert out["img_a"] == ("retain", "protected_live")
+
+
+def test_arbitrarily_dormant_non_archived_canonical_is_protected() -> None:
+    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
+    state = _state("sess_a", dormant=True)
+    out = _classify([img], {"sess_a": state})
+    assert out["img_a"] == ("retain", "protected_live")
+
+
+def test_archived_current_observes_grace_boundary() -> None:
+    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
+    state = _state("sess_a", dormant=True)
+    grace = 86400
+    before = replace(state, archived_at=_NOW - timedelta(seconds=grace - 1))
+    at = replace(state, archived_at=_NOW - timedelta(seconds=grace))
+    assert (
+        _classify_images(
+            [img], {"sess_a": before}, now=_NOW, archive_grace_seconds=grace, this_host=_HOST
+        )[0].verdict
+        == "retain"
+    )
+    verdict = _classify_images(
+        [img], {"sess_a": at}, now=_NOW, archive_grace_seconds=grace, this_host=_HOST
+    )[0]
+    assert (verdict.verdict, verdict.reason) == ("remove", "archived")

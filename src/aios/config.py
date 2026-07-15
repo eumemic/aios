@@ -220,23 +220,24 @@ class Settings(BaseSettings):
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
     )
+    sandbox_archive_gc_grace_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description="Grace after archived_at before canonical filesystem reclamation.",
+    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
-        description="Dormancy TTL for a persisted session snapshot. The GC "
-        "reconciler removes a snapshot whose session's last activity is older "
-        "than this (appending a model-visible ``sandbox_fs_expired`` notice), "
+        description="Dormancy threshold for non-destructive maintenance and pressure reporting. "
         "keyed on the session's ``(session_id, last_event_seq)`` event row. "
-        "Bounds supply-chain accumulation (agent-installed software re-executes "
-        "at every resume) and unbounded snapshot retention.",
+        "It never authorizes deletion of canonical non-archived state.",
     )
     sandbox_snapshot_pool_bytes: int | None = Field(
         default=None,
         ge=0,
-        description="Per-host snapshot disk budget in bytes (durable session "
-        "sandboxes, §5.7) — the load-bearing pool bound. When this host's "
-        "total snapshot bytes exceed it, the GC evicts the MOST-DORMANT "
-        "sessions first (``sandbox_fs_expired {disk_pressure}``). Required in "
+        description="Per-host snapshot pressure threshold in bytes (durable session "
+        "sandboxes, §5.7). Crossing it emits an operator diagnostic but never "
+        "authorizes deletion of canonical session state. Required in "
         "production once the eumemic-ops prune-cron exemption lands (that "
         "exemption removes the only existing disk control). ``None`` ⇒ "
         "unbounded retention (dev default); operators MUST set real host "
