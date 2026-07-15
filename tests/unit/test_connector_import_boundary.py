@@ -13,7 +13,20 @@ def _module_scope_imports(tree: ast.Module) -> list[ast.Import | ast.ImportFrom]
     imports: list[ast.Import | ast.ImportFrom] = []
 
     def visit(node: ast.AST) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.ClassDef):
+            # A class body executes while its enclosing module imports. Traverse
+            # that body (and the class declaration expressions), while the
+            # function guard above still excludes method-local imports.
+            for decorator in node.decorator_list:
+                visit(decorator)
+            for base in node.bases:
+                visit(base)
+            for keyword in node.keywords:
+                visit(keyword.value)
+            for statement in node.body:
+                visit(statement)
             return
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             imports.append(node)
@@ -46,12 +59,18 @@ def test_module_scope_import_finder_excludes_only_local_scopes() -> None:
 if TYPE_CHECKING:
     import aios_connectors.types
 
+class Adapter:
+    import aios_connectors.class_body
+
+    def method(self):
+        import aios_connectors.method_local
+
 def startup():
-    import aios_connectors.providers
+    import aios_connectors.function_local
 """
     )
 
-    assert [node.lineno for node in _module_scope_imports(tree)] == [3]
+    assert [node.lineno for node in _module_scope_imports(tree)] == [3, 6]
 
 
 def test_core_modules_do_not_import_connectors_at_module_scope() -> None:
