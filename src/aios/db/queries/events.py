@@ -2001,10 +2001,11 @@ async def read_events(
     newest_first: bool = False,
     error_only: bool = False,
 ) -> list[Event]:
-    # ``after_seq`` is a lower bound (forward, ASC by default); ``before`` is an
-    # upper bound for tail-anchored backward paging (chat-style reverse scroll),
-    # which is always newest-first. Both compose with ``kind``/``error_only``.
-    order = "DESC" if newest_first or before is not None else "ASC"
+    # Bounds define the requested window; ``newest_first`` alone defines its
+    # traversal direction.  A forward bounded window (``after_seq`` + ``before``)
+    # must remain chronological rather than becoming backward merely because it
+    # has an upper bound.
+    order = "DESC" if newest_first else "ASC"
 
     def _build_query(lower_bound: int, upper_bound: int | None) -> tuple[str, list[Any]]:
         params: list[Any] = [session_id, account_id]

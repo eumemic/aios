@@ -772,7 +772,6 @@ async def list_events(
         error_only = bool(error_only)
         window_after = after_seq or 0
         window_before = before_seq
-        seq = window_after if direction == "forward" else window_before
 
     # Keep the original exclusive window anchors distinct from the moving page
     # keyset.  In particular, never serialize the current page's ``seq`` back as
