@@ -7,8 +7,9 @@
 > defaults and passes `litellm_extra` verbatim (`harness/completion.py::_build_litellm_kwargs`
 > spreads it after the harness's timeout defaults, so agent values win).
 >
-> **Method.** Source audit of the installed LiteLLM — **verified against `litellm==1.91.1` on
-> 2026-07-09**. Symbol names below are stable across minor versions; treat any quoted behaviour as
+> **Method.** Source audit of the installed LiteLLM — **verified against the aios-pinned
+> `litellm==1.91.1` on 2026-07-15**. Symbol names below are stable across minor versions; treat any
+> quoted behaviour as
 > unverified after a bump until §7's checklist is re-run.
 
 ---
@@ -45,11 +46,14 @@ one key that works on all four provider families. Value fidelity varies:
 | `low` / `high` | ✅ faithful | ✅ native | ✅ native | ✅ faithful |
 | `medium` | ✅ faithful | ✅ native | ✅ native | ⚠️ silently upgraded to `high` except on `gemini-3.1-pro` / 3.x-flash SKUs |
 | `minimal` | mapped to `low` | model-dependent | ❌ | `minimal` on 3.x-flash only, else `low` |
-| `xhigh` / `max` | ✅ (validated per model-map flags) | ❌ provider 400 | ❌ provider 400 | ❌ client-side `ValueError` |
-| `none` | strips `thinking` + `output_config` | native on `supports_none` models (gpt-5.1-style) | reportedly 4.3+ | lowest level + `includeThoughts: false` — thinking cannot be fully disabled |
+| `xhigh` | ✅ (validated per model-map flags) | ✅ GPT-5.2+ when model metadata flags support (including GPT-5.6); older families reject it | ❌ provider 400 | ❌ client-side `ValueError` |
+| `max` | ✅ (validated per model-map flags) | ✅ GPT-5.6 only; older families reject it | ❌ provider 400 | ❌ client-side `ValueError` |
+| `none` | strips `thinking` + `output_config` | native on `supports_none` models (GPT-5.1+; model-map gated) | reportedly 4.3+ | lowest level + `includeThoughts: false` — thinking cannot be fully disabled |
 
-**Repoint-safe subset: `low` / `medium` / `high`** — with the Gemini-3-Pro `medium`→`high` caveat.
-`xhigh`/`max` commit the agent to Claude.
+The **broad cross-provider subset is `low` / `medium` / `high`**, with the Gemini-3-Pro
+`medium`→`high` caveat. For the narrower, currently useful Claude-5 ↔ GPT-5.6 intersection,
+`xhigh` and `max` are also portable, subject to the exact Claude and OpenAI model-map entries in
+use. They are not safe when repointing to older OpenAI families, xAI, or Gemini.
 
 ## 3. Per-provider translation
 
@@ -75,8 +79,15 @@ not an aios change.
 
 Pure passthrough — `reasoning_effort` is OpenAI's native param. The Responses-API path
 (`openai/responses/<model>`, the shape used via oai-proxy) bridges the spelling to
-`reasoning: {effort: ...}` with "no mapping applied". One interlock: on GPT-5-family models,
-`temperature ≠ 1` is only accepted when effort is `none`/omitted on models flagged
+`reasoning: {effort: ...}` with "no mapping applied". GPT-5.6 accepts `none`, `low`, `medium`,
+`high`, `xhigh`, and `max`; `max` is new to that family. LiteLLM 1.91.1's bundled map marks
+`supports_xhigh_reasoning_effort` for `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`. It has no separate `supports_max_reasoning_effort` metadata field, but `max`
+remains provider-native because the Responses adapter passes the value through unchanged.
+
+Older families support subsets: GPT-5.1 and earlier do not support `xhigh`; GPT-5.2 and GPT-5.4
+are map-flagged for `xhigh`, but `max` remains GPT-5.6-specific. One interlock: on GPT-5-family
+models, `temperature ≠ 1` is only accepted when effort is `none`/omitted on models flagged
 `supports_none_reasoning_effort` — LiteLLM enforces this client-side.
 
 ### xAI (`llms/xai/chat/transformation.py`)
@@ -127,7 +138,9 @@ plus `reasoning_effort` at a Gemini mind fails — remove, don't layer, there.
 |---|---|
 | Unmapped effort value on Anthropic path | client-side `BadRequestError` (LiteLLM validates) |
 | `xhigh`/`max` on Gemini path | client-side `ValueError` |
-| `xhigh`/`max` on OpenAI/xAI path | **provider** 400 (LiteLLM passes through unvalidated) |
+| `xhigh` on OpenAI models without support (GPT-5.1 and earlier) | **provider** 400 (LiteLLM passes through unvalidated) |
+| `max` on OpenAI models before GPT-5.6 | **provider** 400 (LiteLLM passes through unvalidated) |
+| `xhigh`/`max` on xAI | **provider** 400 (LiteLLM passes through unvalidated) |
 | Stale-map Claude model → `budget_tokens` arm | **provider** 400 |
 
 Either way the error surfaces as a model-call failure the session log records — consistent with
