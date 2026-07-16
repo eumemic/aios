@@ -15,6 +15,7 @@ from tests.helpers.sandbox import run_sandbox
 
 pytestmark = [needs_docker, pytest.mark.docker]
 IMAGE = os.environ.get("AIOS_DOCKER_IMAGE", "ghcr.io/eumemic/aios-sandbox:latest")
+SECCOMP_PROFILE = str(Path(__file__).parents[2] / "docker" / "seccomp-sandbox.json")
 
 
 def _spec(owner: str, workspace: Path) -> SandboxSpec:
@@ -29,7 +30,7 @@ def _spec(owner: str, workspace: Path) -> SandboxSpec:
         host_gateway_alias=None,
         image=IMAGE,
         snapshot_image=None,
-        seccomp_profile="/app/docker/seccomp-sandbox.json",
+        seccomp_profile=SECCOMP_PROFILE,
     )
 
 
