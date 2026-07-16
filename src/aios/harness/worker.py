@@ -67,9 +67,22 @@ from aios.retirements.boot_gate import (
 from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.github_clone_breaker import GithubCloneBreaker
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
-from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
 from aios.sandbox.workspace_ownership import repair_workspace_ownership
+
+
+def _consume_snapshot_pressure(registry: SandboxRegistry, pressure: GcPressureResult) -> None:
+    """Apply one GC pressure report to subsequent provisioning admission."""
+    registry.set_provisioning_pressure(pressure)
+    if pressure.pressured:
+        get_logger("aios.worker").error(
+            "worker.sandbox_capacity_pressure_alarm",
+            pool_used_bytes=pressure.pool_used_bytes,
+            pool_budget_bytes=pressure.pool_budget_bytes,
+            pressured_accounts=sorted(pressure.pressured_accounts),
+        )
+
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
 # advisory-lock key enforcing the worker-process singleton. The string
@@ -484,7 +497,12 @@ async def worker_main() -> None:
         # pointers against store truth, then repeats hourly. Boot is not
         # blocked — a session waking mid-reconcile salvages its own corpse
         # inline under its own lock.
-        sandbox_gc_task = sandbox_registry.start_gc(pool)
+        sandbox_gc_task = sandbox_registry.start_gc(
+            pool,
+            pressure_callback=lambda pressure: _consume_snapshot_pressure(
+                sandbox_registry, pressure
+            ),
+        )
         _supervise(sandbox_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start container + MCP-pool idle-TTL reapers.
