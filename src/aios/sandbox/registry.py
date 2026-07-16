@@ -34,8 +34,9 @@ import asyncio
 import dataclasses
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
@@ -142,15 +143,15 @@ class SessionSnapshotState:
     """The GC's per-session decision inputs (one existing session row).
 
     A session *absent* from the GC's state map is **deleted** — its snapshot
-    is collectible without an event (the model is gone). ``last_event_at`` is
-    the dormancy probe (the ``created_at`` of the event at ``last_event_seq``);
-    ``None`` only on the should-not-happen no-events edge, treated as *not*
-    dormant (conservative — never wipe on a missing probe).
+    is collectible without an event (the model is gone). Canonical filesystem
+    state for an existing session is protected until the session is archived
+    and its archive grace interval has elapsed. ``last_event_at`` remains in
+    the query shape for accounting compatibility; it is not a lifecycle gate.
     """
 
     session_id: str
     account_id: str
-    archived: bool
+    archived_at: datetime | None
     last_event_at: datetime | None
     snapshot_ref: str | None
     snapshot_host: str | None
@@ -158,7 +159,7 @@ class SessionSnapshotState:
 
 
 _GcVerdict = Literal["retain", "remove"]
-_GcReason = Literal["live", "retention_ttl", "deleted", "residue"]
+_GcReason = Literal["protected_live", "archive_grace", "archived", "deleted", "residue"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,15 +174,31 @@ class GcImageVerdict:
     reason: _GcReason
 
 
-def _is_session_dormant(state: SessionSnapshotState, now: datetime, ttl_seconds: int) -> bool:
-    """A session is dormant iff its last activity is older than the TTL.
+@dataclass(frozen=True, slots=True)
+class GcPressureResult:
+    """Capacity pressure observed without widening lifecycle deletion rules."""
 
-    Archived sessions follow the same rule (unarchive exists; immediate
-    deletion would strand it). A missing dormancy probe reads as *not* dormant.
-    """
-    if state.last_event_at is None:
-        return False
-    return (now - state.last_event_at).total_seconds() > ttl_seconds
+    pool_used_bytes: int = 0
+    pool_budget_bytes: int | None = None
+    pressured_accounts: frozenset[str] = frozenset()
+
+    @property
+    def pressured(self) -> bool:
+        return (
+            self.pool_budget_bytes is not None and self.pool_used_bytes > self.pool_budget_bytes
+        ) or bool(self.pressured_accounts)
+
+
+PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
+
+
+def _archive_eligible(
+    state: SessionSnapshotState, now: datetime, archive_grace_seconds: int
+) -> bool:
+    """Whether current state crossed the sole destructive lifecycle boundary."""
+    return state.archived_at is not None and now >= state.archived_at + timedelta(
+        seconds=archive_grace_seconds
+    )
 
 
 def _classify_images(
@@ -189,28 +206,13 @@ def _classify_images(
     states: dict[str, SessionSnapshotState],
     *,
     now: datetime,
-    ttl_seconds: int,
+    archive_grace_seconds: int,
     this_host: str,
 ) -> list[GcImageVerdict]:
-    """Pure retain-rule classifier for the GC image pass (§5.5), table-driven.
-
-    The single rule: **an image is retained iff it is the canonical tag of an
-    existing session whose last activity is within the TTL.** Everything else
-    managed-and-mine is removed — crash residue, flatten leftovers, deleted
-    sessions (the delete hook), and dormant sessions (the latter flagged
-    ``retention_ttl`` so the caller emits ``sandbox_fs_expired``).
-
-    Untagged interiors of *live* chains are skipped **structurally** — any
-    image that is the ``.Parent`` of another listed image is excluded (the
-    leaf's removal cascade-deletes the chain; removing an interior directly
-    would be refused anyway). On the containerd store ``.Parent`` may be empty;
-    the structural skip then no-ops and the ``remove_image`` refusal is the
-    safety net.
-    """
+    """Classify canonical state by archive lifecycle; residue stays collectible."""
     parent_ids = {img.parent_id for img in images if img.parent_id}
     verdicts: list[GcImageVerdict] = []
     for img in images:
-        # Structural skip: interior of a (possibly live) chain.
         if img.image_id in parent_ids:
             continue
         sid = img.labels.get(SESSION_LABEL_KEY)
@@ -218,26 +220,19 @@ def _classify_images(
         is_canonical = canonical_tag is not None and canonical_tag in img.repo_tags
         removal_ref = canonical_tag if (is_canonical and canonical_tag) else img.image_id
         state = states.get(sid) if sid else None
-
-        if is_canonical and state is not None and not _is_session_dormant(state, now, ttl_seconds):
-            verdict: _GcVerdict = "retain"
-            reason: _GcReason = "live"
-        elif is_canonical and state is not None:
-            verdict, reason = "remove", "retention_ttl"  # dormant → emit expired event
-        elif is_canonical and state is None:
-            verdict, reason = "remove", "deleted"  # session deleted → no event
+        if is_canonical and state is not None:
+            if state.archived_at is None:
+                verdict: _GcVerdict = "retain"
+                reason: _GcReason = "protected_live"
+            elif _archive_eligible(state, now, archive_grace_seconds):
+                verdict, reason = "remove", "archived"
+            else:
+                verdict, reason = "retain", "archive_grace"
+        elif is_canonical:
+            verdict, reason = "remove", "deleted"
         else:
-            verdict, reason = "remove", "residue"  # crash/flatten leftover, non-canonical
-        verdicts.append(
-            GcImageVerdict(
-                image=img,
-                session_id=sid,
-                is_canonical=is_canonical,
-                removal_ref=removal_ref,
-                verdict=verdict,
-                reason=reason,
-            )
-        )
+            verdict, reason = "remove", "residue"
+        verdicts.append(GcImageVerdict(img, sid, is_canonical, removal_ref, verdict, reason))
     return verdicts
 
 
@@ -269,6 +264,7 @@ class SandboxRegistry:
         self._gc_task: asyncio.Task[None] | None = None
         self._egress_refresh_task: asyncio.Task[None] | None = None
         self._egress_states: dict[str, EgressRefreshState] = {}
+        self._provisioning_pressure = GcPressureResult()
         # Consecutive salvage failures keyed by full corpse id. The value is
         # ``(owning_session_id, failures, alarmed)`` — the owning session is
         # stored so a salvage pass for one session only reconciles/clears its
@@ -282,6 +278,41 @@ class SandboxRegistry:
         # GC'd before stop() unwinds the proxy's uvicorn server, httpx
         # client and bound TCP port.
         self._evict_proxy_stop_tasks: set[asyncio.Task[None]] = set()
+
+    def set_provisioning_pressure(self, pressure: GcPressureResult) -> None:
+        """Install the worker's latest GC-derived cold-provision admission state."""
+        self._provisioning_pressure = pressure
+
+    def _admit_capacity_provision(
+        self, owner_id: str, *, account_id: str | None, durable: bool = True
+    ) -> None:
+        """Reject only provisions affected by the latest capacity pressure.
+
+        Host-pool pressure applies to every cold provision. Account pressure is
+        scoped to durable session sandboxes owned by that account; ephemeral run
+        sandboxes never add snapshots and therefore do not consume account cap.
+        """
+        pressure = self._provisioning_pressure
+        host_pressured = (
+            pressure.pool_budget_bytes is not None
+            and pressure.pool_used_bytes > pressure.pool_budget_bytes
+        )
+        account_pressured = (
+            durable and account_id is not None and account_id in pressure.pressured_accounts
+        )
+        if not (host_pressured or account_pressured):
+            return
+        log.error(
+            "sandbox.provisioning_pressure_alarm",
+            owner_id=owner_id,
+            account_id=account_id,
+            pool_used_bytes=pressure.pool_used_bytes,
+            pool_budget_bytes=pressure.pool_budget_bytes,
+            pressured_accounts=sorted(pressure.pressured_accounts),
+        )
+        raise RuntimeError(
+            "sandbox provisioning temporarily unavailable: snapshot capacity pressure"
+        )
 
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -393,7 +424,13 @@ class SandboxRegistry:
                     # the before/after diff empty and silently drop the step's
                     # memory writes.
                     self.evict(session_id, unload_session_caches=False)
-            handle = await self._provision_with_span(session_id, pool=pool)
+            account_id: str | None = None
+            if pool is not None:
+                from aios.services import sessions as sessions_service
+
+                account_id = await sessions_service.load_session_account_id(pool, session_id)
+            self._admit_capacity_provision(session_id, account_id=account_id)
+            handle = await self._provision_with_span(session_id, pool=pool, account_id=account_id)
             self._handles[session_id] = handle
             self._last_used[session_id] = time.monotonic()
             return handle
@@ -422,14 +459,19 @@ class SandboxRegistry:
         return current != handle.spec_version
 
     async def _provision_with_span(
-        self, session_id: str, *, pool: asyncpg.Pool[Any] | None
+        self,
+        session_id: str,
+        *,
+        pool: asyncpg.Pool[Any] | None,
+        account_id: str | None = None,
     ) -> SandboxHandle:
         if pool is None:
             return await self._provision(session_id)
 
         from aios.services import sessions as sessions_service
 
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        if account_id is None:
+            account_id = await sessions_service.load_session_account_id(pool, session_id)
         span_start = await sessions_service.append_event(
             pool, session_id, "span", {"event": "sandbox_provision_start"}, account_id=account_id
         )
@@ -601,6 +643,7 @@ class SandboxRegistry:
                 # snapshot: a run sandbox has no durable rootfs to preserve) and
                 # cold-reprovision.
                 await self._destroy_run_quietly(run_id, current)
+            self._admit_capacity_provision(run_id, account_id=None, durable=False)
             handle = await self._provision_run(run_id)
             self._handles[run_id] = handle
             self._last_used[run_id] = time.monotonic()
@@ -1892,7 +1935,9 @@ class SandboxRegistry:
 
     # ── GC: one retain-rule reconciler (§5.5) ───────────────────────────────
 
-    def start_gc(self, pool: asyncpg.Pool[Any]) -> asyncio.Task[None]:
+    def start_gc(
+        self, pool: asyncpg.Pool[Any], *, pressure_callback: PressureCallback | None = None
+    ) -> asyncio.Task[None]:
         """Start the snapshot GC reconciler (hourly, immediate first tick).
 
         Replaces the old boot-time ``reap_orphans``: instead of removing every
@@ -1903,7 +1948,9 @@ class SandboxRegistry:
         """
         if self._gc_task is not None:
             return self._gc_task
-        self._gc_task = asyncio.create_task(self._gc_loop(pool), name="sandbox-snapshot-gc")
+        self._gc_task = asyncio.create_task(
+            self._gc_loop(pool, pressure_callback), name="sandbox-snapshot-gc"
+        )
         return self._gc_task
 
     def stop_gc(self) -> None:
@@ -1912,7 +1959,9 @@ class SandboxRegistry:
             self._gc_task.cancel()
             self._gc_task = None
 
-    async def _gc_loop(self, pool: asyncpg.Pool[Any]) -> None:
+    async def _gc_loop(
+        self, pool: asyncpg.Pool[Any], pressure_callback: PressureCallback | None
+    ) -> None:
         """Background loop: immediate first tick, then hourly.
 
         The try/except is nested INSIDE the loop (mirroring the idle reaper):
@@ -1926,11 +1975,15 @@ class SandboxRegistry:
                 if not first:
                     await asyncio.sleep(_GC_INTERVAL_SECONDS)
                 first = False
-                await self._gc_once(pool)
+                pressure = await self._gc_once(pool)
+                if pressure_callback is not None:
+                    callback_result = pressure_callback(pressure)
+                    if callback_result is not None:
+                        await callback_result
             except Exception:
                 log.exception("sandbox.gc_tick_failed")
 
-    async def _gc_once(self, pool: asyncpg.Pool[Any]) -> None:
+    async def _gc_once(self, pool: asyncpg.Pool[Any]) -> GcPressureResult:
         """One GC tick: corpse pass, image pass, pool-budget pass, pointer reconcile."""
         settings = get_settings()
         instance_id = settings.instance_id
@@ -1953,32 +2006,24 @@ class SandboxRegistry:
             images,
             image_states,
             now=now,
-            ttl_seconds=settings.sandbox_snapshot_ttl_seconds,
+            archive_grace_seconds=settings.sandbox_archive_gc_grace_seconds,
             this_host=instance_id,
         )
         retained = await self._gc_image_pass(
-            verdicts, image_states, now, settings.sandbox_snapshot_ttl_seconds, instance_id
+            verdicts, image_states, now, settings.sandbox_archive_gc_grace_seconds, instance_id
         )
 
         # Pass 3 — per-host pool budget.
-        pool_evicted = await self._gc_pool_budget_pass(
+        pool_pressure = await self._gc_pool_budget_pass(
             retained, image_states, settings.sandbox_snapshot_pool_bytes, instance_id
         )
 
         # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
-        # Skip artifacts the pool-budget pass already evicted this tick.
-        cap_evicted = await self._gc_account_cap_pass(
-            retained, image_states, instance_id, already_evicted=pool_evicted
-        )
+        account_pressure = await self._gc_account_cap_pass(retained, image_states, instance_id)
 
-        # Pass 4 — pointer reconciliation against local store truth. Skip every
-        # snapshot evicted this tick (passes 3 + 3b): its image is gone, but the
-        # tick-start state still shows the pre-eviction pointer, so reconciling
-        # would resurrect a pointer to a now-removed image (a dangling pointer →
-        # unresumable session).
-        await self._gc_reconcile_pointers(
-            retained, image_states, instance_id, already_evicted=pool_evicted | cap_evicted
-        )
+        # Pass 4 — pointer reconciliation against local store truth. Pressure
+        # passes are observational and never remove lifecycle-protected images.
+        await self._gc_reconcile_pointers(retained, image_states, instance_id)
 
         log.info(
             "sandbox.gc_tick",
@@ -1986,6 +2031,11 @@ class SandboxRegistry:
             images=len(images),
             retained=len(retained),
             removed=len(verdicts) - len(retained),
+        )
+        return GcPressureResult(
+            pool_used_bytes=pool_pressure.pool_used_bytes,
+            pool_budget_bytes=pool_pressure.pool_budget_bytes,
+            pressured_accounts=account_pressure.pressured_accounts,
         )
 
     async def _load_gc_states(
@@ -2000,7 +2050,7 @@ class SandboxRegistry:
             row["id"]: SessionSnapshotState(
                 session_id=row["id"],
                 account_id=row["account_id"],
-                archived=row["archived_at"] is not None,
+                archived_at=row["archived_at"],
                 last_event_at=row["last_event_at"],
                 snapshot_ref=row["snapshot_ref"],
                 snapshot_host=row["snapshot_host"],
@@ -2013,12 +2063,11 @@ class SandboxRegistry:
         """Re-read one session's GC state — the **condition re-verify** the
         retain rule needs under the per-session lock (§5.5).
 
-        The tick-start ``states`` snapshot can be stale for a session that woke
-        (or crossed back under the TTL) between the load and a drop decision;
-        re-deriving dormancy from a fresh single-row read under the lock is what
-        keeps the GC from force-removing a just-woke session's corpse without
-        salvage, or removing its canonical snapshot a tick too early. ``None``
-        ⇒ the session is genuinely gone (deleted), still collectible.
+        The tick-start ``states`` snapshot can be stale across archive,
+        unarchive, or rearchive. Re-reading under the lock proves the lifecycle
+        timestamp, grace boundary, pointer, and ownership used by a destructive
+        decision. ``None`` means deleted and is collectible only on paths whose
+        contract explicitly permits deleted-session cleanup.
         """
         from aios.harness import runtime
 
@@ -2035,9 +2084,9 @@ class SandboxRegistry:
     ) -> None:
         """Salvage (or drop) every managed container that isn't a live cached handle.
 
-        Retain rule first: a deleted/dormant session's corpse is removed
-        WITHOUT paying a commit; a live-within-TTL corpse is salvaged (commit)
-        then removed. Best-effort — a snapshot failure leaves the corpse for
+        Retain rule first: a deleted or archived-past-grace session's corpse is
+        removed WITHOUT paying a commit; every other existing session is
+        salvaged (committed) and then removed. Best-effort — a snapshot failure leaves the corpse for
         the next tick (the GC never raises). Each corpse is handled under the
         per-session lock with the cached-handle re-check.
 
@@ -2064,18 +2113,20 @@ class SandboxRegistry:
                     # destroy, no DB lookup.
                     await self._backend.force_remove(ref.sandbox_id)
                     continue
-                # ── session corpse: retain rule + under-lock dormancy re-verify ──
-                ttl = settings.sandbox_snapshot_ttl_seconds
+                # ── session corpse: lifecycle rule + under-lock re-verify ──
                 state = states.get(sid)
-                keep_fs = state is not None and not _is_session_dormant(state, now, ttl)
-                if not keep_fs:
-                    # Drop candidate (deleted/dormant per the tick-start snapshot)
-                    # — re-verify dormancy under the lock (§5.5). A session that
-                    # woke since the load must be salvaged, not dropped without a
-                    # commit. (Only the drop direction can be wrong: a session
-                    # can't grow MORE dormant within one tick.)
-                    fresh = await self._fresh_session_state(sid)
-                    keep_fs = fresh is not None and not _is_session_dormant(fresh, now, ttl)
+                fresh = await self._fresh_session_state(sid)
+                keep_fs = fresh is not None and not _archive_eligible(
+                    fresh, now, settings.sandbox_archive_gc_grace_seconds
+                )
+                # Archived-past-grace destruction requires the exact timestamp
+                # seen by the scan. Any lifecycle race fails closed.
+                if (
+                    not keep_fs
+                    and fresh is not None
+                    and (state is None or fresh.archived_at != state.archived_at)
+                ):
+                    keep_fs = True
                 if keep_fs:
                     removable = await self._snapshot_and_record(
                         sid, ref.sandbox_id, disk_limit_bytes=settings.sandbox_snapshot_budget_bytes
@@ -2092,7 +2143,7 @@ class SandboxRegistry:
         verdicts: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         now: datetime,
-        ttl_seconds: int,
+        archive_grace_seconds: int,
         instance_id: str,
     ) -> list[GcImageVerdict]:
         """Remove every non-retained image (under per-session locks); return the retained."""
@@ -2113,24 +2164,41 @@ class SandboxRegistry:
                 if self._handles.get(sid) is not None:
                     retained.append(v)
                     continue
-                # Condition re-verify (§5.5): a TTL-expiry removal is decided
-                # from the tick-start snapshot — re-read dormancy under the lock
-                # so a session that woke since the load keeps its canonical
-                # snapshot instead of being expired a tick early. (Deleted /
-                # residue verdicts can't flip back within a tick.)
-                if v.reason == "retention_ttl":
-                    fresh = await self._fresh_session_state(sid)
-                    if fresh is not None and not _is_session_dormant(fresh, now, ttl_seconds):
+                # Condition re-verify: destructive archive cleanup requires a
+                # fresh proof of lifecycle, pointer, grace, and host ownership.
+                fresh = await self._fresh_session_state(sid)
+                if v.reason == "archived":
+                    candidate = states.get(sid)
+                    if (
+                        candidate is None
+                        or fresh is None
+                        or fresh.archived_at != candidate.archived_at
+                        or not _archive_eligible(fresh, now, archive_grace_seconds)
+                        or fresh.snapshot_ref != v.removal_ref
+                        or fresh.snapshot_host != instance_id
+                    ):
                         retained.append(v)
                         continue
+                elif (
+                    v.reason == "residue"
+                    and fresh is not None
+                    and fresh.snapshot_ref
+                    in (
+                        v.removal_ref,
+                        *v.image.repo_tags,
+                    )
+                ):
+                    # Publication raced the scan: it is current now, not residue.
+                    retained.append(v)
+                    continue
                 removed = await self._backend.remove_image(v.removal_ref)
                 if not removed:
                     # Refused (a child still references it) — retain this tick.
                     retained.append(v)
                     continue
-                if v.reason == "retention_ttl":
+                if v.reason == "archived":
                     await self._append_fs_event(
-                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "retention_ttl"}
+                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
                     )
                 if v.is_canonical:
                     await self._clear_pointer_if_owned(sid, instance_id, states)
@@ -2142,28 +2210,21 @@ class SandboxRegistry:
         states: dict[str, SessionSnapshotState],
         pool_bytes: int | None,
         instance_id: str,
-    ) -> set[str]:
-        """Evict most-dormant sessions first while this host is over its pool budget.
-
-        Returns the session_ids it evicted, so a downstream cap pass can skip
-        artifacts already gone this tick (and not double-count their bytes).
-        """
+    ) -> GcPressureResult:
+        """Return host pressure; lifecycle eligibility is never widened by it."""
         if pool_bytes is None:
-            return set()
+            return GcPressureResult()
         base_sizes: dict[str, int] = {}
-        sized: list[tuple[GcImageVerdict, int]] = []
-        total = 0
-        for v in retained:
-            if not v.is_canonical:
-                continue
-            ub = await self._unique_bytes_for_image(v.image, base_sizes)
-            total += ub
-            sized.append((v, ub))
-        if total <= pool_bytes:
-            return set()
-        return await self._evict_most_dormant(
-            sized, states, instance_id, total=total, budget=pool_bytes, reason="disk_pressure"
+        total = sum(
+            [
+                await self._unique_bytes_for_image(v.image, base_sizes)
+                for v in retained
+                if v.is_canonical
+            ]
         )
+        if total > pool_bytes:
+            log.error("sandbox.snapshot_pool_pressure", used_bytes=total, budget_bytes=pool_bytes)
+        return GcPressureResult(pool_used_bytes=total, pool_budget_bytes=pool_bytes)
 
     async def _gc_account_cap_pass(
         self,
@@ -2172,95 +2233,31 @@ class SandboxRegistry:
         instance_id: str,
         *,
         already_evicted: set[str] | None = None,
-    ) -> set[str]:
-        """Enforce per-account snapshot caps (``config.sandbox_snapshot_bytes``, §5.7).
-
-        Mirrors the per-host pool-budget pass, but partitioned by account: each
-        over-cap account's MOST-DORMANT snapshots are evicted first (each with a
-        model-visible ``sandbox_fs_expired {account_cap}`` event) until the
-        account is back under cap. An account with no configured cap (none up its
-        parent chain) is never enforced; under-cap accounts are untouched.
-
-        Returns the session_ids it evicted, so the pointer-reconcile pass can
-        skip them — their image is gone this tick but the tick-start state still
-        shows the pre-eviction pointer.
-        """
+    ) -> GcPressureResult:
+        """Report account pressure without deleting canonical session state."""
         from aios.harness import runtime
 
-        skip = already_evicted or set()
-        base_sizes: dict[str, int] = {}  # shared across accounts (sessions share a base)
-        # Group retained canonical snapshots by owning account, summing bytes.
-        by_account: dict[str, list[tuple[GcImageVerdict, int]]] = {}
         totals: dict[str, int] = {}
+        base_sizes: dict[str, int] = {}
         for v in retained:
-            sid = v.session_id
-            if not v.is_canonical or sid is None or sid in skip:
-                continue
-            st = states.get(sid)
-            if st is None:
-                continue  # deleted since tick start — collected elsewhere
-            ub = await self._unique_bytes_for_image(v.image, base_sizes)
-            by_account.setdefault(st.account_id, []).append((v, ub))
-            totals[st.account_id] = totals.get(st.account_id, 0) + ub
-
+            if v.is_canonical and v.session_id in states:
+                account = states[v.session_id].account_id
+                size = await self._unique_bytes_for_image(v.image, base_sizes)
+                totals[account] = totals.get(account, 0) + size
         pool = runtime.require_pool()
-        evicted: set[str] = set()
-        for account_id, sized in by_account.items():
+        pressured: set[str] = set()
+        for account, total in totals.items():
             async with pool.acquire() as conn:
-                cap = await queries.resolve_effective_sandbox_snapshot_bytes(conn, account_id)
-            if cap is None or totals[account_id] <= cap:
-                continue
-            evicted |= await self._evict_most_dormant(
-                sized,
-                states,
-                instance_id,
-                total=totals[account_id],
-                budget=cap,
-                reason="account_cap",
-            )
-        return evicted
-
-    async def _evict_most_dormant(
-        self,
-        sized: list[tuple[GcImageVerdict, int]],
-        states: dict[str, SessionSnapshotState],
-        instance_id: str,
-        *,
-        total: int,
-        budget: int,
-        reason: str,
-    ) -> set[str]:
-        """Evict the most-dormant snapshots from ``sized`` until ``total`` ≤ ``budget``.
-
-        Shared by the per-host pool-budget and per-account cap passes (§5.5/§5.7).
-        Each removal takes the per-session lock and re-checks the cached handle
-        (a waking session is skipped, never evicted out from under itself),
-        appends a model-visible ``sandbox_fs_expired {reason}`` event, and clears
-        the ownership-gated pointer. Returns the evicted session_ids.
-        """
-
-        def _dormancy_key(item: tuple[GcImageVerdict, int]) -> datetime:
-            st = item[0].session_id and states.get(item[0].session_id)
-            if st and st.last_event_at is not None:
-                return st.last_event_at
-            return datetime.min.replace(tzinfo=UTC)  # unknown dormancy ⇒ evict first
-
-        evicted: set[str] = set()
-        for v, ub in sorted(sized, key=_dormancy_key):
-            if total <= budget:
-                break
-            sid = v.session_id
-            if sid is None:
-                continue
-            async with self._lock_for(sid):
-                if self._handles.get(sid) is not None:
-                    continue  # waking — skip
-                if await self._backend.remove_image(v.removal_ref):
-                    total -= ub
-                    evicted.add(sid)
-                    await self._append_fs_event(sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": reason})
-                    await self._clear_pointer_if_owned(sid, instance_id, states)
-        return evicted
+                cap = await queries.resolve_effective_sandbox_snapshot_bytes(conn, account)
+            if cap is not None and total > cap:
+                pressured.add(account)
+                log.error(
+                    "sandbox.snapshot_account_pressure",
+                    account_id=account,
+                    used_bytes=total,
+                    budget_bytes=cap,
+                )
+        return GcPressureResult(pressured_accounts=frozenset(pressured))
 
     async def _gc_reconcile_pointers(
         self,
