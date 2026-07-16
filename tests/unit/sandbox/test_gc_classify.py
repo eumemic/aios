@@ -163,3 +163,25 @@ def test_archived_current_observes_grace_boundary() -> None:
         [img], {"sess_a": at}, now=_NOW, archive_grace_seconds=grace, this_host=_HOST
     )[0]
     assert (verdict.verdict, verdict.reason) == ("remove", "archived")
+
+
+def test_zero_archive_grace_is_immediately_eligible() -> None:
+    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
+    state = replace(_state("sess_a", dormant=False), archived_at=_NOW)
+    verdict = _classify_images(
+        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=0, this_host=_HOST
+    )[0]
+    assert (verdict.verdict, verdict.reason) == ("remove", "archived")
+
+
+def test_nondefault_archive_grace_boundary() -> None:
+    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
+    state = replace(_state("sess_a", dormant=False), archived_at=_NOW - timedelta(seconds=17))
+    before = _classify_images(
+        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=18, this_host=_HOST
+    )[0]
+    at = _classify_images(
+        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=17, this_host=_HOST
+    )[0]
+    assert before.verdict == "retain"
+    assert at.verdict == "remove"
