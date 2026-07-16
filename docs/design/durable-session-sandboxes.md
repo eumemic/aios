@@ -412,42 +412,30 @@ crash windows content-equal no-ops.
 
 `start_gc(pool, ...)` — background loop, hourly tick, immediate first tick at boot:
 
-1. **Corpse pass** — per corpse, under `_lock_for(session_id)`: **consult the retain rule
-   first** (a deleted or TTL-expired session's corpse is removed *without* paying the
-   commit), then salvage (lineage-gated) and remove.
-2. **Image pass** — `docker images -a` (with `--filter label=aios.managed`); the `-a` is
-   load-bearing: untagged crash residue is invisible without it (verified). Untagged
-   interiors of live chains are skipped **structurally** — exclude any image that is the
-   `.Parent` of another listed image — rather than leaning on rmi-refusal churn. Then the
-   single rule: **an image is retained iff it is the canonical tag of an existing session
-   whose last activity is within the TTL** (`sandbox_snapshot_ttl_seconds`, default 30
-   days, keyed on session dormancy via the `(session_id, last_event_seq)` event row — a
-   point probe, not `MAX(events.created_at)`). Everything else managed-and-mine is
-   removed: crash residue, flatten leftovers, deleted sessions (this *is* the delete
-   hook — ≤1 h lag), and dormant sessions (the latter with a model-visible
-   `sandbox_fs_expired {reason: "retention_ttl"}` event). Archived sessions follow the
-   same dormancy rule (unarchive exists; immediate deletion would strand it).
-3. **Pool-budget pass** — if this host's snapshot total exceeds
-   `sandbox_snapshot_pool_bytes` (§5.7), evict **most-dormant sessions first** (by the
-   same `last_event_at` the tick already fetched — *not* image `.Created`, which
-   skip-empty pins and which would evict the most-active session first), each with
-   `sandbox_fs_expired {reason: "disk_pressure"}`.
-4. **Pointer reconciliation** — the tick writes/clears
-   `snapshot_ref/host/bytes/updated_at` to match what its own store actually holds:
-   every removal of a *canonical* artifact in passes 2–3 clears the pointer in the same
-   per-session lock scope; a canonical tag present with a NULL or stale pointer (crash
-   residue) gets the pointer set. The DB never ends a tick claiming something the owning
-   store disowns. **Pointer writes and clears are ownership-gated**: a tick touches
-   `sessions.snapshot_*` only for sessions whose `snapshot_host` is this host (or NULL,
-   for the crash heal) — evicting a local *cache* of another host's artifact never
-   touches the canonical pointer. On multi-host shapes, pointer advancement (salvage, GC
-   heal) is additionally **compare-and-swap** — `UPDATE … WHERE snapshot_host = <this
-   host> AND snapshot_updated_at = <value read at tick start>` — so a session that moved
-   to another host can never be clobbered by a returning host's stale corpse; a CAS
-   failure demotes the local corpse/tag to non-canonical residue, removed without
-   commit. When async push is enabled, the tick also reconciles the store against the
-   local canonical tag (re-enqueue `put` on digest mismatch), so a crash-dropped push
-   converges instead of leaving unbounded staleness.
+1. **Corpse pass** — per corpse, under `_lock_for(session_id)`: re-read the
+   session lifecycle. Deleted sessions and sessions archived at or beyond
+   `sandbox_archive_gc_grace_seconds` are bare-destroyed; all other session
+   corpses are salvaged before removal. Ephemeral workflow-run corpses are
+   always bare-destroyed because they have no durable rootfs.
+2. **Image pass** — enumerate all managed images, including untagged residue.
+   Canonical images for existing non-archived sessions are protected. Archived
+   canonical images become collectible only once archive grace has elapsed;
+   deleted-session images and non-canonical leaf residue are collectible.
+   Live-chain interiors are skipped structurally by parent relationship.
+3. **Pressure passes** — host-pool and per-account snapshot limits are
+   observational: they never delete lifecycle-protected filesystems. Pressure
+   is fed back to cold-provision admission. Host pressure is global; account
+   pressure rejects only durable session provisions owned by that account, and
+   never ephemeral run sandboxes. A later clear report restores admission.
+4. **Pointer reconciliation** — local store truth heals missing/stale pointers.
+   Destructive archive cleanup requires a fresh, exact archive timestamp,
+   elapsed grace, matching pointer, and positive ownership
+   (`snapshot_host == instance_id`) under the per-session lock; an unarchive,
+   rearchive, pointer move, or ambiguous host fails closed.
+
+**Every per-session image removal takes `_lock_for(session_id)` and re-checks
+lifecycle and ownership under the lock.** This closes the scan-to-delete race
+without using activity age as a deletion condition.
 
 **Ownership across hosts**: each host GCs only its own store. For a deleted/expired
 session whose `snapshot_host` is another host, the non-owning tick **skips** — the DB
@@ -464,11 +452,10 @@ global accounting — without it, never-waking sessions' pointers (and their
 `snapshot_bytes`) leak indefinitely, since non-owning ticks skip by design. All of this
 is vacuous single-host.
 
-**Every per-session image removal in passes 2–3 takes `_lock_for(session_id)` and
-re-checks under the lock** (cached handle present → skip; condition re-verified). Without
-this, the TTL/budget pass can race a waking session in the window between
-corpse-salvage and `docker run`, when no container references the tag and `rmi` would
-succeed against a just-salvaged snapshot (a verified-constructible interleaving).
+**Every per-session image removal takes `_lock_for(session_id)` and re-checks
+under the lock** (cached handle present → skip; lifecycle and ownership re-verified).
+Without this, archive cleanup can race an unarchive or rearchive between the scan and
+`rmi`, deleting the canonical snapshot for a newly protected session.
 
 `docker rmi` of a tag cascade-deletes the entire untagged parent chain down to the first
 still-referenced image (verified on overlay2; re-verify on containerd, §9) — GC of an
@@ -567,7 +554,7 @@ entirely. What remains: secrets the agent itself wrote to disk (`~/.netrc`,
 `/workspace` on host disk today, but now also readable by anything with daemon access
 (`docker save`, image inspect of FS layers). **Accepted threat-model boundary requiring
 sign-off**: daemon access ≈ host root, already a near-total compromise; the marginal
-regression is retention duration, bounded by TTL/budget.
+regression is retention duration, bounded by explicit archive lifecycle and grace.
 
 **Deferred hardening, dispositioned rather than re-deferred**: `--read-only` is
 **permanently incompatible** with this contract (the contract *is* a writable persistent
@@ -577,7 +564,7 @@ NET_ADMIN, the largest grant. The resume-fresh-flags property means any future h
 retrofits every parked session automatically.
 
 **Supply-chain accumulation**: agent-installed software re-executes at every resume —
-inherent to persistent disk. Bounds: dormancy TTL, budgets,
+inherent to persistent disk. Bounds: archive lifecycle/grace, pressure alarms,
 fresh security flags each resume, and the sidecar fix removing the worst consequence
 (lockdown subversion). `install_packages` still runs tenant-FS package managers at
 resume; with the lockdown gate moved off the sandbox FS, a poisoned pip/apt harms only
@@ -681,8 +668,8 @@ All four new columns are nullable with NULL = no snapshot — zero backfill, met
 DDL. They are internal (excluded from the session wire shape), so no openapi/SDK churn
 from this migration itself.
 
-**Settings** (config.py): `sandbox_snapshot_ttl_seconds: int = 2_592_000` (30 d);
-`sandbox_snapshot_budget_bytes: int = 4 GiB` (per-session; per-env override via a **new**
+**Settings** (config.py): `sandbox_archive_gc_grace_seconds` controls the explicit
+archive-to-destruction delay; `sandbox_snapshot_budget_bytes: int = 4 GiB` (per-session; per-env override via a **new**
 `EnvironmentConfig` field replacing `disk_bytes` — never a silent semantic rename of the
 existing field, per §5.7's own no-repurposing rule); `sandbox_snapshot_pool_bytes: int | None = None` with the eumemic-ops
 deploy setting it (§9); **delete** `sandbox_disk_bytes`; raise
@@ -828,8 +815,9 @@ E2E (`docker_harness`, gated by the existing `needs_docker` marker; force idle v
   `evict()` → next tool call sees the pre-crash marker; stale-corpse variant never
   regresses tag content.
 - **GC** (`test_sandbox_snapshot_gc.py`): session delete → `_gc_once` → image gone;
-  TTL=0 → image gone + `sandbox_fs_expired` in the event log; orphaned-chain residue
-  (crash-between-import-and-rm shape) collected; pool budget evicts most-dormant first.
+  archive grace boundary and zero-grace cases → image gone; unarchive/rearchive races
+  fail closed; orphaned-chain residue is collected; pressure is signalled without
+  deleting lifecycle-protected snapshots.
 - **Lockdown sidecar** (`test_networking.py` extension): Limited env on a *resumed*
   snapshot whose `/usr/sbin/iptables` was replaced by `exit 0` pre-idle → lockdown still
   enforced (curl to unlisted host fails); sandbox cannot `iptables -F` (no NET_ADMIN).
@@ -886,8 +874,8 @@ Docker availability: e2e requires real Docker (`DOCKER_HOST` per conftest); CI a
 8. **Per-account caps deferred** (usage metric ships, eviction engine doesn't);
    **`--read-only` closed as incompatible** rather than re-deferred; **`--cap-drop=ALL`
    stays deferred** (NET_ADMIN removal ships now via the lockdown sidecar).
-9. **Optional rollback knob** (not in the design, flag only): `sandbox_snapshot_ttl_seconds=0`
-   could degenerate to today's destroy-on-idle if a kill switch is wanted for the rollout.
+9. **Rollback posture**: disable new snapshot creation while retaining lifecycle-
+   protected artifacts; destructive cleanup remains tied to archive plus grace.
 
 ---
 

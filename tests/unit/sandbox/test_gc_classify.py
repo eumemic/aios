@@ -1,11 +1,8 @@
-"""Table-driven coverage for the GC retain-rule classifier (durable session
-sandboxes, §5.5). ``_classify_images`` is pure, so it needs no Docker or DB.
+"""Table-driven coverage for lifecycle-based snapshot GC classification.
 
-The single rule: an image is RETAINED iff it is the canonical tag of an
-existing session whose last activity is within the TTL. Everything else
-managed-and-mine is removed — crash/flatten residue, deleted sessions (the
-delete hook), and dormant sessions (flagged ``retention_ttl``). Untagged
-interiors of live chains are skipped structurally.
+Canonical snapshots of existing, non-archived sessions are protected regardless
+of activity. Archived snapshots become collectible only when archive grace has
+elapsed; deleted sessions and non-canonical residue are collectible immediately.
 """
 
 from __future__ import annotations
@@ -18,7 +15,6 @@ from aios.sandbox.registry import SessionSnapshotState, _classify_images
 from aios.sandbox.spec import snapshot_tag
 
 _HOST = "default"
-_TTL = 30 * 24 * 3600
 _NOW = datetime(2026, 6, 10, tzinfo=UTC)
 
 
@@ -107,8 +103,8 @@ def test_structural_parent_skip_excludes_live_chain_interior() -> None:
     assert out["img_leaf"] == ("retain", "protected_live")
 
 
-def test_archived_session_within_ttl_is_retained() -> None:
-    """Archived sessions follow the same dormancy rule (unarchive exists)."""
+def test_archived_session_within_grace_is_retained() -> None:
+    """An archived session remains protected until archive grace elapses."""
     img = _image(image_id="img_a", session_id="sess_a", canonical=True)
     state = SessionSnapshotState(
         session_id="sess_a",

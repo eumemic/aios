@@ -283,16 +283,32 @@ class SandboxRegistry:
         """Install the worker's latest GC-derived cold-provision admission state."""
         self._provisioning_pressure = pressure
 
-    def _admit_capacity_provision(self, owner_id: str) -> None:
-        """Reject a cold, capacity-consuming provision while GC reports pressure."""
-        if not self._provisioning_pressure.pressured:
+    def _admit_capacity_provision(
+        self, owner_id: str, *, account_id: str | None, durable: bool = True
+    ) -> None:
+        """Reject only provisions affected by the latest capacity pressure.
+
+        Host-pool pressure applies to every cold provision. Account pressure is
+        scoped to durable session sandboxes owned by that account; ephemeral run
+        sandboxes never add snapshots and therefore do not consume account cap.
+        """
+        pressure = self._provisioning_pressure
+        host_pressured = (
+            pressure.pool_budget_bytes is not None
+            and pressure.pool_used_bytes > pressure.pool_budget_bytes
+        )
+        account_pressured = (
+            durable and account_id is not None and account_id in pressure.pressured_accounts
+        )
+        if not (host_pressured or account_pressured):
             return
         log.error(
             "sandbox.provisioning_pressure_alarm",
             owner_id=owner_id,
-            pool_used_bytes=self._provisioning_pressure.pool_used_bytes,
-            pool_budget_bytes=self._provisioning_pressure.pool_budget_bytes,
-            pressured_accounts=sorted(self._provisioning_pressure.pressured_accounts),
+            account_id=account_id,
+            pool_used_bytes=pressure.pool_used_bytes,
+            pool_budget_bytes=pressure.pool_budget_bytes,
+            pressured_accounts=sorted(pressure.pressured_accounts),
         )
         raise RuntimeError(
             "sandbox provisioning temporarily unavailable: snapshot capacity pressure"
@@ -408,8 +424,13 @@ class SandboxRegistry:
                     # the before/after diff empty and silently drop the step's
                     # memory writes.
                     self.evict(session_id, unload_session_caches=False)
-            self._admit_capacity_provision(session_id)
-            handle = await self._provision_with_span(session_id, pool=pool)
+            account_id: str | None = None
+            if pool is not None:
+                from aios.services import sessions as sessions_service
+
+                account_id = await sessions_service.load_session_account_id(pool, session_id)
+            self._admit_capacity_provision(session_id, account_id=account_id)
+            handle = await self._provision_with_span(session_id, pool=pool, account_id=account_id)
             self._handles[session_id] = handle
             self._last_used[session_id] = time.monotonic()
             return handle
@@ -438,14 +459,19 @@ class SandboxRegistry:
         return current != handle.spec_version
 
     async def _provision_with_span(
-        self, session_id: str, *, pool: asyncpg.Pool[Any] | None
+        self,
+        session_id: str,
+        *,
+        pool: asyncpg.Pool[Any] | None,
+        account_id: str | None = None,
     ) -> SandboxHandle:
         if pool is None:
             return await self._provision(session_id)
 
         from aios.services import sessions as sessions_service
 
-        account_id = await sessions_service.load_session_account_id(pool, session_id)
+        if account_id is None:
+            account_id = await sessions_service.load_session_account_id(pool, session_id)
         span_start = await sessions_service.append_event(
             pool, session_id, "span", {"event": "sandbox_provision_start"}, account_id=account_id
         )
@@ -617,7 +643,7 @@ class SandboxRegistry:
                 # snapshot: a run sandbox has no durable rootfs to preserve) and
                 # cold-reprovision.
                 await self._destroy_run_quietly(run_id, current)
-            self._admit_capacity_provision(run_id)
+            self._admit_capacity_provision(run_id, account_id=None, durable=False)
             handle = await self._provision_run(run_id)
             self._handles[run_id] = handle
             self._last_used[run_id] = time.monotonic()

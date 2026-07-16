@@ -1,11 +1,8 @@
-"""The GC passes' under-lock dormancy RE-VERIFY (durable session sandboxes, §5.5).
+"""Impure snapshot-GC pass tests for under-lock lifecycle re-verification.
 
-The retain rule is decided from a ``states`` snapshot loaded once per tick, but
-the design requires the condition to be **re-verified under the per-session
-lock**: a session that wakes (or crosses back under the TTL) between the load
-and a drop decision must keep its filesystem. These tests drive the impure
-corpse/image passes with a stale-dormant tick-start state and a fresh-read that
-says active, and assert the woke session is salvaged / retained — not dropped.
+Destructive archive cleanup must re-read archive state, grace, pointer, and host
+ownership while holding the session lock. Lifecycle races fail closed; deleted
+sessions and ephemeral run corpses may be destroyed without snapshotting.
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ from aios.sandbox.spec import snapshot_tag
 from tests.helpers.sandbox import FakeBackend, FakePool
 
 _NOW = datetime(2026, 6, 10, tzinfo=UTC)
-_TTL = 30 * 24 * 3600
+_ARCHIVE_GRACE = 30 * 24 * 3600
 
 
 @pytest.fixture
@@ -169,11 +166,10 @@ async def test_corpse_pass_run_owner_dropped_without_db_lookup_or_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_image_pass_retains_ttl_removal_for_session_that_woke(
+async def test_image_pass_retains_archived_removal_after_unarchive(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retention_ttl removal verdict is re-verified under the lock — a session
-    that woke since the tick-start load keeps its canonical snapshot image."""
+    """An explicit unarchive in the fresh read fails closed."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     _patch_fresh_read(monkeypatch, dormant=False)  # woke
@@ -193,11 +189,11 @@ async def test_image_pass_retains_ttl_removal_for_session_that_woke(
         [verdict],
         {"sess_x": _state("sess_x", dormant=True)},
         _NOW,
-        _TTL,
+        _ARCHIVE_GRACE,
         get_settings().instance_id,
     )
 
-    assert retained == [verdict], "a woke session's snapshot must not be expired a tick early"
+    assert retained == [verdict], "an explicitly unarchived session must retain its snapshot"
     assert not any(c[0] == "remove_image" for c in backend.calls)
 
 
@@ -451,7 +447,9 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["null_host", "stale_grace", "pointer_moved", "rearchived"])
+@pytest.mark.parametrize(
+    "failure", ["null_host", "stale_grace", "pointer_moved", "unarchived", "rearchived"]
+)
 async def test_archived_current_destructive_path_fails_closed(failure: str) -> None:
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
@@ -466,6 +464,8 @@ async def test_archived_current_destructive_path_fails_closed(failure: str) -> N
         fresh = replace(candidate, archived_at=_NOW - timedelta(seconds=86399))
     elif failure == "pointer_moved":
         fresh = replace(candidate, snapshot_ref="other")
+    elif failure == "unarchived":
+        fresh = replace(candidate, archived_at=None)
     else:
         fresh = replace(candidate, archived_at=archived_at + timedelta(seconds=1))
     verdict = GcImageVerdict(
@@ -513,3 +513,62 @@ async def test_snapshot_failure_retains_archived_grace_corpse() -> None:
 
     registry._snapshot_and_record.assert_awaited_once()
     assert not any(call[0] == "force_remove" for call in backend.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grace_seconds, age_seconds", [(17, 17), (0, 0)])
+async def test_archived_corpse_at_boundary_is_bare_destroyed(
+    grace_seconds: int, age_seconds: int
+) -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    archived_at = _NOW - timedelta(seconds=age_seconds)
+    state = replace(_state("sess_x", dormant=False), archived_at=archived_at)
+    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
+    registry._snapshot_and_record = AsyncMock()  # type: ignore[method-assign]
+    corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
+    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": grace_seconds})
+
+    await registry._gc_corpse_pass(
+        [corpse], {"sess_x": state}, _NOW, settings, get_settings().instance_id
+    )
+
+    registry._snapshot_and_record.assert_not_awaited()
+    assert ("force_remove", {"sandbox_id": "cid"}) in backend.calls
+
+
+@pytest.mark.asyncio
+async def test_archived_past_grace_corpse_is_bare_destroyed() -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    state = replace(_state("sess_x", dormant=False), archived_at=_NOW - timedelta(days=2))
+    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
+    registry._snapshot_and_record = AsyncMock()  # type: ignore[method-assign]
+    corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
+    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 86400})
+
+    await registry._gc_corpse_pass(
+        [corpse], {"sess_x": state}, _NOW, settings, get_settings().instance_id
+    )
+
+    registry._snapshot_and_record.assert_not_awaited()
+    assert any(call[0] == "force_remove" for call in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    scanned = replace(_state("sess_x", dormant=False), archived_at=_NOW - timedelta(days=2))
+    fresh = replace(scanned, archived_at=_NOW - timedelta(days=2) + timedelta(seconds=1))
+    registry._fresh_session_state = AsyncMock(return_value=fresh)  # type: ignore[method-assign]
+    registry._snapshot_and_record = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
+    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 86400})
+
+    await registry._gc_corpse_pass(
+        [corpse], {"sess_x": scanned}, _NOW, settings, get_settings().instance_id
+    )
+
+    registry._snapshot_and_record.assert_awaited_once()
+    assert any(call[0] == "force_remove" for call in backend.calls)
