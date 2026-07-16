@@ -197,7 +197,7 @@ async def test_image_pass_retains_archived_removal_after_unarchive(
     assert not any(c[0] == "remove_image" for c in backend.calls)
 
 
-# ─── account-cap eviction pass (per-account snapshot quota, §5.7) ──────────────
+# ─── observational account-cap pass (per-account snapshot quota, §5.7) ────────
 
 
 def _acct_state(session_id: str, *, account_id: str, days_dormant: float) -> SessionSnapshotState:
@@ -243,9 +243,8 @@ def _patch_caps(monkeypatch: pytest.MonkeyPatch, caps: dict[str, int | None]) ->
 
 
 def _stub_event_and_pointer(registry: SandboxRegistry) -> None:
-    """Stub the DB-touching side effects of an eviction so the pass can run on
-    the FakePool (which has no real ``transaction``). The event text itself is
-    asserted in ``tests/unit/test_context_fs_lifecycle.py``."""
+    """Stub DB-touching methods so observational-pass tests can assert that
+    neither lifecycle events nor pointer changes occur on the transaction-less FakePool."""
     registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
     registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
 
@@ -254,15 +253,15 @@ def _stub_event_and_pointer(registry: SandboxRegistry) -> None:
 async def test_account_cap_pass_evicts_most_dormant_first(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An over-cap account's MOST-DORMANT snapshots are evicted first until the
-    account is back under cap, each with ``sandbox_fs_expired {account_cap}``."""
+    """An over-cap account is reported without removing snapshots or emitting
+    filesystem lifecycle events."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     _stub_event_and_pointer(registry)
     _patch_caps(monkeypatch, {"acct_a": 2_500_000})
 
-    # Three sessions of acct_a, 1MB each (3MB > 2.5MB cap). Evicting the single
-    # most-dormant (sess_old, 6 days) brings the account to 2MB ≤ cap.
+    # Three sessions of acct_a, 1MB each (3MB > 2.5MB cap). The pass observes
+    # the overage while retaining every lifecycle-protected snapshot.
     fresh = _canonical_verdict("sess_new", size_bytes=1_000_000)
     mid = _canonical_verdict("sess_mid", size_bytes=1_000_000)
     old = _canonical_verdict("sess_old", size_bytes=1_000_000)
@@ -276,7 +275,7 @@ async def test_account_cap_pass_evicts_most_dormant_first(
 
     removed = [c[1]["ref"] for c in backend.calls if c[0] == "remove_image"]
     assert removed == []
-    # The eviction emits a model-visible sandbox_fs_expired {account_cap} event.
+    # Observing account pressure emits no filesystem lifecycle event.
     registry._append_fs_event.assert_not_awaited()  # type: ignore[attr-defined]
 
 
@@ -306,7 +305,7 @@ async def test_account_cap_pass_leaves_under_cap_account_untouched(
 async def test_account_cap_pass_skips_accounts_with_no_cap(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An account with no configured cap is never enforced, however large."""
+    """An account with no configured cap remains untouched, however large."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     _patch_caps(monkeypatch, {"acct_a": None})
@@ -322,8 +321,8 @@ async def test_account_cap_pass_skips_accounts_with_no_cap(
 async def test_account_cap_pass_is_per_account(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each account is enforced against its own cap independently: an over-cap
-    account is trimmed while an under-cap one is left alone."""
+    """Account-cap observation is independent per account and retains snapshots
+    for both over-cap and under-cap accounts."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     _stub_event_and_pointer(registry)
@@ -349,8 +348,8 @@ async def test_account_cap_pass_is_per_account(
 async def test_account_cap_pass_skips_waking_session(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session that holds a live cached handle (waking) is never evicted out
-    from under itself, even when it is the most-dormant over-cap candidate."""
+    """Account pressure remains observational when a session has a live cached
+    handle; no snapshot is removed."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     _stub_event_and_pointer(registry)
@@ -367,7 +366,7 @@ async def test_account_cap_pass_skips_waking_session(
     await registry._gc_account_cap_pass([old, new], states, get_settings().instance_id)
 
     removed = [c[1]["ref"] for c in backend.calls if c[0] == "remove_image"]
-    # The waking session is skipped; the next-most-dormant is evicted instead.
+    # Pressure accounting does not remove either the waking or dormant snapshot.
     assert old.removal_ref not in removed
     assert removed == []
 
@@ -376,20 +375,12 @@ async def test_account_cap_pass_skips_waking_session(
 async def test_reconcile_skips_snapshot_evicted_this_tick(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pass 4 must not re-point a session whose canonical image an earlier pass
-    removed this tick.
-
-    The eviction passes leave the verdict in ``retained`` and don't mutate the
-    tick-start ``states``, so an evicted session still presents its pre-eviction
-    pointer (here NULL — the first-commit-crash-heal window: a committed tag
-    whose pointer write was lost). Without the ``already_evicted`` skip, pass 4
-    heals that NULL pointer by writing a pointer to the image pass 3 just
-    removed — a dangling pointer that makes the session unresumable.
-    """
+    """An observational pressure pass retains the canonical image and allows
+    pointer reconciliation to heal a missing pointer in the same tick."""
     instance_id = get_settings().instance_id
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
-    _stub_event_and_pointer(registry)  # stub eviction's event + pointer-clear side effects
+    _stub_event_and_pointer(registry)  # verify pressure causes no lifecycle side effects
     verdict = _canonical_verdict("sess_x", size_bytes=2_000_000)
     states = {
         "sess_x": SessionSnapshotState(
@@ -405,13 +396,12 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
     set_pointer = AsyncMock()
     monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
 
-    # Baseline: with nothing evicted, pass 4 legitimately heals the NULL pointer.
-    # This proves the resurrection path is live, so the skip below is not vacuous.
+    # Pointer reconciliation legitimately heals the NULL pointer.
     await registry._gc_reconcile_pointers([verdict], states, instance_id, already_evicted=set())
     set_pointer.assert_awaited_once()
     set_pointer.reset_mock()
 
-    # Pass 3 evicts sess_x under disk pressure (2 MB snapshot vs 1 MB pool budget).
+    # Pass 3 reports disk pressure (2 MB snapshot vs 1 MB pool budget) without removal.
     pressure = await registry._gc_pool_budget_pass([verdict], states, 1_000_000, instance_id)
     assert pressure.pressured
     assert pressure.pool_used_bytes == 2_000_000

@@ -359,8 +359,8 @@ deterministic local tag — today's behavior exactly. Rules:
   against the old tag and discard live post-drift work as `skipped_stale`) — a
   model-visible `sandbox_fs_reset {reason: "environment_image_changed"}` lifecycle event
   is appended, and the session cold-starts on the new image. (Content changes under the *same* ref — base rebuilds, `:stable`
-  promotes — do not trigger this; parked chains keep their pinned base until reset or
-  expiry.) Keep-the-FS-instead is a defensible alternative semantic; the event is the
+  promotes — do not trigger this; parked chains keep their pinned base until the session is reset or archived and
+  its archive grace has elapsed.) Keep-the-FS-instead is a defensible alternative semantic; the event is the
   non-negotiable part — sign-off item §11.
 - **First-commit crash heal**: the salvage preamble (§5.4), already under the per-session
   lock, also reconciles the pointer against local truth — a crash after the first-ever
@@ -437,8 +437,8 @@ crash windows content-equal no-ops.
 lifecycle and ownership under the lock.** This closes the scan-to-delete race
 without using activity age as a deletion condition.
 
-**Ownership across hosts**: each host GCs only its own store. For a deleted/expired
-session whose `snapshot_host` is another host, the non-owning tick **skips** — the DB
+**Ownership across hosts**: each host GCs only its own store. For a session archived
+past grace whose `snapshot_host` is another host, the non-owning tick **skips** — the DB
 pointer tells it not to reach across; the owning host's tick removes. On multi-host
 shapes the retain rule gains an ownership clause: a local image whose session's
 `snapshot_host` is elsewhere is a transport cache, reclaimable once unreferenced, never
@@ -486,7 +486,7 @@ cycle counts by an order of magnitude.
   delete" forbids.
 - **Metric**: unique bytes = `tag.Size − base.Size` where base is the image named by the
   chain's own `aios.base_image` label (not `settings.docker_image` — per-env overrides
-  would otherwise be billed ~1.5 GB they never wrote, triggering wrongful evictions);
+  would otherwise be billed ~1.5 GB they never wrote, triggering wrongful pressure reports and admission blocks);
   `aios.flattened=true` images charge full `.Size` (they share nothing — subtracting the
   base would hide ~466 MB per flattened session from the very accounting that must see
   the host filling). Computed at read time from the owning daemon, which stays
@@ -494,7 +494,7 @@ cycle counts by an order of magnitude.
   at each commit so cross-host reporting needs no daemon round-trips.
   **`snapshot_bytes` is reporting-only — never an enforcement input**: enforcement
   always derives from the owning store's live enumeration (the column can be one
-  generation stale in a crash window; a future bytes-based eviction reading it would
+  generation stale in a crash window; a future bytes-based destructive cleanup reading it would
   silently break this).
 - **Per-session enforcement**: commit-and-flag, never refuse (refusal destroys the
   agent's work as punishment for a state it wasn't awake to prevent). Over budget →
@@ -509,7 +509,7 @@ cycle counts by an order of magnitude.
   computed by summing `sessions.snapshot_bytes` pointers. v1 enforces per-host and
   reports global.
 - **Per-account caps** (`accounts.config.sandbox_snapshot_bytes`): **deferred to a
-  follow-up.** The eviction engine is the most intricate code in the design and would
+  follow-up.** A destructive quota engine is the most intricate code in the design and would
   ship dead (no account will have a cap set); v1 ships per-account *usage* as a read-time
   ops metric only. (Ethos review; consistent with the no-belt-and-suspenders rule.)
 - **Stated residual**: nothing bounds the *live* writable layer between commits on ext4 —
@@ -573,7 +573,7 @@ the tenant's own sandbox — unchanged from the agent running them directly.
 ### 5.9 Agent observability
 
 `build_messages` skips all non-`message` events today, so loss events need a render path:
-a minimal allowlist in context.py (`sandbox_fs_expired`, `sandbox_fs_over_limit`,
+a minimal allowlist in context.py (`sandbox_fs_expired` for legacy records, `sandbox_fs_over_limit`,
 `sandbox_fs_reset`) rendered as bracketed user-role notices at their seq position —
 append-only in, append-only out (monotonicity holds), **not** stimulus-bearing
 (`find_sessions_needing_inference` ignores them, so a GC append never wakes a session or
@@ -736,7 +736,7 @@ through FastAPI introspection → run `./scripts/regen-openapi.sh && ./scripts/r
 | Host loss | Detected at resume via the pointer (reset event), but the data is unrecoverable until a host-independent store exists — the §9.3 argument for the async `put`. With async push enabled: the replacement host's `store.get` falls back to the **last successful push** (a crash-dropped push is re-enqueued by the GC's push reconciliation, §5.5, so the lag is bounded by one tick in steady state). Elastic shape: the store is authoritative; loss bounded to unpushed deltas. |
 | Env image ref changed while parked | Detected via `aios.base_image` label → snapshot discarded (`store.remove` + pointer cleared) + `sandbox_fs_reset` event + cold start (§5.3). |
 | Mid-commit wake | Waking step blocks on the per-session lock ≤ commit duration (+ `put` duration in the elastic shape — both size-bounded), then provisions from the fresh tag. |
-| Giant layer (100 GB) | Size-derived timeout admits it; budget enforcement flattens/evicts via GC; never an infinite retry loop. |
+| Giant layer (100 GB) | Size-derived timeout admits it; budget enforcement flattens and pressure blocks new durable provisions; never an infinite retry loop. |
 | Session deleted while corpse/image exist | API can't touch Docker; GC removes both within ≤1 h (corpse pass checks retain rule before salvaging — no wasted commit). |
 
 ## 9. Deployment prerequisites (eumemic-ops, lockstep)
@@ -871,7 +871,7 @@ Docker availability: e2e requires real Docker (`DOCKER_HOST` per conftest); CI a
    Deliberate near-redundancy across different writer sets.
 7. **Idle-TTL default 300 s → 1800 s**: operator-visible behavior change shipped inside
    this feature because the feature inverts the constant's economics.
-8. **Per-account caps deferred** (usage metric ships, eviction engine doesn't);
+8. **Per-account caps deferred** (usage metric ships, destructive quota enforcement doesn't);
    **`--read-only` closed as incompatible** rather than re-deferred; **`--cap-drop=ALL`
    stays deferred** (NET_ADMIN removal ships now via the lockdown sidecar).
 9. **Rollback posture**: disable new snapshot creation while retaining lifecycle-
