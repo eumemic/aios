@@ -18,13 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.execute("ALTER TABLE wf_runs ADD COLUMN workspace_mode text NOT NULL DEFAULT 'fresh'")
-    op.execute("ALTER TABLE wf_runs ADD COLUMN workspace_path text")
-    op.execute(
-        "ALTER TABLE wf_runs ADD CONSTRAINT wf_runs_workspace_mode_check CHECK (workspace_mode IN ('shared', 'fresh'))"
-    )
+    op.execute("ALTER TABLE wf_runs ADD COLUMN workpace_path text")
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE wf_runs DROP CONSTRAINT wf_runs_workspace_mode_check")
     op.execute("ALTER TABLE wf_runs DROP COLUMN workspace_path")
     op.execute("ALTER TABLE wf_runs DROP COLUMN workspace_mode")
