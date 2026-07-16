@@ -859,6 +859,10 @@ async def invoke(
             input=input,
             caller=caller,
             output_schema=output_schema,
+            # The external/API task caller has no launcher session from which a
+            # shared workspace could be inherited. Keep this operator launch on
+            # the valid isolated mode; agent launches retain the shared default.
+            workspace="fresh",
         )
         return TaskHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 
