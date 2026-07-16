@@ -267,6 +267,13 @@ async def create_run(
     *completing* run flips terminal without the lock, so a count can only be
     stale-high — a conservative early refusal, never a cap breach.)
     """
+    # A shared workspace is inherited from a launcher session. Reject an impossible
+    # pointer before minting an id, acquiring a connection, inserting a row, or waking.
+    if workspace == "shared" and launcher_session_id is None:
+        raise ValidationError(
+            "workspace='shared' requires a launcher session",
+            detail={"field": "workspace", "value": "shared"},
+        )
     # Exactly one source arm: ``workflow_id`` (registered) XOR ``inline`` (T5, #1466).
     if (workflow_id is None) == (inline is None):
         raise ValidationError(
