@@ -372,6 +372,85 @@ async def test_live_clone_sharing_archived_parents_canonical_dir_is_skipped(
     assert (parent_dir / "scratch.txt").exists()
 
 
+async def test_nonterminal_shared_run_keeps_archived_launcher_workspace(
+    env: dict[str, Any],
+) -> None:
+    """A pending/running/suspended shared run protects its archived launcher's path."""
+    launcher_dir = _mk_workspace(env["root"], "acct1", "sess_launcher")
+    pool = _fake_pool(
+        [_row("acct1", "sess_launcher", str(launcher_dir))],
+        live_paths=[str(launcher_dir)],
+    )
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0
+    assert launcher_dir.exists(), "a non-terminal shared run still uses this workspace"
+    sql = " ".join(call.args[0] for call in pool._conn.fetch.await_args_list)
+    assert "workspace_mode = 'shared'" in sql
+    assert "status IN ('pending', 'running', 'suspended')" in sql
+
+
+async def test_terminal_shared_run_allows_archive_grace_reclamation(
+    env: dict[str, Any],
+) -> None:
+    """Terminal shared runs are absent from the keep-set, so normal reaping proceeds."""
+    launcher_dir = _mk_workspace(env["root"], "acct1", "sess_launcher_terminal")
+    pool = _fake_pool([_row("acct1", "sess_launcher_terminal", str(launcher_dir))])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 1
+    assert not launcher_dir.exists()
+
+
+async def test_nonterminal_fresh_run_does_not_keep_archived_workspace(
+    env: dict[str, Any],
+) -> None:
+    """Fresh-workspace runs remain outside this shared-workspace keep-set."""
+    launcher_dir = _mk_workspace(env["root"], "acct1", "sess_launcher_fresh")
+    pool = _fake_pool([_row("acct1", "sess_launcher_fresh", str(launcher_dir))])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 1
+    assert not launcher_dir.exists()
+
+
+async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidation(
+    env: dict[str, Any],
+) -> None:
+    """A shared run appearing after the initial scan is caught before ``rmtree``."""
+    launcher_dir = _mk_workspace(env["root"], "acct1", "sess_launcher_race")
+    conn = MagicMock()
+    keep_reads = 0
+
+    async def _route_fetch(sql: str, *_a: Any, **_k: Any) -> list[Any]:
+        nonlocal keep_reads
+        if "archived_at IS NOT NULL" in sql:
+            return [_row("acct1", "sess_launcher_race", str(launcher_dir))]
+        keep_reads += 1
+        return [] if keep_reads == 1 else [{"workspace_volume_path": str(launcher_dir)}]
+
+    conn.fetch = AsyncMock(side_effect=_route_fetch)
+
+    class _Cm:
+        async def __aenter__(self) -> Any:
+            return conn
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    pool = MagicMock()
+    pool.acquire.return_value = _Cm()
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0
+    assert launcher_dir.exists()
+    assert keep_reads == 2
+
+
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:
     """An account/session id carrying a path separator or ``..`` is skipped.
 
