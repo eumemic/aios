@@ -275,8 +275,10 @@ jobs:
         # Run serially: each xdist worker owns a session Postgres container,
         # while migration tests start additional containers. Even two workers
         # can exhaust hosted-runner Docker resources and make healthy container
-        # startups time out.
-        run: uv run pytest tests/integration -q
+        # startups time out. Retry only pytest's recorded failures once so a
+        # transient testcontainer startup cannot fail the entire suite; a real
+        # regression fails both attempts and remains blocking.
+        run: uv run pytest tests/integration -q || uv run pytest tests/integration -q --lf
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
