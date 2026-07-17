@@ -166,7 +166,13 @@ async def unscoped_reapable_archived_workspaces(
 async def unscoped_live_workspace_volume_paths(
     conn: asyncpg.Connection[Any],
 ) -> list[str]:
-    """Return every NON-archived (live) session's stored ``workspace_volume_path``.
+    """Return paths currently borrowed by live sessions or shared workflow runs.
+
+    The keep-set includes every non-archived session's ``workspace_volume_path``
+    and every non-terminal shared ``wf_runs.workspace_path``. A shared workflow
+    run keeps executing against its launcher's session workspace even after the
+    launcher is archived, so omitting those run pointers can delete a live run's
+    filesystem.
 
     The keep-set for the archived-workspace reaper's live-clone cross-check
     (aios#40, same never-delete class as the confinement gate). ``clone_session``
@@ -188,6 +194,13 @@ async def unscoped_live_workspace_volume_paths(
          WHERE archived_at IS NULL
            AND workspace_volume_path IS NOT NULL
            AND workspace_volume_path <> ''
+        UNION
+        SELECT workspace_path AS workspace_volume_path
+          FROM wf_runs
+         WHERE workspace_mode = 'shared'
+           AND status IN ('pending', 'running', 'suspended')
+           AND workspace_path IS NOT NULL
+           AND workspace_path <> ''
         """,
     )
     return [row["workspace_volume_path"] for row in rows]
