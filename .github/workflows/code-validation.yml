@@ -278,7 +278,21 @@ jobs:
         # startups time out. Retry only pytest's recorded failures once so a
         # transient testcontainer startup cannot fail the entire suite; a real
         # regression fails both attempts and remains blocking.
-        run: uv run pytest tests/integration -q || uv run pytest tests/integration -q --lf
+        run: |
+          if ! uv run pytest tests/integration -q; then
+            echo "::warning::FLAKE_RETRY integration"
+            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
+            uv run pytest tests/integration -q --lf
+          fi
+
+      - name: Upload integration flake-retry marker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-integration
+          path: flake-retry-integration.txt
+          if-no-files-found: ignore
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
@@ -421,7 +435,20 @@ jobs:
         # preserving a second failure as a blocking signal.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          uv run pytest tests/e2e -q -m "not docker" -n 4 || uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
+          if ! uv run pytest tests/e2e -q -m "not docker" -n 4; then
+            echo "::warning::FLAKE_RETRY e2e-non-docker"
+            echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
+            uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
+          fi
+
+      - name: Upload non-docker E2E flake-retry marker
+        if: always() && needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-e2e-non-docker
+          path: flake-retry-e2e-non-docker.txt
+          if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
