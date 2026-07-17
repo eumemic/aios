@@ -29,8 +29,6 @@ async def chain_conn(
 ) -> AsyncIterator[asyncpg.Connection[Any]]:
     """Real topology: platform_root -> eumemic -> customer."""
     conn = await asyncpg.connect(migrated_db_url)
-    transaction = conn.transaction()
-    await transaction.start()
     try:
         await conn.execute(
             """
@@ -42,9 +40,6 @@ async def chain_conn(
         )
         yield conn
     finally:
-        # This fixture deliberately seeds invalid legacy root rows. Roll back so
-        # xdist test teardown cannot expose one to a concurrent startup audit.
-        await transaction.rollback()
         await conn.close()
 
 
