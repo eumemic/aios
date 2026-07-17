@@ -19,6 +19,7 @@ import pytest
 
 from aios.crypto.vault import KEY_BYTES, CryptoBox
 from aios.db import queries
+from aios.db.pool import register_jsonb_codec
 
 pytestmark = pytest.mark.integration
 
@@ -29,6 +30,7 @@ async def chain_conn(
 ) -> AsyncIterator[asyncpg.Connection[Any]]:
     """Real topology: platform_root -> eumemic -> customer."""
     conn = await asyncpg.connect(migrated_db_url)
+    await register_jsonb_codec(conn)
     try:
         await conn.execute(
             """
