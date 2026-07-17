@@ -26,7 +26,12 @@ work as ``skipped_stale``.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import hashlib
+import json
+import os
+import uuid
+from pathlib import Path
+from typing import Protocol, cast, runtime_checkable
 
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError
 
@@ -34,6 +39,10 @@ from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError
 @runtime_checkable
 class SnapshotStore(Protocol):
     """Pluggable transport for a session's canonical snapshot artifact."""
+
+    def make_ref(self, session_id: str, local_image_tag: str) -> str:
+        """Return an immutable ref for a newly committed generation."""
+        ...
 
     async def put(self, local_image_tag: str, ref: str) -> str:
         """Persist a just-committed local image under ``ref``; return the stored ref.
@@ -78,6 +87,9 @@ class LocalDaemonStore:
     def __init__(self, backend: SandboxBackend) -> None:
         self._backend = backend
 
+    def make_ref(self, session_id: str, local_image_tag: str) -> str:
+        return local_image_tag
+
     async def put(self, local_image_tag: str, ref: str) -> str:
         # Image is already local under ``ref``; nothing to transport in v1.
         return ref
@@ -100,3 +112,137 @@ class LocalDaemonStore:
 
     async def size(self, ref: str) -> int:
         return await self._backend.image_size(ref)
+
+
+class TarballStore:
+    """Canonical immutable Docker archives on a persistent host filesystem."""
+
+    _FORMAT_VERSION = 1
+
+    def __init__(self, backend: SandboxBackend, root: Path) -> None:
+        self._backend = backend
+        self._root = root.resolve()
+        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self._root, 0o700)
+
+    def make_ref(self, session_id: str, local_image_tag: str) -> str:
+        del local_image_tag
+        return f"{session_id}/{uuid.uuid4().hex}.tar"
+
+    def _path(self, ref: str) -> Path:
+        path = self._root.joinpath(ref)
+        if (
+            Path(ref).is_absolute()
+            or ".." in Path(ref).parts
+            or path.resolve().parent == self._root.parent
+        ):
+            raise SandboxBackendError("invalid snapshot ref")
+        try:
+            path.resolve().relative_to(self._root)
+        except ValueError as err:
+            raise SandboxBackendError("invalid snapshot ref") from err
+        return path
+
+    def _manifest_path(self, path: Path) -> Path:
+        return path.with_suffix(path.suffix + ".json")
+
+    def _legacy(self, ref: str) -> bool:
+        return "/" not in ref and not ref.endswith(".tar")
+
+    async def put(self, local_image_tag: str, ref: str) -> str:
+        path = self._path(ref)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        manifest_temp = temp.with_suffix(temp.suffix + ".json")
+        try:
+            await self._backend.save_image(local_image_tag, temp)
+            digest, size = self._digest(temp)
+            with temp.open("rb") as artifact:
+                os.fsync(artifact.fileno())
+            manifest = {
+                "format_version": self._FORMAT_VERSION,
+                "local_tag": local_image_tag,
+                "stored_bytes": size,
+                "sha256": digest,
+            }
+            with manifest_temp.open("w", encoding="utf-8") as stream:
+                json.dump(manifest, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+            os.replace(manifest_temp, self._manifest_path(path))
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            self._verify(path)
+            return ref
+        finally:
+            temp.unlink(missing_ok=True)
+            manifest_temp.unlink(missing_ok=True)
+
+    async def get(self, ref: str) -> str:
+        if self._legacy(ref):
+            return await LocalDaemonStore(self._backend).get(ref)
+        path = self._path(ref)
+        manifest = self._verify(path)
+        local_tag = str(manifest["local_tag"])
+        if await self._backend.image_labels(local_tag) is None:
+            await self._backend.load_image(path)
+        return local_tag
+
+    async def exists(self, ref: str) -> bool:
+        if self._legacy(ref):
+            return await LocalDaemonStore(self._backend).exists(ref)
+        path = self._path(ref)
+        if not path.exists() and not self._manifest_path(path).exists():
+            return False
+        self._verify(path)
+        return True
+
+    async def remove(self, ref: str) -> bool:
+        if self._legacy(ref):
+            return await LocalDaemonStore(self._backend).remove(ref)
+        path = self._path(ref)
+        path.unlink(missing_ok=True)
+        self._manifest_path(path).unlink(missing_ok=True)
+        return True
+
+    async def size(self, ref: str) -> int:
+        if self._legacy(ref):
+            return await LocalDaemonStore(self._backend).size(ref)
+        return cast(int, self._verify(self._path(ref))["stored_bytes"])
+
+    @staticmethod
+    def _digest(path: Path) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with path.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+        except OSError as err:
+            raise SandboxBackendError(f"snapshot artifact I/O failed: {err}") from err
+        return digest.hexdigest(), size
+
+    def _verify(self, path: Path) -> dict[str, object]:
+        try:
+            manifest = cast(
+                dict[str, object],
+                json.loads(self._manifest_path(path).read_text(encoding="utf-8")),
+            )
+            digest, size = self._digest(path)
+            if (
+                manifest.get("format_version") != self._FORMAT_VERSION
+                or manifest.get("sha256") != digest
+                or manifest.get("stored_bytes") != size
+                or not isinstance(manifest.get("local_tag"), str)
+            ):
+                raise SandboxBackendError("snapshot artifact integrity check failed")
+            return manifest
+        except SandboxBackendError:
+            raise
+        except (OSError, ValueError, TypeError) as err:
+            raise SandboxBackendError(f"snapshot artifact integrity check failed: {err}") from err

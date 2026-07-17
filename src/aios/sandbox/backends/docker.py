@@ -20,8 +20,10 @@ expected to run arbitrary shell inside the sandbox.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+from pathlib import Path
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -760,6 +762,27 @@ class DockerBackend:
                 )
             )
         return out
+
+    async def save_image(self, image: str, path: Path) -> None:
+        size = await self.image_size(image)
+        rc, _out, err = await run_docker_cli(
+            ["docker", "image", "save", "--output", str(path), image],
+            timeout_s=_snapshot_timeout_s(size),
+        )
+        if rc != 0:
+            raise SandboxBackendError(
+                f"docker image save failed: {err.decode(errors='replace').strip()}"
+            )
+
+    async def load_image(self, path: Path) -> None:
+        rc, _out, err = await run_docker_cli(
+            ["docker", "image", "load", "--input", str(path)],
+            timeout_s=_snapshot_timeout_s((await asyncio.to_thread(path.stat)).st_size),
+        )
+        if rc != 0:
+            raise SandboxBackendError(
+                f"docker image load failed: {err.decode(errors='replace').strip()}"
+            )
 
     async def remove_image(self, ref: str) -> bool:
         """``docker rmi`` (no force). True on removed/already-gone, False on refusal."""

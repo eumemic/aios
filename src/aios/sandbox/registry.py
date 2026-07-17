@@ -68,7 +68,7 @@ from aios.sandbox.setup import (
     install_egress_ca,
     install_packages,
 )
-from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore
+from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore, TarballStore
 from aios.sandbox.spec import (
     ProvisioningPlan,
     build_spec_from_run,
@@ -254,7 +254,12 @@ class SandboxRegistry:
         # Snapshot transport seam (durable session sandboxes). v1 is the
         # identity store over the local daemon; multi-host is a drop-in
         # replacement here with no lifecycle changes.
-        self._store: SnapshotStore = LocalDaemonStore(backend)
+        store_root = get_settings().sandbox_snapshot_store_root
+        self._store: SnapshotStore = (
+            TarballStore(backend, store_root)
+            if store_root is not None
+            else LocalDaemonStore(backend)
+        )
         self._handles: dict[str, SandboxHandle] = {}
         self._git_proxies: dict[str, GitProxy] = {}
         self._secret_proxies: dict[str, SecretEgressProxy] = {}
@@ -1255,6 +1260,7 @@ class SandboxRegistry:
         """
         settings = get_settings()
         tag = snapshot_tag(settings.instance_id, session_id)
+        ref = self._store.make_ref(session_id, tag)
         try:
             outcome = await self._backend.snapshot(
                 sandbox_id,
@@ -1298,10 +1304,13 @@ class SandboxRegistry:
                     )
                     over_now = False
             try:
-                await self._write_snapshot_pointer(session_id, tag, outcome.unique_bytes)
+                # Canonical publication is synchronous and precedes the pointer:
+                # no crash can expose a ref whose durable artifact is incomplete.
+                await self._store.put(tag, ref)
+                await self._write_snapshot_pointer(session_id, ref, outcome.unique_bytes)
             except Exception as err:
                 log.warning(
-                    "sandbox.snapshot_pointer_write_failed_corpse_retained",
+                    "sandbox.snapshot_publication_failed_corpse_retained",
                     session_id=session_id,
                     container_id=sandbox_id[:12],
                     error=str(err),
@@ -1476,10 +1485,14 @@ class SandboxRegistry:
             await self._reset_snapshot(session_id, reason="snapshot_missing")
             return dataclasses.replace(spec, snapshot_image=None)
 
+        # Materialize remote/durable refs before inspection. The backend only
+        # understands runnable local tags; LocalDaemonStore remains identity.
+        local_tag = await self._store.get(ref)
+
         # Base-image drift: the snapshot's recorded base vs the currently
         # resolved env image. A mismatch means the operator deliberately
         # redefined the environment image.
-        snap_labels = await self._backend.image_labels(ref)
+        snap_labels = await self._backend.image_labels(local_tag)
         if snap_labels is None:
             # The image was removed between the existence probe and here (an
             # operator rmi racing resume). That's the snapshot-missing case, not
@@ -1498,8 +1511,6 @@ class SandboxRegistry:
             await self._reset_snapshot(session_id, reason="environment_image_changed")
             return dataclasses.replace(spec, snapshot_image=None)
 
-        # Valid resume: make the ref locally runnable (identity for v1).
-        local_tag = await self._store.get(ref)
         return dataclasses.replace(spec, snapshot_image=local_tag)
 
     async def _reset_snapshot(self, session_id: str, *, reason: str) -> None:

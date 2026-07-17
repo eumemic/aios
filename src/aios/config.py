@@ -195,6 +195,11 @@ class Settings(BaseSettings):
         "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
         "denial-of-service; ``None`` leaves the host's default in place.",
     )
+    sandbox_snapshot_store_root: Path | None = Field(
+        default=None,
+        description="Persistent host path for canonical immutable sandbox tarballs. "
+        "When set, durable publication is synchronous before the DB pointer write.",
+    )
     sandbox_snapshot_budget_bytes: int | None = Field(
         default=4 * 1024 * 1024 * 1024,
         ge=10 * 1024 * 1024,

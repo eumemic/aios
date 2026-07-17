@@ -423,6 +423,14 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def save_image(self, image: str, path: Path) -> None:
+        """Stream ``image`` as a Docker archive to ``path``."""
+        ...
+
+    async def load_image(self, path: Path) -> None:
+        """Load a Docker archive, restoring its saved local tag."""
+        ...
+
     async def image_size(self, image: str) -> int:
         """Return ``image``'s ``.Size`` in bytes.
 
