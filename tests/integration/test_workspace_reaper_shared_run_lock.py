@@ -11,6 +11,7 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
@@ -44,10 +45,10 @@ async def _insert_run(
     await conn.execute(
         """
         INSERT INTO wf_runs
-          (id, workflow_id, account_id, environment_id, script, script_sha, status,
-           workspace_mode, workspace_path, archived_at)
+          (id, workflow_id, account_id, environment_id, script, script_sha,
+           host_semantics_epoch, status, workspace_mode, workspace_path, archived_at)
         VALUES ($1, 'wf_reaper', 'acc_reaper', 'env_reaper',
-                'async def main(input): return input', 'sha', $2, $3, $4,
+                'async def main(input): return input', 'sha', $6, $2, $3, $4,
                 CASE WHEN $5 THEN now() ELSE NULL END)
         """,
         run_id,
@@ -55,6 +56,7 @@ async def _insert_run(
         mode,
         path,
         archived,
+        HOST_SEMANTICS_EPOCH,
     )
 
 
