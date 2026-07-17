@@ -549,7 +549,12 @@ def bootstrap() -> None:
         print_note("Required contents (generate values yourself):")
         print_note("  AIOS_BOOTSTRAP_TOKEN=<openssl rand -hex 32>")
         print_note("  AIOS_VAULT_KEY=<openssl rand -base64 32>")
-        print_note("Plus any provider keys (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, ...).")
+        print_note(
+            "Provision provider credentials on a non-root account with `aios model-providers create`."
+        )
+        print_note(
+            "For migration only, env keys require AIOS_INFERENCE_CREDENTIAL_POLICY=legacy_env."
+        )
         raise typer.Exit(1)
 
     admin_url = _resolve_admin_url(secrets)

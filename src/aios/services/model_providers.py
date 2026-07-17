@@ -28,10 +28,12 @@ from typing import Any
 import asyncpg
 import litellm
 
+from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ModelProvider, ProviderAuth, provider_auth_conflict
+from aios.services.inference_credential_telemetry import observe_env_fallback
 
 # Surfaced as a session's stop_reason.message (session-visible) and, on the
 # workflow call_llm path, as a journaled {"error": ...} value — both are read
@@ -45,8 +47,7 @@ PROVIDER_NOT_CONFIGURED_MESSAGE = (
 
 PROVIDER_AUTH_CONFLICT_MESSAGE = (
     "This session's effective model-provider key is owned by an account above "
-    "this one; supply your own api_key in litellm_extra or configure a "
-    "model_providers row for this account."
+    "this one; configure a model_providers row for this account."
 )
 
 
@@ -202,7 +203,20 @@ async def _resolve_provider_auth(
             conn, account_id=account_id, provider=provider
         )
     if resolved is None:
+        if get_settings().inference_credential_policy == "observe_legacy_env":
+            observe_env_fallback(account_id=account_id, provider=provider)
         return None
+    settings = get_settings()
+    if resolved.owner_account_id != account_id and (
+        settings.inference_credential_policy == "account_only"
+        or settings.tenancy_posture == "external_byok"
+    ):
+        async with pool.acquire() as conn:
+            owner = await queries.get_account(conn, resolved.owner_account_id)
+        if owner is not None and owner.parent_account_id is None:
+            # Defense in depth for legacy/manual rows: platform-root credentials
+            # are never inherited by a descendant under a non-legacy policy.
+            return None
     subkey = crypto_box.derive_account_subkey(resolved.owner_account_id)
     return ProviderAuth(
         api_key=subkey.decrypt(resolved.blob),

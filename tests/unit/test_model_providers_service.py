@@ -144,7 +144,7 @@ class TestProviderAuthConflict:
             is True
         )
 
-    def test_truthy_self_supplied_key_exempts(self) -> None:
+    def test_truthy_inline_key_does_not_exempt_redirect_guard(self) -> None:
         resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
         assert (
             provider_auth_conflict(
@@ -153,7 +153,7 @@ class TestProviderAuthConflict:
                 account_id="acc_child",
                 account_is_root=False,
             )
-            is False
+            is True
         )
 
     @pytest.mark.parametrize("falsy_key", [None, ""])

@@ -40,6 +40,7 @@ from aios.api.routers import (
 from aios.api.strict_query_params import reject_unknown_query_params
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
+from aios.db import queries
 from aios.db.pool import create_pool
 from aios.errors import install_exception_handlers
 from aios.harness import runtime
@@ -88,6 +89,8 @@ def create_app() -> FastAPI:
         log.info("api.startup", db_url=_redact_dsn(settings.db_url))
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+        async with pool.acquire() as conn:
+            await queries.audit_credentialless_root(conn)
         await procrastinate_app.open_async()
         app.state.pool = pool
         app.state.crypto_box = crypto_box

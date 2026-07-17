@@ -551,6 +551,7 @@ from .memory_stores import (  # noqa: E402
 from .model_providers import (  # noqa: E402
     ResolvedModelProvider,
     archive_model_provider,
+    audit_credentialless_root,
     get_model_provider,
     insert_model_provider,
     list_model_providers,
@@ -770,6 +771,7 @@ __all__ = [
     "archive_vault_credential",
     "attach_github_repos_to_session",
     "attach_memory_stores_to_session",
+    "audit_credentialless_root",
     "batch_get_session_vault_ids",
     "batch_list_session_github_repo_echoes",
     "batch_list_session_memory_store_echoes",

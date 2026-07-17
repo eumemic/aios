@@ -154,7 +154,9 @@ uv sync --dev
 
 # Configure (see Environment variables below) — minimally:
 #   AIOS_DB_URL, AIOS_VAULT_KEY, AIOS_EGRESS_CA_KEY, AIOS_BOOTSTRAP_TOKEN
-#   and a provider key (ANTHROPIC_API_KEY / OPENROUTER_API_KEY / ...)
+# Provider credentials are encrypted model-provider rows on non-root accounts.
+# Use `aios model-providers create`; the platform root is credentialless.
+# Env keys are migration-only: AIOS_INFERENCE_CREDENTIAL_POLICY=legacy_env.
 set -a && source .env && set +a
 
 # Run migrations (also applies the procrastinate schema + lock-release trigger;

@@ -665,18 +665,18 @@ def _build_litellm_kwargs(
         kwargs["stream_options"] = {"include_usage": True}
     if tools:
         kwargs["tools"] = tools
+    effective_extra = dict(extra or {})
+    if auth is not None and get_settings().inference_credential_policy != "legacy_env":
+        # Account rows are authoritative under non-legacy policies. Inline auth
+        # fields are agent metadata, not account configuration.
+        for key in ("api_key", "api_base", "base_url"):
+            effective_extra.pop(key, None)
     if auth is not None:
         kwargs["api_key"] = auth.api_key
-        # Only inject auth.api_base when `extra` doesn't already redirect —
-        # otherwise both `api_base` and its `base_url` alias could end up in
-        # kwargs (one from here, one from extra), and litellm's api_base-over-
-        # base_url precedence would silently invert "extra wins". `extra`
-        # itself needs no such guard: kwargs.update(extra) below overwrites
-        # a same-key api_base naturally.
-        if auth.api_base is not None and api_base_of(extra) is None:
+        if auth.api_base is not None and api_base_of(effective_extra) is None:
             kwargs["api_base"] = auth.api_base
-    if extra:
-        kwargs.update(extra)
+    if effective_extra:
+        kwargs.update(effective_extra)
     _apply_provider_cache_hints(kwargs, model, session_id)
     return kwargs
 
