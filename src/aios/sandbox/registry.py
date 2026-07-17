@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -1277,6 +1278,9 @@ class SandboxRegistry:
             )
             return False
 
+        # Observe after commit but before durable publication. The session lock
+        # serializes local producers; the CAS also protects against DB writers.
+        observed = await self._read_snapshot_pointer(session_id)
         # ``image_id is None`` ⇒ skipped_empty with no prior tag (a session
         # that never wrote): nothing to point at, leave the pointer NULL.
         if outcome.image_id is not None:
@@ -1307,7 +1311,13 @@ class SandboxRegistry:
                 # Canonical publication is synchronous and precedes the pointer:
                 # no crash can expose a ref whose durable artifact is incomplete.
                 await self._store.put(tag, ref)
-                await self._write_snapshot_pointer(session_id, ref, outcome.unique_bytes)
+                published = await self._write_snapshot_pointer(
+                    session_id, ref, outcome.unique_bytes, observed=observed
+                )
+                if not published:
+                    await self._store.remove(ref)
+                    log.warning("sandbox.snapshot_publication_cas_lost", session_id=session_id)
+                    return False
             except Exception as err:
                 log.warning(
                     "sandbox.snapshot_publication_failed_corpse_retained",
@@ -1452,6 +1462,8 @@ class SandboxRegistry:
         the full image size here (reporting-only; the next real commit writes
         the accurate unique figure).
         """
+        if not isinstance(self._store, LocalDaemonStore):
+            return
         tag = snapshot_tag(get_settings().instance_id, session_id)
         try:
             if not await self._store.exists(tag):
@@ -1523,24 +1535,46 @@ class SandboxRegistry:
         await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
         log.info("sandbox.fs_reset", session_id=session_id, reason=reason)
 
-    async def _write_snapshot_pointer(self, session_id: str, ref: str, unique_bytes: int) -> None:
-        """Write the DB snapshot pointer under the deployment's host id.
-
-        ``snapshot_host`` is ``settings.instance_id`` in v1 (one worker), kept
-        distinct from the deployment namespace that derives ``ref`` so a future
-        multi-host deployment never changes a session's ref on handoff (§5.11).
-        """
+    async def _write_snapshot_pointer(
+        self,
+        session_id: str,
+        ref: str,
+        unique_bytes: int,
+        *,
+        observed: tuple[str | None, object | None] | None = None,
+    ) -> bool:
+        """CAS-publish a pointer; direct mode is retained only for local GC healing."""
         from aios.harness import runtime
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_set_session_snapshot(
+            if observed is None:
+                await queries.unscoped_set_session_snapshot(
+                    conn,
+                    session_id,
+                    ref=ref,
+                    host=get_settings().instance_id,
+                    snapshot_bytes=unique_bytes,
+                )
+                return True
+            return await queries.unscoped_compare_and_set_session_snapshot(
                 conn,
                 session_id,
+                observed_ref=observed[0],
+                observed_updated_at=observed[1],
                 ref=ref,
                 host=get_settings().instance_id,
                 snapshot_bytes=unique_bytes,
             )
+
+    async def _read_snapshot_pointer(
+        self, session_id: str
+    ) -> tuple[str | None, object | None] | None:
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            return await queries.unscoped_get_session_snapshot_pointer(conn, session_id)
 
     async def _read_snapshot_bytes(self, session_id: str) -> int | None:
         from aios.harness import runtime
@@ -2024,10 +2058,23 @@ class SandboxRegistry:
             verdicts, image_states, now, settings.sandbox_archive_gc_grace_seconds, instance_id
         )
 
-        # Pass 3 — per-host pool budget.
+        # Separate canonical filesystem pass; it never derives truth from Docker.
+        await self._gc_canonical_store_pass(now)
+
+        # Docker cache and canonical store have independent budgets/verdicts.
+        docker_budget = settings.sandbox_docker_cache_high_watermark_bytes
         pool_pressure = await self._gc_pool_budget_pass(
-            retained, image_states, settings.sandbox_snapshot_pool_bytes, instance_id
+            retained, image_states, docker_budget, instance_id
         )
+        if isinstance(self._store, TarballStore):
+            used = self._store.used_bytes()
+            budget = settings.sandbox_canonical_store_budget_bytes
+            stat = os.statvfs(self._store._root)
+            free = stat.f_bavail * stat.f_frsize
+            effective_used = used
+            if free < settings.sandbox_canonical_store_headroom_bytes:
+                effective_used += settings.sandbox_canonical_store_headroom_bytes - free
+            pool_pressure = GcPressureResult(effective_used, budget)
 
         # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
         account_pressure = await self._gc_account_cap_pass(retained, image_states, instance_id)
@@ -2215,6 +2262,28 @@ class SandboxRegistry:
                     await self._clear_pointer_if_owned(sid, instance_id, states)
         return retained
 
+    async def _gc_canonical_store_pass(self, now: datetime) -> int:
+        """Filesystem-store GC, deliberately independent from Docker cache GC."""
+        if not isinstance(self._store, TarballStore):
+            return 0
+        grace = get_settings().sandbox_archive_gc_grace_seconds
+        removed = 0
+        for ref, mtime in self._store.artifacts():
+            if now.timestamp() - mtime < grace:
+                continue
+            sid = ref.split("/", 1)[0]
+            async with self._lock_for(sid):
+                # Fresh pointer/lifecycle check immediately before every delete.
+                fresh = await self._fresh_session_state(sid)
+                current = fresh is not None and fresh.snapshot_ref == ref
+                if fresh is not None and current and not _archive_eligible(fresh, now, grace):
+                    continue
+                if await self._store.remove(ref):
+                    removed += 1
+                    if current:
+                        await self._reset_snapshot(sid, reason="archived")
+        return removed
+
     async def _gc_pool_budget_pass(
         self,
         retained: list[GcImageVerdict],
@@ -2290,6 +2359,12 @@ class SandboxRegistry:
         don't mutate it) with a tick-start NULL/stale pointer, so without this
         skip the heal would write a pointer to an image that no longer exists.
         """
+        # This pass enumerates Docker images and therefore has authority only
+        # when Docker itself is the canonical store.  In TarballStore mode an
+        # image is disposable cache: rewriting a durable ref to its local tag
+        # would make an external ``docker image prune -af`` destructive.
+        if not isinstance(self._store, LocalDaemonStore):
+            return
         skip = already_evicted or set()
         base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
         for v in retained:
