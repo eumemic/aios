@@ -113,7 +113,7 @@ class InlineScript:
         self.http_servers: list[HttpServerRef] = list(http_servers or [])
 
 
-async def _enforce_inline_surface(
+def _enforce_inline_surface(
     *,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
@@ -354,7 +354,7 @@ async def create_run(
             # exceeding the launcher raises ForbiddenError (vs the registered path's
             # silent clamp — there the author already passed this same gate at
             # create_workflow, so a re-clamp can only narrow, never breach).
-            effective = await _enforce_inline_surface(
+            effective = _enforce_inline_surface(
                 tools=inline.tools,
                 mcp_servers=inline.mcp_servers,
                 http_servers=inline.http_servers,

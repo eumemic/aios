@@ -136,6 +136,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      - name: Pooled connection await invariant
+        run: uv run python scripts/pooled_connection_lint.py src
+
       - name: Lint (ruff)
         # ``packages/aios-sdk/aios_sdk`` carries hand-written modules
         # (``__init__.py``, ``config.py``, ``factory.py``, ``streaming.py``)

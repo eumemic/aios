@@ -642,7 +642,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -674,7 +674,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="http://issuer.example",
                 account_id=account_id,
@@ -704,7 +704,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -737,7 +737,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -768,7 +768,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -805,7 +805,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -846,7 +846,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -880,7 +880,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -916,7 +916,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -950,7 +950,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -984,7 +984,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -1013,7 +1013,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -1033,7 +1033,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -1061,7 +1061,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,

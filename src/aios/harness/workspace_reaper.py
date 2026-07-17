@@ -81,7 +81,6 @@ Six guardrails (irreversible deletion — never-delete care)
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import shutil
@@ -393,10 +392,10 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
                 if await queries.unscoped_workspace_path_is_live(conn, normalized_target):
                     skip_conf += 1
                     continue
-
-                # Off the event loop: a multi-GB tree's rmtree would otherwise block
-                # every concurrent session sharing the worker loop for its duration.
-                await asyncio.to_thread(shutil.rmtree, target)
+                # Filesystem deletion is intentionally synchronous while holding the
+                # advisory lock: moving it to a thread would hold the DB connection
+                # across a non-DB await and permit pool exhaustion.
+                shutil.rmtree(target)
         except (asyncpg.PostgresError, OSError):
             # One un-removable dir (perm drift, read-only FS) must not abort the
             # rest of the sweep; the next sweep retries it.
