@@ -200,6 +200,21 @@ class Settings(BaseSettings):
         description="Persistent host path for canonical immutable sandbox tarballs. "
         "When set, durable publication is synchronous before the DB pointer write.",
     )
+    sandbox_canonical_store_budget_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Canonical tarball-store budget; pressure backpressures admissions.",
+    )
+    sandbox_canonical_store_headroom_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=0,
+        description="Free bytes reserved on the persistent snapshot filesystem.",
+    )
+    sandbox_docker_cache_high_watermark_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Independent disposable Docker snapshot-cache watermark.",
+    )
     sandbox_snapshot_budget_bytes: int | None = Field(
         default=4 * 1024 * 1024 * 1024,
         ge=10 * 1024 * 1024,

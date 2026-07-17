@@ -102,6 +102,43 @@ async def unscoped_set_session_snapshot(
     )
 
 
+async def unscoped_compare_and_set_session_snapshot(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    observed_ref: str | None,
+    observed_updated_at: object | None,
+    ref: str,
+    host: str,
+    snapshot_bytes: int,
+) -> bool:
+    """Publish iff the pointer identity observed under the session lock is unchanged."""
+    status = await conn.execute(
+        """
+        UPDATE sessions SET snapshot_ref=$4, snapshot_host=$5, snapshot_bytes=$6,
+                            snapshot_updated_at=now()
+         WHERE id=$1 AND snapshot_ref IS NOT DISTINCT FROM $2
+           AND snapshot_updated_at IS NOT DISTINCT FROM $3
+        """,
+        session_id,
+        observed_ref,
+        observed_updated_at,
+        ref,
+        host,
+        snapshot_bytes,
+    )
+    return bool(status != "UPDATE 0")
+
+
+async def unscoped_get_session_snapshot_pointer(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str | None, object | None] | None:
+    row = await conn.fetchrow(
+        "SELECT snapshot_ref, snapshot_updated_at FROM sessions WHERE id=$1", session_id
+    )
+    return None if row is None else (row["snapshot_ref"], row["snapshot_updated_at"])
+
+
 async def unscoped_get_session_snapshot_bytes(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> int | None:

@@ -125,6 +125,46 @@ class TarballStore:
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self._root, 0o700)
 
+    def preflight(self, *, headroom_bytes: int = 0) -> None:
+        """Fail loudly unless root is mounted, writable and durably syncable."""
+        if not os.path.ismount(self._root):
+            raise SandboxBackendError(f"snapshot store root is not a mount: {self._root}")
+        probe = self._root / f".preflight-{uuid.uuid4().hex}"
+        try:
+            fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, b"aios snapshot preflight\n")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            dfd = os.open(self._root, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+            stat = os.statvfs(self._root)
+            free = stat.f_bavail * stat.f_frsize
+            if free < headroom_bytes:
+                raise SandboxBackendError(
+                    f"snapshot store below required headroom: {free} < {headroom_bytes}"
+                )
+        finally:
+            probe.unlink(missing_ok=True)
+
+    def artifacts(self) -> list[tuple[str, float]]:
+        """Return immutable published artifact refs and mtimes (never temp files)."""
+        result: list[tuple[str, float]] = []
+        for path in self._root.rglob("*.tar"):
+            if path.name.startswith(".") or path.is_symlink():
+                continue
+            result.append((str(path.relative_to(self._root)), path.stat().st_mtime))
+        return result
+
+    def used_bytes(self) -> int:
+        return sum(
+            path.stat().st_size for path in self._root.rglob("*.tar") if not path.is_symlink()
+        )
+
     def make_ref(self, session_id: str, local_image_tag: str) -> str:
         del local_image_tag
         return f"{session_id}/{uuid.uuid4().hex}.tar"
@@ -169,6 +209,10 @@ class TarballStore:
                 json.dump(manifest, stream, sort_keys=True)
                 stream.flush()
                 os.fsync(stream.fileno())
+            # Verify the exact fsynced bytes before exposing either immutable name.
+            verify_digest, verify_size = self._digest(temp)
+            if verify_digest != digest or verify_size != size:
+                raise SandboxBackendError("snapshot artifact integrity check failed before rename")
             os.replace(temp, path)
             os.replace(manifest_temp, self._manifest_path(path))
             directory_fd = os.open(path.parent, os.O_RDONLY)
