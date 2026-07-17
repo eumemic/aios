@@ -32,6 +32,11 @@ from tests.unit.conftest import fake_pool_yielding_conn
 
 
 @pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
+@pytest.fixture(autouse=True)
 def _unit_provider_auth_ungated() -> None:
     """Shadow (by name) the conftest-level autouse stub of the same name.
 

@@ -177,3 +177,109 @@ async def test_different_provider_does_not_match(
         chain_conn, account_id="acc_customer", provider="anthropic"
     )
     assert resolved is None
+
+
+async def test_startup_audit_rejects_preexisting_active_root_row(
+    chain_conn: asyncpg.Connection[Any], crypto_box: CryptoBox
+) -> None:
+    blob = crypto_box.derive_account_subkey("platform_root").encrypt("sentinel-root")
+    await chain_conn.execute(
+        "INSERT INTO model_providers (id, account_id, provider, ciphertext, nonce) VALUES ($1,$2,$3,$4,$5)",
+        "mp_root_audit",
+        "platform_root",
+        "anthropic",
+        blob.ciphertext,
+        blob.nonce,
+    )
+    with pytest.raises(RuntimeError, match="credentialless-root invariant violated"):
+        await queries.audit_credentialless_root(chain_conn)
+
+
+async def test_root_row_update_is_rejected(
+    chain_conn: asyncpg.Connection[Any], crypto_box: CryptoBox
+) -> None:
+    from aios.errors import ConflictError
+
+    blob = crypto_box.derive_account_subkey("platform_root").encrypt("sentinel-root")
+    await chain_conn.execute(
+        "INSERT INTO model_providers (id, account_id, provider, ciphertext, nonce) VALUES ($1,$2,$3,$4,$5)",
+        "mp_root_update",
+        "platform_root",
+        "anthropic",
+        blob.ciphertext,
+        blob.nonce,
+    )
+    replacement = crypto_box.derive_account_subkey("platform_root").encrypt("replacement")
+    with pytest.raises(ConflictError, match="must remain credentialless"):
+        await queries.update_model_provider(
+            chain_conn, "mp_root_update", account_id="platform_root", blob=replacement
+        )
+
+
+@pytest.mark.parametrize(
+    ("policy", "posture"),
+    [("account_only", "internal"), ("account_only", "external_byok")],
+)
+async def test_root_credentials_never_reach_descendant_harness(
+    chain_conn: asyncpg.Connection[Any],
+    crypto_box: CryptoBox,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+    posture: str,
+) -> None:
+    """Real topology: a legacy ACTIVE root row cannot fund/call for a leaf."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from aios.services import model_providers
+    from aios.workflows.run_llm import invoke_call_llm
+
+    sentinel_env = "SENTINEL_ENV_MUST_NOT_EGRESS"
+    sentinel_row = "SENTINEL_ROOT_ROW_MUST_NOT_EGRESS"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", sentinel_env)
+    blob = crypto_box.derive_account_subkey("platform_root").encrypt(sentinel_row)
+    await chain_conn.execute(
+        "INSERT INTO model_providers (id, account_id, provider, ciphertext, nonce) VALUES ($1,$2,$3,$4,$5)",
+        f"mp_root_{posture}",
+        "platform_root",
+        "anthropic",
+        blob.ciphertext,
+        blob.nonce,
+    )
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=chain_conn)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    pool = MagicMock()
+    pool.acquire.return_value = cm
+    settings = SimpleNamespace(inference_credential_policy=policy, tenancy_posture=posture)
+    request_capture = AsyncMock()
+    run = SimpleNamespace(
+        id="wfr_root_regression",
+        account_id="acc_customer",
+        default_child_model="anthropic/claude-x",
+    )
+    spec = {
+        "model": "anthropic/claude-x",
+        "messages": [{"role": "user", "content": "do not egress credentials"}],
+        "tools": None,
+        "params": None,
+        "session_id": None,
+    }
+    with (
+        patch.object(model_providers, "get_settings", return_value=settings),
+        patch("aios.workflows.run_llm.runtime.require_pool", return_value=pool),
+        patch("aios.workflows.run_llm.runtime.require_crypto_box", return_value=crypto_box),
+        patch("aios.workflows.run_llm.call_litellm", request_capture),
+    ):
+        result, cost = await invoke_call_llm(
+            run=run,  # type: ignore[arg-type]
+            spec=spec,
+        )
+
+    assert result["error_kind"] == "model_provider_not_configured"
+    assert cost == 0
+    request_capture.assert_not_awaited()
+    assert sentinel_env not in repr(request_capture.await_args_list)
+    assert sentinel_row not in repr(request_capture.await_args_list)
+    assert "FUNDED_BY_ROOT" not in repr(result)

@@ -24,6 +24,11 @@ from aios.harness.window import WindowedEvents
 from aios.services.sessions import AssistantAppendResult
 
 
+@pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
 def _llm_response(
     message: dict[str, object],
     *,

@@ -25,6 +25,11 @@ from aios.workflows.wf_script_host import call_llm
 
 
 @pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
+@pytest.fixture(autouse=True)
 def _stub_provider_auth_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guard 3 (provider-auth conflict) needs a worker context (pool/crypto_box)
     and hits the DB. Stub it to a clean pass — no resolved row, no conflict —

@@ -200,3 +200,23 @@ async def test_stream_litellm_also_injects_auth(monkeypatch: pytest.MonkeyPatch)
 
     assert captured["api_key"] == "sk-resolved"
     assert captured["api_base"] == "https://proxy.example"
+
+
+async def test_legacy_env_preserves_inline_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _LegacySettings:
+        inference_credential_policy = "legacy_env"
+        model_call_deadline_s = 300.0
+
+    monkeypatch.setattr(completion, "get_settings", lambda: _LegacySettings())
+    captured = _capture(monkeypatch)
+    auth = ProviderAuth(api_key="sk-row", api_base="https://row.example", owner_account_id="acc_x")
+    await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={"api_key": "sk-inline", "api_base": "https://inline.example"},
+        ),
+        model="anthropic/claude-x",
+        auth=auth,
+    )
+    assert captured["api_key"] == "sk-inline"
+    assert captured["api_base"] == "https://inline.example"
