@@ -416,10 +416,12 @@ jobs:
         # tests/e2e lives in docker-marked test_memory_cross_session_sync.
         # Each worker spins its own session-scoped testcontainer Postgres,
         # so there is no cross-worker DB state at all.  Measured locally:
-        # 141 s serial → 44 s at ``-n 4``.
+        # 141 s serial → 44 s at ``-n 4``. Retry pytest's recorded failures
+        # once to tolerate a transient testcontainer startup failure while
+        # preserving a second failure as a blocking signal.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          uv run pytest tests/e2e -q -m "not docker" -n 4
+          uv run pytest tests/e2e -q -m "not docker" -n 4 || uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
