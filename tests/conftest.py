@@ -257,6 +257,9 @@ def aios_env_minimal(
         "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         "AIOS_DB_URL": migrated_db_url,
         "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
+        # Existing integration/e2e tests stub inference without provisioning an
+        # account provider. Provider-admission tests exercise the fail-closed default.
+        "AIOS_INFERENCE_CREDENTIAL_POLICY": "legacy_env",
         # Issue #807: point the docker_harness-driven e2e provisions at the
         # repo's authored seccomp profile. The config default resolves to the
         # baked /app/docker path, which doesn't exist on the host running the
