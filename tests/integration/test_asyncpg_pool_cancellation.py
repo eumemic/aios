@@ -12,12 +12,18 @@ import contextvars
 import random
 from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest import mock
+from unittest.mock import AsyncMock
 
 import asyncpg
 import asyncpg.pool
 import pytest
 
+from aios.harness import loop, runtime
+from aios.harness.inflight_tool_registry import InflightToolRegistry
+from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
 
 pytestmark = [pytest.mark.integration, needs_docker]
@@ -319,6 +325,118 @@ async def test_incident_call_graph_timeout_under_saturated_pool(
             assert probe.census[phase] == expected
             assert probe.census[phase] > 0
     finally:
+        await observer.close()
+        async with asyncio.timeout(_TASK_BOUND):
+            await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_real_run_session_step_timeout_wrapper_releases_saturated_pool(
+    migrated_db_url: str,
+) -> None:
+    """Drive the production job-level timeout wrapper at the incident pressure.
+
+    Unlike the distilled call-graph probe above, cancellation here is created by
+    ``run_session_step``'s real ``asyncio.wait_for`` and crosses its nested
+    timeout/error/finally/unregister/step-end control flow.  The body seam is
+    replaced only so all sixteen steps can be synchronized at the two observed
+    non-DB frames without constructing paid model calls or OAuth secrets.
+    """
+    pool = await asyncpg.create_pool(
+        migrated_db_url,
+        min_size=_POOL_SIZE,
+        max_size=_POOL_SIZE,
+        server_settings={"application_name": "aios-1975-phase-probe"},
+    )
+    assert pool is not None
+    observer = await asyncpg.connect(migrated_db_url)
+    previous_pool = runtime.pool
+    previous_registry = runtime.inflight_tool_registry
+    runtime.pool = pool
+    runtime.inflight_tool_registry = InflightToolRegistry()
+    event_seq = 0
+
+    async def append_event(*args: Any, **kwargs: Any) -> Any:
+        nonlocal event_seq
+        event_seq += 1
+        return SimpleNamespace(id=f"evt_{event_seq}", seq=event_seq)
+
+    async def load_account(*args: Any, **kwargs: Any) -> str:
+        return "acc_1975"
+
+    async def timeout_result(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    try:
+        for phase in _INCIDENT_PHASES:
+            probe = _Probe()
+            for storm in range(_INCIDENT_STORMS_PER_PHASE):
+                slow = _SlowNonDB(probe, phase)
+
+                async def real_timeout_body(
+                    *args: Any, _slow: _SlowNonDB = slow, _phase_name: str = phase, **kwargs: Any
+                ) -> Any:
+                    # This is the exact connection/transaction/non-DB-await
+                    # shape; the outer production wrapper supplies cancellation.
+                    async with pool.acquire() as connection, connection.transaction():
+                        _slow.ready_count += 1
+                        if _slow.ready_count == _POOL_SIZE:
+                            _slow.all_ready.set()
+                        await _slow.armed.wait()
+                        if _phase_name == "incident_http":
+                            await _slow.http_post()
+                        else:
+                            stream = _slow.stream()
+                            try:
+                                await anext(stream)
+                            finally:
+                                await stream.aclose()
+
+                with (
+                    mock.patch.object(loop, "HARNESS_STEP_TIMEOUT_S", 0.05),
+                    mock.patch.object(loop, "_run_session_step_body", real_timeout_body),
+                    mock.patch.object(
+                        sessions_service,
+                        "load_live_session_account_id",
+                        load_account,
+                    ),
+                    mock.patch.object(sessions_service, "append_event", append_event),
+                    mock.patch.object(loop, "_handle_step_timeout", timeout_result),
+                    mock.patch.object(loop, "defer_wake", new=AsyncMock()),
+                ):
+                    holders = [
+                        asyncio.create_task(
+                            loop.run_session_step(f"sess_1975_{phase}_{storm}_{index}"),
+                            name=f"real-step-{phase}-{storm}-{index}",
+                        )
+                        for index in range(_POOL_SIZE)
+                    ]
+                    async with asyncio.timeout(_TASK_BOUND):
+                        await slow.all_ready.wait()
+                    assert pool.get_idle_size() == 0
+
+                    acquired: Counter[str] = Counter()
+                    waiters = [
+                        asyncio.create_task(
+                            _queued_witness(pool, acquired),
+                            name=f"real-step-waiter-{phase}-{storm}-{index}",
+                        )
+                        for index in range(_INCIDENT_WAITERS)
+                    ]
+                    async with asyncio.timeout(_TASK_BOUND):
+                        while len(pool._queue._getters) < _INCIDENT_WAITERS:  # noqa: ASYNC110
+                            await asyncio.sleep(0)
+                    slow.armed.set()
+                    async with asyncio.timeout(_TASK_BOUND):
+                        await slow.all_entered.wait()
+                    await _assert_recovered(pool, observer, holders + waiters)
+                    assert all(task.exception() is None for task in holders)
+                    assert acquired["waiters"] == _INCIDENT_WAITERS
+
+            assert probe.census[phase] == _INCIDENT_STORMS_PER_PHASE * _POOL_SIZE
+    finally:
+        runtime.pool = previous_pool
+        runtime.inflight_tool_registry = previous_registry
         await observer.close()
         async with asyncio.timeout(_TASK_BOUND):
             await pool.close()
