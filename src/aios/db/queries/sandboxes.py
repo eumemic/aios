@@ -7,12 +7,64 @@ asyncpg, same conventions as the rest of the package.
 
 from __future__ import annotations
 
+import hashlib
+import os
 from collections.abc import Sequence
 from typing import Any
 
 import asyncpg
 
 from aios.db.queries.sessions import session_active_predicate
+
+# Workspace deletion/activation mutex.  Both sides normalize with realpath, then
+# derive one signed int64 advisory-lock key as the first 8 bytes of
+# BLAKE2b("aios.workspace.v1\0" || UTF-8(realpath)).  The domain/version makes
+# this namespace stable and independent of every other advisory-lock user.
+_WORKSPACE_LOCK_DOMAIN = b"aios.workspace.v1\0"
+
+
+def normalized_workspace_path(path: str) -> str:
+    """Return the canonical path used both for keep-set comparison and locking."""
+    return os.path.realpath(path)
+
+
+def workspace_advisory_lock_key(path: str) -> int:
+    """Derive the documented signed PostgreSQL bigint lock key for ``path``."""
+    digest = hashlib.blake2b(
+        _WORKSPACE_LOCK_DOMAIN + normalized_workspace_path(path).encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+async def acquire_workspace_advisory_xact_lock(conn: asyncpg.Connection[Any], path: str) -> None:
+    """Lock a normalized workspace until the caller's transaction ends."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1::bigint)", workspace_advisory_lock_key(path)
+    )
+
+
+async def unscoped_workspace_path_is_live(conn: asyncpg.Connection[Any], path: str) -> bool:
+    """Targeted under-lock recheck for one already-normalized workspace path."""
+    normalized = normalized_workspace_path(path)
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM sessions
+                 WHERE archived_at IS NULL
+                   AND workspace_volume_path = $1
+                UNION ALL
+                SELECT 1 FROM wf_runs
+                 WHERE archived_at IS NULL
+                   AND workspace_mode = 'shared'
+                   AND status IN ('pending', 'running', 'suspended')
+                   AND workspace_path = $1
+            )
+            """,
+            normalized,
+        )
+    )
+
 
 # ─── durable session sandboxes: snapshot pointer (§5.1) ───────────────────────
 #
@@ -197,7 +249,8 @@ async def unscoped_live_workspace_volume_paths(
         UNION
         SELECT workspace_path AS workspace_volume_path
           FROM wf_runs
-         WHERE workspace_mode = 'shared'
+         WHERE archived_at IS NULL
+           AND workspace_mode = 'shared'
            AND status IN ('pending', 'running', 'suspended')
            AND workspace_path IS NOT NULL
            AND workspace_path <> ''

@@ -565,13 +565,17 @@ from .prune import (  # noqa: E402
     prune_unpinned_archived_workflows,
 )
 from .sandboxes import (  # noqa: E402
+    acquire_workspace_advisory_xact_lock,
     gc_snapshot_session_states,
+    normalized_workspace_path,
     unscoped_clear_session_snapshot,
     unscoped_get_session_snapshot_bytes,
     unscoped_live_session_ids,
     unscoped_live_workspace_volume_paths,
     unscoped_reapable_archived_workspaces,
     unscoped_set_session_snapshot,
+    unscoped_workspace_path_is_live,
+    workspace_advisory_lock_key,
 )
 from .session_templates import (  # noqa: E402
     archive_session_template,
@@ -753,6 +757,7 @@ __all__ = [
     "_unresolved_tool_calls",
     "acquire_account_triggers_lock",
     "acquire_session_resources_lock",
+    "acquire_workspace_advisory_xact_lock",
     "add_trigger",
     "advance_open_request_scan_floor",
     "append_event",
@@ -954,6 +959,7 @@ __all__ = [
     "mark_management_call_resolved",
     "mark_session_cancel_marker_harvested",
     "model_token_class_ratios",
+    "normalized_workspace_path",
     "notify_connection_change",
     "notify_management_call_dispatch",
     "notify_management_call_result",
@@ -1018,6 +1024,7 @@ __all__ = [
     "unscoped_live_workspace_volume_paths",
     "unscoped_reapable_archived_workspaces",
     "unscoped_set_session_snapshot",
+    "unscoped_workspace_path_is_live",
     "update_account",
     "update_agent",
     "update_connector_capabilities",
@@ -1032,5 +1039,6 @@ __all__ = [
     "update_trigger",
     "update_vault",
     "update_vault_credential",
+    "workspace_advisory_lock_key",
     "write_response_if_absent",
 ]

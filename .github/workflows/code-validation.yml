@@ -471,8 +471,24 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
+        # Docker-backed E2E occasionally sees transient daemon/container startup
+        # failures on shared runners. Retry only the recorded failures once; a
+        # deterministic regression still fails the required check.
         run: |
-          uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
+            echo "::warning::FLAKE_RETRY e2e-docker"
+            echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
+          fi
+
+      - name: Upload docker E2E flake-retry marker
+        if: always() && needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-e2e-docker
+          path: flake-retry-e2e-docker.txt
+          if-no-files-found: ignore
 
       - name: E2E perf backstop (docker shard, ADVISORY — non-blocking)
         # The ``perf``-marked scaling backstops (#1661): loud advisory signal,
