@@ -272,10 +272,10 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Default ``load`` dist: the suite has no shared module-scoped
-        # fixtures (the migration tests boot their own per-test
-        # containers).  Measured locally: 87 s serial → 43 s at ``-n 4``.
-        run: uv run pytest tests/integration -q -n 4
+        # Keep container concurrency below the hosted runner's practical
+        # Postgres startup limit. Four simultaneous testcontainers can starve
+        # Docker and turn healthy tests into multi-minute startup failures.
+        run: uv run pytest tests/integration -q -n 2
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
