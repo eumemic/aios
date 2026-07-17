@@ -28,6 +28,9 @@ def _unit_env() -> Iterator[None]:
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
         "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
         "AIOS_DB_URL": "postgresql://test:test@localhost:5432/test",
+        # Most existing tests predate account-scoped provider rows and stub no auth.
+        # Dedicated provider-admission tests override this migration escape hatch.
+        "AIOS_INFERENCE_CREDENTIAL_POLICY": "legacy_env",
     }
     with mock.patch.dict(os.environ, env):
         from aios.config import get_settings

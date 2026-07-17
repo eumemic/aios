@@ -184,6 +184,25 @@ async def test_trusted_api_base_admitted() -> None:
 # ─── guard 3: provider-auth conflict ──────────────────────────────────────────
 
 
+async def test_unconfigured_provider_fails_closed() -> None:
+    with (
+        patch(
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(return_value=(None, None)),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as model_call,
+        patch(
+            "aios.workflows.run_llm.get_settings",
+            return_value=SimpleNamespace(inference_credential_policy="account_only"),
+        ),
+    ):
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec())
+
+    assert result["error_kind"] == "model_provider_not_configured"
+    assert cost == 0
+    model_call.assert_not_awaited()
+
+
 async def test_provider_auth_conflict_rejected() -> None:
     with (
         patch(

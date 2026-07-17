@@ -57,6 +57,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.harness.completion import (
@@ -237,6 +238,11 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         }, 0
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
+    if auth is None and get_settings().inference_credential_policy == "account_only":
+        return {
+            "error": model_providers_service.PROVIDER_NOT_CONFIGURED_MESSAGE,
+            "error_kind": "model_provider_not_configured",
+        }, 0
 
     tools = spec.get("tools") if isinstance(spec.get("tools"), list) else None
     session_id = spec.get("session_id") if isinstance(spec.get("session_id"), str) else None

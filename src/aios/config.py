@@ -77,6 +77,18 @@ class Settings(BaseSettings):
         "``openssl rand -base64 32``.",
     )
 
+    inference_credential_policy: Literal["account_only", "observe_legacy_env", "legacy_env"] = (
+        Field(
+            default="account_only",
+            description="Admission policy for paid inference credentials. account_only fails closed; "
+            "legacy modes explicitly permit LiteLLM process-environment fallback during migration.",
+        )
+    )
+    tenancy_posture: Literal["single_operator", "external_byok"] = Field(
+        default="single_operator",
+        description="Deployment tenancy posture. external_byok forbids every process-env inference fallback.",
+    )
+
     default_spend_limit_usd: float | None = Field(
         default=None,
         ge=0,
@@ -878,6 +890,15 @@ class Settings(BaseSettings):
     def oauth_allow_insecure_host_set(self) -> frozenset[str]:
         """Parsed ``oauth_allow_insecure_hosts`` as a set of host[:port] entries."""
         return frozenset(h.strip() for h in self.oauth_allow_insecure_hosts.split(",") if h.strip())
+
+    @model_validator(mode="after")
+    def _external_byok_requires_account_only(self) -> Settings:
+        if (
+            self.tenancy_posture == "external_byok"
+            and self.inference_credential_policy != "account_only"
+        ):
+            raise ValueError("external_byok requires account_only inference credentials")
+        return self
 
     @model_validator(mode="after")
     def _require_absolute_workspace_root(self) -> Settings:

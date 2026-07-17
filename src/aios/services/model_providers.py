@@ -39,6 +39,10 @@ from aios.models.model_providers import ModelProvider, ProviderAuth, provider_au
 # and generic, matching every other stop_message constant in harness/loop.py
 # (_SPEND_CAP_STOP_REASON_MESSAGE, _REFUSAL_STOP_REASON_MESSAGE): no dynamic
 # data embedded.
+PROVIDER_NOT_CONFIGURED_MESSAGE = (
+    "No account-scoped credentials are configured for this model provider."
+)
+
 PROVIDER_AUTH_CONFLICT_MESSAGE = (
     "This session's effective model-provider key is owned by an account above "
     "this one; supply your own api_key in litellm_extra or configure a "

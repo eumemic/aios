@@ -74,6 +74,43 @@ def _enter_base_patches(
     stack.enter_context(patch("aios.harness.loop.prelude_overhead_local", return_value=0))
 
 
+async def test_unconfigured_provider_latches_before_model_call() -> None:
+    pool = MagicMock()
+    inflight_tool_registry = MagicMock()
+    inflight_tool_registry.in_flight_tool_call_ids.return_value = set()
+    append_event = AsyncMock(return_value=SimpleNamespace(id="ev"))
+    with ExitStack() as stack:
+        _enter_base_patches(stack, resolved=None, conflict=None)
+        stack.enter_context(patch("aios.harness.loop.sessions_service.append_event", append_event))
+        fail_open = stack.enter_context(
+            patch("aios.harness.loop.fail_all_open_requests", AsyncMock())
+        )
+        stack.enter_context(
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", AsyncMock())
+        )
+        call_litellm = stack.enter_context(patch("aios.harness.loop.call_litellm", AsyncMock()))
+        stack.enter_context(
+            patch(
+                "aios.harness.loop.get_settings",
+                return_value=SimpleNamespace(inference_credential_policy="account_only"),
+            )
+        )
+        result = await _run_session_step_body(
+            pool, inflight_tool_registry, "sess_x", cause="message", account_id="acc_x"
+        )
+
+    assert result == _StepResult()
+    call_litellm.assert_not_awaited()
+    fail_open.assert_awaited_once_with(
+        ANY, "sess_x", account_id="acc_x", error={"kind": "model_provider_not_configured"}
+    )
+    assert any(
+        call.args[3].get("event") == "model_provider_not_configured"
+        for call in append_event.call_args_list
+        if call.args[2] == "span"
+    )
+
+
 async def test_conflict_latches_errored_before_model_call() -> None:
     pool = MagicMock()
     inflight_tool_registry = MagicMock()

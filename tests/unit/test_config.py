@@ -12,6 +12,34 @@ from pathlib import Path
 import pytest
 
 
+def test_external_byok_rejects_legacy_inference_env_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.setenv("AIOS_TENANCY_POSTURE", "external_byok")
+    monkeypatch.setenv("AIOS_INFERENCE_CREDENTIAL_POLICY", "legacy_env")
+
+    with pytest.raises(ValidationError, match="external_byok requires account_only"):
+        Settings(_env_file=(str(secrets),))
+
+
+def test_inference_credential_policy_defaults_account_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_INFERENCE_CREDENTIAL_POLICY", raising=False)
+    settings = Settings(_env_file=(str(secrets),))
+    assert settings.inference_credential_policy == "account_only"
+
+
 def test_dead_pipeline_max_setting_is_not_exposed() -> None:
     from aios.config import Settings
 
