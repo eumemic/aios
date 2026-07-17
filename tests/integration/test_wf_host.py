@@ -172,7 +172,7 @@ async def test_agent_emits_a_frontier_for_block2() -> None:
     assert out.emitted[0].capability_id == "agent"
 
 
-async def test_generic_agent_spec_has_four_keys() -> None:
+async def test_generic_agent_spec_includes_default_workspace() -> None:
     out = await _run("async def main(input):\n    return await agent({'p': 1})")
     assert out.kind == "suspended"
     assert out.emitted[0].spec == {
@@ -180,6 +180,7 @@ async def test_generic_agent_spec_has_four_keys() -> None:
         "input": {"p": 1},
         "output_schema": None,
         "model": None,
+        "workspace": "shared",
     }
 
 

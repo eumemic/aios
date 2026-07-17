@@ -209,3 +209,52 @@ async def test_run_secret_proxy_start_failure_does_not_double_stop() -> None:
 
     secret_proxy.stop.assert_awaited_once()
     broker.register_session.assert_not_called()
+
+
+async def test_shared_run_missing_workspace_pointer_is_clean_boundary_error() -> None:
+    shared_run = SimpleNamespace(
+        id=_RUN_ID,
+        account_id=_ACC,
+        environment_id="env_run",
+        workspace="shared",
+        workspace_path=None,
+        launcher_session_id="sess_launcher",
+    )
+    with contextlib.ExitStack() as stack:
+        for ctx in _patch_run_spec_deps(env_config=limited_env("api.example.com")):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.db.queries.workflows.get_run_for_step", AsyncMock(return_value=shared_run))
+        )
+        with pytest.raises(ValueError, match=r"shared workflow run .* has no workspace pointer"):
+            await build_spec_from_run(_RUN_ID)
+
+
+async def test_shared_run_invalid_workspace_pointer_is_clean_boundary_error() -> None:
+    from aios.errors import ForbiddenError
+
+    shared_run = SimpleNamespace(
+        id=_RUN_ID,
+        account_id=_ACC,
+        environment_id="env_run",
+        workspace="shared",
+        workspace_path="/other-account/workspace",
+        launcher_session_id="sess_launcher",
+    )
+    with contextlib.ExitStack() as stack:
+        for ctx in _patch_run_spec_deps(env_config=limited_env("api.example.com")):
+            stack.enter_context(ctx)
+        stack.enter_context(
+            patch("aios.db.queries.workflows.get_run_for_step", AsyncMock(return_value=shared_run))
+        )
+        validate = stack.enter_context(
+            patch(
+                "aios.sandbox.volumes.validate_workspace_path",
+                side_effect=ForbiddenError("workspace path is outside the account workspace root"),
+            )
+        )
+        with pytest.raises(ForbiddenError, match="outside the account workspace root"):
+            await build_spec_from_run(_RUN_ID)
+    validate.assert_called_once_with(
+        shared_run.workspace_path, _ACC, session_id=shared_run.launcher_session_id
+    )

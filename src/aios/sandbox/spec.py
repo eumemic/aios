@@ -841,7 +841,11 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     session-OR-run ULID); the backend stamps it onto the handle's ``owner_id``.
     """
     from aios.db.queries import workflows as wf_queries
-    from aios.sandbox.volumes import ensure_run_workspace_dir
+    from aios.sandbox.volumes import (
+        ensure_run_workspace_dir,
+        ensure_workspace_path,
+        validate_workspace_path,
+    )
 
     settings = get_settings()
     pool = runtime.require_pool()
@@ -867,7 +871,17 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     # path when a credentialed run provisions under non-Limited egress.
     _warn_if_creds_under_open_egress(run_id, env_config, env_var_credentials)
 
-    workspace_path = ensure_run_workspace_dir(run_id)
+    run_workspace_path = getattr(run, "workspace_path", None)
+    if run_workspace_path is not None:
+        validate_workspace_path(
+            run_workspace_path, run.account_id, session_id=run.launcher_session_id
+        )
+        workspace_path = ensure_workspace_path(run_workspace_path)
+    elif getattr(run, "workspace", "fresh") == "shared":
+        raise ValueError(f"shared workflow run {run_id!r} has no workspace pointer")
+    else:
+        # Legacy pre-M2 run rows/tests have no persisted pointer.
+        workspace_path = ensure_run_workspace_dir(run_id)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path

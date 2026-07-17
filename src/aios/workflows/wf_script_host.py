@@ -156,6 +156,7 @@ def agent(
     output_schema: Any = None,
     model: str | None = None,
     label: str | None = None,
+    workspace: str = "shared",
 ) -> _Capability:
     """Invoke an agent child and await its ``return``/``error`` result.
 
@@ -166,6 +167,8 @@ def agent(
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")
+    if workspace not in {"shared", "fresh"}:
+        raise ValueError("agent() workspace must be 'shared' or 'fresh'")
     # Carry output_schema as a canonical JSON *string* so a schema's numeric literals
     # (minimum/multipleOf/…) are preserved verbatim — canonical_json normalises
     # integer-valued floats (1.0 → 1), which would alter schema constraints like
@@ -183,6 +186,7 @@ def agent(
             if output_schema is None
             else canonical_schema_json(output_schema),
             "model": model,
+            "workspace": workspace,
         },
         annotations,
     )

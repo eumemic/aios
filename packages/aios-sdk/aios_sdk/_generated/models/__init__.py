@@ -312,12 +312,14 @@ from .wake_session_action import WakeSessionAction
 from .wf_run import WfRun
 from .wf_run_caller_type_0 import WfRunCallerType0
 from .wf_run_create import WfRunCreate
+from .wf_run_create_workspace import WfRunCreateWorkspace
 from .wf_run_event import WfRunEvent
 from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
 from .wf_run_usage import WfRunUsage
+from .wf_run_workspace import WfRunWorkspace
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
 from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
 from .whatsapp_confirm_pairing_response_status import (
@@ -626,12 +628,14 @@ __all__ = (
     "WfRun",
     "WfRunCallerType0",
     "WfRunCreate",
+    "WfRunCreateWorkspace",
     "WfRunEvent",
     "WfRunEventPayload",
     "WfRunEventType",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
     "WfRunUsage",
+    "WfRunWorkspace",
     "WhatsappConfirmPairingRequest",
     "WhatsappConfirmPairingResponse",
     "WhatsappConfirmPairingResponseStatus",
