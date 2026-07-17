@@ -272,10 +272,11 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Keep container concurrency below the hosted runner's practical
-        # Postgres startup limit. Four simultaneous testcontainers can starve
-        # Docker and turn healthy tests into multi-minute startup failures.
-        run: uv run pytest tests/integration -q -n 2
+        # Run serially: each xdist worker owns a session Postgres container,
+        # while migration tests start additional containers. Even two workers
+        # can exhaust hosted-runner Docker resources and make healthy container
+        # startups time out.
+        run: uv run pytest tests/integration -q
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
