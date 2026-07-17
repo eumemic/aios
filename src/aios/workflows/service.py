@@ -12,6 +12,7 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
+from aios.db import queries
 from aios.db.queries import (
     get_environment,
     get_session_bare,
@@ -475,6 +476,12 @@ async def create_run(
                 "to free a slot",
                 detail={"outstanding": outstanding, "max": account_cap},
             )
+        # Minimal mutex scope: take this only at the shared pointer's persist
+        # point. The transaction holds it through INSERT/commit; the reaper takes
+        # the identical normalized-path-derived key across recheck+rmtree.
+        if workspace == "shared" and workspace_path is not None:
+            workspace_path = queries.normalized_workspace_path(workspace_path)
+            await queries.acquire_workspace_advisory_xact_lock(conn, workspace_path)
         run = await wf_queries.insert_wf_run(
             conn,
             account_id=account_id,

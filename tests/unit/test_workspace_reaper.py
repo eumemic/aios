@@ -85,6 +85,17 @@ def _fake_pool(
     """
     live_paths = live_paths or []
     conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=False)
+
+    class _Tx:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    conn.transaction.return_value = _Tx()
 
     if isinstance(candidates, Exception):
         conn.fetch = AsyncMock(side_effect=candidates)
@@ -433,6 +444,17 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
         return [] if keep_reads == 1 else [{"workspace_volume_path": str(launcher_dir)}]
 
     conn.fetch = AsyncMock(side_effect=_route_fetch)
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=True)
+
+    class _Tx:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+    conn.transaction.return_value = _Tx()
 
     class _Cm:
         async def __aenter__(self) -> Any:
@@ -448,7 +470,8 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
     assert result.reaped == 0
     assert launcher_dir.exists()
-    assert keep_reads == 2
+    assert keep_reads == 1
+    conn.fetchval.assert_awaited_once()
 
 
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:

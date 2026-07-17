@@ -384,18 +384,19 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
             )
             continue
         try:
-            # Revalidate immediately before the destructive operation. A shared
-            # run can become non-terminal after the sweep's initial keep-set read;
-            # never treat that stale absence as permission to delete its workspace.
-            async with pool.acquire() as conn:
-                current_live_paths = await queries.unscoped_live_workspace_volume_paths(conn)
-            if str(target.resolve()) in _live_workspace_realpath_keepset(current_live_paths):
-                skip_conf += 1
-                continue
+            # Close activation-vs-delete TOCTOU: hold one transaction-scoped
+            # advisory lock across the targeted recheck AND rmtree. Shared-run
+            # persistence takes the same normalized-path-derived lock before INSERT.
+            normalized_target = queries.normalized_workspace_path(str(target))
+            async with pool.acquire() as conn, conn.transaction():
+                await queries.acquire_workspace_advisory_xact_lock(conn, normalized_target)
+                if await queries.unscoped_workspace_path_is_live(conn, normalized_target):
+                    skip_conf += 1
+                    continue
 
-            # Off the event loop: a multi-GB tree's rmtree would otherwise block
-            # every concurrent session sharing the worker loop for its duration.
-            await asyncio.to_thread(shutil.rmtree, target)
+                # Off the event loop: a multi-GB tree's rmtree would otherwise block
+                # every concurrent session sharing the worker loop for its duration.
+                await asyncio.to_thread(shutil.rmtree, target)
         except (asyncpg.PostgresError, OSError):
             # One un-removable dir (perm drift, read-only FS) must not abort the
             # rest of the sweep; the next sweep retries it.
