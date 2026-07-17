@@ -49,6 +49,7 @@ from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inflight_tool_registry import InflightToolRegistry
+from aios.harness.production_watchdogs import run_production_watchdogs
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -362,6 +363,7 @@ async def worker_main() -> None:
     github_clone_breaker_clear_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
+    watchdog_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
     supervised_failure: _SupervisedTaskFailure = {"exception": None}
     lock_conn.add_termination_listener(
@@ -617,6 +619,21 @@ async def worker_main() -> None:
         )
         _supervise(scheduler_task, latch=supervised_latch, fatal=supervised_failure)
 
+        watchdog_task = asyncio.create_task(
+            run_production_watchdogs(
+                pool,
+                settings.db_url,
+                held_threshold_seconds=settings.held_connection_watchdog_threshold_seconds,
+                dead_man_threshold_seconds=settings.worker_dead_man_threshold_seconds,
+                interval_seconds=settings.worker_watchdog_interval_seconds,
+                rate_limit_seconds=settings.worker_watchdog_rate_limit_seconds,
+                specimen_dir=settings.worker_watchdog_specimen_dir,
+                journal_limit=settings.worker_watchdog_journal_events,
+            ),
+            name="production_watchdogs",
+        )
+        _supervise(watchdog_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully
         # operational. Touch once now for an immediate green signal,
@@ -688,6 +705,8 @@ async def worker_main() -> None:
             await _cancel_and_drain(github_clone_breaker_clear_task)
         if scheduler_task is not None:
             await _cancel_and_drain(scheduler_task)
+        if watchdog_task is not None:
+            await _cancel_and_drain(watchdog_task)
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()

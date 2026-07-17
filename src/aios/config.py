@@ -353,6 +353,20 @@ class Settings(BaseSettings):
         ge=1,
         description="Concurrent session steps per worker process.",
     )
+    held_connection_watchdog_threshold_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Seconds a worker asyncpg checkout may remain held before specimen capture.",
+    )
+    worker_dead_man_threshold_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        description="Seconds claimed jobs may produce zero completed steps before an alarm.",
+    )
+    worker_watchdog_interval_seconds: float = Field(default=10.0, gt=0)
+    worker_watchdog_rate_limit_seconds: float = Field(default=300.0, gt=0)
+    worker_watchdog_journal_events: int = Field(default=100, ge=1)
+    worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(
