@@ -238,7 +238,10 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         }, 0
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
-    if auth is None and get_settings().inference_credential_policy == "account_only":
+    if auth is None and (
+        get_settings().inference_credential_policy == "account_only"
+        or get_settings().tenancy_posture == "external_byok"
+    ):
         return {
             "error": model_providers_service.PROVIDER_NOT_CONFIGURED_MESSAGE,
             "error_kind": "model_provider_not_configured",
