@@ -1328,8 +1328,24 @@ async def _run_session_step_body(
             has_subscriber(pool, session_id),
         )
         if conflict is not None:
-            await _handle_provider_auth_conflict(
-                pool, session_id, message=conflict, account_id=account_id
+            await _handle_provider_configuration_error(
+                pool,
+                session_id,
+                error_kind="provider_auth_conflict",
+                message=conflict,
+                account_id=account_id,
+            )
+            return _StepResult()
+        if auth is None and (
+            get_settings().inference_credential_policy == "account_only"
+            or get_settings().tenancy_posture == "external_byok"
+        ):
+            await _handle_provider_configuration_error(
+                pool,
+                session_id,
+                error_kind="model_provider_not_configured",
+                message=model_providers_service.PROVIDER_NOT_CONFIGURED_MESSAGE,
+                account_id=account_id,
             )
             return _StepResult()
 
@@ -2345,27 +2361,26 @@ async def _handle_spend_cap(
     )
 
 
-async def _handle_provider_auth_conflict(
-    pool: Any, session_id: str, *, message: str, account_id: str
+async def _handle_provider_configuration_error(
+    pool: Any,
+    session_id: str,
+    *,
+    error_kind: str,
+    message: str,
+    account_id: str,
 ) -> None:
-    """Latch a session whose litellm_extra would send an above-owned api_key to a redirect.
-
-    Mirrors ``_handle_spend_cap``: a deterministic config error, not a transient
-    provider failure, so it lands here — before any inference leaves the worker —
-    rather than through the model-call try/except (which would misclassify it as
-    retryable and burn the backoff ladder).
-    """
+    """Latch a deterministic provider configuration error before inference."""
     await sessions_service.append_event(
         pool,
         session_id,
         "span",
-        {"event": "provider_auth_conflict", "is_error": True},
+        {"event": error_kind, "is_error": True},
         account_id=account_id,
     )
     await _latch_errored_turn(
         pool,
         session_id,
-        error_kind="provider_auth_conflict",
+        error_kind=error_kind,
         stop_message=message,
         account_id=account_id,
     )

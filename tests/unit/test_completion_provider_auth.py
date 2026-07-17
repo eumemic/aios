@@ -25,6 +25,15 @@ class _DictResponse(dict[str, object]):
         self._hidden_params: dict[str, object] = {}
 
 
+@pytest.fixture(autouse=True)
+def _nonlegacy_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Settings:
+        inference_credential_policy = "account_only"
+        model_call_deadline_s = 300.0
+
+    monkeypatch.setattr(completion, "get_settings", lambda: _Settings())
+
+
 def _ok_response() -> _DictResponse:
     return _DictResponse(
         choices=[{"message": {"role": "assistant", "content": ""}}],
@@ -71,7 +80,7 @@ async def test_auth_none_injects_neither_key(monkeypatch: pytest.MonkeyPatch) ->
     assert "api_base" not in captured
 
 
-async def test_extra_api_base_overrides_auth_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolved_api_base_overrides_extra_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture(monkeypatch)
     auth = ProviderAuth(
         api_key="sk-resolved", api_base="https://account.example", owner_account_id="acc_x"
@@ -86,13 +95,13 @@ async def test_extra_api_base_overrides_auth_api_base(monkeypatch: pytest.Monkey
         auth=auth,
     )
 
-    assert captured["api_base"] == "https://agent.example"
+    assert captured["api_base"] == "https://account.example"
     assert (
         captured["api_key"] == "sk-resolved"
     )  # extra doesn't carry a key here — auth's still lands
 
 
-async def test_extra_base_url_alias_suppresses_auth_api_base(
+async def test_resolved_api_base_suppresses_extra_base_url_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A redirect via the base_url alias must ALSO suppress auth.api_base —
@@ -114,11 +123,11 @@ async def test_extra_base_url_alias_suppresses_auth_api_base(
         auth=auth,
     )
 
-    assert "api_base" not in captured  # auth's api_base was suppressed
-    assert captured["base_url"] == "https://agent.example"  # extra's redirect lands unmodified
+    assert captured["api_base"] == "https://account.example"
+    assert "base_url" not in captured
 
 
-async def test_extra_api_key_overrides_auth_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolved_api_key_overrides_extra_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture(monkeypatch)
     auth = ProviderAuth(api_key="sk-resolved", api_base=None, owner_account_id="acc_x")
 
@@ -131,7 +140,7 @@ async def test_extra_api_key_overrides_auth_api_key(monkeypatch: pytest.MonkeyPa
         auth=auth,
     )
 
-    assert captured["api_key"] == "sk-agent-supplied"
+    assert captured["api_key"] == "sk-resolved"
 
 
 async def test_cache_hints_unaffected_by_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,3 +200,23 @@ async def test_stream_litellm_also_injects_auth(monkeypatch: pytest.MonkeyPatch)
 
     assert captured["api_key"] == "sk-resolved"
     assert captured["api_base"] == "https://proxy.example"
+
+
+async def test_legacy_env_preserves_inline_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _LegacySettings:
+        inference_credential_policy = "legacy_env"
+        model_call_deadline_s = 300.0
+
+    monkeypatch.setattr(completion, "get_settings", lambda: _LegacySettings())
+    captured = _capture(monkeypatch)
+    auth = ProviderAuth(api_key="sk-row", api_base="https://row.example", owner_account_id="acc_x")
+    await completion.call_litellm(
+        completion.LlmRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            params={"api_key": "sk-inline", "api_base": "https://inline.example"},
+        ),
+        model="anthropic/claude-x",
+        auth=auth,
+    )
+    assert captured["api_key"] == "sk-inline"
+    assert captured["api_base"] == "https://inline.example"

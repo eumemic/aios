@@ -32,6 +32,11 @@ from tests.unit.conftest import fake_pool_yielding_conn
 
 
 @pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
+@pytest.fixture(autouse=True)
 def _unit_provider_auth_ungated() -> None:
     """Shadow (by name) the conftest-level autouse stub of the same name.
 
@@ -144,7 +149,7 @@ class TestProviderAuthConflict:
             is True
         )
 
-    def test_truthy_self_supplied_key_exempts(self) -> None:
+    def test_truthy_inline_key_does_not_exempt_redirect_guard(self) -> None:
         resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
         assert (
             provider_auth_conflict(
@@ -153,7 +158,7 @@ class TestProviderAuthConflict:
                 account_id="acc_child",
                 account_is_root=False,
             )
-            is False
+            is True
         )
 
     @pytest.mark.parametrize("falsy_key", [None, ""])

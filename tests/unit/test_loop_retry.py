@@ -31,6 +31,13 @@ from aios.harness.loop import (
 )
 from aios.harness.window import WindowedEvents
 
+# These tests deliberately exercise downstream provider retry semantics.
+
+
+@pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
 
 def _make_litellm_error(cls: type[Exception]) -> Exception:
     """Construct a litellm exception instance, supplying per-class required args.

@@ -25,6 +25,11 @@ from aios.workflows.wf_script_host import call_llm
 
 
 @pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
+@pytest.fixture(autouse=True)
 def _stub_provider_auth_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guard 3 (provider-auth conflict) needs a worker context (pool/crypto_box)
     and hits the DB. Stub it to a clean pass — no resolved row, no conflict —
@@ -182,6 +187,25 @@ async def test_trusted_api_base_admitted() -> None:
 
 
 # ─── guard 3: provider-auth conflict ──────────────────────────────────────────
+
+
+async def test_unconfigured_provider_fails_closed() -> None:
+    with (
+        patch(
+            "aios.services.model_providers.resolve_provider_auth_or_conflict",
+            AsyncMock(return_value=(None, None)),
+        ),
+        patch("aios.workflows.run_llm.call_litellm", AsyncMock()) as model_call,
+        patch(
+            "aios.workflows.run_llm.get_settings",
+            return_value=SimpleNamespace(inference_credential_policy="account_only"),
+        ),
+    ):
+        result, cost = await invoke_call_llm(run=_run(), spec=_spec())
+
+    assert result["error_kind"] == "model_provider_not_configured"
+    assert cost == 0
+    model_call.assert_not_awaited()
 
 
 async def test_provider_auth_conflict_rejected() -> None:

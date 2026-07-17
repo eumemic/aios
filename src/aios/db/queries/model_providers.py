@@ -43,6 +43,37 @@ def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
     )
 
 
+async def assert_account_accepts_model_provider(
+    conn: asyncpg.Connection[Any], *, account_id: str
+) -> None:
+    """Reject provider credentials on the credentialless platform root."""
+    is_root = await conn.fetchval(
+        "SELECT parent_account_id IS NULL FROM accounts WHERE id = $1 AND archived_at IS NULL",
+        account_id,
+    )
+    if is_root is None:
+        raise NotFoundError(f"account {account_id} not found", detail={"id": account_id})
+    if is_root:
+        raise ConflictError(
+            "the platform-root account must remain credentialless",
+            detail={"account_id": account_id},
+        )
+
+
+async def audit_credentialless_root(conn: asyncpg.Connection[Any]) -> None:
+    """Fail startup if legacy/manual writes left an active root-owned row."""
+    count = await conn.fetchval(
+        "SELECT count(*) FROM model_providers mp "
+        "JOIN accounts a ON a.id = mp.account_id "
+        "WHERE a.parent_account_id IS NULL AND a.archived_at IS NULL "
+        "AND mp.archived_at IS NULL"
+    )
+    if count:
+        raise RuntimeError(
+            f"credentialless-root invariant violated: {count} active root model-provider row(s)"
+        )
+
+
 async def insert_model_provider(
     conn: asyncpg.Connection[Any],
     *,
@@ -51,6 +82,7 @@ async def insert_model_provider(
     api_base: str | None,
     blob: EncryptedBlob,
 ) -> ModelProvider:
+    await assert_account_accepts_model_provider(conn, account_id=account_id)
     new_id = make_id(MODEL_PROVIDER)
     try:
         row = await conn.fetchrow(
@@ -126,6 +158,7 @@ async def update_model_provider(
     model-provider row holds a live provider credential, so this path is
     guarded from the start.
     """
+    await assert_account_accepts_model_provider(conn, account_id=account_id)
     current = await get_model_provider(conn, model_provider_id, account_id=account_id)
     if current.archived_at is not None:
         raise ConflictError(

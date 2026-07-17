@@ -15,6 +15,11 @@ from aios.harness.loop import (
 from aios.harness.window import WindowedEvents
 
 
+@pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
 def test_limit_to_microusd_allows_none_zero_and_rounding() -> None:
     assert _limit_to_microusd(None) is None
     assert _limit_to_microusd(0) == 0

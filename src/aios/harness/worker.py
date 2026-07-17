@@ -37,6 +37,7 @@ import aios.harness.tasks
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
+from aios.db import queries
 from aios.db.listen import (
     listen_for_github_clone_breaker_clear,
     listen_for_mcp_evict_vault,
@@ -373,6 +374,8 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+        async with pool.acquire() as conn:
+            await queries.audit_credentialless_root(conn)
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()

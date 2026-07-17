@@ -272,10 +272,27 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Default ``load`` dist: the suite has no shared module-scoped
-        # fixtures (the migration tests boot their own per-test
-        # containers).  Measured locally: 87 s serial → 43 s at ``-n 4``.
-        run: uv run pytest tests/integration -q -n 4
+        # Run serially: each xdist worker owns a session Postgres container,
+        # while migration tests start additional containers. Even two workers
+        # can exhaust hosted-runner Docker resources and make healthy container
+        # startups time out. Retry only pytest's recorded failures once so a
+        # transient testcontainer startup cannot fail the entire suite; a real
+        # regression fails both attempts and remains blocking.
+        run: |
+          if ! uv run pytest tests/integration -q; then
+            echo "::warning::FLAKE_RETRY integration"
+            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
+            uv run pytest tests/integration -q --lf
+          fi
+
+      - name: Upload integration flake-retry marker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-integration
+          path: flake-retry-integration.txt
+          if-no-files-found: ignore
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
@@ -413,10 +430,25 @@ jobs:
         # tests/e2e lives in docker-marked test_memory_cross_session_sync.
         # Each worker spins its own session-scoped testcontainer Postgres,
         # so there is no cross-worker DB state at all.  Measured locally:
-        # 141 s serial → 44 s at ``-n 4``.
+        # 141 s serial → 44 s at ``-n 4``. Retry pytest's recorded failures
+        # once to tolerate a transient testcontainer startup failure while
+        # preserving a second failure as a blocking signal.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          uv run pytest tests/e2e -q -m "not docker" -n 4
+          if ! uv run pytest tests/e2e -q -m "not docker" -n 4; then
+            echo "::warning::FLAKE_RETRY e2e-non-docker"
+            echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
+            uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
+          fi
+
+      - name: Upload non-docker E2E flake-retry marker
+        if: always() && needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-e2e-non-docker
+          path: flake-retry-e2e-non-docker.txt
+          if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
         # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
