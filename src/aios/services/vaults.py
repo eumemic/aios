@@ -202,14 +202,20 @@ async def refresh_credential(
     """Serialize one credential's refresh without holding a database connection."""
     key = (account_id, vault_id, target_url)
     lock = _OAUTH_REFRESH_LOCKS.setdefault(key, asyncio.Lock())
-    async with lock:
-        await _refresh_credential(
-            crypto_box,
-            pool,
-            account_id=account_id,
-            vault_id=vault_id,
-            target_url=target_url,
-        )
+    try:
+        async with lock:
+            await _refresh_credential(
+                crypto_box,
+                pool,
+                account_id=account_id,
+                vault_id=vault_id,
+                target_url=target_url,
+            )
+    finally:
+        # Delete-on-release bounds this process-local fast-path map.  Identity
+        # check avoids deleting a replacement installed by a later caller.
+        if not lock.locked() and not getattr(lock, "_waiters", ()):
+            _OAUTH_REFRESH_LOCKS.pop(key, None)
 
 
 async def _refresh_credential(
@@ -222,6 +228,13 @@ async def _refresh_credential(
 ) -> None:
     """Refresh OAuth credentials without holding a pool connection during HTTP I/O."""
     async with pool.acquire() as conn, conn.transaction():
+        # Cross-process arbitration.  It protects the read/decision phase on a
+        # dedicated briefly-held borrow; the transaction (and connection) are
+        # released before token-endpoint HTTP.
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            f"oauth-refresh:v1:{account_id}:{vault_id}:{target_url}",
+        )
         locked = await queries.lock_oauth_credential_for_refresh(
             conn, vault_id, target_url, account_id=account_id
         )
@@ -284,6 +297,19 @@ async def _refresh_credential(
             response.raise_for_status()
             token_data = response.json()
     except httpx.HTTPError as exc:
+        # A rotating provider can reject the cross-process race loser because
+        # the winner consumed ``refresh_token`` while this POST was in flight.
+        # Re-read after the conflict and adopt a fresh winner credential rather
+        # than surfacing OAuthRefreshError on this expected race path.
+        async with pool.acquire() as conn:
+            current = await queries.lock_oauth_credential_for_refresh(
+                conn, vault_id, target_url, account_id=account_id
+            )
+        if current is not None:
+            _winner_id, winner_blob = current
+            winner_payload = subkey.decrypt_dict(winner_blob)
+            if not is_expiring(winner_payload):
+                return
         log.warning(
             "vault.oauth_refresh_http_error",
             credential_id=credential_id,

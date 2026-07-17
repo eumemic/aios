@@ -139,6 +139,20 @@ jobs:
       - name: Pooled connection await invariant
         run: uv run python scripts/pooled_connection_lint.py src
 
+      - name: Verify pooled-await exception issues are open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          refs=$(grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src \
+            | grep -oE 'eumemic/aios#[0-9]+' | sort -u || true)
+          while read -r ref; do
+            [[ -z "$ref" ]] && continue
+            issue=${ref##*#}
+            state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state)
+            [[ "$state" == "open" ]] || { echo "$ref does not exist or is not open"; exit 1; }
+          done <<< "$refs"
+
       - name: Lint (ruff)
         # ``packages/aios-sdk/aios_sdk`` carries hand-written modules
         # (``__init__.py``, ``config.py``, ``factory.py``, ``streaming.py``)

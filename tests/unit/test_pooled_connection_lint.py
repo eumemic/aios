@@ -34,6 +34,27 @@ async def work(pool):
     )
 
 
+def test_passing_conn_to_arbitrary_call_is_not_db_io() -> None:
+    # Reviewer's bypass: classification must be by called object, not arguments.
+    assert _messages(
+        """
+async def work(pool, client):
+    async with pool.acquire() as conn:
+        await client.post(conn, "https://example.com")
+"""
+    )
+
+
+def test_fabricated_repository_pragma_does_not_suppress_violation() -> None:
+    assert _messages(
+        """
+async def work(pool, client):
+    async with pool.acquire() as conn:
+        await client.post("https://example.com")  # pooled-connection-await: allow evil/aios#123
+"""
+    )
+
+
 def test_transaction_scope_on_connection_parameter_is_checked() -> None:
     assert _messages(
         """
@@ -49,7 +70,7 @@ def test_linked_pragma_allows_a_reviewed_exception() -> None:
         """
 async def work(pool, client):
     async with pool.acquire() as conn:
-        await client.post("https://example.com")  # pooled-connection-await: allow https://github.com/eumemic/aios/issues/123
+        await client.post("https://example.com")  # pooled-connection-await: allow eumemic/aios#123
 """
     )
 

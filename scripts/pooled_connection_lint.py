@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _PRAGMA = "pooled-connection-await: allow"
-_ISSUE_LINK = re.compile(r"https://github\.com/[^/]+/[^/]+/(?:issues|pull)/\d+")
+_ISSUE_REF = re.compile(r"(?<![A-Za-z0-9_.-])eumemic/aios#(\d+)(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -32,8 +32,9 @@ def _root_name(node: ast.AST) -> str | None:
 
 
 class _Checker(ast.NodeVisitor):
-    def __init__(self, filename: str, lines: list[str]) -> None:
+    def __init__(self, filename: str, lines: list[str], local_db_helpers: set[str]) -> None:
         self.filename = filename
+        self.local_db_helpers = local_db_helpers
         self.lines = lines
         self.held: list[set[str]] = []
         self.violations: list[Violation] = []
@@ -82,23 +83,75 @@ class _Checker(ast.NodeVisitor):
     def _is_db_await(self, expression: ast.AST, held: set[str]) -> bool:
         if not isinstance(expression, ast.Call):
             return False
-        if _root_name(expression.func) in held:
+        # Classification is by the CALLED OBJECT, never merely by seeing a
+        # connection somewhere in the argument list.  In particular,
+        # ``await arbitrary_network_call(conn)`` is foreign I/O, not DB I/O.
+        if isinstance(expression.func, ast.Attribute) and _root_name(expression.func.value) in held:
             return True
-        return any(
-            isinstance(argument, ast.Name) and argument.id in held for argument in expression.args
-        ) or any(
-            isinstance(keyword.value, ast.Name) and keyword.value.id in held
-            for keyword in expression.keywords
+
+        # The repository's DB helper surface lives below ``queries``.  Helpers
+        # must receive the held connection as their first positional argument;
+        # no second connection argument or ``conn=`` smuggling is accepted.
+        root = _root_name(expression.func)
+        called = (
+            expression.func.attr
+            if isinstance(expression.func, ast.Attribute)
+            else (expression.func.id if isinstance(expression.func, ast.Name) else "")
         )
+        recognized = (
+            (
+                isinstance(expression.func, ast.Name)
+                and (
+                    called in self.local_db_helpers
+                    or called.startswith(
+                        (
+                            "get_",
+                            "list_",
+                            "find_",
+                            "read_",
+                            "resolve_",
+                            "validate_",
+                            "materialize_",
+                            "session_",
+                            "calibration_",
+                            "prune",
+                            "append_",
+                            "agents_",
+                            "write_",
+                        )
+                    )
+                )
+            )
+            or root == "queries"
+            or bool(
+                root
+                and (
+                    root.endswith(("queries", "_queries", "_service", "_q"))
+                    or root in {"queries", "trace_q", "wf_queries", "db_queries", "service"}
+                )
+            )
+            or called.endswith("_conn")
+        )
+        if not recognized:
+            return False
+        values = [*expression.args, *(keyword.value for keyword in expression.keywords)]
+        return sum(isinstance(value, ast.Name) and value.id in held for value in values) == 1
 
     def _has_linked_pragma(self, node: ast.Await) -> bool:
         line = self.lines[node.lineno - 1]
-        return _PRAGMA in line and _ISSUE_LINK.search(line) is not None
+        return _PRAGMA in line and _ISSUE_REF.search(line) is not None
 
 
 def check_source(source: str, *, filename: str = "<unknown>") -> list[Violation]:
     tree = ast.parse(source, filename=filename)
-    checker = _Checker(filename, source.splitlines())
+    local_db_helpers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.args.args
+        and node.args.args[0].arg in {"conn", "connection", "acquired"}
+    }
+    checker = _Checker(filename, source.splitlines(), local_db_helpers)
     checker.visit(tree)
     return checker.violations
 
