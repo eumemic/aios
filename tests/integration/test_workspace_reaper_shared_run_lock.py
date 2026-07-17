@@ -26,6 +26,10 @@ async def _seed(conn: asyncpg.Connection[Any]) -> None:
         "INSERT INTO environments (id, name, config, account_id) VALUES "
         "('env_reaper', 'reaper', '{}'::jsonb, 'acc_reaper')"
     )
+    await conn.execute(
+        "INSERT INTO workflows (id, account_id, name, script) VALUES "
+        "('wf_reaper', 'acc_reaper', 'reaper', 'async def main(input): return input')"
+    )
 
 
 async def _insert_run(
@@ -40,10 +44,11 @@ async def _insert_run(
     await conn.execute(
         """
         INSERT INTO wf_runs
-          (id, account_id, environment_id, script, script_sha, status,
+          (id, workflow_id, account_id, environment_id, script, script_sha, status,
            workspace_mode, workspace_path, archived_at)
-        VALUES ($1, 'acc_reaper', 'env_reaper', 'async def main(input): return input',
-                'sha', $2, $3, $4, CASE WHEN $5 THEN now() ELSE NULL END)
+        VALUES ($1, 'wf_reaper', 'acc_reaper', 'env_reaper',
+                'async def main(input): return input', 'sha', $2, $3, $4,
+                CASE WHEN $5 THEN now() ELSE NULL END)
         """,
         run_id,
         status,
