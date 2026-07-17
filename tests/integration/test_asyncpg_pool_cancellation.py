@@ -27,6 +27,9 @@ _INCIDENT_HOLDERS = 9
 _STORMS_PER_PHASE = 112
 _TASK_BOUND = 5.0
 _PHASES = ("post_query", "release", "acquire")
+_INCIDENT_PHASES = ("incident_http", "incident_stream")
+_INCIDENT_WAITERS = 13
+_INCIDENT_STORMS_PER_PHASE = 8
 _phase: contextvars.ContextVar[str | None] = contextvars.ContextVar("asyncpg_phase", default=None)
 
 
@@ -197,6 +200,125 @@ async def test_phase_complete_asyncpg_cancellation_probe(
         assert sum(probe.census.values()) == 3024
     finally:
         _Probe.current = None
+        await observer.close()
+        async with asyncio.timeout(_TASK_BOUND):
+            await pool.close()
+
+
+class _SlowNonDB:
+    """Sleep-backed HTTP/model-stream double synchronized after transaction entry."""
+
+    def __init__(self, probe: _Probe, phase: str) -> None:
+        self.probe = probe
+        self.phase = phase
+        self.entered_count = 0
+        self.ready_count = 0
+        self.all_ready = asyncio.Event()
+        self.all_entered = asyncio.Event()
+        self.armed = asyncio.Event()
+
+    async def _slow_await(self) -> None:
+        self.probe.census[self.phase] += 1
+        self.entered_count += 1
+        if self.entered_count == _POOL_SIZE:
+            self.all_entered.set()
+        await asyncio.sleep(60)
+
+    async def http_post(self) -> None:
+        """Mock an HTTP POST whose transport is a slow asyncio sleep."""
+        await self._slow_await()
+
+    async def stream(self) -> Any:
+        """Mock a model response that blocks before its first streamed chunk."""
+        await self._slow_await()
+        yield b"unreachable-until-timeout"
+
+
+async def _incident_holder(pool: asyncpg.Pool[Any], slow: _SlowNonDB) -> None:
+    async with pool.acquire() as connection, connection.transaction():
+        slow.ready_count += 1
+        if slow.ready_count == _POOL_SIZE:
+            slow.all_ready.set()
+        # Arm only after all 16 transactions are holding all 16 pool slots and
+        # the 13 incident-shaped pool waiters have actually queued.
+        await slow.armed.wait()
+        if slow.phase == "incident_http":
+            await asyncio.wait_for(slow.http_post(), timeout=0.05)
+        else:
+            stream = slow.stream()
+            try:
+                await asyncio.wait_for(anext(stream), timeout=0.05)
+            finally:
+                await stream.aclose()
+
+
+async def _queued_witness(pool: asyncpg.Pool[Any], acquired: Counter[str]) -> None:
+    async with pool.acquire() as connection:
+        await connection.fetchval("SELECT 1")
+        acquired["waiters"] += 1
+
+
+@pytest.mark.asyncio
+async def test_incident_call_graph_timeout_under_saturated_pool(
+    migrated_db_url: str,
+) -> None:
+    """Probe timeout cancellation of non-DB awaits under a held transaction."""
+    probe = _Probe()
+    pool = await asyncpg.create_pool(
+        migrated_db_url,
+        min_size=_POOL_SIZE,
+        max_size=_POOL_SIZE,
+        server_settings={"application_name": "aios-1975-phase-probe"},
+    )
+    assert pool is not None
+    observer = await asyncpg.connect(migrated_db_url)
+    try:
+        for phase in _INCIDENT_PHASES:
+            for storm in range(_INCIDENT_STORMS_PER_PHASE):
+                slow = _SlowNonDB(probe, phase)
+                holders = [
+                    asyncio.create_task(
+                        _incident_holder(pool, slow),
+                        name=f"incident-{phase}-{storm}-{index}",
+                    )
+                    for index in range(_POOL_SIZE)
+                ]
+                async with asyncio.timeout(_TASK_BOUND):
+                    # Every holder has acquired a connection and opened a
+                    # transaction before it reaches this mocked non-DB await.
+                    await slow.all_ready.wait()
+                assert pool.get_idle_size() == 0
+
+                acquired: Counter[str] = Counter()
+                waiters = [
+                    asyncio.create_task(
+                        _queued_witness(pool, acquired),
+                        name=f"incident-waiter-{phase}-{storm}-{index}",
+                    )
+                    for index in range(_INCIDENT_WAITERS)
+                ]
+                async with asyncio.timeout(_TASK_BOUND):
+                    while len(pool._queue._getters) < _INCIDENT_WAITERS:  # noqa: ASYNC110 -- waiter census
+                        await asyncio.sleep(0)
+
+                slow.armed.set()
+                async with asyncio.timeout(_TASK_BOUND):
+                    await slow.all_entered.wait()
+                await _assert_recovered(pool, observer, holders + waiters)
+                assert acquired["waiters"] == _INCIDENT_WAITERS, (
+                    "queued waiters did not eventually acquire"
+                )
+
+                # wait_for must have delivered TimeoutError through every open
+                # transaction; a success or unrelated exception is a bad probe.
+                results = [task.exception() for task in holders]
+                assert all(isinstance(result, TimeoutError) for result in results)
+
+        expected = _INCIDENT_STORMS_PER_PHASE * _POOL_SIZE
+        for phase in _INCIDENT_PHASES:
+            assert probe.census[phase] == expected
+            assert probe.census[phase] > 0
+    finally:
         await observer.close()
         async with asyncio.timeout(_TASK_BOUND):
             await pool.close()
