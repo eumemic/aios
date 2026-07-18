@@ -54,6 +54,12 @@ PRE_RESIZE_CEILING_BYTES = 50 * 1024 * 1024
 # else defers to litellm — but kept as the stub point for tests.
 _VISION_OVERRIDES: dict[str, bool] = {}
 
+# oai-proxy exposes custom Responses API routes that LiteLLM does not catalog.
+# These OpenAI families accept image inputs, so assert their capability rather
+# than silently degrading to text markers when model-info lookup raises.
+_VISION_GATEWAY_PREFIX = "openai/responses/"
+_VISION_GATEWAY_FAMILIES = frozenset({"gpt-5", "gpt-4o", "o4"})
+
 
 def supports_vision(model: str) -> bool:
     """True when ``model`` accepts ``image_url`` content parts.
@@ -62,9 +68,10 @@ def supports_vision(model: str) -> bool:
 
     1. :data:`_VISION_OVERRIDES` — explicit per-model escape hatch (force
        ``True`` or ``False``).
-    2. Any Claude family is assumed vision-capable (3.x onward; aios targets
-       4.x).  A long-running worker fetches litellm's catalog once at startup,
-       so a Claude model released afterwards makes ``litellm.get_model_info``
+    2. Known vision families on custom gateway routes, plus any Claude family,
+       are assumed vision-capable. A long-running worker fetches litellm's
+       catalog once at startup, so a Claude model released afterwards makes
+       ``litellm.get_model_info``
        raise "isn't mapped yet" and we would otherwise collapse to "no vision"
        — silently degrading image reads to a text marker.  Asserting the family
        by name needs no edit when the next Claude lands.  The match is a
@@ -78,8 +85,13 @@ def supports_vision(model: str) -> bool:
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
-    if "claude" in model.lower():
+    normalized = model.lower()
+    if "claude" in normalized:
         return True
+    if normalized.startswith(_VISION_GATEWAY_PREFIX):
+        gateway_model = normalized.removeprefix(_VISION_GATEWAY_PREFIX)
+        if any(gateway_model.startswith(family) for family in _VISION_GATEWAY_FAMILIES):
+            return True
     # Defer the heavy ``litellm`` import: every harness consumer of this
     # module pays ~1.18s of bootstrap otherwise, and most call sites never
     # reach this branch (Claude short-circuits above).
