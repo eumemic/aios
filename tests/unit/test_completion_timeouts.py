@@ -86,13 +86,13 @@ def _make_chunk(text: str | None) -> object:
 
 
 class _StubPool:
-    """``stream_litellm`` only uses the pool to ``pg_notify`` deltas.
+    """No-op pool that records streaming-step connection acquisitions."""
 
-    A no-op pool keeps the chunk loop honest — every yielded chunk runs
-    through ``_notify_delta`` which pulls a connection.
-    """
+    def __init__(self) -> None:
+        self.acquire_count = 0
 
     def acquire(self) -> _StubPoolAcquire:
+        self.acquire_count += 1
         return _StubPoolAcquire()
 
 
@@ -502,15 +502,17 @@ async def test_stream_litellm_closes_stream_on_normal_drain(
         },
     )
 
+    pool = _StubPool()
     response = await completion.stream_litellm(
         completion.LlmRequest(
             messages=[{"role": "user", "content": "ping"}],
             session_id="sess_test",
         ),
         model="anthropic/claude-sonnet-4-6",
-        pool=_StubPool(),
+        pool=pool,
     )
     message = response.message
 
     assert message["content"] == "hello"
+    assert pool.acquire_count == 1
     assert resp.aclose_count == 1

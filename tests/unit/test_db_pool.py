@@ -19,10 +19,10 @@ from aios.db.pool import (
 )
 
 
-def _make_fake_pool(pg_max_connections: str) -> MagicMock:
+def _make_fake_pool(pg_max_connections: str, listener_count: int = 0) -> MagicMock:
     """Build a fake asyncpg pool whose acquire() yields a conn with fetchval."""
     fake_conn = AsyncMock()
-    fake_conn.fetchval = AsyncMock(return_value=pg_max_connections)
+    fake_conn.fetchval = AsyncMock(side_effect=[pg_max_connections, listener_count])
 
     fake_pool = MagicMock()
 
@@ -159,3 +159,15 @@ def test_jsonb_encoder_passes_through_preserialized_string() -> None:
     assert _jsonb_encoder(pre) == pre  # no extra layer of quoting
     # A plain json.dumps encoder would have produced a double-encoded string.
     assert _jsonb_encoder(pre) != json.dumps(pre)
+
+
+@pytest.mark.asyncio
+async def test_warning_includes_live_listener_backends(
+    capture_logs: structlog.testing.LogCapture,
+) -> None:
+    fake_pool = _make_fake_pool("20", listener_count=5)
+    with patch("aios.db.pool.asyncpg.create_pool", new=AsyncMock(return_value=fake_pool)):
+        await create_pool("postgresql://stub/db")
+    entry = next(e for e in capture_logs.entries if e.get("event") == "db.pool.unsafe_max_size")
+    assert entry["live_listener_count"] == 5
+    assert entry["total_connection_budget"] == 21

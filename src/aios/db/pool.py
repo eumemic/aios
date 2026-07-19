@@ -121,13 +121,22 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
         raise RuntimeError(f"asyncpg.create_pool returned None for {db_url}")
     async with pool.acquire() as conn:
         pg_max_connections = int(await conn.fetchval("SHOW max_connections"))
+        live_listener_count = int(
+            await conn.fetchval(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE application_name LIKE 'aios-listener:%'"
+            )
+        )
     total_pool_capacity = max_size * _KNOWN_POOL_COUNT
-    if total_pool_capacity >= pg_max_connections:
+    total_connection_budget = total_pool_capacity + live_listener_count
+    if total_connection_budget >= pg_max_connections:
         log.warning(
             "db.pool.unsafe_max_size",
             max_size=max_size,
             known_pool_count=_KNOWN_POOL_COUNT,
             total_pool_capacity=total_pool_capacity,
+            live_listener_count=live_listener_count,
+            total_connection_budget=total_connection_budget,
             pg_max_connections=pg_max_connections,
         )
     return pool
