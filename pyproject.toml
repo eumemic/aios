@@ -95,6 +95,7 @@ dev = [
     "aios-sms",
     "aios-telegram",
     "aios-whatsapp",
+    "types-pyyaml>=6",
 ]
 
 [project.scripts]
