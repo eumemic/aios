@@ -425,27 +425,31 @@ async def listen_for_connector_result(
     Mirrors :func:`listen_for_events` but with a per-call (not
     per-session) channel and a tighter queue bound.
     """
-    conn = await _connect_listener(db_url)
+    release_capacity = _reserve_sse_subscriber()
     try:
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
-        channel = f"connector_result_{call_id}"
+        conn = await _connect_listener(db_url)
+        try:
+            queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+            channel = f"connector_result_{call_id}"
 
-        def _callback(
-            _conn: asyncpg.Connection[object],
-            _pid: int,
-            _channel: str,
-            payload: str,
-        ) -> None:
-            # See ``listen_for_events`` for why this MUST be synchronous.
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                log.warning("listen.connector_result_queue_full", call_id=call_id)
+            def _callback(
+                _conn: asyncpg.Connection[object],
+                _pid: int,
+                _channel: str,
+                payload: str,
+            ) -> None:
+                # See ``listen_for_events`` for why this MUST be synchronous.
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    log.warning("listen.connector_result_queue_full", call_id=call_id)
 
-        await conn.add_listener(channel, _callback)
-        yield queue
+            await conn.add_listener(channel, _callback)
+            yield queue
+        finally:
+            conn.terminate()
     finally:
-        conn.terminate()
+        release_capacity()
 
 
 @asynccontextmanager
