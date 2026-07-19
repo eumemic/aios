@@ -1,13 +1,11 @@
 """Table-driven coverage for lifecycle-based snapshot GC classification.
 
 Canonical snapshots of existing, non-archived sessions are protected regardless
-of activity. Archived snapshots become collectible only when archive grace has
-elapsed; deleted sessions and non-canonical residue are collectible immediately.
+of activity. Archived snapshots become collectible immediately; deleted sessions and non-canonical residue are collectible immediately.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from aios.sandbox.backends.base import SESSION_LABEL_KEY, ManagedImage
@@ -57,9 +55,7 @@ def _state(session_id: str, *, dormant: bool) -> SessionSnapshotState:
 def _classify(
     images: list[ManagedImage], states: dict[str, SessionSnapshotState]
 ) -> dict[str, tuple[str, str]]:
-    verdicts = _classify_images(
-        images, states, now=_NOW, archive_grace_seconds=86400, this_host=_HOST
-    )
+    verdicts = _classify_images(images, states, this_host=_HOST)
     return {v.image.image_id: (v.verdict, v.reason) for v in verdicts}
 
 
@@ -103,8 +99,8 @@ def test_structural_parent_skip_excludes_live_chain_interior() -> None:
     assert out["img_leaf"] == ("retain", "protected_live")
 
 
-def test_archived_session_within_grace_is_retained() -> None:
-    """An archived session remains protected until archive grace elapses."""
+def test_archived_session_is_removed_immediately() -> None:
+    """An archived session bypasses retention regardless of archive age."""
     img = _image(image_id="img_a", session_id="sess_a", canonical=True)
     state = SessionSnapshotState(
         session_id="sess_a",
@@ -116,7 +112,7 @@ def test_archived_session_within_grace_is_retained() -> None:
         snapshot_bytes=1,
     )
     out = _classify([img], {"sess_a": state})
-    assert out["img_a"] == ("retain", "archive_grace")
+    assert out["img_a"] == ("remove", "archived")
 
 
 def test_missing_dormancy_probe_is_not_dormant() -> None:
@@ -141,43 +137,3 @@ def test_arbitrarily_dormant_non_archived_canonical_is_protected() -> None:
     state = _state("sess_a", dormant=True)
     out = _classify([img], {"sess_a": state})
     assert out["img_a"] == ("retain", "protected_live")
-
-
-def test_archived_current_observes_grace_boundary() -> None:
-    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
-    state = _state("sess_a", dormant=True)
-    grace = 86400
-    before = replace(state, archived_at=_NOW - timedelta(seconds=grace - 1))
-    at = replace(state, archived_at=_NOW - timedelta(seconds=grace))
-    assert (
-        _classify_images(
-            [img], {"sess_a": before}, now=_NOW, archive_grace_seconds=grace, this_host=_HOST
-        )[0].verdict
-        == "retain"
-    )
-    verdict = _classify_images(
-        [img], {"sess_a": at}, now=_NOW, archive_grace_seconds=grace, this_host=_HOST
-    )[0]
-    assert (verdict.verdict, verdict.reason) == ("remove", "archived")
-
-
-def test_zero_archive_grace_is_immediately_eligible() -> None:
-    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
-    state = replace(_state("sess_a", dormant=False), archived_at=_NOW)
-    verdict = _classify_images(
-        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=0, this_host=_HOST
-    )[0]
-    assert (verdict.verdict, verdict.reason) == ("remove", "archived")
-
-
-def test_nondefault_archive_grace_boundary() -> None:
-    img = _image(image_id="img_a", session_id="sess_a", canonical=True)
-    state = replace(_state("sess_a", dormant=False), archived_at=_NOW - timedelta(seconds=17))
-    before = _classify_images(
-        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=18, this_host=_HOST
-    )[0]
-    at = _classify_images(
-        [img], {"sess_a": state}, now=_NOW, archive_grace_seconds=17, this_host=_HOST
-    )[0]
-    assert before.verdict == "retain"
-    assert at.verdict == "remove"

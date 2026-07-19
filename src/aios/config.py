@@ -232,11 +232,6 @@ class Settings(BaseSettings):
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
     )
-    sandbox_archive_gc_grace_seconds: int = Field(
-        default=86400,
-        ge=0,
-        description="Grace after archived_at before canonical filesystem reclamation.",
-    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
