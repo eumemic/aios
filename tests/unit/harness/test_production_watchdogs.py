@@ -178,3 +178,57 @@ async def test_runner_reconnects_after_failed_capture_tick(
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
+
+
+@pytest.mark.asyncio
+async def test_runner_counts_session_and_workflow_wake_completions_symmetrically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Healthy workflow wakes count as throughput even when the run parks."""
+    import aios.harness.production_watchdogs as module
+
+    class Inspector:
+        def __init__(self) -> None:
+            self.closed = False
+            self.queries: list[str] = []
+            self.observed = asyncio.Event()
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def fetch(self, query: str, *args: object, **kwargs: object) -> list[object]:
+            return []
+
+        async def fetchrow(self, query: str, *args: object, **kwargs: object) -> dict[str, int]:
+            self.queries.append(query)
+            self.observed.set()
+            return {"claimed": 1, "completed": 1}
+
+    inspector = Inspector()
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=inspector))
+    runner = asyncio.create_task(
+        module.run_production_watchdogs(
+            _Pool(_Holder(object())),
+            "postgresql://example/db",
+            held_threshold_seconds=999,
+            dead_man_threshold_seconds=0.001,
+            interval_seconds=0.001,
+            rate_limit_seconds=10,
+            specimen_dir=tmp_path,
+            journal_limit=10,
+            operation_timeout_seconds=0.1,
+        )
+    )
+    await asyncio.wait_for(inspector.observed.wait(), 1)
+    query = inspector.queries[-1]
+    assert "procrastinate_events" in query
+    assert "harness.wake_session" in query
+    assert "harness.wake_workflow" in query
+    assert "run_completed" not in query
+    assert not runner.done()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
