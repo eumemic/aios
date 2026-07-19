@@ -153,9 +153,7 @@ async def test_reaper_lock_survives_real_to_thread_delete(
         await owner.execute("SELECT pg_advisory_lock($1::bigint)", key)
         delete_task = asyncio.create_task(asyncio.to_thread(slow_delete))
         await thread_entered.wait()
-        blocked = asyncio.create_task(
-            contender.execute("SELECT pg_advisory_lock($1::bigint)", key)
-        )
+        blocked = asyncio.create_task(contender.execute("SELECT pg_advisory_lock($1::bigint)", key))
         await asyncio.sleep(0.05)
         assert not blocked.done(), "separate backend entered during to_thread deletion"
         release_thread.set()
