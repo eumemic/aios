@@ -376,12 +376,11 @@ async def model_token_class_ratios(
     guard), so the regression trains only on NEW spans and self-heals as
     they accumulate (same contract as #160).
 
-    Same cache machinery as the scalar: mature fits cached 60 s,
-    below-threshold neutral results cached 10 s (bounding the activation
-    lag).  ``k_bucket`` is accepted for signature/cache-key compatibility
-    with the scalar contract (it keyed the bucket width); the per-class
-    fit's stability comes from the ridge regularizer, not bucket
-    quantization, so ``k_bucket`` only partitions the cache here.
+    Mature fits are cached 60 s; below-threshold neutral results are cached
+    10 s to bound the activation lag.  ``k_bucket`` partitions the cache so
+    callers using different calibration bucket widths do not share fitted
+    results.  The per-class fit's stability comes from the ridge regularizer,
+    not bucket quantization.
 
     ``model`` is the raw model string (``agent.model``) — NO
     NORMALIZATION; the same string must appear at stamp and query time.
@@ -399,8 +398,8 @@ async def model_token_class_ratios(
     per-tenant one.  This is NOT a tenant leak.  Do **not** add an
     ``account_id`` predicate: it would fragment the sample (slowing
     calibration convergence) and require a new index without buying any
-    correctness.  The param is kept for signature/cache-key compatibility
-    with the scalar contract.
+    correctness.  The parameter retains the caller's account-scoped query
+    interface while the cache and fit intentionally remain global per model.
 
     The fetch is bounded to the most recent
     :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY created_at
