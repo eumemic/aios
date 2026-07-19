@@ -12764,6 +12764,16 @@
                   },
                   "type": "array"
                 },
+                "propertyNames": {
+                  "enum": [
+                    "apt",
+                    "pip",
+                    "npm",
+                    "cargo",
+                    "gem",
+                    "go"
+                  ]
+                },
                 "type": "object"
               },
               {
