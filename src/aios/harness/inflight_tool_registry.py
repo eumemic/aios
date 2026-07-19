@@ -10,6 +10,7 @@ One instance per worker process, stashed on :mod:`aios.harness.runtime`.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from aios.logging import get_logger
 
@@ -20,12 +21,12 @@ class InflightToolRegistry:
     """Maps ``session_id`` → ``{tool_call_id → asyncio.Task}``."""
 
     def __init__(self) -> None:
-        self._tasks: dict[str, dict[str, asyncio.Task[None]]] = {}
+        self._tasks: dict[str, dict[str, asyncio.Task[Any]]] = {}
         self._dispatch_seq: dict[str, dict[str, int | None]] = {}
         self._step_tasks: dict[str, asyncio.Task[None]] = {}
         self._step_start_seq: dict[str, int | None] = {}
 
-    def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[None]) -> None:
+    def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[Any]) -> None:
         """Register a newly-launched tool task.
 
         Auto-captures the CURRENT ``start_seq`` of *session_id*'s registered
