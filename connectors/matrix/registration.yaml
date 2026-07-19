@@ -7,6 +7,6 @@ rate_limited: true
 namespaces:
   users:
     - exclusive: true
-      regex: "^@_aios_agent_[a-z0-9]+:your\\.server$"
+      regex: '^@_aios_agent_[a-z0-9]+:your\.server$'
   aliases: []
   rooms: []
