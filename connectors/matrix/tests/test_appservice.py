@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import socket
+import subprocess
+import time
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -78,25 +81,55 @@ async def test_state_store_is_asyncpg_backed(
 
 
 @pytest.fixture(scope="module")
-def postgres_container() -> Iterator[Any]:
-    docker = pytest.importorskip("docker")
-    pytest.importorskip("testcontainers.postgres")
-    from testcontainers.postgres import PostgresContainer
-
+def postgres_url() -> Iterator[str]:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not available")
+    probe = subprocess.run(
+        ["docker", "info"], capture_output=True, check=False, timeout=10
+    )
+    if probe.returncode != 0:
+        pytest.skip("Docker daemon is not available")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    name = f"aios-matrix-test-{port}"
+    run = subprocess.run(
+        [
+            "docker", "run", "--detach", "--rm", "--name", name,
+            "--publish", f"127.0.0.1:{port}:5432",
+            "--env", "POSTGRES_PASSWORD=aios",
+            "--env", "POSTGRES_USER=aios",
+            "--env", "POSTGRES_DB=matrix",
+            "postgres:16-alpine",
+        ],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    if run.returncode != 0:
+        pytest.skip(f"could not start Postgres container: {run.stderr}")
     try:
-        docker.from_env().ping()
-    except Exception:
-        pytest.skip("Docker is not available")
-
-    with PostgresContainer("postgres:16-alpine") as postgres:
-        yield postgres
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready = subprocess.run(
+                ["docker", "exec", name, "pg_isready", "-U", "aios"],
+                capture_output=True, check=False, timeout=5,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(0.25)
+        else:
+            pytest.fail("Postgres container did not become ready")
+        yield f"postgresql://aios:aios@127.0.0.1:{port}/matrix"
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", name], capture_output=True, check=False, timeout=10
+        )
 
 
 @pytest.mark.asyncio
 async def test_fresh_postgres_store_persists_membership(
-    config: MatrixConfig, postgres_container: Any
+    config: MatrixConfig, postgres_url: str
 ) -> None:
-    config = config.model_copy(update={"database_url": postgres_container.get_connection_url()})
+    config = config.model_copy(update={"database_url": postgres_url})
     room_id = RoomID("!room:your.server")
     user_id = UserID("@_aios_agent_one:your.server")
 
