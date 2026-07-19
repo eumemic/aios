@@ -377,6 +377,14 @@ async def worker_main() -> None:
         async with pool.acquire() as conn:
             await queries.audit_credentialless_root(conn)
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
+        # A configured canonical store is mandatory, not a best-effort fallback.
+        if settings.sandbox_snapshot_store_root is not None:
+            from aios.sandbox.snapshot_store import TarballStore
+
+            assert isinstance(sandbox_registry._store, TarballStore)
+            sandbox_registry._store.preflight(
+                headroom_bytes=settings.sandbox_canonical_store_headroom_bytes
+            )
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()

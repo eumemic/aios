@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -20,6 +21,7 @@ from aios.harness import runtime
 from aios.ids import make_id
 from aios.sandbox.backends.base import ManagedImage, ManagedSandboxRef
 from aios.sandbox.registry import GcImageVerdict, SandboxRegistry, SessionSnapshotState
+from aios.sandbox.snapshot_store import TarballStore
 from aios.sandbox.spec import snapshot_tag
 from tests.helpers.sandbox import FakeBackend, FakePool
 
@@ -562,3 +564,27 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
 
     registry._snapshot_and_record.assert_awaited_once()
     assert any(call[0] == "force_remove" for call in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_tarball_pointer_survives_docker_gc_reconciliation_and_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker cache enumeration must never rewrite canonical durable refs."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    registry._store = TarballStore(backend, tmp_path)
+    sid = "sess_durable"
+    durable_ref = f"{sid}/generation.tar"
+    state = SessionSnapshotState(
+        sid, "acct", None, _NOW, durable_ref, get_settings().instance_id, 7
+    )
+    set_pointer = AsyncMock()
+    monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
+    verdict = _canonical_verdict(sid, size_bytes=7)
+
+    await registry._gc_reconcile_pointers([verdict], {sid: state}, get_settings().instance_id)
+    set_pointer.assert_not_awaited()
+    # Simulate label-blind `docker image prune -af`: only the local cache vanishes.
+    await backend.remove_image(verdict.removal_ref)
+    assert state.snapshot_ref == durable_ref
