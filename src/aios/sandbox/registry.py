@@ -1678,20 +1678,30 @@ class SandboxRegistry:
     async def _recycle_live_session(self, session_id: str) -> None:
         from aios.harness import runtime
 
-        async with self._lock_for(session_id):
-            # ``exec`` intentionally does not hold the provision lock. Defer the
-            # destructive snapshot/remove until every registered tool task has
-            # finished so rotation cannot terminate or snapshot a command
-            # midway through its writes. Holding the lock while draining also
-            # prevents a concurrent cold provision from installing a handle
-            # that this notification would then accidentally recycle.
-            inflight = runtime.inflight_tool_registry
-            if inflight is not None:
-                await inflight.wait_for_session_tools(session_id)
-            if session_id in self._handles:
-                # Normal release snapshots before removal. The next provision
-                # resumes that FS through a newly built credential/spec plan.
-                await self.release(session_id)
+        inflight = runtime.inflight_tool_registry
+        while True:
+            async with self._lock_for(session_id):
+                # Tool tasks register before their bodies run. Check that set
+                # while holding the provision lock, but never wait for it while
+                # holding the lock: a registered cold task may itself be queued
+                # in get_or_provision(). If work raced us to the lock, drain it
+                # outside and retry the check under the lock.
+                #
+                # Once the set is empty here it is safe to release while still
+                # holding the lock. A newly registered task can start during an
+                # await in release(), but its get_or_provision() cannot return a
+                # handle until teardown is complete and this lock is released.
+                if inflight is not None and inflight.in_flight_tool_call_ids(session_id):
+                    pass
+                else:
+                    if session_id in self._handles:
+                        # Normal release snapshots before removal. The next
+                        # provision resumes that FS through a newly built
+                        # credential/spec plan.
+                        await self.release(session_id)
+                    return
+            assert inflight is not None  # The guarded branch above requires it.
+            await inflight.wait_for_session_tools(session_id)
 
     async def release_if_mounts_changed(
         self,

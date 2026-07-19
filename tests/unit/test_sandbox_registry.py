@@ -1753,6 +1753,35 @@ async def test_vault_rotation_waits_for_exec_then_recycles_with_new_placeholder(
             AsyncMock(return_value=["sess_X"]),
         ),
     ):
+        # Counterexample for lock inversion: a registered cold tool is queued on
+        # the provision lock when rotation arrives. Rotation must let provision
+        # run, drain the tool outside the lock, and only then recycle its handle.
+        cold_lock = registry._lock_for("sess_cold")
+        await cold_lock.acquire()
+        cold_provisioned = asyncio.Event()
+        cold_finished = asyncio.Event()
+
+        async def cold_tool() -> None:
+            await registry.get_or_provision("sess_cold")
+            cold_provisioned.set()
+            await cold_finished.wait()
+
+        cold_task = asyncio.create_task(cold_tool())
+        inflight.add("sess_cold", "call_cold", cold_task)
+        await asyncio.sleep(0)
+        cold_rotation = asyncio.create_task(registry._recycle_live_session("sess_cold"))
+        await asyncio.sleep(0)
+        cold_lock.release()
+
+        await asyncio.wait_for(cold_provisioned.wait(), timeout=1)
+        assert not cold_rotation.done()
+        assert registry.peek("sess_cold") is not None
+        cold_finished.set()
+        await asyncio.wait_for(cold_task, timeout=1)
+        await asyncio.wait_for(cold_rotation, timeout=1)
+        assert registry.peek("sess_cold") is None
+        backend.calls.clear()
+
         await registry.get_or_provision("sess_X")
         assert backend.specs[-1].environment["GITHUB_TOKEN"] == "PLACEHOLDER_A"
 
