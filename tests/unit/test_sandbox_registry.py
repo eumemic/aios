@@ -14,6 +14,7 @@ next exec with "No such container" (issue #691).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gc
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -1650,3 +1651,96 @@ class TestSalvageBreaker:
         with pytest.raises(SandboxBackendError, match="breaker open"):
             await registry._salvage_session_corpses("sess_B")
         assert self._snapshot_count(backend) == snaps_before
+
+async def test_vault_rotation_snapshots_recreates_spec_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Archive/recreate notification recycles FS and rebuilds credential state."""
+    from aios.sandbox.backends.base import BASE_IMAGE_LABEL_KEY
+    from aios.sandbox.spec import _assemble_plan, snapshot_tag
+
+    class CapturingBackend(FakeBackend):
+        specs: list[SandboxSpec]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.specs = []
+
+        async def create(self, spec: SandboxSpec) -> SandboxHandle:
+            self.specs.append(spec)
+            return await super().create(spec)
+
+    now = datetime.now(UTC)
+    current = [
+        ResolvedEnvVarCredential(
+            credential_id="vc_archived",
+            secret_name="GITHUB_TOKEN",
+            secret_value="token-a",
+            allowed_hosts=("github.com",),
+            updated_at=now,
+            placeholder="PLACEHOLDER_A",
+        )
+    ]
+    resume_ref: list[str | None] = [None]
+    backend = CapturingBackend()
+    registry = SandboxRegistry(backend)
+
+    def build_plan() -> ProvisioningPlan:
+        return _assemble_plan(
+            session_id="sess_X",
+            instance_id="inst_TEST",
+            image="aios-sandbox:test",
+            workspace_path=Path("/tmp/w"),
+            env_config=None,
+            session_env={},
+            memory_echoes=[],
+            github_echoes=[],
+            git_proxy=None,
+            tool_broker_url="http://worker:1",
+            tool_broker_secret="broker-secret",
+            snapshot_ref=resume_ref[0],
+            env_var_credentials=tuple(current),
+            secret_proxy=cast(Any, FakeSecretProxy()),
+        )
+
+    async def build(_session_id: str) -> ProvisioningPlan:
+        return build_plan()
+
+    settings = MagicMock()
+    settings.instance_id = "inst_TEST"
+    settings.sandbox_snapshot_empty_floor_bytes = 0
+    settings.sandbox_snapshot_budget_bytes = None
+    settings.sandbox_cpu_quota = None
+    settings.sandbox_memory_bytes = None
+    settings.sandbox_pids_limit = None
+    settings.sandbox_seccomp_profile = "/tmp/seccomp.json"
+    settings.sandbox_runtime = None
+    settings.tool_broker_socket_path = None
+    tag = snapshot_tag("inst_TEST", "sess_X")
+
+    with (
+        patch("aios.sandbox.registry.build_spec_from_session", side_effect=build),
+        patch("aios.sandbox.registry.get_settings", return_value=settings),
+        patch("aios.sandbox.spec.get_settings", return_value=settings),
+        patch("aios.sandbox.volumes.ensure_session_attachments_dir", return_value=Path("/tmp/a")),
+        patch("aios.sandbox.volumes.ensure_session_uploads_dir", return_value=Path("/tmp/u")),
+        patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+        patch("aios.sandbox.registry.install_packages", AsyncMock()),
+        patch.object(registry, "_apply_egress_rules", AsyncMock()),
+        patch("aios.sandbox.registry.queries.list_session_ids_for_vault", AsyncMock(return_value=["sess_X"])),
+    ):
+        await registry.get_or_provision("sess_X")
+        assert backend.specs[-1].environment["GITHUB_TOKEN"] == "PLACEHOLDER_A"
+
+        # Actual archive+recreate shape: the row/id (and therefore placeholder)
+        # changes, then the vault notification drives the registry recycle.
+        current[:] = [dataclasses.replace(current[0], credential_id="vc_recreated", secret_value="token-a2", placeholder="PLACEHOLDER_A2")]
+        await registry.recycle_sessions_for_vault("vlt_X")
+        assert any(call[0] == "snapshot" for call in backend.calls)
+
+        resume_ref[0] = tag
+        backend.image_labels_by_ref[tag] = {BASE_IMAGE_LABEL_KEY: "aios-sandbox:test"}
+        await registry.get_or_provision("sess_X")
+
+    resumed = backend.specs[-1]
+    assert resumed.snapshot_image == tag
+    assert resumed.environment["GITHUB_TOKEN"] == "PLACEHOLDER_A2"
+    assert "PLACEHOLDER_A" not in resumed.environment.values()

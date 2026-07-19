@@ -1132,10 +1132,6 @@ def _assemble_plan(
         workspace=Mount(host_path=workspace_path, sandbox_path="/workspace", read_only=False),
         extra_mounts=tuple(extra_mounts),
         environment=merged_env,
-        # Explicit start-time-derived layer. It is applied last by the backend
-        # on cold starts and snapshot resumes, so image state can never restore
-        # an archived credential's placeholder.
-        start_environment=placeholder_env,
         labels=labels,
         network_policy=env_config.networking if env_config else None,
         host_gateway_alias=None if is_running_in_container() else WORKER_NETWORK_ALIAS,

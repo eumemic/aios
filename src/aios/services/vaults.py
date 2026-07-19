@@ -544,7 +544,7 @@ async def create_vault_credential(
                 f"vault has reached the maximum of {MAX_CREDENTIALS_PER_VAULT} credentials",
                 detail={"vault_id": vault_id, "limit": MAX_CREDENTIALS_PER_VAULT},
             )
-        return await queries.insert_vault_credential(
+        created = await queries.insert_vault_credential(
             conn,
             vault_id=vault_id,
             display_name=body.display_name,
@@ -556,6 +556,10 @@ async def create_vault_credential(
             metadata=body.metadata,
             account_id=account_id,
         )
+    # A create can be the second half of archive+recreate rotation. Notify after
+    # commit so workers recycle any sandbox that was resumed in the gap.
+    await _notify_evict_vault(pool, vault_id)
+    return created
 
 
 async def get_vault_credential(

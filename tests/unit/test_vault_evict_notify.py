@@ -142,9 +142,8 @@ async def test_delete_vault_fires_evict_notify() -> None:
     _assert_notified(pool, "vlt_1")
 
 
-async def test_create_credential_does_not_fire_evict_notify(crypto_box: CryptoBox) -> None:
-    """A brand-new credential has no pooled session yet — no eviction needed,
-    so create must NOT fire the NOTIFY (scope discipline)."""
+async def test_create_credential_fires_evict_notify(crypto_box: CryptoBox) -> None:
+    """Create may complete archive/recreate rotation, so workers must recycle."""
     from aios.models.vaults import VaultCredentialCreate
 
     conn = _conn_with_transaction()
@@ -168,4 +167,4 @@ async def test_create_credential_does_not_fire_evict_notify(crypto_box: CryptoBo
             ),
         )
 
-    pool.execute.assert_not_awaited()
+    _assert_notified(pool, "vlt_1")

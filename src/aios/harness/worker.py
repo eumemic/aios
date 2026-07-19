@@ -1100,12 +1100,11 @@ async def _run_mcp_evict_listener(db_url: str) -> None:
                         if vault_id == "":
                             raise ConnectionError("mcp evict LISTEN connection terminated")
                         pool = runtime.mcp_session_pool
-                        if pool is None:
-                            # Pool not yet initialized (startup race) or already
-                            # torn down — nothing to evict; the idle reaper and
-                            # a fresh pool cover the gap.
-                            continue
-                        await pool.evict_by_vault(vault_id)
+                        if pool is not None:
+                            await pool.evict_by_vault(vault_id)
+                        registry = runtime.sandbox_registry
+                        if registry is not None:
+                            await registry.recycle_sessions_for_vault(vault_id)
                         log.info("mcp_evict_listener.dispatch", vault_id=vault_id)
                     except ConnectionError:
                         raise

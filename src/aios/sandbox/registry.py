@@ -1665,6 +1665,23 @@ class SandboxRegistry:
         # already ran, so a retained corpse never leaves a stale proxy/secret.
         await self._snapshot_and_remove(session_id, handle)
 
+    async def recycle_sessions_for_vault(self, vault_id: str) -> None:
+        """Durably recycle live sandboxes attached to a mutated vault."""
+        from aios.harness import runtime
+
+        async with runtime.require_pool().acquire() as conn:
+            session_ids = await queries.list_session_ids_for_vault(conn, vault_id)
+        await asyncio.gather(
+            *(self._recycle_live_session(session_id) for session_id in session_ids)
+        )
+
+    async def _recycle_live_session(self, session_id: str) -> None:
+        async with self._lock_for(session_id):
+            if session_id in self._handles:
+                # Normal release snapshots before removal. The next provision
+                # resumes that FS through a newly built credential/spec plan.
+                await self.release(session_id)
+
     async def release_if_mounts_changed(
         self,
         session_id: str,
