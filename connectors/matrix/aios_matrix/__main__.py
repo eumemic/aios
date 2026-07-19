@@ -7,7 +7,7 @@ from .config import MatrixConfig
 
 
 async def main() -> None:
-    config = MatrixConfig()  # type: ignore[call-arg]
+    config = MatrixConfig()
     host, port = config.listen
     appservice = create_appservice(config)
     await appservice.start(host, port)
