@@ -97,3 +97,20 @@ async def work(pool):
     tree = ast.parse(path.read_text(), filename=str(path))
     assert tree.body
     assert _messages(source)
+
+
+def test_name_heuristics_are_not_db_helpers() -> None:
+    for call in ("get_weather(conn)", "send_network_conn(conn)", "service.post(conn)"):
+        assert _messages(f"""
+async def work(pool):
+    async with pool.acquire() as conn:
+        await {call}
+""")
+
+
+def test_attribute_connection_does_not_allow_other_self_awaits() -> None:
+    assert _messages("""
+async def work(self):
+    async with self.conn.transaction():
+        await self.http_client.post("https://example.com")
+""")

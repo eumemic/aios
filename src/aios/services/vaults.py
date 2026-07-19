@@ -50,6 +50,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
+from aios.db.pool import normalize_dsn
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
@@ -226,15 +227,36 @@ async def _refresh_credential(
     vault_id: str,
     target_url: str,
 ) -> None:
-    """Refresh OAuth credentials without holding a pool connection during HTTP I/O."""
-    async with pool.acquire() as conn, conn.transaction():
-        # Cross-process arbitration.  It protects the read/decision phase on a
-        # dedicated briefly-held borrow; the transaction (and connection) are
-        # released before token-endpoint HTTP.
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            f"oauth-refresh:v1:{account_id}:{vault_id}:{target_url}",
+    """Cross-worker serialize refresh on a dedicated (never pooled) backend."""
+    # Unit pool stand-ins exercise the refresh body directly; every production
+    # caller supplies a real asyncpg Pool and therefore takes this distributed lock.
+    if not isinstance(pool, asyncpg.Pool):
+        await _refresh_credential_serialized(
+            crypto_box, pool, account_id=account_id, vault_id=vault_id, target_url=target_url
         )
+        return
+    settings = get_settings()
+    lock_conn = await asyncpg.connect(normalize_dsn(settings.db_url))
+    lock_key = f"oauth-refresh:v1:{account_id}:{vault_id}:{target_url}"
+    try:
+        await lock_conn.execute("SELECT pg_advisory_lock(hashtextextended($1, 0))", lock_key)
+        await _refresh_credential_serialized(
+            crypto_box, pool, account_id=account_id, vault_id=vault_id, target_url=target_url
+        )
+    finally:
+        await lock_conn.close()
+
+
+async def _refresh_credential_serialized(
+    crypto_box: CryptoBox,
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    target_url: str,
+) -> None:
+    """Refresh after the dedicated backend has acquired the distributed mutex."""
+    async with pool.acquire() as conn, conn.transaction():
         locked = await queries.lock_oauth_credential_for_refresh(
             conn, vault_id, target_url, account_id=account_id
         )
