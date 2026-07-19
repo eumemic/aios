@@ -549,7 +549,7 @@ _LEAK_SENTINELS = tuple(_LIFECYCLE_REDACTION_SENTINELS.values())
 
 
 def test_lifecycle_redaction_vocabulary_alignment() -> None:
-    migration = importlib.import_module("migrations.versions.0152_lifecycle_search_real_counters")
+    migration = importlib.import_module("migrations.versions.0153_lifecycle_search_real_counters")
     projected_payload_keys = {
         "event",
         "request_id",
