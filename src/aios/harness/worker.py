@@ -629,10 +629,12 @@ async def worker_main() -> None:
                 rate_limit_seconds=settings.worker_watchdog_rate_limit_seconds,
                 specimen_dir=settings.worker_watchdog_specimen_dir,
                 journal_limit=settings.worker_watchdog_journal_events,
+                operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
+                activity_limit=settings.worker_watchdog_activity_rows,
+                max_specimens=settings.worker_watchdog_max_specimens,
             ),
             name="production_watchdogs",
         )
-        _supervise(watchdog_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully

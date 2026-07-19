@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import pytest
 
 from aios.harness.production_watchdogs import (
@@ -83,3 +84,97 @@ async def test_dead_man_alarms_only_when_claimed_work_stalls() -> None:
     assert not monitor.observe(claimed=1, completed=0, now=603)
     assert not monitor.observe(claimed=1, completed=1, now=604)
     assert alarm.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_held_connection_watchdog_matches_asyncpg_proxy(tmp_path: Path) -> None:
+    """A borrower frame holds a proxy while PoolConnectionHolder holds raw con."""
+    parked = asyncio.Event()
+    raw = object()
+    holder_obj = _Holder(raw)
+
+    # Use asyncpg's production proxy type. Bypass its constructor only because
+    # the raw connection is deliberately inert; preserve its real slots/layout.
+    proxy = asyncpg.pool.PoolConnectionProxy.__new__(asyncpg.pool.PoolConnectionProxy)
+    proxy._con = raw
+    proxy._holder = holder_obj
+
+    async def borrower() -> None:
+        session_id = "proxy-session"
+        conn = proxy
+        await parked.wait()
+        assert conn and session_id
+
+    task = asyncio.create_task(borrower())
+    await asyncio.sleep(0)
+    watchdog = HeldConnectionWatchdog(
+        _Pool(holder_obj),
+        threshold_seconds=0,
+        rate_limit_seconds=60,
+        specimen_dir=tmp_path,
+        inspect_pg=AsyncMock(return_value=[]),
+        load_journal=AsyncMock(return_value=[]),
+        alarm=MagicMock(),
+    )
+    specimen = (await watchdog.check_once())[0]
+    assert specimen["owner_id"] == "proxy-session"
+    assert "await parked.wait()" in "\n".join(specimen["task_stack"])
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_runner_reconnects_after_failed_capture_tick(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Telemetry failure is isolated: a later tick reconnects and runs."""
+    import aios.harness.production_watchdogs as module
+
+    class Inspector:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.closed = False
+            self.dead_man_seen = asyncio.Event()
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def fetch(
+            self, query: str, *args: object, **kwargs: object
+        ) -> list[dict[str, object]]:
+            if self.fail:
+                raise OSError("telemetry database disconnected")
+            return []
+
+        async def fetchrow(self, query: str, *args: object, **kwargs: object) -> dict[str, int]:
+            self.dead_man_seen.set()
+            return {"claimed": 0, "completed": 0}
+
+    first, second = Inspector(fail=True), Inspector(fail=False)
+    connect = AsyncMock(side_effect=[first, second])
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    raw = object()
+    runner = asyncio.create_task(
+        module.run_production_watchdogs(
+            _Pool(_Holder(raw)),
+            "postgresql://example/db",
+            held_threshold_seconds=0,
+            dead_man_threshold_seconds=10,
+            interval_seconds=0.001,
+            rate_limit_seconds=10,
+            specimen_dir=tmp_path,
+            journal_limit=10,
+            operation_timeout_seconds=0.1,
+        )
+    )
+    await asyncio.wait_for(second.dead_man_seen.wait(), 1)
+    assert connect.await_count == 2
+    assert first.closed
+    assert not runner.done()
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner

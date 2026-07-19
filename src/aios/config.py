@@ -365,7 +365,10 @@ class Settings(BaseSettings):
     )
     worker_watchdog_interval_seconds: float = Field(default=10.0, gt=0)
     worker_watchdog_rate_limit_seconds: float = Field(default=300.0, gt=0)
-    worker_watchdog_journal_events: int = Field(default=100, ge=1)
+    worker_watchdog_journal_events: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_operation_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
     worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
 
     # ── container lifecycle ────────────────────────────────────────────────

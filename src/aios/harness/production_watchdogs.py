@@ -34,14 +34,26 @@ def _emit_alarm(kind: str, specimen: dict[str, Any]) -> None:
     log.error(f"worker.{kind}_alarm", alarm_event=True, **specimen)
 
 
-def _task_for_connection(connection: object) -> asyncio.Task[Any] | None:
+def _task_for_connection(
+    connection: object, holder: object | None = None
+) -> asyncio.Task[Any] | None:
+    """Find the borrower of an asyncpg holder's raw connection.
+
+    Application frames contain ``PoolConnectionProxy``, not the raw
+    ``holder._con``.  Match both the proxy's raw connection and holder.
+    """
     current = asyncio.current_task()
-    for task in asyncio.all_tasks():
+    for task in list(asyncio.all_tasks())[:1000]:
         if task is current:
             continue
-        for frame in task.get_stack():
-            if any(value is connection for value in frame.f_locals.values()):
-                return task
+        for frame in task.get_stack(limit=32):
+            for value in list(frame.f_locals.values())[:128]:
+                if (
+                    value is connection
+                    or getattr(value, "_con", None) is connection
+                    or (holder is not None and getattr(value, "_holder", None) is holder)
+                ):
+                    return task
     return None
 
 
@@ -70,6 +82,8 @@ class HeldConnectionWatchdog:
         inspect_pg: Callable[[], Awaitable[list[dict[str, Any]]]],
         load_journal: Callable[[str | None], Awaitable[list[dict[str, Any]]]],
         alarm: Callable[[str, dict[str, Any]], None] = _emit_alarm,
+        operation_timeout_seconds: float = 5.0,
+        max_specimens: int = 20,
     ) -> None:
         self.pool = pool
         self.threshold_seconds = threshold_seconds
@@ -78,6 +92,8 @@ class HeldConnectionWatchdog:
         self.inspect_pg = inspect_pg
         self.load_journal = load_journal
         self.alarm = alarm
+        self.operation_timeout_seconds = operation_timeout_seconds
+        self.max_specimens = max_specimens
         self._first_seen: dict[int, float] = {}
         self._last_alarm: dict[int, float] = {}
 
@@ -94,7 +110,7 @@ class HeldConnectionWatchdog:
                 continue
             if stamp - self._last_alarm.get(key, float("-inf")) < self.rate_limit_seconds:
                 continue
-            task = _task_for_connection(holder._con)
+            task = _task_for_connection(holder._con, holder)
             owner_id = _owner_id(task)
             specimen = {
                 "captured_at": datetime.now(UTC).isoformat(),
@@ -103,9 +119,9 @@ class HeldConnectionWatchdog:
                 "task": repr(task),
                 "coroutine": repr(task.get_coro()) if task is not None else None,
                 "task_stack": [
-                    line
-                    for frame in (task.get_stack() if task is not None else [])
-                    for line in traceback.format_stack(frame)
+                    line[-4096:]
+                    for frame in (task.get_stack(limit=32) if task is not None else [])
+                    for line in traceback.format_stack(frame, limit=1)
                 ],
                 "pool": {
                     "size": self.pool.get_size(),
@@ -113,12 +129,28 @@ class HeldConnectionWatchdog:
                     "holders": len(self.pool._holders),
                     "in_use": len(holders),
                 },
-                "pg_stat_activity": await self.inspect_pg(),
-                "journal_events": await self.load_journal(owner_id),
+                "pg_stat_activity": await asyncio.wait_for(
+                    self.inspect_pg(), self.operation_timeout_seconds
+                ),
+                "journal_events": await asyncio.wait_for(
+                    self.load_journal(owner_id), self.operation_timeout_seconds
+                ),
             }
             self.specimen_dir.mkdir(parents=True, exist_ok=True)
             path = self.specimen_dir / f"held-connection-{time.time_ns()}.json"
-            await asyncio.to_thread(path.write_text, json.dumps(specimen, default=str, indent=2))
+            rendered = json.dumps(specimen, default=str, indent=2)
+            await asyncio.wait_for(
+                asyncio.to_thread(path.write_text, rendered), self.operation_timeout_seconds
+            )
+            # Bound forensic disk retention; this observer must not fill /tmp.
+            old = sorted(
+                self.specimen_dir.glob("held-connection-*.json"),
+                key=lambda item: item.stat().st_mtime_ns,
+                reverse=True,
+            )
+            for stale in old[self.max_specimens :]:
+                with contextlib.suppress(OSError):
+                    stale.unlink()
             specimen["specimen_path"] = str(path)
             self.alarm("held_connection_watchdog", specimen)
             self._last_alarm[key] = stamp
@@ -176,56 +208,100 @@ async def run_production_watchdogs(
     rate_limit_seconds: float,
     specimen_dir: Path,
     journal_limit: int,
+    operation_timeout_seconds: float = 5.0,
+    activity_limit: int = 100,
+    max_specimens: int = 20,
 ) -> None:
-    """Run both observers using a substrate-different dedicated connection."""
-    inspector = await asyncpg.connect(
-        normalize_dsn(db_url), server_settings=LISTENER_TCP_KEEPALIVE_SETTINGS
-    )
-
-    async def inspect_pg() -> list[dict[str, Any]]:
-        rows = await inspector.fetch(
-            "SELECT pid, application_name, state, wait_event_type, wait_event, "
-            "query_start, xact_start, query FROM pg_stat_activity "
-            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
-        )
-        return [dict(row) for row in rows]
-
-    async def load_journal(owner_id: str | None) -> list[dict[str, Any]]:
-        if owner_id is None:
-            return []
-        rows = await inspector.fetch(
-            "SELECT seq, kind, data, created_at FROM events WHERE session_id = $1 "
-            "UNION ALL SELECT seq, type::text AS kind, data, created_at "
-            "FROM wf_run_events WHERE run_id = $1 ORDER BY seq DESC LIMIT $2",
-            owner_id,
-            journal_limit,
-        )
-        return [dict(row) for row in rows]
-
-    watchdog = HeldConnectionWatchdog(
-        pool,
-        threshold_seconds=held_threshold_seconds,
-        rate_limit_seconds=rate_limit_seconds,
-        specimen_dir=specimen_dir,
-        inspect_pg=inspect_pg,
-        load_journal=load_journal,
-    )
+    """Run fail-open observers on a reconnecting, dedicated connection."""
+    inspector: Any = None
+    backoff = min(1.0, interval_seconds)
+    watchdog: HeldConnectionWatchdog | None = None
     dead_man = ThroughputDeadMan(
-        threshold_seconds=dead_man_threshold_seconds,
-        rate_limit_seconds=rate_limit_seconds,
+        threshold_seconds=dead_man_threshold_seconds, rate_limit_seconds=rate_limit_seconds
     )
-    try:
-        while True:
+
+    while True:
+        try:
+            if inspector is None or inspector.is_closed():
+                inspector = await asyncio.wait_for(
+                    asyncpg.connect(
+                        normalize_dsn(db_url),
+                        server_settings=LISTENER_TCP_KEEPALIVE_SETTINGS,
+                    ),
+                    operation_timeout_seconds,
+                )
+
+                connected = inspector
+
+                async def inspect_pg(connected: Any = connected) -> list[dict[str, Any]]:
+                    rows = await connected.fetch(
+                        "SELECT pid, application_name, state, wait_event_type, wait_event, "
+                        "query_start, xact_start, left(query, 2000) AS query "
+                        "FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid() ORDER BY query_start NULLS LAST LIMIT $1",
+                        activity_limit,
+                        timeout=operation_timeout_seconds,
+                    )
+                    return [dict(row) for row in rows]
+
+                async def load_journal(
+                    owner_id: str | None, connected: Any = connected
+                ) -> list[dict[str, Any]]:
+                    if owner_id is None:
+                        return []
+                    rows = await connected.fetch(
+                        "SELECT seq, kind, data, created_at FROM ("
+                        "SELECT seq, kind, left(data::text, 4000) AS data, created_at "
+                        "FROM events WHERE session_id = $1 "
+                        "UNION ALL SELECT seq, type::text AS kind, "
+                        "left(payload::text, 4000) AS data, created_at "
+                        "FROM wf_run_events WHERE run_id = $1) journal "
+                        "ORDER BY created_at DESC LIMIT $2",
+                        owner_id,
+                        journal_limit,
+                        timeout=operation_timeout_seconds,
+                    )
+                    return [dict(row) for row in rows]
+
+                watchdog = HeldConnectionWatchdog(
+                    pool,
+                    threshold_seconds=held_threshold_seconds,
+                    rate_limit_seconds=rate_limit_seconds,
+                    specimen_dir=specimen_dir,
+                    inspect_pg=inspect_pg,
+                    load_journal=load_journal,
+                    operation_timeout_seconds=operation_timeout_seconds,
+                    max_specimens=max_specimens,
+                )
+                backoff = min(1.0, interval_seconds)
+
             await asyncio.sleep(interval_seconds)
-            await watchdog.check_once()
+            assert watchdog is not None
+            await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
             row = await inspector.fetchrow(
-                "SELECT "
-                "(SELECT count(*) FROM procrastinate_jobs WHERE status = 'doing') AS claimed, "
-                "(SELECT count(*) FROM events WHERE kind = 'span' "
+                "SELECT (SELECT count(*) FROM procrastinate_jobs "
+                "WHERE status = 'doing' AND task_name IN "
+                "('harness.wake_session', 'harness.wake_workflow')) AS claimed, "
+                "((SELECT count(*) FROM events WHERE kind = 'span' "
                 "AND data->>'event' = 'step_end' "
-                "AND created_at >= now() - make_interval(secs => $1)) AS completed",
+                "AND created_at >= now() - make_interval(secs => $1)) + "
+                "(SELECT count(*) FROM wf_run_events WHERE type = 'run_completed' "
+                "AND created_at >= now() - make_interval(secs => $1))) AS completed",
                 interval_seconds,
+                timeout=operation_timeout_seconds,
             )
             dead_man.observe(claimed=int(row["claimed"]), completed=int(row["completed"]))
-    finally:
-        await inspector.close()
+        except asyncio.CancelledError:
+            if inspector is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(inspector.close(), operation_timeout_seconds)
+            raise
+        except Exception:
+            # Pure telemetry: failure is never allowed onto worker fatal supervision.
+            log.exception("worker.watchdog_tick_failed", retry_seconds=backoff)
+            if inspector is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(inspector.close(), operation_timeout_seconds)
+            inspector = None
+            await asyncio.sleep(backoff)
+            backoff = min(max(interval_seconds, 1.0), backoff * 2)
