@@ -9,7 +9,6 @@ dependencies = ["mautrix==0.21.1", "asyncpg>=0.30", "pydantic-settings>=2.6"]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "testcontainers[postgres]>=4.8",
     "pyyaml>=6",
     "types-pyyaml>=6",
     "ruff>=0.8",
