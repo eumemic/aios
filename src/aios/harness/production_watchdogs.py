@@ -282,11 +282,11 @@ async def run_production_watchdogs(
                 "SELECT (SELECT count(*) FROM procrastinate_jobs "
                 "WHERE status = 'doing' AND task_name IN "
                 "('harness.wake_session', 'harness.wake_workflow')) AS claimed, "
-                "((SELECT count(*) FROM events WHERE kind = 'span' "
-                "AND data->>'event' = 'step_end' "
-                "AND created_at >= now() - make_interval(secs => $1)) + "
-                "(SELECT count(*) FROM wf_run_events WHERE type = 'run_completed' "
-                "AND created_at >= now() - make_interval(secs => $1))) AS completed",
+                "(SELECT count(*) FROM procrastinate_events e "
+                "JOIN procrastinate_jobs j ON j.id = e.job_id "
+                "WHERE e.type = 'succeeded' AND j.task_name IN "
+                "('harness.wake_session', 'harness.wake_workflow') "
+                "AND e.at >= now() - make_interval(secs => $1)) AS completed",
                 interval_seconds,
                 timeout=operation_timeout_seconds,
             )
