@@ -28,6 +28,7 @@ import pytest
 from aios.config import get_settings
 from aios.db.queries import EnvVarCredentialEcho
 from aios.harness import runtime
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.ids import VAULT_CREDENTIAL
 from aios.models.environments import UnrestrictedNetworking
 from aios.models.memory_stores import Access, MemoryStoreResourceEcho
@@ -1652,8 +1653,11 @@ class TestSalvageBreaker:
             await registry._salvage_session_corpses("sess_B")
         assert self._snapshot_count(backend) == snaps_before
 
-async def test_vault_rotation_snapshots_recreates_spec_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Archive/recreate notification recycles FS and rebuilds credential state."""
+
+async def test_vault_rotation_waits_for_exec_then_recycles_with_new_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rotation drains active exec before recycling into new credential state."""
     from aios.sandbox.backends.base import BASE_IMAGE_LABEL_KEY
     from aios.sandbox.spec import _assemble_plan, snapshot_tag
 
@@ -1682,6 +1686,25 @@ async def test_vault_rotation_snapshots_recreates_spec_and_resumes(monkeypatch: 
     resume_ref: list[str | None] = [None]
     backend = CapturingBackend()
     registry = SandboxRegistry(backend)
+    inflight = InflightToolRegistry()
+    monkeypatch.setattr(runtime, "inflight_tool_registry", inflight)
+
+    exec_started = asyncio.Event()
+    exec_finished = asyncio.Event()
+
+    async def blocking_exec(
+        handle: SandboxHandle,
+        command: str,
+        *,
+        timeout_seconds: int,
+        max_output_bytes: int,
+        cwd: str = "/workspace",
+    ) -> CommandResult:
+        exec_started.set()
+        await exec_finished.wait()
+        return CommandResult(0, "completed", "", False, False)
+
+    backend.exec = blocking_exec  # type: ignore[method-assign]
 
     def build_plan() -> ProvisioningPlan:
         return _assemble_plan(
@@ -1725,16 +1748,49 @@ async def test_vault_rotation_snapshots_recreates_spec_and_resumes(monkeypatch: 
         patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
         patch("aios.sandbox.registry.install_packages", AsyncMock()),
         patch.object(registry, "_apply_egress_rules", AsyncMock()),
-        patch("aios.sandbox.registry.queries.list_session_ids_for_vault", AsyncMock(return_value=["sess_X"])),
+        patch(
+            "aios.sandbox.registry.queries.list_session_ids_for_vault",
+            AsyncMock(return_value=["sess_X"]),
+        ),
     ):
         await registry.get_or_provision("sess_X")
         assert backend.specs[-1].environment["GITHUB_TOKEN"] == "PLACEHOLDER_A"
 
         # Actual archive+recreate shape: the row/id (and therefore placeholder)
-        # changes, then the vault notification drives the registry recycle.
-        current[:] = [dataclasses.replace(current[0], credential_id="vc_recreated", secret_value="token-a2", placeholder="PLACEHOLDER_A2")]
-        await registry.recycle_sessions_for_vault("vlt_X")
+        # changes, then the vault notification arrives during an active command.
+        current[:] = [
+            dataclasses.replace(
+                current[0],
+                credential_id="vc_recreated",
+                secret_value="token-a2",
+                placeholder="PLACEHOLDER_A2",
+            )
+        ]
+        old_handle = registry.peek("sess_X")
+        assert old_handle is not None
+        exec_task = asyncio.create_task(
+            registry.exec(
+                old_handle,
+                "write-late-state",
+                timeout_seconds=30,
+                max_output_bytes=1024,
+            )
+        )
+        inflight.add("sess_X", "call_active", exec_task)
+        await exec_started.wait()
+
+        rotation_task = asyncio.create_task(registry.recycle_sessions_for_vault("vlt_X"))
+        await asyncio.sleep(0)
+        assert not rotation_task.done()
+        assert not any(call[0] == "snapshot" for call in backend.calls)
+        assert registry.peek("sess_X") is old_handle
+
+        exec_finished.set()
+        result = await exec_task
+        assert result.stdout == "completed"
+        await rotation_task
         assert any(call[0] == "snapshot" for call in backend.calls)
+        assert registry.peek("sess_X") is None
 
         resume_ref[0] = tag
         backend.image_labels_by_ref[tag] = {BASE_IMAGE_LABEL_KEY: "aios-sandbox:test"}

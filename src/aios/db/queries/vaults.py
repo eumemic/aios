@@ -695,9 +695,7 @@ async def set_session_vaults(
             )
 
 
-async def list_session_ids_for_vault(
-    conn: asyncpg.Connection[Any], vault_id: str
-) -> list[str]:
+async def list_session_ids_for_vault(conn: asyncpg.Connection[Any], vault_id: str) -> list[str]:
     """Session owners attached to ``vault_id`` (worker eviction fan-out)."""
     rows = await conn.fetch(
         "SELECT session_id FROM session_vaults WHERE vault_id = $1",

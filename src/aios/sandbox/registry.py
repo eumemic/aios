@@ -1676,7 +1676,18 @@ class SandboxRegistry:
         )
 
     async def _recycle_live_session(self, session_id: str) -> None:
+        from aios.harness import runtime
+
         async with self._lock_for(session_id):
+            # ``exec`` intentionally does not hold the provision lock. Defer the
+            # destructive snapshot/remove until every registered tool task has
+            # finished so rotation cannot terminate or snapshot a command
+            # midway through its writes. Holding the lock while draining also
+            # prevents a concurrent cold provision from installing a handle
+            # that this notification would then accidentally recycle.
+            inflight = runtime.inflight_tool_registry
+            if inflight is not None:
+                await inflight.wait_for_session_tools(session_id)
             if session_id in self._handles:
                 # Normal release snapshots before removal. The next provision
                 # resumes that FS through a newly built credential/spec plan.

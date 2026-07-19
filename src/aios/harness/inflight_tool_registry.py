@@ -102,6 +102,20 @@ class InflightToolRegistry:
             return set()
         return {tcid for tcid, task in session_tasks.items() if not task.done()}
 
+    async def wait_for_session_tools(self, session_id: str) -> None:
+        """Wait until every tool task currently running for a session is done.
+
+        The task map is re-read after each drain. This catches sibling tool
+        dispatches added while the first batch was completing and gives
+        lifecycle operations a point after which no active sandbox command is
+        still using the session's container.
+        """
+        while True:
+            tasks = [task for task in self._tasks.get(session_id, {}).values() if not task.done()]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def all_in_flight_tool_call_ids(self) -> dict[str, set[str]]:
         """Return ``{session_id: {tool_call_ids}}`` for all sessions with in-flight tasks."""
         result: dict[str, set[str]] = {}
