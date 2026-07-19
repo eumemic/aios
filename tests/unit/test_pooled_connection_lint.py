@@ -114,3 +114,18 @@ async def work(self):
     async with self.conn.transaction():
         await self.http_client.post("https://example.com")
 """)
+
+
+def test_qualified_non_db_names_are_not_blanket_allowed() -> None:
+    for call in (
+        "queries.get_weather(conn)",
+        "queries.send_network_conn(conn)",
+        "_queries.post(conn)",
+        "wf_queries.http(conn)",
+        "trace_q.fetch_weather(conn)",
+    ):
+        assert _messages(f"""
+async def work(pool):
+    async with pool.acquire() as conn:
+        await {call}
+""")
