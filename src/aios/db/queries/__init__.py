@@ -436,24 +436,18 @@ from .connections import (  # noqa: E402
     get_connection,
     get_connection_for_account,
     get_connection_secret_blob,
-    get_management_call,
     insert_binding,
     insert_chat_session,
     insert_connection,
-    insert_management_call,
     list_chat_sessions_for_connection,
     list_connection_capabilities_for_session,
     list_connection_tools_for_session,
     list_connections,
-    list_pending_management_calls_for_connector,
     list_recent_chat_ids,
     list_routing_rules_for_connection,
     list_session_ids_for_connection,
     lookup_chat_session,
-    mark_management_call_resolved,
     notify_connection_change,
-    notify_management_call_dispatch,
-    notify_management_call_result,
     reparent_connection,
     set_connection_inbound_policy,
     set_connection_secrets,
@@ -511,6 +505,14 @@ from .events import (  # noqa: E402
 )
 from .files import (  # noqa: E402
     insert_file,
+)
+from .management_calls import (  # noqa: E402
+    get_management_call,
+    insert_management_call,
+    list_pending_management_calls_for_connector,
+    mark_management_call_resolved,
+    notify_management_call_dispatch,
+    notify_management_call_result,
 )
 from .memory_stores import (  # noqa: E402
     _allocate_version_seq,
