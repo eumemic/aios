@@ -27,7 +27,11 @@ def create_appservice(
 ) -> AppService:
     """Build the receiver, using a durable mautrix state store by default."""
     if state_store is _USE_POSTGRES:
-        database = Database.create(config.database_url, owner_name="aios-matrix")
+        database = Database.create(
+            config.database_url,
+            upgrade_table=PgASStateStore.upgrade_table,
+            owner_name="aios-matrix",
+        )
         state_store = PostgresStateStore(database)
     return AppService(
         server=config.hs_url,
