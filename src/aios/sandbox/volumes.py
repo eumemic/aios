@@ -110,20 +110,9 @@ def workspace_dir_for(session_id: str) -> Path:
     path (e.g. ``./workspaces`` in a dev ``.env``), it is resolved
     against the current working directory at call time.
 
-    Pure — does not touch the filesystem. Use :func:`ensure_workspace_dir`
-    to both compute and create.
+    Pure — does not touch the filesystem.
     """
     return (get_settings().workspace_root / session_id).resolve()
-
-
-def ensure_workspace_dir(session_id: str) -> Path:
-    """Return the absolute host directory for ``session_id``, creating it if needed.
-
-    Also ensures the parent ``workspace_root`` exists. ``parents=True,
-    exist_ok=True`` semantics — safe to call repeatedly.
-    """
-    path = workspace_dir_for(session_id)
-    return ensure_owned_dir(path)
 
 
 def ensure_workspace_path(raw_path: str) -> Path:

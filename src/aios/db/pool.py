@@ -100,10 +100,6 @@ async def register_jsonb_codec(conn: asyncpg.Connection[Any]) -> None:
     )
 
 
-# Back-compat alias: the original private name used as the pool ``init``.
-_register_jsonb_codec = register_jsonb_codec
-
-
 async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> asyncpg.Pool[Any]:
     """Create a new asyncpg pool against ``db_url``."""
     # asyncpg exposes no client-side keepalive kwarg, so the statement/idle
