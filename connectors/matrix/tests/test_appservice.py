@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from mautrix.types import Membership, RoomID, UserID
 
-from aios_matrix.appservice import create_appservice
+from aios_matrix.appservice import PostgresStateStore, create_appservice
 from aios_matrix.config import MatrixConfig
 
 
@@ -54,6 +57,7 @@ async def test_state_store_is_asyncpg_backed(
     config: MatrixConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = asyncio.Event()
+    create_kwargs: dict[str, object] = {}
 
     class FakeDatabase:
         async def start(self) -> None:
@@ -62,9 +66,50 @@ async def test_state_store_is_asyncpg_backed(
         async def stop(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        "aios_matrix.appservice.Database.create", lambda *args, **kwargs: FakeDatabase()
-    )
+    def create_database(*args: object, **kwargs: object) -> FakeDatabase:
+        create_kwargs.update(kwargs)
+        return FakeDatabase()
+
+    monkeypatch.setattr("aios_matrix.appservice.Database.create", create_database)
     appservice = create_appservice(config)
     await appservice.state_store.open()
     assert opened.is_set()
+    assert create_kwargs["upgrade_table"] is PostgresStateStore.upgrade_table
+
+
+@pytest.fixture(scope="module")
+def postgres_container() -> Iterator[Any]:
+    docker = pytest.importorskip("docker")
+    pytest.importorskip("testcontainers.postgres")
+    from testcontainers.postgres import PostgresContainer
+
+    try:
+        docker.from_env().ping()
+    except Exception:
+        pytest.skip("Docker is not available")
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        yield postgres
+
+
+@pytest.mark.asyncio
+async def test_fresh_postgres_store_persists_membership(
+    config: MatrixConfig, postgres_container: Any
+) -> None:
+    config = config.model_copy(update={"database_url": postgres_container.get_connection_url()})
+    room_id = RoomID("!room:your.server")
+    user_id = UserID("@_aios_agent_one:your.server")
+
+    first = create_appservice(config).state_store
+    await first.open()
+    try:
+        await first.set_membership(room_id, user_id, Membership.JOIN)
+    finally:
+        await first.close()
+
+    reopened = create_appservice(config).state_store
+    await reopened.open()
+    try:
+        assert await reopened.get_members(room_id) == [user_id]
+    finally:
+        await reopened.close()
