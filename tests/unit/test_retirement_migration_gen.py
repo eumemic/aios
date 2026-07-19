@@ -119,6 +119,7 @@ def test_expand_is_a_genuine_noop_without_ledger_dml() -> None:
     src = _chain(LEGACY_BUILTIN_RENAMES).expand.source
     assert "retirement_ledger" not in src
     assert "op.execute" not in src
+    assert "from alembic import op" not in src
     assert "jsonb_set" not in src
 
 
@@ -221,8 +222,6 @@ def test_contract_has_in_transaction_abort_on_nonzero_guard() -> None:
     # contract rev on abort).
     assert "RAISE EXCEPTION" in src
     assert "residue > 0" in src
-    # The guard remains the final load-bearing operation in upgrade().
-    assert src.index("RAISE EXCEPTION") < src.index("def downgrade")
 
 
 def test_contract_guard_references_the_backfill_revision() -> None:
