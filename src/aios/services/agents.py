@@ -42,20 +42,21 @@ async def _enforce_surface_attenuation(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
+    prior_surface: Surface | None = None,
 ) -> None:
     """Raise ``ForbiddenError`` unless the declared agent surface is admissible against
     the acting (creator/editor) session's agent surface.
 
-    The create-time clamp the issue (T1) calls for: ``create_agent`` authored from
-    inside a session may only declare a surface ⊆ the creating agent's own — an agent
-    cannot grant a child agent a tool, MCP server, or HTTP server it does not itself
-    hold. ``update_agent`` runs the same check on the merged final surface against the
-    editing agent. This is the model-tool plane's analog of the ``create_workflow``
-    surface clamp (``services.workflows._enforce_surface_attenuation``); the HTTP/operator
-    path passes no actor and skips this entirely (declares verbatim, account-scoped).
+    At create time, an agent authored from inside a session may only declare a surface
+    ⊆ the creating agent's own. At update time, ``prior_surface`` admits capabilities
+    already held by the target as well: each resulting capability must be dominated by
+    either the editor or the target's prior surface. Preservation and shrinking therefore
+    pass without requiring the editor to hold the target's connectors, while additions
+    remain bounded by the editor. The HTTP/operator path passes no actor and skips this.
 
-    The predicate is the lattice fixpoint: ``clamp(declared, actor) == normalize(declared)``
-    iff the meet narrowed nothing, i.e. ``declared ≤ actor`` on tool membership +
+    Without ``prior_surface``, the predicate is the lattice fixpoint:
+    ``clamp(declared, actor) == normalize(declared)`` iff the meet narrowed nothing,
+    i.e. ``declared ≤ actor`` on tool membership +
     per-tool permission/transport, MCP server identity, and HTTP server identity
     (name + base_url). A breach raises ``ForbiddenError`` with ``detail=surface_diff``.
 
@@ -80,16 +81,18 @@ async def _enforce_surface_attenuation(
     declared = Surface(tools, mcp_servers, http_servers)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(agent))
-    surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
-    exceeds = (
-        effective.tools != expected.tools
-        or effective.mcp_servers != expected.mcp_servers
-        or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
-    )
-    if exceeds:
+    if prior_surface is not None:
+        preserved = attenuation_service.clamp(declared, prior_surface)
+        effective = Surface(
+            effective.tools + preserved.tools,
+            effective.mcp_servers + preserved.mcp_servers,
+            effective.http_servers + preserved.http_servers,
+        )
+    diff = surface_diff(expected, effective)
+    if diff:
         raise ForbiddenError(
             "agent surface exceeds the acting agent's permissions",
-            detail={"exceeds": surface_diff(expected, effective)},
+            detail={"exceeds": diff},
         )
 
 
@@ -208,13 +211,11 @@ async def update_agent(
     """Update an agent in place, creating a new immutable version (optimistic
     concurrency on ``expected_version``).
 
-    **Update-time attenuation (T1):** when ``editor_session_id`` is set (an agent
-    editing another agent via the ``update_agent`` model tool), the **merged final
-    surface** must be a subset of the editing agent's own — an agent may only update an
-    agent to a surface it could have declared itself; a breach raises
-    :class:`ForbiddenError`. Omitted surface fields are merged from the current stored
-    version before the check. With no editor (the HTTP/operator path) anything may be
-    updated.
+    **Update-time attenuation:** when ``editor_session_id`` is set, the merged final
+    surface may contain only capabilities held by the editor or already held by the
+    target's current version. Thus preserving or shrinking existing surface is allowed,
+    while additions remain bounded by the editor; a breach raises :class:`ForbiddenError`.
+    With no editor (the HTTP/operator path) anything may be updated.
     """
     if editor_session_id is not None:
         # #1636: the model-binding privilege, keyed on the editor being a
@@ -230,6 +231,7 @@ async def update_agent(
             tools=tools if tools is not None else current.tools,
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
             http_servers=http_servers if http_servers is not None else current.http_servers,
+            prior_surface=surface_of(current),
         )
     skills_json_str: str | None = None
     if skills is not None:

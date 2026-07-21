@@ -877,7 +877,13 @@ async def stream_litellm(
                 saw_content_filter = True
             content = chunk.choices[0].delta.content
             if content:
-                await _notify_delta(pool, session_id, content)
+                payload = json.dumps({"delta": content})
+                async with pool.acquire() as notify_conn:
+                    await notify_conn.execute(
+                        "SELECT pg_notify($1, $2)",
+                        f"events_{session_id}",
+                        payload,
+                    )
     finally:
         # Close the litellm CustomStreamWrapper on every exit path — normal
         # full drain (no-op), TTFT/inter-chunk TimeoutError, or any in-loop
@@ -914,23 +920,3 @@ async def stream_litellm(
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
     return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
-
-
-async def _notify_delta(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    content: str,
-) -> None:
-    """Send a transient content delta via pg_notify.
-
-    Uses the same ``events_{session_id}`` channel as persisted events.
-    The JSON payload is distinguishable from event-id payloads because
-    it starts with ``{``.
-    """
-    payload = json.dumps({"delta": content})
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "SELECT pg_notify($1, $2)",
-            f"events_{session_id}",
-            payload,
-        )

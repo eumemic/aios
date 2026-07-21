@@ -93,6 +93,20 @@ def _seed_store(
     return host_dir
 
 
+class TestKillSwitch:
+    async def test_disabled_returns_empty_result_without_acquiring_db(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = MagicMock(memory_reconcile_audit_enabled=False)
+        monkeypatch.setattr(audit, "get_settings", lambda: settings)
+        pool = MagicMock()
+
+        result = await audit.run_memory_reconcile_audit(pool)
+
+        assert result == audit.AuditResult(stores_checked=0, files_hashed=0)
+        pool.acquire.assert_not_called()
+
+
 class TestCleanAudit:
     async def test_matching_disk_and_db_produce_no_divergence(
         self,
