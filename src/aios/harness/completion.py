@@ -836,51 +836,54 @@ async def stream_litellm(
     # Make it sticky: once seen on the wire, override the assembled value.
     saw_content_filter = False
     try:
-        # Hold one pool connection for the streaming step instead of acquiring
-        # and releasing once per content chunk.
-        async with pool.acquire() as notify_conn:
-            while True:
-                guard_timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
-                remaining_deadline_s = deadline_at - loop.time()
-                timeout = min(guard_timeout, remaining_deadline_s)
-                try:
-                    chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
-                except TimeoutError as exc:
-                    if loop.time() >= deadline_at:
-                        usage: dict[str, int] = {}
-                        cost: float | None = None
-                        if chunks:
-                            partial_assembled: Any = litellm.stream_chunk_builder(
-                                chunks=chunks, messages=messages
+        while True:
+            guard_timeout = _STREAM_TTFT_TIMEOUT_S if first else _STREAM_INTER_CHUNK_TIMEOUT_S
+            remaining_deadline_s = deadline_at - loop.time()
+            timeout = min(guard_timeout, remaining_deadline_s)
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+            except TimeoutError as exc:
+                if loop.time() >= deadline_at:
+                    usage: dict[str, int] = {}
+                    cost: float | None = None
+                    if chunks:
+                        partial_assembled: Any = litellm.stream_chunk_builder(
+                            chunks=chunks, messages=messages
+                        )
+                        if partial_assembled is not None:
+                            _, usage, cost, _ = _unpack_litellm_response(
+                                partial_assembled, source="stream_chunk_builder"
                             )
-                            if partial_assembled is not None:
-                                _, usage, cost, _ = _unpack_litellm_response(
-                                    partial_assembled, source="stream_chunk_builder"
-                                )
-                        raise ModelCallDeadlineError(
-                            f"model call exceeded its {deadline_s:.0f}s total deadline while still streaming",
-                            usage=usage,
-                            cost_usd=cost,
-                            chunks_seen=len(chunks),
-                        ) from exc
-                    raise
-                except StopAsyncIteration:
-                    break
-                first = False
-                chunks.append(chunk)
-                # Some providers (OpenRouter, Grok, vLLM, OpenAI with stream_options.
-                # include_usage) emit a terminal usage-summary chunk with empty choices.
-                if not chunk.choices:
-                    continue
-                # ``"content_filter"`` == ``loop.REFUSAL_FINISH_REASON`` (literal here
-                # to avoid a loop<->completion import cycle). ``getattr`` guard: real
-                # litellm chunks always carry ``finish_reason`` (defaults None/""), but
-                # a partial/edge chunk that omits it must not crash the stream loop.
-                if getattr(chunk.choices[0], "finish_reason", None) == "content_filter":
-                    saw_content_filter = True
-                content = chunk.choices[0].delta.content
-                if content:
-                    await _notify_delta(notify_conn, session_id, content)
+                    raise ModelCallDeadlineError(
+                        f"model call exceeded its {deadline_s:.0f}s total deadline while still streaming",
+                        usage=usage,
+                        cost_usd=cost,
+                        chunks_seen=len(chunks),
+                    ) from exc
+                raise
+            except StopAsyncIteration:
+                break
+            first = False
+            chunks.append(chunk)
+            # Some providers (OpenRouter, Grok, vLLM, OpenAI with stream_options.
+            # include_usage) emit a terminal usage-summary chunk with empty choices.
+            if not chunk.choices:
+                continue
+            # ``"content_filter"`` == ``loop.REFUSAL_FINISH_REASON`` (literal here
+            # to avoid a loop<->completion import cycle). ``getattr`` guard: real
+            # litellm chunks always carry ``finish_reason`` (defaults None/""), but
+            # a partial/edge chunk that omits it must not crash the stream loop.
+            if getattr(chunk.choices[0], "finish_reason", None) == "content_filter":
+                saw_content_filter = True
+            content = chunk.choices[0].delta.content
+            if content:
+                payload = json.dumps({"delta": content})
+                async with pool.acquire() as notify_conn:
+                    await notify_conn.execute(
+                        "SELECT pg_notify($1, $2)",
+                        f"events_{session_id}",
+                        payload,
+                    )
     finally:
         # Close the litellm CustomStreamWrapper on every exit path — normal
         # full drain (no-op), TTFT/inter-chunk TimeoutError, or any in-loop
@@ -917,22 +920,3 @@ async def stream_litellm(
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
     return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
-
-
-async def _notify_delta(
-    conn: asyncpg.Connection[Any],
-    session_id: str,
-    content: str,
-) -> None:
-    """Send a transient content delta via pg_notify.
-
-    Uses the same ``events_{session_id}`` channel as persisted events.
-    The JSON payload is distinguishable from event-id payloads because
-    it starts with ``{``.
-    """
-    payload = json.dumps({"delta": content})
-    await conn.execute(
-        "SELECT pg_notify($1, $2)",
-        f"events_{session_id}",
-        payload,
-    )

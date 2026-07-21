@@ -232,11 +232,6 @@ class Settings(BaseSettings):
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
     )
-    sandbox_archive_gc_grace_seconds: int = Field(
-        default=86400,
-        ge=0,
-        description="Grace after archived_at before canonical filesystem reclamation.",
-    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
@@ -353,6 +348,23 @@ class Settings(BaseSettings):
         ge=1,
         description="Concurrent session steps per worker process.",
     )
+    held_connection_watchdog_threshold_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Seconds a worker asyncpg checkout may remain held before specimen capture.",
+    )
+    worker_dead_man_threshold_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        description="Seconds claimed jobs may produce zero completed steps before an alarm.",
+    )
+    worker_watchdog_interval_seconds: float = Field(default=10.0, gt=0)
+    worker_watchdog_rate_limit_seconds: float = Field(default=300.0, gt=0)
+    worker_watchdog_journal_events: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_operation_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
+    worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(

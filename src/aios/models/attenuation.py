@@ -620,17 +620,24 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
     """
     out: dict[str, list[str]] = {}
 
-    actual_tools = {_tool_key(t): t for t in actual.tools}
     bad_tools = [
         t.name or t.mcp_server_name or t.type
         for t in expected.tools
-        if actual_tools.get(_tool_key(t)) != t
+        if not any(
+            _tool_key(candidate) == _tool_key(t) and candidate == t for candidate in actual.tools
+        )
     ]
     if bad_tools:
         out["tools"] = bad_tools
 
-    actual_mcp = {(s.name, s.url): s for s in actual.mcp_servers}
-    bad_mcp = [s.name for s in expected.mcp_servers if actual_mcp.get((s.name, s.url)) != s]
+    bad_mcp = [
+        s.name
+        for s in expected.mcp_servers
+        if not any(
+            (candidate.name, candidate.url) == (s.name, s.url) and candidate == s
+            for candidate in actual.mcp_servers
+        )
+    ]
     if bad_mcp:
         out["mcp_servers"] = bad_mcp
 
