@@ -79,11 +79,6 @@ def reset_inflight_harvests() -> None:
     _INFLIGHT_HARVESTS.clear()
 
 
-def inflight_harvest_keys() -> frozenset[tuple[str, str]]:
-    """The ``(session_id, run_id)`` keys of harvest tasks live in THIS worker (#1635)."""
-    return frozenset(_INFLIGHT_HARVESTS)
-
-
 # Event ``kind`` is ``"span"`` (excluded from the message-replay window like the
 # other harness bookkeeping events); the ``event`` discriminator names the role.
 PARK_EVENT = "model_workflow_park"

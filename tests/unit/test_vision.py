@@ -100,6 +100,28 @@ class TestSupportsVision:
         _patch_get_model_info(monkeypatch, {})  # stale catalog: every lookup raises
         assert vision.supports_vision(model) is True
 
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "openai/responses/gpt-5.6-sol",
+            "openai/responses/gpt-4o",
+            "openai/responses/o4-mini",
+        ],
+    )
+    def test_openai_responses_gateway_families_assumed_vision_capable(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        """Custom Responses API gateway routes are absent from LiteLLM's model
+        catalog, but the routed OpenAI families all accept image inputs."""
+        _patch_get_model_info(monkeypatch, {})
+        assert vision.supports_vision(model) is True
+
+    def test_gateway_rule_does_not_match_unknown_family(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_get_model_info(monkeypatch, {})
+        assert vision.supports_vision("openai/responses/future-text-model") is False
+
     def test_explicit_override_can_force_claude_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The override dict is consulted before the Claude-family rule, so an
         explicit ``False`` still forces a Claude model off."""
