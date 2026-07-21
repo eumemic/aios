@@ -33,6 +33,11 @@ import litellm
 
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
+from aios.harness.request_body_budget import (
+    body_budget_for_model,
+    enforce_request_body_budget,
+    is_request_too_large_error,
+)
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
 
@@ -750,9 +755,18 @@ async def call_litellm(
         session_id=request.session_id,
         stream=False,
     )
+    enforce_request_body_budget(kwargs, byte_budget=body_budget_for_model(model))
     deadline_s = get_settings().model_call_deadline_s
     try:
-        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
+        try:
+            response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
+        except Exception as exc:
+            if not is_request_too_large_error(exc):
+                raise
+            trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
+            if trimmed.media_removed == 0:
+                raise
+            response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
     except TimeoutError as exc:
         raise ModelCallDeadlineError(
             f"model call exceeded its {deadline_s:.0f}s total deadline before returning",
@@ -805,10 +819,25 @@ async def stream_litellm(
         session_id=session_id,
         stream=True,
     )
+    # Enforce aggregate media and the provider's serialized body ceiling only
+    # after cache hints, tools and passthrough params have reached their final
+    # outbound shape. This is the same payload LiteLLM receives.
+    enforce_request_body_budget(kwargs, byte_budget=body_budget_for_model(model))
     deadline_s = get_settings().model_call_deadline_s
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + deadline_s
-    response = await litellm.acompletion(**kwargs)
+    try:
+        response = await litellm.acompletion(**kwargs)
+    except Exception as exc:
+        # One guarded reactive retry protects against provider serialization
+        # overhead or a provider cap stricter than our proactive safety margin.
+        # Strip historical media, but retain text and signed thinking blocks.
+        if not is_request_too_large_error(exc):
+            raise
+        trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
+        if trimmed.media_removed == 0:
+            raise
+        response = await litellm.acompletion(**kwargs)
 
     # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
     # LiteLLM's own per-chunk bound, but its behavior varies by provider
