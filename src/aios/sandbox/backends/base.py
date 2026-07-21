@@ -284,6 +284,10 @@ class SandboxBackendError(Exception):
     """
 
 
+class SandboxSnapshotTimeoutError(SandboxBackendError):
+    """Size-dependent snapshot work exceeded its deadline."""
+
+
 @runtime_checkable
 class SandboxBackend(Protocol):
     """The five-verb surface every backend implements."""

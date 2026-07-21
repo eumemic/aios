@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 
-from aios.sandbox.backends.base import SandboxBackendError
+from aios.sandbox.backends.base import SandboxBackendError, SandboxSnapshotTimeoutError
 
 # Bound on the post-kill drain so a CLI stuck in an uninterruptible
 # state can't hold the worker indefinitely past the wait_for timeout.
@@ -84,7 +84,7 @@ async def run_subprocess_with_timeout(
 
 
 async def run_docker_cli(
-    argv: list[str], *, timeout_s: float = DOCKER_CLI_TIMEOUT_S
+    argv: list[str], *, timeout_s: float = DOCKER_CLI_TIMEOUT_S, snapshot_timeout: bool = False
 ) -> tuple[int, bytes, bytes]:
     """Run a ``docker`` CLI call. Returns ``(exit_code, stdout, stderr)``.
 
@@ -96,7 +96,8 @@ async def run_docker_cli(
         argv, timeout_s=timeout_s
     )
     if timed_out:
-        raise SandboxBackendError(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
+        error_type = SandboxSnapshotTimeoutError if snapshot_timeout else SandboxBackendError
+        raise error_type(f"docker cli timed out after {timeout_s}s: {' '.join(argv)}")
     return rc, stdout_bytes, stderr_bytes
 
 

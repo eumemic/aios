@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections import namedtuple
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -51,7 +52,9 @@ class _FakeDocker:
         # size-scaled timeout.
         self.pipeline_timeouts: list[tuple[float, float]] = []
 
-    async def cli(self, argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def cli(
+        self, argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         self.calls.append(argv)
         self.cli_timeouts.append((argv, timeout_s))
         sub = argv[1]
@@ -106,8 +109,11 @@ class _FakeDocker:
 
 
 @pytest.fixture
-def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
+def fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDocker:
     fd = _FakeDocker()
+    monkeypatch.setattr(
+        get_settings(), "sandbox_snapshot_throughput_state_path", tmp_path / "throughput.json"
+    )
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fd.cli)
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_pipeline", fd.pipeline)
     # Default to abundant free disk so flatten-path tests are deterministic;
@@ -238,7 +244,7 @@ class TestSnapshotTimeoutBudget:
         commit_timeout = next(
             timeout for argv, timeout in fake_docker.cli_timeouts if argv[1] == "commit"
         )
-        assert commit_timeout == 240.0
+        assert commit_timeout == 480.0
 
     @pytest.mark.asyncio
     async def test_inspect_size_walk_gets_generous_timeout(self, fake_docker: _FakeDocker) -> None:
@@ -427,7 +433,7 @@ class TestFlattenDiskGate:
         assert out.kind == "flattened"
         assert fake_docker.pipelines, "a large corpse must flatten via the pipeline"
         settings = get_settings()
-        budget = max(60.0, size_rw * 20e-9)
+        budget = max(60.0, size_rw * 20e-9) * 2.0
         assert fake_docker.pipeline_timeouts == [
             (min(settings.sandbox_pipeline_stall_seconds, budget), budget)
         ]

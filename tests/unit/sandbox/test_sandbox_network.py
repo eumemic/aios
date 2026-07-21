@@ -29,7 +29,9 @@ def install_docker_responder(
     """
     calls: list[list[str]] = []
 
-    async def fake_run(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
         return responder(argv)
