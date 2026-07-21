@@ -197,6 +197,20 @@ def _provider_error_detail(exc: BaseException) -> dict[str, Any]:
     }
 
 
+_CONTEXT_OVERFLOW_SIGNATURES: tuple[str, ...] = (
+    "input exceeds the context window",
+    "input exceeds context window",
+)
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """Recognize native and gateway-wrapped provider token overflows."""
+    if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+        return True
+    message = " ".join(str(exc).casefold().split())
+    return any(signature in message for signature in _CONTEXT_OVERFLOW_SIGNATURES)
+
+
 def _is_terminal_model_error(exc: BaseException) -> bool:
     """True iff ``exc`` is a litellm error that retrying the SAME prompt cannot fix.
 
@@ -973,20 +987,25 @@ async def _run_session_step_body(
         # shrink factor onto the stop_reason; a fresh/non-overflow step reads
         # none and builds at full budget (shrink 1.0).
         _stop_reason = getattr(session, "stop_reason", None) or {}
+        adaptive_context_retry = _stop_reason.get("context_overflow") is True
         request_window_max = effective_window_max(
             model=capability_model,
             window_max=agent.window_max,
             params=agent.litellm_extra,
             shrink_factor=(
                 _stop_reason.get("context_shrink_factor", _CONTEXT_OVERFLOW_SHRINK_BASE)
-                if _stop_reason.get("context_overflow") is True
+                if adaptive_context_retry
                 else 1.0
             ),
         )
         windowed = await sessions_service.read_windowed_events(
             pool,
             session_id,
-            window_min=min(agent.window_min, request_window_max),
+            # Adaptive recovery drops the configured snap band for this
+            # attempt. The provider rejection is the authoritative bound; a
+            # zero minimum lets the windower discard exactly as much history
+            # as the progressively smaller maximum requires.
+            window_min=0 if adaptive_context_retry else min(agent.window_min, request_window_max),
             window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),
@@ -1429,7 +1448,7 @@ async def _run_session_step_body(
                 retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
             )
         except Exception as exc:
-            if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+            if _is_context_overflow(exc):
                 log.warning("step.model_context_overflow", session_id=session_id)
                 await _append_model_request_error_span(
                     pool,
@@ -2277,6 +2296,17 @@ async def _apply_context_overflow_retry(
             "type": "rescheduling",
             "context_overflow": True,
             "context_shrink_factor": shrink_factor,
+        },
+        account_id=account_id,
+    )
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {
+            "event": "adaptive_context_truncation",
+            "axis": "tokens",
+            "shrink_factor": shrink_factor,
         },
         account_id=account_id,
     )

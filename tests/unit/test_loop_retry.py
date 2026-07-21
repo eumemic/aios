@@ -235,7 +235,7 @@ def mock_step_dependencies() -> Any:
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
             AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
-        ),
+        ) as read_windowed_events_mock,
         patch(
             "aios.harness.loop._dispatch_confirmed_tools",
             AsyncMock(return_value=[]),
@@ -292,6 +292,8 @@ def mock_step_dependencies() -> Any:
             fail_all_open_requests=fail_all_open_requests_mock,
             stream_litellm=stream_litellm_mock,
             increment_usage=increment_usage_mock,
+            read_windowed_events=read_windowed_events_mock,
+            session=session,
         )
 
 
@@ -680,6 +682,72 @@ class TestRunSessionStepOnContextOverflow:
             for call in mock_step_dependencies.set_stop_reason.call_args_list
         )
         mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "error_class,message",
+        [
+            (
+                litellm_exceptions.BadGatewayError,
+                "Your input exceeds the context window of this model",
+            ),
+            (litellm_exceptions.ServiceUnavailableError, "input exceeds context window"),
+        ],
+    )
+    async def test_gateway_wrapped_overflow_uses_adaptive_recovery(
+        self,
+        mock_step_dependencies: Any,
+        error_class: Any,
+        message: str,
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(502, request=request)
+        mock_step_dependencies.stream_litellm.side_effect = error_class(
+            message=message,
+            model="x",
+            llm_provider="gateway",
+            response=response,
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=0),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        lifecycle_payloads = [
+            call.args[3] for call in mock_step_dependencies.append_event.call_args_list
+        ]
+        assert {
+            "event": "adaptive_context_truncation",
+            "axis": "tokens",
+            "shrink_factor": 0.8,
+        } in lifecycle_payloads
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+    async def test_adaptive_retry_drops_configured_window_band(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.session.stop_reason = {
+            "type": "rescheduling",
+            "context_overflow": True,
+            "context_shrink_factor": 0.8,
+        }
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=1),
+        ):
+            await run_session_step("sess_x")
+
+        read_call = mock_step_dependencies.read_windowed_events.await_args
+        assert read_call.kwargs["window_min"] == 0
+        assert read_call.kwargs["window_max"] == 8_000
 
     async def test_repeated_overflow_shrinks_progressively_and_is_not_verbatim(
         self, mock_step_dependencies: Any
