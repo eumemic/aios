@@ -24,7 +24,6 @@ from aios.sandbox.spec import snapshot_tag
 from tests.helpers.sandbox import FakeBackend, FakePool
 
 _NOW = datetime(2026, 6, 10, tzinfo=UTC)
-_ARCHIVE_GRACE = 30 * 24 * 3600
 
 
 @pytest.fixture
@@ -188,8 +187,6 @@ async def test_image_pass_retains_archived_removal_after_unarchive(
     retained = await registry._gc_image_pass(
         [verdict],
         {"sess_x": _state("sess_x", dormant=True)},
-        _NOW,
-        _ARCHIVE_GRACE,
         get_settings().instance_id,
     )
 
@@ -417,7 +414,7 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     tag = snapshot_tag(get_settings().instance_id, "sess_x")
-    archived_at = _NOW - timedelta(days=2)
+    archived_at = _NOW
     state = SessionSnapshotState(
         "sess_x", "acct", archived_at, _NOW, tag, get_settings().instance_id, 1
     )
@@ -429,7 +426,7 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
     registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
 
     retained = await registry._gc_image_pass(
-        [verdict], {"sess_x": state}, _NOW, 86400, get_settings().instance_id
+        [verdict], {"sess_x": state}, get_settings().instance_id
     )
 
     assert retained == []
@@ -437,9 +434,7 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure", ["null_host", "stale_grace", "pointer_moved", "unarchived", "rearchived"]
-)
+@pytest.mark.parametrize("failure", ["null_host", "pointer_moved", "unarchived", "rearchived"])
 async def test_archived_current_destructive_path_fails_closed(failure: str) -> None:
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
@@ -450,8 +445,6 @@ async def test_archived_current_destructive_path_fails_closed(failure: str) -> N
     fresh = candidate
     if failure == "null_host":
         fresh = replace(candidate, snapshot_host=None)
-    elif failure == "stale_grace":
-        fresh = replace(candidate, archived_at=_NOW - timedelta(seconds=86399))
     elif failure == "pointer_moved":
         fresh = replace(candidate, snapshot_ref="other")
     elif failure == "unarchived":
@@ -463,82 +456,24 @@ async def test_archived_current_destructive_path_fails_closed(failure: str) -> N
     )
     registry._fresh_session_state = AsyncMock(return_value=fresh)  # type: ignore[method-assign]
 
-    retained = await registry._gc_image_pass([verdict], {"sess_x": candidate}, _NOW, 86400, host)
+    retained = await registry._gc_image_pass([verdict], {"sess_x": candidate}, host)
 
     assert retained == [verdict]
     assert tag not in backend.removed_image_refs
 
 
 @pytest.mark.asyncio
-async def test_archived_within_grace_corpse_is_salvaged() -> None:
+async def test_archived_corpse_is_removed_without_salvage() -> None:
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
     state = replace(_state("sess_x", dormant=False), archived_at=_NOW - timedelta(seconds=16))
     registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
     registry._snapshot_and_record = AsyncMock(return_value=True)  # type: ignore[method-assign]
     container = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
-    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 17})
+    settings = get_settings()
 
     await registry._gc_corpse_pass(
         [container], {"sess_x": state}, _NOW, settings, get_settings().instance_id
-    )
-
-    registry._snapshot_and_record.assert_awaited_once()
-    assert any(call[0] == "force_remove" for call in backend.calls)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_failure_retains_archived_grace_corpse() -> None:
-    backend = FakeBackend()
-    registry = SandboxRegistry(backend=backend)
-    state = replace(_state("sess_x", dormant=False), archived_at=_NOW)
-    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
-    registry._snapshot_and_record = AsyncMock(return_value=False)  # type: ignore[method-assign]
-    container = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
-    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 17})
-
-    await registry._gc_corpse_pass(
-        [container], {"sess_x": state}, _NOW, settings, get_settings().instance_id
-    )
-
-    registry._snapshot_and_record.assert_awaited_once()
-    assert not any(call[0] == "force_remove" for call in backend.calls)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("grace_seconds, age_seconds", [(17, 17), (0, 0)])
-async def test_archived_corpse_at_boundary_is_bare_destroyed(
-    grace_seconds: int, age_seconds: int
-) -> None:
-    backend = FakeBackend()
-    registry = SandboxRegistry(backend=backend)
-    archived_at = _NOW - timedelta(seconds=age_seconds)
-    state = replace(_state("sess_x", dormant=False), archived_at=archived_at)
-    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
-    registry._snapshot_and_record = AsyncMock()  # type: ignore[method-assign]
-    corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
-    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": grace_seconds})
-
-    await registry._gc_corpse_pass(
-        [corpse], {"sess_x": state}, _NOW, settings, get_settings().instance_id
-    )
-
-    registry._snapshot_and_record.assert_not_awaited()
-    assert ("force_remove", {"sandbox_id": "cid"}) in backend.calls
-
-
-@pytest.mark.asyncio
-async def test_archived_past_grace_corpse_is_bare_destroyed() -> None:
-    backend = FakeBackend()
-    registry = SandboxRegistry(backend=backend)
-    state = replace(_state("sess_x", dormant=False), archived_at=_NOW - timedelta(days=2))
-    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
-    registry._snapshot_and_record = AsyncMock()  # type: ignore[method-assign]
-    corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
-    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 86400})
-
-    await registry._gc_corpse_pass(
-        [corpse], {"sess_x": state}, _NOW, settings, get_settings().instance_id
     )
 
     registry._snapshot_and_record.assert_not_awaited()
@@ -554,7 +489,7 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
     registry._fresh_session_state = AsyncMock(return_value=fresh)  # type: ignore[method-assign]
     registry._snapshot_and_record = AsyncMock(return_value=True)  # type: ignore[method-assign]
     corpse = ManagedSandboxRef(sandbox_id="cid", session_id="sess_x", running=False)
-    settings = get_settings().model_copy(update={"sandbox_archive_gc_grace_seconds": 86400})
+    settings = get_settings()
 
     await registry._gc_corpse_pass(
         [corpse], {"sess_x": scanned}, _NOW, settings, get_settings().instance_id
