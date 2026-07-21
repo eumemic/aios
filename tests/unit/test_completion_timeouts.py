@@ -86,27 +86,36 @@ def _make_chunk(text: str | None) -> object:
 
 
 class _StubPool:
-    """No-op pool that records streaming-step connection acquisitions."""
+    """No-op pool that records connection acquisitions and checkouts."""
 
     def __init__(self) -> None:
         self.acquire_count = 0
+        self.checked_out = 0
+        self.executions: list[tuple[object, ...]] = []
 
     def acquire(self) -> _StubPoolAcquire:
         self.acquire_count += 1
-        return _StubPoolAcquire()
+        return _StubPoolAcquire(self)
 
 
 class _StubPoolAcquire:
+    def __init__(self, pool: _StubPool) -> None:
+        self.pool = pool
+
     async def __aenter__(self) -> _StubConnection:
-        return _StubConnection()
+        self.pool.checked_out += 1
+        return _StubConnection(self.pool)
 
     async def __aexit__(self, *args: object) -> None:
-        pass
+        self.pool.checked_out -= 1
 
 
 class _StubConnection:
+    def __init__(self, pool: _StubPool) -> None:
+        self.pool = pool
+
     async def execute(self, *args: object) -> None:
-        pass
+        self.pool.executions.append(args)
 
 
 @pytest.mark.asyncio
@@ -481,6 +490,43 @@ async def test_stream_litellm_closes_stream_on_mid_stream_exception(
 
 
 @pytest.mark.asyncio
+async def test_stream_litellm_releases_notify_connection_before_stream_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation while waiting for a chunk cannot strand a notify checkout."""
+    pool = _StubPool()
+
+    class _CancelWhileStreaming:
+        def __aiter__(self) -> _CancelWhileStreaming:
+            return self
+
+        async def __anext__(self) -> object:
+            assert pool.checked_out == 0
+            raise asyncio.CancelledError
+
+        async def aclose(self) -> None:
+            pass
+
+    async def fake_acompletion(**kwargs: object) -> _CancelWhileStreaming:
+        return _CancelWhileStreaming()
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    with pytest.raises(asyncio.CancelledError):
+        await completion.stream_litellm(
+            completion.LlmRequest(
+                messages=[{"role": "user", "content": "ping"}],
+                session_id="sess_test",
+            ),
+            model="anthropic/claude-sonnet-4-6",
+            pool=pool,
+        )
+
+    assert pool.checked_out == 0
+    assert pool.acquire_count == 0
+
+
+@pytest.mark.asyncio
 async def test_stream_litellm_closes_stream_on_normal_drain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -514,5 +560,10 @@ async def test_stream_litellm_closes_stream_on_normal_drain(
     message = response.message
 
     assert message["content"] == "hello"
-    assert pool.acquire_count == 1
+    assert pool.acquire_count == 2
+    assert pool.checked_out == 0
+    assert pool.executions == [
+        ("SELECT pg_notify($1, $2)", "events_sess_test", '{"delta": "hel"}'),
+        ("SELECT pg_notify($1, $2)", "events_sess_test", '{"delta": "lo"}'),
+    ]
     assert resp.aclose_count == 1
