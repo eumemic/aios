@@ -35,7 +35,7 @@ import asyncpg
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from aios.db import queries
-from aios.db.listen import EVENTS_ARCHIVED_NOTIFY
+from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, SSESubscriberCapacityError
 from aios.errors import SSEPreflightFailedError
 from aios.harness.chat_type import ChatType, chat_type_of
 from aios.logging import get_logger
@@ -54,7 +54,7 @@ log = get_logger("aios.api.sse")
 # Realistic transient failures during testcontainer Postgres warmup or
 # socket churn — these surface as a clean 503 from the SSE route handlers
 # (issue #376). Anything else bubbles as an unhandled 500.
-SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError)
+SSE_PREFLIGHT_EXCEPTIONS = (asyncpg.PostgresError, OSError, SSESubscriberCapacityError)
 
 # Heartbeat interval (seconds) for every SSE response built here.
 # sse-starlette emits an SSE comment (``: ping``) every ``ping`` seconds
