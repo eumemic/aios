@@ -47,7 +47,7 @@ from collections.abc import Sequence
 
 from aios.config import get_settings
 from aios.logging import get_logger
-from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.environments import EnvironmentConfig, LimitedNetworking, PackageManager
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
 from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 from aios.sandbox.env_keys import PATH_ENV_KEY
@@ -151,7 +151,7 @@ async def install_packages(
 
     packages = env_config.packages
 
-    install_cmds = {
+    install_cmds: dict[PackageManager, str] = {
         "apt": "apt-get update -qq && apt-get install -y -qq {}",
         "pip": "pip install -q {}",
         "npm": "npm install -g --silent {}",
