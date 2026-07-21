@@ -7,9 +7,9 @@ migrations. Given the name of a descriptor declared as data in
 ``aios.retirements.registry`` (#1573), it emits the three lifecycle migrations in
 chain order on top of the current migration head:
 
-  * **expand**   (rev N)   — open the ledger (no data change),
+  * **expand**   (rev N)   — genuine no-op (the read-tolerance shim does the work),
   * **backfill** (rev N+1) — EXISTS-pre-checked, batched, epoch-stamping rewrite,
-  * **contract** (rev N+2) — stamp the ledger + in-transaction abort-guard.
+  * **contract** (rev N+2) — in-transaction residue abort-guard.
 
 The emitted SQL matches the merged 0116/0120/0122 shape and slots into the
 linear alembic ladder, so the migration-chain test stays green.

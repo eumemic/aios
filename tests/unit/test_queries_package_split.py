@@ -28,6 +28,7 @@ from aios.db.queries import (
     environments,
     events,
     files,
+    management_calls,
     memory_stores,
     sandboxes,
     session_templates,
@@ -52,6 +53,15 @@ def test_functions_live_in_expected_submodules() -> None:
     assert session_templates.get_session_template.__module__ == "aios.db.queries.session_templates"
     assert memory_stores.insert_memory_with_version.__module__ == "aios.db.queries.memory_stores"
     assert files.insert_file.__module__ == "aios.db.queries.files"
+    for function in (
+        management_calls.insert_management_call,
+        management_calls.list_pending_management_calls_for_connector,
+        management_calls.get_management_call,
+        management_calls.mark_management_call_resolved,
+        management_calls.notify_management_call_dispatch,
+        management_calls.notify_management_call_result,
+    ):
+        assert function.__module__ == "aios.db.queries.management_calls"
     assert accounts.bootstrap_root_account.__module__ == "aios.db.queries.accounts"
     assert sandboxes.unscoped_set_session_snapshot.__module__ == "aios.db.queries.sandboxes"
     assert triggers.delete_trigger_by_id.__module__ == "aios.db.queries.triggers"
@@ -62,6 +72,15 @@ def test_reexport_identity() -> None:
     assert q.get_session is sessions.get_session
     assert q.get_session_template is session_templates.get_session_template
     assert q.get_active_binding is connections.get_active_binding
+    for name in (
+        "insert_management_call",
+        "list_pending_management_calls_for_connector",
+        "get_management_call",
+        "mark_management_call_resolved",
+        "notify_management_call_dispatch",
+        "notify_management_call_result",
+    ):
+        assert getattr(q, name) is getattr(management_calls, name)
     assert q.delete_trigger_by_id is triggers.delete_trigger_by_id
     assert q.update_vault_credential is vaults.update_vault_credential
     assert q.reparent_connection is connections.reparent_connection

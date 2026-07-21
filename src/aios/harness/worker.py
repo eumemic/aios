@@ -910,9 +910,6 @@ async def _memory_reconcile_audit_loop(pool: asyncpg.Pool[Any]) -> None:
     """
     log = get_logger("aios.worker.memory_reconcile_audit")
     settings = get_settings()
-    if not settings.memory_reconcile_audit_enabled:
-        log.warning("memory_reconcile_audit.disabled")
-        return
     from aios.harness.memory_reconcile_audit import run_memory_reconcile_audit
 
     interval = settings.memory_reconcile_audit_interval_seconds
