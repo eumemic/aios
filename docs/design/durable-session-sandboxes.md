@@ -359,8 +359,8 @@ deterministic local tag — today's behavior exactly. Rules:
   against the old tag and discard live post-drift work as `skipped_stale`) — a
   model-visible `sandbox_fs_reset {reason: "environment_image_changed"}` lifecycle event
   is appended, and the session cold-starts on the new image. (Content changes under the *same* ref — base rebuilds, `:stable`
-  promotes — do not trigger this; parked chains keep their pinned base until the session is reset or archived and
-  its archive grace has elapsed.) Keep-the-FS-instead is a defensible alternative semantic; the event is the
+  promotes — do not trigger this; parked chains keep their pinned base until the session is
+  reset or archived.) Keep-the-FS-instead is a defensible alternative semantic; the event is the
   non-negotiable part — sign-off item §11.
 - **First-commit crash heal**: the salvage preamble (§5.4), already under the per-session
   lock, also reconciles the pointer against local truth — a crash after the first-ever
@@ -413,14 +413,14 @@ crash windows content-equal no-ops.
 `start_gc(pool, ...)` — background loop, hourly tick, immediate first tick at boot:
 
 1. **Corpse pass** — per corpse, under `_lock_for(session_id)`: re-read the
-   session lifecycle. Deleted sessions and sessions archived at or beyond
-   `sandbox_archive_gc_grace_seconds` are bare-destroyed; all other session
-   corpses are salvaged before removal. Ephemeral workflow-run corpses are
+   session lifecycle. Deleted and archived sessions are bare-destroyed immediately;
+   non-archived session corpses are salvaged before removal. Ephemeral workflow-run
+   corpses are
    always bare-destroyed because they have no durable rootfs.
 2. **Image pass** — enumerate all managed images, including untagged residue.
    Canonical images for existing non-archived sessions are protected. Archived
-   canonical images become collectible only once archive grace has elapsed;
-   deleted-session images and non-canonical leaf residue are collectible.
+   canonical images, deleted-session images, and non-canonical leaf residue are
+   collectible immediately.
    Live-chain interiors are skipped structurally by parent relationship.
 3. **Pressure passes** — host-pool and per-account snapshot limits are
    observational: they never delete lifecycle-protected filesystems. Pressure
@@ -429,7 +429,7 @@ crash windows content-equal no-ops.
    never ephemeral run sandboxes. A later clear report restores admission.
 4. **Pointer reconciliation** — local store truth heals missing/stale pointers.
    Destructive archive cleanup requires a fresh, exact archive timestamp,
-   elapsed grace, matching pointer, and positive ownership
+   matching pointer and positive ownership
    (`snapshot_host == instance_id`) under the per-session lock; an unarchive,
    rearchive, pointer move, or ambiguous host fails closed.
 
@@ -668,8 +668,7 @@ All four new columns are nullable with NULL = no snapshot — zero backfill, met
 DDL. They are internal (excluded from the session wire shape), so no openapi/SDK churn
 from this migration itself.
 
-**Settings** (config.py): `sandbox_archive_gc_grace_seconds` controls the explicit
-archive-to-destruction delay; `sandbox_snapshot_budget_bytes: int = 4 GiB` (per-session; per-env override via a **new**
+**Settings** (config.py): `sandbox_snapshot_budget_bytes: int = 4 GiB` (per-session; per-env override via a **new**
 `EnvironmentConfig` field replacing `disk_bytes` — never a silent semantic rename of the
 existing field, per §5.7's own no-repurposing rule); `sandbox_snapshot_pool_bytes: int | None = None` with the eumemic-ops
 deploy setting it (§9); **delete** `sandbox_disk_bytes`; raise
@@ -815,7 +814,7 @@ E2E (`docker_harness`, gated by the existing `needs_docker` marker; force idle v
   `evict()` → next tool call sees the pre-crash marker; stale-corpse variant never
   regresses tag content.
 - **GC** (`test_sandbox_snapshot_gc.py`): session delete → `_gc_once` → image gone;
-  archive grace boundary and zero-grace cases → image gone; unarchive/rearchive races
+  archive boundary → image gone; unarchive/rearchive races
   fail closed; orphaned-chain residue is collected; pressure is signalled without
   deleting lifecycle-protected snapshots.
 - **Lockdown sidecar** (`test_networking.py` extension): Limited env on a *resumed*
@@ -875,7 +874,7 @@ Docker availability: e2e requires real Docker (`DOCKER_HOST` per conftest); CI a
    **`--read-only` closed as incompatible** rather than re-deferred; **`--cap-drop=ALL`
    stays deferred** (NET_ADMIN removal ships now via the lockdown sidecar).
 9. **Rollback posture**: disable new snapshot creation while retaining lifecycle-
-   protected artifacts; destructive cleanup remains tied to archive plus grace.
+   protected artifacts; destructive cleanup remains tied to archive.
 
 ---
 
