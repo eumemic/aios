@@ -69,14 +69,26 @@ def upgrade() -> None:
     """)
 
     for table, column in _SURFACES:
-        op.execute(f"""
-            UPDATE {table}
-            SET {column} = CASE
-                    WHEN {column} IS NULL THEN NULL
-                    ELSE _aios_contract_legacy_tools({column})
-                END,
-                tools_vocab_epoch = {_EPOCH_HORIZON}
-        """)
+        # ``workflow_versions`` is immutable at runtime.  Temporarily suspend its
+        # guard for this migration-owned canonicalization, as migration 0154 does
+        # for its account-id rewrite.
+        immutable = table == "workflow_versions"
+        if immutable:
+            op.execute("ALTER TABLE workflow_versions DISABLE TRIGGER workflow_versions_no_update")
+        try:
+            op.execute(f"""
+                UPDATE {table}
+                SET {column} = CASE
+                        WHEN {column} IS NULL THEN NULL
+                        ELSE _aios_contract_legacy_tools({column})
+                    END,
+                    tools_vocab_epoch = {_EPOCH_HORIZON}
+            """)
+        finally:
+            if immutable:
+                op.execute(
+                    "ALTER TABLE workflow_versions ENABLE TRIGGER workflow_versions_no_update"
+                )
         op.execute(f"DROP INDEX IF EXISTS ix_{table}_tools_vocab_epoch_stale")
         op.execute(
             f"CREATE INDEX ix_{table}_tools_vocab_epoch_stale "
