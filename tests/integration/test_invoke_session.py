@@ -34,7 +34,7 @@ from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
 from aios.models.github_repositories import GithubRepositoryResource
-from aios.models.memory_stores import MemoryStoreResource
+from aios.models.memory_stores import MemoryStore, MemoryStoreResource, MemoryStoreResourceEcho
 from aios.models.sessions import Ok
 from aios.models.tasks import TaskHandle
 from aios.services import agents as agents_service
@@ -348,14 +348,14 @@ async def test_call_agent_frozen_surface_survives_reload_and_composes(
     assert {tool.type for tool in grandchild_agent.tools} == {"bash"}
 
 
-async def _memory_store(pool, account_id, name):
+async def _memory_store(pool: asyncpg.Pool[Any], account_id: str, name: str) -> MemoryStore:
     return await memory_stores_service.create_store(
         pool, account_id=account_id, name=name, description="spawn authority", metadata={}
     )
 
 
 async def test_call_agent_resources_omitted_inherits_all_and_empty_gets_none(
-    pool_env,
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
     pool, account_id, agent_id, env_id, parent_id = pool_env
     store = await _memory_store(pool, account_id, "spawn-inherit")
@@ -376,7 +376,7 @@ async def test_call_agent_resources_omitted_inherits_all_and_empty_gets_none(
 
 
 async def test_call_agent_rejects_unheld_memory_store(
-    pool_env,
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
     pool, account_id, agent_id, env_id, parent_id = pool_env
     unheld = await _memory_store(pool, account_id, "spawn-unheld")
@@ -397,7 +397,7 @@ async def test_call_agent_rejects_unheld_memory_store(
 
 
 async def test_call_agent_memory_access_may_narrow_but_not_escalate(
-    pool_env,
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
     pool, account_id, agent_id, env_id, parent_id = pool_env
     store = await _memory_store(pool, account_id, "spawn-access")
@@ -420,12 +420,14 @@ async def test_call_agent_memory_access_may_narrow_but_not_escalate(
     )
     child = await service.get_session(pool, handle.servicer_id, account_id=account_id)
     assert len(child.resources) == 1
-    assert child.resources[0].access == "read_only"
+    memory_binding = child.resources[0]
+    assert isinstance(memory_binding, MemoryStoreResourceEcho)
+    assert memory_binding.access == "read_only"
 
 
 async def test_call_agent_copies_parent_repository_ciphertext_without_token_payload(
-    pool_env,
-    aios_env_minimal,
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+    aios_env_minimal: dict[str, str],
 ) -> None:
     from aios.config import get_settings
     from aios.crypto.vault import CryptoBox
@@ -472,7 +474,7 @@ async def test_call_agent_copies_parent_repository_ciphertext_without_token_payl
 
 
 async def test_call_agent_rejects_unheld_repository_selector(
-    pool_env,
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
     pool, account_id, agent_id, env_id, parent_id = pool_env
     selector = _RepositoryBindingSelection(
