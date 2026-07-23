@@ -240,9 +240,10 @@ def _plain_move(source: str, destination: str) -> None:
         "accounts",
         "account_keys",
         "events",
-        # 0112 forbids UPDATE on workflow_versions at the DB (immutable,
-        # replay-load-bearing). Ownership is resolved via workflows.account_id;
-        # the stale denormalized copy on historical version rows is accepted.
+        # workflow_versions moves via its own guarded path below: the 0112
+        # immutability trigger forbids UPDATE, but the composite FK to
+        # workflows(id, account_id) forces version rows to move with their
+        # workflow. The trigger is disabled for exactly that statement.
         "workflow_versions",
         *[item[0] for item in _ENCRYPTED],
     }
@@ -261,6 +262,19 @@ def _plain_move(source: str, destination: str) -> None:
                 sa.text(f'UPDATE "{table}" SET account_id=:destination WHERE account_id=:source'),
                 {"source": source, "destination": destination},
             )
+    # workflow_versions: suspend the 0112 no-UPDATE trigger for this one
+    # statement (same transaction), because the composite FK to workflows
+    # requires the denormalized account_id to move in lockstep.
+    bind.execute(sa.text("ALTER TABLE workflow_versions DISABLE TRIGGER workflow_versions_no_update"))
+    try:
+        bind.execute(
+            sa.text("UPDATE workflow_versions SET account_id=:destination WHERE account_id=:source"),
+            {"source": source, "destination": destination},
+        )
+    finally:
+        bind.execute(
+            sa.text("ALTER TABLE workflow_versions ENABLE TRIGGER workflow_versions_no_update")
+        )
     # Events are normally the largest relation. Locks persist until commit;
     # ctid batches only bound each statement's work and memory.
     while (
