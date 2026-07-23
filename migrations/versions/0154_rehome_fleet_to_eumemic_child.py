@@ -5,7 +5,7 @@ Eumemic tenant below it, moves every account-scoped row, and re-encrypts every
 secret whose key is derived from its owning account.  Alembic's PostgreSQL
 transaction envelope makes the cutover atomic.
 
-Revision ID: 0153
+Revision ID: 0154
 Revises: 0152
 """
 
@@ -23,13 +23,13 @@ from nacl.exceptions import CryptoError
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
-revision: str = "0153"
+revision: str = "0154"
 down_revision: str = "0152"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _CHILD_NAME = "Eumemic"
-_MARKER_LABEL = "0153 bootstrap (revoked)"
+_MARKER_LABEL = "0154 bootstrap (revoked)"
 _BLOB_VERSION = b"\x01"
 # These constraints make a bulk account-id rewrite impossible.  They are
 # recreated (and validated) before the transaction commits.
@@ -100,7 +100,7 @@ class _Box:
                 # A legacy blob's first MAC byte can equal the version byte.
                 return self._box.decrypt(ciphertext, nonce).decode()
         except CryptoError as exc:
-            raise RuntimeError("migration 0153 could not decrypt account-owned ciphertext") from exc
+            raise RuntimeError("migration 0154 could not decrypt account-owned ciphertext") from exc
 
     def encrypt(self, plaintext: str, nonce: bytes | None = None) -> tuple[bytes, bytes]:
         nonce = nonce or nacl_random(SecretBox.NONCE_SIZE)
@@ -114,13 +114,17 @@ def _master() -> _Box:
     return _Box(base64.b64decode(value, validate=True))
 
 
-def _root_and_child(*, create: bool) -> tuple[str, str]:
+def _root_and_child(*, create: bool) -> tuple[str | None, str | None]:
     bind = op.get_bind()
     root = bind.execute(
         sa.text(
             "SELECT id FROM accounts WHERE parent_account_id IS NULL AND archived_at IS NULL FOR UPDATE"
         )
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if root is None:
+        # Fresh database (tests, new installs): no root account, nothing to
+        # re-home. The migration is a structural no-op.
+        return None, None
     child = bind.execute(
         sa.text(
             "SELECT id FROM accounts WHERE parent_account_id=:root AND display_name=:name AND archived_at IS NULL FOR UPDATE"
@@ -154,7 +158,12 @@ def _root_and_child(*, create: bool) -> tuple[str, str]:
             {"id": key_id, "account": child, "hash": os.urandom(32), "label": _MARKER_LABEL},
         )
     if child is None:
-        raise RuntimeError("migration 0153 downgrade cannot find the Eumemic child")
+        if not create:
+            # No child on this database (the upgrade no-opped): nothing to undo.
+            return root, None
+        raise RuntimeError("migration 0154 upgrade could not create the Eumemic child")
+    if child is None:
+        return root, None
     marker = bind.execute(
         sa.text(
             "SELECT 1 FROM account_keys WHERE account_id=:child AND label=:label "
@@ -165,7 +174,7 @@ def _root_and_child(*, create: bool) -> tuple[str, str]:
     if marker is None:
         direction = "upgrade" if create else "downgrade"
         raise RuntimeError(
-            f"migration 0153 {direction} refuses pre-existing Eumemic child; "
+            f"migration 0154 {direction} refuses pre-existing Eumemic child; "
             "rename/archive it or verify the migration-owned marker key"
         )
     return root, child
@@ -267,7 +276,7 @@ def _move_keys(source: str, destination: str, *, retain_one: bool) -> None:
             {"source": source},
         ).scalar_one_or_none()
         if keeper is None:
-            raise RuntimeError("migration 0153 requires one active platform-admin root key")
+            raise RuntimeError("migration 0154 requires one active platform-admin root key")
         bind.execute(
             sa.text(
                 "UPDATE account_keys SET account_id=:destination WHERE account_id=:source AND key_id<>:keeper"
@@ -279,7 +288,7 @@ def _move_keys(source: str, destination: str, *, retain_one: bool) -> None:
         # can be deleted with the account; move every pre-existing key back.
         bind.execute(
             sa.text(
-                "UPDATE account_keys SET account_id=:destination WHERE account_id=:source AND label<>'0153 bootstrap (revoked)'"
+                "UPDATE account_keys SET account_id=:destination WHERE account_id=:source AND label<>'0154 bootstrap (revoked)'"
             ),
             {"source": source, "destination": destination},
         )
@@ -287,6 +296,8 @@ def _move_keys(source: str, destination: str, *, retain_one: bool) -> None:
 
 def upgrade() -> None:
     root, child = _root_and_child(create=True)
+    if root is None or child is None:
+        return
     _drop_composite_fks()
     _rekey(root, child)
     _plain_move(root, child)
@@ -308,6 +319,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     root, child = _root_and_child(create=False)
+    if root is None or child is None:
+        return
     _drop_composite_fks()
     _rekey(child, root)
     _plain_move(child, root)

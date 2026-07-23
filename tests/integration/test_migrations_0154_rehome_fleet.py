@@ -16,6 +16,7 @@ import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import asyncpg
 import pytest
@@ -32,9 +33,9 @@ def _migration() -> ModuleType:
         Path(__file__).parents[2]
         / "migrations"
         / "versions"
-        / "0153_rehome_fleet_to_eumemic_child.py"
+        / "0154_rehome_fleet_to_eumemic_child.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_0153", path)
+    spec = importlib.util.spec_from_file_location("migration_0154", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -96,7 +97,7 @@ def test_legacy_unversioned_blob_starting_with_version_byte_round_trips() -> Non
 
 def test_revision_and_transactional_upgrade_downgrade_contract() -> None:
     migration = _migration()
-    assert migration.revision == "0153"
+    assert migration.revision == "0154"
     assert migration.down_revision == "0152"
     assert migration._CHILD_NAME == "Eumemic"
     assert migration._COMPOSITE_FKS
@@ -106,7 +107,7 @@ def test_revision_and_transactional_upgrade_downgrade_contract() -> None:
 
 
 @pytest.fixture
-def postgres() -> Iterator[object]:
+def postgres() -> Iterator[Any]:
     if not _docker_available():
         pytest.skip("Docker not available")
     from testcontainers.postgres import PostgresContainer
@@ -134,7 +135,7 @@ def _run_alembic(args: list[str], db_url: str, key: bytes) -> subprocess.Complet
     )
 
 
-async def _seed_fleet(db_url: str, master: object) -> dict[str, tuple[bytes, bytes, str]]:
+async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes, str]]:
     conn = await asyncpg.connect(db_url)
     root = master.account("acc_root")
     secrets = {
@@ -226,7 +227,7 @@ async def _seed_fleet(db_url: str, master: object) -> dict[str, tuple[bytes, byt
 
 
 async def _assert_upgraded(
-    db_url: str, master: object, expected: dict[str, tuple[bytes, bytes, str]]
+    db_url: str, master: Any, expected: dict[str, tuple[bytes, bytes, str]]
 ) -> str:
     conn = await asyncpg.connect(db_url)
     try:
@@ -271,7 +272,7 @@ async def _assert_upgraded(
             assert (
                 master.account(child).decrypt(row["ciphertext"], row["nonce"]) == expected[table][2]
             )
-        return child
+        return str(child)
     finally:
         await conn.close()
 
@@ -304,7 +305,7 @@ async def _assert_restored(db_url: str, expected: dict[str, tuple[bytes, bytes, 
 
 
 @needs_docker
-def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: object) -> None:
+def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)
     migration = _migration()
@@ -313,7 +314,7 @@ def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: object) -> Non
     assert result.returncode == 0, result.stderr
     expected = asyncio.run(_seed_fleet(db_url, master))
 
-    result = _run_alembic(["upgrade", "0153"], db_url, key)
+    result = _run_alembic(["upgrade", "0154"], db_url, key)
     assert result.returncode == 0, result.stderr
     asyncio.run(_assert_upgraded(db_url, master, expected))
 
