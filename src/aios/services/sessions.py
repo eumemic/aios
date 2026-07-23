@@ -911,7 +911,9 @@ async def invoke(
             account_id=account_id,
             agent_id=target,
             environment_id=environment_id,
-            agent_version=agent_version,
+            # Frozen children must pin the version supplying model/system/skills;
+            # otherwise the loader resolves version=None on their first wake.
+            agent_version=child_agent.version if child_agent is not None else agent_version,
             title=title,
             metadata=metadata or {},
             vault_ids=vault_ids,
