@@ -64,6 +64,11 @@ _COMPOSITE_FKS: Sequence[tuple[str, str, str]] = (
         "oauth_flows_vault_account_id_fkey",
         "FOREIGN KEY (vault_id, account_id) REFERENCES vaults(id, account_id) ON DELETE CASCADE",
     ),
+    (
+        "workflow_versions",
+        "workflow_versions_workflow_id_account_id_fkey",
+        "FOREIGN KEY (workflow_id, account_id) REFERENCES workflows(id, account_id) ON DELETE CASCADE",
+    ),
 )
 _ENCRYPTED: Sequence[tuple[str, str, str, str]] = (
     ("model_providers", "ciphertext", "nonce", "ciphertext IS NOT NULL"),
