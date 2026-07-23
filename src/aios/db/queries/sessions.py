@@ -222,6 +222,8 @@ async def insert_session(
     focal_locked: bool = False,
     archive_when_idle: bool = False,
     outbound_suppression: str = "off",
+    frozen_surface: Surface | None = None,
+    frozen_litellm_extra: dict[str, Any] | None = None,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -247,9 +249,11 @@ async def insert_session(
                 id, agent_id, environment_id, agent_version, title, metadata,
                 workspace_volume_path, env,
                 focal_channel, focal_locked, account_id, archive_when_idle,
-                outbound_suppression, created_by_type, created_by_ref
+                outbound_suppression, created_by_type, created_by_ref,
+                tools, mcp_servers, http_servers, surface_frozen, litellm_extra
             )
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
+                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb)
             RETURNING *
             """,
             new_id,
@@ -266,6 +270,17 @@ async def insert_session(
             archive_when_idle,
             outbound_suppression,
             *actor_columns(),
+            json.dumps([item.model_dump() for item in frozen_surface.tools])
+            if frozen_surface
+            else None,
+            json.dumps([item.model_dump() for item in frozen_surface.mcp_servers])
+            if frozen_surface
+            else None,
+            json.dumps([item.model_dump() for item in frozen_surface.http_servers])
+            if frozen_surface
+            else None,
+            frozen_surface is not None,
+            json.dumps(frozen_litellm_extra or {}) if frozen_surface else None,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

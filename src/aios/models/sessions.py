@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from aios.actors import Actor
 from aios.models.events import Event
@@ -434,7 +435,7 @@ class Session(BaseModel):
     parent_run_id: str | None = None  # set for a workflow-spawned (background) child
     # Internal authority discriminator. Excluded from API serialization while remaining
     # available to fresh DB-loaded sessions at the surface-loader choke point.
-    surface_frozen: bool = Field(default=False, exclude=True)
+    surface_frozen: SkipJsonSchema[bool] = Field(default=False, exclude=True)
     archive_when_idle: bool = False  # self-archive on first idle (immutable launch property)
     outbound_suppression: OutboundSuppression = "off"  # #710 — intercept side-effecting outbound
     last_event_at: datetime | None = None

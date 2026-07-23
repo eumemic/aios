@@ -249,6 +249,8 @@ async def create_session(
     archive_when_idle: bool = False,
     outbound_suppression: str | None = None,
     inherit_from_session_id: str | None = None,
+    frozen_surface: Surface | None = None,
+    frozen_litellm_extra: dict[str, Any] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -357,6 +359,8 @@ async def create_session(
             archive_when_idle=archive_when_idle,
             outbound_suppression=outbound_suppression or "off",
             account_id=account_id,
+            frozen_surface=frozen_surface,
+            frozen_litellm_extra=frozen_litellm_extra,
         )
         effective_vault_ids = (
             inherited_vault_ids if inherit_from_session_id is not None else vault_ids
@@ -906,6 +910,13 @@ async def invoke(
 
         # create_session account-scopes both agent_id and environment_id (404s a
         # foreign id before any row is written) — the ownership half of #1130.
+        effective_surface = None
+        if launcher_session_id is not None:
+            assert launcher_agent is not None and child_agent is not None
+            effective_surface = attenuation_service.clamp(
+                surface_of(child_agent), surface_of(launcher_agent)
+            )
+
         session = await create_session(
             pool,
             account_id=account_id,
@@ -923,21 +934,9 @@ async def invoke(
             inherit_from_session_id=launcher_session_id,
             crypto_box=crypto_box,
             archive_when_idle=True,
+            frozen_surface=effective_surface,
+            frozen_litellm_extra=(child_agent.litellm_extra if child_agent is not None else None),
         )
-        if launcher_session_id is not None:
-            assert launcher_agent is not None and child_agent is not None
-            effective_surface = attenuation_service.clamp(
-                surface_of(child_agent), surface_of(launcher_agent)
-            )
-            async with pool.acquire() as conn, conn.transaction():
-                await queries.freeze_session_surface(
-                    conn,
-                    session.id,
-                    effective_surface,
-                    account_id=account_id,
-                    litellm_extra=child_agent.litellm_extra,
-                )
-            session = session.model_copy(update={"surface_frozen": True})
         request_id = await _inject_api_request(
             pool,
             session=session,

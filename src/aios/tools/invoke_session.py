@@ -49,7 +49,7 @@ re-dispatch. Single-shot is the per-call contract.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -57,6 +57,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
+from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import OutboundSuppression, SessionResource
 from aios.models.tasks import AwaitResponse
 from aios.models.workflows import InlineScriptBody
@@ -96,6 +97,16 @@ class _CallSessionArgs(BaseModel):
     )
 
 
+class _RepositoryBindingSelection(BaseModel):
+    """Credential-free selector for a repository already held by the parent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["github_repository"] = "github_repository"
+    url: str = Field(min_length=1)
+    mount_path: str = Field(min_length=2)
+
+
 class _CallAgentArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -116,9 +127,12 @@ class _CallAgentArgs(BaseModel):
         default=None,
         description="Sandbox environment overrides; omitted inherits the parent's environment.",
     )
-    resources: list[SessionResource] | None = Field(
+    resources: list[MemoryStoreResource | _RepositoryBindingSelection] | None = Field(
         default=None,
-        description="Resources to attach; omitted inherits all parent resource mounts.",
+        description=(
+            "Parent-held resources to attach; repository selections contain only "
+            "url and mount_path. Omitted inherits all parent resource mounts."
+        ),
     )
     outbound_suppression: OutboundSuppression | None = Field(
         default=None, description="Outbound suppression; omitted inherits the parent's setting."
@@ -344,7 +358,9 @@ async def call_agent_handler(
         title=args.title,
         metadata=args.metadata,
         vault_ids=args.vault_ids,
-        resources=args.resources,
+        # Repository selectors contain no credential material; create_session
+        # uses only their type/url/mount_path to copy the parent's ciphertext.
+        resources=cast(list[SessionResource], args.resources),
         env=args.env,
         outbound_suppression=args.outbound_suppression,
         launcher_session_id=session_id,
