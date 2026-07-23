@@ -66,6 +66,7 @@ class Session:
             focal_locked (bool | Unset):  Default: False.
             origin (SessionOrigin | Unset):  Default: SessionOrigin.FOREGROUND.
             parent_run_id (None | str | Unset):
+            surface_frozen (bool | Unset):  Default: False.
             archive_when_idle (bool | Unset):  Default: False.
             outbound_suppression (SessionOutboundSuppression | Unset):  Default: SessionOutboundSuppression.OFF.
             last_event_at (datetime.datetime | None | Unset):
@@ -98,6 +99,7 @@ class Session:
     focal_locked: bool | Unset = False
     origin: SessionOrigin | Unset = SessionOrigin.FOREGROUND
     parent_run_id: None | str | Unset = UNSET
+    surface_frozen: bool | Unset = False
     archive_when_idle: bool | Unset = False
     outbound_suppression: SessionOutboundSuppression | Unset = (
         SessionOutboundSuppression.OFF
@@ -221,6 +223,8 @@ class Session:
         else:
             parent_run_id = self.parent_run_id
 
+        surface_frozen = self.surface_frozen
+
         archive_when_idle = self.archive_when_idle
 
         outbound_suppression: str | Unset = UNSET
@@ -280,6 +284,8 @@ class Session:
             field_dict["origin"] = origin
         if parent_run_id is not UNSET:
             field_dict["parent_run_id"] = parent_run_id
+        if surface_frozen is not UNSET:
+            field_dict["surface_frozen"] = surface_frozen
         if archive_when_idle is not UNSET:
             field_dict["archive_when_idle"] = archive_when_idle
         if outbound_suppression is not UNSET:
@@ -491,6 +497,8 @@ class Session:
 
         parent_run_id = _parse_parent_run_id(d.pop("parent_run_id", UNSET))
 
+        surface_frozen = d.pop("surface_frozen", UNSET)
+
         archive_when_idle = d.pop("archive_when_idle", UNSET)
 
         _outbound_suppression = d.pop("outbound_suppression", UNSET)
@@ -544,6 +552,7 @@ class Session:
             focal_locked=focal_locked,
             origin=origin,
             parent_run_id=parent_run_id,
+            surface_frozen=surface_frozen,
             archive_when_idle=archive_when_idle,
             outbound_suppression=outbound_suppression,
             last_event_at=last_event_at,
