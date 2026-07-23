@@ -29,6 +29,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _CHILD_NAME = "Eumemic"
+_MARKER_LABEL = "0153 bootstrap (revoked)"
 _BLOB_VERSION = b"\x01"
 # These constraints make a bulk account-id rewrite impossible.  They are
 # recreated (and validated) before the transaction commits.
@@ -90,14 +91,19 @@ class _Box:
         return _Box(key)
 
     def decrypt(self, ciphertext: bytes, nonce: bytes) -> str:
-        payload = ciphertext[1:] if ciphertext[:1] == _BLOB_VERSION else ciphertext
         try:
-            return self._box.decrypt(payload, nonce).decode()
+            if ciphertext[:1] != _BLOB_VERSION:
+                return self._box.decrypt(ciphertext, nonce).decode()
+            try:
+                return self._box.decrypt(ciphertext[1:], nonce).decode()
+            except CryptoError:
+                # A legacy blob's first MAC byte can equal the version byte.
+                return self._box.decrypt(ciphertext, nonce).decode()
         except CryptoError as exc:
             raise RuntimeError("migration 0153 could not decrypt account-owned ciphertext") from exc
 
-    def encrypt(self, plaintext: str) -> tuple[bytes, bytes]:
-        nonce = nacl_random(SecretBox.NONCE_SIZE)
+    def encrypt(self, plaintext: str, nonce: bytes | None = None) -> tuple[bytes, bytes]:
+        nonce = nonce or nacl_random(SecretBox.NONCE_SIZE)
         return _BLOB_VERSION + self._box.encrypt(plaintext.encode(), nonce).ciphertext, nonce
 
 
@@ -121,7 +127,8 @@ def _root_and_child(*, create: bool) -> tuple[str, str]:
         ),
         {"root": root, "name": _CHILD_NAME},
     ).scalar_one_or_none()
-    if child is None and create:
+    created = child is None and create
+    if created:
         # SQL equivalent of insert_child_account: account and first key are
         # inserted together in this migration's transaction.  The bootstrap
         # key is deliberately revoked; operational keys are moved below.
@@ -142,12 +149,25 @@ def _root_and_child(*, create: bool) -> tuple[str, str]:
         bind.execute(
             sa.text(
                 "INSERT INTO account_keys (key_id,account_id,hash,label,revoked_at) "
-                "VALUES (:id,:account,:hash,'0153 bootstrap (revoked)',now())"
+                "VALUES (:id,:account,:hash,:label,now())"
             ),
-            {"id": key_id, "account": child, "hash": os.urandom(32)},
+            {"id": key_id, "account": child, "hash": os.urandom(32), "label": _MARKER_LABEL},
         )
     if child is None:
         raise RuntimeError("migration 0153 downgrade cannot find the Eumemic child")
+    marker = bind.execute(
+        sa.text(
+            "SELECT 1 FROM account_keys WHERE account_id=:child AND label=:label "
+            "AND revoked_at IS NOT NULL"
+        ),
+        {"child": child, "label": _MARKER_LABEL},
+    ).scalar_one_or_none()
+    if marker is None:
+        direction = "upgrade" if create else "downgrade"
+        raise RuntimeError(
+            f"migration 0153 {direction} refuses pre-existing Eumemic child; "
+            "rename/archive it or verify the migration-owned marker key"
+        )
     return root, child
 
 
@@ -167,6 +187,9 @@ def _rekey(source: str, destination: str) -> None:
     bind = op.get_bind()
     master: _Box | None = None
     for table, ciphertext, nonce, live_filter in _ENCRYPTED:
+        # Block concurrent writes until this transaction commits, so the live
+        # selection and inverse-predicate scrubbed-row move are exhaustive.
+        bind.execute(sa.text(f"LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE"))
         rows = bind.execute(
             sa.text(
                 f"SELECT id,{ciphertext} AS ciphertext,{nonce} AS nonce FROM {table} WHERE account_id=:source AND {live_filter} FOR UPDATE"
@@ -178,7 +201,9 @@ def _rekey(source: str, destination: str) -> None:
         for row in rows:
             assert master is not None
             plaintext = master.account(source).decrypt(row.ciphertext, row.nonce)
-            new_ciphertext, new_nonce = master.account(destination).encrypt(plaintext)
+            # Reuse the nonce: SecretBox permits this because the key changes,
+            # and it makes downgrade restore the original bytes exactly.
+            new_ciphertext, new_nonce = master.account(destination).encrypt(plaintext, row.nonce)
             bind.execute(
                 sa.text(
                     f"UPDATE {table} SET account_id=:destination,{ciphertext}=:ciphertext,{nonce}=:nonce WHERE id=:id"
@@ -192,7 +217,10 @@ def _rekey(source: str, destination: str) -> None:
             )
         # Scrubbed/archived encrypted rows still belong to the fleet but need no decrypt.
         bind.execute(
-            sa.text(f"UPDATE {table} SET account_id=:destination WHERE account_id=:source"),
+            sa.text(
+                f"UPDATE {table} SET account_id=:destination "
+                f"WHERE account_id=:source AND NOT ({live_filter})"
+            ),
             {"source": source, "destination": destination},
         )
 
@@ -215,8 +243,8 @@ def _plain_move(source: str, destination: str) -> None:
                 sa.text(f'UPDATE "{table}" SET account_id=:destination WHERE account_id=:source'),
                 {"source": source, "destination": destination},
             )
-    # Events are normally the largest relation.  ctid batches bound each lock
-    # acquisition while retaining the migration's all-or-nothing transaction.
+    # Events are normally the largest relation. Locks persist until commit;
+    # ctid batches only bound each statement's work and memory.
     while (
         bind.execute(
             sa.text(
