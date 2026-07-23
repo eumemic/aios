@@ -34,6 +34,7 @@ from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
 from aios.models.sessions import Ok
+from aios.models.tasks import TaskHandle
 from aios.services import agents as agents_service
 from aios.services import sessions as service
 from aios.services import vaults as vaults_service
@@ -242,7 +243,14 @@ async def test_duplicate_answer_is_idempotent(
     assert second == "duplicate"  # first-writer-wins
 
 
-async def _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, **kw):
+async def _invoke_agent_child(
+    pool: asyncpg.Pool[Any],
+    account_id: str,
+    parent_id: str,
+    agent_id: str,
+    env_id: str,
+    **kw: Any,
+) -> TaskHandle:
     return await service.invoke(
         pool,
         account_id=account_id,
@@ -256,7 +264,9 @@ async def _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, **k
     )
 
 
-async def test_call_agent_vault_attenuation_and_suppression(pool_env) -> None:
+async def test_call_agent_vault_attenuation_and_suppression(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
     pool, account_id, agent_id, env_id, parent_id = pool_env
     first = await vaults_service.create_vault(
         pool, account_id=account_id, display_name="first", metadata={}
@@ -297,7 +307,9 @@ async def test_call_agent_vault_attenuation_and_suppression(pool_env) -> None:
         )
 
 
-async def test_call_agent_frozen_surface_survives_reload_and_composes(pool_env) -> None:
+async def test_call_agent_frozen_surface_survives_reload_and_composes(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
     pool, account_id, _agent_id, env_id, parent_id = pool_env
     parent_agent, _, _ = await seed_agent_env_session(
         pool, account_id=account_id, prefix="clamped_parent", tools=[ToolSpec(type="bash")]

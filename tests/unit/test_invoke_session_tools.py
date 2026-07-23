@@ -184,6 +184,7 @@ async def test_call_agent_preserves_omitted_vs_empty_vault_selection(
 
     await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", **tool_args})
 
+    assert inv_mock.await_args is not None
     assert inv_mock.await_args.kwargs["vault_ids"] == expected
 
 
