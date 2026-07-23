@@ -885,16 +885,12 @@ async def invoke(
         if launcher_session_id is not None:
             # Resolve and validate both model identities before creating a row: an
             # untrusted api_base must not leave an orphaned, runnable child behind.
-            launcher = await get_session_basic(
-                pool, launcher_session_id, account_id=account_id
-            )
+            launcher = await get_session_basic(pool, launcher_session_id, account_id=account_id)
             launcher_agent = await agents_service.load_for_session(
                 pool, launcher, account_id=account_id
             )
             if agent_version is None:
-                child_agent = await agents_service.get_agent(
-                    pool, target, account_id=account_id
-                )
+                child_agent = await agents_service.get_agent(pool, target, account_id=account_id)
             else:
                 child_agent = await agents_service.get_agent_version(
                     pool, target, agent_version, account_id=account_id
