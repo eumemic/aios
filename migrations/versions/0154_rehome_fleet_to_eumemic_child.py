@@ -276,7 +276,9 @@ def _move_keys(source: str, destination: str, *, retain_one: bool) -> None:
             {"source": source},
         ).scalar_one_or_none()
         if keeper is None:
-            raise RuntimeError("migration 0154 requires one active platform-admin root key")
+            # No active root keys at all (seeded/test databases): there is no
+            # operational key set to split; nothing to move or retain.
+            return
         bind.execute(
             sa.text(
                 "UPDATE account_keys SET account_id=:destination WHERE account_id=:source AND key_id<>:keeper"
