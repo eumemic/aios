@@ -111,9 +111,10 @@ def test_drop_descriptors_never_contribute_to_rename_map() -> None:
 # ── Telemetry: corroboration only, NEVER the gate ─────────────────────────────
 
 
-def test_every_fire_increments_hits_and_stamps_last_seen() -> None:
+def test_every_fire_increments_hits_and_stamps_last_seen(monkeypatch: pytest.MonkeyPatch) -> None:
     assert telemetry.tolerance_hits("invoke") == 0
     assert telemetry.last_seen("invoke") is None
+    monkeypatch.setattr(agents_mod, "tolerated_rename_map", lambda: {"invoke": "call_session"})
 
     ToolSpec.model_validate({"type": "invoke"})
     ToolSpec.model_validate({"type": "invoke"})
@@ -122,7 +123,12 @@ def test_every_fire_increments_hits_and_stamps_last_seen() -> None:
     assert telemetry.last_seen("invoke") is not None
 
 
-def test_telemetry_is_keyed_per_token() -> None:
+def test_telemetry_is_keyed_per_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        agents_mod,
+        "tolerated_rename_map",
+        lambda: {"invoke": "call_session", "cancel_run": "stop_task"},
+    )
     ToolSpec.model_validate({"type": "invoke"})
     ToolSpec.model_validate({"type": "cancel_run"})
     assert telemetry.tolerance_hits("invoke") == 1
@@ -162,6 +168,7 @@ def test_validator_maps_token_even_when_sink_is_broken(monkeypatch: pytest.Monke
             raise RuntimeError("metrics surface down")
 
     monkeypatch.setattr(telemetry, "_RETIREMENT_TOLERANCE_HITS", _BoomCounter())
+    monkeypatch.setattr(agents_mod, "tolerated_rename_map", lambda: {"invoke": "call_session"})
     assert ToolSpec.model_validate({"type": "invoke"}).type == "call_session"
 
 
