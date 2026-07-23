@@ -333,7 +333,10 @@ async def _load_for_session_conn(
     # particular, call_agent children are ordinary sessions (no parent_run_id),
     # so keying this branch only on workflow lineage would silently re-expand
     # their authority to the live agent surface on the first wake.
-    if session.surface_frozen or session.parent_run_id is not None:
+    # Some internal read models intentionally project only the legacy session
+    # fields. Treat an omitted flag as unfrozen; lineage remains the fail-closed
+    # backstop for workflow children.
+    if getattr(session, "surface_frozen", False) or session.parent_run_id is not None:
         frozen = await queries.get_session_frozen_surface(conn, session.id, account_id=account_id)
         if frozen is None:
             raise RuntimeError(
