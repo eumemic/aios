@@ -310,6 +310,39 @@ async def create_session(
                 )
             if outbound_suppression is None:
                 outbound_suppression = parent.outbound_suppression
+            elif parent.outbound_suppression == "on":
+                # Monotonic meet: a suppressed launcher cannot be widened by an
+                # explicit child override.  "on" is the more restrictive arm.
+                outbound_suppression = "on"
+            if resources is not None:
+                parent_resources = await _list_all_echoes(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+                parent_memory = {
+                    item.memory_store_id: item
+                    for item in parent_resources
+                    if item.type == "memory_store"
+                }
+                parent_repos = {
+                    (item.url, item.mount_path)
+                    for item in parent_resources
+                    if item.type == "github_repository"
+                }
+                ungranted_resources: list[str] = []
+                for resource in resources:
+                    if resource.type == "memory_store":
+                        held = parent_memory.get(resource.memory_store_id)
+                        if held is None or (
+                            held.access == "read_only" and resource.access == "read_write"
+                        ):
+                            ungranted_resources.append(resource.memory_store_id)
+                    elif (resource.url, resource.mount_path) not in parent_repos:
+                        ungranted_resources.append(resource.mount_path)
+                if ungranted_resources:
+                    raise ForbiddenError(
+                        "child session requested resources the launching session does not hold",
+                        detail={"ungranted_resources": ungranted_resources},
+                    )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -346,7 +379,18 @@ async def create_session(
                 await memory_service.attach_to_session(
                     conn, session.id, memory_resources, account_id=account_id
                 )
-            if github_resources:
+            if github_resources and inherit_from_session_id is not None:
+                # Spawn requests select an existing parent binding.  Never consume
+                # caller-supplied credential material; copy the encrypted parent
+                # attachment so secrets cannot ride tool args or logs.
+                await queries.copy_session_github_resources(
+                    conn,
+                    inherit_from_session_id,
+                    session.id,
+                    [(item.url, item.mount_path) for item in github_resources],
+                    account_id=account_id,
+                )
+            elif github_resources:
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
@@ -836,6 +880,34 @@ async def invoke(
                 "environment_id is required for target_kind=agent",
                 detail={"target_kind": target_kind},
             )
+        launcher_agent: StepSurface | None = None
+        child_agent: Any = None
+        if launcher_session_id is not None:
+            # Resolve and validate both model identities before creating a row: an
+            # untrusted api_base must not leave an orphaned, runnable child behind.
+            launcher = await get_session_basic(
+                pool, launcher_session_id, account_id=account_id
+            )
+            launcher_agent = await agents_service.load_for_session(
+                pool, launcher, account_id=account_id
+            )
+            if agent_version is None:
+                child_agent = await agents_service.get_agent(
+                    pool, target, account_id=account_id
+                )
+            else:
+                child_agent = await agents_service.get_agent_version(
+                    pool, target, agent_version, account_id=account_id
+                )
+            from aios.services import attenuation as attenuation_service
+
+            if not attenuation_service.model_identity_trusted(
+                child_agent.litellm_extra, launcher_agent.litellm_extra
+            ):
+                raise ForbiddenError(
+                    "child agent routes model calls to an untrusted inference endpoint"
+                )
+
         # create_session account-scopes both agent_id and environment_id (404s a
         # foreign id before any row is written) — the ownership half of #1130.
         session = await create_session(
@@ -855,21 +927,17 @@ async def invoke(
             archive_when_idle=True,
         )
         if launcher_session_id is not None:
-            launcher = await get_session_basic(pool, launcher_session_id, account_id=account_id)
-            launcher_agent = await agents_service.load_for_session(
-                pool, launcher, account_id=account_id
-            )
-            child_agent = await agents_service.load_for_session(
-                pool, session, account_id=account_id
-            )
-            from aios.services import attenuation as attenuation_service
-
+            assert launcher_agent is not None and child_agent is not None
             effective_surface = attenuation_service.clamp(
                 surface_of(child_agent), surface_of(launcher_agent)
             )
             async with pool.acquire() as conn, conn.transaction():
                 await queries.freeze_session_surface(
-                    conn, session.id, effective_surface, account_id=account_id
+                    conn,
+                    session.id,
+                    effective_surface,
+                    account_id=account_id,
+                    litellm_extra=child_agent.litellm_extra,
                 )
             session = session.model_copy(update={"surface_frozen": True})
         request_id = await _inject_api_request(

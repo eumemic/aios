@@ -371,20 +371,65 @@ async def freeze_session_surface(
     surface: Surface,
     *,
     account_id: str,
+    litellm_extra: dict[str, Any] | None = None,
 ) -> None:
-    """Pin a newly spawned session to its launch-attenuated authority surface."""
+    """Pin a newly spawned session's authority surface and model identity."""
     result = await conn.execute(
         "UPDATE sessions SET tools = $3::jsonb, mcp_servers = $4::jsonb, "
-        "http_servers = $5::jsonb, surface_frozen = TRUE "
+        "http_servers = $5::jsonb, litellm_extra = $6::jsonb, surface_frozen = TRUE "
         "WHERE id = $1 AND account_id = $2",
         session_id,
         account_id,
         json.dumps([item.model_dump() for item in surface.tools]),
         json.dumps([item.model_dump() for item in surface.mcp_servers]),
         json.dumps([item.model_dump() for item in surface.http_servers]),
+        json.dumps(litellm_extra or {}),
     )
     if result == "UPDATE 0":
         raise NotFoundError("session not found", detail={"session_id": session_id})
+
+
+async def copy_session_github_resources(
+    conn: asyncpg.Connection[Any],
+    parent_session_id: str,
+    child_session_id: str,
+    bindings: list[tuple[str, str]],
+    *,
+    account_id: str,
+) -> None:
+    """Copy selected parent repository bindings without accepting new credentials."""
+    if not bindings:
+        return
+    rows = await conn.fetch(
+        "SELECT * FROM session_github_repositories "
+        "WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
+        parent_session_id,
+        account_id,
+    )
+    wanted = set(bindings)
+    rank = 0
+    for row in rows:
+        if (row["repo_url"], row["mount_path"]) not in wanted:
+            continue
+        await conn.execute(
+            """
+            INSERT INTO session_github_repositories
+                (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
+                 git_user_name, git_user_email, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+            make_id(GITHUB_REPOSITORY),
+            child_session_id,
+            rank,
+            row["repo_url"],
+            row["mount_path"],
+            row["ciphertext"],
+            row["nonce"],
+            row["git_user_name"],
+            row["git_user_email"],
+            account_id,
+        )
+        rank += 1
 
 
 async def copy_session_resources(
