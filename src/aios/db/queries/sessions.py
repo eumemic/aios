@@ -352,6 +352,90 @@ async def insert_child_session(
     return _row_to_session(row) if row is not None else None
 
 
+async def get_session_env(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> dict[str, str]:
+    row = await conn.fetchrow(
+        "SELECT env FROM sessions WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError("session not found", detail={"session_id": session_id})
+    return dict(row["env"] or {})
+
+
+async def freeze_session_surface(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    surface: Surface,
+    *,
+    account_id: str,
+) -> None:
+    """Pin a newly spawned session to its launch-attenuated authority surface."""
+    result = await conn.execute(
+        "UPDATE sessions SET tools = $3::jsonb, mcp_servers = $4::jsonb, "
+        "http_servers = $5::jsonb, surface_frozen = TRUE "
+        "WHERE id = $1 AND account_id = $2",
+        session_id,
+        account_id,
+        json.dumps([item.model_dump() for item in surface.tools]),
+        json.dumps([item.model_dump() for item in surface.mcp_servers]),
+        json.dumps([item.model_dump() for item in surface.http_servers]),
+    )
+    if result == "UPDATE 0":
+        raise NotFoundError("session not found", detail={"session_id": session_id})
+
+
+async def copy_session_resources(
+    conn: asyncpg.Connection[Any],
+    parent_session_id: str,
+    child_session_id: str,
+    *,
+    account_id: str,
+) -> None:
+    """Copy parent resource bindings, including encrypted repository credentials."""
+    await conn.execute(
+        """
+        INSERT INTO session_memory_stores
+            (session_id, memory_store_id, rank, access, instructions,
+             name_at_attach, description_at_attach, account_id)
+        SELECT $2, memory_store_id, rank, access, instructions,
+               name_at_attach, description_at_attach, account_id
+          FROM session_memory_stores
+         WHERE session_id = $1 AND account_id = $3
+        """,
+        parent_session_id,
+        child_session_id,
+        account_id,
+    )
+    rows = await conn.fetch(
+        "SELECT * FROM session_github_repositories "
+        "WHERE session_id = $1 AND account_id = $2 ORDER BY rank",
+        parent_session_id,
+        account_id,
+    )
+    for row in rows:
+        await conn.execute(
+            """
+            INSERT INTO session_github_repositories
+                (id, session_id, rank, repo_url, mount_path, ciphertext, nonce,
+                 git_user_name, git_user_email, account_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+            make_id(GITHUB_REPOSITORY),
+            child_session_id,
+            row["rank"],
+            row["repo_url"],
+            row["mount_path"],
+            row["ciphertext"],
+            row["nonce"],
+            row["git_user_name"],
+            row["git_user_email"],
+            account_id,
+        )
+
+
 async def get_session_frozen_surface(
     conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
 ) -> Surface | None:

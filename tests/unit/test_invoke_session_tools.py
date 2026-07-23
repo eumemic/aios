@@ -138,6 +138,38 @@ async def test_invoke_repolls_until_done(monkeypatch: Any) -> None:
     assert await_mock.await_count == 2
 
 
+async def test_call_agent_forwards_spawn_parameters_and_inherits_by_default(
+    monkeypatch: Any,
+) -> None:
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    await invoke_builtin(
+        _CALLER,
+        "call_agent",
+        {
+            "agent_id": "agt_1",
+            "input": "go",
+            "vault_ids": ["vlt_1"],
+            "env": {"MODE": "build"},
+            "resources": [],
+            "title": "builder",
+            "metadata": {"job": 1},
+        },
+    )
+    assert inv_mock.await_args is not None
+    kwargs = inv_mock.await_args.kwargs
+    assert kwargs["launcher_session_id"] == _CALLER
+    assert kwargs["vault_ids"] == ["vlt_1"]
+    assert kwargs["env"] == {"MODE": "build"}
+    assert kwargs["resources"] == []
+    assert kwargs["title"] == "builder"
+    assert kwargs["metadata"] == {"job": 1}
+
+
 async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
     inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
