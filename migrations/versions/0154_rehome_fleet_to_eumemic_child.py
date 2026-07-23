@@ -236,7 +236,16 @@ def _rekey(source: str, destination: str) -> None:
 
 def _plain_move(source: str, destination: str) -> None:
     bind = op.get_bind()
-    excluded = {"accounts", "account_keys", "events", *[item[0] for item in _ENCRYPTED]}
+    excluded = {
+        "accounts",
+        "account_keys",
+        "events",
+        # 0112 forbids UPDATE on workflow_versions at the DB (immutable,
+        # replay-load-bearing). Ownership is resolved via workflows.account_id;
+        # the stale denormalized copy on historical version rows is accepted.
+        "workflow_versions",
+        *[item[0] for item in _ENCRYPTED],
+    }
     tables = (
         bind.execute(
             sa.text(
