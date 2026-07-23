@@ -33,10 +33,8 @@ from aios.db.pool import create_pool
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.models.agents import ToolSpec
-from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import Ok
 from aios.services import agents as agents_service
-from aios.services import memory_stores as memory_stores_service
 from aios.services import sessions as service
 from aios.services import vaults as vaults_service
 from aios.tools import workflow_completion
@@ -244,9 +242,7 @@ async def test_duplicate_answer_is_idempotent(
     assert second == "duplicate"  # first-writer-wins
 
 
-async def _invoke_agent_child(
-    pool, account_id, parent_id, agent_id, env_id, **kw
-):
+async def _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, **kw):
     return await service.invoke(
         pool,
         account_id=account_id,
@@ -294,6 +290,7 @@ async def test_call_agent_vault_attenuation_and_suppression(pool_env) -> None:
     assert empty_session.outbound_suppression == "on"
 
     import pytest as _pytest
+
     with _pytest.raises(ForbiddenError, match="vault"):
         await _invoke_agent_child(
             pool, account_id, parent_id, agent_id, env_id, vault_ids=[outside.id]

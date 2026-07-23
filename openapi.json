@@ -16191,6 +16191,11 @@
             ],
             "title": "Parent Run Id"
           },
+          "surface_frozen": {
+            "type": "boolean",
+            "title": "Surface Frozen",
+            "default": false
+          },
           "archive_when_idle": {
             "type": "boolean",
             "title": "Archive When Idle",
