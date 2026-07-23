@@ -69,7 +69,7 @@ def upgrade() -> None:
     """)
 
     for table, column in _SURFACES:
-        # ``workflow_versions`` is immutable at runtime.  Temporarily suspend its
+        # ``workflow_versions`` is immutable at runtime. Temporarily suspend its
         # guard for this migration-owned canonicalization, as migration 0154 does
         # for its account-id rewrite.
         immutable = table == "workflow_versions"
@@ -80,7 +80,11 @@ def upgrade() -> None:
                 UPDATE {table}
                 SET {column} = CASE
                         WHEN {column} IS NULL THEN NULL
-                        ELSE _aios_contract_legacy_tools({column})
+                        WHEN EXISTS (
+                            SELECT 1 FROM jsonb_array_elements({column}) e
+                            WHERE e->>'type' IN ({_LEGACY_NAMES_SQL})
+                        ) THEN _aios_contract_legacy_tools({column})
+                        ELSE {column}
                     END,
                     tools_vocab_epoch = {_EPOCH_HORIZON}
             """)
