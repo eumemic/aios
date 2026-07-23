@@ -24,6 +24,7 @@ from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     ConflictError,
+    ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
     RateLimitedError,
@@ -246,7 +247,8 @@ async def create_session(
     focal_channel: str | None = None,
     focal_locked: bool = False,
     archive_when_idle: bool = False,
-    outbound_suppression: str = "off",
+    outbound_suppression: str | None = None,
+    inherit_from_session_id: str | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -286,6 +288,28 @@ async def create_session(
         await agents_service.validate_pinned_agent_version(
             conn, agent_id=agent_id, agent_version=agent_version, account_id=account_id
         )
+        inherited_vault_ids: list[str] | None = None
+        if inherit_from_session_id is not None:
+            parent = await queries.get_session(conn, inherit_from_session_id, account_id=account_id)
+            parent_vault_ids = await queries.get_session_vault_ids(
+                conn, inherit_from_session_id, account_id=account_id
+            )
+            requested_vault_ids = parent_vault_ids if vault_ids is None else vault_ids
+            ungranted = [
+                vault_id for vault_id in requested_vault_ids if vault_id not in parent_vault_ids
+            ]
+            if ungranted:
+                raise ForbiddenError(
+                    "child session requested vaults the launching session does not hold",
+                    detail={"ungranted_vault_ids": ungranted},
+                )
+            inherited_vault_ids = requested_vault_ids
+            if env is None:
+                env = await queries.get_session_env(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+            if outbound_suppression is None:
+                outbound_suppression = parent.outbound_suppression
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -298,13 +322,24 @@ async def create_session(
             focal_channel=focal_channel,
             focal_locked=focal_locked,
             archive_when_idle=archive_when_idle,
-            outbound_suppression=outbound_suppression,
+            outbound_suppression=outbound_suppression or "off",
             account_id=account_id,
         )
-        if vault_ids:
-            await queries.set_session_vaults(conn, session.id, vault_ids, account_id=account_id)
+        effective_vault_ids = (
+            inherited_vault_ids if inherit_from_session_id is not None else vault_ids
+        )
+        if effective_vault_ids:
+            await queries.set_session_vaults(
+                conn, session.id, effective_vault_ids, account_id=account_id
+            )
             await _assert_env_var_creds_contained(conn, session.id, account_id=account_id)
-            session = session.model_copy(update={"vault_ids": vault_ids})
+            session = session.model_copy(update={"vault_ids": effective_vault_ids})
+        if inherit_from_session_id is not None and resources is None:
+            await queries.copy_session_resources(
+                conn, inherit_from_session_id, session.id, account_id=account_id
+            )
+            echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
+            session = session.model_copy(update={"resources": echoes})
         if resources:
             memory_resources, github_resources = split_resources_by_type(resources)
             if memory_resources:
@@ -759,6 +794,14 @@ async def invoke(
     input: Any,
     output_schema: dict[str, Any] | None = None,
     environment_id: str | None = None,
+    agent_version: int | None = None,
+    title: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    vault_ids: list[str] | None = None,
+    resources: list[SessionResource] | None = None,
+    env: dict[str, str] | None = None,
+    outbound_suppression: str | None = None,
+    launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
 ) -> TaskHandle:
@@ -800,11 +843,35 @@ async def invoke(
             account_id=account_id,
             agent_id=target,
             environment_id=environment_id,
-            title=None,
-            metadata={},
+            agent_version=agent_version,
+            title=title,
+            metadata=metadata or {},
+            vault_ids=vault_ids,
+            resources=resources,
+            env=env,
+            outbound_suppression=outbound_suppression,
+            inherit_from_session_id=launcher_session_id,
             crypto_box=crypto_box,
             archive_when_idle=True,
         )
+        if launcher_session_id is not None:
+            launcher = await get_session_basic(pool, launcher_session_id, account_id=account_id)
+            launcher_agent = await agents_service.load_for_session(
+                pool, launcher, account_id=account_id
+            )
+            child_agent = await agents_service.load_for_session(
+                pool, session, account_id=account_id
+            )
+            from aios.services import attenuation as attenuation_service
+
+            effective_surface = attenuation_service.clamp(
+                surface_of(child_agent), surface_of(launcher_agent)
+            )
+            async with pool.acquire() as conn, conn.transaction():
+                await queries.freeze_session_surface(
+                    conn, session.id, effective_surface, account_id=account_id
+                )
+            session = session.model_copy(update={"surface_frozen": True})
         request_id = await _inject_api_request(
             pool,
             session=session,

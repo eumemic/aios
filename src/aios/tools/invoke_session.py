@@ -57,6 +57,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.harness import runtime
+from aios.models.sessions import OutboundSuppression, SessionResource
 from aios.models.tasks import AwaitResponse
 from aios.models.workflows import InlineScriptBody
 from aios.services import sessions as sessions_service
@@ -99,10 +100,28 @@ class _CallAgentArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(description="The id of the same-account agent to spawn and invoke.")
+    agent_version: int | None = Field(default=None, description="Optional agent version pin.")
     input: Any = Field(default=None, description="The request payload (JSON or a string).")
     output_schema: dict[str, Any] | None = Field(
         default=None,
         description="Optional JSON Schema the answer's value must satisfy (validated fail-loud).",
+    )
+    title: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    vault_ids: list[str] | None = Field(
+        default=None,
+        description="Parent-held vault ids; omitted inherits every vault bound to the parent.",
+    )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description="Sandbox environment overrides; omitted inherits the parent's environment.",
+    )
+    resources: list[SessionResource] | None = Field(
+        default=None,
+        description="Resources to attach; omitted inherits all parent resource mounts.",
+    )
+    outbound_suppression: OutboundSuppression | None = Field(
+        default=None, description="Outbound suppression; omitted inherits the parent's setting."
     )
 
 
@@ -321,6 +340,14 @@ async def call_agent_handler(
         input=args.input,
         output_schema=args.output_schema,
         environment_id=session.environment_id,
+        agent_version=args.agent_version,
+        title=args.title,
+        metadata=args.metadata,
+        vault_ids=args.vault_ids,
+        resources=args.resources,
+        env=args.env,
+        outbound_suppression=args.outbound_suppression,
+        launcher_session_id=session_id,
         crypto_box=runtime.require_crypto_box(),
         caller=_caller(session_id),
     )
@@ -392,8 +419,10 @@ CALL_SESSION_DESCRIPTION = (
 CALL_AGENT_DESCRIPTION = (
     "Spawn a fresh session from one of your agents and call it with `input`, "
     "waiting for its single answer ({ok: value} or an error). The new session runs "
-    "in your own environment. Optionally constrain the answer with `output_schema`. "
-    "Single-shot; you stay responsive while waiting."
+    "in your own environment. It inherits all your vaults, sandbox env, resource mounts, "
+    "and outbound suppression unless overridden; requested vaults are restricted to your "
+    "own. Optionally constrain the answer with `output_schema`. Single-shot; you stay "
+    "responsive while waiting."
 )
 CALL_WORKFLOW_DESCRIPTION = (
     "Launch a run and wait for its result ({ok: output} on completion, an error if it "
