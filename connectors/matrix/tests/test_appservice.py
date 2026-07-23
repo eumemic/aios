@@ -84,7 +84,9 @@ async def test_state_store_is_asyncpg_backed(
 def postgres_url() -> Iterator[str]:
     if shutil.which("docker") is None:
         pytest.skip("Docker CLI is not available")
-    probe = subprocess.run(["docker", "info"], capture_output=True, check=False, timeout=10)
+    probe = subprocess.run(
+        ["docker", "info"], capture_output=True, check=False, timeout=10
+    )
     if probe.returncode != 0:
         pytest.skip("Docker daemon is not available")
     with socket.socket() as listener:
@@ -93,26 +95,14 @@ def postgres_url() -> Iterator[str]:
     name = f"aios-matrix-test-{port}"
     run = subprocess.run(
         [
-            "docker",
-            "run",
-            "--detach",
-            "--rm",
-            "--name",
-            name,
-            "--publish",
-            f"127.0.0.1:{port}:5432",
-            "--env",
-            "POSTGRES_PASSWORD=aios",
-            "--env",
-            "POSTGRES_USER=aios",
-            "--env",
-            "POSTGRES_DB=matrix",
+            "docker", "run", "--detach", "--rm", "--name", name,
+            "--publish", f"127.0.0.1:{port}:5432",
+            "--env", "POSTGRES_PASSWORD=aios",
+            "--env", "POSTGRES_USER=aios",
+            "--env", "POSTGRES_DB=matrix",
             "postgres:16-alpine",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
+        capture_output=True, text=True, check=False, timeout=60,
     )
     if run.returncode != 0:
         pytest.skip(f"could not start Postgres container: {run.stderr}")
@@ -121,9 +111,7 @@ def postgres_url() -> Iterator[str]:
         while time.monotonic() < deadline:
             ready = subprocess.run(
                 ["docker", "exec", name, "pg_isready", "-U", "aios"],
-                capture_output=True,
-                check=False,
-                timeout=5,
+                capture_output=True, check=False, timeout=5,
             )
             if ready.returncode == 0:
                 break
