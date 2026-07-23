@@ -183,6 +183,7 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         # explicit-column reads that don't select them.
         origin=row.get("origin") or "foreground",
         parent_run_id=row.get("parent_run_id"),
+        surface_frozen=bool(row.get("surface_frozen")),
         archive_when_idle=bool(row.get("archive_when_idle")),
         # Soft read: present in every ``SELECT *`` / ``RETURNING *`` feeder;
         # the few explicit-column reads that don't select it fall back to the

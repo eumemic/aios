@@ -30,10 +30,15 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.errors import NotFoundError
+from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
+from aios.models.agents import ToolSpec
+from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import Ok
+from aios.services import agents as agents_service
+from aios.services import memory_stores as memory_stores_service
 from aios.services import sessions as service
+from aios.services import vaults as vaults_service
 from aios.tools import workflow_completion
 from tests.integration.conftest import seed_agent_env_session
 
@@ -237,3 +242,94 @@ async def test_duplicate_answer_is_idempotent(
     )
     assert first == "responded"
     assert second == "duplicate"  # first-writer-wins
+
+
+async def _invoke_agent_child(
+    pool, account_id, parent_id, agent_id, env_id, **kw
+):
+    return await service.invoke(
+        pool,
+        account_id=account_id,
+        target_kind="agent",
+        target=agent_id,
+        environment_id=env_id,
+        input="go",
+        launcher_session_id=parent_id,
+        caller={"kind": "session", "id": parent_id},
+        **kw,
+    )
+
+
+async def test_call_agent_vault_attenuation_and_suppression(pool_env) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    first = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="first", metadata={}
+    )
+    second = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="second", metadata={}
+    )
+    outside = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="outside", metadata={}
+    )
+    await service.update_session(
+        pool,
+        parent_id,
+        account_id=account_id,
+        vault_ids=[first.id, second.id],
+        outbound_suppression="on",
+    )
+
+    inherited = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id)
+    inherited_session = await service.get_session(
+        pool, inherited.servicer_id, account_id=account_id
+    )
+    assert set(inherited_session.vault_ids) == {first.id, second.id}
+    assert inherited_session.outbound_suppression == "on"
+
+    empty = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, vault_ids=[], outbound_suppression="off"
+    )
+    empty_session = await service.get_session(pool, empty.servicer_id, account_id=account_id)
+    assert empty_session.vault_ids == []
+    assert empty_session.outbound_suppression == "on"
+
+    import pytest as _pytest
+    with _pytest.raises(ForbiddenError, match="vault"):
+        await _invoke_agent_child(
+            pool, account_id, parent_id, agent_id, env_id, vault_ids=[outside.id]
+        )
+
+
+async def test_call_agent_frozen_surface_survives_reload_and_composes(pool_env) -> None:
+    pool, account_id, _agent_id, env_id, parent_id = pool_env
+    parent_agent, _, _ = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="clamped_parent", tools=[ToolSpec(type="bash")]
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET agent_id=$1, agent_version=$2 WHERE id=$3",
+            parent_agent.id,
+            parent_agent.version,
+            parent_id,
+        )
+    broad, _, _ = await seed_agent_env_session(
+        pool,
+        account_id=account_id,
+        prefix="broad_child",
+        tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
+    )
+
+    child_handle = await _invoke_agent_child(pool, account_id, parent_id, broad.id, env_id)
+    child = await service.get_session_basic(pool, child_handle.servicer_id, account_id=account_id)
+    assert child.surface_frozen is True
+    loaded = await agents_service.load_for_session(pool, child, account_id=account_id)
+    assert {tool.type for tool in loaded.tools} == {"bash"}
+
+    grandchild_handle = await _invoke_agent_child(pool, account_id, child.id, broad.id, env_id)
+    grandchild = await service.get_session_basic(
+        pool, grandchild_handle.servicer_id, account_id=account_id
+    )
+    grandchild_agent = await agents_service.load_for_session(
+        pool, grandchild, account_id=account_id
+    )
+    assert {tool.type for tool in grandchild_agent.tools} == {"bash"}

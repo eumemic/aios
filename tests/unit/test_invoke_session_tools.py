@@ -170,6 +170,23 @@ async def test_call_agent_forwards_spawn_parameters_and_inherits_by_default(
     assert kwargs["metadata"] == {"job": 1}
 
 
+@pytest.mark.parametrize("tool_args, expected", [({}, None), ({"vault_ids": []}, [])])
+async def test_call_agent_preserves_omitted_vs_empty_vault_selection(
+    monkeypatch: Any, tool_args: dict[str, Any], expected: list[str] | None
+) -> None:
+    """Omitted means inherit all; an explicit empty list means inherit none."""
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", **tool_args})
+
+    assert inv_mock.await_args.kwargs["vault_ids"] == expected
+
+
 async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
     inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
     monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
