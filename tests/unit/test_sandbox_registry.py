@@ -1455,7 +1455,38 @@ class TestSalvageBreaker:
         assert alert.await_count == 1
         assert self._snapshot_count(backend) == threshold  # unchanged
 
-    async def test_breaker_half_open_recovers_after_cooldown(
+    async def test_repeated_same_cause_escalates_without_half_open_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = FakeBackend()
+        session_id = "sess_deterministic"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        alert = AsyncMock()
+        registry._alert_operator = alert  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+        now = 1000.0
+        monkeypatch.setattr("aios.sandbox.registry.time.monotonic", lambda: now)
+
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses(session_id)
+
+        now += 300.0
+        with pytest.raises(SandboxBackendError, match="deterministic salvage failure") as excinfo:
+            await registry._salvage_session_corpses(session_id)
+
+        assert self._snapshot_count(backend) == threshold
+        assert "fake snapshot failure" in str(excinfo.value)
+        call = alert.await_args
+        assert call is not None
+        content = call.args[1]
+        assert "fake snapshot failure" in content
+        assert f"POST /v1/sessions/{session_id}/sandbox/recycle" in content
+
+    async def test_breaker_half_open_recovers_after_cooldown_when_causes_differ(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         backend = FakeBackend()
@@ -1472,6 +1503,8 @@ class TestSalvageBreaker:
         for _ in range(threshold):
             with pytest.raises(SandboxBackendError):
                 await registry._salvage_session_corpses(session_id)
+        # Model distinct transient causes: no single cause reached threshold.
+        registry._salvage_failure_causes[ref.sandbox_id] = ("latest transient", 1)
         with pytest.raises(SandboxBackendError, match="breaker open"):
             await registry._salvage_session_corpses(session_id)
 
