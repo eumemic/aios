@@ -395,6 +395,9 @@ class SessionUpdate(BaseModel):
         return self
 
 
+SessionOrderBy = Literal["created_at", "last_event_at", "updated_at"]
+
+
 class Session(BaseModel):
     """Read view of a session. Internal-only columns are not exposed.
 

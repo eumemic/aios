@@ -49,6 +49,7 @@ from aios.models.sessions import (
     Outcome,
     Session,
     SessionAwaitResponse,
+    SessionOrderBy,
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
@@ -1135,8 +1136,9 @@ async def list_sessions(
     agent_id: str | None = None,
     status: SessionStatus | None = None,
     parent_run_id: str | None = None,
+    order_by: SessionOrderBy = "created_at",
     limit: int = 50,
-    after: str | None = None,
+    after: tuple[datetime | None, str] | None = None,
 ) -> list[Session]:
     # See ``get_session`` for the rationale on the snapshot wrap.
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
@@ -1145,6 +1147,7 @@ async def list_sessions(
             agent_id=agent_id,
             status=status,
             parent_run_id=parent_run_id,
+            order_by=order_by,
             limit=limit,
             after=after,
             account_id=account_id,
