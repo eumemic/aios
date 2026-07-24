@@ -146,18 +146,18 @@ class TestAgentCreateDuplicateIngressInvariants:
             )
 
     def test_mcp_server_rejects_loopback_url(self) -> None:
-        with pytest.raises(ValidationError, match="private or runtime-local host"):
+        with pytest.raises(ValidationError, match="private, internal, or runtime-local"):
             McpServerSpec(name="local", url="http://127.0.0.1:8080/mcp")
 
     def test_mcp_server_rejects_runtime_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AIOS_URL", "https://runtime.example/v1")
-        with pytest.raises(ValidationError, match="private or runtime-local host"):
+        with pytest.raises(ValidationError, match="private, internal, or runtime-local"):
             McpServerSpec(name="self", url="https://runtime.example/mcp")
 
     def test_mcp_server_private_host_can_be_explicitly_allowlisted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("AIOS_TARGET_URL_ALLOW_HOSTS", "127.0.0.1")
+        monkeypatch.setenv("AIOS_OAUTH_ALLOW_INSECURE_HOSTS", "127.0.0.1")
         assert McpServerSpec(name="dev", url="http://127.0.0.1:9000/mcp").url.endswith("/mcp")
 
     def test_rejects_duplicate_mcp_server_name(self) -> None:

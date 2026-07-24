@@ -109,7 +109,7 @@ class TestTokenEndpointAuth:
 
 class TestTargetUrlSafety:
     def test_rejects_loopback_target(self) -> None:
-        with pytest.raises(ValidationError, match="private or runtime-local host"):
+        with pytest.raises(ValidationError, match="private, internal, or runtime-local"):
             VaultCredentialCreate(
                 auth_type="bearer",
                 target_url="http://127.0.0.1:8080/mcp",
@@ -118,7 +118,7 @@ class TestTargetUrlSafety:
 
     def test_rejects_runtime_target(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AIOS_URL", "https://runtime.example/v1")
-        with pytest.raises(ValidationError, match="private or runtime-local host"):
+        with pytest.raises(ValidationError, match="private, internal, or runtime-local"):
             VaultCredentialCreate(
                 auth_type="bearer",
                 target_url="https://runtime.example/mcp",
