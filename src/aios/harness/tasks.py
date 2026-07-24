@@ -31,11 +31,24 @@
 
     * ``retry=False``: failed jobs land in procrastinate's failed table.
       The periodic sweep catches sessions that need re-waking.
+
+``recycle_sandbox``
+    The one task here that does NOT use ``retry=False``: it is destructive,
+    rate-limited, and has no sweep to re-drive it, so a transient failure must
+    not permanently consume an admitted request. It retries with bounded
+    backoff and records a typed ``sandbox_recycle_failed`` lifecycle event when
+    the budget is exhausted. See the comment above the task.
 """
 
 from __future__ import annotations
 
+from procrastinate import JobContext, RetryStrategy
+
 from aios.jobs.app import app
+from aios.logging import get_logger
+from aios.models.events import SANDBOX_RECYCLE_FAILED_EVENT, SANDBOX_RECYCLED_EVENT
+
+log = get_logger("aios.harness.tasks")
 
 
 @app.task(
@@ -104,3 +117,95 @@ async def wake_workflow(run_id: str) -> None:
     from aios.workflows.step import run_workflow_step
 
     await run_workflow_step(run_id)
+
+
+# Recycle is DESTRUCTIVE and rate-limited: an admitted request must not be
+# silently consumed by a transient Docker/proxy/DB hiccup. So unlike the other
+# harness tasks (``retry=False`` — the sweep re-drives them), the recycle job
+# retries with a bounded exponential backoff and, on the final attempt, records
+# a typed terminal failure event so the outcome is durable and redrivable.
+#
+# Every stage is convergent, so a retry is safe:
+#   * ``inflight.cancel_session`` — idempotent (no in-flight tasks ⇒ no-op),
+#   * ``registry.recycle`` — removes containers/artifacts to a goal state
+#     ("gone"); a partial first attempt just finds less to do the second time,
+#     and the artifact-before-pointer ordering means a crash mid-way never
+#     leaves an unattributable orphan (see ``SandboxRegistry.recycle``),
+#   * ``registry.get_or_provision`` — a normal cold provision.
+_RECYCLE_MAX_ATTEMPTS = 4
+
+recycle_retry = RetryStrategy(
+    max_attempts=_RECYCLE_MAX_ATTEMPTS,
+    exponential_wait=2,  # 2s, 4s, 8s
+)
+
+
+@app.task(
+    name="harness.recycle_sandbox",
+    queue="sessions",
+    retry=recycle_retry,
+    pass_context=True,
+)
+async def recycle_sandbox(context: JobContext, session_id: str, requested_by: str) -> None:
+    """Discard every container/corpse/snapshot and provision fresh current config.
+
+    Emits exactly one terminal lifecycle event per admitted request:
+    ``sandbox_recycled`` on success, or ``sandbox_recycle_failed`` once the
+    retry budget is exhausted — so the 202 the caller already received always
+    resolves to an observable outcome in the journal rather than dead-ending
+    at ``sandbox_recycle_requested``. The failure event carries ``error`` and
+    ``attempts`` and is model-visible-adjacent state a caller/operator can
+    redrive from (the admission limit is per accepted request, so a redrive is
+    a new request; the failure event is what tells anyone it is needed).
+    """
+    from aios.harness import runtime
+    from aios.services import sessions as sessions_service
+
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    attempt = context.job.attempts + 1  # ``attempts`` counts PRIOR failures
+    try:
+        registry = runtime.require_sandbox_registry()
+        inflight = runtime.require_inflight_tool_registry()
+        inflight.cancel_session(session_id)
+        await registry.recycle(session_id)
+        await registry.get_or_provision(session_id, pool=pool)
+    except Exception as exc:
+        if attempt < _RECYCLE_MAX_ATTEMPTS:
+            log.warning(
+                "sandbox.recycle_attempt_failed",
+                session_id=session_id,
+                attempt=attempt,
+                error=str(exc),
+            )
+            raise  # procrastinate re-drives under ``recycle_retry``
+        # Budget exhausted: record the typed terminal failure BEFORE the job
+        # lands in the failed table, so the outcome is durable even though no
+        # further retry will run. The append is best-effort-ordered ahead of
+        # the re-raise; if IT fails too, the raise still surfaces the original.
+        log.error(
+            "sandbox.recycle_failed",
+            session_id=session_id,
+            attempts=attempt,
+            error=str(exc),
+        )
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "lifecycle",
+            {
+                "event": SANDBOX_RECYCLE_FAILED_EVENT,
+                "requested_by": requested_by,
+                "attempts": attempt,
+                "error": str(exc),
+            },
+            account_id=account_id,
+        )
+        raise
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {"event": SANDBOX_RECYCLED_EVENT, "requested_by": requested_by, "attempts": attempt},
+        account_id=account_id,
+    )

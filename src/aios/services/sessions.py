@@ -38,7 +38,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
-from aios.models.events import Event, EventKind
+from aios.models.events import SANDBOX_RECYCLE_REQUESTED_EVENT, Event, EventKind
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -1211,6 +1211,53 @@ async def append_user_message(
             data=data,
             orig_channel=orig_channel,
             account_id=account_id,
+        )
+
+
+async def request_sandbox_recycle(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    requested_by: str,
+    discard_unsalvaged: bool,
+) -> Event:
+    """Atomically admit a recycle and append its typed request event."""
+    if not discard_unsalvaged:
+        raise ValidationError(
+            "discard_unsalvaged must be true; recycle discards sandbox-local state"
+        )
+    limit = get_settings().sandbox_recycle_hourly_limit
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            session_id,
+            account_id,
+        )
+        await queries.get_session_bare(conn, session_id, account_id=account_id)
+        recent = await conn.fetchval(
+            """SELECT count(*) FROM events
+                 WHERE session_id = $1 AND account_id = $2
+                   AND kind = 'lifecycle'
+                   AND data->>'event' = $3
+                   AND created_at >= now() - interval '1 hour'""",
+            session_id,
+            account_id,
+            SANDBOX_RECYCLE_REQUESTED_EVENT,
+        )
+        if int(recent) >= limit:
+            raise RateLimitedError(
+                f"sandbox recycle rate limit exceeded ({limit}/hour); retry later"
+            )
+        return await queries.append_event(
+            conn,
+            session_id=session_id,
+            account_id=account_id,
+            kind="lifecycle",
+            data={
+                "event": SANDBOX_RECYCLE_REQUESTED_EVENT,
+                "requested_by": requested_by,
+            },
         )
 
 

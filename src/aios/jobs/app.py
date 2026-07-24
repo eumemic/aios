@@ -197,6 +197,21 @@ async def defer_wake(
         )
 
 
+async def defer_sandbox_recycle(session_id: str, *, requested_by: str) -> None:
+    """Enqueue one serialized recycle job for a session."""
+    deferrer = app.configure_task(
+        "harness.recycle_sandbox",
+        queue=_polled_queue(QUEUE_SESSIONS),
+        lock=session_id,
+        queueing_lock=f"recycle:{session_id}",
+        priority=_FOREGROUND_PRIORITY,
+    )
+    try:
+        await deferrer.defer_async(session_id=session_id, requested_by=requested_by)
+    except procrastinate_exceptions.AlreadyEnqueued:
+        return
+
+
 async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:
     """Enqueue a ``wake_workflow`` job for a run, swallowing ``AlreadyEnqueued``.
 
