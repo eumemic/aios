@@ -547,6 +547,15 @@ async def connection_discovery_stream(
     skips the snapshot and resumes strictly after its persisted cursor. An
     arm-less subscription retains the v1 snapshot shape, plus the sentinel.
     NOTIFY is only a doorbell: every delivered event is read from the ledger.
+
+    Cursor soundness: ``seq`` is allocated at INSERT time, but
+    ``insert_connection_change`` holds a per-``(account, connector)``
+    transaction-scoped advisory lock from allocation to commit, so within
+    the stream this generator reads, seq order IS commit order. That is
+    what makes "watermark, then replay ``seq > watermark``" lossless: no
+    transaction can commit a seq at or below an already-visible high-water
+    mark, so a change is either in the snapshot, in the replay, or both
+    (duplicates allowed; loss is not).
     """
     allowlist = set(connection_ids) if connection_ids is not None else None
     queue = subscription.queue
@@ -556,12 +565,31 @@ async def connection_discovery_stream(
 
     try:
         async with pool.acquire() as conn:
-            floor = await queries.get_connection_change_floor(conn)
-            high_water = await queries.get_connection_change_high_water(conn)
+            # Both watermarks are scoped to this (account_id, connector)
+            # stream. Per-stream matters twice over: (a) the writer-side
+            # advisory lock in ``insert_connection_change`` only equates
+            # seq order with commit order *within* a stream, so a global
+            # MAX(seq) could stand above an uncommitted lower seq from
+            # another tenant and a watermark based on it would be
+            # meaningless; (b) the pruning watermark is a durable row that
+            # survives the deletes it describes, so the staleness check
+            # below fails CLOSED even after retention has emptied the
+            # ledger (a derived MIN(seq) floor returns NULL then, and
+            # would wave every stale cursor through).
+            pruned_through = await queries.get_connection_change_pruned_through(
+                conn, account_id=account_id, connector=connector
+            )
+            high_water = await queries.get_connection_change_high_water(
+                conn, account_id=account_id, connector=connector
+            )
 
         if arm == "tail":
             assert after_change_seq is not None
-            if floor is not None and after_change_seq < floor - 1:
+            if after_change_seq < pruned_through:
+                # Rows in (after_change_seq, pruned_through] may already be
+                # deleted — replay cannot be proven complete, so tell the
+                # client to re-run ``fresh`` instead of silently resuming
+                # an incomplete view (it must retire nothing on that pass).
                 yield event({"event": "reset"})
                 return
             cursor = after_change_seq

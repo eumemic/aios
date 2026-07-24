@@ -285,6 +285,19 @@ class HttpConnector:
         # An entry is cleared on a clean serve (one that ran past the
         # backoff sleep without immediately failing) and on ``removed``.
         self._reconnect_backoff: dict[str, float] = {}
+        # In-memory discovery resume cursor: the highest ledger
+        # ``change_seq`` this process has observed.  ``None`` means "no
+        # complete view yet" → the next (re)subscribe uses the ``fresh``
+        # arm (cursor event + full snapshot + sentinel).  Non-``None`` →
+        # reconnects use ``tail(after_change_seq=cursor)`` so a restart
+        # of the *stream* (not the container) replays O(Δ) ledger rows
+        # instead of an O(N) snapshot.  A server ``reset`` (cursor below
+        # the pruning horizon) clears it, forcing a fresh re-run — and
+        # per §12.4 nothing may be retired on that pass, which holds
+        # trivially here because the runner never acts on absence at all.
+        # Durable (cross-restart) cursor persistence is the #1906
+        # consumer's job; container restarts simply re-run ``fresh``.
+        self._discovery_cursor: int | None = None
 
     # ── reconnect-backoff tunables (overridable on subclasses) ────────
     #
@@ -923,9 +936,26 @@ class HttpConnector:
         backoff = 1.0
         _signalled_ready = False
         while True:
+            if self._discovery_cursor is None:
+                arm: str | None = "fresh"
+                after_change_seq: int | None = None
+            else:
+                arm = "tail"
+                after_change_seq = self._discovery_cursor
+            got_reset = False
+            # ``fresh`` watermark S₀, buffered until ``snapshot_complete``.
+            # Committing it to ``_discovery_cursor`` early would be a loss
+            # bug: a mid-snapshot disconnect would resume as
+            # ``tail(S₀)`` and permanently skip the snapshot rows that
+            # were never streamed.  Only a *complete* view is a valid
+            # resume point.
+            pending_watermark: int | None = None
             try:
                 async for msg in stream_connection_discovery(
-                    client.get_async_httpx_client(), self.connector
+                    client.get_async_httpx_client(),
+                    self.connector,
+                    arm=arm,
+                    after_change_seq=after_change_seq,
                 ):
                     if msg.event == "_open":
                         # SDK-synthetic marker: the SSE handshake succeeded
@@ -947,7 +977,35 @@ class HttpConnector:
                         continue
                     payload = json.loads(msg.data)
                     event = payload.get("event")
+                    if event == "reset":
+                        # Our tail cursor fell below the server's durable
+                        # pruning horizon: rows we never saw may already be
+                        # deleted, so replay cannot be proven complete.  Drop
+                        # the cursor and immediately re-subscribe ``fresh``
+                        # (cursor → snapshot → sentinel); the per-connection
+                        # idempotence check in ``_on_connection_added`` makes
+                        # the replayed snapshot ``added``s no-ops for workers
+                        # that are already running.  Nothing is torn down on
+                        # this pass — absence in a post-reset view means
+                        # "unknown", never "removed" (§12.4).
+                        log.warning(
+                            "connector.discovery.reset",
+                            connector=self.connector,
+                            stale_cursor=self._discovery_cursor,
+                        )
+                        self._discovery_cursor = None
+                        got_reset = True
+                        break
+                    if event == "cursor":
+                        pending_watermark = int(payload["change_seq"])
+                        continue
                     if event == "snapshot_complete":
+                        if pending_watermark is not None:
+                            # The fresh view is now complete: S₀ becomes the
+                            # resume cursor (everything after the sentinel
+                            # has seq > S₀ and advances it further).
+                            self._discovery_cursor = pending_watermark
+                            pending_watermark = None
                         if not _signalled_ready:
                             _signalled_ready = True
                             self._mark_loop_backfilled()
@@ -958,6 +1016,11 @@ class HttpConnector:
                         await self._on_connection_added(tg, connection_id, external_account_id)
                     elif event == "removed":
                         await self._on_connection_removed(connection_id)
+                    if (seq := payload.get("change_seq")) is not None:
+                        # Advance the resume cursor only AFTER the event is
+                        # fully handled, so a crash between receive and
+                        # handle replays (at-least-once) rather than skips.
+                        self._discovery_cursor = int(seq)
             # Only retry on transport-level errors (timeouts, dropped
             # connections, server restarts). Application-level exceptions
             # — including secrets-fetch failures from
@@ -971,6 +1034,12 @@ class HttpConnector:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
+                continue
+            if got_reset:
+                # Reset is a server-directed recovery, not a failure: the
+                # stream ended cleanly and the very next subscribe (fresh)
+                # is what restores a complete view.  Skip the backoff so
+                # the incomplete-view window stays as small as possible.
                 continue
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)

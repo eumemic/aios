@@ -1225,6 +1225,29 @@ async def insert_connection_change(
     connection_id: str,
     external_account_id: str,
 ) -> int:
+    """Append a row to the sequenced discovery ledger.
+
+    MUST run inside the caller's transaction (the attach/archive transaction
+    that also flips the connection row) — it takes a transaction-scoped
+    advisory lock on the ``(account_id, connector)`` stream *before* the
+    identity ``seq`` is allocated, and holds it until that transaction
+    commits or rolls back.
+
+    The lock is the ledger's core no-loss guarantee: identity values are
+    allocated at INSERT, not commit, so without serialization transaction X
+    can allocate seq=100, stay in flight while Y commits seq=101, and a
+    reader that advanced its cursor to 101 permanently skips 100 when X
+    finally commits.  Holding the per-stream lock across allocation→commit
+    makes seq order equal commit order within a stream, so ``MAX(seq)``
+    visible to any reader implies every lower seq in that stream is also
+    committed and visible.  Cross-stream ordering is deliberately NOT
+    serialized — readers filter on ``(account_id, connector)``, so global
+    interleaving is invisible to them and unrelated tenants never contend.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_connection_changes:{account_id}:{connector}",
+    )
     return int(
         await conn.fetchval(
             """INSERT INTO connection_changes
@@ -1239,13 +1262,79 @@ async def insert_connection_change(
     )
 
 
-async def get_connection_change_high_water(conn: asyncpg.Connection[Any]) -> int:
-    return int(await conn.fetchval("SELECT COALESCE(MAX(seq), 0) FROM connection_changes"))
+async def get_connection_change_high_water(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> int:
+    """Highest committed-and-visible ``seq`` for one ``(account, connector)``
+    stream (0 when the stream has no rows).
+
+    Per-stream on purpose: the commit-order guarantee from
+    :func:`insert_connection_change`'s advisory lock is per-stream, so a
+    global ``MAX(seq)`` could stand above an uncommitted lower seq from a
+    *different* writer in this stream and a ``fresh`` watermark based on it
+    would skip that change.  Scoped to the stream, "visible high water"
+    implies "every lower seq in this stream is visible" — which is what the
+    watermark-before-snapshot ordering in ``connection_discovery_stream``
+    relies on.
+    """
+    return int(
+        await conn.fetchval(
+            """SELECT COALESCE(MAX(seq), 0) FROM connection_changes
+        WHERE account_id = $1 AND connector = $2""",
+            account_id,
+            connector,
+        )
+    )
 
 
-async def get_connection_change_floor(conn: asyncpg.Connection[Any]) -> int | None:
-    value = await conn.fetchval("SELECT MIN(seq) FROM connection_changes")
-    return int(value) if value is not None else None
+async def get_connection_change_pruned_through(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> int:
+    """Durable per-stream pruning watermark: every ledger row with
+    ``seq <= pruned_through_seq`` may have been deleted.
+
+    Returns 0 when the stream has never been pruned.  This deliberately
+    replaces a derived ``MIN(seq)`` floor, which fails OPEN: once retention
+    empties the table ``MIN(seq)`` is NULL and every stale tail cursor would
+    be accepted, silently resuming an incomplete view.  The watermark row
+    survives the deletes it describes (the pruner writes it in the same
+    transaction as its DELETE), so the staleness check keeps working after
+    the last retained row is gone.
+    """
+    return int(
+        await conn.fetchval(
+            """SELECT COALESCE(
+            (SELECT pruned_through_seq FROM connection_change_horizons
+              WHERE account_id = $1 AND connector = $2), 0)""",
+            account_id,
+            connector,
+        )
+    )
+
+
+async def set_connection_change_pruned_through(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str, pruned_through_seq: int
+) -> None:
+    """Advance the durable pruning watermark for one stream (monotonic —
+    ``GREATEST`` guards against a stale pruner run moving it backwards).
+
+    The pruner (#1909) MUST call this in the same transaction as the
+    ``DELETE FROM connection_changes`` it describes; a watermark that could
+    lag its deletes would re-open the fail-open hole this table closes.
+    """
+    await conn.execute(
+        """INSERT INTO connection_change_horizons
+        (account_id, connector, pruned_through_seq, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (account_id, connector) DO UPDATE
+           SET pruned_through_seq = GREATEST(
+                   connection_change_horizons.pruned_through_seq,
+                   EXCLUDED.pruned_through_seq),
+               updated_at = now()""",
+        account_id,
+        connector,
+        pruned_through_seq,
+    )
 
 
 async def list_connection_changes(
