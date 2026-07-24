@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import json
 from collections.abc import Iterator
 from typing import Any
@@ -96,6 +97,13 @@ _SENTINEL_VAULT = "vlt_sentinel_zzz"
 _SENTINEL_ENV = "env_sentinel_zzz"
 _SENTINEL_CUMULATIVE_TOKENS = 161803398874
 _SENTINEL_CUMULATIVE_CLASS_MASS = "sentinel_cumulative_class_mass_zzz"
+_CUMULATIVE_SENTINELS = {
+    "cumulative_messages": 100000000019,
+    "cumulative_text_mass": 100000000033,
+    "cumulative_tool_result_mass": 100000000061,
+    "cumulative_thinking_mass": 100000000069,
+    "cumulative_tool_use_mass": 100000000087,
+}
 # Positive control: a NON-redacted lifecycle payload key that MUST survive
 # into detail_text (proves the leak assertions are not vacuously passing
 # against an empty rendering).
@@ -325,6 +333,12 @@ _EVENTS: list[
             "output_schema": {"marker": _SENTINEL_SCHEMA},
             "vault_ids": [_SENTINEL_VAULT],
             "environment_id": _SENTINEL_ENV,
+            "model": _SENTINEL_MODEL,
+            "model_usage": {"marker": _SENTINEL_USAGE},
+            "local_tokens": _SENTINEL_TOKENS,
+            "local_tokens_by_class": {"marker": _SENTINEL_USAGE},
+            "cost_usd": _SENTINEL_COST,
+            **_CUMULATIVE_SENTINELS,
             "cumulative_tokens": _SENTINEL_CUMULATIVE_TOKENS,
             "cumulative_class_mass": {"marker": _SENTINEL_CUMULATIVE_CLASS_MASS},
             "custom_note": _VISIBLE_DETAIL,
@@ -375,10 +389,42 @@ _EVENTS: list[
         None,
         None,
     ),
+    *[
+        (
+            f"evt_trigger_{index}",
+            "sess_x",
+            15 + index,
+            "lifecycle",
+            {
+                "event": kind,
+                "model": _SENTINEL_MODEL,
+                "model_usage": {"marker": _SENTINEL_USAGE},
+                "local_tokens": _SENTINEL_TOKENS,
+                "local_tokens_by_class": {"marker": _SENTINEL_USAGE},
+                "cost_usd": _SENTINEL_COST,
+                "frozen_surface": _SENTINEL_FROZEN,
+                "output_schema": {"marker": _SENTINEL_SCHEMA},
+                "vault_ids": [_SENTINEL_VAULT],
+                "environment_id": _SENTINEL_ENV,
+                "cumulative_tokens": _SENTINEL_CUMULATIVE_TOKENS,
+                "cumulative_class_mass": _SENTINEL_CUMULATIVE_CLASS_MASS,
+                **_CUMULATIVE_SENTINELS,
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        for index, kind in enumerate(
+            ("trigger_fired", "trigger_disabled", "trigger_enabled"), start=1
+        )
+    ],
     (
         "evt_lc_5",
         "sess_x",
-        16,
+        19,
         "lifecycle",
         {"event": "wake_deferred", "cause": "message"},
         None,
@@ -475,6 +521,7 @@ _DENYLISTED_COLUMNS = frozenset(
         "cost_usd",
         "cumulative_tokens",
         "cumulative_class_mass",
+        *_CUMULATIVE_SENTINELS,
         "frozen_surface",
         "output_schema",
         "vault_ids",
@@ -482,19 +529,43 @@ _DENYLISTED_COLUMNS = frozenset(
     }
 )
 
-# Payload-value sentinels that must never appear in any view output.
-_LEAK_SENTINELS = (
-    _SENTINEL_MODEL,
-    _SENTINEL_USAGE,
-    str(_SENTINEL_TOKENS),
-    str(_SENTINEL_COST),
-    _SENTINEL_FROZEN,
-    _SENTINEL_SCHEMA,
-    _SENTINEL_VAULT,
-    _SENTINEL_ENV,
-    str(_SENTINEL_CUMULATIVE_TOKENS),
-    _SENTINEL_CUMULATIVE_CLASS_MASS,
-)
+# Payload-value sentinels that must never appear in any view output. Keying
+# these by payload field lets the structural test align all three vocabularies.
+_LIFECYCLE_REDACTION_SENTINELS = {
+    "model": _SENTINEL_MODEL,
+    "model_usage": _SENTINEL_USAGE,
+    "local_tokens": str(_SENTINEL_TOKENS),
+    "local_tokens_by_class": _SENTINEL_USAGE,
+    "cost_usd": str(_SENTINEL_COST),
+    "frozen_surface": _SENTINEL_FROZEN,
+    "output_schema": _SENTINEL_SCHEMA,
+    "vault_ids": _SENTINEL_VAULT,
+    "environment_id": _SENTINEL_ENV,
+    "cumulative_tokens": str(_SENTINEL_CUMULATIVE_TOKENS),
+    "cumulative_class_mass": _SENTINEL_CUMULATIVE_CLASS_MASS,
+    **{key: str(value) for key, value in _CUMULATIVE_SENTINELS.items()},
+}
+_LEAK_SENTINELS = tuple(_LIFECYCLE_REDACTION_SENTINELS.values())
+
+
+def test_lifecycle_redaction_vocabulary_alignment() -> None:
+    migration = importlib.import_module("migrations.versions.0153_lifecycle_search_real_counters")
+    projected_payload_keys = {
+        "event",
+        "request_id",
+        "summary",
+        "status",
+        "awaited",
+        "caller",
+        "is_error",
+    }
+    strip_keys = set(migration.REDACTED_KEYS)
+    sentinel_keys = set(_LIFECYCLE_REDACTION_SENTINELS)
+
+    vocabulary_drift = (sentinel_keys ^ (_DENYLISTED_COLUMNS - {"data"})) | (
+        (strip_keys - projected_payload_keys) ^ sentinel_keys
+    )
+    assert not vocabulary_drift
 
 
 @pytest.fixture(scope="module")
@@ -758,7 +829,15 @@ def test_lifecycle_kind_allowlist_fail_closed(db_url: str) -> None:
         _scoped_fetch(db_url, "sess_x", "SELECT * FROM lifecycle_search ORDER BY seq")
     )
     kinds = [r["lifecycle_kind"] for r in rows]
-    assert kinds == ["request_opened", "request_response", "turn_ended", "tool_confirmed"]
+    assert kinds == [
+        "request_opened",
+        "request_response",
+        "turn_ended",
+        "tool_confirmed",
+        "trigger_fired",
+        "trigger_disabled",
+        "trigger_enabled",
+    ]
     assert "wake_deferred" not in kinds  # non-allowlisted kind stays invisible
 
     by_kind = {r["lifecycle_kind"]: r for r in rows}
