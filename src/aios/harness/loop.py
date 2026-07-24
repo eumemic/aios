@@ -74,7 +74,6 @@ from aios.logging import get_logger
 from aios.models.agents import (
     McpServerSpec,
     StepSurface,
-    is_mcp_tool_name,
 )
 from aios.models.events import (
     ERRORED_LIFECYCLE_STATUS,
@@ -1030,23 +1029,14 @@ async def _run_session_step_body(
         inflight_tool_registry=inflight_tool_registry,
     )
     if pending:
-        pending_builtin = [tc for tc in pending if not is_mcp_tool_name(_tc_name(tc))]
-        pending_mcp = [tc for tc in pending if is_mcp_tool_name(_tc_name(tc))]
-        if pending_builtin:
-            launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
-        if pending_mcp:
-            launch_mcp_tool_calls(
-                pool,
-                session_id,
-                pending_mcp,
-                mcp_server_map,
-                focal_channel=session.focal_channel,
-                account_id=account_id,
-            )
-        log.info(
-            "step.confirmed_tools_dispatched",
-            session_id=session_id,
-            count=len(pending),
+        _launch_confirmed_calls(
+            pool,
+            session_id,
+            pending,
+            agent,
+            mcp_server_map,
+            focal_channel=session.focal_channel,
+            account_id=account_id,
         )
         return _StepResult()
 
@@ -1676,6 +1666,7 @@ async def _run_session_step_body(
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
         unknown_mcp: list[dict[str, Any]] = []
+        blocked_mcp: list[dict[str, Any]] = []
 
         for tc in offered_calls:
             kind = _classify_tool_call(tc, agent, mcp_server_map)
@@ -1687,8 +1678,10 @@ async def _run_session_step_body(
                 needs_confirm.append(tc)
             elif kind == "custom":
                 custom.append(tc)
-            else:  # "unknown_mcp"
+            elif kind == "unknown_mcp":
                 unknown_mcp.append(tc)
+            else:  # "mcp_blocked"
+                blocked_mcp.append(tc)
 
         if immediate:
             launch_tool_calls(
@@ -1711,6 +1704,20 @@ async def _run_session_step_body(
         # event for them.  Routing them to immediate dispatch lets the
         # model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
+        if blocked_mcp:
+            # Route disabled / CLI-only model calls to the MCP dispatcher's
+            # existing typed "server not found" error path without contacting
+            # the declared server.
+            launch_mcp_tool_calls(
+                pool,
+                session_id,
+                blocked_mcp,
+                {},
+                focal_channel=session.focal_channel,
+                account_id=account_id,
+                parent_focal_at_arrival=parent_focal,
+            )
+
         if immediate_mcp:
             launch_mcp_tool_calls(
                 pool,
@@ -1819,7 +1826,7 @@ def _tc_name(tc: dict[str, Any]) -> str:
 
 
 type ToolDispatchKind = Literal[
-    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
+    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp", "mcp_blocked"
 ]
 
 
@@ -1827,6 +1834,8 @@ def _classify_tool_call(
     tool_call: dict[str, Any],
     agent: Any,
     mcp_server_map: dict[str, McpServerSpec],
+    *,
+    confirmation_resolved: bool = False,
 ) -> ToolDispatchKind:
     """Classify a tool call into a dispatch bucket.
 
@@ -1850,8 +1859,11 @@ def _classify_tool_call(
     :class:`~aios.harness.tool_disposition.ToolDisposition` values verbatim.
     """
     # Thin projection of the single-source disposition classifier (#1076).
-    # A fresh dispatch is never pre-confirmed, so confirmation_resolved=False;
-    # the loop carries the mcp_server_map and so distinguishes unknown_mcp.
+    # Fresh dispatch is never pre-confirmed (``confirmation_resolved=False``,
+    # the default); the confirmed cold-dispatch path passes ``True`` so an
+    # already-satisfied ``always_ask`` gate projects to an immediate
+    # disposition while the enabled/transport policy still re-applies.
+    # The loop carries the mcp_server_map and so distinguishes unknown_mcp.
     function = tool_call.get("function") or {}
     name: str = function.get("name") or ""
 
@@ -1859,7 +1871,7 @@ def _classify_tool_call(
         name,
         function.get("arguments"),
         agent,
-        confirmation_resolved=False,
+        confirmation_resolved=confirmation_resolved,
         mcp_server_map=mcp_server_map,
     )
     return disposition.value
@@ -2073,6 +2085,76 @@ async def _dispatch_confirmed_tools(
         else:
             dispatch_now.append(tc)
     return dispatch_now
+
+
+def _launch_confirmed_calls(
+    pool: Any,
+    session_id: str,
+    pending: list[dict[str, Any]],
+    agent: Any,
+    mcp_server_map: dict[str, McpServerSpec],
+    *,
+    focal_channel: str | None,
+    account_id: str,
+) -> None:
+    """Re-classify confirmed calls against the CURRENT agent surface, then launch.
+
+    Confirmation is not a policy bypass (#1931 review): an ``always_ask`` MCP
+    call proposed-and-confirmed while its toolset was enabled can have that
+    toolset disabled, removed, or narrowed to ``transport="cli"`` before this
+    cold dispatch runs.  Each confirmed call therefore re-walks the shared
+    disposition classifier (`#1076`) with ``confirmation_resolved=True`` —
+    the satisfied ``always_ask`` gate projects to an immediate disposition,
+    but the CURRENT enabled/transport policy still applies:
+
+    * ``mcp_blocked`` — routed to the MCP dispatcher's typed error path with
+      an EMPTY server map, so the declared server is never contacted;
+    * ``unknown_mcp`` (server un-declared since proposal) — routed through the
+      regular MCP dispatcher, which detects the unknown server and appends a
+      typed ``tool_error`` without contacting anything (same as fresh dispatch);
+    * everything else launches exactly as before.
+    """
+    pending_builtin: list[dict[str, Any]] = []
+    pending_mcp: list[dict[str, Any]] = []
+    pending_blocked_mcp: list[dict[str, Any]] = []
+    for tc in pending:
+        kind = _classify_tool_call(tc, agent, mcp_server_map, confirmation_resolved=True)
+        if kind == "mcp_blocked":
+            pending_blocked_mcp.append(tc)
+        elif kind in ("mcp_immediate", "unknown_mcp"):
+            pending_mcp.append(tc)
+        else:
+            # "immediate" and the degenerate "custom" (unknown bare name —
+            # invoke_builtin resolves it to a typed unknown-tool error, the
+            # same terminal the pre-classification path produced).
+            pending_builtin.append(tc)
+    if pending_builtin:
+        launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
+    if pending_blocked_mcp:
+        launch_mcp_tool_calls(
+            pool,
+            session_id,
+            pending_blocked_mcp,
+            {},
+            focal_channel=focal_channel,
+            account_id=account_id,
+        )
+    if pending_mcp:
+        launch_mcp_tool_calls(
+            pool,
+            session_id,
+            pending_mcp,
+            mcp_server_map,
+            focal_channel=focal_channel,
+            account_id=account_id,
+        )
+    log.info(
+        "step.confirmed_tools_dispatched",
+        session_id=session_id,
+        count=len(pending),
+        blocked_count=len(pending_blocked_mcp),
+        tool_names=[_tc_name(tc) for tc in pending],
+    )
 
 
 async def _append_model_request_error_span(

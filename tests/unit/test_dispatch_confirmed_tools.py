@@ -224,3 +224,192 @@ class TestConfirmThenInterruptGuard:
             )
         assert [tc["id"] for tc in pending] == ["tc_fresh"]
         resolve_mock.assert_awaited_once()
+
+
+class TestLaunchConfirmedCallsReclassification:
+    """Confirmation is not a policy bypass (PR #1931 review finding 1): confirmed
+    cold-dispatch re-walks the shared classifier against the CURRENT agent
+    surface, so a toolset disabled / removed / narrowed to CLI-only between
+    proposal and confirmation is blocked via the typed non-networking error
+    path instead of contacting the MCP server."""
+
+    @staticmethod
+    def _agent(tools: list[Any]) -> Any:
+        from aios.models.agents import AgentBinding, StepSurface
+
+        return StepSurface(
+            model="gpt-test",
+            system="",
+            tools=tools,
+            skills=[],
+            mcp_servers=[],
+            http_servers=[],
+            litellm_extra={},
+            window_min=1,
+            window_max=10,
+            preempt_policy="wait",
+            binding=AgentBinding(agent_id="agt_test", version=1),
+        )
+
+    @staticmethod
+    def _mcp_call(tool_call_id: str = "tc_M") -> dict[str, Any]:
+        return _tool_call(tool_call_id, name="mcp__srv__tool")
+
+    def _launch(
+        self,
+        pending: list[dict[str, Any]],
+        agent: Any,
+        server_map: dict[str, Any],
+    ) -> tuple[MagicMock, MagicMock]:
+        from aios.harness.loop import _launch_confirmed_calls
+
+        builtin_mock = MagicMock()
+        mcp_mock = MagicMock()
+        with (
+            patch("aios.harness.loop.launch_tool_calls", builtin_mock),
+            patch("aios.harness.loop.launch_mcp_tool_calls", mcp_mock),
+        ):
+            _launch_confirmed_calls(
+                MagicMock(),
+                "sess_x",
+                pending,
+                agent,
+                server_map,
+                focal_channel=None,
+                account_id="acc_test_stub",
+            )
+        return builtin_mock, mcp_mock
+
+    def _server_map(self) -> dict[str, Any]:
+        from aios.models.agents import McpServerSpec
+
+        return {"srv": McpServerSpec(name="srv", url="https://mcp.example.test")}
+
+    def test_disabled_between_proposal_and_confirm_is_blocked(self) -> None:
+        """Toolset disabled after the always_ask proposal: the confirmed call
+        goes to the MCP dispatcher with an EMPTY server map (typed error, no
+        contact), never with the real registered server."""
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent(
+            [
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_ask",
+                        "configs": [{"name": "tool", "enabled": False}],
+                    }
+                )
+            ]
+        )
+        builtin_mock, mcp_mock = self._launch([self._mcp_call()], agent, self._server_map())
+        builtin_mock.assert_not_called()
+        mcp_mock.assert_called_once()
+        args = mcp_mock.call_args.args
+        assert [tc["id"] for tc in args[2]] == ["tc_M"]
+        assert args[3] == {}  # empty server map — declared server never contacted
+
+    def test_cli_only_between_proposal_and_confirm_is_blocked(self) -> None:
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent(
+            [
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_ask",
+                        "configs": [{"name": "tool", "transport": "cli"}],
+                    }
+                )
+            ]
+        )
+        builtin_mock, mcp_mock = self._launch([self._mcp_call()], agent, self._server_map())
+        builtin_mock.assert_not_called()
+        assert mcp_mock.call_args.args[3] == {}
+
+    def test_toolset_removed_between_proposal_and_confirm_is_blocked(self) -> None:
+        """The whole mcp_toolset entry removed from agent.tools (while the
+        server stays registered): resolve_mcp_enabled → False → blocked."""
+        agent = self._agent([])
+        builtin_mock, mcp_mock = self._launch([self._mcp_call()], agent, self._server_map())
+        builtin_mock.assert_not_called()
+        assert mcp_mock.call_args.args[3] == {}
+
+    def test_still_enabled_confirmed_call_dispatches_with_real_map(self) -> None:
+        """The happy path is unchanged: an enabled always_ask toolset whose
+        call was confirmed dispatches against the REAL server map — the
+        satisfied gate projects through confirmation_resolved=True (it must
+        NOT re-classify as needs_confirm and stall)."""
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent(
+            [
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_ask",
+                    }
+                )
+            ]
+        )
+        server_map = self._server_map()
+        builtin_mock, mcp_mock = self._launch([self._mcp_call()], agent, server_map)
+        builtin_mock.assert_not_called()
+        mcp_mock.assert_called_once()
+        args = mcp_mock.call_args.args
+        assert [tc["id"] for tc in args[2]] == ["tc_M"]
+        assert args[3] is server_map
+
+    def test_server_undeclared_since_proposal_routes_unknown_mcp(self) -> None:
+        """Server deleted from mcp_servers after proposal: unknown_mcp routes
+        through the regular dispatcher (empty map), which appends the typed
+        unknown-server error without contacting anything."""
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent(
+            [ToolSpec.model_validate({"type": "mcp_toolset", "mcp_server_name": "srv"})]
+        )
+        builtin_mock, mcp_mock = self._launch([self._mcp_call()], agent, {})
+        builtin_mock.assert_not_called()
+        mcp_mock.assert_called_once()
+        assert mcp_mock.call_args.args[3] == {}
+
+    def test_builtin_confirmed_call_still_launches_builtin(self) -> None:
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent([ToolSpec(type="bash", permission="always_ask")])
+        builtin_mock, mcp_mock = self._launch([_tool_call("tc_B", name="bash")], agent, {})
+        mcp_mock.assert_not_called()
+        builtin_mock.assert_called_once()
+        assert [tc["id"] for tc in builtin_mock.call_args.args[2]] == ["tc_B"]
+
+    def test_mixed_batch_partitions_blocked_and_live(self) -> None:
+        from aios.models.agents import ToolSpec
+
+        agent = self._agent(
+            [
+                ToolSpec(type="bash", permission="always_ask"),
+                ToolSpec.model_validate(
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "srv",
+                        "permission": "always_ask",
+                        "configs": [{"name": "tool", "enabled": False}],
+                    }
+                ),
+            ]
+        )
+        builtin_mock, mcp_mock = self._launch(
+            [_tool_call("tc_B", name="bash"), self._mcp_call("tc_M")],
+            agent,
+            self._server_map(),
+        )
+        builtin_mock.assert_called_once()
+        assert [tc["id"] for tc in builtin_mock.call_args.args[2]] == ["tc_B"]
+        mcp_mock.assert_called_once()  # only the blocked branch fired for MCP
+        args = mcp_mock.call_args.args
+        assert [tc["id"] for tc in args[2]] == ["tc_M"]
+        assert args[3] == {}

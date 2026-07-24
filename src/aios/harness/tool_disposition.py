@@ -37,7 +37,12 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from aios.models.agents import is_mcp_tool_name, resolve_permission
+from aios.models.agents import (
+    is_mcp_tool_name,
+    resolve_mcp_enabled,
+    resolve_mcp_transport,
+    resolve_permission,
+)
 from aios.services.agents import effective_mcp_permission
 
 if TYPE_CHECKING:
@@ -58,9 +63,10 @@ class ToolDisposition(Enum):
       not MCP-namespaced): the harness holds it, waiting on the CLIENT.
     * :attr:`UNKNOWN_MCP` — MCP-namespaced tool whose server is not registered
       on the agent: routed to an immediate tool-error so the model
-      self-corrects.  Only distinguishable when an ``mcp_server_map`` is
-      supplied (the dispatch path has one; the read/sweep paths do not and
-      treat an unknown MCP server like any other MCP tool).
+      self-corrects.
+    * :attr:`MCP_BLOCKED` — declared MCP tool disabled for this name or exposed
+      only to the CLI transport: routed to an immediate tool-error without
+      contacting the server.
     """
 
     IMMEDIATE = "immediate"
@@ -68,6 +74,7 @@ class ToolDisposition(Enum):
     NEEDS_CONFIRM = "needs_confirm"
     CUSTOM = "custom"
     UNKNOWN_MCP = "unknown_mcp"
+    MCP_BLOCKED = "mcp_blocked"
 
 
 def classify_tool_call(
@@ -126,6 +133,15 @@ def classify_tool_call(
             server_name = _mcp_server_name(name)
             if server_name is None or server_name not in mcp_server_map:
                 return ToolDisposition.UNKNOWN_MCP
+        # The model path admits only enabled tools whose effective transport
+        # includes ``agent_tool``. The system transport fallback is ``both``.
+        # Keep this distinct from an unregistered server so dispatch can emit a
+        # typed error without contacting a declared-but-disabled server.
+        if (
+            not resolve_mcp_enabled(name, agent.tools)
+            or resolve_mcp_transport(name, agent.tools) == "cli"
+        ):
+            return ToolDisposition.MCP_BLOCKED
         if effective_mcp_permission(name, agent.tools) == "always_allow":
             return ToolDisposition.MCP_IMMEDIATE
         if confirmation_resolved:

@@ -68,9 +68,9 @@ class TestClassifyAwaitingPendingSince:
         assert result.pending_since == PENDING_SINCE
 
     def test_mcp_always_ask_carries_pending_since(self) -> None:
-        # No matching mcp_toolset entry → effective permission defaults to
-        # always_ask, so the mcp call surfaces as awaiting.
-        agent = _make_agent([])
+        agent = _make_agent(
+            [ToolSpec(type="mcp_toolset", mcp_server_name="server", permission="always_ask")]
+        )
         result = _classify_awaiting(_entry("mcp__server__tool"), agent)
         assert result is not None
         assert result.kind == "mcp"
