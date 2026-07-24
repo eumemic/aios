@@ -55,7 +55,7 @@ async def test_fresh_orders_cursor_snapshot_sentinel_then_ledger(
         yield _connection("con_1")
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_floor", AsyncMock(return_value=1)
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
     )
     monkeypatch.setattr(
         "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=7)
@@ -94,7 +94,7 @@ async def test_tail_replays_delta_without_snapshot_and_honours_allowlist(
     snapshot = MagicMock()
     monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", snapshot)
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_floor", AsyncMock(return_value=1)
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
     )
     monkeypatch.setattr(
         "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=1000)
@@ -137,9 +137,9 @@ async def test_tail_replays_delta_without_snapshot_and_honours_allowlist(
     snapshot.assert_not_called()
 
 
-async def test_tail_below_retention_floor_resets(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_tail_below_pruning_watermark_resets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_floor", AsyncMock(return_value=50)
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=50)
     )
     monkeypatch.setattr(
         "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=60)
@@ -152,13 +152,68 @@ async def test_tail_below_retention_floor_resets(monkeypatch: pytest.MonkeyPatch
         await gen.__anext__()
 
 
+async def test_tail_resets_even_when_ledger_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-closed after retention emptied the ledger (review finding #3).
+
+    The durable ``pruned_through`` watermark survives the deletes it
+    describes, so a stale cursor is still detected when zero ledger rows
+    remain — the regime where the old derived ``MIN(seq)`` floor returned
+    ``None`` and waved every cursor through.
+    """
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=100)
+    )
+    # MAX(seq) over an empty stream is 0 — no rows retained at all.
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
+    )
+    gen = connection_discovery_stream(
+        _sub(), _pool(), "matrix", account_id="acct", arm="tail", after_change_seq=10
+    )
+    assert _data(await gen.__anext__()) == {"event": "reset"}
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+
+
+async def test_tail_at_watermark_boundary_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``after_change_seq == pruned_through`` is sound: rows ``<= cursor``
+    were already consumed, so pruning through exactly the cursor loses
+    nothing.  Strictly below it must reset (covered above)."""
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=10)
+    )
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=10)
+    )
+    monkeypatch.setattr(
+        "aios.api.sse.queries.list_connection_changes",
+        AsyncMock(
+            return_value=[
+                {
+                    "seq": 11,
+                    "kind": "added",
+                    "connection_id": "con_a",
+                    "external_account_id": "x",
+                }
+            ]
+        ),
+    )
+    gen = connection_discovery_stream(
+        _sub(), _pool(), "matrix", account_id="acct", arm="tail", after_change_seq=10
+    )
+    first = _data(await gen.__anext__())
+    await gen.aclose()  # type: ignore[attr-defined]
+    assert first["event"] == "added"
+    assert first["change_seq"] == 11
+
+
 async def test_v1_emits_snapshot_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     async def empty(*args: object, **kwargs: object) -> AsyncGenerator[Connection]:
         return
         yield
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_floor", AsyncMock(return_value=None)
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
     )
     monkeypatch.setattr(
         "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
