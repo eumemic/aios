@@ -21,7 +21,10 @@ import pytest
 
 from aios.harness.completion import ModelCallDeadlineError
 from aios.harness.loop import (
+    _CONTEXT_OVERFLOW_SHRINK_BASE,
     _RETRY_BACKOFF_SECONDS,
+    _STREAK_TRANSPARENT_LIFECYCLE_EVENTS,
+    _apply_context_overflow_retry,
     _count_consecutive_context_overflow,
     _count_consecutive_rescheduling,
     _is_terminal_model_error,
@@ -235,7 +238,7 @@ def mock_step_dependencies() -> Any:
         patch(
             "aios.harness.loop.sessions_service.read_windowed_events",
             AsyncMock(return_value=WindowedEvents(events=[], omission=None)),
-        ),
+        ) as read_windowed_events_mock,
         patch(
             "aios.harness.loop._dispatch_confirmed_tools",
             AsyncMock(return_value=[]),
@@ -292,6 +295,8 @@ def mock_step_dependencies() -> Any:
             fail_all_open_requests=fail_all_open_requests_mock,
             stream_litellm=stream_litellm_mock,
             increment_usage=increment_usage_mock,
+            read_windowed_events=read_windowed_events_mock,
+            session=session,
         )
 
 
@@ -681,6 +686,72 @@ class TestRunSessionStepOnContextOverflow:
         )
         mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "error_class,message",
+        [
+            (
+                litellm_exceptions.BadGatewayError,
+                "Your input exceeds the context window of this model",
+            ),
+            (litellm_exceptions.ServiceUnavailableError, "input exceeds context window"),
+        ],
+    )
+    async def test_gateway_wrapped_overflow_uses_adaptive_recovery(
+        self,
+        mock_step_dependencies: Any,
+        error_class: Any,
+        message: str,
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(502, request=request)
+        mock_step_dependencies.stream_litellm.side_effect = error_class(
+            message=message,
+            model="x",
+            llm_provider="gateway",
+            response=response,
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=0),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_awaited_once_with(
+            ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
+        )
+        lifecycle_payloads = [
+            call.args[3] for call in mock_step_dependencies.append_event.call_args_list
+        ]
+        assert {
+            "event": "adaptive_context_truncation",
+            "axis": "tokens",
+            "shrink_factor": 0.8,
+        } in lifecycle_payloads
+        mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+    async def test_adaptive_retry_drops_configured_window_band(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.session.stop_reason = {
+            "type": "rescheduling",
+            "context_overflow": True,
+            "context_shrink_factor": 0.8,
+        }
+        mock_step_dependencies.stream_litellm.side_effect = _make_litellm_error(
+            litellm_exceptions.ContextWindowExceededError
+        )
+
+        with patch(
+            "aios.harness.loop._count_consecutive_context_overflow",
+            AsyncMock(return_value=1),
+        ):
+            await run_session_step("sess_x")
+
+        read_call = mock_step_dependencies.read_windowed_events.await_args
+        assert read_call.kwargs["window_min"] == 0
+        assert read_call.kwargs["window_max"] == 8_000
+
     async def test_repeated_overflow_shrinks_progressively_and_is_not_verbatim(
         self, mock_step_dependencies: Any
     ) -> None:
@@ -772,3 +843,176 @@ class TestCountConsecutiveContextOverflow:
                 )
                 == 0
             )
+
+
+def _turn_ended(stop_reason: str) -> SimpleNamespace:
+    return SimpleNamespace(data={"event": "turn_ended", "stop_reason": stop_reason})
+
+
+def _adaptive_truncation(shrink_factor: float) -> SimpleNamespace:
+    """The diagnostic breadcrumb ``_apply_context_overflow_retry`` writes
+    immediately BEFORE each overflow ``turn_ended``."""
+    return SimpleNamespace(
+        data={
+            "event": "adaptive_context_truncation",
+            "axis": "tokens",
+            "shrink_factor": shrink_factor,
+        }
+    )
+
+
+def _overflow_log_newest_first(attempts: int) -> list[SimpleNamespace]:
+    """Realistic newest-first lifecycle tail after ``attempts`` overflow retries.
+
+    Each retry writes ``adaptive_context_truncation`` then ``turn_ended``, so
+    newest-first the pairs come back (turn_ended, adaptive), interleaved.
+    """
+    events: list[SimpleNamespace] = []
+    for n in range(attempts, 0, -1):
+        events.append(_turn_ended("context_overflow"))
+        events.append(_adaptive_truncation(round(_CONTEXT_OVERFLOW_SHRINK_BASE**n, 4)))
+    return events
+
+
+class TestOverflowStreakSurvivesDiagnosticEvents:
+    """Regression for the #2010 review block: the ``adaptive_context_truncation``
+    breadcrumb sits between consecutive overflow ``turn_ended`` events. If the
+    streak counter treats it as a streak breaker, every attempt past the second
+    reads 1 — the shrink factor sticks at 0.64 and the backoff never reaches the
+    end of the ladder, so an oversized prompt retries FOREVER instead of latching
+    errored. These tests drive the real counter (no mock) over a realistic log.
+    """
+
+    @pytest.mark.parametrize("attempts", [1, 2, 3, 4])
+    async def test_counter_ignores_interleaved_diagnostics(self, attempts: int) -> None:
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=_overflow_log_newest_first(attempts)),
+        ):
+            assert (
+                await _count_consecutive_context_overflow(
+                    pool, "sess_x", account_id="acc_test_stub"
+                )
+                == attempts
+            )
+
+    async def test_read_limit_covers_a_full_interleaved_streak(self) -> None:
+        """The read window must be wide enough to hold the whole ladder PLUS its
+        interleaved diagnostics; otherwise a live streak is silently truncated
+        and the ladder stalls just as surely as a miscount would."""
+        pool = MagicMock()
+        read_events = AsyncMock(return_value=_overflow_log_newest_first(4))
+        with patch("aios.harness.loop.sessions_service.read_events", read_events):
+            await _count_consecutive_context_overflow(pool, "sess_x", account_id="acc_test_stub")
+        await_args = read_events.await_args
+        assert await_args is not None
+        limit = await_args.kwargs["limit"]
+        # Full ladder + the terminal attempt, each with its diagnostic breadcrumb.
+        assert limit >= (len(_RETRY_BACKOFF_SECONDS) + 1) * 2
+
+    async def test_real_turn_boundary_still_breaks_the_streak(self) -> None:
+        """The fix must skip ONLY the diagnostic event — a genuine intervening
+        turn outcome still resets the ladder (overflow after real progress is a
+        fresh incident, not attempt N+1)."""
+        events_newest_first = [
+            _turn_ended("context_overflow"),
+            _adaptive_truncation(0.8),
+            _turn_ended("end_turn"),
+            _adaptive_truncation(0.64),
+            _turn_ended("context_overflow"),
+        ]
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=events_newest_first),
+        ):
+            assert (
+                await _count_consecutive_context_overflow(
+                    pool, "sess_x", account_id="acc_test_stub"
+                )
+                == 1
+            )
+
+    async def test_rescheduling_streak_also_survives_diagnostics(self) -> None:
+        """The transparency lives in the shared helper, so the sibling
+        transient-error counter gets the same treatment."""
+        events_newest_first = [
+            _turn_ended("rescheduling"),
+            _adaptive_truncation(0.8),
+            _turn_ended("rescheduling"),
+        ]
+        pool = MagicMock()
+        with patch(
+            "aios.harness.loop.sessions_service.read_events",
+            AsyncMock(return_value=events_newest_first),
+        ):
+            assert (
+                await _count_consecutive_rescheduling(pool, "sess_x", account_id="acc_test_stub")
+                == 2
+            )
+
+    async def test_diagnostic_event_is_declared_streak_transparent(self) -> None:
+        assert "adaptive_context_truncation" in _STREAK_TRANSPARENT_LIFECYCLE_EVENTS
+
+
+class TestOverflowLadderProgressesToExhaustion:
+    """End-to-end over the ladder: walk the real counter and the real applier
+    together across every attempt and assert the shrink factor keeps tightening,
+    the backoff keeps lengthening, and the session finally latches errored."""
+
+    async def test_ladder_tightens_each_attempt_then_latches_errored(self) -> None:
+        pool = MagicMock()
+        appended: list[dict[str, Any]] = []
+        stop_reasons: list[dict[str, Any]] = []
+
+        async def _append_event(_pool: Any, _sid: str, _kind: str, data: Any, **_kw: Any) -> None:
+            appended.append(data)
+
+        async def _set_stop_reason(_pool: Any, _sid: str, data: Any, **_kw: Any) -> None:
+            stop_reasons.append(data)
+
+        # The log grows exactly as production writes it: every applier call
+        # appends its diagnostic + turn_ended, and the counter reads it back.
+        async def _read_events(*_a: Any, limit: int = 200, **_kw: Any) -> list[SimpleNamespace]:
+            tail = [SimpleNamespace(data=d) for d in appended]
+            return list(reversed(tail))[:limit]
+
+        latched: list[str] = []
+
+        async def _latch(_pool: Any, _sid: str, *, error_kind: str, **_kw: Any) -> None:
+            latched.append(error_kind)
+
+        delays: list[float | None] = []
+        with (
+            patch("aios.harness.loop.sessions_service.read_events", _read_events),
+            patch("aios.harness.loop.sessions_service.append_event", _append_event),
+            patch("aios.harness.loop.sessions_service.set_session_stop_reason", _set_stop_reason),
+            patch("aios.harness.loop._latch_errored_turn", _latch),
+        ):
+            # One call per rung of the ladder, plus one past the end.
+            for _ in range(len(_RETRY_BACKOFF_SECONDS) + 1):
+                delays.append(
+                    await _apply_context_overflow_retry(pool, "sess_x", account_id="acc_test_stub")
+                )
+
+        # Every rung retried on its own (strictly increasing) backoff...
+        assert delays[:-1] == _RETRY_BACKOFF_SECONDS
+        # ...and the budget is spent exactly once, landing terminal.
+        assert delays[-1] is None
+        assert latched == ["context_overflow"]
+
+        # The shrink factor tightened on EVERY attempt — never stuck at 0.64.
+        shrinks = [
+            d["shrink_factor"] for d in appended if d.get("event") == "adaptive_context_truncation"
+        ]
+        assert shrinks == [
+            round(_CONTEXT_OVERFLOW_SHRINK_BASE ** (n + 1), 4)
+            for n in range(len(_RETRY_BACKOFF_SECONDS))
+        ]
+        assert shrinks == sorted(shrinks, reverse=True)
+        assert len(set(shrinks)) == len(shrinks)
+
+        # The stop_reason handed to the next build tracked the same ladder.
+        overflow_stops = [s for s in stop_reasons if s.get("context_overflow") is True]
+        assert [s["context_shrink_factor"] for s in overflow_stops] == shrinks
