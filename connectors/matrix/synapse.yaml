@@ -1,0 +1,11 @@
+# Overlay these settings onto the fleet homeserver's homeserver.yaml.
+app_service_config_files:
+  - /data/aios-matrix-registration.yaml
+
+# Closed federation. Add explicitly trusted domains here if required.
+federation_domain_whitelist: {}
+allow_profile_lookup_over_federation: false
+
+# Fleet-wide: humans also automatically forget rooms when leaving.
+forget_rooms_on_leave: true
+forgotten_room_retention_period: 28d

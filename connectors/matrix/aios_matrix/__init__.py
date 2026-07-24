@@ -1,0 +1,1 @@
+"""Matrix appservice receiver."""

@@ -1,0 +1,12 @@
+id: aios-matrix
+url: http://matrix:29328
+as_token: CHANGE_ME_AS_TOKEN
+hs_token: CHANGE_ME_HS_TOKEN
+sender_localpart: _aios
+rate_limited: true
+namespaces:
+  users:
+    - exclusive: true
+      regex: '^@_aios_agent_[a-z0-9]+:your\.server$'
+  aliases: []
+  rooms: []

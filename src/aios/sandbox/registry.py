@@ -36,7 +36,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
@@ -144,9 +144,8 @@ class SessionSnapshotState:
 
     A session *absent* from the GC's state map is **deleted** — its snapshot
     is collectible without an event (the model is gone). Canonical filesystem
-    state for an existing session is protected until the session is archived
-    and its archive grace interval has elapsed. ``last_event_at`` remains in
-    the query shape for accounting compatibility; it is not a lifecycle gate.
+    state for an existing session is protected until the session is archived.
+    ``last_event_at`` remains in the query shape for accounting compatibility; it is not a lifecycle gate.
     """
 
     session_id: str
@@ -159,7 +158,7 @@ class SessionSnapshotState:
 
 
 _GcVerdict = Literal["retain", "remove"]
-_GcReason = Literal["protected_live", "archive_grace", "archived", "deleted", "residue"]
+_GcReason = Literal["protected_live", "archived", "deleted", "residue"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,21 +191,10 @@ class GcPressureResult:
 PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
 
 
-def _archive_eligible(
-    state: SessionSnapshotState, now: datetime, archive_grace_seconds: int
-) -> bool:
-    """Whether current state crossed the sole destructive lifecycle boundary."""
-    return state.archived_at is not None and now >= state.archived_at + timedelta(
-        seconds=archive_grace_seconds
-    )
-
-
 def _classify_images(
     images: list[ManagedImage],
     states: dict[str, SessionSnapshotState],
     *,
-    now: datetime,
-    archive_grace_seconds: int,
     this_host: str,
 ) -> list[GcImageVerdict]:
     """Classify canonical state by archive lifecycle; residue stays collectible."""
@@ -224,10 +212,8 @@ def _classify_images(
             if state.archived_at is None:
                 verdict: _GcVerdict = "retain"
                 reason: _GcReason = "protected_live"
-            elif _archive_eligible(state, now, archive_grace_seconds):
-                verdict, reason = "remove", "archived"
             else:
-                verdict, reason = "retain", "archive_grace"
+                verdict, reason = "remove", "archived"
         elif is_canonical:
             verdict, reason = "remove", "deleted"
         else:
@@ -2005,13 +1991,9 @@ class SandboxRegistry:
         verdicts = _classify_images(
             images,
             image_states,
-            now=now,
-            archive_grace_seconds=settings.sandbox_archive_gc_grace_seconds,
             this_host=instance_id,
         )
-        retained = await self._gc_image_pass(
-            verdicts, image_states, now, settings.sandbox_archive_gc_grace_seconds, instance_id
-        )
+        retained = await self._gc_image_pass(verdicts, image_states, instance_id)
 
         # Pass 3 — per-host pool budget.
         pool_pressure = await self._gc_pool_budget_pass(
@@ -2065,7 +2047,7 @@ class SandboxRegistry:
 
         The tick-start ``states`` snapshot can be stale across archive,
         unarchive, or rearchive. Re-reading under the lock proves the lifecycle
-        timestamp, grace boundary, pointer, and ownership used by a destructive
+        timestamp, pointer, and ownership used by a destructive
         decision. ``None`` means deleted and is collectible only on paths whose
         contract explicitly permits deleted-session cleanup.
         """
@@ -2084,8 +2066,8 @@ class SandboxRegistry:
     ) -> None:
         """Salvage (or drop) every managed container that isn't a live cached handle.
 
-        Retain rule first: a deleted or archived-past-grace session's corpse is
-        removed WITHOUT paying a commit; every other existing session is
+        Retain rule first: a deleted or archived session's corpse is removed
+        WITHOUT paying a commit; every non-archived existing session is
         salvaged (committed) and then removed. Best-effort — a snapshot failure leaves the corpse for
         the next tick (the GC never raises). Each corpse is handled under the
         per-session lock with the cached-handle re-check.
@@ -2116,10 +2098,8 @@ class SandboxRegistry:
                 # ── session corpse: lifecycle rule + under-lock re-verify ──
                 state = states.get(sid)
                 fresh = await self._fresh_session_state(sid)
-                keep_fs = fresh is not None and not _archive_eligible(
-                    fresh, now, settings.sandbox_archive_gc_grace_seconds
-                )
-                # Archived-past-grace destruction requires the exact timestamp
+                keep_fs = fresh is not None and fresh.archived_at is None
+                # Archived destruction requires the exact timestamp
                 # seen by the scan. Any lifecycle race fails closed.
                 if (
                     not keep_fs
@@ -2135,15 +2115,13 @@ class SandboxRegistry:
                         await self._backend.force_remove(ref.sandbox_id)
                     # else: snapshot failed — leave the corpse for the next tick.
                 else:
-                    # Deleted/dormant: remove without paying a commit.
+                    # Deleted/archived: remove without paying a commit.
                     await self._backend.force_remove(ref.sandbox_id)
 
     async def _gc_image_pass(
         self,
         verdicts: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
-        now: datetime,
-        archive_grace_seconds: int,
         instance_id: str,
     ) -> list[GcImageVerdict]:
         """Remove every non-retained image (under per-session locks); return the retained."""
@@ -2173,7 +2151,7 @@ class SandboxRegistry:
                         candidate is None
                         or fresh is None
                         or fresh.archived_at != candidate.archived_at
-                        or not _archive_eligible(fresh, now, archive_grace_seconds)
+                        or fresh.archived_at is None
                         or fresh.snapshot_ref != v.removal_ref
                         or fresh.snapshot_host != instance_id
                     ):

@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]  # types-PyYAML not in the dep set
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WF = _REPO_ROOT / ".github" / "workflows" / "phantom-ref-canary.yml"
