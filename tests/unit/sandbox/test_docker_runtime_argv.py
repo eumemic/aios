@@ -45,7 +45,9 @@ def _runtime_values(argv: list[str]) -> list[str]:
 async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
-    async def fake_run(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
         return 0, b"deadbeefcafe\n", b""
@@ -60,7 +62,9 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
-    async def fake_run(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
         return 0, b"deadbeefcafe\n", b""

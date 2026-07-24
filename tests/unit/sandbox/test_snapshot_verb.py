@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 from collections import namedtuple
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from aios.config import get_settings
-from aios.sandbox.backends.base import SandboxBackendError
+from aios.sandbox.backends.base import SandboxBackendError, SandboxSnapshotTimeoutError
 from aios.sandbox.backends.docker import _FLATTEN_DEPTH_CEILING, DockerBackend
 
 _Usage = namedtuple("_Usage", ["total", "used", "free"])
@@ -51,7 +52,9 @@ class _FakeDocker:
         # size-scaled timeout.
         self.pipeline_timeouts: list[tuple[float, float]] = []
 
-    async def cli(self, argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def cli(
+        self, argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         self.calls.append(argv)
         self.cli_timeouts.append((argv, timeout_s))
         sub = argv[1]
@@ -106,8 +109,11 @@ class _FakeDocker:
 
 
 @pytest.fixture
-def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
+def fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDocker:
     fd = _FakeDocker()
+    monkeypatch.setattr(
+        get_settings(), "sandbox_snapshot_throughput_state_path", tmp_path / "throughput.json"
+    )
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fd.cli)
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_pipeline", fd.pipeline)
     # Default to abundant free disk so flatten-path tests are deterministic;
@@ -238,7 +244,7 @@ class TestSnapshotTimeoutBudget:
         commit_timeout = next(
             timeout for argv, timeout in fake_docker.cli_timeouts if argv[1] == "commit"
         )
-        assert commit_timeout == 240.0
+        assert commit_timeout == 480.0
 
     @pytest.mark.asyncio
     async def test_inspect_size_walk_gets_generous_timeout(self, fake_docker: _FakeDocker) -> None:
@@ -427,7 +433,169 @@ class TestFlattenDiskGate:
         assert out.kind == "flattened"
         assert fake_docker.pipelines, "a large corpse must flatten via the pipeline"
         settings = get_settings()
-        budget = max(60.0, size_rw * 20e-9)
+        budget = max(60.0, size_rw * 20e-9) * 2.0
         assert fake_docker.pipeline_timeouts == [
             (min(settings.sandbox_pipeline_stall_seconds, budget), budget)
         ]
+
+
+# ── timeout retry-state lifecycle (#2009 review) ─────────────────────────────
+
+
+class TestTimeoutRetryStateCleared:
+    """Every SUCCESSFUL snapshot outcome must clear the corpse's timeout-retry
+    entry — not just the commit/flatten paths.
+
+    The normal timeout recovery is ``docker commit`` completing server-side
+    while the client's deadline fires: the retry then observes the advanced
+    tag and returns ``skipped_stale`` (or ``skipped_empty``) from an early
+    return, and the corpse is removed immediately after. If those paths didn't
+    clear the entry, nothing ever could — the container is gone — so
+    ``_snapshot_timeout_attempts`` would grow one stranded entry per
+    successfully-salvaged timeout corpse for the lifetime of the worker.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_then_skipped_stale_clears_retry_state(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = DockerBackend()
+        fake_docker.size_rw = 12_000_000_000
+        fake_docker.parent_image = "img_S1"
+
+        real_cli = fake_docker.cli
+
+        async def timing_out_commit(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            if argv[1] == "commit":
+                raise SandboxSnapshotTimeoutError(f"docker cli timed out after {timeout_s}s")
+            return await real_cli(argv, timeout_s=timeout_s, snapshot_timeout=snapshot_timeout)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", timing_out_commit)
+
+        with pytest.raises(SandboxSnapshotTimeoutError):
+            await backend.snapshot(
+                "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+            )
+        assert backend._snapshot_timeout_attempts["cid"] == 1, "a timeout must escalate the budget"
+
+        # The commit actually landed daemon-side: the tag has moved past the
+        # corpse's parent, so the retry takes the lineage-gate early return.
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", real_cli)
+        fake_docker.images["tag:latest"] = {
+            "id": "img_S2",
+            "size": 700_000,
+            "depth": 3,
+            "labels": {},
+        }
+
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "skipped_stale"
+        assert "cid" not in backend._snapshot_timeout_attempts, (
+            "skipped_stale is a successful salvage — it must not strand retry state"
+        )
+        assert backend._snapshot_timeout_attempts == {}
+
+    @pytest.mark.asyncio
+    async def test_timeout_then_skipped_empty_clears_retry_state(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = DockerBackend()
+        fake_docker.size_rw = 12_000_000_000
+
+        real_cli = fake_docker.cli
+
+        async def timing_out_commit(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            if argv[1] == "commit":
+                raise SandboxSnapshotTimeoutError(f"docker cli timed out after {timeout_s}s")
+            return await real_cli(argv, timeout_s=timeout_s, snapshot_timeout=snapshot_timeout)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", timing_out_commit)
+
+        with pytest.raises(SandboxSnapshotTimeoutError):
+            await backend.snapshot(
+                "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+            )
+        assert backend._snapshot_timeout_attempts["cid"] == 1
+
+        # Retry against a corpse whose writable layer is at/below the floor →
+        # the identity short-circuit early return.
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", real_cli)
+        fake_docker.size_rw = 4096
+
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "skipped_empty"
+        assert not _committed(fake_docker)
+        assert "cid" not in backend._snapshot_timeout_attempts, (
+            "skipped_empty is a successful salvage — it must not strand retry state"
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeated_timeouts_escalate_then_success_clears(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Consecutive timeouts accumulate (escalating the budget); the first
+        successful outcome settles the entry back to empty."""
+        backend = DockerBackend()
+        fake_docker.size_rw = 12_000_000_000
+        real_cli = fake_docker.cli
+        commit_timeouts: list[float] = []
+
+        async def timing_out_commit(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            if argv[1] == "commit":
+                commit_timeouts.append(timeout_s)
+                raise SandboxSnapshotTimeoutError(f"docker cli timed out after {timeout_s}s")
+            return await real_cli(argv, timeout_s=timeout_s, snapshot_timeout=snapshot_timeout)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", timing_out_commit)
+        for expected_attempts in (1, 2, 3):
+            with pytest.raises(SandboxSnapshotTimeoutError):
+                await backend.snapshot(
+                    "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+                )
+            assert backend._snapshot_timeout_attempts["cid"] == expected_attempts
+
+        assert commit_timeouts == sorted(commit_timeouts), "each retry must get a larger budget"
+        assert commit_timeouts[1] > commit_timeouts[0]
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", real_cli)
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "committed"
+        assert backend._snapshot_timeout_attempts == {}
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_failure_leaves_retry_state_untouched(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only typed snapshot timeouts escalate. A generic backend error is a
+        retained-corpse failure that must neither escalate nor clear."""
+        backend = DockerBackend()
+        fake_docker.size_rw = 12_000_000_000
+        real_cli = fake_docker.cli
+
+        async def failing_commit(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            if argv[1] == "commit":
+                return 1, b"", b"no space left on device"
+            return await real_cli(argv, timeout_s=timeout_s, snapshot_timeout=snapshot_timeout)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", failing_commit)
+        with pytest.raises(SandboxBackendError):
+            await backend.snapshot(
+                "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+            )
+        assert "cid" not in backend._snapshot_timeout_attempts
