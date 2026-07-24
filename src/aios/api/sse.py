@@ -27,6 +27,8 @@ let it propagate.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import weakref
 from typing import TYPE_CHECKING, Any
@@ -535,83 +537,102 @@ async def connection_discovery_stream(
     *,
     account_id: str,
     connection_ids: list[str] | None = None,
+    arm: str | None = None,
+    after_change_seq: int | None = None,
 ) -> AsyncIterator[ServerSentEvent]:
-    """Yield ``added`` SSE events backfilling every active connection of
-    ``connector`` type, then ``added`` / ``removed`` events as connections
-    are attached or archived (#328 PR 5).
+    """Stream a durable connection view.
 
-    Backs the runtime container's connection-discovery loop: it
-    subscribes once, walks the ``added`` events to spawn per-connection
-    workers, and tears workers down on ``removed`` events.  The emit
-    side lives in :mod:`aios.services.connections.attach_connection` /
-    ``archive_connection``.
+    ``fresh`` captures a ledger high-water mark, snapshots active rows, emits
+    the completeness sentinel, then replays changes after that mark. ``tail``
+    skips the snapshot and resumes strictly after its persisted cursor. An
+    arm-less subscription retains the v1 snapshot shape, plus the sentinel.
+    NOTIFY is only a doorbell: every delivered event is read from the ledger.
 
-    When ``connection_ids`` is non-``None`` (#350), the backfill and
-    tail both filter to that allowlist — out-of-scope IDs are silently
-    skipped in either phase so the runtime container's discovery loop
-    just doesn't see them.
+    Cursor soundness: ``seq`` is allocated at INSERT time, but
+    ``insert_connection_change`` holds a per-``(account, connector)``
+    transaction-scoped advisory lock from allocation to commit, so within
+    the stream this generator reads, seq order IS commit order. That is
+    what makes "watermark, then replay ``seq > watermark``" lossless: no
+    transaction can commit a seq at or below an already-visible high-water
+    mark, so a change is either in the snapshot, in the replay, or both
+    (duplicates allowed; loss is not).
     """
     allowlist = set(connection_ids) if connection_ids is not None else None
     queue = subscription.queue
-    try:
-        emitted_added: set[str] = set()
 
-        # Backfill every active connection of this type. ``iter_all_connections``
-        # keyset-paginates internally (acquiring/releasing the pool per page),
-        # so this fan-out can't silently under-count for runtimes with more
-        # than the default page of connections — and we don't re-roll the loop.
-        async for connection in connections_service.iter_all_connections(
-            pool, connector=connector, account_id=account_id
-        ):
-            if allowlist is not None and connection.id not in allowlist:
-                continue
-            emitted_added.add(connection.id)
-            yield ServerSentEvent(
-                data=json.dumps(
+    def event(data: dict[str, Any]) -> ServerSentEvent:
+        return ServerSentEvent(data=json.dumps(data), event="connection")
+
+    try:
+        async with pool.acquire() as conn:
+            # Both watermarks are scoped to this (account_id, connector)
+            # stream. Per-stream matters twice over: (a) the writer-side
+            # advisory lock in ``insert_connection_change`` only equates
+            # seq order with commit order *within* a stream, so a global
+            # MAX(seq) could stand above an uncommitted lower seq from
+            # another tenant and a watermark based on it would be
+            # meaningless; (b) the pruning watermark is a durable row that
+            # survives the deletes it describes, so the staleness check
+            # below fails CLOSED even after retention has emptied the
+            # ledger (a derived MIN(seq) floor returns NULL then, and
+            # would wave every stale cursor through).
+            pruned_through = await queries.get_connection_change_pruned_through(
+                conn, account_id=account_id, connector=connector
+            )
+            high_water = await queries.get_connection_change_high_water(
+                conn, account_id=account_id, connector=connector
+            )
+
+        if arm == "tail":
+            assert after_change_seq is not None
+            if after_change_seq < pruned_through:
+                # Rows in (after_change_seq, pruned_through] may already be
+                # deleted — replay cannot be proven complete, so tell the
+                # client to re-run ``fresh`` instead of silently resuming
+                # an incomplete view (it must retire nothing on that pass).
+                yield event({"event": "reset"})
+                return
+            cursor = after_change_seq
+        else:
+            cursor = high_water
+            if arm == "fresh":
+                yield event({"event": "cursor", "change_seq": cursor})
+            async for connection in connections_service.iter_all_connections(
+                pool, connector=connector, account_id=account_id
+            ):
+                if allowlist is not None and connection.id not in allowlist:
+                    continue
+                yield event(
                     {
                         "event": "added",
                         "connection_id": connection.id,
                         "external_account_id": connection.external_account_id,
                     }
-                ),
-                event="connection",
-            )
+                )
+            yield event({"event": "snapshot_complete"})
 
         while True:
-            raw = await queue.get()
-            try:
-                payload = json.loads(raw)
-                event = payload["event"]
-                connection_id = payload["connection_id"]
-                event_account_id = payload["account_id"]
-                external_account_id = payload["external_account_id"]
-            except (json.JSONDecodeError, KeyError, TypeError):
-                log.warning("sse.discovery.malformed_payload", payload=raw)
-                continue
-            # Tenant isolation: a runtime token scopes a subscriber to one
-            # tenant; the named account_id field cannot be displaced by any
-            # other field's contents (no positional encoding), so this gate
-            # is correct by construction, not by field ordering.
-            if event_account_id != account_id:
-                continue
-            if allowlist is not None and connection_id not in allowlist:
-                continue
-            if event == "added" and connection_id in emitted_added:
-                continue
-            if event == "added":
-                emitted_added.add(connection_id)
-            elif event == "removed":
-                emitted_added.discard(connection_id)
-            yield ServerSentEvent(
-                data=json.dumps(
+            async with pool.acquire() as conn:
+                changes = await queries.list_connection_changes(
+                    conn, account_id=account_id, connector=connector, after_seq=cursor
+                )
+            for change in changes:
+                cursor = int(change["seq"])
+                if allowlist is not None and change["connection_id"] not in allowlist:
+                    continue
+                yield event(
                     {
-                        "event": event,
-                        "connection_id": connection_id,
-                        "external_account_id": external_account_id,
+                        "event": change["kind"],
+                        "change_seq": cursor,
+                        "connection_id": change["connection_id"],
+                        "external_account_id": change["external_account_id"],
                     }
-                ),
-                event="connection",
-            )
+                )
+            if changes:
+                continue
+            # Periodic reads make a missed/dropped doorbell a delay, not loss.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(queue.get(), timeout=1.0)
     except Exception:
         log.exception("sse.connection_discovery.body_raised", connector=connector)
         raise

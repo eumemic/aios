@@ -175,6 +175,9 @@ async def stream_connector_calls(
 async def stream_connection_discovery(
     httpx_client: httpx.AsyncClient,
     connector: str,
+    *,
+    arm: str | None = "fresh",
+    after_change_seq: int | None = None,
 ) -> AsyncIterator[SseMessage]:
     """Yield SSE messages from ``GET /v1/connectors/connections`` (#328 PR 5).
 
@@ -183,7 +186,12 @@ async def stream_connection_discovery(
     :func:`stream_connector_calls` for the auth model.
     """
     del connector  # carried implicitly via the runtime bearer token
-    async for msg in _stream_sse(httpx_client, "/v1/connectors/connections"):
+    params: dict[str, str | int] = {}
+    if arm is not None:
+        params["arm"] = arm
+    if after_change_seq is not None:
+        params["after_change_seq"] = after_change_seq
+    async for msg in _stream_sse(httpx_client, "/v1/connectors/connections", params=params):
         yield msg
 
 
@@ -204,7 +212,12 @@ async def stream_management_calls(
         yield msg
 
 
-async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterator[SseMessage]:
+async def _stream_sse(
+    httpx_client: httpx.AsyncClient,
+    path: str,
+    *,
+    params: dict[str, str | int] | None = None,
+) -> AsyncIterator[SseMessage]:
     """Open an SSE stream against ``path`` and yield parsed messages.
 
     The first yielded message is a synthetic ``SseMessage(event="_open",
@@ -222,6 +235,7 @@ async def _stream_sse(httpx_client: httpx.AsyncClient, path: str) -> AsyncIterat
     async with httpx_client.stream(
         "GET",
         path,
+        params=params,
         headers={"Accept": "text/event-stream"},
         # Bounded read timeout (NOT ``read=None``): a healthy idle stream
         # is kept alive by the server's ``: ping`` heartbeat, so this only

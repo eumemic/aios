@@ -560,6 +560,12 @@ class Settings(BaseSettings):
         "Includes one-shot ``schedule_wake`` rows; bump if your workload "
         "legitimately needs more standing timers per tenant.",
     )
+    connection_changes_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Named retention horizon for the durable connection_changes ledger. "
+        "Pruning is implemented separately; connections-row retention must never undercut it.",
+    )
     trigger_runs_retention_days: int = Field(
         default=30,
         ge=1,
