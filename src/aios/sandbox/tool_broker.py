@@ -223,6 +223,11 @@ class ToolBroker:
             routes=[
                 # Discovery: everything the CLI can see, in one round trip.
                 Route("/v1/{secret}/tools", self._list_surface, methods=["GET"]),
+                Route(
+                    "/v1/{secret}/sandbox/recycle",
+                    self._recycle_sandbox,
+                    methods=["POST"],
+                ),
                 # Built-in: schema + invoke.
                 Route("/v1/{secret}/builtins/{name}", self._builtin_schema, methods=["GET"]),
                 Route("/v1/{secret}/builtins/{name}", self._builtin_invoke, methods=["POST"]),
@@ -411,6 +416,36 @@ class ToolBroker:
         return await resolve_auth_for_target_url(
             pool, crypto_box, session_id, server_url, account_id=account_id
         )
+
+    async def _recycle_sandbox(self, request: Request) -> Response:
+        """Session-secret-scoped self recycle; no caller-supplied session id."""
+        resolved = await self._resolve_session(request)
+        if isinstance(resolved, Response):
+            return resolved
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return _err(400, "request body must be JSON")
+        if not isinstance(body, dict) or body.get("discard_unsalvaged") is not True:
+            return _err(422, "discard_unsalvaged must be true")
+        from aios.harness import runtime
+        from aios.jobs.app import defer_sandbox_recycle
+        from aios.services import sessions as sessions_service
+
+        pool = runtime.require_pool()
+        account_id = await sessions_service.load_session_account_id(pool, resolved)
+        try:
+            event = await sessions_service.request_sandbox_recycle(
+                pool,
+                resolved,
+                account_id=account_id,
+                requested_by="self",
+                discard_unsalvaged=True,
+            )
+            await defer_sandbox_recycle(resolved, requested_by="self")
+        except AiosError as exc:
+            return _err(exc.status_code, exc.to_message(), code=exc.error_type)
+        return JSONResponse(event.model_dump(mode="json"), status_code=202)
 
     # ── discovery ─────────────────────────────────────────────────────────
 

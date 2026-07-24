@@ -482,6 +482,14 @@ class SessionInterruptRequest(BaseModel):
     reason: str | None = None
 
 
+class SandboxRecycleRequest(BaseModel):
+    """Explicit acknowledgement for discarding sandbox-local writable state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    discard_unsalvaged: Literal[True]
+
+
 class ToolResultRequest(BaseModel):
     """Request body for ``POST /v1/sessions/{id}/tool-results``.
 

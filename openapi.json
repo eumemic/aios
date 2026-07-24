@@ -3059,6 +3059,80 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/sandbox/recycle": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Recycle Sandbox",
+        "description": "Discard the sandbox writable layer and provision current config fresh.\n\nDurable workspace, repositories, memory stores, and uploads are bind mounts\noutside the container and survive. Packages, caches, and dotfiles do not.\nIn-flight sandbox calls are cancelled with their normal retryable result.",
+        "operationId": "recycle_session_sandbox",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SandboxRecycleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "mcp": {
+            "destructiveHint": true
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/tool-results": {
       "post": {
         "tags": [
@@ -15986,6 +16060,22 @@
         ],
         "title": "SandboxCommandActionReplace",
         "description": "Update-side variant: optional-at-create fields are REQUIRED, so a\npartial action 422s instead of silently resetting stored values to\ndefaults. (Create keeps the defaults for tool ergonomics.)"
+      },
+      "SandboxRecycleRequest": {
+        "properties": {
+          "discard_unsalvaged": {
+            "type": "boolean",
+            "const": true,
+            "title": "Discard Unsalvaged"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "discard_unsalvaged"
+        ],
+        "title": "SandboxRecycleRequest",
+        "description": "Explicit acknowledgement for discarding sandbox-local writable state."
       },
       "Session": {
         "properties": {

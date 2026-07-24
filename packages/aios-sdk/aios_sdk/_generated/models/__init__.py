@@ -202,6 +202,7 @@ from .runtime_tool_result_request_content_type_1_item import (
 )
 from .sandbox_command_action import SandboxCommandAction
 from .sandbox_command_action_replace import SandboxCommandActionReplace
+from .sandbox_recycle_request import SandboxRecycleRequest
 from .session import Session
 from .session_await_response import SessionAwaitResponse
 from .session_clone_request import SessionCloneRequest
@@ -524,6 +525,7 @@ __all__ = (
     "RuntimeToolResultRequestContentType1Item",
     "SandboxCommandAction",
     "SandboxCommandActionReplace",
+    "SandboxRecycleRequest",
     "Session",
     "SessionAwaitResponse",
     "SessionCloneRequest",
