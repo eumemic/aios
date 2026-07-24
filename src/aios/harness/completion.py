@@ -34,7 +34,7 @@ import litellm
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
 from aios.harness.request_body_budget import (
-    body_budget_for_model,
+    body_limits_for_model,
     enforce_request_body_budget,
     is_request_too_large_error,
 )
@@ -755,7 +755,12 @@ async def call_litellm(
         session_id=request.session_id,
         stream=False,
     )
-    enforce_request_body_budget(kwargs, byte_budget=body_budget_for_model(model))
+    # Last gate before the wire: enforce the bound provider's request-body
+    # ceilings only after cache hints, tools and passthrough params have
+    # reached their final outbound shape. This is the same payload LiteLLM
+    # receives. Limits are provider-scoped (``body_limits_for_model``) — a
+    # provider that publishes no such cap is left untouched.
+    enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
     deadline_s = get_settings().model_call_deadline_s
     try:
         try:
@@ -819,10 +824,12 @@ async def stream_litellm(
         session_id=session_id,
         stream=True,
     )
-    # Enforce aggregate media and the provider's serialized body ceiling only
-    # after cache hints, tools and passthrough params have reached their final
-    # outbound shape. This is the same payload LiteLLM receives.
-    enforce_request_body_budget(kwargs, byte_budget=body_budget_for_model(model))
+    # Enforce the bound provider's aggregate-media and serialized-body
+    # ceilings only after cache hints, tools and passthrough params have
+    # reached their final outbound shape. This is the same payload LiteLLM
+    # receives. Limits are provider-scoped (``body_limits_for_model``) — a
+    # provider that publishes no such cap is left untouched.
+    enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
     deadline_s = get_settings().model_call_deadline_s
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + deadline_s
