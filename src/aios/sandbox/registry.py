@@ -1589,11 +1589,31 @@ class SandboxRegistry:
         )
 
     async def recycle(self, session_id: str) -> None:
-        """Force-discard all containers/corpses for a session.
+        """Force-discard all containers/corpses **and the canonical snapshot**.
 
         Durable data is exclusively bind-mounted (workspace, repositories,
         memory stores, uploads); this deliberately drops only writable-layer
         packages, caches, and dotfiles and clears any salvage breaker state.
+
+        **Artifact-before-pointer ordering (review finding 1).** Clearing
+        ``sessions.snapshot_*`` while the canonical image/tag survives creates
+        exactly the state :meth:`_gc_reconcile_pointers` is built to heal: a
+        retained canonical tag with a NULL pointer and no active handle. A
+        later GC tick would then re-point the session at the writable layer
+        this call was asked to discard, and the next provision would resume
+        the stale packages/caches/dotfiles. So the artifact is removed FIRST
+        and the pointer is cleared LAST:
+
+        - crash between the two ⇒ an orphaned-but-attributable pointer whose
+          artifact is gone; ``_resolve_snapshot`` sees a verified-negative
+          ``exists`` and resets (cold start) — the intended outcome,
+        - never the inverse (tag alive + NULL pointer), which is the
+          unattributable orphan the reconciler would resurrect.
+
+        A *refused* removal (``remove_image`` returns ``False`` because a child
+        layer still references it) or an indeterminate backend probe raises:
+        the pointer is then deliberately left in place so the artifact stays
+        attributable to this session, and the caller (the recycle job) retries.
         """
         from aios.config import get_settings
         from aios.harness import runtime
@@ -1618,9 +1638,54 @@ class SandboxRegistry:
                 await self._backend.force_remove(ref.sandbox_id)
                 self._salvage_failures.pop(ref.sandbox_id, None)
                 self._salvage_breaker_opened_at.pop(ref.sandbox_id, None)
+            # Artifact FIRST — see the ordering contract above.
+            await self._discard_canonical_snapshot(session_id)
+            # Pointer LAST — only once the artifact is provably gone.
             pool = runtime.require_pool()
             async with pool.acquire() as conn:
                 await queries.unscoped_clear_session_snapshot(conn, session_id)
+
+    async def _discard_canonical_snapshot(self, session_id: str) -> None:
+        """Remove the session's canonical snapshot artifact (recycle path).
+
+        Removes the deterministic canonical tag *and* any non-canonical
+        managed image still labelled for this session on this host (a
+        pre-rename artifact or a stale lineage tag), so a recycle leaves ZERO
+        snapshot tags attributable to the session — the regression the
+        guardian asked to be asserted (count before == count after minus the
+        discarded ones).
+
+        Raises :class:`SandboxBackendError` when an artifact is still present
+        after the attempt (a refusal, or an indeterminate probe). The caller
+        must NOT clear the pointer in that case: a surviving artifact with a
+        live pointer is attributable and converges on retry; a surviving
+        artifact with a NULL pointer is the orphan GC pass 4 would resurrect.
+        """
+        instance_id = get_settings().instance_id
+        canonical = snapshot_tag(instance_id, session_id)
+        refs: list[str] = [canonical]
+        try:
+            for img in await self._backend.list_managed_images(instance_id=instance_id):
+                if img.labels.get(SESSION_LABEL_KEY) != session_id:
+                    continue
+                for extra in img.repo_tags or [img.image_id]:
+                    if extra not in refs:
+                        refs.append(extra)
+        except SandboxBackendError as err:
+            # Enumeration is an optimization over the deterministic tag; an
+            # indeterminate listing must not skip the canonical removal.
+            log.warning("sandbox.recycle_image_enum_failed", session_id=session_id, error=str(err))
+        for ref in refs:
+            removed = await self._store.remove(ref)
+            if removed:
+                continue
+            # Refused: verify against the store rather than trusting the verb —
+            # a refusal for an already-absent ref is a no-op, not a leak.
+            if await self._store.exists(ref):
+                raise SandboxBackendError(
+                    f"refused to remove snapshot artifact during recycle: {ref}"
+                )
+        log.info("sandbox.recycle_snapshot_discarded", session_id=session_id, refs=len(refs))
 
     async def release(self, session_id: str) -> None:
         """Tear down one session's sandbox + proxy. No-op if not cached.
