@@ -572,7 +572,48 @@ class DockerBackend:
         empty_floor_bytes: int,
         flatten_if_unique_bytes_over: int | None,
     ) -> SnapshotOutcome:
-        """Commit (or flatten) ``sandbox_id``'s rootfs to ``tag`` (§5.2)."""
+        """Commit (or flatten) ``sandbox_id``'s rootfs to ``tag`` (§5.2).
+
+        Owns the per-corpse timeout-retry state for the WHOLE verb, so every
+        terminal outcome settles it exactly once:
+
+        * any successful outcome — including the early ``skipped_stale`` /
+          ``skipped_empty`` returns — clears the entry. The common timeout
+          recovery is ``docker commit`` finishing server-side while the client
+          gave up: the retry then sees the advanced tag and returns
+          ``skipped_stale``, and the corpse is removed right after. Clearing
+          only on the commit/flatten path would strand that entry forever
+          (the container is gone, so nothing can ever clear it), leaking a
+          dict entry per successfully-salvaged timeout corpse for the life of
+          the worker.
+        * a typed snapshot timeout escalates the next attempt's budget.
+        * any other failure leaves the entry untouched — the corpse is
+          retained fail-closed and salvage converges on a later attempt.
+        """
+        try:
+            outcome = await self._snapshot_uncounted(
+                sandbox_id,
+                tag,
+                empty_floor_bytes=empty_floor_bytes,
+                flatten_if_unique_bytes_over=flatten_if_unique_bytes_over,
+            )
+        except SandboxSnapshotTimeoutError:
+            self._snapshot_timeout_attempts[sandbox_id] = (
+                self._snapshot_timeout_attempts.get(sandbox_id, 0) + 1
+            )
+            raise
+        self._snapshot_timeout_attempts.pop(sandbox_id, None)
+        return outcome
+
+    async def _snapshot_uncounted(
+        self,
+        sandbox_id: str,
+        tag: str,
+        *,
+        empty_floor_bytes: int,
+        flatten_if_unique_bytes_over: int | None,
+    ) -> SnapshotOutcome:
+        """``snapshot()`` minus the retry-state bookkeeping its caller owns."""
         # 1. Stop (idempotent — the corpse may already be stopped).
         await self.stop(sandbox_id)
 
@@ -652,13 +693,7 @@ class DockerBackend:
             operation = self._commit(
                 sandbox_id, tag, env_keys, base_ref, timeout_s=timeout_s, size_rw=rw
             )
-        try:
-            outcome = await operation
-        except SandboxSnapshotTimeoutError:
-            self._snapshot_timeout_attempts[sandbox_id] = retry_attempt + 1
-            raise
-        self._snapshot_timeout_attempts.pop(sandbox_id, None)
-        return outcome
+        return await operation
 
     async def _commit(
         self,
