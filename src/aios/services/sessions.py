@@ -38,7 +38,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
-from aios.models.events import Event, EventKind
+from aios.models.events import SANDBOX_RECYCLE_REQUESTED_EVENT, Event, EventKind
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -1239,10 +1239,11 @@ async def request_sandbox_recycle(
             """SELECT count(*) FROM events
                  WHERE session_id = $1 AND account_id = $2
                    AND kind = 'lifecycle'
-                   AND data->>'event' = 'sandbox_recycle_requested'
+                   AND data->>'event' = $3
                    AND created_at >= now() - interval '1 hour'""",
             session_id,
             account_id,
+            SANDBOX_RECYCLE_REQUESTED_EVENT,
         )
         if int(recent) >= limit:
             raise RateLimitedError(
@@ -1253,7 +1254,10 @@ async def request_sandbox_recycle(
             session_id=session_id,
             account_id=account_id,
             kind="lifecycle",
-            data={"event": "sandbox_recycle_requested", "requested_by": requested_by},
+            data={
+                "event": SANDBOX_RECYCLE_REQUESTED_EVENT,
+                "requested_by": requested_by,
+            },
         )
 
 

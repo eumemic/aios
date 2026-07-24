@@ -65,6 +65,18 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 
+# ── Sandbox recycle lifecycle vocabulary (#2022) ──────────────────────────
+# The self-recycle route admits a request (``sandbox_recycle_requested``) and
+# the ``harness.recycle_sandbox`` job resolves it to EXACTLY ONE terminal
+# event: ``sandbox_recycled`` on success, ``sandbox_recycle_failed`` once the
+# job's retry budget is exhausted. Named here (not inline in the task) so the
+# journal vocabulary has one authority that both the producer and any consumer
+# (tests, operators, redrive tooling) read.
+SANDBOX_RECYCLE_REQUESTED_EVENT = "sandbox_recycle_requested"
+SANDBOX_RECYCLED_EVENT = "sandbox_recycled"
+SANDBOX_RECYCLE_FAILED_EVENT = "sandbox_recycle_failed"
+
+
 # ── Error-latch lifecycle vocabulary (#1084) ──────────────────────────────
 # The error latch (``harness/loop.py``) writes a ``turn_ended`` lifecycle event
 # with this exact ``stop_reason`` string; ``append_event``
