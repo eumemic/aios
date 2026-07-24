@@ -10,8 +10,6 @@ or a genuine failure (also evicts the sandbox).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
@@ -606,22 +604,29 @@ class TestParentChannelThreading:
             AsyncMock(return_value=MagicMock(id="span_1")),
         )
         monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
+        # The dispatch preamble (#1903) parses/looks-up/validates before the
+        # handler; these tests use synthetic tool names, so stub it to a
+        # no-op admit. Individual tests re-override to exercise refusal.
+        monkeypatch.setattr(tool_dispatch, "prepare_builtin", lambda *_a: {})
 
     async def test_quota_refusal_never_invokes_tool_and_is_model_visible(
         self, monkeypatch: Any
     ) -> None:
+        from aios.services.outbound_tool_quota import QuotaAdmission
+
         self._stub_lifecycle_deps(monkeypatch)
         invoke = AsyncMock()
         append_error = AsyncMock()
         monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke)
         monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_error)
-
-        @asynccontextmanager
-        async def refuse(*_args: Any, **_kwargs: Any) -> AsyncIterator[str | None]:
-            yield "quota_exceeded: telegram_send 100/100 per hour"
-
+        monkeypatch.setattr(tool_dispatch, "prepare_builtin", lambda *_a: {})
         monkeypatch.setattr(
-            "aios.services.outbound_tool_quota.outbound_tool_quota_reservation", refuse
+            "aios.services.outbound_tool_quota.reserve_outbound_tool_quota",
+            AsyncMock(
+                return_value=QuotaAdmission(
+                    refusal="quota_exceeded: telegram_send 100/100 per hour"
+                )
+            ),
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
@@ -632,6 +637,83 @@ class TestParentChannelThreading:
         assert append_error.await_args.kwargs["error"] == (
             "quota_exceeded: telegram_send 100/100 per hour"
         )
+
+    async def test_prepare_refusal_precedes_quota_admission(self, monkeypatch: Any) -> None:
+        """A call that would refuse anyway (bad args / unknown tool / schema
+        mismatch) is bailed BEFORE quota admission — it must consume no
+        outbound dispatch capacity (#1903)."""
+        from aios.tools.invoke import ToolBail
+
+        self._stub_lifecycle_deps(monkeypatch)
+        invoke = AsyncMock()
+        append_error = AsyncMock()
+        reserve = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke)
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_error)
+
+        def _bail(*_a: Any) -> None:
+            raise ToolBail("arguments were not valid JSON")
+
+        monkeypatch.setattr(tool_dispatch, "prepare_builtin", _bail)
+        monkeypatch.setattr(
+            "aios.services.outbound_tool_quota.reserve_outbound_tool_quota", reserve
+        )
+
+        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "not json"}}
+        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+
+        reserve.assert_not_awaited()
+        invoke.assert_not_awaited()
+        assert append_error.await_args.kwargs["error"] == "arguments were not valid JSON"
+
+    async def test_admission_store_failure_fails_closed_as_tool_error(
+        self, monkeypatch: Any
+    ) -> None:
+        """A DB failure inside quota admission lands in the lifecycle's
+        generic-exception arm: the call resolves with a typed model-visible
+        error result, never an unresolved call, and the tool never runs."""
+        self._stub_lifecycle_deps(monkeypatch)
+        invoke = AsyncMock()
+        append_error = AsyncMock()
+        monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke)
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", append_error)
+        monkeypatch.setattr(tool_dispatch, "prepare_builtin", lambda *_a: {})
+        monkeypatch.setattr(tool_dispatch, "_evict_session_container", lambda _s: None)
+        monkeypatch.setattr(
+            "aios.services.outbound_tool_quota.reserve_outbound_tool_quota",
+            AsyncMock(side_effect=RuntimeError("admission store down")),
+        )
+
+        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+
+        invoke.assert_not_awaited()
+        assert "admission store down" in append_error.await_args.kwargs["error"]
+
+    async def test_admitted_dispatch_marks_reservation_completed(self, monkeypatch: Any) -> None:
+        from aios.services.outbound_tool_quota import QuotaAdmission
+        from aios.tools.registry import ToolResult
+
+        self._stub_lifecycle_deps(monkeypatch)
+        monkeypatch.setattr(
+            tool_dispatch, "invoke_builtin", AsyncMock(return_value=ToolResult(content="ok"))
+        )
+        monkeypatch.setattr(tool_dispatch, "prepare_builtin", lambda *_a: {})
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", AsyncMock())
+        mark = AsyncMock()
+        monkeypatch.setattr(
+            "aios.services.outbound_tool_quota.reserve_outbound_tool_quota",
+            AsyncMock(return_value=QuotaAdmission(reservation_id="res_1")),
+        )
+        monkeypatch.setattr(
+            "aios.services.outbound_tool_quota.mark_outbound_dispatch_completed", mark
+        )
+
+        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+
+        mark.assert_awaited_once()
+        assert mark.await_args.args[1] == "res_1"
 
     async def test_execute_tool_async_threads_parent_channel(self, monkeypatch: Any) -> None:
         from aios.tools.registry import ToolResult
