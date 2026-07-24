@@ -642,14 +642,16 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
         client.post.assert_not_awaited()
-        conn.execute.assert_not_awaited()  # row not updated
+        assert not any(
+            "UPDATE vault_credentials" in str(c.args[0]) for c in conn.execute.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_refuses_plaintext_token_endpoint(self, crypto_box: CryptoBox) -> None:
@@ -674,7 +676,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="http://issuer.example",
                 account_id=account_id,
@@ -704,7 +706,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -737,7 +739,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -768,7 +770,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -805,7 +807,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -846,7 +848,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -880,7 +882,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -888,8 +890,9 @@ class TestRefreshCredential:
 
         # The UPDATE call carried fresh ciphertext+nonce. Decrypt them and
         # confirm the new token is in the payload.
-        conn.execute.assert_awaited_once()
-        args = conn.execute.await_args.args
+        args = next(
+            c.args for c in conn.execute.await_args_list if "UPDATE vault_credentials" in c.args[0]
+        )
         new_blob = EncryptedBlob(ciphertext=args[1], nonce=args[2])
         new_payload = json.loads(crypto_box.derive_account_subkey(account_id).decrypt(new_blob))
         assert new_payload["access_token"] == "fresh-at"
@@ -916,7 +919,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -950,7 +953,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -984,14 +987,16 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
             )
 
         # Row not updated when refresh fails.
-        conn.execute.assert_not_awaited()
+        assert not any(
+            "UPDATE vault_credentials" in str(c.args[0]) for c in conn.execute.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_malformed_response_raises(self, crypto_box: CryptoBox) -> None:
@@ -1013,7 +1018,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -1033,7 +1038,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
@@ -1061,7 +1066,7 @@ class TestRefreshCredential:
         ):
             await refresh_credential(
                 crypto_box,
-                conn,
+                fake_pool_yielding_conn(conn),
                 vault_id="vlt_1",
                 target_url="https://mcp.example.com",
                 account_id=account_id,
