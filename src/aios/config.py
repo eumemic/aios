@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,11 @@ from aios.models.vaults import OAuthProviderApp
 # budget). Imported by ``aios.harness.loop`` as the job-level asyncio.wait_for
 # timeout; the validators below reject per-phase budgets that meet or exceed it.
 HARNESS_STEP_TIMEOUT_S: float = 960.0
+
+OutboundToolQuota = tuple[
+    Annotated[int, Field(gt=0)],
+    Annotated[int, Field(gt=0)],
+]
 
 
 class Settings(BaseSettings):
@@ -786,6 +791,13 @@ class Settings(BaseSettings):
         "harness retry-backoff path (cause='reschedule') and the async "
         "tool-completion path (cause='connector_tool_result') are "
         "untouched.",
+    )
+    outbound_tool_quotas: dict[str, OutboundToolQuota] = Field(
+        default_factory=dict,
+        description="Per-tool rolling outbound dispatch quotas as "
+        "tool_name -> (window_seconds, max_per_window). Empty (default) disables "
+        "quota checks and performs no dispatch-path query. Connector verbs are "
+        "matched without their MCP server namespace.",
     )
     inbound_rate_window_seconds: int = Field(
         default=0,
