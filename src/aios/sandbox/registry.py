@@ -54,6 +54,7 @@ from aios.sandbox.backends.base import (
     SandboxBackend,
     SandboxBackendError,
     SandboxHandle,
+    SandboxSnapshotTimeoutError,
     SandboxSpec,
 )
 from aios.sandbox.git_proxy import GitProxy
@@ -258,6 +259,8 @@ class SandboxRegistry:
         # pass must never GC session-B's open-breaker entry). ``alarmed``
         # records whether the one-shot operator wake has been emitted.
         self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
+        self._snapshot_timeout_failures: dict[str, int] = {}
+        self._snapshot_timeout_alarmed: set[str] = set()
         self._salvage_breaker_opened_at: dict[str, float] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
@@ -1249,12 +1252,36 @@ class SandboxRegistry:
                 flatten_if_unique_bytes_over=disk_limit_bytes,
             )
         except Exception as err:
-            log.warning(
+            is_timeout = isinstance(err, SandboxSnapshotTimeoutError)
+            timeout_failures = 0
+            if is_timeout:
+                timeout_failures = self._snapshot_timeout_failures.get(sandbox_id, 0) + 1
+                self._snapshot_timeout_failures[sandbox_id] = timeout_failures
+            logger = log.error if is_timeout else log.warning
+            logger(
                 "sandbox.snapshot_failed_corpse_retained",
                 session_id=session_id,
                 container_id=sandbox_id[:12],
+                cause="TIMEOUT" if is_timeout else "ERROR",
+                timeout_failures=timeout_failures,
                 error=str(err),
             )
+            if (
+                is_timeout
+                and timeout_failures >= settings.sandbox_salvage_breaker_threshold
+                and sandbox_id not in self._snapshot_timeout_alarmed
+            ):
+                try:
+                    await self._alert_operator(
+                        session_id,
+                        f"Sandbox snapshot TIMEOUT repeated {timeout_failures} times for corpse "
+                        f"{sandbox_id[:12]}; corpse retained and provisioning remains fail-closed.",
+                        cause="sandbox.snapshot_failed_corpse_retained.TIMEOUT",
+                    )
+                except Exception as alert_err:
+                    log.warning("sandbox.snapshot_timeout_alert_failed", error=str(alert_err))
+                else:
+                    self._snapshot_timeout_alarmed.add(sandbox_id)
             return False
 
         # ``image_id is None`` ⇒ skipped_empty with no prior tag (a session
@@ -1312,6 +1339,8 @@ class SandboxRegistry:
                         error=str(err),
                     )
 
+        self._snapshot_timeout_failures.pop(sandbox_id, None)
+        self._snapshot_timeout_alarmed.discard(sandbox_id)
         log.info(
             "sandbox.snapshot",
             session_id=session_id,
