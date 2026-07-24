@@ -828,22 +828,13 @@ async def _run_session_step_body(
     try:
         pool_acquire_start = await _span({"event": "sweep.pool_acquire_start"})
         async with pool.acquire() as fast_conn:
-            await _span(
-                {
-                    "event": "sweep.pool_acquire_end",
-                    "start_id": pool_acquire_start.id if pool_acquire_start else None,
-                }
-            )
-            query_exec_start = await _span({"event": "sweep.query_exec_start"})
-            try:
-                has_work = await session_has_pending_work(fast_conn, session_id)
-            finally:
-                await _span(
-                    {
-                        "event": "sweep.query_exec_end",
-                        "start_id": query_exec_start.id if query_exec_start else None,
-                    }
-                )
+            has_work = await session_has_pending_work(fast_conn, session_id)
+        await _span(
+            {
+                "event": "sweep.pool_acquire_end",
+                "start_id": pool_acquire_start.id if pool_acquire_start else None,
+            }
+        )
     finally:
         await _span(
             {

@@ -920,12 +920,12 @@ class TestOAuthRefreshE2E:
         assert new_payload["access_token"] == "fresh-at"
 
     async def test_concurrent_resolve_only_refreshes_once(self, pool: Any, crypto_box: Any) -> None:
-        """Five parallel resolutions on an expiring credential issue exactly one POST.
+        """Separate dedicated PG connections serialize a single-use token refresh.
 
-        Without the SELECT … FOR UPDATE row lock + double-check, every
-        coroutine would race to the token endpoint. The lock serializes
-        them; the second-to-last waiter sees the now-fresh expires_at
-        after acquiring the lock and exits without POSTing.
+        Each parallel call opens its own advisory-lock backend before touching
+        the pooled read/write connections.  Thus this is a real cross-worker
+        connection race, not evidence from the process-local fast-path lock.
+        The loser adopts the persisted winner and never POSTs the consumed token.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.mcp.client import resolve_auth_for_target_url
