@@ -250,6 +250,49 @@ class TestSnapshotTimeoutBudget:
         assert commit_timeout == pytest.approx(640.2)
 
     @pytest.mark.asyncio
+    async def test_incident_scale_corpse_salvages_within_its_computed_budget(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reviewer's verification bar for Defect A: a corpse whose commit
+        legitimately needs minutes must SALVAGE, not time out.
+
+        Replays the 2026-07-23 outage corpse (3.37 GB writable layer, 64.02 s
+        stat walk) and drives commit against a clock that consumes 300 s of
+        wall time — far past the old fixed-coefficient budget of 67.44 s, which
+        is what produced the 22 h fail-closed outage. The commit must be
+        allowed to finish under the measured-throughput budget.
+        """
+        fake_docker.size_rw = 3_370_000_000
+        walk_seconds = 64.02
+        legacy_budget = fake_docker.size_rw * 20e-9  # the unachievable 67.44 s
+        commit_seconds = 300.0  # what this corpse really costs on prod hardware
+
+        ticks = iter((100.0, 100.0 + walk_seconds))
+        monkeypatch.setattr("aios.sandbox.backends.docker.monotonic", lambda: next(ticks))
+
+        real_cli = fake_docker.cli
+
+        async def _cli(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+            if argv[1] == "commit" and commit_seconds > timeout_s:
+                raise SandboxBackendError(
+                    f"docker cli timed out after {timeout_s}s: {' '.join(argv)}"
+                )
+            return await real_cli(argv, timeout_s=timeout_s)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", _cli)
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "committed"
+        commit_timeout = next(
+            timeout for argv, timeout in fake_docker.cli_timeouts if argv[1] == "commit"
+        )
+        assert commit_timeout > commit_seconds
+        assert commit_timeout > legacy_budget  # the old constant could never have passed
+
+    @pytest.mark.asyncio
     async def test_inspect_size_walk_gets_generous_timeout(self, fake_docker: _FakeDocker) -> None:
         """The ``docker inspect --size`` writable-layer walk must NOT run on the
         blanket 30s CLI bound. ``--size`` stat-walks the corpse's RW layer, so a

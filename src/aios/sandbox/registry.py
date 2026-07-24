@@ -224,6 +224,59 @@ def _classify_images(
 
 _SALVAGE_BREAKER_COOLDOWN_S = 300.0
 
+# In-band recovery lever for an escalated (deterministic) salvage breaker.
+#
+# The escalated state must name an action the operator/agent can actually
+# take **in this build**. The session-scoped self-recycle route
+# (``POST /v1/sessions/{id}/sandbox/recycle``, #2022) lands separately in
+# #2031; naming it unconditionally would hand a wedged caller a 404 — a
+# confidently wrong instruction is worse than a vague one, because it looks
+# actionable. So the hint is *probed*, not assumed: we name the endpoint only
+# when it is actually registered on the sessions router in this revision, and
+# otherwise fall back to the recovery that is always available (removing the
+# corpse, which self-clears the in-memory breaker on the next provision —
+# exactly the manual fix used to end the 22 h outage).
+_recycle_route_available: bool | None = None
+
+
+def _recycle_route_registered() -> bool:
+    """Is the self-recycle route actually served by this build?
+
+    Probed once from the sessions router's own route table (the source of
+    truth FastAPI serves from), then cached. Any import/introspection problem
+    is treated as "not available" so the surfaced guidance degrades to the
+    always-true fallback rather than to a 404.
+    """
+    global _recycle_route_available
+    if _recycle_route_available is None:
+        try:
+            from aios.api.routers.sessions import router as sessions_router
+
+            _recycle_route_available = any(
+                getattr(route, "path", "").endswith("/sandbox/recycle")
+                for route in sessions_router.routes
+            )
+        except Exception:  # pragma: no cover - defensive: never fail salvage on a probe
+            _recycle_route_available = False
+    return _recycle_route_available
+
+
+def _salvage_recovery_hint(session_id: str) -> str:
+    """The in-band recovery action to advertise, guaranteed to exist here."""
+    if _recycle_route_registered():
+        return (
+            f"recover in-band via POST /v1/sessions/{session_id}/sandbox/recycle "
+            'with body {"discard_unsalvaged": true} (self-recycle, #2022) — durable '
+            "workspace, repositories, memory stores and uploads are bind mounts and survive"
+        )
+    return (
+        "this build exposes no in-band recycle route, so recovery is out-of-band: remove the "
+        "corpse (``docker rm -f <corpse_id>``) — the breaker state is in-memory and keyed on "
+        "the corpse, so it self-clears on the next provision. Durable workspace, repositories, "
+        "memory stores and uploads are bind mounts and survive; only writable-layer packages, "
+        "caches and dotfiles are lost"
+    )
+
 
 class SandboxRegistry:
     """Maps session_id to a live :class:`SandboxHandle` with idle-TTL.
@@ -1372,9 +1425,10 @@ class SandboxRegistry:
                     )
                     self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
                     raise SandboxBackendError(
-                        f"salvage breaker open: deterministic salvage failure for corpse {ref.sandbox_id[:12]}: "
-                        f"{cause}; refusing to provision over unrecovered state; recover via "
-                        f"POST /v1/sessions/{session_id}/sandbox/recycle"
+                        "salvage breaker open (escalated): deterministic salvage failure "
+                        "for corpse "
+                        f"{ref.sandbox_id[:12]}: {cause}; refusing to provision over "
+                        f"unrecovered state; {_salvage_recovery_hint(session_id)}"
                     )
                 opened_at = self._salvage_breaker_opened_at.setdefault(
                     ref.sandbox_id, time.monotonic()
@@ -1451,8 +1505,8 @@ class SandboxRegistry:
                 session_id,
                 f"Sandbox salvage breaker OPEN for corpse {corpse_id[:12]}: "
                 f"{failures} consecutive salvage failures with cause: {cause}. "
-                "Provisioning remains fail-closed over unrecovered state. Recover in-band "
-                f"via POST /v1/sessions/{session_id}/sandbox/recycle (self-recycle, #2022).",
+                "Provisioning remains fail-closed over unrecovered state. To recover, "
+                f"{_salvage_recovery_hint(session_id)}.",
                 cause="sandbox.salvage_breaker_open",
             )
         except Exception as err:
