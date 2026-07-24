@@ -87,8 +87,29 @@ _SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
 _SNAPSHOT_WALK_SAFETY_FACTOR = 10.0
 
 
-def _snapshot_timeout_s(size_walk_seconds: float) -> float:
-    return max(_SNAPSHOT_TIMEOUT_FLOOR_S, size_walk_seconds * _SNAPSHOT_WALK_SAFETY_FACTOR)
+def _snapshot_timeout_s(
+    size_rw: int | None,
+    *,
+    throughput_bytes_per_second: float | None = None,
+    retry_attempt: int = 0,
+    size_walk_seconds: float | None = None,
+) -> float:
+    settings = get_settings()
+    if size_walk_seconds is not None:
+        base = max(_SNAPSHOT_TIMEOUT_FLOOR_S, size_walk_seconds * _SNAPSHOT_WALK_SAFETY_FACTOR)
+    else:
+        seconds = (
+            (size_rw or 0) * settings.sandbox_snapshot_timeout_ns_per_byte
+            if throughput_bytes_per_second is None
+            else (size_rw or 0) / throughput_bytes_per_second
+        )
+        base = max(settings.sandbox_snapshot_timeout_floor_seconds, seconds)
+        base *= settings.sandbox_snapshot_timeout_safety_margin
+    retry_scale = min(
+        settings.sandbox_snapshot_timeout_retry_cap,
+        settings.sandbox_snapshot_timeout_retry_multiplier**retry_attempt,
+    )
+    return base * retry_scale
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -615,7 +636,7 @@ class DockerBackend:
         # reflects this daemon, filesystem, and corpse rather than a fixed rate.
         inspect_started = monotonic()
         parent_image, size_rw, labels = await self._inspect_container_for_snapshot(sandbox_id)
-        snapshot_timeout_s = _snapshot_timeout_s(monotonic() - inspect_started)
+        size_walk_seconds = monotonic() - inspect_started
         env_keys = _split_label_list(labels.get(ENV_KEYS_LABEL_KEY))
         base_ref = labels.get(BASE_IMAGE_LABEL_KEY)
 
@@ -664,10 +685,8 @@ class DockerBackend:
             and projected_unique > flatten_if_unique_bytes_over
         )
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
-        timeout_s = _snapshot_timeout_s(
-            size_rw,
-            throughput_bytes_per_second=self._throughput_bytes_per_second,
-            retry_attempt=retry_attempt,
+        snapshot_timeout_s = _snapshot_timeout_s(
+            size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
         )
         if parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget:
             estimate = parent_size + rw

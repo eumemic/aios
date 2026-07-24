@@ -1484,7 +1484,91 @@ class TestSalvageBreaker:
         assert call is not None
         content = call.args[1]
         assert "fake snapshot failure" in content
-        assert f"POST /v1/sessions/{session_id}/sandbox/recycle" in content
+        # The surfaced recovery action must EXIST in this build. The route is
+        # only named when it is actually registered on the sessions router;
+        # otherwise the always-true corpse-removal fallback is surfaced.
+        from aios.sandbox import registry as registry_mod
+
+        if registry_mod._recycle_route_registered():
+            assert f"POST /v1/sessions/{session_id}/sandbox/recycle" in content
+        else:
+            assert "/sandbox/recycle" not in content
+            assert "docker rm -f" in content
+
+    async def test_escalation_never_advertises_an_unregistered_route(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The escalated state must never name an endpoint this build does not
+        serve: a 404'ing instruction is worse than a vague one because it looks
+        actionable (the exact failure mode the review blocked on).
+
+        Both branches are asserted against the router's OWN route table, so the
+        hint tracks reality whether or not the self-recycle route (#2031) has
+        landed in this revision.
+        """
+        from aios.api.routers.sessions import router as sessions_router
+        from aios.sandbox import registry as registry_mod
+
+        served = {getattr(route, "path", "") for route in sessions_router.routes}
+
+        monkeypatch.setattr(registry_mod, "_recycle_route_available", None)
+        registered = registry_mod._recycle_route_registered()
+        assert registered == any(path.endswith("/sandbox/recycle") for path in served)
+
+        hint = registry_mod._salvage_recovery_hint("sess_x")
+        if registered:
+            assert "POST /v1/sessions/sess_x/sandbox/recycle" in hint
+            assert "discard_unsalvaged" in hint  # the route's required ack
+        else:
+            # No endpoint may be named when the route is not served.
+            assert "/v1/sessions/" not in hint
+            assert "POST " not in hint
+            assert "docker rm -f" in hint
+
+        # Force the not-available branch: no endpoint may be named at all.
+        monkeypatch.setattr(registry_mod, "_recycle_route_available", False)
+        fallback = registry_mod._salvage_recovery_hint("sess_x")
+        assert "/v1/sessions/" not in fallback
+        assert "docker rm -f" in fallback
+
+    async def test_advertised_recovery_clears_breaker_and_allows_provisioning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The advertised recovery must actually work: once the corpse is gone
+        (what every branch of the hint achieves — the route force-removes it,
+        the fallback tells you to), the breaker clears and salvage stops
+        raising, so provisioning is permitted again.
+        """
+        backend = FakeBackend()
+        session_id = "sess_recovered"
+        ref = self._corpse_ref(session_id)
+        backend.managed = [ref]
+        backend.snapshot_raises = True
+        registry = SandboxRegistry(backend=backend)
+        registry._alert_operator = AsyncMock()  # type: ignore[method-assign]
+        threshold = get_settings().sandbox_salvage_breaker_threshold
+        now = 1000.0
+        monkeypatch.setattr("aios.sandbox.registry.time.monotonic", lambda: now)
+
+        for _ in range(threshold):
+            with pytest.raises(SandboxBackendError):
+                await registry._salvage_session_corpses(session_id)
+        # Escalated: fail-closed, and no further snapshot attempts.
+        with pytest.raises(SandboxBackendError, match="deterministic salvage failure"):
+            await registry._salvage_session_corpses(session_id)
+        assert self._snapshot_count(backend) == threshold
+
+        # Perform the advertised recovery: the corpse is discarded.
+        backend.managed = []
+
+        # Salvage now succeeds (nothing to salvage) and every scrap of breaker
+        # state for that corpse is gone — a fresh sandbox can be provisioned.
+        await registry._salvage_session_corpses(session_id)
+        assert ref.sandbox_id not in registry._salvage_failures
+        assert ref.sandbox_id not in registry._salvage_failure_causes
+        assert ref.sandbox_id not in registry._last_snapshot_failure
+        assert ref.sandbox_id not in registry._salvage_breaker_opened_at
+        assert self._snapshot_count(backend) == threshold  # no extra attempt
 
     async def test_breaker_half_open_recovers_after_cooldown_when_causes_differ(
         self, monkeypatch: pytest.MonkeyPatch
