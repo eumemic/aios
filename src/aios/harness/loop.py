@@ -105,6 +105,12 @@ _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 # request; the reschedule ladder bounds the attempts (terminal once spent).
 _CONTEXT_OVERFLOW_SHRINK_BASE: float = 0.8
 
+# Lifecycle events that are pure diagnostics: they record what a retry path did
+# but carry no turn outcome, so they must not break a consecutive-``turn_ended``
+# streak (see :func:`_count_consecutive_stop_reason`). Anything added here is
+# invisible to the retry-attempt counters, so only add write-only breadcrumbs.
+_STREAK_TRANSPARENT_LIFECYCLE_EVENTS: frozenset[str] = frozenset({"adaptive_context_truncation"})
+
 # ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
 # wall-clock cap on a single ``run_session_step`` call. The harness's
 # zero-hang guarantee: per-call timeouts (LiteLLM, MCP, tool dispatch, etc.)
@@ -2470,21 +2476,34 @@ async def _count_consecutive_stop_reason(
 ) -> int:
     """Count consecutive ``turn_ended`` lifecycle events with ``stop_reason`` at
     the tail of the log. A ``turn_ended`` with any other stop_reason — or any
-    non-``turn_ended`` event — breaks the streak.
+    non-``turn_ended`` event that is not purely diagnostic — breaks the streak.
+
+    Diagnostic lifecycle events (:data:`_STREAK_TRANSPARENT_LIFECYCLE_EVENTS`)
+    are skipped rather than treated as streak breakers: they are written by the
+    retry paths themselves, interleaved with the very ``turn_ended`` events this
+    counter measures, so counting them as "some other event happened" would peg
+    every streak at 1 and make the shrink/backoff ladder never advance (an
+    unbounded retry loop — the failure mode this ladder exists to prevent).
     """
     # Only the tail matters; reading ASC with the default LIMIT would miss the
-    # recent streak entirely on a session with >limit lifecycle events.
+    # recent streak entirely on a session with >limit lifecycle events. The
+    # window must also cover the diagnostic events interleaved with the streak,
+    # hence the per-attempt multiplier — undersizing it would silently truncate
+    # a live streak and, again, stall the ladder.
     lifecycle_events = await sessions_service.read_events(
         pool,
         session_id,
         kind="lifecycle",
         newest_first=True,
-        limit=len(_RETRY_BACKOFF_SECONDS) + 1,
+        limit=(len(_RETRY_BACKOFF_SECONDS) + 1) * (1 + len(_STREAK_TRANSPARENT_LIFECYCLE_EVENTS)),
         account_id=account_id,
     )
     count = 0
     for e in lifecycle_events:
-        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == stop_reason:
+        event = e.data.get("event")
+        if event in _STREAK_TRANSPARENT_LIFECYCLE_EVENTS:
+            continue
+        if event == "turn_ended" and e.data.get("stop_reason") == stop_reason:
             count += 1
         else:
             break
