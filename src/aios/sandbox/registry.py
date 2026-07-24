@@ -1588,6 +1588,40 @@ class SandboxRegistry:
             cwd=cwd,
         )
 
+    async def recycle(self, session_id: str) -> None:
+        """Force-discard all containers/corpses for a session.
+
+        Durable data is exclusively bind-mounted (workspace, repositories,
+        memory stores, uploads); this deliberately drops only writable-layer
+        packages, caches, and dotfiles and clears any salvage breaker state.
+        """
+        from aios.config import get_settings
+        from aios.harness import runtime
+
+        async with self._lock_for(session_id):
+            self._handles.pop(session_id, None)
+            self._last_used.pop(session_id, None)
+            self._egress_states.pop(session_id, None)
+            proxy = self._git_proxies.pop(session_id, None)
+            secret_proxy = self._secret_proxies.pop(session_id, None)
+            if proxy is not None:
+                await self._stop_proxy_silently(proxy, session_id, kind="git_proxy")
+            if secret_proxy is not None:
+                await self._stop_proxy_silently(secret_proxy, session_id, kind="secret_proxy")
+            self._release_tool_broker_secret(session_id)
+            runtime.clear_session_memory_mounts(session_id)
+            runtime.clear_session_read_shas(session_id)
+            refs = await self._backend.list_managed(
+                instance_id=get_settings().instance_id, session_id=session_id
+            )
+            for ref in refs:
+                await self._backend.force_remove(ref.sandbox_id)
+                self._salvage_failures.pop(ref.sandbox_id, None)
+                self._salvage_breaker_opened_at.pop(ref.sandbox_id, None)
+            pool = runtime.require_pool()
+            async with pool.acquire() as conn:
+                await queries.unscoped_clear_session_snapshot(conn, session_id)
+
     async def release(self, session_id: str) -> None:
         """Tear down one session's sandbox + proxy. No-op if not cached.
 

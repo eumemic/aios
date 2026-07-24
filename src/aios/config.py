@@ -222,6 +222,11 @@ class Settings(BaseSettings):
         "walk during salvage; it scales with the corpse, so it gets this "
         "generous bound rather than the blanket ``DOCKER_CLI_TIMEOUT_S``.",
     )
+    sandbox_recycle_hourly_limit: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum accepted sandbox recycle requests per session in a rolling hour.",
+    )
     sandbox_salvage_breaker_threshold: int = Field(
         default=3,
         ge=1,

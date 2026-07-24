@@ -104,3 +104,30 @@ async def wake_workflow(run_id: str) -> None:
     from aios.workflows.step import run_workflow_step
 
     await run_workflow_step(run_id)
+
+
+@app.task(
+    name="harness.recycle_sandbox",
+    queue="sessions",
+    retry=False,
+    pass_context=False,
+)
+async def recycle_sandbox(session_id: str, requested_by: str) -> None:
+    """Discard every container/corpse and provision fresh current config."""
+    from aios.harness import runtime
+    from aios.services import sessions as sessions_service
+
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    registry = runtime.require_sandbox_registry()
+    inflight = runtime.require_inflight_tool_registry()
+    inflight.cancel_session(session_id)
+    await registry.recycle(session_id)
+    await registry.get_or_provision(session_id, pool=pool)
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {"event": "sandbox_recycled", "requested_by": requested_by},
+        account_id=account_id,
+    )

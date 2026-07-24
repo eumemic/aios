@@ -35,7 +35,7 @@ from aios.db.listen import (
 from aios.errors import ValidationError
 from aios.harness.chat_type import ChatType
 from aios.ids import GITHUB_REPOSITORY, split_id
-from aios.jobs.app import defer_wake
+from aios.jobs.app import defer_sandbox_recycle, defer_wake
 from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.events import Event, EventKind
@@ -57,6 +57,7 @@ from aios.models.pagination import (
 )
 from aios.models.sessions import (
     ContextResponse,
+    SandboxRecycleRequest,
     Session,
     SessionAwaitResponse,
     SessionCloneRequest,
@@ -592,6 +593,35 @@ async def interrupt(
     )
     await pool.execute("SELECT pg_notify($1, $2)", SESSION_INTERRUPT_CHANNEL, session_id)
     return await service.get_session(pool, session_id, account_id=account_id)
+
+
+@router.post(
+    "/{session_id}/sandbox/recycle",
+    operation_id="recycle_session_sandbox",
+    status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-codegen": {"mcp": {"destructiveHint": True}}},
+)
+async def recycle_sandbox(
+    session_id: str,
+    body: SandboxRecycleRequest,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> Event:
+    """Discard the sandbox writable layer and provision current config fresh.
+
+    Durable workspace, repositories, memory stores, and uploads are bind mounts
+    outside the container and survive. Packages, caches, and dotfiles do not.
+    In-flight sandbox calls are cancelled with their normal retryable result.
+    """
+    event = await service.request_sandbox_recycle(
+        pool,
+        session_id,
+        account_id=account_id,
+        requested_by="operator",
+        discard_unsalvaged=body.discard_unsalvaged,
+    )
+    await defer_sandbox_recycle(session_id, requested_by="operator")
+    return event
 
 
 @router.post(

@@ -257,6 +257,22 @@ def interrupt(
     run_or_die(_run)
 
 
+@app.command("recycle-sandbox", help="Discard sandbox-local state and provision fresh.")
+@covers("recycle_session_sandbox")
+def recycle_sandbox(ctx: typer.Context, session_id: str) -> None:
+    """Recycle while preserving bind-mounted durable session data."""
+
+    def _run() -> None:
+        raw_single(
+            ctx,
+            "POST",
+            f"/v1/sessions/{session_id}/sandbox/recycle",
+            json_body={"discard_unsalvaged": True},
+        )
+
+    run_or_die(_run)
+
+
 @app.command("events", help="List a session's events (backfill).")
 @covers("list_session_events")
 def events(
