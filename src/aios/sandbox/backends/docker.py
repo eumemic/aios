@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from time import monotonic
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -75,16 +76,17 @@ _CONTAINER_TIMEOUT_EXIT_CODE = 137
 _FLATTEN_DEPTH_CEILING = 200
 
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
-# metadata/management calls on the blanket Docker CLI bound, but budget the
-# data-scaling work so large corpses converge: commit/export/import by SizeRw,
-# and the ``inspect --size`` writable-layer walk (whose size is not yet known)
-# by the fixed ``sandbox_inspect_size_timeout_seconds`` bound.
+# metadata calls on the blanket Docker CLI bound, but calibrate data work from
+# the immediately preceding ``inspect --size`` stat-walk. Commit must walk the
+# same paths and additionally read and compress their contents, so ten walk
+# durations is a deliberately generous measured-hardware budget. The floor
+# covers tiny layers and clocks with coarse resolution.
 _SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
-_SNAPSHOT_TIMEOUT_NS_PER_BYTE = 20e-9
+_SNAPSHOT_WALK_SAFETY_FACTOR = 10.0
 
 
-def _snapshot_timeout_s(size_rw: int | None) -> float:
-    return max(_SNAPSHOT_TIMEOUT_FLOOR_S, (size_rw or 0) * _SNAPSHOT_TIMEOUT_NS_PER_BYTE)
+def _snapshot_timeout_s(size_walk_seconds: float) -> float:
+    return max(_SNAPSHOT_TIMEOUT_FLOOR_S, size_walk_seconds * _SNAPSHOT_WALK_SAFETY_FACTOR)
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -532,7 +534,11 @@ class DockerBackend:
         await self.stop(sandbox_id)
 
         # 2. Inspect the corpse: parent image, writable-layer bytes, labels.
+        # Time the data-scaling stat walk so the subsequent operation's budget
+        # reflects this daemon, filesystem, and corpse rather than a fixed rate.
+        inspect_started = monotonic()
         parent_image, size_rw, labels = await self._inspect_container_for_snapshot(sandbox_id)
+        snapshot_timeout_s = _snapshot_timeout_s(monotonic() - inspect_started)
         env_keys = _split_label_list(labels.get(ENV_KEYS_LABEL_KEY))
         base_ref = labels.get(BASE_IMAGE_LABEL_KEY)
 
@@ -596,12 +602,8 @@ class DockerBackend:
                 raise SandboxBackendError(
                     f"flatten deferred: {free} free bytes, {required} required"
                 )
-            return await self._flatten(
-                sandbox_id, tag, labels, timeout_s=_snapshot_timeout_s(size_rw)
-            )
-        return await self._commit(
-            sandbox_id, tag, env_keys, base_ref, timeout_s=_snapshot_timeout_s(size_rw)
-        )
+            return await self._flatten(sandbox_id, tag, labels, timeout_s=snapshot_timeout_s)
+        return await self._commit(sandbox_id, tag, env_keys, base_ref, timeout_s=snapshot_timeout_s)
 
     async def _commit(
         self,

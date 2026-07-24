@@ -258,6 +258,11 @@ class SandboxRegistry:
         # pass must never GC session-B's open-breaker entry). ``alarmed``
         # records whether the one-shot operator wake has been emitted.
         self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
+        # Exact failure text and its consecutive repetition count. Once one
+        # cause alone reaches the breaker threshold, cooldown cannot make the
+        # identical operation transient; it remains escalated until recovery.
+        self._salvage_failure_causes: dict[str, tuple[str, int]] = {}
+        self._last_snapshot_failure: dict[str, str] = {}
         self._salvage_breaker_opened_at: dict[str, float] = {}
         # Strong refs for evict()'s fire-and-forget proxy-stop tasks.
         # asyncio only weak-refs tasks, so without this the task can be
@@ -1249,11 +1254,13 @@ class SandboxRegistry:
                 flatten_if_unique_bytes_over=disk_limit_bytes,
             )
         except Exception as err:
+            cause = str(err)
+            self._last_snapshot_failure[sandbox_id] = cause
             log.warning(
                 "sandbox.snapshot_failed_corpse_retained",
                 session_id=session_id,
                 container_id=sandbox_id[:12],
-                error=str(err),
+                error=cause,
             )
             return False
 
@@ -1286,6 +1293,8 @@ class SandboxRegistry:
             try:
                 await self._write_snapshot_pointer(session_id, tag, outcome.unique_bytes)
             except Exception as err:
+                cause = f"snapshot pointer write failed: {err}"
+                self._last_snapshot_failure[sandbox_id] = cause
                 log.warning(
                     "sandbox.snapshot_pointer_write_failed_corpse_retained",
                     session_id=session_id,
@@ -1312,6 +1321,7 @@ class SandboxRegistry:
                         error=str(err),
                     )
 
+        self._last_snapshot_failure.pop(sandbox_id, None)
         log.info(
             "sandbox.snapshot",
             session_id=session_id,
@@ -1345,12 +1355,27 @@ class SandboxRegistry:
         for corpse_id, (owner, _failures, _alarmed) in list(self._salvage_failures.items()):
             if owner == session_id and corpse_id not in present:
                 self._salvage_failures.pop(corpse_id, None)
+                self._salvage_failure_causes.pop(corpse_id, None)
+                self._last_snapshot_failure.pop(corpse_id, None)
                 self._salvage_breaker_opened_at.pop(corpse_id, None)
         for ref in refs:
             _owner, failures, alarmed = self._salvage_failures.get(
                 ref.sandbox_id, (session_id, 0, False)
             )
             if failures >= settings.sandbox_salvage_breaker_threshold:
+                cause, same_cause_count = self._salvage_failure_causes.get(
+                    ref.sandbox_id, ("unknown salvage failure", 0)
+                )
+                if same_cause_count >= settings.sandbox_salvage_breaker_threshold:
+                    alarmed = await self._alarm_salvage_breaker_once(
+                        session_id, ref.sandbox_id, failures, alarmed, cause=cause
+                    )
+                    self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
+                    raise SandboxBackendError(
+                        f"salvage breaker open: deterministic salvage failure for corpse {ref.sandbox_id[:12]}: "
+                        f"{cause}; refusing to provision over unrecovered state; recover via "
+                        f"POST /v1/sessions/{session_id}/sandbox/recycle"
+                    )
                 opened_at = self._salvage_breaker_opened_at.setdefault(
                     ref.sandbox_id, time.monotonic()
                 )
@@ -1372,9 +1397,17 @@ class SandboxRegistry:
             )
             if not removable:
                 failures += 1
+                cause = self._last_snapshot_failure.get(
+                    ref.sandbox_id, "snapshot or pointer write failed"
+                )
+                previous_cause, previous_count = self._salvage_failure_causes.get(
+                    ref.sandbox_id, ("", 0)
+                )
+                same_cause_count = previous_count + 1 if cause == previous_cause else 1
+                self._salvage_failure_causes[ref.sandbox_id] = (cause, same_cause_count)
                 if failures >= settings.sandbox_salvage_breaker_threshold:
                     alarmed = await self._alarm_salvage_breaker_once(
-                        session_id, ref.sandbox_id, failures, alarmed
+                        session_id, ref.sandbox_id, failures, alarmed, cause=cause
                     )
                 self._salvage_failures[ref.sandbox_id] = (session_id, failures, alarmed)
                 self._salvage_breaker_opened_at[ref.sandbox_id] = time.monotonic()
@@ -1384,11 +1417,19 @@ class SandboxRegistry:
                     "unrecovered state"
                 )
             self._salvage_failures.pop(ref.sandbox_id, None)
+            self._salvage_failure_causes.pop(ref.sandbox_id, None)
+            self._last_snapshot_failure.pop(ref.sandbox_id, None)
             self._salvage_breaker_opened_at.pop(ref.sandbox_id, None)
             await self._backend.force_remove(ref.sandbox_id)
 
     async def _alarm_salvage_breaker_once(
-        self, session_id: str, corpse_id: str, failures: int, alarmed: bool
+        self,
+        session_id: str,
+        corpse_id: str,
+        failures: int,
+        alarmed: bool,
+        *,
+        cause: str = "unknown salvage failure",
     ) -> bool:
         """Emit the one-shot operator wake for an open salvage breaker.
 
@@ -1409,8 +1450,9 @@ class SandboxRegistry:
             await self._alert_operator(
                 session_id,
                 f"Sandbox salvage breaker OPEN for corpse {corpse_id[:12]}: "
-                f"{failures} consecutive salvage failures. Provisioning for this "
-                "session is fail-closed until the corpse is recovered or cleared.",
+                f"{failures} consecutive salvage failures with cause: {cause}. "
+                "Provisioning remains fail-closed over unrecovered state. Recover in-band "
+                f"via POST /v1/sessions/{session_id}/sandbox/recycle (self-recycle, #2022).",
                 cause="sandbox.salvage_breaker_open",
             )
         except Exception as err:
