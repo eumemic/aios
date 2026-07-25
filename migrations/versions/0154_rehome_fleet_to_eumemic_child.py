@@ -270,10 +270,14 @@ def _plain_move(source: str, destination: str) -> None:
     # workflow_versions: suspend the 0112 no-UPDATE trigger for this one
     # statement (same transaction), because the composite FK to workflows
     # requires the denormalized account_id to move in lockstep.
-    bind.execute(sa.text("ALTER TABLE workflow_versions DISABLE TRIGGER workflow_versions_no_update"))
+    bind.execute(
+        sa.text("ALTER TABLE workflow_versions DISABLE TRIGGER workflow_versions_no_update")
+    )
     try:
         bind.execute(
-            sa.text("UPDATE workflow_versions SET account_id=:destination WHERE account_id=:source"),
+            sa.text(
+                "UPDATE workflow_versions SET account_id=:destination WHERE account_id=:source"
+            ),
             {"source": source, "destination": destination},
         )
     finally:
