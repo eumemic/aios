@@ -1,6 +1,6 @@
 """Align lifecycle_search redaction with the real cumulative counters.
 
-Revision ID: 0156
+Revision ID: 0157
 Revises: 0151
 
 Fence invariant: ``data - ARRAY[...]`` removes top-level JSON keys only. Writers
@@ -15,7 +15,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0156"
+revision: str = "0157"
 down_revision: str = "0155"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
