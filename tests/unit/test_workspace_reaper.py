@@ -465,6 +465,7 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
     pool = MagicMock()
     pool.acquire.return_value = _Cm()
+    pool._conn = conn
 
     result = await sweep_archived_workspaces(pool)
 

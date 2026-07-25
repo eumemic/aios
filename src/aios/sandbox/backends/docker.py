@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from time import monotonic
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -44,6 +45,7 @@ from aios.sandbox.backends.base import (
     ManagedSandboxRef,
     SandboxBackendError,
     SandboxHandle,
+    SandboxSnapshotTimeoutError,
     SandboxSpec,
     SnapshotOutcome,
 )
@@ -74,17 +76,40 @@ _CONTAINER_TIMEOUT_EXIT_CODE = 137
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
-# metadata/management calls on the blanket Docker CLI bound, but budget the
-# data-scaling work so large corpses converge: commit/export/import by SizeRw,
-# and the ``inspect --size`` writable-layer walk (whose size is not yet known)
-# by the fixed ``sandbox_inspect_size_timeout_seconds`` bound.
+# metadata calls on the blanket Docker CLI bound, but calibrate data work from
+# the immediately preceding ``inspect --size`` stat-walk. Commit must walk the
+# same paths and additionally read and compress their contents, so ten walk
+# durations is a deliberately generous measured-hardware budget. The floor
+# covers tiny layers and clocks with coarse resolution.
 _SNAPSHOT_TIMEOUT_FLOOR_S = 60.0
-_SNAPSHOT_TIMEOUT_NS_PER_BYTE = 20e-9
+_SNAPSHOT_WALK_SAFETY_FACTOR = 10.0
 
 
-def _snapshot_timeout_s(size_rw: int | None) -> float:
-    return max(_SNAPSHOT_TIMEOUT_FLOOR_S, (size_rw or 0) * _SNAPSHOT_TIMEOUT_NS_PER_BYTE)
+def _snapshot_timeout_s(
+    size_rw: int | None,
+    *,
+    throughput_bytes_per_second: float | None = None,
+    retry_attempt: int = 0,
+    size_walk_seconds: float | None = None,
+) -> float:
+    settings = get_settings()
+    if size_walk_seconds is not None:
+        base = max(_SNAPSHOT_TIMEOUT_FLOOR_S, size_walk_seconds * _SNAPSHOT_WALK_SAFETY_FACTOR)
+    else:
+        seconds = (
+            (size_rw or 0) * settings.sandbox_snapshot_timeout_ns_per_byte
+            if throughput_bytes_per_second is None
+            else (size_rw or 0) / throughput_bytes_per_second
+        )
+        base = max(settings.sandbox_snapshot_timeout_floor_seconds, seconds)
+        base *= settings.sandbox_snapshot_timeout_safety_margin
+    retry_scale = min(
+        settings.sandbox_snapshot_timeout_retry_cap,
+        settings.sandbox_snapshot_timeout_retry_multiplier**retry_attempt,
+    )
+    return base * retry_scale
 
 
 def _decode_and_truncate(raw: bytes, max_bytes: int) -> tuple[str, bool]:
@@ -104,6 +129,40 @@ class DockerBackend:
     """Sandbox backend backed by the host's Docker daemon."""
 
     name = "docker"
+
+    def __init__(self) -> None:
+        self._throughput_bytes_per_second = self._load_throughput()
+        self._snapshot_timeout_attempts: dict[str, int] = {}
+
+    @staticmethod
+    def _load_throughput() -> float | None:
+        path = get_settings().sandbox_snapshot_throughput_state_path
+        try:
+            value = json.loads(path.read_text()).get("bytes_per_second")
+            return float(value) if float(value) > 0 else None
+        except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
+            return None
+
+    def _record_throughput(self, bytes_processed: int, elapsed_s: float) -> None:
+        if bytes_processed <= 0 or elapsed_s <= 0:
+            return
+        settings = get_settings()
+        measured = bytes_processed / elapsed_s
+        previous = self._throughput_bytes_per_second
+        alpha = settings.sandbox_snapshot_throughput_ewma_alpha
+        self._throughput_bytes_per_second = (
+            measured if previous is None else alpha * measured + (1 - alpha) * previous
+        )
+        path = settings.sandbox_snapshot_throughput_state_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps({"bytes_per_second": self._throughput_bytes_per_second})
+            )
+            temporary.replace(path)
+        except OSError as err:
+            log.warning("sandbox.snapshot_throughput_persist_failed", error=str(err))
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
@@ -527,12 +586,57 @@ class DockerBackend:
         empty_floor_bytes: int,
         flatten_if_unique_bytes_over: int | None,
     ) -> SnapshotOutcome:
-        """Commit (or flatten) ``sandbox_id``'s rootfs to ``tag`` (§5.2)."""
+        """Commit (or flatten) ``sandbox_id``'s rootfs to ``tag`` (§5.2).
+
+        Owns the per-corpse timeout-retry state for the WHOLE verb, so every
+        terminal outcome settles it exactly once:
+
+        * any successful outcome — including the early ``skipped_stale`` /
+          ``skipped_empty`` returns — clears the entry. The common timeout
+          recovery is ``docker commit`` finishing server-side while the client
+          gave up: the retry then sees the advanced tag and returns
+          ``skipped_stale``, and the corpse is removed right after. Clearing
+          only on the commit/flatten path would strand that entry forever
+          (the container is gone, so nothing can ever clear it), leaking a
+          dict entry per successfully-salvaged timeout corpse for the life of
+          the worker.
+        * a typed snapshot timeout escalates the next attempt's budget.
+        * any other failure leaves the entry untouched — the corpse is
+          retained fail-closed and salvage converges on a later attempt.
+        """
+        try:
+            outcome = await self._snapshot_uncounted(
+                sandbox_id,
+                tag,
+                empty_floor_bytes=empty_floor_bytes,
+                flatten_if_unique_bytes_over=flatten_if_unique_bytes_over,
+            )
+        except SandboxSnapshotTimeoutError:
+            self._snapshot_timeout_attempts[sandbox_id] = (
+                self._snapshot_timeout_attempts.get(sandbox_id, 0) + 1
+            )
+            raise
+        self._snapshot_timeout_attempts.pop(sandbox_id, None)
+        return outcome
+
+    async def _snapshot_uncounted(
+        self,
+        sandbox_id: str,
+        tag: str,
+        *,
+        empty_floor_bytes: int,
+        flatten_if_unique_bytes_over: int | None,
+    ) -> SnapshotOutcome:
+        """``snapshot()`` minus the retry-state bookkeeping its caller owns."""
         # 1. Stop (idempotent — the corpse may already be stopped).
         await self.stop(sandbox_id)
 
         # 2. Inspect the corpse: parent image, writable-layer bytes, labels.
+        # Time the data-scaling stat walk so the subsequent operation's budget
+        # reflects this daemon, filesystem, and corpse rather than a fixed rate.
+        inspect_started = monotonic()
         parent_image, size_rw, labels = await self._inspect_container_for_snapshot(sandbox_id)
+        size_walk_seconds = monotonic() - inspect_started
         env_keys = _split_label_list(labels.get(ENV_KEYS_LABEL_KEY))
         base_ref = labels.get(BASE_IMAGE_LABEL_KEY)
 
@@ -580,6 +684,10 @@ class DockerBackend:
             flatten_if_unique_bytes_over is not None
             and projected_unique > flatten_if_unique_bytes_over
         )
+        retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
+        snapshot_timeout_s = _snapshot_timeout_s(
+            size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
+        )
         if parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget:
             estimate = parent_size + rw
             settings = get_settings()
@@ -596,12 +704,14 @@ class DockerBackend:
                 raise SandboxBackendError(
                     f"flatten deferred: {free} free bytes, {required} required"
                 )
-            return await self._flatten(
-                sandbox_id, tag, labels, timeout_s=_snapshot_timeout_s(size_rw)
+            operation = self._flatten(
+                sandbox_id, tag, labels, timeout_s=snapshot_timeout_s, size_rw=rw
             )
-        return await self._commit(
-            sandbox_id, tag, env_keys, base_ref, timeout_s=_snapshot_timeout_s(size_rw)
-        )
+        else:
+            operation = self._commit(
+                sandbox_id, tag, env_keys, base_ref, timeout_s=snapshot_timeout_s, size_rw=rw
+            )
+        return await operation
 
     async def _commit(
         self,
@@ -611,6 +721,7 @@ class DockerBackend:
         base_ref: str | None,
         *,
         timeout_s: float,
+        size_rw: int,
     ) -> SnapshotOutcome:
         """``docker commit`` one layer, scrubbing exactly the run-injected env keys.
 
@@ -625,7 +736,11 @@ class DockerBackend:
         for key in env_keys:
             argv.extend(["--change", f"ENV {key}="])
         argv.extend([sandbox_id, tag])
-        rc, _stdout, stderr_bytes = await run_docker_cli(argv, timeout_s=timeout_s)
+        started = monotonic()
+        rc, _stdout, stderr_bytes = await run_docker_cli(
+            argv, timeout_s=timeout_s, snapshot_timeout=True
+        )
+        elapsed = monotonic() - started
         if rc != 0:
             raise SandboxBackendError(
                 f"docker commit failed (exit {rc}) for {tag}: "
@@ -634,6 +749,7 @@ class DockerBackend:
         new = await self._inspect_image_fields(tag)
         if new is None:
             raise SandboxBackendError(f"committed image {tag} not found after commit")
+        self._record_throughput(size_rw, elapsed)
         return SnapshotOutcome(
             kind="committed",
             image_id=new[0],
@@ -648,6 +764,7 @@ class DockerBackend:
         labels: dict[str, str],
         *,
         timeout_s: float,
+        size_rw: int,
     ) -> SnapshotOutcome:
         """``docker export | docker import`` — collapse the chain to one layer.
 
@@ -683,15 +800,23 @@ class DockerBackend:
             consumer.extend(["--change", change])
         consumer.extend(["-", tag])
         settings = get_settings()
-        await run_docker_pipeline(
-            ["docker", "export", sandbox_id],
-            consumer,
-            stall_timeout_s=min(settings.sandbox_pipeline_stall_seconds, timeout_s),
-            max_timeout_s=timeout_s,
-        )
+        started = monotonic()
+        try:
+            await run_docker_pipeline(
+                ["docker", "export", sandbox_id],
+                consumer,
+                stall_timeout_s=min(settings.sandbox_pipeline_stall_seconds, timeout_s),
+                max_timeout_s=timeout_s,
+            )
+        except SandboxBackendError as err:
+            if "timed out" in str(err).lower():
+                raise SandboxSnapshotTimeoutError(str(err)) from err
+            raise
+        elapsed = monotonic() - started
         new = await self._inspect_image_fields(tag)
         if new is None:
             raise SandboxBackendError(f"flattened image {tag} not found after import")
+        self._record_throughput(size_rw, elapsed)
         # A flattened image is standalone — it shares no layers with the base,
         # so it is charged its FULL size (subtracting a base it doesn't share
         # would hide ~hundreds of MB from the accounting that must see the host
