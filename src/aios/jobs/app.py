@@ -197,9 +197,7 @@ async def defer_wake(
         )
 
 
-async def defer_sandbox_recycle(
-    session_id: str, *, requested_by: str, request_id: str
-) -> None:
+async def defer_sandbox_recycle(session_id: str, *, requested_by: str, request_id: str) -> None:
     """Enqueue one serialized recycle job for ONE admitted recycle request.
 
     ``request_id`` is the id of the ``sandbox_recycle_requested`` event that

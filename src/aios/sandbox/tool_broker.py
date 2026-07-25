@@ -445,9 +445,7 @@ class ToolBroker:
             # ``event.id`` — the admitting request's durable identity; see
             # ``defer_sandbox_recycle``. Never a session-wide queueing key, or a
             # second admitted request would be silently dropped.
-            await defer_sandbox_recycle(
-                resolved, requested_by="self", request_id=event.id
-            )
+            await defer_sandbox_recycle(resolved, requested_by="self", request_id=event.id)
         except AiosError as exc:
             return _err(exc.status_code, exc.to_message(), code=exc.error_type)
         return JSONResponse(event.model_dump(mode="json"), status_code=202)

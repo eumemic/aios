@@ -160,6 +160,4 @@ async def test_route_defers_with_the_admitting_event_id() -> None:
         )
 
     assert returned is event
-    defer.assert_awaited_once_with(
-        "sess_1", requested_by="operator", request_id="evt_admitted"
-    )
+    defer.assert_awaited_once_with("sess_1", requested_by="operator", request_id="evt_admitted")
