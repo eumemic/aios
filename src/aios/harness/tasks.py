@@ -43,6 +43,7 @@
 from __future__ import annotations
 
 from procrastinate import JobContext, RetryStrategy
+from procrastinate.jobs import Job
 
 from aios.jobs.app import app
 from aios.logging import get_logger
@@ -122,8 +123,9 @@ async def wake_workflow(run_id: str) -> None:
 # Recycle is DESTRUCTIVE and rate-limited: an admitted request must not be
 # silently consumed by a transient Docker/proxy/DB hiccup. So unlike the other
 # harness tasks (``retry=False`` — the sweep re-drives them), the recycle job
-# retries with a bounded exponential backoff and, on the final attempt, records
-# a typed terminal failure event so the outcome is durable and redrivable.
+# retries with a bounded exponential backoff and, on the genuinely FINAL run,
+# records a typed terminal failure event so the outcome is durable and
+# redrivable.
 #
 # Every stage is convergent, so a retry is safe:
 #   * ``inflight.cancel_session`` — idempotent (no in-flight tasks ⇒ no-op),
@@ -132,12 +134,64 @@ async def wake_workflow(run_id: str) -> None:
 #     and the artifact-before-pointer ordering means a crash mid-way never
 #     leaves an unattributable orphan (see ``SandboxRegistry.recycle``),
 #   * ``registry.get_or_provision`` — a normal cold provision.
+#
+# ── Attempt accounting (procrastinate 3.8.1) ───────────────────────────────
+# The terminal event must be emitted EXACTLY ONCE, on the run after which no
+# further retry is scheduled. Getting that predicate right requires reading the
+# library rather than guessing, because ``job.attempts`` is NOT "runs so far":
+#
+#   * ``procrastinate_fetch_job_v2`` does NOT touch ``attempts``. A job's very
+#     first run therefore observes ``job.attempts == 0``.
+#   * On failure the worker asks ``RetryStrategy.get_retry_decision()``, which
+#     returns ``None`` (⇒ no retry, job goes to ``failed``) iff
+#     ``max_attempts and job.attempts >= max_attempts`` — i.e. it keeps
+#     retrying while ``job.attempts < max_attempts``, comparing the value the
+#     RUNNING job was fetched with.
+#   * Only when a retry IS scheduled does ``procrastinate_retry_job_v*`` do
+#     ``attempts = attempts + 1`` (the in-memory testing connector mirrors
+#     this). ``procrastinate_finish_job_v1`` also increments, but that is the
+#     bookkeeping write for a run that is already terminal.
+#
+# So the observed sequence of ``context.job.attempts`` across the ladder for
+# ``max_attempts = N`` is 0, 1, 2, ... N, i.e. N + 1 runs, and the LAST one —
+# the only one after which no retry is scheduled — is the one that observes
+# ``job.attempts == N``.
+#
+# The previous implementation computed ``attempt = job.attempts + 1`` and
+# declared terminal at ``attempt >= N``, i.e. at ``job.attempts == N - 1``.
+# That run still satisfies ``job.attempts < max_attempts``, so procrastinate
+# scheduled ANOTHER run, which then also saw the terminal predicate satisfied:
+# two ``sandbox_recycle_failed`` events per exhausted request, the first one
+# premature (a retry that might still have succeeded was already journalled as
+# a terminal failure).
+#
+# The predicate below is therefore derived from the strategy object itself
+# (:func:`_is_final_attempt`) rather than restating the ``+ 1`` arithmetic, so
+# it stays true to whatever the configured strategy actually decides — and the
+# strategy is consulted through ``get_retry_decision`` with the real exception,
+# which also honours ``retry_exceptions`` filtering.
 _RECYCLE_MAX_ATTEMPTS = 4
 
 recycle_retry = RetryStrategy(
     max_attempts=_RECYCLE_MAX_ATTEMPTS,
     exponential_wait=2,  # 2s, 4s, 8s
 )
+
+# Total number of RUNS the ladder above performs before the job is failed for
+# good: the initial run (``attempts == 0``) plus ``max_attempts`` retries.
+_RECYCLE_MAX_RUNS = _RECYCLE_MAX_ATTEMPTS + 1
+
+
+def _is_final_attempt(job: Job, exc: BaseException) -> bool:
+    """Return True iff procrastinate will NOT schedule another run of *job*.
+
+    Asks the very strategy the task is registered with, with the very exception
+    that was raised — the same call ``procrastinate.worker.Worker._process_job``
+    makes via ``Task.get_retry_exception`` — so this predicate cannot drift from
+    the library's decision (nor from ``retry_exceptions`` filtering, should the
+    strategy ever grow one). ``None`` ⇒ no retry ⇒ this run is terminal.
+    """
+    return recycle_retry.get_retry_decision(exception=exc, job=job) is None
 
 
 @app.task(
@@ -146,24 +200,42 @@ recycle_retry = RetryStrategy(
     retry=recycle_retry,
     pass_context=True,
 )
-async def recycle_sandbox(context: JobContext, session_id: str, requested_by: str) -> None:
+async def recycle_sandbox(
+    context: JobContext,
+    session_id: str,
+    requested_by: str,
+    request_id: str | None = None,
+) -> None:
     """Discard every container/corpse/snapshot and provision fresh current config.
 
     Emits exactly one terminal lifecycle event per admitted request:
-    ``sandbox_recycled`` on success, or ``sandbox_recycle_failed`` once the
-    retry budget is exhausted — so the 202 the caller already received always
-    resolves to an observable outcome in the journal rather than dead-ending
-    at ``sandbox_recycle_requested``. The failure event carries ``error`` and
-    ``attempts`` and is model-visible-adjacent state a caller/operator can
-    redrive from (the admission limit is per accepted request, so a redrive is
-    a new request; the failure event is what tells anyone it is needed).
+    ``sandbox_recycled`` on success, or ``sandbox_recycle_failed`` on the run
+    after which procrastinate schedules no further retry — so the 202 the caller
+    already received always resolves to an observable outcome in the journal
+    rather than dead-ending at ``sandbox_recycle_requested``. The failure event
+    carries ``error`` and ``attempts`` and is state a caller/operator can redrive
+    from (the admission limit is per accepted request, so a redrive is a new
+    request; the failure event is what tells anyone it is needed).
+
+    Terminality is decided by :func:`_is_final_attempt` — the configured
+    ``RetryStrategy`` itself — never by re-deriving attempt arithmetic here; see
+    the attempt-accounting note above the strategy for why the naive
+    ``attempts + 1 >= max_attempts`` form double-emitted.
+
+    ``request_id`` is the id of the admitting ``sandbox_recycle_requested``
+    event (see :func:`aios.jobs.app.defer_sandbox_recycle`); it is stamped onto
+    the terminal event so each admitted, rate-limit-counted request is joinable
+    to exactly one outcome. Optional/defaulted so a job deferred by a previous
+    release still deserializes across the deploy window.
     """
     from aios.harness import runtime
     from aios.services import sessions as sessions_service
 
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
-    attempt = context.job.attempts + 1  # ``attempts`` counts PRIOR failures
+    # ``job.attempts`` counts retries ALREADY SCHEDULED for this job, so the
+    # first run sees 0; the human-facing run counter is one more than that.
+    run_number = context.job.attempts + 1
     try:
         registry = runtime.require_sandbox_registry()
         inflight = runtime.require_inflight_tool_registry()
@@ -171,22 +243,22 @@ async def recycle_sandbox(context: JobContext, session_id: str, requested_by: st
         await registry.recycle(session_id)
         await registry.get_or_provision(session_id, pool=pool)
     except Exception as exc:
-        if attempt < _RECYCLE_MAX_ATTEMPTS:
+        if not _is_final_attempt(context.job, exc):
             log.warning(
                 "sandbox.recycle_attempt_failed",
                 session_id=session_id,
-                attempt=attempt,
+                attempt=run_number,
                 error=str(exc),
             )
             raise  # procrastinate re-drives under ``recycle_retry``
-        # Budget exhausted: record the typed terminal failure BEFORE the job
-        # lands in the failed table, so the outcome is durable even though no
-        # further retry will run. The append is best-effort-ordered ahead of
-        # the re-raise; if IT fails too, the raise still surfaces the original.
+        # No further retry will be scheduled: record the typed terminal failure
+        # BEFORE the job lands in the failed table, so the outcome is durable.
+        # The append is ordered ahead of the re-raise; if IT fails too, the
+        # raise still surfaces the original.
         log.error(
             "sandbox.recycle_failed",
             session_id=session_id,
-            attempts=attempt,
+            attempts=run_number,
             error=str(exc),
         )
         await sessions_service.append_event(
@@ -196,7 +268,8 @@ async def recycle_sandbox(context: JobContext, session_id: str, requested_by: st
             {
                 "event": SANDBOX_RECYCLE_FAILED_EVENT,
                 "requested_by": requested_by,
-                "attempts": attempt,
+                "request_id": request_id,
+                "attempts": run_number,
                 "error": str(exc),
             },
             account_id=account_id,
@@ -206,6 +279,11 @@ async def recycle_sandbox(context: JobContext, session_id: str, requested_by: st
         pool,
         session_id,
         "lifecycle",
-        {"event": SANDBOX_RECYCLED_EVENT, "requested_by": requested_by, "attempts": attempt},
+        {
+            "event": SANDBOX_RECYCLED_EVENT,
+            "requested_by": requested_by,
+            "request_id": request_id,
+            "attempts": run_number,
+        },
         account_id=account_id,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -95,4 +96,70 @@ async def test_recycle_rate_limit_is_atomic() -> None:
             raise AssertionError("expected rate limit")
     conn.execute.assert_awaited_once_with(
         "SELECT 1 FROM sessions WHERE id = $1 AND account_id = $2 FOR UPDATE", "sess_1", "acct_1"
+    )
+
+
+async def test_two_admitted_requests_each_get_their_own_job(in_memory_app: Any) -> None:
+    """Finding 2: admission must be one-to-one with execution and outcome.
+
+    ``request_sandbox_recycle`` commits a distinct ``sandbox_recycle_requested``
+    event (counted against the 3/hour budget, answered 202) BEFORE the enqueue.
+    The enqueue therefore may not silently coalesce two distinct admissions:
+    with the old session-wide ``queueing_lock=recycle:{session_id}``, a second
+    admitted request arriving while the first job was still ``todo`` raised
+    ``AlreadyEnqueued``, which ``defer_sandbox_recycle`` swallowed — two request
+    events, one job, one terminal event.
+
+    Keying the queueing lock on the admitting event's id makes the identity
+    per-request, so both admissions get a job (and both terminal events).
+    """
+    from aios.jobs.app import defer_sandbox_recycle
+
+    await defer_sandbox_recycle("sess_1", requested_by="operator", request_id="evt_a")
+    await defer_sandbox_recycle("sess_1", requested_by="self", request_id="evt_b")
+
+    jobs = list(in_memory_app.connector.jobs.values())
+    assert len(jobs) == 2, f"each admitted request needs its own job, got {jobs}"
+    assert {j["queueing_lock"] for j in jobs} == {"recycle:evt_a", "recycle:evt_b"}
+    # ...but they still serialize on the session: ``lock`` is the RUNNING-job
+    # mutex, so two recycles never race on the same sandbox.
+    assert {j["lock"] for j in jobs} == {"sess_1"}
+    assert {j["args"]["request_id"] for j in jobs} == {"evt_a", "evt_b"}
+    assert {j["args"]["session_id"] for j in jobs} == {"sess_1"}
+
+
+async def test_redefer_of_same_request_is_idempotent(in_memory_app: Any) -> None:
+    """A re-defer of ONE admission (at-least-once retry) still coalesces."""
+    from aios.jobs.app import defer_sandbox_recycle
+
+    await defer_sandbox_recycle("sess_1", requested_by="operator", request_id="evt_a")
+    await defer_sandbox_recycle("sess_1", requested_by="operator", request_id="evt_a")
+
+    assert len(in_memory_app.connector.jobs) == 1
+
+
+async def test_route_defers_with_the_admitting_event_id() -> None:
+    """The route must pass the committed request event's id, not a fresh one."""
+    from aios.api.routers import sessions as sessions_router
+    from aios.models.sessions import SandboxRecycleRequest
+
+    event = MagicMock()
+    event.id = "evt_admitted"
+    with (
+        patch(
+            "aios.api.routers.sessions.service.request_sandbox_recycle",
+            AsyncMock(return_value=event),
+        ),
+        patch("aios.api.routers.sessions.defer_sandbox_recycle", AsyncMock()) as defer,
+    ):
+        returned = await sessions_router.recycle_sandbox(
+            "sess_1",
+            SandboxRecycleRequest(discard_unsalvaged=True),
+            MagicMock(),
+            "acct_1",
+        )
+
+    assert returned is event
+    defer.assert_awaited_once_with(
+        "sess_1", requested_by="operator", request_id="evt_admitted"
     )

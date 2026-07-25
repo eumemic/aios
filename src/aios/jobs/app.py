@@ -197,19 +197,53 @@ async def defer_wake(
         )
 
 
-async def defer_sandbox_recycle(session_id: str, *, requested_by: str) -> None:
-    """Enqueue one serialized recycle job for a session."""
+async def defer_sandbox_recycle(
+    session_id: str, *, requested_by: str, request_id: str
+) -> None:
+    """Enqueue one serialized recycle job for ONE admitted recycle request.
+
+    ``request_id`` is the id of the ``sandbox_recycle_requested`` event that
+    admitted this request (committed, and rate-limit-counted, by
+    :func:`aios.services.sessions.request_sandbox_recycle`). It is the durable
+    identity that makes admission one-to-one with execution and outcome:
+
+    * it keys the ``queueing_lock``. The previous ``recycle:{session_id}`` form
+      made the lock a *session* identity, so a second admitted request arriving
+      while the first job was still ``todo`` raised ``AlreadyEnqueued`` and was
+      silently swallowed — the journal held two ``sandbox_recycle_requested``
+      events (both counted against the 3/hour budget, both answered 202) but
+      only one job ever ran and only one terminal event was ever written. With
+      a per-request lock, two distinct admissions can never coalesce; the
+      ``lock=session_id`` (a *running*-job mutex, not a queueing one) still
+      serializes their execution so two recycles never race on the same
+      sandbox.
+    * it is carried into the job kwargs and stamped onto the terminal
+      ``sandbox_recycled`` / ``sandbox_recycle_failed`` event, so every admitted
+      request is joinable to exactly one outcome.
+
+    ``AlreadyEnqueued`` is now only reachable for a re-defer of the SAME
+    ``request_id`` (an at-least-once retry of one admission), which is a true
+    idempotent no-op rather than a dropped request.
+    """
     deferrer = app.configure_task(
         "harness.recycle_sandbox",
         queue=_polled_queue(QUEUE_SESSIONS),
         lock=session_id,
-        queueing_lock=f"recycle:{session_id}",
+        queueing_lock=f"recycle:{request_id}",
         priority=_FOREGROUND_PRIORITY,
     )
     try:
-        await deferrer.defer_async(session_id=session_id, requested_by=requested_by)
+        await deferrer.defer_async(
+            session_id=session_id, requested_by=requested_by, request_id=request_id
+        )
     except procrastinate_exceptions.AlreadyEnqueued:
-        return
+        # Same request re-deferred (retry of one admission) — not a second
+        # admitted request, so nothing is lost by coalescing.
+        log.debug(
+            "sandbox_recycle.already_enqueued",
+            session_id=session_id,
+            request_id=request_id,
+        )
 
 
 async def defer_run_wake(run_id: str, *, batch: bool = False) -> None:

@@ -620,7 +620,10 @@ async def recycle_sandbox(
         requested_by="operator",
         discard_unsalvaged=body.discard_unsalvaged,
     )
-    await defer_sandbox_recycle(session_id, requested_by="operator")
+    # The admitting event's id is the request's durable identity: it keys the
+    # enqueue (so two admitted requests can never be coalesced away by a
+    # session-wide queueing lock) and is stamped onto the terminal event.
+    await defer_sandbox_recycle(session_id, requested_by="operator", request_id=event.id)
     return event
 
 
