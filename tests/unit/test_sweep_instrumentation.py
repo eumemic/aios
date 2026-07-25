@@ -213,8 +213,6 @@ class TestEntrySweepSpan:
             "sweep_start",
             "sweep.pool_acquire_start",
             "sweep.pool_acquire_end",
-            "sweep.query_exec_start",
-            "sweep.query_exec_end",
             "sweep_end",
         ]
 

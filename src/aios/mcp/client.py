@@ -274,9 +274,7 @@ async def resolve_auth_for_target_url(
         )
         if cred is None:
             return None, {}
-        return await _auth_from_credential(
-            conn, crypto_box, cred, target_url, account_id=account_id
-        )
+    return await _auth_from_credential(pool, crypto_box, cred, target_url, account_id=account_id)
 
 
 async def resolve_auth_for_target_url_run(
@@ -298,13 +296,11 @@ async def resolve_auth_for_target_url_run(
         cred = await queries.resolve_run_credential(conn, run_id, target_url, account_id=account_id)
         if cred is None:
             return None, {}
-        return await _auth_from_credential(
-            conn, crypto_box, cred, target_url, account_id=account_id
-        )
+    return await _auth_from_credential(pool, crypto_box, cred, target_url, account_id=account_id)
 
 
 async def _auth_from_credential(
-    conn: asyncpg.Connection[Any],
+    pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
     cred: tuple[EncryptedBlob, AuthType, str],
     target_url: str,
@@ -325,14 +321,15 @@ async def _auth_from_credential(
         if is_expiring(payload):
             await refresh_credential(
                 crypto_box,
-                conn,
+                pool,
                 vault_id=vault_id,
                 target_url=target_url,
                 account_id=account_id,
             )
-            refreshed = await queries.resolve_vault_credential(
-                conn, vault_id=vault_id, target_url=target_url, account_id=account_id
-            )
+            async with pool.acquire() as conn:
+                refreshed = await queries.resolve_vault_credential(
+                    conn, vault_id=vault_id, target_url=target_url, account_id=account_id
+                )
             if refreshed is None:
                 return None, {}
             blob = refreshed[0]

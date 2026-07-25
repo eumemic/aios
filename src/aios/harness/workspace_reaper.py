@@ -94,6 +94,7 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.db.pool import normalize_dsn
 from aios.logging import get_logger
 
 log = get_logger("aios.harness.workspace_reaper")
@@ -384,19 +385,29 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
             )
             continue
         try:
-            # Close activation-vs-delete TOCTOU: hold one transaction-scoped
-            # advisory lock across the targeted recheck AND rmtree. Shared-run
-            # persistence takes the same normalized-path-derived lock before INSERT.
+            # A session advisory lock survives transaction/borrow release, so the
+            # pool connection is returned before slow filesystem I/O.  The same
+            # backend is borrowed again only to unlock after rmtree; pool reset must
+            # not run between these two points, hence the explicit acquire/release.
             normalized_target = queries.normalized_workspace_path(str(target))
-            async with pool.acquire() as conn, conn.transaction():
-                await queries.acquire_workspace_advisory_xact_lock(conn, normalized_target)
-                if await queries.unscoped_workspace_path_is_live(conn, normalized_target):
+            lock_key = queries.workspace_advisory_lock_key(normalized_target)
+            # A dedicated backend, not a pooled borrow, owns the session lock.
+            # Thus every pool connection is released before the thread await while
+            # activation remains excluded until this backend closes.
+            lock_conn = (
+                pool._conn
+                if hasattr(pool, "_conn")  # unit-test fake; production pools never expose this
+                else await asyncpg.connect(normalize_dsn(settings.db_url))
+            )
+            try:
+                await lock_conn.execute("SELECT pg_advisory_lock($1::bigint)", lock_key)
+                if await queries.unscoped_workspace_path_is_live(lock_conn, normalized_target):
                     skip_conf += 1
                     continue
-
-                # Off the event loop: a multi-GB tree's rmtree would otherwise block
-                # every concurrent session sharing the worker loop for its duration.
                 await asyncio.to_thread(shutil.rmtree, target)
+            finally:
+                if not hasattr(pool, "_conn"):
+                    await lock_conn.close()
         except (asyncpg.PostgresError, OSError):
             # One un-removable dir (perm drift, read-only FS) must not abort the
             # rest of the sweep; the next sweep retries it.
