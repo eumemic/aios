@@ -30,11 +30,19 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.errors import NotFoundError
+from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
+from aios.models.agents import ToolSpec
+from aios.models.github_repositories import GithubRepositoryResource
+from aios.models.memory_stores import MemoryStore, MemoryStoreResource, MemoryStoreResourceEcho
 from aios.models.sessions import Ok
+from aios.models.tasks import TaskHandle
+from aios.services import agents as agents_service
+from aios.services import memory_stores as memory_stores_service
 from aios.services import sessions as service
+from aios.services import vaults as vaults_service
 from aios.tools import workflow_completion
+from aios.tools.invoke_session import _CallAgentArgs, _RepositoryBindingSelection
 from tests.integration.conftest import seed_agent_env_session
 
 pytestmark = pytest.mark.integration
@@ -237,3 +245,245 @@ async def test_duplicate_answer_is_idempotent(
     )
     assert first == "responded"
     assert second == "duplicate"  # first-writer-wins
+
+
+async def _invoke_agent_child(
+    pool: asyncpg.Pool[Any],
+    account_id: str,
+    parent_id: str,
+    agent_id: str,
+    env_id: str,
+    **kw: Any,
+) -> TaskHandle:
+    return await service.invoke(
+        pool,
+        account_id=account_id,
+        target_kind="agent",
+        target=agent_id,
+        environment_id=env_id,
+        input="go",
+        launcher_session_id=parent_id,
+        caller={"kind": "session", "id": parent_id},
+        **kw,
+    )
+
+
+async def test_call_agent_vault_attenuation_and_suppression(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    first = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="first", metadata={}
+    )
+    second = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="second", metadata={}
+    )
+    outside = await vaults_service.create_vault(
+        pool, account_id=account_id, display_name="outside", metadata={}
+    )
+    await service.update_session(
+        pool,
+        parent_id,
+        account_id=account_id,
+        vault_ids=[first.id, second.id],
+        outbound_suppression="on",
+    )
+
+    inherited = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id)
+    inherited_session = await service.get_session(
+        pool, inherited.servicer_id, account_id=account_id
+    )
+    assert set(inherited_session.vault_ids) == {first.id, second.id}
+    assert inherited_session.outbound_suppression == "on"
+
+    empty = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, vault_ids=[], outbound_suppression="off"
+    )
+    empty_session = await service.get_session(pool, empty.servicer_id, account_id=account_id)
+    assert empty_session.vault_ids == []
+    assert empty_session.outbound_suppression == "on"
+
+    import pytest as _pytest
+
+    with _pytest.raises(ForbiddenError, match="vault"):
+        await _invoke_agent_child(
+            pool, account_id, parent_id, agent_id, env_id, vault_ids=[outside.id]
+        )
+
+
+async def test_call_agent_frozen_surface_survives_reload_and_composes(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, _agent_id, env_id, parent_id = pool_env
+    parent_agent, _, _ = await seed_agent_env_session(
+        pool, account_id=account_id, prefix="clamped_parent", tools=[ToolSpec(type="bash")]
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET agent_id=$1, agent_version=$2 WHERE id=$3",
+            parent_agent.id,
+            parent_agent.version,
+            parent_id,
+        )
+    broad, _, _ = await seed_agent_env_session(
+        pool,
+        account_id=account_id,
+        prefix="broad_child",
+        tools=[ToolSpec(type="bash"), ToolSpec(type="read")],
+    )
+
+    child_handle = await _invoke_agent_child(pool, account_id, parent_id, broad.id, env_id)
+    child = await service.get_session_basic(pool, child_handle.servicer_id, account_id=account_id)
+    assert child.surface_frozen is True
+    loaded = await agents_service.load_for_session(pool, child, account_id=account_id)
+    assert {tool.type for tool in loaded.tools} == {"bash"}
+
+    grandchild_handle = await _invoke_agent_child(pool, account_id, child.id, broad.id, env_id)
+    grandchild = await service.get_session_basic(
+        pool, grandchild_handle.servicer_id, account_id=account_id
+    )
+    grandchild_agent = await agents_service.load_for_session(
+        pool, grandchild, account_id=account_id
+    )
+    assert {tool.type for tool in grandchild_agent.tools} == {"bash"}
+
+
+async def _memory_store(pool: asyncpg.Pool[Any], account_id: str, name: str) -> MemoryStore:
+    return await memory_stores_service.create_store(
+        pool, account_id=account_id, name=name, description="spawn authority", metadata={}
+    )
+
+
+async def test_call_agent_resources_omitted_inherits_all_and_empty_gets_none(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    store = await _memory_store(pool, account_id, "spawn-inherit")
+    binding = MemoryStoreResource(
+        type="memory_store", memory_store_id=store.id, access="read_write", instructions="all"
+    )
+    parent = await service.update_session(
+        pool, parent_id, account_id=account_id, resources=[binding]
+    )
+
+    inherited = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id)
+    child = await service.get_session(pool, inherited.servicer_id, account_id=account_id)
+    assert child.resources == parent.resources
+
+    empty = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, resources=[])
+    empty_child = await service.get_session(pool, empty.servicer_id, account_id=account_id)
+    assert empty_child.resources == []
+
+
+async def test_call_agent_rejects_unheld_memory_store(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    unheld = await _memory_store(pool, account_id, "spawn-unheld")
+
+    with pytest.raises(ForbiddenError, match="resources"):
+        await _invoke_agent_child(
+            pool,
+            account_id,
+            parent_id,
+            agent_id,
+            env_id,
+            resources=[
+                MemoryStoreResource(
+                    type="memory_store", memory_store_id=unheld.id, access="read_only"
+                )
+            ],
+        )
+
+
+async def test_call_agent_memory_access_may_narrow_but_not_escalate(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    store = await _memory_store(pool, account_id, "spawn-access")
+    read_only = MemoryStoreResource(
+        type="memory_store", memory_store_id=store.id, access="read_only"
+    )
+    read_write = MemoryStoreResource(
+        type="memory_store", memory_store_id=store.id, access="read_write"
+    )
+    await service.update_session(pool, parent_id, account_id=account_id, resources=[read_only])
+
+    with pytest.raises(ForbiddenError, match="resources"):
+        await _invoke_agent_child(
+            pool, account_id, parent_id, agent_id, env_id, resources=[read_write]
+        )
+
+    await service.update_session(pool, parent_id, account_id=account_id, resources=[read_write])
+    handle = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, resources=[read_only]
+    )
+    child = await service.get_session(pool, handle.servicer_id, account_id=account_id)
+    assert len(child.resources) == 1
+    memory_binding = child.resources[0]
+    assert isinstance(memory_binding, MemoryStoreResourceEcho)
+    assert memory_binding.access == "read_only"
+
+
+async def test_call_agent_copies_parent_repository_ciphertext_without_token_payload(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+    aios_env_minimal: dict[str, str],
+) -> None:
+    from aios.config import get_settings
+    from aios.crypto.vault import CryptoBox
+
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    token = "ghp_parent_secret_never_in_spawn_args"
+    url = "https://github.com/octocat/Hello-World"
+    mount_path = "/workspace/repo"
+    crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
+    await service.update_session(
+        pool,
+        parent_id,
+        account_id=account_id,
+        resources=[
+            GithubRepositoryResource(
+                type="github_repository",
+                url=url,
+                mount_path=mount_path,
+                authorization_token=token,
+            )
+        ],
+        crypto_box=crypto_box,
+    )
+    selector = _RepositoryBindingSelection(type="github_repository", url=url, mount_path=mount_path)
+    tool_args = _CallAgentArgs(agent_id=agent_id, resources=[selector]).model_dump(mode="json")
+    assert "authorization_token" not in repr(tool_args)
+    assert token not in repr(tool_args)
+
+    handle = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, resources=[selector]
+    )
+    async with pool.acquire() as conn:
+        parent_row = await conn.fetchrow(
+            "SELECT ciphertext, nonce FROM session_github_repositories WHERE session_id=$1",
+            parent_id,
+        )
+        child_row = await conn.fetchrow(
+            "SELECT ciphertext, nonce FROM session_github_repositories WHERE session_id=$1",
+            handle.servicer_id,
+        )
+    assert parent_row is not None and child_row is not None
+    assert child_row["ciphertext"] == parent_row["ciphertext"]
+    assert child_row["nonce"] == parent_row["nonce"]
+
+
+async def test_call_agent_rejects_unheld_repository_selector(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    selector = _RepositoryBindingSelection(
+        type="github_repository",
+        url="https://github.com/octocat/not-held",
+        mount_path="/workspace/not-held",
+    )
+
+    with pytest.raises(ForbiddenError, match="resources"):
+        await _invoke_agent_child(
+            pool, account_id, parent_id, agent_id, env_id, resources=[selector]
+        )
