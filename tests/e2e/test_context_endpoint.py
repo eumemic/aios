@@ -10,6 +10,7 @@ from unittest import mock
 import httpx
 import pytest
 
+from tests.e2e.local_targets import allow_local_targets
 from tests.helpers.connections import authed_client, wired_app
 from tests.helpers.images import valid_png_bytes
 
@@ -190,37 +191,45 @@ class TestContextEndpoint:
             env = await queries.insert_environment(
                 conn, name=f"ctx-mcp-env-{_uniq()}", account_id=account_id
             )
-        agent = await agents_svc.create_agent(
-            pool,
-            name=f"ctx-mcp-agent-{_uniq()}",
-            model="openai/gpt-4o-mini",
-            system="",
-            tools=[],
-            mcp_servers=[McpServerSpec(name="probe", url="http://127.0.0.1:1/mcp")],
-            description=None,
-            metadata={},
-            window_min=50_000,
-            window_max=150_000,
-            account_id=account_id,
-        )
-        session = await sessions_svc.create_session(
-            pool,
-            agent_id=agent.id,
-            environment_id=env.id,
-            title=None,
-            metadata={},
-            account_id=account_id,
-        )
+        # The probe URL is a deliberately-dead LOCAL port, so BOTH declaring it
+        # and every later read of the agent row (``McpServerSpec`` re-validates
+        # on load) need the scoped local-target opt-in from
+        # tests/e2e/local_targets.py. The window is this ONE test body, not the
+        # package: a process-global allowlist here is exactly what PR #1931's
+        # review flagged as disarming the loopback regression tests, so the
+        # default #861 policy stays armed everywhere else.
+        with allow_local_targets("127.0.0.1:1"):
+            agent = await agents_svc.create_agent(
+                pool,
+                name=f"ctx-mcp-agent-{_uniq()}",
+                model="openai/gpt-4o-mini",
+                system="",
+                tools=[],
+                mcp_servers=[McpServerSpec(name="probe", url="http://127.0.0.1:1/mcp")],
+                description=None,
+                metadata={},
+                window_min=50_000,
+                window_max=150_000,
+                account_id=account_id,
+            )
+            session = await sessions_svc.create_session(
+                pool,
+                agent_id=agent.id,
+                environment_id=env.id,
+                title=None,
+                metadata={},
+                account_id=account_id,
+            )
 
-        # Stub discovery so we don't depend on a running MCP server.  The
-        # important wiring being tested is that ``require_crypto_box`` is
-        # reachable from the API process; patching the outer discovery
-        # still exercises the module-level import of the compose path.
-        with mock.patch(
-            "aios.harness.loop.discover_session_mcp_tools",
-            new=mock.AsyncMock(return_value=([], {})),
-        ):
-            r = await http_client.get(f"/v1/sessions/{session.id}/context")
+            # Stub discovery so we don't depend on a running MCP server.  The
+            # important wiring being tested is that ``require_crypto_box`` is
+            # reachable from the API process; patching the outer discovery
+            # still exercises the module-level import of the compose path.
+            with mock.patch(
+                "aios.harness.loop.discover_session_mcp_tools",
+                new=mock.AsyncMock(return_value=([], {})),
+            ):
+                r = await http_client.get(f"/v1/sessions/{session.id}/context")
 
         assert r.status_code == 200, r.text
 
