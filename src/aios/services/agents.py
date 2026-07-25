@@ -329,12 +329,16 @@ async def _load_for_session_conn(
     supplied ``conn`` so a caller already inside a transaction (``create_run``'s
     launcher read) resolves at the same consistency point without a second acquire.
     """
-    if session.parent_run_id is not None:
+    # Every spawn edge that persists a frozen surface must consume it here.  In
+    # particular, call_agent children are ordinary sessions (no parent_run_id),
+    # so keying this branch only on workflow lineage would silently re-expand
+    # their authority to the live agent surface on the first wake.
+    if session.surface_frozen or session.parent_run_id is not None:
         frozen = await queries.get_session_frozen_surface(conn, session.id, account_id=account_id)
         if frozen is None:
             raise RuntimeError(
-                f"workflow child {session.id} has no frozen surface snapshot "
-                "(parent_run_id set but surface_frozen is false)"
+                f"spawned session {session.id} has no frozen surface snapshot "
+                "(spawn lineage set but surface_frozen is false)"
             )
         if session.agent_id is None:
             # Generic workflow child: no agent at all. Build the surface from
