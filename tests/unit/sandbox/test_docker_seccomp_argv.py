@@ -31,7 +31,9 @@ def _install_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Patch ``run_docker_cli`` to record argv and return a fake container id."""
     calls: list[list[str]] = []
 
-    async def fake_run(argv: list[str], *, timeout_s: float = 30.0) -> tuple[int, bytes, bytes]:
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
         return 0, b"deadbeefcafe\n", b""
