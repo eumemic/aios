@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from aios.actors import Actor
 from aios.models.skills import AgentSkillRef
+from aios.models.target_urls import validate_outbound_target_url
 from aios.retirements.registry import tolerated_rename_map
 from aios.retirements.telemetry import record_tolerance_hit
 
@@ -206,6 +207,8 @@ class McpServerSpec(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     url: str = Field(min_length=1)
     include_instructions: bool = True
+
+    _validate_url = field_validator("url")(validate_outbound_target_url)
     headers: dict[str, str] | None = Field(default=None)
 
     @field_validator("name")
