@@ -122,3 +122,46 @@ async def test_shared_activation_serializes_with_reap(
         await asyncio.gather(activate_task, reap_task)
     finally:
         await pool.close()
+
+
+async def test_reaper_lock_survives_real_to_thread_delete(
+    migrated_db_url: str, tmp_path: Path
+) -> None:
+    """A dedicated backend excludes a separate connection across thread deletion."""
+    target = tmp_path / "delete-me"
+    target.mkdir()
+    (target / "payload").write_text("x")
+    path = str(target.resolve())
+    key = queries.workspace_advisory_lock_key(queries.normalized_workspace_path(path))
+    owner = await asyncpg.connect(migrated_db_url)
+    contender = await asyncpg.connect(migrated_db_url)
+    thread_entered = asyncio.Event()
+    release_thread = asyncio.Event()
+
+    def slow_delete() -> None:
+        thread_entered.set()
+        # Prove the event loop remains free while the filesystem operation waits.
+        while not release_thread.is_set():
+            import time
+
+            time.sleep(0.005)
+        import shutil
+
+        shutil.rmtree(target)
+
+    try:
+        await owner.execute("SELECT pg_advisory_lock($1::bigint)", key)
+        delete_task = asyncio.create_task(asyncio.to_thread(slow_delete))
+        await thread_entered.wait()
+        blocked = asyncio.create_task(contender.execute("SELECT pg_advisory_lock($1::bigint)", key))
+        await asyncio.sleep(0.05)
+        assert not blocked.done(), "separate backend entered during to_thread deletion"
+        release_thread.set()
+        await delete_task
+        await owner.close()  # session-lock release happens only after deletion
+        await asyncio.wait_for(blocked, timeout=1)
+        assert not target.exists()
+    finally:
+        if not owner.is_closed():
+            await owner.close()
+        await contender.close()

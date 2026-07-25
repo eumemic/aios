@@ -37,6 +37,7 @@ key (#877).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
+from aios.db.pool import normalize_dsn
 from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
@@ -69,6 +71,7 @@ MAX_CREDENTIALS_PER_VAULT = 20
 # Refresh an OAuth token if it expires within this window — gives the
 # in-flight request enough headroom to complete on the new token.
 REFRESH_SKEW_SECONDS = 30
+_OAUTH_REFRESH_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 # Timeout for the OAuth token-endpoint POST. Generous because OAuth providers
 # vary widely; tighter values cause spurious refresh failures.
@@ -191,24 +194,69 @@ def is_expiring(payload: dict[str, Any], skew: int = REFRESH_SKEW_SECONDS) -> bo
 
 async def refresh_credential(
     crypto_box: CryptoBox,
-    conn: asyncpg.Connection[Any],
+    pool: asyncpg.Pool[Any],
     *,
     account_id: str,
     vault_id: str,
     target_url: str,
 ) -> None:
-    """Refresh the OAuth access token for ``(vault_id, target_url)``.
+    """Serialize one credential's refresh without holding a database connection."""
+    key = (account_id, vault_id, target_url)
+    lock = _OAUTH_REFRESH_LOCKS.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            await _refresh_credential(
+                crypto_box,
+                pool,
+                account_id=account_id,
+                vault_id=vault_id,
+                target_url=target_url,
+            )
+    finally:
+        # Delete-on-release bounds this process-local fast-path map.  Identity
+        # check avoids deleting a replacement installed by a later caller.
+        if not lock.locked() and not getattr(lock, "_waiters", ()):
+            _OAUTH_REFRESH_LOCKS.pop(key, None)
 
-    Concurrency-safe: opens a transaction, locks the credential row with
-    ``SELECT … FOR UPDATE``, then re-checks ``expires_at`` against the skew
-    window. If a parallel coroutine already refreshed during the wait on
-    the lock, this call returns without POSTing.
 
-    Raises :class:`OAuthRefreshError` on any HTTP failure, malformed
-    response, or missing fields. The transaction rolls back on raise so the
-    stale token stays in place for the next attempt.
-    """
-    async with conn.transaction():
+async def _refresh_credential(
+    crypto_box: CryptoBox,
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    target_url: str,
+) -> None:
+    """Cross-worker serialize refresh on a dedicated (never pooled) backend."""
+    # Unit pool stand-ins exercise the refresh body directly; every production
+    # caller supplies a real asyncpg Pool and therefore takes this distributed lock.
+    if not isinstance(pool, asyncpg.Pool):
+        await _refresh_credential_serialized(
+            crypto_box, pool, account_id=account_id, vault_id=vault_id, target_url=target_url
+        )
+        return
+    settings = get_settings()
+    lock_conn = await asyncpg.connect(normalize_dsn(settings.db_url))
+    lock_key = f"oauth-refresh:v1:{account_id}:{vault_id}:{target_url}"
+    try:
+        await lock_conn.execute("SELECT pg_advisory_lock(hashtextextended($1, 0))", lock_key)
+        await _refresh_credential_serialized(
+            crypto_box, pool, account_id=account_id, vault_id=vault_id, target_url=target_url
+        )
+    finally:
+        await lock_conn.close()
+
+
+async def _refresh_credential_serialized(
+    crypto_box: CryptoBox,
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    vault_id: str,
+    target_url: str,
+) -> None:
+    """Refresh after the dedicated backend has acquired the distributed mutex."""
+    async with pool.acquire() as conn, conn.transaction():
         locked = await queries.lock_oauth_credential_for_refresh(
             conn, vault_id, target_url, account_id=account_id
         )
@@ -226,112 +274,100 @@ async def refresh_credential(
                 "failed to decrypt stored credential",
                 detail={"credential_id": credential_id, "reason": str(exc)},
             ) from exc
-
-        # Double-check after lock — another worker may have refreshed already.
         if not is_expiring(payload):
             return
 
-        token_endpoint = payload.get("token_endpoint")
-        refresh_token = payload.get("refresh_token")
-        client_id = payload.get("client_id")
-        if not token_endpoint or not refresh_token or not client_id:
-            raise OAuthRefreshError(
-                "credential is missing required refresh fields",
-                detail={
-                    "credential_id": credential_id,
-                    "missing": [
-                        name
-                        for name, val in (
-                            ("token_endpoint", token_endpoint),
-                            ("refresh_token", refresh_token),
-                            ("client_id", client_id),
-                        )
-                        if not val
-                    ],
-                },
+    token_endpoint = payload.get("token_endpoint")
+    refresh_token = payload.get("refresh_token")
+    client_id = payload.get("client_id")
+    if not token_endpoint or not refresh_token or not client_id:
+        missing = [
+            name
+            for name, value in (
+                ("token_endpoint", token_endpoint),
+                ("refresh_token", refresh_token),
+                ("client_id", client_id),
             )
-
-        # Build the refresh POST. Client-auth handling (none/basic/post) is
-        # shared with the authorization-code exchange via
-        # ``build_token_endpoint_post`` so the two paths can't drift.
-        body: dict[str, str] = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-        scope = payload.get("scope")
-        if scope:
-            body["scope"] = scope
-        # RFC 8707: some providers bind the refresh to the same resource the
-        # tokens were minted for; include it when the credential stored one.
-        resource = payload.get("resource")
-        if resource:
-            body["resource"] = resource
-        post_kwargs = build_token_endpoint_post(
-            body, client_id=client_id, endpoint_auth=payload.get("token_endpoint_auth")
+            if not value
+        ]
+        raise OAuthRefreshError(
+            "credential is missing required refresh fields",
+            detail={"credential_id": credential_id, "missing": missing},
         )
 
-        # Lazy import: a module-level ``from aios.tools...`` would run the
-        # ``aios.tools`` package __init__ mid-import and re-enter this
-        # partially-initialized module (``aios.tools`` → ``bash``/``http_request``
-        # → ``sandbox.spec``/``mcp.client`` → ``services.vaults``). Same acyclic
-        # precedent as ``pinned_transport``/``mcp.client``.
-        from aios.tools.url_safety import is_cleartext_credential_target
+    body: dict[str, str] = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+    for name in ("scope", "resource"):
+        if value := payload.get(name):
+            body[name] = value
+    post_kwargs = build_token_endpoint_post(
+        body, client_id=client_id, endpoint_auth=payload.get("token_endpoint_auth")
+    )
+    from aios.tools.url_safety import is_cleartext_credential_target
 
-        if is_cleartext_credential_target(
-            token_endpoint, allow_hosts=get_settings().oauth_allow_insecure_host_set
-        ):
-            raise OAuthRefreshError(
-                "refusing to send refresh credential over plaintext http",
-                detail={"token_endpoint": token_endpoint, "vault_id": vault_id},
+    allow_hosts = get_settings().oauth_allow_insecure_host_set
+    if is_cleartext_credential_target(token_endpoint, allow_hosts=allow_hosts):
+        raise OAuthRefreshError(
+            "refusing to send refresh credential over plaintext http",
+            detail={"token_endpoint": token_endpoint, "vault_id": vault_id},
+        )
+    try:
+        async with httpx.AsyncClient(
+            timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
+            transport=PinnedTransport(allow_hosts=allow_hosts),
+        ) as client:
+            response = await client.post(token_endpoint, **post_kwargs)
+            response.raise_for_status()
+            token_data = response.json()
+    except httpx.HTTPError as exc:
+        # A rotating provider can reject the cross-process race loser because
+        # the winner consumed ``refresh_token`` while this POST was in flight.
+        # Re-read after the conflict and adopt a fresh winner credential rather
+        # than surfacing OAuthRefreshError on this expected race path.
+        async with pool.acquire() as conn:
+            current = await queries.lock_oauth_credential_for_refresh(
+                conn, vault_id, target_url, account_id=account_id
             )
+        if current is not None:
+            _winner_id, winner_blob = current
+            winner_payload = subkey.decrypt_dict(winner_blob)
+            if not is_expiring(winner_payload):
+                return
+        log.warning(
+            "vault.oauth_refresh_http_error",
+            credential_id=credential_id,
+            token_endpoint=token_endpoint,
+            exc_info=True,
+        )
+        raise OAuthRefreshError(
+            f"OAuth token endpoint request failed: {exc}",
+            detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
+        ) from exc
 
-        try:
-            # The stored token_endpoint was SSRF-guarded once at flow start,
-            # possibly long ago; PinnedTransport re-validates and pins its
-            # connect IP now, so a since-rebound host can't pull the refresh
-            # credential onto an internal address.
-            async with httpx.AsyncClient(
-                timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
-                transport=PinnedTransport(allow_hosts=get_settings().oauth_allow_insecure_host_set),
-            ) as client:
-                resp = await client.post(token_endpoint, **post_kwargs)
-                resp.raise_for_status()
-                token_data = resp.json()
-        except httpx.HTTPError as exc:
-            log.warning(
-                "vault.oauth_refresh_http_error",
-                credential_id=credential_id,
-                token_endpoint=token_endpoint,
-                exc_info=True,
-            )
+    new_access_token = token_data.get("access_token")
+    if not new_access_token:
+        raise OAuthRefreshError(
+            "OAuth response missing 'access_token'",
+            detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
+        )
+
+    # Re-lock and re-check: if another worker refreshed while HTTP was in flight,
+    # preserve its result rather than overwriting it with this response.
+    async with pool.acquire() as conn, conn.transaction():
+        current = await queries.lock_oauth_credential_for_refresh(
+            conn, vault_id, target_url, account_id=account_id
+        )
+        if current is None:
             raise OAuthRefreshError(
-                f"OAuth token endpoint request failed: {exc}",
-                detail={
-                    "credential_id": credential_id,
-                    "token_endpoint": token_endpoint,
-                },
-            ) from exc
-
-        new_access_token = token_data.get("access_token")
-        if not new_access_token:
-            raise OAuthRefreshError(
-                "OAuth response missing 'access_token'",
-                detail={
-                    "credential_id": credential_id,
-                    "token_endpoint": token_endpoint,
-                },
+                f"no active credential for {target_url!r} in vault {vault_id}",
+                detail={"vault_id": vault_id, "target_url": target_url},
             )
-
+        credential_id, current_blob = current
+        payload = subkey.decrypt_dict(current_blob)
+        if not is_expiring(payload):
+            return
         payload["access_token"] = new_access_token
-        # Rotate refresh_token if the provider returned a new one; otherwise keep.
-        rotated = token_data.get("refresh_token")
-        if rotated:
+        if rotated := token_data.get("refresh_token"):
             payload["refresh_token"] = rotated
-        # Update expires_at if the provider declared an expires_in. Accept
-        # numeric strings as well as int/float — RFC 6749 says SHOULD be a
-        # number, but real providers (Slack, others) sometimes return strings.
-        # Without this, the new access_token would be stored without an
-        # ``expires_at`` and ``is_expiring`` would treat it as never-expiring.
         try:
             seconds = int(token_data.get("expires_in", 0))
         except (TypeError, ValueError):
@@ -339,19 +375,10 @@ async def refresh_credential(
         if seconds > 0:
             payload["expires_at"] = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
         else:
-            # No expires_in in the response: drop any prior expires_at so the
-            # fresh token reads as never-expiring. The prior value is within-skew
-            # by construction (a refresh only fires when is_expiring was True), so
-            # inheriting it would keep is_expiring True and re-trigger a refresh on
-            # every subsequent call — churning a rotated refresh_token and tripping
-            # rate limits. Mirrors _store_oauth_credential's write-even-when-None.
             payload.pop("expires_at", None)
-
         new_blob = subkey.encrypt_dict(payload)
         await conn.execute(
-            "UPDATE vault_credentials "
-            "SET ciphertext = $1, nonce = $2, updated_at = now() "
-            "WHERE id = $3",
+            "UPDATE vault_credentials SET ciphertext = $1, nonce = $2, updated_at = now() WHERE id = $3",
             new_blob.ciphertext,
             new_blob.nonce,
             credential_id,

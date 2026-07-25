@@ -115,7 +115,7 @@ jobs:
           lines += [
               "",
               "---",
-              "Detected by `.github/workflows/retirement-aging-sla.yml` via the offline aging core `src/aios/retirements/aging.py`. NOT auto-closed — close it yourself once the descriptor(s) are torn down or re-SLA'd.",
+              "Detected by `.github/workflows/retirement-aging-sla.yml` via the offline aging core `src/aios/retirements/aging.py`. NOT auto-closed — close it yourself once the descriptor(s) are torn down or re-SLA-ed.",
           ]
           print("\n".join(lines))
           ')

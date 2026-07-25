@@ -80,6 +80,30 @@ async def test_leaf_row_wins_over_ancestors(
     assert crypto_box.derive_account_subkey("acc_customer").decrypt(resolved.blob) == "sk-customer"
 
 
+async def test_rehomed_fleet_resolves_provider_on_eumemic_child(
+    chain_conn: asyncpg.Connection[Any], crypto_box: CryptoBox
+) -> None:
+    """A fleet session moved off root sees credentials moved to the child."""
+    await _insert(
+        chain_conn,
+        crypto_box,
+        account_id="acc_eumemic",
+        api_key="sk-rehomed",
+        api_base="https://proxy.eumemic.example",
+    )
+
+    resolved = await queries.resolve_model_provider(
+        chain_conn, account_id="acc_eumemic", provider="anthropic"
+    )
+
+    assert resolved is not None
+    assert resolved.owner_account_id == "acc_eumemic"
+    assert resolved.api_base == "https://proxy.eumemic.example"
+    assert crypto_box.derive_account_subkey(resolved.owner_account_id).decrypt(resolved.blob) == (
+        "sk-rehomed"
+    )
+
+
 async def test_no_leaf_row_resolves_nearest_ancestor(
     chain_conn: asyncpg.Connection[Any], crypto_box: CryptoBox
 ) -> None:

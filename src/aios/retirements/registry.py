@@ -80,12 +80,10 @@ TOOL_SURFACES: tuple[Surface, ...] = (
 #: :func:`tolerated_rename_map` (#1574); the data migrations 0116 (#1419) and
 #: 0117 (#1428) rewrite persisted rows to canonical.
 #:
-#: ``contract_rev`` is ``None``: this retirement is still in its **expand span**,
-#: so the registry-driven before-validator keeps tolerating these tokens at every
-#: ``ToolSpec.model_validate`` site (no regression to the pre-#1574 unconditional
-#: shim). Stamping ``contract_rev`` here is what makes the validator stop
-#: remapping these tokens — that post-contract teardown is sequenced + exercised
-#: in the live-exercise issue, not #1574.
+#: Migration 0155 re-runs the canonicalization over every declared surface,
+#: including the connector surface omitted by 0116/0117, and stamps the current
+#: vocabulary epoch.  Its ``contract_rev`` closes the expand span, so the
+#: registry-driven validator no longer accepts these retired tokens.
 LEGACY_BUILTIN_RENAMES = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
     action="rename",
@@ -99,7 +97,7 @@ LEGACY_BUILTIN_RENAMES = Retirement(
     ),
     surfaces=TOOL_SURFACES,
     introduced_rev="0116",
-    contract_rev=None,
+    contract_rev="0155",
     sla_days=30,
 )
 
@@ -131,6 +129,27 @@ REGISTRY: tuple[Retirement, ...] = (
     LEGACY_BUILTIN_RENAMES,
     RETIRED_GOAL_OUTCOME_BUILTINS,
 )
+
+
+def rename_map(
+    domain: str = TOOL_SURFACE_DOMAIN,
+    *,
+    registry: tuple[Retirement, ...] = REGISTRY,
+) -> dict[str, str]:
+    """All declared rename tokens and successors in ``domain``.
+
+    Unlike :func:`tolerated_rename_map`, this includes contracted retirements for
+    restore/import canonicalization of snapshots that may predate the contract.
+    """
+
+    out: dict[str, str] = {}
+    for retirement in registry:
+        if retirement.domain != domain or retirement.action != "rename":
+            continue
+        for token, successor in retirement.token_map().items():
+            if successor is not None:
+                out[token] = successor
+    return out
 
 
 def tolerated_rename_map(

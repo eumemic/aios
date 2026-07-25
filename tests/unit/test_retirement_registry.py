@@ -89,6 +89,7 @@ def test_legacy_builtin_renames_descriptor() -> None:
         "await_run": "call_workflow",
         "cancel_run": "stop_task",
     }
+    assert r.contract_rev == "0155"
 
 
 def test_retired_goal_outcome_descriptor_is_drop_with_no_successor() -> None:
