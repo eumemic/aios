@@ -100,7 +100,12 @@ def test_revision_and_transactional_upgrade_downgrade_contract() -> None:
     assert migration.revision == "0154"
     assert migration.down_revision == "0152"
     assert migration._CHILD_NAME == "Eumemic"
-    assert migration._COMPOSITE_FKS
+    assert (
+        "wf_runs",
+        "wf_runs_source_version_fkey",
+        "FOREIGN KEY (workflow_id, source_version, account_id) "
+        "REFERENCES workflow_versions(workflow_id, version, account_id)",
+    ) in migration._COMPOSITE_FKS
     # Alembic/PostgreSQL supplies the transaction envelope; both directions
     # use the same rekey and inventory walkers, with source/destination swapped.
     assert migration.upgrade.__module__ == migration.downgrade.__module__
@@ -133,6 +138,39 @@ def _run_alembic(args: list[str], db_url: str, key: bytes) -> subprocess.Complet
         text=True,
         check=False,
     )
+
+
+async def _composite_fks(db_url: str) -> set[tuple[str, str]]:
+    """Enumerate composite FKs whose referenced rows are moved by 0154."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT tc.table_name, tc.constraint_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON kcu.constraint_schema = tc.constraint_schema
+             AND kcu.constraint_name = tc.constraint_name
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_schema = tc.constraint_schema
+             AND rc.constraint_name = tc.constraint_name
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_schema = rc.unique_constraint_schema
+             AND ccu.constraint_name = rc.unique_constraint_name
+            WHERE tc.constraint_schema = current_schema()
+              AND tc.constraint_type = 'FOREIGN KEY'
+              AND ccu.table_name IN (
+                  SELECT table_name
+                  FROM information_schema.columns
+                  WHERE table_schema = current_schema() AND column_name = 'account_id'
+              )
+            GROUP BY tc.table_name, tc.constraint_name
+            HAVING count(DISTINCT kcu.ordinal_position) > 1
+            """
+        )
+        return {(row["table_name"], row["constraint_name"]) for row in rows}
+    finally:
+        await conn.close()
 
 
 async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes, str]]:
@@ -168,6 +206,21 @@ async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes,
         await conn.execute(
             "INSERT INTO agents (id,account_id,name,model,system,window_min,window_max,version) "
             "VALUES ('agent_0153','acc_root','agent','test/model','',1,2,1)"
+        )
+        await conn.execute(
+            "INSERT INTO workflows (id,account_id,name,version,script) "
+            "VALUES ('wf_0153','acc_root','workflow',1,'async def main(input): return input')"
+        )
+        await conn.execute(
+            "INSERT INTO workflow_versions (workflow_id,account_id,version,name,script) "
+            "VALUES ('wf_0153','acc_root',1,'workflow','async def main(input): return input')"
+        )
+        await conn.execute(
+            "INSERT INTO wf_runs "
+            "(id,workflow_id,account_id,environment_id,script,script_sha,source_version,status) "
+            "VALUES "
+            "('run_versioned','wf_0153','acc_root','env_0153','script','sha-versioned',1,'completed'),"
+            "('run_legacy','wf_0153','acc_root','env_0153','script','sha-legacy',NULL,'completed')"
         )
         await conn.execute(
             "INSERT INTO sessions (id,account_id,agent_id,environment_id,agent_version,workspace_volume_path) "
@@ -277,7 +330,9 @@ async def _assert_upgraded(
         await conn.close()
 
 
-async def _assert_restored(db_url: str, expected: dict[str, tuple[bytes, bytes, str]]) -> None:
+async def _assert_restored(
+    db_url: str, master: Any, expected: dict[str, tuple[bytes, bytes, str]]
+) -> None:
     conn = await asyncpg.connect(db_url)
     columns = {
         "model_providers": ("ciphertext", "nonce"),
@@ -298,8 +353,10 @@ async def _assert_restored(db_url: str, expected: dict[str, tuple[bytes, bytes, 
                 f"SELECT {ciphertext_column} ciphertext,{nonce_column} nonce,account_id FROM {table}"
             )
             assert row["account_id"] == "acc_root"
-            assert bytes(row["ciphertext"]) == expected[table][0]
-            assert bytes(row["nonce"]) == expected[table][1]
+            assert (
+                master.account("acc_root").decrypt(row["ciphertext"], row["nonce"])
+                == expected[table][2]
+            )
     finally:
         await conn.close()
 
@@ -312,6 +369,9 @@ def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
     master = migration._Box(key)
     result = _run_alembic(["upgrade", "0152"], db_url, key)
     assert result.returncode == 0, result.stderr
+    expected_fks = asyncio.run(_composite_fks(db_url))
+    listed_fks = {(table, name) for table, name, _ in migration._COMPOSITE_FKS}
+    assert listed_fks == expected_fks
     expected = asyncio.run(_seed_fleet(db_url, master))
 
     result = _run_alembic(["upgrade", "0154"], db_url, key)
@@ -320,4 +380,8 @@ def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
 
     result = _run_alembic(["downgrade", "0152"], db_url, key)
     assert result.returncode == 0, result.stderr
-    asyncio.run(_assert_restored(db_url, expected))
+    asyncio.run(_assert_restored(db_url, master, expected))
+
+    result = _run_alembic(["upgrade", "0154"], db_url, key)
+    assert result.returncode == 0, result.stderr
+    asyncio.run(_assert_upgraded(db_url, master, expected))
