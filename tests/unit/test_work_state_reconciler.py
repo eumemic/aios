@@ -930,7 +930,8 @@ def test_B1_has_more_with_an_unusable_cursor_is_a_READ_FAILURE() -> None:
     and reported exhaustive=True — a truncated read rendered as exhaustive, which is the
     2026-07-25 failure mode this PR exists to kill. Every ZOMBIE rests on 'no run in the
     list I read', so an unread page manufactures false ZOMBIEs."""
-    for bad_cursor in (None, "", 0, {}):
+    bad_cursors: tuple[object, ...] = (None, "", 0, {})
+    for bad_cursor in bad_cursors:
 
         def getter(url: str, headers: Any, _c: Any = bad_cursor) -> Any:
             return (
