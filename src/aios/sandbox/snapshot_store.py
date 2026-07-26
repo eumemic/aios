@@ -232,8 +232,11 @@ class TarballStore:
         path = self._path(ref)
         manifest = self._verify(path)
         local_tag = str(manifest["local_tag"])
-        if await self._backend.image_labels(local_tag) is None:
-            await self._backend.load_image(path)
+        # A tag's presence does not identify the immutable generation it names:
+        # every generation for a session is materialized under the same local
+        # tag. Always load the requested archive so a cache containing an older
+        # generation cannot silently win.
+        await self._backend.load_image(path)
         return local_tag
 
     async def exists(self, ref: str) -> bool:

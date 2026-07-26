@@ -127,6 +127,30 @@ class TestTarballStore:
         backend.load_image.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_get_replaces_cached_generation_sharing_local_tag(self, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        store = TarballStore(backend, tmp_path)
+        local_tag = "aios-sbx-local"
+        ref_a = store.make_ref("sess_ABC", local_tag)
+        ref_b = store.make_ref("sess_ABC", local_tag)
+        generations = iter((b"generation-a", b"generation-b"))
+        backend.save_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda _tag, path: path.write_bytes(next(generations))
+        )
+        await store.put(local_tag, ref_a)
+        await store.put(local_tag, ref_b)
+        # Simulate generation A already cached under the shared deterministic tag.
+        backend.image_labels_by_ref[local_tag] = {"aios.managed": "true"}
+        loaded: list[bytes] = []
+        backend.load_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda path: loaded.append(path.read_bytes())
+        )
+
+        assert await store.get(ref_a) == local_tag
+        assert await store.get(ref_b) == local_tag
+        assert loaded == [b"generation-a", b"generation-b"]
+
+    @pytest.mark.asyncio
     async def test_get_rejects_corrupt_artifact(self, tmp_path: Path) -> None:
         backend = FakeBackend()
         store = TarballStore(backend, tmp_path)

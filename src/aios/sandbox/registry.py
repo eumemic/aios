@@ -196,6 +196,14 @@ class GcPressureResult:
 PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
 
 
+def _archive_eligible(state: SessionSnapshotState, now: datetime, grace_seconds: int) -> bool:
+    """Return whether an archived session has passed its retention grace."""
+    archived_at = state.archived_at
+    if archived_at is None:
+        return False
+    return (now - archived_at).total_seconds() >= grace_seconds
+
+
 def _classify_images(
     images: list[ManagedImage],
     states: dict[str, SessionSnapshotState],
