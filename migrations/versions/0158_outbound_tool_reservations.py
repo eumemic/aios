@@ -14,14 +14,14 @@ the external call may have started — a crash leaves this state and the row
 conservatively counts until the window rolls past it) → ``completed``
 (connector invocation returned; best-effort observability mark).
 
-Revision ID: 0156
-Revises: 0155
+Revision ID: 0158
+Revises: 0157
 """
 
 from alembic import op
 
-revision = "0156"
-down_revision = "0155"
+revision = "0158"
+down_revision = "0157"
 branch_labels = None
 depends_on = None
 
