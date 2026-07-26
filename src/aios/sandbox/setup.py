@@ -777,8 +777,13 @@ def build_lockdown_verify_script(
             '"$IPT" -t nat -S OUTPUT | grep -q -- '
             f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
         )
-        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'")
-        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'")
+        # ``iptables -S`` canonicalizes port matches by inserting the protocol
+        # module (for example ``-p udp -m udp --dport 53``), so allow tokens
+        # between the protocol and destination port.  Matching them adjacently
+        # made the read-back reject a correctly installed chokepoint on real
+        # Docker hosts even though recording unit shims preserved input syntax.
+        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp .*--dport 53 .*-j DNAT'")
+        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp .*--dport 53 .*-j DNAT'")
         lines.append(f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'")
     return "\n".join(lines)
 

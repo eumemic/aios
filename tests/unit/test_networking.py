@@ -671,8 +671,8 @@ class TestBuildLockdownVerifyScript:
             '"$IPT" -t nat -S OUTPUT | grep -q -- '
             f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
         ) in script
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'" in script
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'" in script
+        assert ("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp .*--dport 53 .*-j DNAT'") in script
+        assert ("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp .*--dport 53 .*-j DNAT'") in script
         assert f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'" in script
         # The filter-table DROP assertion is still present.
         assert "OUTPUT DROP" in script
