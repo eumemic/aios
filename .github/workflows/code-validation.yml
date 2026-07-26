@@ -511,21 +511,13 @@ jobs:
             docker container prune -f
             docker network prune -f
             docker volume prune -af
-            # Recovery prioritizes daemon headroom over throughput. If the
-            # balanced first pass still destabilized Docker, immediately
-            # recreating two testcontainer stacks can reproduce the same
-            # failure before the restarted daemon settles.
-            if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
-              # A full clean-session retry can still leave one independently
-              # flaky test behind.  At this point pytest's last-failed cache is
-              # from the clean serial pass (not the contaminated parallel
-              # session), so one final targeted replay is both safe and much
-              # cheaper than rebuilding all 351 Docker tests again.
-              docker container prune -f
-              docker network prune -f
-              docker volume prune -af
-              uv run pytest tests/e2e -q -m "docker and not perf" --lf
-            fi
+            # Start a fresh pytest session after the daemon restart, but replay
+            # only the failures recorded by the serial first pass. Re-running
+            # all Docker tests here needlessly recreates hundreds of containers
+            # and can exhaust the recovered daemon before reaching the original
+            # failure. If collection/setup failed before pytest identified an
+            # individual test, --lf safely falls back to the full selection.
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
