@@ -51,7 +51,25 @@ DEV_PIPELINE_WORKFLOW_ID = "wf_01KV4YGV4PSGP08TJBAY32J2VK"
 LIVE = {"pending", "running"}
 SUSPENDED = {"suspended"}
 TERMINAL = {"completed", "errored", "cancelled"}
-CLASSES = ["ZOMBIE", "DEAD", "MISLABELLED", "LAGGING"]
+CLASSES = ["ZOMBIE", "AMBIGUOUS", "DEAD", "MISLABELLED", "LAGGING"]
+
+# C1 — the UNION of "work is in flight" assertions, NOT the single literal
+# `dispatched`. The seat stripped `dispatched` from all nine confirmed zombies on
+# 2026-07-26; they still carry `autodev:in-progress` + `needs:human/build`, which
+# claim exactly the same thing. Keying on one label would have reported
+# "0 ZOMBIE" over nine dead issues. Mirrors IN_FLIGHT_LABELS in the library.
+IN_FLIGHT_LABELS = {"dispatched", "autodev:in-progress", "design:in-progress"}
+IN_FLIGHT_PREFIXES = ("needs:human/",)
+NOT_IN_FLIGHT_LABELS = {"autodev:built", "autodev:failed", "hold", "paused"}
+
+# B3 — ZOMBIE cannot prove "never picked up": list_runs filters archived_at IS NULL
+# and archiving requires a TERMINAL run, so a completed-then-archived run reads as
+# "no run, ever". Stated in every report rather than left to inference.
+ZOMBIE_MEANS = (
+    "no UNARCHIVED run exists for this item. `list_runs` cannot see archived runs "
+    "(archived_at IS NULL) and archiving requires a TERMINAL run, so ZOMBIE cannot "
+    "distinguish 'never picked up' from 'ran and was tidied away'."
+)
 
 PIPELINE_LABELS = {
     "dispatched",
@@ -71,6 +89,71 @@ MAX_RUN_PAGES = 200
 
 class ReadFailure(Exception):
     """A source read failed. NEVER degrades to an empty list."""
+
+
+def _check_issue_row(repo, row):
+    """Validate ONE issue row. Raises ReadFailure — never AttributeError.
+
+    A 2xx carrying a non-object row used to reach ``row.get()`` and raise
+    AttributeError OUTSIDE the ReadFailure handlers, killing the workflow instead of
+    returning verdict:ALARM. A malformed row is a FAILED READ, which must alarm.
+    """
+    if not isinstance(row, dict):
+        raise ReadFailure(
+            "issue list for %s contained a non-object row (%s)" % (repo, type(row).__name__)
+        )
+    raw_labels = row.get("labels")
+    if raw_labels is not None and not isinstance(raw_labels, list):
+        raise ReadFailure(
+            "issue row %s#%s has a non-list 'labels' (%s)"
+            % (repo, row.get("number"), type(raw_labels).__name__)
+        )
+    return raw_labels or []
+
+
+def _check_run_row(row):
+    """Validate ONE run row. Same contract as :func:`_check_issue_row`."""
+    if not isinstance(row, dict):
+        raise ReadFailure("list_runs returned a non-object run row (%s)" % type(row).__name__)
+    return row
+
+
+def _paginate_check(rows):
+    """Return the keyset cursor for the next page, or None when the page is the last.
+
+    B2 — the mirror of B1 in the CLI. A FULL page whose last row carries no ``id``
+    leaves no cursor: the run history is TRUNCATED and we cannot continue. The old
+    code broke out of the loop with ``exhaustive`` still True, so a truncated read
+    rendered as exhaustive — and every ZOMBIE verdict rests on "no run exists in the
+    list I read". Refusing here is what keeps a partial read from reading as health.
+    """
+    if len(rows) < 200:
+        return None
+    after = rows[-1].get("id")
+    if not after:
+        raise ReadFailure(
+            "list_runs returned a full page (%d rows) whose last row has no 'id' — no "
+            "pagination cursor, so the run history is TRUNCATED. Refusing to report a "
+            "truncated read as exhaustive." % len(rows)
+        )
+    return after
+
+
+def is_in_flight_label(label):
+    """True iff ``label`` asserts work is in flight (a run ought to exist)."""
+    if label in NOT_IN_FLIGHT_LABELS:
+        return False
+    if label in IN_FLIGHT_LABELS:
+        return True
+    for prefix in IN_FLIGHT_PREFIXES:
+        if label.startswith(prefix):
+            return True
+    return False
+
+
+def in_flight_assertions(labels):
+    """Every in-flight assertion in ``labels``, sorted — the trigger set."""
+    return sorted({x for x in labels if is_in_flight_label(x)})
 
 
 def is_pipeline_label(label):
@@ -157,14 +240,16 @@ async def _read_items(repos):
                 raise ReadFailure("issue list for %s was not a JSON array" % repo)
             pages += 1
             for row in body:
+                raw_labels = _check_issue_row(repo, row)
                 labels = sorted(
                     [
                         x.get("name", "") if isinstance(x, dict) else str(x)
-                        for x in (row.get("labels") or [])
+                        for x in raw_labels
                     ]
                 )
-                if not any(is_pipeline_label(x) for x in labels):
-                    continue
+                # C5: unlabelled items are KEPT. LAGGING is defined by the ABSENCE of an
+                # in-flight assertion, so filtering enumeration on presence-of-some-label
+                # makes a live run against an unlabelled issue structurally undetectable.
                 items.append(
                     {
                         "repo": repo,
@@ -275,24 +360,28 @@ async def _read_runs(workflow_ids):
                 # A missing 'runs' key is a CONTRACT failure, not an empty page.
                 raise ReadFailure("list_runs response has no 'runs' list")
             pages += 1
+            for row in rows:
+                _check_run_row(row)
             runs.extend(rows)
-            if len(rows) < 200:
-                break
-            after = rows[-1].get("id")
-            if not after:
+            after = _paginate_check(rows)
+            if after is None:
                 break
     return runs, exhaustive
 
 
 def classify(item, runs):
-    """Classify one item against its runs. ``None`` == the label agrees.
+    """Classify one item against its runs. ``None`` == the labels agree.
 
-    Precedence: live > suspended > terminal. One live run means work really is
-    happening. With none live, a SUSPENDED run is parked at a gate — a different
-    condition from running, so MISLABELLED, not 'agree' (folding parked into agree
-    is how a gate-parked item hides behind `dispatched` forever).
+    MIRROR of ``aios.reconcilers.work_state.classify_item`` — kept in lockstep by
+    the drift tests. Two things this must NOT get wrong:
+
+    * C1 — "claims in flight" is the UNION of in-flight assertions, never the single
+      literal ``dispatched``. The trigger label(s) ride on the finding.
+    * C3 — precedence is live > suspended > UNKNOWN > terminal. An unrecognised
+      status is never evidence of death, not even beside a terminal sibling.
     """
-    dispatched = "dispatched" in item["labels"]
+    labels = item["labels"]
+    triggers = in_flight_assertions(labels)
     live = [r for r in runs if r.get("status") in LIVE]
     suspended = [r for r in runs if r.get("status") in SUSPENDED]
     terminal = [r for r in runs if r.get("status") in TERMINAL]
@@ -304,7 +393,7 @@ def classify(item, runs):
         and r.get("status") not in TERMINAL
     ]
 
-    def mk(classification, detail, subject, caveats=()):
+    def mk(classification, detail, subject, caveats=(), trigger_labels=None):
         return {
             "classification": classification,
             "repo": item["repo"],
@@ -312,41 +401,83 @@ def classify(item, runs):
             "kind": item["kind"],
             "title": item["title"],
             "url": item["url"],
-            "labels": [x for x in item["labels"] if is_pipeline_label(x)],
+            "labels": [x for x in labels if is_pipeline_label(x)],
             "detail": detail,
             "run_ids": [r.get("id", "") for r in subject],
             "run_statuses": sorted({r.get("status", "") for r in subject}),
             "updated_at": item["updated_at"],
             "caveats": list(caveats),
+            "trigger_labels": list(triggers if trigger_labels is None else trigger_labels),
         }
 
-    if not dispatched:
+    def _statuses(rs):
+        return ", ".join(sorted({r.get("status", "") for r in rs}))
+
+    if not triggers:
         if live:
             return mk(
                 "LAGGING",
-                "%d live run(s) but no `dispatched` label" % len(live),
+                "%d live run(s) (%s) but NO in-flight label (no `dispatched`, no "
+                "`autodev:in-progress`, no `needs:human/*`)" % (len(live), _statuses(live)),
                 live,
+                trigger_labels=[],
             )
         return None
+
+    claim = ", ".join(["`%s`" % x for x in triggers])
+
     if live:
         return None
-    if unknown and not suspended and not terminal:
+    if unknown:
+        # C3: handled BEFORE terminal. An unknown status may be live under a name this
+        # vocabulary has not learned; a terminal sibling does not make it dead.
+        others = suspended + terminal
+        extra = ""
+        if others:
+            extra = (
+                " (alongside %d run(s) in %s — a terminal sibling does NOT make an "
+                "unknown status dead)" % (len(others), _statuses(others))
+            )
         return mk(
             "MISLABELLED",
-            "run(s) in unrecognised status — cannot prove live; treat as parked pending triage",
-            unknown,
+            "%s and run(s) in unrecognised status (%s) — cannot prove live; treat as "
+            "parked pending triage%s" % (claim, _statuses(unknown), extra),
+            unknown + others,
             ("unrecognised-run-status",),
         )
     if suspended:
         return mk(
             "MISLABELLED",
-            "%d run(s) suspended at a gate — parked is NOT running" % len(suspended),
+            "%s but %d run(s) suspended at a gate — parked is NOT running"
+            % (claim, len(suspended)),
             suspended,
         )
     if terminal:
-        return mk("DEAD", "`dispatched` but every run is terminal", terminal)
+        return mk(
+            "DEAD",
+            "%s but every run is terminal (%s)" % (claim, _statuses(terminal)),
+            terminal,
+        )
+    linked = item.get("linked_pr_numbers") or []
+    if linked:
+        # C2: linked PRs mean work demonstrably happened, so this is NOT a zombie and
+        # must not land in counts["ZOMBIE"]. Its own class; phase 2 acts on the class.
+        prs = ", ".join(["#%s" % n for n in linked])
+        return mk(
+            "AMBIGUOUS",
+            "%s and no unarchived run — BUT PR(s) %s reference this issue. Work "
+            "demonstrably happened, so the join key (or the run's archival) is the "
+            "suspect, not the item. NEEDS TRIAGE — deliberately NOT counted as a ZOMBIE."
+            % (claim, prs),
+            [],
+            ("has-linked-prs", "excluded-from-zombie-count"),
+        )
     return mk(
-        "ZOMBIE", "`dispatched` but NO run exists for this issue — nothing ever picked it up", []
+        "ZOMBIE",
+        "%s but NO unarchived run exists for this issue — nothing (visible) ever "
+        "picked it up" % claim,
+        [],
+        ("zombie-means-no-unarchived-run",),
     )
 
 
@@ -360,6 +491,7 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures):
         return {
             "verdict": "ALARM",
             "counts": None,
+            "zombie_means": ZOMBIE_MEANS,
             "total_disagreements": None,
             "failures": failures,
             "disagreements": [],
@@ -386,16 +518,21 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures):
     unmatched = []
     for run in runs:
         repo, number = _run_key(run)
-        if run.get("status") not in LIVE and run.get("status") not in SUSPENDED:
-            continue
         if repo is None or number is None:
+            # B4: terminal runs included. Dropping an unkeyable `errored` run makes its
+            # issue read as ZOMBIE with no trace of the run that did exist — a
+            # manufactured false ZOMBIE, the exact failure this is meant to prevent.
             unmatched.append(
                 {
                     "run_id": run.get("id", ""),
                     "status": run.get("status", ""),
                     "repo": repo,
                     "issue_number": number,
-                    "reason": "run.input carries no usable (repo, issue_number)",
+                    "reason": (
+                        "run.input carries no usable (repo, issue_number) — join key "
+                        "unreadable (status %s); any item this run belonged to may "
+                        "therefore read as a FALSE ZOMBIE" % (run.get("status") or "unknown")
+                    ),
                 }
             )
         elif run.get("status") in LIVE and (repo, number) not in open_keys:
@@ -415,6 +552,9 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures):
     return {
         "verdict": "OK",
         "counts": counts,
+        "zombie_means": ZOMBIE_MEANS,
+        "in_flight_labels_checked": sorted(IN_FLIGHT_LABELS)
+        + [x + "*" for x in IN_FLIGHT_PREFIXES],
         "total_disagreements": len(disagreements),
         "failures": [],
         "disagreements": disagreements,
@@ -440,8 +580,14 @@ def disagreement_hash(report):
     else:
         parts = sorted(
             [
-                "%s:%s#%s:%s"
-                % (d["classification"], d["repo"], d["number"], ",".join(sorted(d["run_statuses"])))
+                "%s:%s#%s:%s:%s"
+                % (
+                    d["classification"],
+                    d["repo"],
+                    d["number"],
+                    ",".join(sorted(d["run_statuses"])),
+                    ",".join(sorted(d.get("trigger_labels") or [])),
+                )
                 for d in report["disagreements"]
             ]
         )

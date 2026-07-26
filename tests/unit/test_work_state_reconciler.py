@@ -107,7 +107,11 @@ def test_zombie_dispatched_with_no_run_ever() -> None:
     (d,) = report.disagreements
     assert d.classification == "ZOMBIE"
     assert d.run_ids == ()
-    assert "NO run exists" in d.detail
+    # B3: the wording must say UNARCHIVED — `list_runs` cannot see archived runs, so
+    # ZOMBIE cannot distinguish "never picked up" from "ran and was tidied away".
+    assert "NO unarchived run exists" in d.detail
+    assert "zombie-means-no-unarchived-run" in d.caveats
+    assert d.trigger_labels == ("dispatched",)
 
 
 def test_dead_dispatched_but_run_terminal() -> None:
@@ -411,8 +415,11 @@ def test_next_link_parsing() -> None:
     assert _next_link({"Link": '<https://x>; rel="last"'}) is None
 
 
-def test_items_without_pipeline_labels_are_filtered_but_all_open_items_are_enumerated() -> None:
-    """LAGGING is defined by the ABSENCE of `dispatched`, so we must not query by it."""
+def test_unlabelled_open_items_are_KEPT_so_lagging_is_detectable() -> None:
+    """C5. LAGGING is defined by the ABSENCE of an in-flight assertion, so enumeration
+    can neither query by label NOR drop items that carry none. Dropping them made a
+    live run against an unlabelled issue structurally impossible to classify LAGGING —
+    it was demoted to an ``unmatched_run`` stamped "not open", which is simply false."""
     seen: list[str] = []
 
     def getter(url: str, headers: Any) -> Any:
@@ -435,8 +442,19 @@ def test_items_without_pipeline_labels_are_filtered_but_all_open_items_are_enume
         ], {}
 
     items, _ = fetch_repo_items("eumemic/aios", token="t", getter=getter)
-    assert [i.number for i in items] == [2]
+    assert [i.number for i in items] == [1, 2]
     assert all("labels=" not in url for url in seen)
+    # And the payoff: a live run against the UNLABELLED issue #1 is now LAGGING.
+    report = ok_report(list(items), [run("running", number=1)])
+    (lagging,) = report.by_class("LAGGING")
+    assert lagging.number == 1
+    assert lagging.trigger_labels == ()  # its trigger is the ABSENCE of an assertion
+
+    # Opting out still works for callers that only want labelled items.
+    only_labelled, _ = fetch_repo_items(
+        "eumemic/aios", token="t", getter=getter, keep_unlabelled=False
+    )
+    assert [i.number for i in only_labelled] == [2]
 
 
 # ─── (6) change detection ────────────────────────────────────────────────────
@@ -474,13 +492,44 @@ def test_alarm_hash_is_driven_by_failure_reasons_so_a_new_outage_wakes_the_seat(
 # ─── (7) the eumemic-company#71 shape: a ZOMBIE with linked PRs ──────────────
 
 
-def test_zombie_with_linked_prs_is_flagged_as_suspect_join_key() -> None:
-    """'No run ever' + 'a PR exists' cannot both be true of healthy work."""
-    (d,) = ok_report([item(71, repo="eumemic/eumemic-company", linked=(72, 73))], []).disagreements
-    assert d.classification == "ZOMBIE"
+def test_linked_prs_make_it_AMBIGUOUS_and_EXCLUDED_from_the_zombie_count() -> None:
+    """C2. 'No run ever' + 'a PR exists' cannot both be true of healthy work, so these
+    are NOT zombies. The first cut attached a caveat and returned ZOMBIE anyway, which
+    inflated the headline ~36% (5 of 14) and — the part that matters — left phase 2
+    acting on the CLASS while the disclaimer sat in a footnote. A caveat does not undo
+    a count."""
+    report = ok_report([item(71, repo="eumemic/eumemic-company", linked=(72, 73))], [])
+    (d,) = report.disagreements
+    assert d.classification == "AMBIGUOUS"
     assert "has-linked-prs" in d.caveats
-    assert "#72" in d.detail and "verify the join key" in d.detail
-    assert "⚠️" in render_markdown(ok_report([item(71, linked=(72,))], []))
+    assert "excluded-from-zombie-count" in d.caveats
+    assert "#72" in d.detail and "NOT counted as a ZOMBIE" in d.detail
+    counts = report.counts
+    assert counts is not None
+    assert counts["ZOMBIE"] == 0
+    assert counts["AMBIGUOUS"] == 1
+    md = render_markdown(report)
+    assert "⚠️" in md
+    assert "AMBIGUOUS (1)" in md
+    assert "ZOMBIE (" not in md  # empty classes are not rendered at all
+
+
+def test_the_five_known_good_items_are_not_counted_as_zombies() -> None:
+    """The exact five the reviewer named, with their real linked PRs."""
+    known_good = {
+        ("eumemic/eumemic-company", 71): (67, 68, 69, 100, 101),
+        ("eumemic/eumemic-company", 50): (96, 204, 206),
+        ("eumemic/eumemic-company", 135): (212,),
+        ("eumemic/eumemic-ops", 337): (1977, 1979, 2016),
+        ("eumemic/eumemic-ops", 331): (1995, 2041),
+    }
+    items = [item(n, repo=r, linked=prs) for (r, n), prs in known_good.items()]
+    report = ok_report(items, [])
+    counts = report.counts
+    assert counts is not None
+    assert counts["ZOMBIE"] == 0, "known-good items must never inflate the ZOMBIE count"
+    assert counts["AMBIGUOUS"] == 5
+    assert {(d.repo, d.number) for d in report.by_class("AMBIGUOUS")} == set(known_good)
 
 
 # ─── (8) OBSERVE-ONLY: the phase-1 hard constraint ──────────────────────────
@@ -566,6 +615,15 @@ _SCENARIOS: list[tuple[str, tuple[str, ...], list[str]]] = [
     ("", ("dispatched",), ["running"]),
     ("", ("dispatched",), ["errored", "running"]),
     ("", ("approved",), ["completed"]),
+    # FIX ROUND — the mirror must agree on every NEW rule too, or the two forms drift.
+    ("ZOMBIE", ("autodev:in-progress",), []),  # C1
+    ("ZOMBIE", ("needs:human/build",), []),  # C1
+    ("ZOMBIE", ("approved", "autodev:in-progress", "needs:human/build"), []),  # the nine
+    ("", ("autodev:built",), []),  # C1: done is not in-flight
+    ("MISLABELLED", ("dispatched",), ["errored", "quiesced"]),  # C3
+    ("MISLABELLED", ("dispatched",), ["suspended", "quiesced"]),  # C3
+    ("", ("dispatched",), ["quiesced", "running"]),  # C3: live still wins
+    ("LAGGING", (), ["running"]),  # C5: no labels at all
 ]
 
 
@@ -591,6 +649,33 @@ def test_workflow_script_mirror_classifies_identically(
     )
     assert (lib_verdict.classification if lib_verdict else "") == expected
     assert (wf_verdict["classification"] if wf_verdict else "") == expected
+    # The trigger set is part of the contract now, so it must not drift either.
+    assert list(lib_verdict.trigger_labels if lib_verdict else []) == (
+        wf_verdict["trigger_labels"] if wf_verdict else []
+    )
+
+
+def test_workflow_script_mirror_agrees_on_AMBIGUOUS() -> None:
+    """C2 in both forms: linked PRs mean NOT a zombie, in the library and the mirror."""
+    wf = _load_wf_module()
+    lib = classify_item(item(71, repo="eumemic/eumemic-company", linked=(67, 68)), [])
+    wf_verdict = wf.classify(
+        {
+            "repo": "eumemic/eumemic-company",
+            "number": 71,
+            "kind": "issue",
+            "title": "item 71",
+            "labels": ["dispatched"],
+            "url": "",
+            "updated_at": "",
+            "linked_pr_numbers": [67, 68],
+        },
+        [],
+    )
+    assert lib is not None
+    assert lib.classification == "AMBIGUOUS"
+    assert wf_verdict["classification"] == "AMBIGUOUS"
+    assert "excluded-from-zombie-count" in wf_verdict["caveats"]
 
 
 def test_workflow_script_alarms_with_null_counts_on_failure() -> None:
@@ -680,15 +765,20 @@ def test_end_to_end_on_the_known_2043_zombie_set() -> None:
     report = ok_report(items, [run("running", repo="eumemic/aios", number=1)])
     counts = report.counts
     assert counts is not None
-    assert counts["ZOMBIE"] == 14
-    assert {(d.repo, d.number) for d in report.by_class("ZOMBIE")} == set(known)
+    # 13, not 14: #71 has a linked PR, so it is AMBIGUOUS (C2) and must NOT inflate
+    # the headline. The set of FINDINGS is still all 14 — nothing is dropped.
+    assert counts["ZOMBIE"] == 13
+    assert counts["AMBIGUOUS"] == 1
+    assert {(d.repo, d.number) for d in report.disagreements} == set(known)
     # #71 is the designed-in check on the join logic, not a silent pass.
     (suspect,) = [d for d in report.disagreements if d.number == 71]
-    assert suspect.caveats == ("has-linked-prs",)
+    assert suspect.classification == "AMBIGUOUS"
+    assert suspect.caveats == ("has-linked-prs", "excluded-from-zombie-count")
     payload = json.loads(render_json(report))
     assert payload["verdict"] == "OK"
-    assert payload["counts"]["ZOMBIE"] == 14
-    assert "ZOMBIE (14)" in render_markdown(report)
+    assert payload["counts"]["ZOMBIE"] == 13
+    assert "ZOMBIE (13)" in render_markdown(report)
+    assert "no UNARCHIVED run exists" in payload["zombie_means"]
 
 
 def test_disagreements_are_sorted_by_class_then_repo_then_number() -> None:
@@ -731,3 +821,280 @@ def test_disagreement_identity_excludes_run_ids() -> None:
     )
     b = a.__class__(**{**a.__dict__, "run_ids": ("r2",)})
     assert a.identity() == b.identity()
+
+
+# ─── (11) FIX ROUND for the second review ───────────────────────────────────
+#
+# Each test below names the finding it locks down. These are the regressions the
+# reviewer reproduced, so they get explicit tests rather than incidental coverage.
+
+
+# ---- C1: the headline. In-flight is a UNION of assertions, not one literal. ----
+
+#: The NINE confirmed zombies with the labels they ACTUALLY carry as of
+#: 2026-07-26T03:25, after the seat stripped `dispatched` from every one of them as
+#: remediation. If the classifier keys on `dispatched`, this set reports "0 ZOMBIE"
+#: while nine issues sit dead — the exact failure the reviewer reproduced.
+_NINE_AFTER_THE_STRIP: list[tuple[str, int]] = [
+    ("eumemic/aios", 2000),
+    ("eumemic/eumemic-ops", 337),
+    ("eumemic/eumemic-ops", 331),
+    ("eumemic/eumemic-company", 210),
+    ("eumemic/eumemic-company", 199),
+    ("eumemic/eumemic-company", 192),
+    ("eumemic/eumemic-company", 166),
+    ("eumemic/eumemic-company", 151),
+    ("eumemic/eumemic-company", 147),
+]
+_LABELS_AFTER_THE_STRIP = ("approved", "autodev:in-progress", "needs:human/build")
+
+
+def test_C1_the_nine_zombies_are_still_found_after_dispatched_was_stripped() -> None:
+    """THE headline regression. `dispatched` is gone from all nine; they still assert
+    'a machine has this' via `autodev:in-progress` + `needs:human/build`. A tool built
+    BECAUSE a label is an assertion nothing re-checks must not itself trust one label."""
+    items = [item(n, repo=r, labels=_LABELS_AFTER_THE_STRIP) for r, n in _NINE_AFTER_THE_STRIP]
+    report = ok_report(items, [])
+    counts = report.counts
+    assert counts is not None
+    assert counts["ZOMBIE"] == 9, "keying on `dispatched` alone would report 0 here"
+    assert {(d.repo, d.number) for d in report.by_class("ZOMBIE")} == set(_NINE_AFTER_THE_STRIP)
+    # And the report must say WHICH assertion lied, not just that something did.
+    for d in report.by_class("ZOMBIE"):
+        assert d.trigger_labels == ("autodev:in-progress", "needs:human/build")
+        assert "`autodev:in-progress`" in d.detail
+    assert "triggered by:" in render_markdown(report)
+
+
+@pytest.mark.parametrize(
+    ("labels", "expect_in_flight"),
+    [
+        (("dispatched",), True),
+        (("autodev:in-progress",), True),
+        (("design:in-progress",), True),
+        (("needs:human/build",), True),
+        (("needs:human/review",), True),
+        (("needs:human/anything-at-all",), True),
+        (("approved",), False),
+        (("autodev:built",), False),  # a PR exists — done, not in flight
+        (("autodev:failed",), False),
+        (("hold",), False),
+        ((), False),
+    ],
+)
+def test_C1_in_flight_vocabulary(labels: tuple[str, ...], expect_in_flight: bool) -> None:
+    assert item(1, labels=labels).claims_in_flight is expect_in_flight
+    verdict = classify_item(item(1, labels=labels), [])
+    assert (verdict is not None and verdict.classification == "ZOMBIE") is expect_in_flight
+
+
+def test_C1_a_done_label_alone_is_not_an_in_flight_claim() -> None:
+    """`autodev:built` means a PR exists. That is not a claim a machine is on it now,
+    so a built item with no live run is NOT a zombie."""
+    assert classify_item(item(1, labels=("autodev:built",)), []) is None
+
+
+# ---- C3: unknown status outranks terminal; never evidence of death. ----
+
+
+def test_C3_unknown_status_beside_a_terminal_run_is_not_DEAD() -> None:
+    """`if unknown and not (suspended or terminal)` made [unknown, errored] return DEAD,
+    contradicting the documented contract that an unrecognised status is never evidence
+    of death. The unknown run may well BE live under a status name we have not learned."""
+    d = classify_item(item(1), [run("errored", run_id="r1"), run("quiesced", run_id="r2")])
+    assert d is not None
+    assert d.classification == "MISLABELLED"
+    assert "unrecognised-run-status" in d.caveats
+    assert "quiesced" in d.detail
+    assert "terminal sibling does NOT make an unknown status dead" in d.detail
+
+
+def test_C3_unknown_status_beside_a_suspended_run_is_still_not_DEAD() -> None:
+    d = classify_item(item(1), [run("suspended", run_id="r1"), run("quiesced", run_id="r2")])
+    assert d is not None
+    assert d.classification == "MISLABELLED"
+    assert "unrecognised-run-status" in d.caveats
+
+
+def test_C3_a_live_run_still_outranks_everything() -> None:
+    assert (
+        classify_item(item(1), [run("quiesced", run_id="r1"), run("running", run_id="r2")]) is None
+    )
+
+
+# ---- B1 / B2: a truncated read must NEVER render as exhaustive. ----
+
+
+def test_B1_has_more_with_an_unusable_cursor_is_a_READ_FAILURE() -> None:
+    """The server said THERE IS MORE and gave no cursor. The old code ended pagination
+    and reported exhaustive=True — a truncated read rendered as exhaustive, which is the
+    2026-07-25 failure mode this PR exists to kill. Every ZOMBIE rests on 'no run in the
+    list I read', so an unread page manufactures false ZOMBIEs."""
+    for bad_cursor in (None, "", 0, {}):
+
+        def getter(url: str, headers: Any, _c: Any = bad_cursor) -> Any:
+            return (
+                {
+                    "data": [{"id": "r1", "status": "completed"}],
+                    "has_more": True,
+                    "next_cursor": _c,
+                },
+                {},
+            )
+
+        source = read_aios_runs(base_url="http://x", api_key="k", getter=getter)
+        assert isinstance(source, SourceFailed), f"cursor={bad_cursor!r} must FAIL the read"
+        assert "has_more" in source.reason and "unusable" in source.reason
+        # ...and it must surface as ALARM with counts None, never as a clean report.
+        report = build_report(items_read=SourceOk(name="github", items=()), runs_read=source)
+        assert report.verdict == "ALARM"
+        assert report.counts is None
+
+
+def test_B2_workflow_full_page_without_an_id_cursor_is_a_READ_FAILURE() -> None:
+    """The mirror of B1 in the workflow form: a full page whose last row carries no `id`
+    leaves no keyset cursor, so the history is truncated. Breaking the loop with
+    exhaustive=True is the same lie in a different file."""
+    wf = _load_wf_module()
+    rows = [{"id": f"r{n}", "status": "completed"} for n in range(199)]
+    rows.append({"status": "completed"})
+    assert len(rows) == 200
+    with pytest.raises(wf.ReadFailure) as excinfo:
+        wf._paginate_check(rows)
+    assert "TRUNCATED" in str(excinfo.value)
+
+
+# ---- B3: ZOMBIE means "no UNARCHIVED run", and every report says so. ----
+
+
+def test_B3_every_report_states_what_zombie_can_actually_prove() -> None:
+    """`list_runs` filters archived_at IS NULL and archiving requires a TERMINAL run, so
+    a completed-then-archived run reads as 'no run, ever'. The class cannot distinguish
+    'never picked up' from 'tidied away', so it must not imply the former."""
+    report = ok_report([item(2000)], [])
+    payload = json.loads(render_json(report))
+    assert "no UNARCHIVED run exists" in payload["zombie_means"]
+    assert "archived" in payload["zombie_means"]
+    md = render_markdown(report)
+    assert "What ZOMBIE can prove" in md
+    assert "no UNARCHIVED run exists" in md
+    # The per-finding text must not overclaim either.
+    (d,) = report.disagreements
+    assert "NO unarchived run exists" in d.detail
+    assert "zombie-means-no-unarchived-run" in d.caveats
+
+
+def test_B3_workflow_form_states_it_too() -> None:
+    wf = _load_wf_module()
+    report = wf.build([], True, [], True, [])
+    assert "no UNARCHIVED run exists" in report["zombie_means"]
+
+
+# ---- B4: unkeyable runs are NEVER skipped — the PR body's claim, made true. ----
+
+
+def test_B4_terminal_runs_with_an_unreadable_join_key_are_reported() -> None:
+    """Only live/suspended unkeyable runs reached unmatched_runs, so an `errored` run
+    with an unparseable input vanished — and its issue was then classified ZOMBIE with no
+    trace of the run that existed. A manufactured false ZOMBIE, silently."""
+    for status in ("completed", "errored", "cancelled"):
+        report = ok_report([item(2000)], [run(status, repo=None, number=None, run_id="r_lost")])
+        assert [u.run_id for u in report.unmatched_runs] == ["r_lost"], status
+        (u,) = report.unmatched_runs
+        assert "FALSE ZOMBIE" in u.reason
+        assert status in u.reason
+        assert "Unmatched runs" in render_markdown(report)
+
+
+def test_B4_workflow_form_reports_terminal_unkeyable_runs_too() -> None:
+    wf = _load_wf_module()
+    report = wf.build([], True, [{"id": "r_lost", "status": "errored", "input": {}}], True, [])
+    assert [u["run_id"] for u in report["unmatched_runs"]] == ["r_lost"]
+    assert "FALSE ZOMBIE" in report["unmatched_runs"][0]["reason"]
+
+
+# ---- malformed rows ALARM instead of killing the workflow (first review) ----
+
+
+def test_malformed_issue_row_is_a_read_failure_not_an_AttributeError() -> None:
+    """A 2xx carrying a non-object row reached row.get() and raised AttributeError
+    OUTSIDE the ReadFailure handlers, killing the workflow instead of returning
+    verdict:ALARM. A malformed row is a FAILED READ."""
+    wf = _load_wf_module()
+    for bad in ("a string", 42, None, ["nested"]):
+        with pytest.raises(wf.ReadFailure):
+            wf._check_issue_row("eumemic/aios", bad)
+
+
+def test_malformed_labels_field_is_a_read_failure() -> None:
+    wf = _load_wf_module()
+    with pytest.raises(wf.ReadFailure):
+        wf._check_issue_row("eumemic/aios", {"number": 1, "labels": "dispatched"})
+
+
+def test_malformed_run_row_is_a_read_failure() -> None:
+    wf = _load_wf_module()
+    for bad in ("a string", 42, None):
+        with pytest.raises(wf.ReadFailure):
+            wf._check_run_row(bad)
+
+
+# ---- C4: a transferred issue is DETECTED, not silently turned into a zombie. ----
+
+
+def test_C4_a_redirect_on_the_issue_read_is_surfaced_as_a_transfer() -> None:
+    """68 issues were transferred between repos on 2026-07-25. A transfer gives the issue
+    a NEW (repo, number) while every run.input still holds the OLD one, so the join key
+    is stale and the item reads as a false ZOMBIE. urllib follows the 301 silently, so the
+    transport reports where it actually landed and the report says so."""
+    from aios.reconcilers.work_state_cli import _FINAL_URL_HEADER
+
+    def getter(url: str, headers: Any) -> Any:
+        if "/issues?" in url or url.endswith("/issues"):
+            return [
+                {
+                    "number": 71,
+                    "title": "moved",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ], {}
+        return [], {
+            _FINAL_URL_HEADER: "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+        }
+
+    source = read_github_items(
+        repos=["eumemic/eumemic-company"], token="t", getter=getter, enrich_linked_prs=True
+    )
+    assert isinstance(source, SourceOk)
+    assert any("TRANSFERRED" in n for n in source.notes)
+    assert any("eumemic-ops/issues/900" in n for n in source.notes)
+    report = build_report(items_read=source, runs_read=SourceOk(name="aios-runs", items=()))
+    assert any("TRANSFERRED" in n for n in report.notes)
+    assert "TRANSFERRED" in render_markdown(report)
+    assert any("TRANSFERRED" in n for n in json.loads(render_json(report))["notes"])
+
+
+# ---- the drift guard now asserts the TRANSPORT, not source text. ----
+
+
+def test_drift_guard_catches_a_data_kwarg_that_would_silently_become_a_POST() -> None:
+    """`urllib.request.Request(url, data=...)` infers POST from a non-None body and
+    contains none of the literals a source grep looks for. Assert the TRANSPORT."""
+    import urllib.request
+
+    real_request = urllib.request.Request
+
+    class SneakyRequest(real_request):  # type: ignore[misc,valid-type]
+        def __init__(self, url: str, **kw: Any) -> None:
+            super().__init__(url, data=b"{}", **{k: v for k, v in kw.items() if k != "method"})
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(urllib.request, "Request", SneakyRequest)
+        with pytest.raises(ObserveOnlyViolation) as excinfo:
+            _get("https://api.github.com/repos/eumemic/aios/issues/1", {})
+        assert "OBSERVE-ONLY" in str(excinfo.value)
+    finally:
+        monkey.undo()

@@ -68,6 +68,9 @@ DEFAULT_REPOS: tuple[str, ...] = (
 DEV_PIPELINE_WORKFLOW_ID = "wf_01KV4YGV4PSGP08TJBAY32J2VK"
 
 _GITHUB_API = "https://api.github.com"
+#: Synthetic response header carrying the post-redirect URL (see :func:`_get`).
+#: Not a wire header — the transport's own report of where it actually landed.
+_FINAL_URL_HEADER = "X-Reconciler-Final-Url"
 _REQUEST_TIMEOUT_S = 30
 #: Hard page ceilings. Hitting one is NOT silently ignored: the source is marked
 #: non-exhaustive and every derived count renders as "at least N".
@@ -102,13 +105,29 @@ def _get(
             "Mutating a reconciled item is a failed build, not a feature."
         )
     req = urllib.request.Request(url, method="GET")
+    # Belt-and-braces for the reviewer's `data=` hole: urllib infers POST from a
+    # non-None body, so a future `Request(url, data=...)` would mutate while
+    # containing none of the literals a source grep looks for. Assert the TRANSPORT.
+    if req.get_method() != "GET" or req.data is not None:
+        raise ObserveOnlyViolation(
+            f"phase-1 reconciler is OBSERVE-ONLY: transport resolved to "
+            f"{req.get_method()} (data={'set' if req.data is not None else 'None'}) for {url}"
+        )
     for k, v in headers.items():
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
             raw = resp.read().decode()
             body = json.loads(raw) if raw else None
-            return body, dict(resp.headers)
+            out = dict(resp.headers)
+            # urllib follows a 301 SILENTLY. GitHub 301s a TRANSFERRED issue to its
+            # new (repo, number) — the single signal that a run's stored join key is
+            # stale (C4). Surface the final URL so the caller can SEE the redirect
+            # instead of the transfer vanishing into a false ZOMBIE.
+            final = resp.geturl()
+            if final and final != url:
+                out[_FINAL_URL_HEADER] = final
+            return body, out
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:400]
         raise ReadFailure(f"GET {url} → HTTP {exc.code}: {detail}") from exc
@@ -167,8 +186,18 @@ def fetch_repo_items(
     token: str,
     getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
     max_pages: int = _MAX_ISSUE_PAGES,
+    keep_unlabelled: bool = True,
 ) -> tuple[list[WorkItem], bool]:
-    """Every OPEN issue/PR in ``repo`` carrying at least one pipeline state label.
+    """Every OPEN issue/PR in ``repo``.
+
+    C5 — ``keep_unlabelled=True`` (the default) keeps items carrying NO pipeline
+    label at all. The previous cut dropped them, which made LAGGING structurally
+    under-detectable: a live run against an unlabelled issue could never be LAGGING;
+    it was demoted to an ``unmatched_run`` reason-stringed "not open", which is
+    false — the item IS open, it just has no label. Since LAGGING is defined by the
+    ABSENCE of an in-flight assertion, the enumeration cannot pre-filter on
+    presence-of-*some*-label either. Unlabelled items with no run classify to
+    ``None`` and cost nothing.
 
     Enumerates all open items and filters locally rather than asking GitHub for
     ``?labels=dispatched``: the LAGGING class is defined by the ABSENCE of
@@ -201,7 +230,7 @@ def fetch_repo_items(
             if not isinstance(payload, Mapping):
                 raise ReadFailure(f"GET {url} returned a non-object row")
             item = _item_from_payload(repo, payload)
-            if any(is_pipeline_state_label(x) for x in item.labels):
+            if keep_unlabelled or any(is_pipeline_state_label(x) for x in item.labels):
                 items.append(item)
         url = _next_link(resp_headers)
     return items, True
@@ -213,8 +242,12 @@ def fetch_linked_prs(
     *,
     token: str,
     getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
-) -> tuple[int, ...]:
-    """PRs cross-referencing an issue, from its timeline (READ-ONLY).
+) -> tuple[tuple[int, ...], str | None]:
+    """PRs cross-referencing an issue + any redirect seen, from its timeline (READ-ONLY).
+
+    Returns ``(linked_pr_numbers, redirected_to_url_or_None)``. The second element is
+    the C4 transfer signal: a non-None value means GitHub 301'd this (repo, number),
+    i.e. the issue MOVED and every run keyed to the old coordinates is now unjoinable.
 
     Used only to qualify a ZOMBIE verdict: "no run ever" + "a PR exists" means the
     join key is suspect, and the report says so instead of asserting a zombie.
@@ -228,9 +261,18 @@ def fetch_linked_prs(
         "User-Agent": "aios-work-state-reconciler",
     }
     found: set[int] = set()
+    redirected_to: str | None = None
     next_url: str | None = url
     while next_url is not None:
         body, resp_headers = getter(next_url, headers)
+        if resp_headers.get(_FINAL_URL_HEADER):
+            # C4 — 68 issues were transferred between repos on 2026-07-25. A transfer
+            # gives the issue a NEW (repo, number) while every run.input still holds
+            # the OLD one, so the join key is stale and the item reads as a false
+            # ZOMBIE (or its run as unmatched). The 301 is the only signal, and urllib
+            # follows it silently. Detection only in phase 1 — we report it, we do not
+            # rewrite the key.
+            redirected_to = str(resp_headers[_FINAL_URL_HEADER])
         if not isinstance(body, list):
             raise ReadFailure(f"GET {next_url} did not return a JSON array")
         for event in body:
@@ -245,7 +287,7 @@ def fetch_linked_prs(
                 if isinstance(num, int):
                     found.add(num)
         next_url = _next_link(resp_headers)
-    return tuple(sorted(found))
+    return tuple(sorted(found)), redirected_to
 
 
 def read_github_items(
@@ -279,12 +321,21 @@ def read_github_items(
             name="github", reason=f"unexpected read error: {type(exc).__name__}: {exc}"
         )
 
+    transferred: dict[tuple[str, int], str] = {}
     if enrich_linked_prs:
         try:
             enriched: list[WorkItem] = []
             for item in all_items:
-                if item.is_dispatched and item.kind == "issue":
-                    linked = fetch_linked_prs(item.repo, item.number, token=token, getter=getter)
+                # C1: enrich on the UNION of in-flight assertions. Keying this on
+                # `dispatched` alone meant the nine issues that now assert in-flight
+                # via `autodev:in-progress` never had their linked PRs read, so the
+                # AMBIGUOUS class (C2) could never fire for them.
+                if item.claims_in_flight and item.kind == "issue":
+                    linked, redirected = fetch_linked_prs(
+                        item.repo, item.number, token=token, getter=getter
+                    )
+                    if redirected:
+                        transferred[item.key] = redirected
                     enriched.append(
                         WorkItem(
                             repo=item.repo,
@@ -304,7 +355,16 @@ def read_github_items(
         except ReadFailure as exc:
             return SourceFailed(name="github-timeline", reason=str(exc))
 
-    return SourceOk(name="github", items=tuple(all_items), exhaustive=exhaustive)
+    return SourceOk(
+        name="github",
+        items=tuple(all_items),
+        exhaustive=exhaustive,
+        notes=tuple(
+            f"{repo}#{number} was REDIRECTED to {dest} — the issue appears to have been "
+            "TRANSFERRED, so any run keyed to these coordinates cannot join (C4)"
+            for (repo, number), dest in sorted(transferred.items())
+        ),
+    )
 
 
 # ─── aios: runs of the pipeline workflows ────────────────────────────────────
@@ -360,7 +420,22 @@ def read_aios_runs(
                     records.append(run_record_from_payload(row))
                 cursor = body.get("next_cursor")
                 has_more = body.get("has_more")
-                if has_more and isinstance(cursor, str) and cursor:
+                if has_more and not (isinstance(cursor, str) and cursor):
+                    # B1 — THE fail-loud break. The server said THERE IS MORE and handed
+                    # us no usable cursor. The old code fell into the `else` branch,
+                    # ended pagination, and reported exhaustive=True: a truncated read
+                    # rendered as exhaustive, which is the 2026-07-25 failure mode with
+                    # extra steps. Every ZOMBIE verdict is derived from "no run exists in
+                    # the list I read", so an unread page of runs manufactures false
+                    # ZOMBIEs and hides live runs from LAGGING. This is a FAILED read.
+                    raise ReadFailure(
+                        f"GET {url} returned has_more={has_more!r} with an unusable "
+                        f"next_cursor ({cursor!r}) — the server says there is MORE run "
+                        "history and gave no way to fetch it. Refusing to report a "
+                        "truncated read as exhaustive."
+                    )
+                if has_more:
+                    assert isinstance(cursor, str)
                     url = f"{base_url.rstrip('/')}/v1/runs?cursor={urllib.parse.quote(cursor)}"
                 else:
                     url = None
