@@ -872,9 +872,7 @@ def classify_item(
         moved_from = f"{transfer.stale_repo}#{transfer.stale_number}"
         ids = ", ".join(transfer.run_ids) or "(none)"
         prs = (
-            " Linked PR(s): "
-            + ", ".join("#" + str(n) for n in item.linked_pr_numbers)
-            + "."
+            " Linked PR(s): " + ", ".join("#" + str(n) for n in item.linked_pr_numbers) + "."
             if item.linked_pr_numbers
             else ""
         )

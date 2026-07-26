@@ -642,9 +642,12 @@ def reconcile(
                 items, runs, token=github_token, getter=getter
             )
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            transfers, probe_notes = (), (
-                f"C4 stale-key probe failed: {type(exc).__name__}: {exc} — a transferred "
-                "issue among the stale join keys would be unreported",
+            transfers, probe_notes = (
+                (),
+                (
+                    f"C4 stale-key probe failed: {type(exc).__name__}: {exc} — a transferred "
+                    "issue among the stale join keys would be unreported",
+                ),
             )
         if probe_notes:
             items_read = SourceOk(

@@ -1113,9 +1113,7 @@ def test_C4_the_INVERTED_probe_finds_a_transfer_from_a_REALIZABLE_world() -> Non
 
     report = build_report(
         items_read=source,
-        runs_read=SourceOk(
-            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
-        ),
+        runs_read=SourceOk(name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)),
         transfers=transfers,
     )
 
@@ -1179,9 +1177,7 @@ def test_C4_the_OLD_probe_direction_could_not_have_seen_this_world() -> None:
     assert not any("issues/71" in p for p in enum_paths)
     blind = build_report(
         items_read=source,
-        runs_read=SourceOk(
-            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
-        ),
+        runs_read=SourceOk(name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)),
     )
     assert (blind.counts or {})["ZOMBIE"] == 1, (
         "this fixture must reproduce the FALSE ZOMBIE, or it is not testing the defect"
@@ -1191,9 +1187,7 @@ def test_C4_the_OLD_probe_direction_could_not_have_seen_this_world() -> None:
     _s, transfers, _p = _cli_reader(world, ["eumemic/eumemic-ops"], runs)
     fixed = build_report(
         items_read=_s,
-        runs_read=SourceOk(
-            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
-        ),
+        runs_read=SourceOk(name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)),
         transfers=transfers,
     )
     assert (fixed.counts or {})["ZOMBIE"] == 0
@@ -1241,9 +1235,7 @@ def test_C4_a_stale_key_that_resolves_to_ITSELF_is_not_a_transfer() -> None:
     assert transfers == ()
     report = build_report(
         items_read=source,
-        runs_read=SourceOk(
-            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
-        ),
+        runs_read=SourceOk(name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)),
         transfers=transfers,
     )
     assert (report.counts or {})["ZOMBIE"] == 1, "a real zombie must stay a zombie"
@@ -1256,6 +1248,7 @@ def test_C4_probe_read_error_is_a_NOTE_not_an_ALARM() -> None:
     It must not ALARM the whole reconcile — but it must not be silent either, since an
     unprobed key is a transfer we did not look for.
     """
+
     def getter(url: str, headers: Any) -> Any:
         raise ReadFailure(f"GET {url} → HTTP 404: gone")
 
@@ -1271,12 +1264,11 @@ def test_C4_probe_read_error_is_a_NOTE_not_an_ALARM() -> None:
 
 def test_C4_probe_cap_is_reported_as_a_gap_not_ignored() -> None:
     """Hitting the probe ceiling says so. An unprobed key is an unseen transfer."""
+
     def getter(url: str, headers: Any) -> Any:
         return {"number": 1, "url": url}, {}
 
-    runs = [
-        run("completed", repo="eumemic/aios", number=n, run_id=f"r{n}") for n in range(10, 20)
-    ]
+    runs = [run("completed", repo="eumemic/aios", number=n, run_id=f"r{n}") for n in range(10, 20)]
     transfers, notes = probe_stale_keys([], runs, token="t", getter=getter, max_probes=3)
     assert transfers == ()
     assert any("capped at 3 of 10" in n and "NOT probed" in n for n in notes)
@@ -1325,6 +1317,7 @@ def test_ITEM2_transfer_notes_are_folded_into_the_disagreement_hash() -> None:
     newly-discovered transfer as "unchanged, nothing to say" and stay silent about the
     exact fact a triager needs.
     """
+
     def report(transfers: tuple[TransferEvidence, ...]) -> ReconcileReport:
         return build_report(
             items_read=SourceOk(name="github", items=()),
@@ -1352,6 +1345,7 @@ def test_ITEM2_transfer_notes_are_folded_into_the_disagreement_hash() -> None:
 
 def test_ITEM2_transfer_notes_change_the_hash_on_the_ALARM_path_too() -> None:
     """An outage must not mask a newly-discovered stale key."""
+
     def alarm(transfers: tuple[TransferEvidence, ...]) -> ReconcileReport:
         return build_report(
             items_read=SourceFailed(name="github", reason="HTTP 500"),
@@ -1610,15 +1604,11 @@ def _assert_forms_agree(
     """
     runs = runs or []
     source, cli_transfers, cli_paths = _cli_reader(world, repos, runs)
-    (wf, wf_items, wf_exhaustive, wf_notes, wf_transfers), wf_paths = _wf_reader(
-        world, repos, runs
-    )
+    (wf, wf_items, wf_exhaustive, wf_notes, wf_transfers), wf_paths = _wf_reader(world, repos, runs)
 
     lib_report = build_report(
         items_read=source,
-        runs_read=SourceOk(
-            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
-        ),
+        runs_read=SourceOk(name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)),
         transfers=cli_transfers,
     )
     wf_report = wf.build(wf_items, wf_exhaustive, runs, True, [], wf_notes, wf_transfers)
@@ -1981,7 +1971,13 @@ def test_C4_mirror_probe_read_error_is_a_NOTE_not_an_ALARM() -> None:
     transfers, notes = asyncio.run(
         wf._probe_stale_keys(
             [],
-            [{"id": "r_x", "status": "completed", "input": {"repo": "eumemic/aios", "issue": 4242}}],
+            [
+                {
+                    "id": "r_x",
+                    "status": "completed",
+                    "input": {"repo": "eumemic/aios", "issue": 4242},
+                }
+            ],
         )
     )
     assert transfers == []
