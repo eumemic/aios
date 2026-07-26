@@ -210,6 +210,7 @@ class CredentialDnsResolver:
         self._upstream: str | None = upstream or _resolv_conf_nameserver()
         self._port: int | None = None
         self._udp_transport: asyncio.DatagramTransport | None = None
+        self._udp_protocol: _UdpProtocol | None = None
         self._tcp_server: asyncio.Server | None = None
         self._tcp_conns: set[asyncio.Task[None]] = set()
 
@@ -235,10 +236,11 @@ class CredentialDnsResolver:
             udp_sock.setblocking(False)
             udp_sock.bind(("0.0.0.0", 0))
             port = udp_sock.getsockname()[1]
-            transport, _protocol = await loop.create_datagram_endpoint(
+            transport, protocol = await loop.create_datagram_endpoint(
                 lambda: _UdpProtocol(self), sock=udp_sock
             )
             self._udp_transport = transport
+            self._udp_protocol = protocol
             self._tcp_server = await asyncio.start_server(self._handle_tcp, "0.0.0.0", port)
             self._port = port
         except BaseException as exc:
@@ -252,6 +254,9 @@ class CredentialDnsResolver:
         )
 
     async def stop(self) -> None:
+        if self._udp_protocol is not None:
+            await self._udp_protocol.stop()
+            self._udp_protocol = None
         if self._udp_transport is not None:
             self._udp_transport.close()
             self._udp_transport = None
@@ -362,6 +367,13 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         task = asyncio.get_running_loop().create_task(self._respond(data, addr))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    async def stop(self) -> None:
+        """Cancel and join all in-flight forwarding tasks."""
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _respond(self, data: bytes, addr: tuple[str | int, ...]) -> None:
         try:
