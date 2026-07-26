@@ -371,13 +371,6 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def stop(self) -> None:
-        """Cancel and join all in-flight forwarding tasks."""
-        for task in list(self._tasks):
-            task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
     async def _respond(self, data: bytes, addr: tuple[str | int, ...]) -> None:
         try:
             response = await self._resolver.answer(data)
