@@ -57,6 +57,8 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     await DockerBackend().create(_spec())
 
     assert _runtime_values(calls[0]) == []
+    sysctl = calls[0].index("--sysctl")
+    assert calls[0][sysctl + 1] == "net.ipv4.conf.all.route_localnet=1"
 
 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:

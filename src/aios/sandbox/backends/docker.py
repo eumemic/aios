@@ -194,7 +194,17 @@ class DockerBackend:
         for key, value in spec.labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
-        argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        argv.extend(
+            [
+                "--network",
+                SANDBOX_NETWORK_NAME,
+                # Credential DNS rewrites Docker's loopback resolver destination
+                # (127.0.0.11) to the worker. Set this while Docker creates the
+                # netns: /proc/sys is read-only in the later NET_ADMIN sidecar.
+                "--sysctl",
+                "net.ipv4.conf.all.route_localnet=1",
+            ]
+        )
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
