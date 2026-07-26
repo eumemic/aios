@@ -170,12 +170,11 @@ async def test_resolve_miss_retains_last_good_and_skips_refresh_sidecar() -> Non
     assert state.pinned == {"api.github.com": {"1.1.1.1": 0}}
 
 
-async def test_blackhole_recovery_swaps_dnat_and_limited_accept_rules() -> None:
+async def test_blackhole_recovery_refreshes_safe_limited_rules() -> None:
     """End-to-end #1946 recovery with a NON-EMPTY ``limited_hosts``: DNS
-    rotates 1.1.1.1 → 2.2.2.2. The sweep must first install the new IP's
-    rules (recovering the placeholder swap), then — after the eviction
-    window — emit the stale IP's ``-D`` for BOTH the nat DNAT and the
-    filter ACCEPTs."""
+    rotates 1.1.1.1 → 2.2.2.2. The sweep installs the new IP's HTTP rule,
+    but not a raw HTTPS bypass for a credential host, then removes all legacy
+    rules for the stale IP after the eviction window."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend)
     registry._handles["sess_X"] = make_handle(session_id="sess_X")
@@ -187,14 +186,15 @@ async def test_blackhole_recovery_swaps_dnat_and_limited_accept_rules() -> None:
     )
     registry._egress_states["sess_X"] = state
 
-    # Tick 1: the new IP appears → its filter rules are installed immediately.
+    # Tick 1: the new IP appears → its safe filter rule is installed immediately.
     # NO credential DNAT is added: since #2042 that interception is keyed on
-    # the name (one sentinel rule), not on whatever DNS just returned.
+    # the name (one sentinel rule), not on whatever DNS just returned. Nor is a
+    # raw-IP HTTPS ACCEPT added, because that would bypass name interception.
     await registry._merge_egress_resolutions("sess_X", {host: {"2.2.2.2"}})
     add_script = _sidecar_scripts(backend)[-1]
     assert "-A OUTPUT -d 2.2.2.2 -p tcp --dport 443 -j DNAT" not in add_script
     assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 80 -j ACCEPT' in add_script
-    assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 443 -j ACCEPT' in add_script
+    assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 443 -j ACCEPT' not in add_script
     assert "-D OUTPUT" not in add_script  # stale IP survives the union window
 
     # Ticks 2-3: the stale IP stays omitted → evicted, deletes emitted for
