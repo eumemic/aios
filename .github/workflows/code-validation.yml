@@ -483,11 +483,15 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Docker-backed E2E occasionally sees transient daemon/container startup
-        # failures on shared runners. Retry only the recorded failures once; a
-        # deterministic regression still fails the required check.
+        # Docker-backed tests each provision Postgres plus sandbox/operator
+        # containers. Run this shard serially: two concurrent stacks have
+        # repeatedly exhausted dockerd/containerd on the four-core hosted
+        # runner, and a later serial retry cannot reliably recover a daemon
+        # after that resource collapse. A clean serial first pass keeps the
+        # required check deterministic; the retry remains a bounded recovery
+        # for genuine transient daemon startup failures.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
