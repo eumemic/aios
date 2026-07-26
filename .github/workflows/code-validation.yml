@@ -498,7 +498,9 @@ jobs:
             # before pytest recreates its fixtures.
             # xargs batches large container sets and avoids unsafe shell word
             # splitting while remaining a no-op when the daemon is already clean.
-            docker ps -aq | xargs -r docker rm -f
+            # A container may auto-remove between the listing and removal; that
+            # race must not abort the shell before pytest gets its retry.
+            docker ps -aq | xargs -r docker rm -f || true
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
