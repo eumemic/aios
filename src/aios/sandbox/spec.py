@@ -48,6 +48,7 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     Mount,
     SandboxSpec,
 )
@@ -1114,6 +1115,13 @@ def _assemble_plan(
         # unique-bytes accounting.
         ENV_KEYS_LABEL_KEY: ",".join(sorted(merged_env)),
         BASE_IMAGE_LABEL_KEY: image,
+        # The vault-placeholder env keys injected by THIS provision
+        # (eumemic/eumemic-ops#331). Names only — never a placeholder value,
+        # never a credential id. The resume path diffs the snapshot's recorded
+        # set against the current one and explicitly empties any key that is no
+        # longer backed by an active credential, so a resumed container can
+        # never inherit a stale, unexchangeable placeholder from its snapshot.
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: ",".join(sorted(placeholder_env)),
     }
 
     # Drift key is stamped from the ATTEMPTED github set (issue #1725):

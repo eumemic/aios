@@ -49,6 +49,7 @@ from aios.sandbox.backends.base import (
     FLATTENED_LABEL_VALUE,
     PREWARM_LABEL_KEY,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     CommandResult,
     ManagedImage,
     SandboxBackend,
@@ -56,6 +57,7 @@ from aios.sandbox.backends.base import (
     SandboxHandle,
     SandboxSnapshotTimeoutError,
     SandboxSpec,
+    split_label_list,
 )
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
@@ -1611,7 +1613,65 @@ class SandboxRegistry:
 
         # Valid resume: make the ref locally runnable (identity for v1).
         local_tag = await self._store.get(ref)
-        return dataclasses.replace(spec, snapshot_image=local_tag)
+        return self._neutralize_stale_placeholder_env(
+            dataclasses.replace(spec, snapshot_image=local_tag), snap_labels
+        )
+
+    @staticmethod
+    def _neutralize_stale_placeholder_env(
+        spec: SandboxSpec, snap_labels: dict[str, str]
+    ) -> SandboxSpec:
+        """Ensure a resumed container inherits NO vault placeholder from its snapshot.
+
+        The invariant (eumemic/eumemic-ops#331): a sandbox's vault-credential
+        placeholder env vars are **re-derived from the currently-active
+        credentials on every sandbox start — provision AND snapshot-resume —
+        and are never restored or reused from the snapshot.**
+
+        ``spec.environment`` is already re-derived: ``build_spec_from_session``
+        calls ``resolve_session_env_var_credentials`` against ACTIVE credentials
+        on every provision, and ``docker run --env`` overrides the image's baked
+        ENV. Placeholders are a deterministic function of (salt, owner,
+        credential id), so re-deriving is idempotent — a no-op when the
+        credentials are unchanged, and a self-heal when a credential was
+        RECREATED (same ``secret_name``, new credential id ⇒ new placeholder
+        overriding the old one).
+
+        The residual hole this closes is the credential that was ARCHIVED and
+        not replaced. Its ``secret_name`` is absent from the current
+        placeholder set, so no ``--env`` is emitted for that key and the
+        resumed container silently inherits the value baked into the snapshot
+        by the provision that minted it — a placeholder bound to a dead
+        credential id. The egress proxy builds its swap set from ACTIVE
+        credentials only, so that placeholder can never be exchanged: before
+        the fail-loud fence it rode out to the remote literally and drew a
+        misleading ``401``.
+
+        So: every key the snapshot recorded as a vault placeholder that the
+        CURRENT provision does not re-inject is explicitly set to the empty
+        string. Empty (not merely absent) is required — ``docker run --env
+        K=`` is what actually overrides a baked ``ENV K=<stale>``; omitting the
+        key would let the snapshot's value survive, which is the bug.
+        """
+        recorded = split_label_list(snap_labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY))
+        if not recorded:
+            # No recorded placeholder keys: either a pre-#331 snapshot or a
+            # session that never had credentials. Nothing to neutralize by
+            # name — the current provision's --env still overrides every key it
+            # does inject.
+            return spec
+        stale = sorted(key for key in recorded if key not in spec.environment)
+        if not stale:
+            return spec
+        log.info(
+            "sandbox.stale_placeholder_env_neutralized",
+            owner_id=spec.session_id,
+            # Names only — never a placeholder value or a credential id.
+            secret_names=stale,
+        )
+        return dataclasses.replace(
+            spec, environment={**spec.environment, **dict.fromkeys(stale, "")}
+        )
 
     async def _reset_snapshot(self, session_id: str, *, reason: str) -> None:
         """Clear the snapshot pointer and append a model-visible reset notice."""

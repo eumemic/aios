@@ -48,6 +48,7 @@ from aios.sandbox.backends.base import (
     SandboxSnapshotTimeoutError,
     SandboxSpec,
     SnapshotOutcome,
+    split_label_list,
 )
 from aios.sandbox.network import SANDBOX_NETWORK_NAME
 
@@ -1072,11 +1073,9 @@ class DockerBackend:
         return max(0, size - await self._image_size_or_zero(base_ref))
 
 
-def _split_label_list(value: str | None) -> list[str]:
-    """Parse a comma-separated label value (e.g. ``aios.env_keys``) into names."""
-    if not value:
-        return []
-    return [item for item in (part.strip() for part in value.split(",")) if item]
+# Shared with the registry's resume-time placeholder neutralization so the
+# label grammar has exactly one reader.
+_split_label_list = split_label_list
 
 
 def _parse_json_labels(raw: str) -> dict[str, str]:

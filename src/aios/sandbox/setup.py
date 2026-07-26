@@ -338,11 +338,45 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
     return lines
 
 
-def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
-    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP."""
+# How many times each host is resolved per refresh tick
+# (eumemic/eumemic-ops#331 fix C).
+#
+# A rotating DNS pool — api.github.com serves a ~60s-TTL round-robin set — hands
+# back only a SUBSET of the live addresses per query, and often a different
+# subset each time. Pinning one query's answer means the very next in-sandbox
+# resolution can return an address that carries NO DNAT rule, so that request
+# never reaches the secret-egress proxy: it goes DIRECTLY to the upstream
+# carrying the literal placeholder and comes back ``401``. That is the
+# "intermittent auth failure that retrying fixes" signature — a retry that
+# happens to land on a pinned address works.
+#
+# Probing several times per tick samples more of the pool per sweep; combined
+# with the keep-last-good aging in the registry's merge (an address is only
+# evicted after it is ABSENT from several consecutive successful sweeps), the
+# pinned set converges on the UNION of the recently-served pool instead of
+# tracking one query's answer. That closes the drift window rather than
+# narrowing it by luck.
+EGRESS_RESOLVE_PROBES = 4
+
+
+def build_egress_resolve_script(
+    hosts: Sequence[str] | set[str], *, probes: int = EGRESS_RESOLVE_PROBES
+) -> str:
+    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP.
+
+    Each host is resolved ``probes`` times and the union of the answers is
+    emitted (deduplicated by the caller, which collects into a set). See
+    :data:`EGRESS_RESOLVE_PROBES` for why one query is not enough against a
+    rotating pool. A resolution miss still prints nothing, so the fail-closed
+    "no IPs ⇒ no rule" semantics are unchanged.
+    """
     lines = ["set -e", _RESOLVE_IPV4_FN]
     for host in sorted(set(hosts)):
-        lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
+        lines.append(f"for _ in $(seq 1 {probes}); do")
+        lines.append(
+            f"  for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done"
+        )
+        lines.append("done")
     return _RESOLV_PREAMBLE + "\n".join(lines)
 
 

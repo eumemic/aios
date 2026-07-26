@@ -32,6 +32,9 @@ from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox import secret_egress_proxy as sep
 from aios.sandbox.egress_ca import get_egress_ca
 from aios.sandbox.secret_egress_proxy import (
+    PLACEHOLDER_SUBSTITUTION_FAILED_CODE,
+    PLACEHOLDER_SUBSTITUTION_FAILED_HEADER,
+    PLACEHOLDER_SUBSTITUTION_FAILED_STATUS,
     SecretEgressProxy,
     _path_within_prefix,
     _request_path,
@@ -166,6 +169,28 @@ async def make_proxy(
 @pytest.fixture
 async def gh_proxy(make_proxy: MakeProxy) -> ProxyAndCapture:
     return await make_proxy([_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)])
+
+
+def _assert_refused(response: httpx.Response, captured: list[httpx.Request]) -> None:
+    """The substitution-failure contract (eumemic/eumemic-ops#331 fix B).
+
+    Asserts BOTH halves that make the failure actionable: a distinguishable,
+    machine-readable refusal to the caller, AND — the security half — that the
+    literal placeholder never reached the upstream. ``captured`` is the mock
+    transport's request log, so an empty log proves no upstream request was
+    ever opened, not merely that the body was rewritten.
+    """
+    assert response.status_code == PLACEHOLDER_SUBSTITUTION_FAILED_STATUS
+    assert response.status_code != 401, "must never be conflatable with an upstream 401"
+    assert (
+        response.headers[PLACEHOLDER_SUBSTITUTION_FAILED_HEADER]
+        == PLACEHOLDER_SUBSTITUTION_FAILED_CODE
+    )
+    assert "placeholder substitution failed" in response.text
+    assert captured == [], "the literal placeholder must NOT be transmitted upstream"
+    assert SECRET_PLACEHOLDER_PREFIX not in response.text.replace(
+        "AIOS_SECRET_PLACEHOLDER_*", ""
+    ), "the refusal body must not echo a concrete placeholder token"
 
 
 class TestPathHelpers:
@@ -349,17 +374,19 @@ class TestBasicAuthSwap:
         )
         assert captured[0].headers["authorization"] == "Basic not-b64-ghp_REALSECRET"
 
-    async def test_basic_auth_outside_prefix_passes_placeholder_through(
-        self, make_proxy: MakeProxy
-    ) -> None:
+    async def test_basic_auth_outside_prefix_is_refused(self, make_proxy: MakeProxy) -> None:
+        # Outside the prefix → no swap fires. Pre-#331 the placeholder rode
+        # through verbatim inside the Basic blob; now the request is refused.
+        # This is the case a raw substring scan would MISS — base64 shifts the
+        # byte boundaries, so the fence must decode Basic before scanning.
         proxy, captured = await make_proxy(
             [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test/repos/ok",), PH_GH)]
         )
         header = _basic("x-access-token", PH_GH)
-        await _request(proxy, "api.allowed.test", "/repos/nope", headers={"Authorization": header})
-        out = captured[0].headers["authorization"]
-        # Outside the prefix → no swap → placeholder rides through verbatim.
-        assert _decode_basic(out) == f"x-access-token:{PH_GH}"
+        res = await _request(
+            proxy, "api.allowed.test", "/repos/nope", headers={"Authorization": header}
+        )
+        _assert_refused(res, captured)
 
 
 class TestPathGating:
@@ -378,25 +405,27 @@ class TestPathGating:
         assert captured[0].headers["authorization"] == "ghp_REALSECRET"
 
     @pytest.mark.parametrize("path", ["/repos/eumemic-evil", "/repos/other"])
-    async def test_passes_through_outside_prefix(
+    async def test_refused_outside_prefix(
         self, repo_proxy: tuple[SecretEgressProxy, list[httpx.Request]], path: str
     ) -> None:
+        # Path gate fails → no swap. The gate's SECURITY behaviour is unchanged
+        # (the secret is still never sent outside its prefix); what changes is
+        # that the placeholder is no longer sent either.
         proxy, captured = repo_proxy
-        await _request(proxy, "api.allowed.test", path, headers={"Authorization": PH_GH})
-        # Path gate fails → placeholder rides through unswapped.
-        assert captured[0].headers["authorization"] == PH_GH
+        res = await _request(proxy, "api.allowed.test", path, headers={"Authorization": PH_GH})
+        _assert_refused(res, captured)
 
-    async def test_dot_segment_climbout_passes_through(
+    async def test_dot_segment_climbout_is_refused(
         self, repo_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
     ) -> None:
         proxy, captured = repo_proxy
-        await _request(
+        res = await _request(
             proxy,
             "api.allowed.test",
             "/repos/eumemic/../../gists",
             headers={"Authorization": PH_GH},
         )
-        assert captured[0].headers["authorization"] == PH_GH
+        _assert_refused(res, captured)
 
     async def test_mixed_case_stored_host_terminates_and_swaps(self, make_proxy: MakeProxy) -> None:
         # F1: parse_allowed_host_entry stores the host as-given; the proxy must
@@ -409,20 +438,19 @@ class TestPathGating:
         await _request(proxy, "api.allowed.test", "/x", headers={"Authorization": PH_GH})
         assert captured[0].headers["authorization"] == "ghp_REALSECRET"
 
-    async def test_unauthorized_host_passes_placeholder_through(
-        self, make_proxy: MakeProxy
-    ) -> None:
+    async def test_unauthorized_host_is_refused_not_leaked(self, make_proxy: MakeProxy) -> None:
         # Two allow-set hosts (so TLS terminates for both); a placeholder for
         # host A sent to host B does not swap (B has no matching cred).
+        # Pre-#331 it rode through raw — i.e. host A's placeholder was handed
+        # to an unrelated host B. Now B never sees it.
         proxy, captured = await make_proxy(
             [
                 _cred("A_TOKEN", "secret_A", ("api.a.test",), PH_GH),
                 _cred("B_TOKEN", "secret_B", ("api.b.test",), _ph("b")),
             ]
         )
-        await _request(proxy, "api.b.test", "/x", headers={"Authorization": PH_GH})
-        # PH_GH belongs to api.a.test; on api.b.test it rides through raw.
-        assert captured[0].headers["authorization"] == PH_GH
+        res = await _request(proxy, "api.b.test", "/x", headers={"Authorization": PH_GH})
+        _assert_refused(res, captured)
 
 
 class TestFailClosed:
@@ -782,4 +810,12 @@ class TestRequestBodyCapDefault:
 def test_module_exports() -> None:
     from aios.sandbox import secret_egress_proxy
 
-    assert secret_egress_proxy.__all__ == ["SecretEgressProxy"]
+    # The fence's wire contract is exported alongside the proxy so callers
+    # branch on the named constants rather than a hardcoded 421 / header
+    # spelling (eumemic/eumemic-ops#331).
+    assert secret_egress_proxy.__all__ == [
+        "PLACEHOLDER_SUBSTITUTION_FAILED_CODE",
+        "PLACEHOLDER_SUBSTITUTION_FAILED_HEADER",
+        "PLACEHOLDER_SUBSTITUTION_FAILED_STATUS",
+        "SecretEgressProxy",
+    ]

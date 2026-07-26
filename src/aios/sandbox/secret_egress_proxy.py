@@ -76,7 +76,7 @@ from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
 from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
-from aios.services.vaults import ResolvedEnvVarCredential
+from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, ResolvedEnvVarCredential
 
 log = get_logger("aios.sandbox.secret_egress_proxy")
 
@@ -194,6 +194,80 @@ def _apply_swaps_bytes(data: bytes, swaps: list[tuple[str, str]]) -> bytes:
     for placeholder, secret in swaps:
         data = data.replace(placeholder.encode(), secret.encode())
     return data
+
+
+# ── unexchangeable-placeholder fence (eumemic/eumemic-ops#331) ───────────────
+#
+# A placeholder that survives the swap is a SUBSTITUTION MISS, not a credential
+# the upstream can evaluate: the sandbox holds an opaque stand-in whose real
+# secret this proxy could not supply (an archived/recreated credential id, a
+# snapshot-resumed env carrying a dead placeholder, a host/path gate that
+# excluded the only cred that could have swapped it). Forwarding it emits the
+# LITERAL ``AIOS_SECRET_PLACEHOLDER_…`` string to the remote, which answers
+# ``401 Bad credentials`` — indistinguishable from a genuinely bad secret, and
+# the single reason this class of bug reads as "random intermittent auth
+# failure" for weeks. So we refuse the request HERE with a distinguishable
+# status + machine-readable reason, and never open the upstream connection.
+#
+# 421 Misdirected Request is deliberate: it is not 401 (never conflatable with
+# an upstream credential verdict), not 5xx (this is not an upstream/plumbing
+# outage), and semantically apt — the request was routed to a proxy that
+# cannot serve the credential it carries.
+_PLACEHOLDER_SUBSTITUTION_FAILED_STATUS = 421
+_PLACEHOLDER_SUBSTITUTION_FAILED_HEADER = "x-aios-egress-error"
+_PLACEHOLDER_SUBSTITUTION_FAILED_CODE = "placeholder_substitution_failed"
+_PLACEHOLDER_SUBSTITUTION_FAILED_BODY = (
+    b"aios egress refused this request: placeholder substitution failed.\n"
+    b"\n"
+    b"An AIOS_SECRET_PLACEHOLDER_* token in this request could not be exchanged\n"
+    b"for its vaulted secret, so the request was NOT sent upstream (sending it\n"
+    b"would transmit the literal placeholder and draw a misleading 401).\n"
+    b"\n"
+    b"Cause: the placeholder is not bound to any ACTIVE environment_variable\n"
+    b"credential for this sandbox -- typically a credential that was rotated,\n"
+    b"archived or recreated after this sandbox's environment was materialized\n"
+    b"(placeholders are keyed on credential id), or a credential whose\n"
+    b"allowed_hosts / path prefix do not cover this request.\n"
+    b"\n"
+    b"Fix: re-provision the sandbox so the CURRENT credential's placeholder is\n"
+    b"injected, or widen the credential's allowed_hosts to cover this host.\n"
+)
+
+# Matches the minted placeholder shape: the greppable prefix plus the 32 hex
+# chars ``mint_secret_placeholder`` emits. Anchored on the exact shape (not a
+# bare prefix scan) so an unrelated string that merely mentions the prefix in
+# prose cannot trip the fence.
+_PLACEHOLDER_RE = re.compile(re.escape(SECRET_PLACEHOLDER_PREFIX) + r"[0-9a-f]{32}")
+_PLACEHOLDER_RE_BYTES = re.compile(re.escape(SECRET_PLACEHOLDER_PREFIX.encode()) + rb"[0-9a-f]{32}")
+
+
+def _residual_placeholder(headers: list[tuple[str, str]], body: bytes) -> str | None:
+    """The first unexchanged placeholder left in the post-swap request, if any.
+
+    Runs on the ALREADY-SWAPPED headers and body, so anything it finds is by
+    construction a placeholder no rule in this session's swap set could
+    exchange. ``Authorization: Basic`` values are decoded before the scan for
+    the same reason ``_swap_header_value`` decodes them: base64 shifts byte
+    boundaries, so a placeholder riding inside a Basic credential is not a
+    literal substring of the header and a raw scan would miss the exact case
+    (git-over-HTTPS, ``curl -u``) that motivated this fence.
+
+    Returns the matched placeholder token (safe to log — it IS the opaque
+    stand-in, never the secret) or ``None`` when the request is clean.
+    """
+    for name, value in headers:
+        scanned = value
+        if name.lower() == "authorization":
+            decoded = _decode_basic_credential(value)
+            if decoded is not None:
+                scanned = decoded
+        match = _PLACEHOLDER_RE.search(scanned)
+        if match is not None:
+            return match.group(0)
+    match_bytes = _PLACEHOLDER_RE_BYTES.search(body)
+    if match_bytes is not None:
+        return match_bytes.group(0).decode("ascii")
+    return None
 
 
 def _swap_header_value(name: str, value: str, swaps: list[tuple[str, str]]) -> str:
@@ -489,6 +563,32 @@ class SecretEgressProxy:
 
         fwd_headers = self._forward_headers(request.headers.raw_items(), host, swaps)
         swapped_body = _apply_swaps_bytes(body, swaps)
+
+        # FAIL LOUD on a substitution miss (eumemic/eumemic-ops#331). Anything
+        # still matching the placeholder shape after the swap is a placeholder
+        # this session's swap set could not exchange. Historically it rode out
+        # to the remote verbatim and came back as the upstream's ``401 Bad
+        # credentials`` — an upstream verdict on a credential the upstream
+        # never actually received, which is why a substitution miss was
+        # indistinguishable from a real auth failure. Refuse it here: no
+        # upstream connection is opened, so the literal placeholder is never
+        # transmitted, and the caller gets an error that NAMES the cause.
+        residual = _residual_placeholder(fwd_headers, swapped_body)
+        if residual is not None:
+            log.warning(
+                "secret_egress_proxy.placeholder_substitution_failed",
+                host=host,
+                path=path,
+                # The placeholder is the opaque stand-in, never the secret, so
+                # logging it is safe — and it is the ONLY handle an operator
+                # has to correlate the refusal with the credential id whose
+                # rotation orphaned it.
+                placeholder=residual,
+                swap_rule_count=len(swaps),
+            )
+            await self._send_substitution_failure(conn, writer)
+            return
+
         # The URL carries the request-target verbatim — the placeholder is
         # NEVER swapped in the path/query, only in headers and body.
         url = f"https://{_bracket(pinned)}:{_UPSTREAM_PORT}{target}"
@@ -619,6 +719,38 @@ class SecretEgressProxy:
         writer.write(_h11_send(conn, h11.EndOfMessage()))
         await writer.drain()
 
+    async def _send_substitution_failure(
+        self, conn: h11.Connection, writer: asyncio.StreamWriter
+    ) -> None:
+        """Refuse a request carrying an unexchangeable placeholder.
+
+        Distinguishable from every other outcome on this path by construction:
+        a dedicated status (``421``, never ``401``/``502``) AND a machine-
+        readable ``x-aios-egress-error: placeholder_substitution_failed``
+        header, so a caller can branch on the cause without parsing prose.
+        """
+        body = _PLACEHOLDER_SUBSTITUTION_FAILED_BODY
+        if conn.our_state is not h11.SEND_RESPONSE:
+            return
+        headers = [
+            (b"content-length", str(len(body)).encode()),
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (
+                _PLACEHOLDER_SUBSTITUTION_FAILED_HEADER.encode(),
+                _PLACEHOLDER_SUBSTITUTION_FAILED_CODE.encode(),
+            ),
+            (b"connection", b"close"),
+        ]
+        writer.write(
+            _h11_send(
+                conn,
+                h11.Response(status_code=_PLACEHOLDER_SUBSTITUTION_FAILED_STATUS, headers=headers),
+            )
+        )
+        writer.write(_h11_send(conn, h11.Data(data=body)))
+        writer.write(_h11_send(conn, h11.EndOfMessage()))
+        await writer.drain()
+
     async def _send_simple(
         self, conn: h11.Connection, writer: asyncio.StreamWriter, status: int, body: bytes
     ) -> None:
@@ -631,4 +763,15 @@ class SecretEgressProxy:
         await writer.drain()
 
 
-__all__ = ["SecretEgressProxy"]
+__all__ = [
+    "PLACEHOLDER_SUBSTITUTION_FAILED_CODE",
+    "PLACEHOLDER_SUBSTITUTION_FAILED_HEADER",
+    "PLACEHOLDER_SUBSTITUTION_FAILED_STATUS",
+    "SecretEgressProxy",
+]
+
+# Public aliases for the fence's wire contract, so callers/tests assert against
+# the module's exported names rather than private constants.
+PLACEHOLDER_SUBSTITUTION_FAILED_STATUS = _PLACEHOLDER_SUBSTITUTION_FAILED_STATUS
+PLACEHOLDER_SUBSTITUTION_FAILED_HEADER = _PLACEHOLDER_SUBSTITUTION_FAILED_HEADER
+PLACEHOLDER_SUBSTITUTION_FAILED_CODE = _PLACEHOLDER_SUBSTITUTION_FAILED_CODE
