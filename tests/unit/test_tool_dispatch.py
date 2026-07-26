@@ -664,7 +664,9 @@ class TestParentChannelThreading:
 
         reserve.assert_not_awaited()
         invoke.assert_not_awaited()
-        assert append_error.await_args.kwargs["error"] == "arguments were not valid JSON"
+        append_call = append_error.await_args
+        assert append_call is not None
+        assert append_call.kwargs["error"] == "arguments were not valid JSON"
 
     async def test_admission_store_failure_fails_closed_as_tool_error(
         self, monkeypatch: Any
@@ -688,7 +690,9 @@ class TestParentChannelThreading:
         await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
 
         invoke.assert_not_awaited()
-        assert "admission store down" in append_error.await_args.kwargs["error"]
+        append_call = append_error.await_args
+        assert append_call is not None
+        assert "admission store down" in append_call.kwargs["error"]
 
     async def test_admitted_dispatch_marks_reservation_completed(self, monkeypatch: Any) -> None:
         from aios.services.outbound_tool_quota import QuotaAdmission
@@ -713,7 +717,9 @@ class TestParentChannelThreading:
         await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
 
         mark.assert_awaited_once()
-        assert mark.await_args.args[1] == "res_1"
+        mark_call = mark.await_args
+        assert mark_call is not None
+        assert mark_call.args[1] == "res_1"
 
     async def test_execute_tool_async_threads_parent_channel(self, monkeypatch: Any) -> None:
         from aios.tools.registry import ToolResult
