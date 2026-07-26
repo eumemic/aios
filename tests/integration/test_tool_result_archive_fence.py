@@ -165,6 +165,10 @@ async def test_tool_result_after_phase_b_flip_is_clean_drop(
             raise RuntimeError("handler failed after the flip")
         return {"ok": True}
 
+    # Quota admission now runs the pure prepare preamble before invocation.
+    # This test's synthetic handler is intentionally outside the builtin
+    # registry, so stub both halves of that dispatch boundary.
+    monkeypatch.setattr(tool_dispatch, "prepare_builtin", lambda *_args: None)
     monkeypatch.setattr(tool_dispatch, "invoke_builtin", fake_invoke_builtin)
 
     call = {
