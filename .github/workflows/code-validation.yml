@@ -481,15 +481,16 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Do not restart dockerd between passes: that kills each worker's
-        # session-scoped testcontainer Postgres. Retry pytest's recorded failures
-        # in the still-live worker environment.
+        # Do not restart dockerd between passes: that can race fixture teardown.
+        # Keep the retry file-distributed too; a serial --lf pass put every
+        # recorded failure into one fresh Postgres/Docker fixture stack, so one
+        # residual fixture failure could contaminate all remaining retries.
         run: |
           if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 2 --dist=loadfile
           fi
 
       - name: Upload docker E2E flake-retry marker
