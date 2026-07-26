@@ -217,10 +217,13 @@ async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes,
         )
         await conn.execute(
             "INSERT INTO wf_runs "
-            "(id,workflow_id,account_id,environment_id,script,script_sha,source_version,status,host_semantics_epoch) "
+            "(id,workflow_id,account_id,environment_id,script,script_sha,source_version,"
+            "host_semantics_epoch,status) "
             "VALUES "
-            "('run_versioned','wf_0153','acc_root','env_0153','script','sha-versioned',1,'completed',0),"
-            "('run_legacy','wf_0153','acc_root','env_0153','script','sha-legacy',NULL,'completed',0)"
+            "('run_versioned','wf_0153','acc_root','env_0153','script','sha-versioned',"
+            "1,0,'completed'),"
+            "('run_legacy','wf_0153','acc_root','env_0153','script','sha-legacy',"
+            "NULL,0,'completed')"
         )
         await conn.execute(
             "INSERT INTO sessions (id,account_id,agent_id,environment_id,agent_version,workspace_volume_path) "
