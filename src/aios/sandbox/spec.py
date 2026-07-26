@@ -750,10 +750,13 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # ``_materialize_github_clones``'s return value (only set on a clean
         # start).
         if env_var_credentials:
-            proxy = SecretEgressProxy(
-                env_var_credentials,
-                passthrough_https=not isinstance(env_config.networking, LimitedNetworking),
-            )
+            # Preserve the default constructor shape for Limited sandboxes (and
+            # its test/mocking contract).  A missing env config means the
+            # runtime default, Unrestricted.
+            if env_config is None or not isinstance(env_config.networking, LimitedNetworking):
+                proxy = SecretEgressProxy(env_var_credentials, passthrough_https=True)
+            else:
+                proxy = SecretEgressProxy(env_var_credentials)
             await proxy.start()
             secret_proxy = proxy
 
@@ -893,10 +896,13 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     broker_registered = False
     try:
         if env_var_credentials:
-            proxy = SecretEgressProxy(
-                env_var_credentials,
-                passthrough_https=not isinstance(env_config.networking, LimitedNetworking),
-            )
+            # Preserve the default constructor shape for Limited sandboxes (and
+            # its test/mocking contract).  A missing env config means the
+            # runtime default, Unrestricted.
+            if env_config is None or not isinstance(env_config.networking, LimitedNetworking):
+                proxy = SecretEgressProxy(env_var_credentials, passthrough_https=True)
+            else:
+                proxy = SecretEgressProxy(env_var_credentials)
             await proxy.start()
             secret_proxy = proxy
 

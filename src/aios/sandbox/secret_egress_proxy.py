@@ -65,7 +65,9 @@ import contextlib
 import os
 import re
 import secrets
+import socket
 import ssl
+import struct
 import tempfile
 import weakref
 from collections.abc import Iterable
@@ -95,6 +97,25 @@ _READ_CHUNK = 65536
 # never sends one) must not pin a handler indefinitely. Bounds idle time
 # between chunks, not total transfer, so a slow-but-steady upload is unaffected.
 _INBOUND_IDLE_TIMEOUT_S = 60.0
+# Linux netfilter exposes the pre-DNAT destination on accepted TCP sockets.
+_SO_ORIGINAL_DST = 80
+# Arbitrary-SNI passthrough is bounded even before destination validation runs.
+_MAX_PASSTHROUGH_LEAVES = 128
+
+
+def _original_ipv4(writer: asyncio.StreamWriter) -> str | None:
+    """Return the packet's pre-DNAT IPv4 destination, failing closed."""
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    try:
+        raw = sock.getsockopt(socket.SOL_IP, _SO_ORIGINAL_DST, 16)
+        family, _port, address = struct.unpack_from("!HH4s", raw)
+    except (OSError, TypeError, ValueError, struct.error):
+        return None
+    if family != socket.AF_INET:
+        return None
+    return socket.inet_ntoa(address)
 
 
 class _BodyTooLarge:
@@ -588,8 +609,13 @@ class SecretEgressProxy:
             if not server_name:
                 return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
             host = server_name.lower()
-            if host not in self._allowed_hosts and not self._passthrough_https:
-                return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+            if host not in self._allowed_hosts:
+                if not self._passthrough_https:
+                    return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+                # Bound attacker-controlled certificate generation/cache growth.
+                passthrough_count = len(self._leaf_ctx.keys() - self._allowed_hosts)
+                if host not in self._leaf_ctx and passthrough_count >= _MAX_PASSTHROUGH_LEAVES:
+                    return ssl.ALERT_DESCRIPTION_INTERNAL_ERROR
             sslobj.context = self._leaf_context(host)
             self._sni[sslobj] = host
             return None
@@ -681,6 +707,16 @@ class SecretEgressProxy:
             # client not to send it (RFC 7231 §5.1.1).
             await self._send_simple(conn, writer, 502, b"egress blocked")
             return
+
+        # Credential names intentionally arrive via the sentinel. Ordinary
+        # Unrestricted passthrough must preserve the packet's destination:
+        # sandbox-selected SNI may not redirect a DNATed connection through the
+        # worker's DNS/network namespace to another target.
+        if host not in self._allowed_hosts:
+            original = _original_ipv4(writer)
+            if original is None or original != pinned:
+                await self._send_simple(conn, writer, 502, b"egress blocked")
+                return
 
         # We are the TLS-terminating origin, so we own the 100-continue
         # handshake the upstream never sees (we strip Expect): tell the client
