@@ -1665,6 +1665,18 @@ class SandboxRegistry:
         K=`` is what actually overrides a baked ``ENV K=<stale>``; omitting the
         key would let the snapshot's value survive, which is the bug.
 
+        **A PRESENT but EMPTY label is not the same as an ABSENT one.** Every
+        post-#331 provision stamps ``aios.vault_placeholder_keys``, and it
+        stamps the empty string when the sandbox had no vault env credentials
+        to inject. That empty value is EVIDENCE — the snapshot positively
+        recorded that it baked no placeholder — so the correct action is to
+        scrub nothing and resume unchanged. Only an ABSENT label means "unknown
+        provenance" and takes the legacy path below. The branch is therefore on
+        label PRESENCE, not on the parsed list's truthiness: treating
+        present-empty as legacy costs a needless env scrub or, when the snapshot
+        also records no env keys, a COLD START that discards the session's
+        filesystem for a snapshot already proven clean.
+
         **The unlabeled (pre-#331) snapshot.** A snapshot committed before this
         fix carries no ``aios.vault_placeholder_keys`` label at all, so the
         stale-key diff has nothing to diff against. Treating that as "nothing
@@ -1688,9 +1700,29 @@ class SandboxRegistry:
         shipping an unexchangeable credential placeholder to a remote, which is
         neither.
         """
-        recorded = split_label_list(snap_labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY))
-        if not recorded:
+        # Branch on label PRESENCE, never on truthiness. ``split_label_list``
+        # maps BOTH a missing label and a present-but-empty one to ``[]``, but
+        # those are different states with different correct behaviours:
+        #
+        #   * PRESENT-AND-EMPTY — a post-#331 provision stamped the label and
+        #     recorded that it injected NO placeholder keys (a sandbox with no
+        #     active environment_variable credentials). That is a positive,
+        #     verified statement about the snapshot: there is no stale
+        #     placeholder to neutralize, so scrub NOTHING and resume as-is.
+        #   * ABSENT — a pre-#331 snapshot whose provenance is unknown. It may
+        #     have baked a placeholder for a since-archived credential, so it
+        #     takes the legacy handling below.
+        #
+        # Conflating them (``if not recorded``) sent every fully-verifiable
+        # empty-label snapshot down the legacy path: with a non-empty
+        # ``aios.env_keys`` it needlessly EMPTIES baked env the current
+        # provision does not re-inject, and with an empty one it COLD-STARTS —
+        # discarding a user's sandbox filesystem to defend against a stale
+        # placeholder the label already proved is not there. Avoidable
+        # filesystem loss is not a safe default; it is a bug.
+        if VAULT_PLACEHOLDER_KEYS_LABEL_KEY not in snap_labels:
             return SandboxRegistry._neutralize_unlabeled_placeholder_env(spec, snap_labels)
+        recorded = split_label_list(snap_labels[VAULT_PLACEHOLDER_KEYS_LABEL_KEY])
         stale = sorted(key for key in recorded if key not in spec.environment)
         if not stale:
             return spec

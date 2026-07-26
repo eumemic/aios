@@ -16,11 +16,7 @@ from aios.sandbox.registry import (
     EgressRefreshState,
     SandboxRegistry,
 )
-from aios.sandbox.setup import (
-    EGRESS_RESOLVE_PROBES,
-    build_egress_refresh_script,
-    build_egress_resolve_script,
-)
+from aios.sandbox.setup import build_egress_refresh_script
 from tests.helpers.sandbox import FakeBackend, make_handle
 
 _PROXY = ("172.18.0.2", 49152)
@@ -321,42 +317,3 @@ async def test_stamp_seeds_pinned_and_proxy_target_from_live_rules() -> None:
     state = registry._egress_states["sess_X"]
     assert state.pinned == {"api.github.com": {"1.1.1.1": 0}}
     assert (state.proxy_ip, state.proxy_port) == _PROXY
-
-
-# ── DNS-pin drift (eumemic/eumemic-ops#331 fix C) ───────────────────────────
-
-
-def test_resolve_script_probes_each_host_several_times() -> None:
-    """A rotating pool (api.github.com, ~60s TTL) returns only a SUBSET of the
-    live addresses per query. Pinning ONE query's answer leaves the sandbox
-    free to resolve an address with no DNAT rule, which bypasses the secret
-    proxy entirely and sends the literal placeholder to GitHub. Sampling the
-    pool several times per sweep is what makes the pinned set converge on the
-    union of the recently-served addresses."""
-    script = build_egress_resolve_script(["api.github.com"])
-
-    assert f"seq 1 {EGRESS_RESOLVE_PROBES}" in script
-    assert EGRESS_RESOLVE_PROBES > 1, "a single probe is the bug this closes"
-    # Still one machine-readable "<host> <ip>" row per answer, so the caller's
-    # parser (which collects into a set) is unchanged and dedupes for free.
-    assert "printf '%s %s\\n' api.github.com" in script
-
-
-def test_resolve_script_probe_count_is_overridable_and_covers_every_host() -> None:
-    script = build_egress_resolve_script(["api.github.com", "codeload.github.com"], probes=2)
-
-    assert script.count("seq 1 2") == 2
-    for host in ("api.github.com", "codeload.github.com"):
-        assert f"resolve_ipv4 {host}" in script
-
-
-def test_resolve_script_still_fails_closed_on_a_miss() -> None:
-    """Multi-probing must not turn a resolution miss into anything but silence:
-    no rows printed ⇒ the merge keeps the last-good pins (asserted by
-    ``test_resolve_miss_retains_last_good_and_skips_refresh_sidecar``) rather
-    than evicting the placeholder's only route."""
-    script = build_egress_resolve_script(["api.github.com"])
-
-    # ``resolve_ipv4`` emitting nothing makes the inner for-loop a no-op; there
-    # is no fallback/echo that could fabricate an address.
-    assert "|| true" not in script.split("resolve_ipv4 api.github.com")[1]

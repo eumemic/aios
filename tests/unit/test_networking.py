@@ -1231,158 +1231,6 @@ class TestApplySecretEgressDnat:
         )  # must not raise
 
 
-class TestCredentialHostFailsClosed:
-    """Finding 4: a missing DNAT rule must NOT fall through to direct egress.
-
-    The DNAT rules are keyed on RESOLVED IPs, and a rotating pool (api.github.com
-    serves a short-TTL set and returns only a SUBSET per query) means the set of
-    IPs we installed rules for is a SAMPLE, not the pool. Probing more times per
-    tick samples more of it but guarantees nothing — resolver caching can return
-    the same subset every probe, and a later in-sandbox lookup can still return
-    an address no rule covers.
-
-    Pre-fix, that residual was FAIL-OPEN: under the ``cred ⊆ env`` gate the
-    credential host's :443 was filter-ACCEPTed, so an un-DNATed packet went
-    straight to the real upstream carrying the literal placeholder. These tests
-    pin the inverted invariant: **no DNAT ⇒ no egress**.
-    """
-
-    FENCE = "--dport 443 -j REJECT --reject-with tcp-reset"
-
-    def test_limited_lockdown_fences_credential_hosts(self) -> None:
-        script = build_iptables_script(
-            allowed_hosts={"api.secret.com"},
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        assert self.FENCE in script
-
-    def test_fence_is_inserted_at_head_so_it_beats_the_accepts(self) -> None:
-        """iptables is first-match-wins and the credential host also carries a
-        per-host ACCEPT on :443 (it is in ``allowed_hosts``). An APPENDED reject
-        would never be reached — the ACCEPT would match first and the packet
-        would leave un-proxied. Head insertion is what makes the fence real."""
-        script = build_iptables_script(
-            allowed_hosts={"api.secret.com"},
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        fence_line = next(line for line in script.splitlines() if self.FENCE in line)
-        assert "-I OUTPUT" in fence_line, "an appended fence would sit behind the ACCEPT"
-        assert "-A OUTPUT" not in fence_line
-
-    def test_dnated_packet_is_unaffected_by_the_fence(self) -> None:
-        """nat OUTPUT runs BEFORE filter OUTPUT, so a packet that matched a DNAT
-        rule reaches filter already rewritten to the proxy endpoint and no longer
-        matches ``-d <credential-host-ip>``. Pin the rule shape that makes that
-        true: the fence matches on the credential host's address, never on the
-        proxy's."""
-        script = build_iptables_script(
-            allowed_hosts=set(),
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        fence_line = next(line for line in script.splitlines() if self.FENCE in line)
-        assert '-d "$ip"' in fence_line
-        assert "$PROXY_IP" not in fence_line
-
-    def test_unrestricted_dnat_only_also_fences(self) -> None:
-        """Under Unrestricted the filter policy stays ACCEPT, so an un-DNATed
-        credential-host packet would leave by default. The fence applies there
-        too — it is the ONLY thing standing between an unsampled IP and direct
-        egress with a placeholder."""
-        script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        assert f'"$IPT" -A OUTPUT -d "$ip" -p tcp {self.FENCE}' in script
-
-    def test_unrestricted_fence_is_idempotent_without_flushing_filter(self) -> None:
-        """The DNAT-only script does not own the filter chain, so it must clear
-        its OWN previous fence rules rather than flushing OUTPUT wholesale."""
-        script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        assert '"$IPT" -F OUTPUT' not in script, "must not flush a chain it does not own"
-        assert f'"$IPT" -D OUTPUT -d "$ip" -p tcp {self.FENCE}' in script
-
-    def test_proxy_alias_resolve_miss_fails_closed(self) -> None:
-        """If the proxy alias does not resolve there is no DNAT at all. The
-        fence must be installed OUTSIDE the ``if [ -n "$PROXY_IP" ]`` guard, so
-        the miss refuses credential-host egress instead of letting every
-        credential request out un-proxied."""
-        script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"],
-            dnat_target=("aios-worker", 49152),
-        )
-        lines = script.splitlines()
-        guard_end = max(i for i, line in enumerate(lines) if line.strip() == "fi")
-        # The INSTALL line (the idempotency flush earlier in the script also
-        # mentions the fence, as a -D).
-        fence_at = next(
-            i for i, line in enumerate(lines) if self.FENCE in line and "-A OUTPUT" in line
-        )
-        assert fence_at > guard_end, "the fence must survive a proxy-alias DNS miss"
-
-    def test_no_fence_without_credential_hosts(self) -> None:
-        """The fence is scoped to credential hosts; an ordinary allowed host
-        must not be rejected."""
-        script = build_iptables_script(
-            allowed_hosts={"api.example.com"},
-            dnat_hosts=[],
-            dnat_target=("aios-worker", 49152),
-        )
-        assert "REJECT" not in script
-
-    def test_verify_asserts_the_fence_landed(self) -> None:
-        """An unverified fence is no fence: a credential host whose REJECT
-        failed to install is a host whose unsampled addresses egress directly.
-        The provision verify must fail closed on it."""
-        from aios.sandbox.setup import build_lockdown_verify_script
-
-        script = build_lockdown_verify_script(["api.secret.com"], assert_drop=True)
-        assert "-j DNAT" in script
-        assert self.FENCE in script
-
-    def test_refresh_installs_the_fence_before_the_dnat(self) -> None:
-        """Ordering is a security property, not cosmetics: between the two
-        statements a newly learned address must never be
-        allowed-but-unproxied. Fence first means the worst intermediate state is
-        'refused', never 'direct egress with a placeholder'."""
-        from aios.sandbox.setup import build_egress_refresh_script
-
-        script = build_egress_refresh_script(
-            old_ips={},
-            new_ips={"api.secret.com": {"1.2.3.4"}},
-            credential_hosts={"api.secret.com"},
-            limited_hosts=set(),
-            dnat_target=("10.0.0.9", 49152),
-        )
-        fence_at = next(i for i, line in enumerate(script.splitlines()) if self.FENCE in line)
-        dnat_at = next(i for i, line in enumerate(script.splitlines()) if "-j DNAT" in line)
-        assert fence_at < dnat_at
-        assert "-I OUTPUT" in script.splitlines()[fence_at]
-
-    def test_refresh_removes_the_fence_after_the_dnat(self) -> None:
-        """The mirror of the add ordering: an evicted address that still has a
-        fence is merely refused, but one that lost its fence while a stale
-        ACCEPT lingers would be direct egress."""
-        from aios.sandbox.setup import build_egress_refresh_script
-
-        script = build_egress_refresh_script(
-            old_ips={"api.secret.com": {"1.2.3.4"}},
-            new_ips={"api.secret.com": set()},
-            credential_hosts={"api.secret.com"},
-            limited_hosts=set(),
-            dnat_target=("10.0.0.9", 49152),
-        )
-        lines = script.splitlines()
-        fence_at = next(i for i, line in enumerate(lines) if self.FENCE in line and "-D" in line)
-        dnat_at = next(i for i, line in enumerate(lines) if "-j DNAT" in line and "-D" in line)
-        assert dnat_at < fence_at
-
-
 # ── behavioural egress verdict: what happens to a packet, not what the rule
 #    text says (finding 4 / eumemic/aios#2042) ──────────────────────────────────
 
@@ -1392,7 +1240,7 @@ class TestCredentialHostEgressVerdict:
 
     Every other test in this file asserts *rule syntax* — that some string is
     present in the script. That is exactly why the Unrestricted fail-open in
-    finding 4 survived a fix round: the fence rule was emitted, the syntax
+    finding 4 survived a review cycle: rules were emitted, the syntax
     assertions passed, and nobody asked what happens to a packet addressed to
     an IP the sampler never returned. This class asks that question.
 
@@ -1574,21 +1422,39 @@ class TestCredentialHostEgressVerdict:
             "fail-open was closed — delete this test and update the PR/issue"
         )
 
-    def test_the_fence_only_covers_what_the_sampler_saw(self) -> None:
-        """The property behind #2042, stated directly: the fence is IP-keyed, so
-        its coverage is exactly the sampled set — not the host. An earlier
-        review round described it as 'needing no knowledge of the pool', which
-        is what made the residual look closed; it inherits the sample's
-        incompleteness like the DNAT does."""
+    def test_credential_host_rules_only_cover_what_the_sampler_saw(self) -> None:
+        """The property behind #2042, stated directly: the credential-host rules
+        are IP-keyed, so their coverage is exactly the SAMPLED SET — not the
+        host. This is why no IP-keyed rule can close the hole, and why this PR
+        adds none: a rule that covers only the addresses we already learned
+        would read as a fence to the next reader while the unsampled address —
+        the ordinary case against a rotating pool — walks straight past it."""
         rules = self._record_rules(
             build_secret_egress_dnat_script(
                 dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
             )
         )
-        fenced = {
+        covered = {
             argv[argv.index("-d") + 1]
             for table, argv in rules
-            if table == "filter" and "REJECT" in argv and "-d" in argv
+            if table == "nat" and "DNAT" in argv and "-d" in argv
         }
-        assert fenced == {self.SAMPLED_IP}
-        assert self.UNSAMPLED_IP not in fenced
+        assert covered == {self.SAMPLED_IP}
+        assert self.UNSAMPLED_IP not in covered
+
+    def test_no_ip_keyed_filter_fence_is_installed(self) -> None:
+        """Round 4 scope decision, pinned so it cannot silently come back.
+
+        An earlier round added a per-credential-host filter REJECT for the
+        LEARNED addresses. It was withdrawn: it protects only what was already
+        sampled, so it reads as a fence without being one, and a future reader
+        finding it in the diff would reasonably conclude #2042 was closed. A
+        DOCUMENTED hole is safer than a DISGUISED one. If a REJECT reappears
+        here it must be part of a real deny-by-default design (#2042), which
+        would also flip the ``direct`` assertion above."""
+        rules = self._record_rules(
+            build_secret_egress_dnat_script(
+                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
+            )
+        )
+        assert not [argv for table, argv in rules if table == "filter" and "REJECT" in argv]

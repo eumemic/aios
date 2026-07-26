@@ -148,6 +148,60 @@ class TestResumeRebindsPlaceholders:
         assert resolved.environment[SECRET_NAME] == ""
 
     @pytest.mark.asyncio
+    async def test_present_but_empty_label_scrubs_nothing_and_resumes(self) -> None:
+        """A PRESENT-but-EMPTY placeholder label is EVIDENCE, not ignorance.
+
+        Every post-#331 provision stamps ``aios.vault_placeholder_keys``, and it
+        stamps the empty string when the sandbox had no vault env credentials to
+        inject. That snapshot positively recorded that it baked NO placeholder,
+        so there is nothing to neutralize: resume unchanged and leave the baked
+        env alone.
+
+        The bug this pins is conflating present-empty with ABSENT (both parse to
+        ``[]``). Down the legacy path this snapshot's ``aios.env_keys`` entries
+        that the current provision does not re-inject would be needlessly
+        emptied — collateral damage to a sandbox that was already proven clean.
+        """
+        backend = FakeBackend()
+        backend.image_labels_by_ref[REF] = {
+            "aios.base_image": BASE_IMAGE,
+            # Stamped, and stamped EMPTY: no vault env credentials at provision.
+            VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+            ENV_KEYS_LABEL_KEY: f"{SECRET_NAME},UNRELATED",
+        }
+        reg = SandboxRegistry(backend=backend)
+
+        resolved = await reg._resolve_snapshot(OWNER, _spec({}))
+
+        assert resolved.snapshot_image == REF, "a verified-clean snapshot must resume"
+        # NOT emptied: the label proves no placeholder was baked, so the legacy
+        # shape-based scrub must not fire.
+        assert SECRET_NAME not in resolved.environment
+        assert "UNRELATED" not in resolved.environment
+        assert resolved.environment == {}
+
+    @pytest.mark.asyncio
+    async def test_present_but_empty_label_with_no_env_inventory_still_resumes(self) -> None:
+        """The costly half of the same conflation: a present-empty label with NO
+        ``aios.env_keys`` would fall into the opaque branch and COLD-START,
+        discarding the user's sandbox filesystem to defend against a stale
+        placeholder the label already proved is not there.
+
+        Absent-label opacity is unknowable provenance; present-empty is a
+        verified empty set. Only the first justifies losing filesystem state."""
+        backend = FakeBackend()
+        backend.image_labels_by_ref[REF] = {
+            "aios.base_image": BASE_IMAGE,
+            VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "",
+        }
+        reg = SandboxRegistry(backend=backend)
+
+        resolved = await reg._resolve_snapshot(OWNER, _spec({"UNRELATED": "keep-me"}))
+
+        assert resolved.snapshot_image == REF, "no cold start: the label is present and empty"
+        assert resolved.environment == {"UNRELATED": "keep-me"}
+
+    @pytest.mark.asyncio
     async def test_pre_331_snapshot_with_env_inventory_is_scrubbed(self) -> None:
         """A snapshot committed before this fix carries no placeholder-keys
         label, so the stale-key diff has nothing to diff against. Treating that
