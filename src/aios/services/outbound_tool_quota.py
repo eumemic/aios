@@ -2,7 +2,7 @@
 
 Redesign (#1903): admission is a **durable reservation**, not a count over
 ``events``.  Each admitted dispatch inserts one row into
-``outbound_tool_reservations`` (migration 0156) keyed on
+``outbound_tool_reservations`` (migration 0158) keyed on
 ``(session_id, canonical verb)`` inside a single short, DB-only transaction:
 
 * **Atomic count+insert.** The transaction takes a per-key
