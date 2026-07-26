@@ -396,7 +396,7 @@ def _nat_dnat_lines(
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         "# The ONE credential rule: every credential name resolves to this sentinel",
-        "# inside the sandbox, so this covers the host completely (#2042).",
+        "# inside the sandbox, so this covers the DNS path completely (#2042).",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
     ]
@@ -484,7 +484,8 @@ def build_egress_refresh_script(
         for ip in sorted(added):
             if host in limited_hosts:
                 lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+                if host not in credential_hosts:
+                    lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     for host in sorted(old_ips):
         removed = old_ips[host] - new_ips.get(host, set())
         for ip in sorted(removed):
@@ -583,12 +584,16 @@ def build_iptables_script(
         '"$IPT" -A OUTPUT -p tcp --dport 53 -j ACCEPT',
     ]
 
+    credential_hosts = set(dnat_hosts) if dnat_target is not None else set()
     for host in sorted(allowed_hosts):
         lines.append("")
         lines.append(f"# Allow {host}")
         lines.append(f"for ip in $(resolve_ipv4 {host}); do")
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
-        lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
+        if host not in credential_hosts:
+            # Raw-IP credential traffic must fall through to DROP rather than
+            # bypass the name-based proxy via this sampled-address allowance.
+            lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
 
     for host, port in extra_host_ports:

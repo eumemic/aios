@@ -242,32 +242,18 @@ class TestOrdinaryResolutionIsUnaffected:
         assert _answers(response) == [CREDENTIAL_SENTINEL_IP]
 
     @pytest.mark.asyncio
-    async def test_upstream_failure_is_servfail_not_a_bypass(self) -> None:
-        """A forwarding failure degrades that ONE query to SERVFAIL.
-
-        It must never become a fallback to un-intercepted resolution — and
-        credential names never touch the forward path at all.
-        """
+    async def test_missing_upstream_fails_start(self) -> None:
+        """Provisioning must not succeed when ordinary DNS cannot be relayed."""
         r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
-        # ``upstream=None`` falls back to the worker's resolv.conf; force the
-        # no-upstream-available case explicitly.
         r._upstream = None
-        await r.start()
-        try:
-            response = await _udp_ask(r.port, _query("pypi.org"))
-            assert struct.unpack_from("!H", response, 2)[0] & 0x000F == 2  # SERVFAIL
-            # The credential name still answers from local policy.
-            credential = await _udp_ask(r.port, _query(CREDENTIAL_HOST))
-            assert _answers(credential) == [CREDENTIAL_SENTINEL_IP]
-        finally:
-            await r.stop()
+        with pytest.raises(CredentialDnsError, match="no IPv4 upstream"):
+            await r.start()
 
 
 class TestFailClosed:
     @pytest.mark.asyncio
     async def test_malformed_query_does_not_crash_the_resolver(self) -> None:
-        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
-        r._upstream = None  # junk must not be forwarded to a real resolver
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream="127.0.0.1")
         await r.start()
         try:
             for junk in (b"", b"\x00", b"\xff" * 40):
@@ -300,7 +286,7 @@ class TestFailClosed:
 
     @pytest.mark.asyncio
     async def test_stop_is_idempotent(self) -> None:
-        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream="127.0.0.1")
         await r.start()
         await r.stop()
         await r.stop()
@@ -308,7 +294,7 @@ class TestFailClosed:
     @pytest.mark.asyncio
     async def test_stop_reaps_in_flight_udp_queries(self) -> None:
         """Shutdown must not leak UDP response tasks into later tests."""
-        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream="127.0.0.1")
         started = asyncio.Event()
 
         async def _blocked_forward(query: bytes) -> bytes:
@@ -332,8 +318,7 @@ class TestNoRequestContentIsLogged:
 
     @pytest.mark.asyncio
     async def test_query_names_are_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
-        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
-        r._upstream = None
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream="127.0.0.1")
         await r.start()
         try:
             with caplog.at_level("DEBUG"):

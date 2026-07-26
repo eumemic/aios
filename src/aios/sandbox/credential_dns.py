@@ -110,9 +110,8 @@ def _parse_question(message: bytes) -> tuple[str, int, int, int] | None:
 
     ``name`` is lowercased with no trailing dot, so DNS 0x20 case games cannot
     slip a credential host past the match. Returns ``None`` for anything that
-    is not a well-formed single-question query — such a message is forwarded
-    verbatim rather than interpreted, since we only ever special-case names we
-    have positively identified.
+    is not a well-formed single-question query. Callers must fail such messages
+    closed rather than expose parser differentials with the upstream resolver.
     """
     if len(message) < 12:
         return None
@@ -230,6 +229,9 @@ class CredentialDnsResolver:
         turns that into a failed provision, because a sandbox whose credential
         names cannot be pinned must not be handed a credential.
         """
+        if self._upstream is None:
+            raise CredentialDnsError("credential DNS resolver has no IPv4 upstream")
+
         loop = asyncio.get_running_loop()
         try:
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -260,9 +262,6 @@ class CredentialDnsResolver:
         if self._udp_transport is not None:
             self._udp_transport.close()
             self._udp_transport = None
-        if self._udp_protocol is not None:
-            await self._udp_protocol.stop()
-            self._udp_protocol = None
         if self._tcp_server is not None:
             self._tcp_server.close()
             for task in list(self._tcp_conns):
@@ -284,7 +283,9 @@ class CredentialDnsResolver:
         """
         parsed = _parse_question(query)
         if parsed is None:
-            return await self._forward(query)
+            # Never let an upstream interpret a query that our policy parser
+            # could not. Parser differentials must fail closed.
+            return _servfail(query)
         name, qtype, qclass, question_end = parsed
         if name not in self._hosts:
             return await self._forward(query)
