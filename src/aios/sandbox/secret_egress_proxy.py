@@ -9,9 +9,12 @@ connection (the host comes from the TLS ClientHello SNI), mints a leaf cert
 for that host from the aios egress CA (which every sandbox already trusts,
 #875), reads the request, replaces the opaque per-session placeholder token
 with the real secret as a literal substring **in request headers + body
-only** (never the URL path/query — the URL carries the placeholder
+only** (never the URL path/query — the request-target is forwarded
 verbatim), forwards to the real host over a freshly-verified upstream TLS
-connection, and streams the response straight back.
+connection, and streams the response straight back. Because the target is
+never swapped, a placeholder-shaped token there can only ever be
+transmitted literally, so the residual fence SCANS the target too and
+refuses the request rather than forwarding it (eumemic/eumemic-ops#331).
 
 Security posture:
 
@@ -231,42 +234,95 @@ _PLACEHOLDER_SUBSTITUTION_FAILED_BODY = (
     b"\n"
     b"Fix: re-provision the sandbox so the CURRENT credential's placeholder is\n"
     b"injected, or widen the credential's allowed_hosts to cover this host.\n"
+    b"\n"
+    b"Note: a placeholder in the URL PATH or QUERY is never substituted (the\n"
+    b"request-target is forwarded verbatim), so it is always refused. Send the\n"
+    b"credential in a header or the request body instead.\n"
 )
 
 # Matches the minted placeholder shape: the greppable prefix plus the 32 hex
-# chars ``mint_secret_placeholder`` emits. Anchored on the exact shape (not a
-# bare prefix scan) so an unrelated string that merely mentions the prefix in
-# prose cannot trip the fence.
-_PLACEHOLDER_RE = re.compile(re.escape(SECRET_PLACEHOLDER_PREFIX) + r"[0-9a-f]{32}")
-_PLACEHOLDER_RE_BYTES = re.compile(re.escape(SECRET_PLACEHOLDER_PREFIX.encode()) + rb"[0-9a-f]{32}")
+# chars ``mint_secret_placeholder`` emits, ANCHORED at both ends on a
+# non-placeholder-alphabet boundary. The prefix+hex alone is not enough: a
+# 33rd hex char (or a longer opaque blob that merely happens to embed the
+# prefix) would match a 32-char window inside it and refuse legitimate
+# traffic. A real minted placeholder is always delimited — it is a whole env
+# var value, a whole Bearer token, a JSON string, a Basic user/pass field — so
+# requiring the boundary keeps every genuine miss while dropping the
+# false-positive class (MEDIUM finding: user data / code samples that merely
+# CONTAIN a placeholder-shaped substring).
+#
+# ``[0-9A-Za-z_]`` is the boundary alphabet because the placeholder itself is
+# drawn from it (prefix has ``_``, body is hex); anything else — quote, colon,
+# space, comma, brace, ``/``, end-of-string — is a legitimate delimiter.
+_PLACEHOLDER_BODY = re.escape(SECRET_PLACEHOLDER_PREFIX) + r"[0-9a-f]{32}"
+_PLACEHOLDER_RE = re.compile(r"(?<![0-9A-Za-z_])" + _PLACEHOLDER_BODY + r"(?![0-9A-Za-z_])")
+_PLACEHOLDER_BODY_BYTES = re.escape(SECRET_PLACEHOLDER_PREFIX.encode()) + rb"[0-9a-f]{32}"
+_PLACEHOLDER_RE_BYTES = re.compile(
+    rb"(?<![0-9A-Za-z_])" + _PLACEHOLDER_BODY_BYTES + rb"(?![0-9A-Za-z_])"
+)
 
 
-def _residual_placeholder(headers: list[tuple[str, str]], body: bytes) -> str | None:
-    """The first unexchanged placeholder left in the post-swap request, if any.
+# Where a residual placeholder was found. NON-SECRET by construction: it names
+# a REGION of the request, never any request-derived byte. This is the ONLY
+# scan-derived value that may ever be logged.
+#
+# WHY THE MATCHED BYTES MAY NEVER BE LOGGED (the CRITICAL finding on the first
+# cut of this fence): the scan runs POST-swap, so the content it inspects
+# contains REAL SECRETS. A vault secret is arbitrary operator-supplied text —
+# nothing stops one from being, or containing, a placeholder-shaped string. In
+# that case a SUCCESSFUL substitution is misread as a residual placeholder and
+# logging "the matched token" writes the real credential to the log. There is
+# no safe prefix either (a prefix of a secret is still secret material). So the
+# refusal log carries the FACT, the REGION, and a count — never a byte, never a
+# prefix, never a length-revealing field derived from the match.
+_RESIDUAL_IN_AUTHORIZATION = "authorization_header"
+_RESIDUAL_IN_BASIC_CREDENTIAL = "authorization_basic_credential"
+_RESIDUAL_IN_HEADER = "header_value"
+_RESIDUAL_IN_BODY = "body"
+_RESIDUAL_IN_REQUEST_TARGET = "request_target"
 
-    Runs on the ALREADY-SWAPPED headers and body, so anything it finds is by
-    construction a placeholder no rule in this session's swap set could
-    exchange. ``Authorization: Basic`` values are decoded before the scan for
-    the same reason ``_swap_header_value`` decodes them: base64 shifts byte
-    boundaries, so a placeholder riding inside a Basic credential is not a
-    literal substring of the header and a raw scan would miss the exact case
+
+def _residual_placeholder_region(
+    headers: list[tuple[str, str]], body: bytes, target: str | None = None
+) -> str | None:
+    """The REGION of the post-swap request holding an unexchanged placeholder.
+
+    Runs on the ALREADY-SWAPPED headers, body and (unswappable by design)
+    request target, so anything it finds is either a placeholder no rule in
+    this session's swap set could exchange, or — indistinguishably from here —
+    a real secret that happens to have the placeholder shape. Both outcomes
+    must refuse: forwarding case 1 transmits the literal placeholder (the bug),
+    and case 2 cannot be told apart from it without comparing against secret
+    material, which is exactly what we refuse to do in a decision that gets
+    logged.
+
+    ``Authorization: Basic`` values are decoded before the scan for the same
+    reason ``_swap_header_value`` decodes them: base64 shifts byte boundaries,
+    so a placeholder riding inside a Basic credential is not a literal
+    substring of the header and a raw scan would miss the exact case
     (git-over-HTTPS, ``curl -u``) that motivated this fence.
 
-    Returns the matched placeholder token (safe to log — it IS the opaque
-    stand-in, never the secret) or ``None`` when the request is clean.
+    Returns a fixed REGION LABEL from the ``_RESIDUAL_IN_*`` set — a constant
+    chosen from a closed vocabulary, carrying **zero** request-derived bytes
+    and therefore safe to log — or ``None`` when the request is clean.
     """
+    if target is not None and _PLACEHOLDER_RE.search(target) is not None:
+        return _RESIDUAL_IN_REQUEST_TARGET
     for name, value in headers:
-        scanned = value
-        if name.lower() == "authorization":
+        lname = name.lower()
+        if lname == "authorization":
             decoded = _decode_basic_credential(value)
             if decoded is not None:
-                scanned = decoded
-        match = _PLACEHOLDER_RE.search(scanned)
-        if match is not None:
-            return match.group(0)
-    match_bytes = _PLACEHOLDER_RE_BYTES.search(body)
-    if match_bytes is not None:
-        return match_bytes.group(0).decode("ascii")
+                if _PLACEHOLDER_RE.search(decoded) is not None:
+                    return _RESIDUAL_IN_BASIC_CREDENTIAL
+                continue
+            if _PLACEHOLDER_RE.search(value) is not None:
+                return _RESIDUAL_IN_AUTHORIZATION
+            continue
+        if _PLACEHOLDER_RE.search(value) is not None:
+            return _RESIDUAL_IN_HEADER
+    if _PLACEHOLDER_RE_BYTES.search(body) is not None:
+        return _RESIDUAL_IN_BODY
     return None
 
 
@@ -573,17 +629,29 @@ class SecretEgressProxy:
         # indistinguishable from a real auth failure. Refuse it here: no
         # upstream connection is opened, so the literal placeholder is never
         # transmitted, and the caller gets an error that NAMES the cause.
-        residual = _residual_placeholder(fwd_headers, swapped_body)
-        if residual is not None:
+        #
+        # The REQUEST TARGET (path + query) is scanned too even though it is
+        # deliberately never swapped. Excluding it from the scan while still
+        # forwarding it verbatim is a live transmission path: a credential
+        # carried in a query parameter (``?token=<placeholder>``,
+        # ``?access_token=…``) would go upstream literally — the exact leak the
+        # fence exists to stop, one field over. Scanning it makes the invariant
+        # whole: NOTHING placeholder-shaped reaches ``self._client.send``.
+        residual_region = _residual_placeholder_region(fwd_headers, swapped_body, target)
+        if residual_region is not None:
             log.warning(
                 "secret_egress_proxy.placeholder_substitution_failed",
                 host=host,
-                path=path,
-                # The placeholder is the opaque stand-in, never the secret, so
-                # logging it is safe — and it is the ONLY handle an operator
-                # has to correlate the refusal with the credential id whose
-                # rotation orphaned it.
-                placeholder=residual,
+                # NOTHING request-derived is logged. The scan runs POST-swap,
+                # so its input contains real secrets, and a real secret with
+                # the placeholder shape makes a SUCCESSFUL swap look residual —
+                # logging the matched bytes (or any prefix of them) would then
+                # write the credential to the log. ``region`` is a constant
+                # from a closed vocabulary; ``swap_rule_count`` counts this
+                # session's rules, not request content. ``path`` is dropped
+                # too: it is sandbox-controlled and, per the request-target
+                # scan above, may itself be where the token sits.
+                region=residual_region,
                 swap_rule_count=len(swaps),
             )
             await self._send_substitution_failure(conn, writer)

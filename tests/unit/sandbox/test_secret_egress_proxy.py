@@ -251,14 +251,26 @@ class TestSwapForwarding:
         )
         assert captured[0].content == b'{"token":"ghp_REALSECRET"}'
 
-    async def test_url_path_and_query_not_swapped(
+    async def test_url_path_and_query_not_swapped_and_therefore_refused(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
     ) -> None:
+        """The request target is still never SWAPPED — but it is no longer
+        forwarded either (eumemic/eumemic-ops#331).
+
+        This test previously pinned the placeholder riding through the URL
+        verbatim. That is exactly the leak: an unswappable placeholder in a
+        path or query parameter reaches the upstream LITERALLY, and (worse) a
+        sandbox that puts a credential in ``?access_token=`` gets it
+        transmitted in the clear to the real host. Since the target cannot be
+        swapped, the only safe handling is refusal, so the residual fence scans
+        it too and no upstream connection is opened.
+        """
         proxy, captured = gh_proxy
-        await _request(proxy, "api.allowed.test", f"/v1/{PH_GH}?token={PH_GH}")
-        # The placeholder rides through the URL verbatim — never swapped there.
-        assert PH_GH in str(captured[0].url)
-        assert "ghp_REALSECRET" not in str(captured[0].url)
+        res = await _request(proxy, "api.allowed.test", f"/v1/{PH_GH}?token={PH_GH}")
+
+        assert res.status_code == 421
+        assert res.headers["x-aios-egress-error"] == "placeholder_substitution_failed"
+        assert captured == [], "an unswappable URL placeholder must never be forwarded"
 
     async def test_pins_resolved_ip_and_keeps_sni_on_hostname(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]

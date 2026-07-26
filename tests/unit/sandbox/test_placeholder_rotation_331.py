@@ -24,6 +24,7 @@ import pytest
 
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
+    ENV_KEYS_LABEL_KEY,
     VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     Mount,
     SandboxSpec,
@@ -147,18 +148,52 @@ class TestResumeRebindsPlaceholders:
         assert resolved.environment[SECRET_NAME] == ""
 
     @pytest.mark.asyncio
-    async def test_pre_331_snapshot_without_the_label_still_resumes(self) -> None:
+    async def test_pre_331_snapshot_with_env_inventory_is_scrubbed(self) -> None:
         """A snapshot committed before this fix carries no placeholder-keys
-        label. It must still resume (no crash, no spurious cold start); the
-        current provision's own ``--env`` still overrides every key it injects."""
+        label, so the stale-key diff has nothing to diff against. Treating that
+        as "nothing to neutralize" would PRESERVE the original vulnerability
+        for exactly the population that has it — a pre-#331 snapshot is
+        precisely the artifact that may have baked a placeholder for a
+        since-archived credential.
+
+        When the snapshot records its env-key inventory (``aios.env_keys``,
+        which predates #331), every recorded key the current provision does not
+        re-inject is emptied — scrubbing on SHAPE instead of on name.
+        """
         backend = FakeBackend()
-        backend.image_labels_by_ref[REF] = {"aios.base_image": BASE_IMAGE}
+        backend.image_labels_by_ref[REF] = {
+            "aios.base_image": BASE_IMAGE,
+            ENV_KEYS_LABEL_KEY: f"{SECRET_NAME},UNRELATED",
+        }
         reg = SandboxRegistry(backend=backend)
 
-        resolved = await reg._resolve_snapshot(OWNER, _spec({SECRET_NAME: PH_B}))
+        # The archived-and-not-replaced case: SECRET_NAME is absent from the
+        # current provision's env, so nothing would override the baked value.
+        resolved = await reg._resolve_snapshot(OWNER, _spec({}))
+
+        assert resolved.snapshot_image == REF, "a scrubbable snapshot still resumes"
+        assert resolved.environment[SECRET_NAME] == "", "the stale baked key must be emptied"
+        assert PH_A not in resolved.environment.values()
+
+    @pytest.mark.asyncio
+    async def test_pre_331_snapshot_with_env_inventory_keeps_reinjected_keys(self) -> None:
+        """The scrub is a superset of the placeholder keys, but a key the
+        CURRENT provision re-injects has a legitimate claim to survive (its
+        ``--env`` overrides the baked value anyway) and must not be emptied."""
+        backend = FakeBackend()
+        backend.image_labels_by_ref[REF] = {
+            "aios.base_image": BASE_IMAGE,
+            ENV_KEYS_LABEL_KEY: f"{SECRET_NAME},UNRELATED",
+        }
+        reg = SandboxRegistry(backend=backend)
+
+        resolved = await reg._resolve_snapshot(
+            OWNER, _spec({SECRET_NAME: PH_B, "UNRELATED": "keep-me"})
+        )
 
         assert resolved.snapshot_image == REF
         assert resolved.environment[SECRET_NAME] == PH_B
+        assert resolved.environment["UNRELATED"] == "keep-me"
 
 
 def test_provision_stamps_the_placeholder_keys_label() -> None:
@@ -314,3 +349,166 @@ class TestUnexchangeablePlaceholderIsRefused:
 
         assert res.status_code == 200
         assert len(captured) == 1
+
+    @pytest.mark.asyncio
+    async def test_placeholder_in_query_string_is_refused(
+        self, rotated_cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """The request TARGET is never swapped (it is forwarded verbatim), so a
+        placeholder in a query parameter could only ever be transmitted
+        LITERALLY — the exact leak the fence exists to stop, one field over.
+
+        Refuse before any upstream connection opens rather than forwarding.
+        """
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([rotated_cred])
+        res = await _request(proxy, "api.github.com", f"/user?access_token={PH_A}")
+
+        assert res.status_code == 421
+        assert res.headers["x-aios-egress-error"] == "placeholder_substitution_failed"
+        assert captured == [], "a query-string placeholder must never reach the upstream"
+
+    @pytest.mark.asyncio
+    async def test_live_placeholder_in_query_string_is_also_refused(
+        self, rotated_cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """Even the CURRENT placeholder is refused in the target: the proxy
+        cannot swap it there (URLs are forwarded verbatim), so forwarding would
+        transmit a literal placeholder and reaching upstream with it is the bug.
+        Refusal is the honest outcome — and it names the fix in the body."""
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([rotated_cred])
+        res = await _request(proxy, "api.github.com", f"/user?access_token={PH_B}")
+
+        assert res.status_code == 421
+        assert captured == []
+        assert "QUERY" in res.text, "the refusal must tell the caller why a URL token cannot work"
+
+    @pytest.mark.asyncio
+    async def test_refusal_log_never_carries_request_derived_bytes(
+        self,
+        rotated_cred: ResolvedEnvVarCredential,
+        make_proxy: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """THE CRITICAL PROPERTY: the residual scan runs POST-swap, so its input
+        contains REAL SECRETS.
+
+        A vault secret is arbitrary operator-supplied text — nothing stops one
+        from having the placeholder shape. Here the live credential's REAL
+        VALUE is placeholder-shaped, so a SUCCESSFUL substitution looks residual
+        to the scanner and the request is refused (fail-closed, correct). The
+        thing that must never happen is the refusal log writing the real
+        credential — so assert no request-derived bytes reach the logs at all.
+        """
+        import logging
+
+        shaped_secret = SECRET_PLACEHOLDER_PREFIX + "f" * 32
+        cred = ResolvedEnvVarCredential(
+            credential_id=CRED_B_ID,
+            secret_name=SECRET_NAME,
+            secret_value=shaped_secret,
+            allowed_hosts=("api.github.com",),
+            updated_at=datetime(2026, 7, 13, tzinfo=UTC),
+            placeholder=PH_B,
+        )
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        with caplog.at_level(logging.WARNING):
+            res = await _request(
+                proxy, "api.github.com", "/user", headers={"Authorization": PH_B}
+            )
+
+        assert res.status_code == 421, "an indistinguishable residual must fail closed"
+        assert captured == []
+        logged = "\n".join(
+            [record.getMessage() for record in caplog.records]
+            + [str(record.__dict__) for record in caplog.records]
+        )
+        assert "placeholder_substitution_failed" in logged, "the refusal must still be visible"
+        # The real secret — and every prefix of it long enough to be useful —
+        # must be absent. A prefix of a secret is still secret material.
+        assert shaped_secret not in logged
+        assert shaped_secret[: len(SECRET_PLACEHOLDER_PREFIX) + 8] not in logged
+        # The region label is a constant from a closed vocabulary, so it is the
+        # one scan-derived thing that may appear.
+        assert "authorization_header" in logged
+
+
+class TestPlaceholderShapeIsBounded:
+    """Finding 5: the fence keys on the MINTED placeholder shape, anchored, so
+    traffic that merely CONTAINS a placeholder-shaped substring inside a longer
+    opaque token is not collateral damage."""
+
+    @pytest.fixture
+    def cred(self) -> ResolvedEnvVarCredential:
+        return ResolvedEnvVarCredential(
+            credential_id=CRED_B_ID,
+            secret_name=SECRET_NAME,
+            secret_value=SECRET_VALUE,
+            allowed_hosts=("api.github.com",),
+            updated_at=datetime(2026, 7, 13, tzinfo=UTC),
+            placeholder=PH_B,
+        )
+
+    @pytest.mark.asyncio
+    async def test_longer_token_embedding_the_shape_is_not_refused(
+        self, cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """A 33rd hex char makes it a DIFFERENT token, not a placeholder. An
+        unanchored match would find a 32-char window inside it and refuse
+        legitimate traffic; a real minted placeholder is always delimited."""
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        res = await _request(
+            proxy,
+            "api.github.com",
+            "/user",
+            headers={"Authorization": f"Bearer {PH_A}deadbeef"},
+        )
+
+        assert res.status_code == 200, "a longer opaque token must not be refused"
+        assert len(captured) == 1
+
+    @pytest.mark.asyncio
+    async def test_placeholder_shaped_substring_in_a_body_is_not_refused(
+        self, cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """Code samples and user data may legitimately mention the prefix (docs,
+        a diff, a log line being uploaded). Only a whole, delimited placeholder
+        is a substitution miss."""
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        body = b"see AIOS_SECRET_PLACEHOLDER_notactuallyhex and " + PH_A.encode() + b"0123"
+        res = await _request(
+            proxy, "api.github.com", "/graphql", method="POST", content=body
+        )
+
+        assert res.status_code == 200
+        assert len(captured) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_delimited_placeholder_in_prose_is_still_refused(
+        self, cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """The relaxation is bounded: a WHOLE placeholder surrounded by ordinary
+        delimiters (quotes, spaces, JSON punctuation) is still a miss — that is
+        how it appears in every real transport."""
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        res = await _request(
+            proxy,
+            "api.github.com",
+            "/graphql",
+            method="POST",
+            content=b'{"token": "' + PH_A.encode() + b'"}',
+        )
+
+        assert res.status_code == 421
+        assert captured == []
