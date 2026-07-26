@@ -76,10 +76,11 @@ async def test_pool_cancellation_storm_returns_every_connection(db_url: str) -> 
         async with acquire_saturation_lock:
             held = [await pool.acquire() for _ in range(_POOL_SIZE)]
             try:
-                acquire = asyncio.create_task(pool.acquire())
-                await asyncio.sleep(0)
                 stage.set()
-                await acquire
+                # Await the pool acquisition in this task.  A detached child
+                # would survive cancellation, consume the released connection,
+                # and leak it because no caller remains to release the result.
+                await pool.acquire()
             finally:
                 await asyncio.gather(*(pool.release(conn) for conn in held))
 
@@ -116,11 +117,25 @@ async def test_pool_cancellation_storm_returns_every_connection(db_url: str) -> 
 
     try:
         for _ in range(_ROUNDS):
-            burst = [
-                asyncio.create_task(_run_cancelled(rng.choice(operations)))
-                for _ in range(_BURST_SIZE)
-            ]
-            await asyncio.wait_for(asyncio.gather(*burst), timeout=_SETTLE_TIMEOUT)
+            # Do not mix acquire saturation with the other phases.  A task
+            # deliberately holding every connection cannot make progress while
+            # query/release tasks are themselves queued for a connection.  That
+            # tests a harness deadlock rather than asyncpg cancellation.
+            rng.shuffle(operations)
+            for operation in operations:
+                # Cancellation at one boundary may leave asyncpg's shielded
+                # cleanup running briefly.  Start the next probe only after the
+                # previous probe has settled so probes cannot consume each
+                # other's deliberately constrained pool capacity.
+                for _ in range(_BURST_SIZE // len(operations)):
+                    await _run_cancelled(operation)
+                    # Pool.release() shields cleanup from cancellation, so the
+                    # cancelled caller can finish before that cleanup task does.
+                    # Wait for it rather than overlapping the next probe with
+                    # an intentionally constrained pool.
+                    async with asyncio.timeout(_SETTLE_TIMEOUT):
+                        while pool.get_idle_size() != _POOL_SIZE:  # noqa: ASYNC110
+                            await asyncio.sleep(0)
 
             # Pool census: every physical connection is idle after the burst.
             assert pool.get_size() == _POOL_SIZE
