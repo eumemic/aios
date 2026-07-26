@@ -44,51 +44,16 @@ the registry and the orchestrator backend-agnostic.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking, PackageManager
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
+from aios.sandbox.credential_dns import CREDENTIAL_SENTINEL_IP
 from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 from aios.sandbox.env_keys import PATH_ENV_KEY
 
 log = get_logger("aios.sandbox.setup")
-
-
-@dataclass(frozen=True)
-class HostSkip:
-    host: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class EgressProvisionResult:
-    hosts_installed: tuple[str, ...] = ()
-    hosts_skipped: tuple[HostSkip, ...] = ()
-
-
-_EGRESS_INSTALLED_PREFIX = "AIOS_EGRESS_INSTALLED "
-_EGRESS_SKIPPED_PREFIX = "AIOS_EGRESS_SKIPPED "
-
-
-def _parse_egress_provision_result(stdout: str) -> EgressProvisionResult:
-    installed: set[str] = set()
-    skipped: dict[str, HostSkip] = {}
-    for line in stdout.splitlines():
-        if line.startswith(_EGRESS_INSTALLED_PREFIX):
-            host = line.removeprefix(_EGRESS_INSTALLED_PREFIX)
-            installed.add(host)
-            skipped.pop(host, None)
-        elif line.startswith(_EGRESS_SKIPPED_PREFIX):
-            value = line.removeprefix(_EGRESS_SKIPPED_PREFIX)
-            host, reason = value.split("\t", 1)
-            if host not in installed:
-                skipped[host] = HostSkip(host=host, reason=reason)
-    return EgressProvisionResult(
-        hosts_installed=tuple(sorted(installed)),
-        hosts_skipped=tuple(skipped[host] for host in sorted(skipped)),
-    )
 
 
 # Hardcoded absolute system PATH because docker --env doesn't expand $PATH;
@@ -325,114 +290,134 @@ _RESOLVE_IPV4_FN = (
 )
 
 
-# KNOWN RESIDUAL — credential-host egress fails OPEN under Unrestricted
-# networking (eumemic/aios#2042). Documented here, deliberately NOT
-# half-mitigated here.
+# NAME-BASED credential-host interception (eumemic/aios#2042).
 #
-# The credential-host rules below are the nat-OUTPUT DNAT redirect, and they are
-# generated ONLY for RESOLVED (learned) addresses: the ``for ip in $(resolve_ipv4
-# <host>)`` loop installs one rule per address the sidecar's DNS query happened
-# to return. A rotating pool — api.github.com serves a ~60s-TTL set and returns
-# only a SUBSET per query — means that set is a SAMPLE, not the pool.
+# THE DEFECT THIS REPLACES. The credential-host rules used to be generated only
+# for RESOLVED (learned) addresses: ``for ip in $(resolve_ipv4 <host>)`` emitted
+# one nat DNAT per address the sidecar's DNS query happened to return. A
+# rotating pool — api.github.com serves a ~60s-TTL set and answers with only a
+# SUBSET per query — makes that set a SAMPLE, never the pool. Under Unrestricted
+# (filter policy ``ACCEPT``) an address no sampler ever returned matched no
+# rule, egressed DIRECTLY to the real upstream carrying the literal
+# ``AIOS_SECRET_PLACEHOLDER_*``, and came back ``401`` — the misleading
+# "flaky auth, retry fixes it" signature. More probes shrink that window and
+# CANNOT close it; every IP-keyed variant (a wider fence, a bigger sample)
+# re-inherits the same defect one level down, because a sample is not a
+# guarantee.
 #
-# Consequence, stated as the failure it is:
+# THE FIX: stop keying policy on addresses. Every DNS query leaving the netns is
+# redirected (nat OUTPUT, ``-I`` at the TOP of the chain so no in-netns resolver
+# — including Docker's embedded 127.0.0.11 — can answer first) to the
+# per-session worker-controlled resolver in :mod:`aios.sandbox.credential_dns`.
+# That resolver answers a CREDENTIAL HOST with one fixed, non-routable sentinel
+# address (:data:`CREDENTIAL_SENTINEL_IP`) and never forwards those names, so
+# the sandbox cannot learn a real pool address for them at all; every other name
+# is forwarded verbatim, so ordinary resolution is unchanged. The netns then
+# needs exactly ONE credential rule, keyed on a constant THIS worker chose:
 #
-#   * LIMITED networking is closed. An unsampled address matches no DNAT and no
-#     per-host ACCEPT, so it falls through to the terminal ``-P OUTPUT DROP``.
-#     Nothing leaves.
-#   * UNRESTRICTED networking is OPEN. The filter policy stays ``ACCEPT``, so an
-#     unsampled address matches no DNAT and egresses DIRECTLY to the real
-#     upstream carrying the literal ``AIOS_SECRET_PLACEHOLDER_*`` — never
-#     reaching the secret-egress proxy, so neither the swap nor the #331
-#     fail-loud fence in ``secret_egress_proxy.py`` ever runs on it.
+#     -t nat -A OUTPUT -d <sentinel> -p tcp --dport 443 \
+#         -j DNAT --to-destination "$PROXY_IP:<proxy_port>"
 #
-# Why nothing is done about it HERE. An earlier round of this PR added a
-# per-credential-host filter REJECT for the learned addresses and called it a
-# fence. It was withdrawn on review, and the reasoning is worth keeping because
-# it is the reason this block is a comment and not code: that rule is IP-keyed
-# exactly like the DNAT, so its coverage is exactly the same sample, and the
-# unsampled address — the ordinary case against a rotating pool, not an exotic
-# one — walks past it. It reads as a fence to the next person who greps for one
-# while leaving the hole open. A DOCUMENTED hole is safer than a DISGUISED one:
-# a reader who finds this comment knows the exposure is live, whereas a reader
-# who finds a REJECT rule reasonably concludes it is closed. More DNS probing
-# has the same defect one level down — it narrows the window and cannot close
-# it, so it would be mitigation theatre with a security-shaped name.
+# An address nobody ever sampled is now structurally incapable of bypassing the
+# proxy — not because we enumerated it, but because the NAME can no longer
+# resolve to it inside the sandbox. Addresses have stopped being what policy
+# depends on.
 #
-# The correct shape INVERTS the default for credential hosts: deny-by-default
-# with the learned set as an ALLOW-list, rather than allow-by-default with the
-# learned set as a fence. That cannot be decided at the IP layer for an address
-# we have never seen; it needs name-based interception (a worker-controlled
-# resolver answering credential hosts with the proxy address, or an in-netns
-# SNI-aware TPROXY on :443). eumemic/aios#2042 carries the four options
-# considered and why each is a larger change than this PR.
+# FAIL CLOSED, three ways:
+#   * the sentinel is RFC 3927 link-local and routed nowhere, so a missing or
+#     malformed DNAT kills the connection in the sandbox's own stack instead of
+#     sending a placeholder to the real upstream. A broken rule can only DENY;
+#   * a filter REJECT catches any other sentinel-addressed traffic (e.g. :80).
+#     It is NOT an IP-keyed fence over a sampled set — the address it names is
+#     our own constant, and it covers the host completely because the host has
+#     exactly one address inside the sandbox now;
+#   * the proxy-alias lookup is now a HARD ERROR (``exit 1``) rather than a
+#     silently-skipped block: previously a ``$PROXY_IP`` miss guarded the whole
+#     nat block out and every credential request went straight to the real
+#     upstream. A sandbox whose credential egress cannot be protected must not
+#     be able to send a credential, so the apply fails and the provision aborts.
 #
-# The residual is pinned BEHAVIOURALLY, not only in prose:
-# ``TestCredentialHostEgressVerdict`` (tests/unit/test_networking.py) runs the
-# real generated script against recording ``iptables``/``getent`` shims and
-# replays the ruleset against a packet — asserting Limited BLOCKS an unsampled
-# address and that Unrestricted still routes it DIRECT. That assertion failing
-# is the acceptance signal for #2042, not a regression.
+# Behaviourally pinned by ``TestCredentialHostEgressVerdict``
+# (tests/unit/test_networking.py), which resolves the host THROUGH the generated
+# ruleset and replays the resulting packet — including a live pool address no
+# sampler ever returned.
 
 
-def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> list[str]:
-    """The nat-OUTPUT DNAT block: credential-host :443 → secret-egress proxy.
+def _nat_dnat_lines(
+    dnat_hosts: Sequence[str],
+    dnat_target: tuple[str, int],
+    dns_port: int,
+    *,
+    filter_accepts: bool = False,
+) -> list[str]:
+    """The name-based credential-interception block (#2042).
 
     Shared by the Limited lockdown script (:func:`build_iptables_script`) and
     the Unrestricted DNAT-only script (:func:`build_secret_egress_dnat_script`)
-    so the rule shape — and the ``$PROXY_IP``-miss fail-open-to-placeholder
-    guard — lives in exactly one place (#1153).
+    so both modes install a byte-identical chokepoint (#1153).
 
-    The proxy alias is resolved to ``$PROXY_IP`` exactly ONCE at sidecar
-    runtime (iptables ``--to-destination`` needs an IP, not a DNS name) and the
-    whole block is guarded by ``if [ -n "$PROXY_IP" ]`` so a proxy-alias DNS
-    miss emits no malformed rule. On such a miss the behavior is
-    fail-open-to-placeholder, NOT fail-closed: the placeholder reaches the real
-    upstream (an authentication failure, never a secret leak — the real secret
-    never enters the container). See :func:`build_iptables_script` for the full
-    rationale.
+    Emits, in order:
 
-    Callers only invoke this when ``dnat_hosts`` is non-empty and a
-    ``dnat_target`` is supplied.
+    1. ``PROXY_IP`` — the proxy alias resolved ONCE at sidecar runtime
+       (iptables ``--to-destination`` needs an IP, not a name). A miss is a
+       HARD FAILURE now: it exits nonzero so the provision aborts, instead of
+       guarding the block out and letting every credential request reach the
+       real upstream with a literal placeholder.
+    2. The DNS interception: udp+tcp ``:53`` DNATed to the worker-controlled
+       resolver, inserted with ``-I`` at the TOP of nat OUTPUT so nothing in
+       the netns can answer a credential name first.
+    3. One credential DNAT keyed on :data:`CREDENTIAL_SENTINEL_IP` — the single
+       address every credential name now resolves to inside the sandbox.
+    4. A filter REJECT for any other sentinel-addressed packet (the ``:443``
+       flow is already rewritten to the proxy by the nat table, which runs
+       first, so this cannot catch it).
+
+    ``dnat_hosts`` is no longer used to generate per-address rules; it is
+    carried for the emitted comment (and to keep the callers' contract that the
+    block is only emitted when there are credential hosts). ``filter_accepts``
+    is set by the Limited path only: its ``-P OUTPUT DROP`` would otherwise
+    drop the post-DNAT DNS flow to the proxy's resolver port.
     """
     proxy_alias, proxy_port = dnat_target
     lines = [
         "",
-        "# Route credential-host HTTPS through the secret-egress proxy (#878)",
+        "# Name-based credential-host interception (#2042): policy is keyed on the",
+        "# NAME, never on a sampled address. Credential hosts: " + ", ".join(sorted(dnat_hosts)),
         # Resolve the proxy alias to an IP ONCE — iptables --to-destination
-        # needs an IP, not a DNS name. The block is guarded on a non-empty
-        # $PROXY_IP, so a proxy-alias DNS miss emits no malformed ":<port>"
-        # rule. NOTE the resulting behavior: under #879's `cred ⊆ env` gate
-        # (Limited) the credential host IS always in allowed_hosts and therefore
-        # filter-ACCEPTed on :443 — so on a proxy miss, traffic flows DIRECTLY
-        # to the real upstream carrying the opaque placeholder. That is
-        # fail-open-to-placeholder (auth failures), never a secret leak: the
-        # real secret never enters the container. (In practice the alias is the
-        # load-bearing WORKER_NETWORK_ALIAS, so a miss already means a
-        # non-functional sandbox.)
+        # needs an IP, not a DNS name.
         f"PROXY_IP=$(resolve_ipv4 {proxy_alias} | head -n1)",
-        'if [ -n "$PROXY_IP" ]; then',
+        'if [ -z "$PROXY_IP" ]; then',
+        f'  echo "credential interception: proxy alias {proxy_alias} did not resolve; '
+        'refusing to run a credentialed sandbox with unprotected egress" >&2',
+        "  exit 1",
+        "fi",
+        "# All DNS out of this netns goes to the worker-controlled resolver. -I puts",
+        "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
+        f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
+        f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
+        "# The ONE credential rule: every credential name resolves to this sentinel",
+        "# inside the sandbox, so this covers the host completely (#2042).",
+        f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
+        f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
     ]
-    for host in sorted(dnat_hosts):
-        lines.append(f"  ips=$(resolve_ipv4 {host})")
-        lines.append(
-            f"  if [ -z \"$ips\" ]; then printf '%s\\t%s\\n' "
-            f"'{_EGRESS_SKIPPED_PREFIX}{host}' 'no IPv4 address'; "
-            f"else echo '{_EGRESS_INSTALLED_PREFIX}{host}'; fi"
+    if filter_accepts:
+        lines.extend(
+            [
+                "# Limited only: -P OUTPUT DROP would otherwise drop the post-DNAT DNS",
+                "# flow to the worker resolver (filter sees the REWRITTEN destination).",
+                f'"$IPT" -A OUTPUT -d "$PROXY_IP" -p udp --dport {dns_port} -j ACCEPT',
+                f'"$IPT" -A OUTPUT -d "$PROXY_IP" -p tcp --dport {dns_port} -j ACCEPT',
+            ]
         )
-        lines.append("  for ip in $ips; do")
-        lines.append(
-            '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
-            f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
-        )
-        lines.append("  done")
-    lines.append("else")
-    for host in sorted(dnat_hosts):
-        lines.append(
-            f"  printf '%s\\t%s\\n' '{_EGRESS_SKIPPED_PREFIX}{host}' "
-            f"'proxy alias {proxy_alias} has no IPv4 address'"
-        )
-    lines.append("fi")
+    lines.extend(
+        [
+            "# Fail closed: anything else addressed to the sentinel (e.g. :80) is",
+            "# refused rather than left to leak. The :443 flow never reaches here —",
+            "# nat runs first and has already rewritten it to the proxy.",
+            f'"$IPT" -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -j REJECT '
+            "--reject-with icmp-port-unreachable",
+        ]
+    )
     return lines
 
 
@@ -442,40 +427,6 @@ def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
     for host in sorted(set(hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
     return _RESOLV_PREAMBLE + "\n".join(lines)
-
-
-def egress_unread_hosts(
-    *,
-    new_ips: dict[str, set[str]],
-    credential_hosts: set[str],
-    limited_hosts: set[str],
-) -> list[str]:
-    """In-scope hosts ABSENT from ``new_ips`` — i.e. hosts whose IPs were not read.
-
-    Absence and presence-with-an-empty-set are DIFFERENT facts: the first is
-    "could not be read", the second is "read, and this host genuinely owns
-    nothing". Only the second may drive a deletion.
-
-    Exposed (rather than inlined into :func:`build_egress_refresh_script`) so
-    the CALLER can act on the same signal the builder acts on. The builder can
-    only decline to emit deletes; it cannot stop the caller from advancing its
-    ``pinned`` bookkeeping past IPs whose rules were deliberately left
-    installed. Both layers must read the identical predicate or the two
-    disagree — which is how a refusal to delete silently becomes "the rule is
-    installed and nothing remembers it exists".
-
-    NOTE ON REACHABILITY (measured, not assumed): with today's sole in-tree
-    caller this returns ``[]`` unconditionally — ``_seed_pinned_from_installed``
-    writes a key for EVERY in-scope host and ``_merge_egress_resolutions`` only
-    ever copies/``setdefault``s that dict, never deletes a key, and carries an
-    unread host forward at its last-good pins (``if not fresh: continue``). A
-    20k-tick randomized simulation of the merge (resolve failures, empty
-    resolves, rotations, whole-sidecar failure) produced zero non-empty
-    results. **Keep-last-good upstream is the actual live protection**; this
-    predicate is defence-in-depth on a public helper whose contract would
-    otherwise turn a missing key into a delete.
-    """
-    return sorted((credential_hosts | limited_hosts) - set(new_ips))
 
 
 def build_egress_refresh_script(
@@ -498,6 +449,17 @@ def build_egress_refresh_script(
     tolerate an already-absent rule (``-D … || true``). A genuine ``-A``
     failure still aborts the script loudly (nonzero exit) so the caller keeps
     its last-good ``pinned`` state and retries the same delta next tick.
+
+    **Credential hosts no longer take part in this sweep (#2042).** They used
+    to get one nat DNAT per newly-sampled address, and lose it again when the
+    address aged out — the sampling machinery that made an unsampled address
+    fail open in the first place. Interception is now keyed on the NAME (the
+    single sentinel address every credential name resolves to inside the
+    sandbox), so there is nothing per-address left to refresh, and re-adding
+    per-address DNATs here would quietly restore an IP-keyed variant of the
+    exact defect. ``credential_hosts`` is still accepted so callers keep their
+    contract and so a host that is BOTH a credential host and an allowed
+    Limited host still gets its filter ACCEPTs refreshed via ``limited_hosts``.
     """
 
     def _add(table_flag: str, rule: str) -> str:
@@ -511,54 +473,26 @@ def build_egress_refresh_script(
         return f'"$IPT"{table_flag} -D OUTPUT {rule} 2>/dev/null || true'
 
     proxy_ip, proxy_port = dnat_target
-    # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
-    # DNAT shape so -C/-D match the installed rules exactly.
-    dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
-
-    def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
-        return set().union(*(host_ips.get(host, set()) for host in hosts))
-
-    # FAIL CLOSED on an incomplete inventory. An in-scope host ABSENT from
-    # ``new_ips`` is a host whose IPs could not be READ; a host present with an
-    # empty set is a host that genuinely owns NONE. Those are different facts,
-    # and conflating them (``.get(host, set())``) drops the unread host's live
-    # IPs into the ``old - new`` difference — so one transient/partial resolve
-    # would DELETE firewall rules that are still in force. Deletions are
-    # therefore refused entirely while any in-scope host is unread; adds are
-    # unaffected because an add only ever widens what is already permitted.
-    #
-    # The SAME predicate is read by the caller (``_merge_egress_resolutions``),
-    # which must also hold its ``pinned`` bookkeeping when it fires — see
-    # :func:`egress_unread_hosts`.
-    unread_hosts = egress_unread_hosts(
-        new_ips=new_ips, credential_hosts=credential_hosts, limited_hosts=limited_hosts
-    )
-
-    old_credential_ips = _category_ips(old_ips, credential_hosts)
-    new_credential_ips = _category_ips(new_ips, credential_hosts)
-    old_limited_ips = _category_ips(old_ips, limited_hosts)
-    new_limited_ips = _category_ips(new_ips, limited_hosts)
-
+    # Legacy per-address credential DNAT shape, kept ONLY as a delete target:
+    # a session provisioned before #2042 (or a snapshot resumed across the
+    # upgrade) can still carry these, and the sweep should retire them. Nothing
+    # here ever ADDS one.
+    legacy_dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
     lines = ["set -e", _IPTABLES_BACKEND_SELECT]
-    for ip in sorted(new_limited_ips - old_limited_ips):
-        lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-        lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
-    for ip in sorted(new_credential_ips - old_credential_ips):
-        lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
-    if unread_hosts:
-        # Surfaced, not silent: the emitted script itself records why no
-        # delete pass ran, so an operator reading the sidecar script sees the
-        # refusal rather than an unexplained absence of deletions.
-        lines.append(
-            "# egress refresh: deletions REFUSED — incomplete host inventory "
-            f"(unread: {' '.join(unread_hosts)})"
-        )
-        return "\n".join(lines)
-    for ip in sorted(old_credential_ips - new_credential_ips):
-        lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
-    for ip in sorted(old_limited_ips - new_limited_ips):
-        lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-        lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for host in sorted(new_ips):
+        added = new_ips[host] - old_ips.get(host, set())
+        for ip in sorted(added):
+            if host in limited_hosts:
+                lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for host in sorted(old_ips):
+        removed = old_ips[host] - new_ips.get(host, set())
+        for ip in sorted(removed):
+            if host in credential_hosts:
+                lines.append(_delete(" -t nat", f"-d {ip} {legacy_dnat_tail}"))
+            if host in limited_hosts:
+                lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+                lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     return "\n".join(lines)
 
 
@@ -589,6 +523,7 @@ def build_iptables_script(
     *,
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
+    dns_port: int | None = None,
 ) -> str:
     """Build a shell script that restricts outbound traffic via iptables.
 
@@ -609,22 +544,18 @@ def build_iptables_script(
     binds to a non-standard ephemeral port; without it, in-sandbox
     git traffic to the proxy would be dropped by the default policy.
 
-    When ``dnat_target`` is supplied alongside a non-empty ``dnat_hosts``,
-    a nat-table OUTPUT section rewrites each credential host's resolved
-    IPs on **dport 443 only** to the proxy endpoint (#878). The proxy
-    alias is resolved to ``$PROXY_IP`` exactly ONCE at sidecar runtime
-    (iptables ``--to-destination`` needs an IP, not a DNS name) and the
-    whole nat block is guarded by ``if [ -n "$PROXY_IP" ]`` so a
-    proxy-alias DNS miss emits no malformed rule. On such a miss the
-    behavior is fail-open-to-placeholder, NOT fail-closed: dnat_hosts ⊆
-    networking.allowed_hosts (enforced by the #879 provision gate), so the
-    credential host's :443 is still filter-ACCEPTed and traffic reaches
-    the real upstream carrying the opaque placeholder — an authentication
-    failure, never a secret leak (the real secret never enters the
-    container). A non-functional credentialed sandbox is acceptable here;
-    a WORKER_NETWORK_ALIAS miss already implies the proxy infrastructure
-    is broken. ``dnat_target`` of ``None`` (the default) emits NO nat
-    rules, preserving every existing caller.
+    When ``dnat_target`` + ``dns_port`` are supplied alongside a non-empty
+    ``dnat_hosts``, the name-based credential-interception block is emitted
+    (:func:`_nat_dnat_lines`, #2042): all ``:53`` is DNATed to the
+    worker-controlled resolver, and the single sentinel address every
+    credential name now resolves to inside the sandbox is DNATed on ``:443``
+    to the secret-egress proxy. NOTHING here is keyed on a sampled address any
+    more. A proxy-alias DNS miss is a HARD apply failure (``exit 1``) — the old
+    ``if [ -n "$PROXY_IP" ]`` guard silently skipped the whole block and sent
+    every credential request to the real upstream carrying the literal
+    placeholder; a sandbox that cannot protect a credential must not be able to
+    send one. ``dnat_target``/``dns_port`` of ``None`` (the default) emits NO
+    nat rules, preserving every existing caller.
 
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
     only) so embedding them in the script is safe; ``proxy_port`` is an int.
@@ -655,12 +586,7 @@ def build_iptables_script(
     for host in sorted(allowed_hosts):
         lines.append("")
         lines.append(f"# Allow {host}")
-        lines.append(f"ips=$(resolve_ipv4 {host})")
-        lines.append(
-            f"if [ -z \"$ips\" ]; then printf '%s\\t%s\\n' '{_EGRESS_SKIPPED_PREFIX}{host}' 'no IPv4 address'; "
-            f"else echo '{_EGRESS_INSTALLED_PREFIX}{host}'; fi"
-        )
-        lines.append("for ip in $ips; do")
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do")
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
@@ -672,11 +598,13 @@ def build_iptables_script(
         lines.append(f'  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport {port} -j ACCEPT')
         lines.append("done")
 
-    if dnat_target is not None and dnat_hosts:
-        # The nat-OUTPUT DNAT block lives in one place (#1153) so the Limited
-        # lockdown script and the Unrestricted DNAT-only script emit a
-        # byte-identical rule shape.
-        lines.extend(_nat_dnat_lines(dnat_hosts, dnat_target))
+    if dnat_target is not None and dnat_hosts and dns_port is not None:
+        # The credential-interception block lives in one place (#1153/#2042) so
+        # the Limited lockdown script and the Unrestricted DNAT-only script
+        # install a byte-identical chokepoint. ``filter_accepts`` opens the
+        # post-DNAT DNS flow to the worker resolver, which this script's
+        # terminal ``-P OUTPUT DROP`` would otherwise drop.
+        lines.extend(_nat_dnat_lines(dnat_hosts, dnat_target, dns_port, filter_accepts=True))
 
     lines.append("")
     lines.append("# Drop everything else")
@@ -689,25 +617,42 @@ def build_iptables_script(
     return "\n".join(lines)
 
 
-def build_secret_egress_dnat_script(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> str:
-    """Install ONLY the credential-host → proxy nat-OUTPUT DNAT (no lockdown).
+def build_secret_egress_dnat_script(
+    dnat_hosts: Sequence[str], dnat_target: tuple[str, int], dns_port: int
+) -> str:
+    """Install ONLY the credential-host interception chokepoint (no lockdown).
 
     For an **Unrestricted** environment that nonetheless carries env-var
     credentials (#1153): the secret swap must fire, but general egress stays
-    open. So this emits the same nat-OUTPUT DNAT block as the Limited lockdown
-    (via the shared :func:`_nat_dnat_lines`) but leaves the filter OUTPUT policy
-    at its default ``ACCEPT`` — there is NO ``-P OUTPUT DROP`` and NO per-host
-    filter ``ACCEPT`` rules. The DNATed packet (now to ``$PROXY_IP:<port>``)
-    traverses the default-ACCEPT filter OUTPUT and is forwarded; no explicit
-    proxy ACCEPT is needed (and adding one would contradict the no-lockdown
-    intent).
+    open. So this emits the same name-based interception block as the Limited
+    lockdown (via the shared :func:`_nat_dnat_lines`) while leaving the filter
+    OUTPUT policy at its default ``ACCEPT`` — there is NO ``-P OUTPUT DROP`` and
+    NO per-allowed-host filter ``ACCEPT`` rules. The DNATed packet (now to
+    ``$PROXY_IP:<port>``) traverses the default-ACCEPT filter OUTPUT and is
+    forwarded, so no ``filter_accepts`` block is needed here (adding one would
+    contradict the no-lockdown intent).
+
+    **This is the path #2042 was filed against, and where the fix bites
+    hardest.** Under the old IP-keyed shape the default-``ACCEPT`` policy meant
+    an address no sampler returned egressed DIRECTLY with the literal
+    placeholder. Now no credential name resolves to a real address inside the
+    sandbox at all: it resolves to the sentinel, whose only route out is the
+    nat DNAT to the proxy, and whose non-``:443`` traffic is REJECTed. The
+    filter policy staying ``ACCEPT`` no longer helps an unsampled address —
+    there is no such thing as an unsampled address here any more.
+
+    Both the filter REJECT and the sentinel DNAT are emitted UNCONDITIONALLY
+    (no resolution loop), so unlike every previous shape their coverage does not
+    depend on what DNS happened to return.
 
     Only the nat OUTPUT chain is flushed for idempotent re-apply — the filter
-    OUTPUT chain is deliberately left untouched.
+    OUTPUT chain is deliberately left untouched, except for the single sentinel
+    REJECT this function must own. That REJECT is deleted-then-appended so a
+    re-apply cannot stack duplicates.
 
     Callers only invoke this with a non-empty ``dnat_hosts`` and a real
     ``dnat_target`` (the registry routes here only when there are credentials),
-    so the nat block is always emitted.
+    so the block is always emitted.
     """
     return "\n".join(
         [
@@ -718,92 +663,18 @@ def build_secret_egress_dnat_script(dnat_hosts: Sequence[str], dnat_target: tupl
             "# Resolve hosts IPv4-only so AAAA records never reach the IPv4 rules (#978)",
             _RESOLVE_IPV4_FN,
             "",
-            "# Flush nat OUTPUT for idempotent re-apply (do NOT touch filter OUTPUT)",
+            "# Flush nat OUTPUT for idempotent re-apply (do NOT touch filter OUTPUT:",
+            "# under Unrestricted it carries the operator's / Docker's own rules).",
             '"$IPT" -t nat -F OUTPUT',
-            *_nat_dnat_lines(dnat_hosts, dnat_target),
-            # NO `-P OUTPUT DROP`, NO filter ACCEPTs — the filter policy stays
-            # ACCEPT so general egress remains open under Unrestricted.
+            "# Drop our own previous sentinel REJECT (if any) so a re-apply cannot",
+            "# stack duplicates; the append below reinstates it.",
+            f'"$IPT" -D OUTPUT -d {CREDENTIAL_SENTINEL_IP} -j REJECT '
+            "--reject-with icmp-port-unreachable 2>/dev/null || true",
+            *_nat_dnat_lines(dnat_hosts, dnat_target, dns_port),
+            # NO `-P OUTPUT DROP`, NO per-allowed-host filter ACCEPTs — the
+            # filter policy stays ACCEPT so general egress remains open.
         ]
     )
-
-
-# The internal / link-local / metadata / CGNAT destination ranges a browser
-# container is denied outbound (jarbot#106). A deliberately NARROW, targeted L3
-# subset for the SSRF / credential-theft threat — NOT the full internal-IP
-# predicate in ``aios.tools.url_safety`` (which also blocks multicast, reserved,
-# and TEST-NET; those are non-SSRF and unroutable from this isolated bridge, so
-# they are intentionally omitted rather than carried as near-dead rules).
-# Link-local 169.254.0.0/16 covers the cloud-metadata endpoint (169.254.169.254);
-# the three RFC1918 blocks cover every private network INCLUDING the docker
-# bridge gateway (so "reach the host via the gateway" is already denied — no
-# separate gateway rule); 100.64.0.0/10 is CGNAT, which ``ipaddress`` does NOT
-# fold into ``is_private``, so it must be listed explicitly. 127.0.0.0/8 is
-# deliberately ABSENT: the container's embedded DNS resolver is 127.0.0.11
-# (netns-local loopback) and the browser needs it to resolve the public web.
-# This is a DESTINATION-IP filter: an internal service reachable on a PUBLIC IP
-# is not covered here and must rely on its own auth (e.g. the API bearer key).
-# IPv4-only: ``ensure_browser_network`` enforces the ``aios-browser`` network is
-# ``--ipv6=false`` (hard-failing otherwise), so a browser container gets no v6
-# address or route and v6 egress is impossible — no v6 rules needed.
-_BROWSER_DENY_INTERNAL_CIDRS = (
-    "169.254.0.0/16",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "100.64.0.0/10",
-)
-
-
-def build_browser_deny_internal_script() -> str:
-    """Build the L3 deny-internal egress script for a browser container.
-
-    The browser renders UNTRUSTED web content, so — unlike the session/run
-    lockdown, which is a default-DROP allow-list (:func:`build_iptables_script`)
-    — general (public) egress must stay OPEN. This is the default-ACCEPT sibling
-    of :func:`build_secret_egress_dnat_script`: it leaves the filter OUTPUT
-    policy at ``ACCEPT`` (NO ``-P OUTPUT DROP``) and only appends targeted
-    ``DROP`` rules for the ranges in :data:`_BROWSER_DENY_INTERNAL_CIDRS`. That
-    closes cloud-metadata theft (169.254.169.254) and internal-service SSRF at
-    L3 — on the resolved *destination IP*, so it holds against the DNS rebinding
-    the driver's userspace navigate guard (navigate-time, hostname-based) cannot
-    catch — while leaving the public web reachable.
-
-    Only the filter OUTPUT chain is flushed (for idempotent re-apply); the nat
-    table is untouched. No ``_RESOLV_PREAMBLE``: the rules are static CIDRs, so
-    nothing resolves a hostname.
-    """
-    lines = [
-        "set -e",
-        "",
-        _IPTABLES_BACKEND_SELECT,
-        "",
-        "# Clear filter OUTPUT (empty on the fresh container this always runs on),",
-        "# leave the policy at ACCEPT (general egress stays open), do NOT touch nat.",
-        '"$IPT" -F OUTPUT',
-        "",
-        "# Deny egress to the internal / link-local / metadata / CGNAT ranges; every",
-        "# other destination (the public web) stays allowed by the ACCEPT policy.",
-    ]
-    lines += [f'"$IPT" -A OUTPUT -d {cidr} -j DROP' for cidr in _BROWSER_DENY_INTERNAL_CIDRS]
-    return "\n".join(lines)
-
-
-def build_browser_deny_internal_verify_script() -> str:
-    """Read-back verify that every deny-internal DROP rule actually landed.
-
-    Proof the rules took effect in the shared netns, not merely that the apply
-    script exited 0 — the browser's analog of the ``-P OUTPUT DROP`` read-back
-    in :func:`build_lockdown_verify_script`. ``set -e`` makes each missing-rule
-    grep independently fatal. There is NO policy assertion: the deny-internal
-    path deliberately leaves the filter policy at ``ACCEPT``. ``grep -F`` so the
-    CIDR dots/slash are matched literally, not as a regexp.
-    """
-    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
-    lines += [
-        f"\"$IPT\" -S OUTPUT | grep -qF -- '-d {cidr} -j DROP'"
-        for cidr in _BROWSER_DENY_INTERNAL_CIDRS
-    ]
-    return "\n".join(lines)
 
 
 # Docker's embedded DNS, served inside every user-defined-network netns (the
@@ -846,17 +717,18 @@ def build_lockdown_verify_script(
     ``ACCEPT`` and installs no v6 DROP, so there is no DROP (v4 or v6) to assert
     (asserting it would always fail).
 
-    When ``dnat_hosts`` is non-empty it ALSO asserts the nat table carries at
-    least one ``DNAT`` OUTPUT rule. Without this, a credential host whose
-    ``getent`` returns zero IPs emits no DNAT rule and no error: apply exits 0,
-    a filter-only verify passes, and the session runs WITHOUT DNAT for that host
-    — the placeholder goes direct to the real upstream and auth fails with no
-    operator signal (#984). Asserting nat coverage turns that silent omission
-    into a fail-closed provision error. (Coverage is asserted at the table
-    level, not per-host: any host resolving to zero IPs with NO other DNAT rule
-    present fails the verify; the proxy-alias DNS-miss case — where the whole
-    nat block is guarded out — is the documented fail-open-to-placeholder path
-    in :func:`build_iptables_script` and is out of scope here.)
+    When ``dnat_hosts`` is non-empty it ALSO reads back every rule the
+    name-based credential chokepoint depends on (#2042): the ``:53`` DNAT to
+    the worker-controlled resolver (udp AND tcp), the sentinel ``:443`` DNAT to
+    the secret-egress proxy, and the sentinel filter REJECT. Asserting merely
+    that "some ``-j DNAT`` exists" (the pre-#2042 check) would pass on a
+    half-installed chokepoint — DNS intercepted but the sentinel unrouted, or
+    the reverse — which is a green verify over unprotected credential egress,
+    the precise failure mode this issue exists to kill. Each assertion is
+    independently fatal under ``set -e``, so a partial apply fails the
+    provision instead of downgrading it silently. (This subsumes #984: a host
+    that resolves to zero IPs is no longer even relevant, because no rule is
+    keyed on a resolution any more.)
 
     Under DNAT-only (``assert_drop=False``) the caller always passes a
     non-empty ``dnat_hosts`` — it only runs when there are credentials — so the
@@ -896,7 +768,18 @@ def build_lockdown_verify_script(
             "printf '%s\\n' \"$v6_output\" | grep -qx -- '-P OUTPUT DROP'; fi"
         )
     if dnat_hosts:
-        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
+        # Read back the THREE rules that make the name-based chokepoint real
+        # (#2042). Asserting only "some DNAT exists" would pass on a ruleset
+        # that intercepts DNS but never redirects the sentinel (or vice versa)
+        # — i.e. green verify while credential egress is unprotected. Each is
+        # independently fatal under ``set -e``.
+        lines.append(
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+        )
+        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'")
+        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'")
+        lines.append(f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'")
     return "\n".join(lines)
 
 
@@ -908,8 +791,9 @@ async def apply_network_lockdown(
     extra_host_ports: Sequence[tuple[str, int]] = (),
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
+    dns_port: int | None = None,
     runtime: str | None = None,
-) -> EgressProvisionResult:
+) -> None:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
     Called after package installation so ``pip install`` etc. can reach
@@ -921,13 +805,15 @@ async def apply_network_lockdown(
     locks down. The backend layer takes it as an explicit parameter — it never
     reads ambient config.
 
-    ``dnat_hosts`` + ``dnat_target`` are threaded into
-    :func:`build_iptables_script` to DNAT credential-host :443 egress through
-    the secret-egress proxy (#878). The read-back verify always asserts the
+    ``dnat_hosts`` + ``dnat_target`` + ``dns_port`` are threaded into
+    :func:`build_iptables_script` to install the name-based credential
+    chokepoint (#878, #2042): all ``:53`` to the worker-controlled resolver,
+    and the sentinel every credential name resolves to redirected on ``:443``
+    to the secret-egress proxy. The read-back verify always asserts the
     filter-table DROP policy and, when ``dnat_hosts`` is non-empty, ALSO
-    asserts the nat table carries a ``DNAT`` OUTPUT rule
-    (:func:`build_lockdown_verify_script`) so a host resolving to zero IPs
-    fails closed instead of silently running without DNAT (#984).
+    asserts every rule of that chokepoint landed
+    (:func:`build_lockdown_verify_script`), so a partial install fails the
+    provision rather than running unprotected.
 
     **Off the tenant-writable filesystem (§5.8).** Under durable persistence,
     running the lockdown *inside* the sandbox (its own ``iptables``/``getent``)
@@ -956,6 +842,7 @@ async def apply_network_lockdown(
         extra_host_ports=extra_host_ports,
         dnat_hosts=dnat_hosts,
         dnat_target=dnat_target,
+        dns_port=dns_port,
     )
     # Point the sidecar at the netns's embedded resolver before getent runs.
     apply_script = _RESOLV_PREAMBLE + iptables_script
@@ -1021,7 +908,6 @@ async def apply_network_lockdown(
         extra_host_port_count=len(extra_host_ports),
         dnat_host_count=len(dnat_hosts),
     )
-    return _parse_egress_provision_result(result.stdout)
 
 
 async def apply_secret_egress_dnat(
@@ -1030,19 +916,25 @@ async def apply_secret_egress_dnat(
     *,
     dnat_hosts: Sequence[str],
     dnat_target: tuple[str, int],
+    dns_port: int,
     runtime: str | None = None,
-) -> EgressProvisionResult:
-    """Install the credential-host → proxy DNAT in an OPEN-egress sandbox (#1153).
+) -> None:
+    """Install the name-based credential chokepoint in an OPEN-egress sandbox.
 
-    The Unrestricted sibling of :func:`apply_network_lockdown`: for an
+    The Unrestricted sibling of :func:`apply_network_lockdown` (#1153): for an
     Unrestricted (or no-networking-config) environment that nonetheless carries
     env-var credentials, the secret swap must fire — but general egress stays
     open. So this runs the same operator-image netns sidecar with the same
     fail-closed posture, but applies :func:`build_secret_egress_dnat_script`
-    (DNAT-only; the filter OUTPUT policy is left at ``ACCEPT``) and verifies
-    with ``assert_drop=False`` (assert the nat DNAT rule exists — fail-closed on
-    a zero-IP credential host per #984 — but NOT a DROP policy, of which there
-    is none).
+    (no lockdown; the filter OUTPUT policy is left at ``ACCEPT``) and verifies
+    with ``assert_drop=False`` (assert the whole name-based chokepoint landed,
+    but NOT a DROP policy, of which there is none).
+
+    **This is the path #2042 was filed against.** The interception installed
+    here is keyed on NAMES, not on addresses a DNS sample happened to return,
+    so a credential host resolving to an address no sampler ever saw is still
+    proxied: inside this sandbox that name resolves ONLY to the sentinel, and
+    the sentinel's only route out is the DNAT to the proxy.
 
     Deliberately **NOT** factored into a shared sidecar helper with
     :func:`apply_network_lockdown`: the two paths carry genuinely different
@@ -1058,7 +950,9 @@ async def apply_secret_egress_dnat(
     propagates and the registry tears the sandbox down rather than handing back
     a half-wired credentialed box whose swap silently doesn't fire.
     """
-    apply_script = _RESOLV_PREAMBLE + build_secret_egress_dnat_script(dnat_hosts, dnat_target)
+    apply_script = _RESOLV_PREAMBLE + build_secret_egress_dnat_script(
+        dnat_hosts, dnat_target, dns_port
+    )
     settings = get_settings()
 
     try:
@@ -1121,83 +1015,3 @@ async def apply_secret_egress_dnat(
         owner_id=handle.owner_id,
         dnat_host_count=len(dnat_hosts),
     )
-    return _parse_egress_provision_result(result.stdout)
-
-
-async def apply_browser_deny_internal(backend: SandboxBackend, handle: SandboxHandle) -> None:
-    """Apply + verify a browser container's L3 deny-internal egress (jarbot#106).
-
-    Called right after the browser container is created. Runs the same
-    operator-image netns sidecar as :func:`apply_network_lockdown` — the browser
-    container itself holds no ``NET_ADMIN``, so root-in-container can neither
-    flush nor poison the rules — but applies
-    :func:`build_browser_deny_internal_script` (default-ACCEPT + targeted DROP)
-    and verifies every DROP rule landed (there is no DROP *policy* to assert).
-
-    Deliberately NOT factored into a shared helper with the session/run egress
-    orchestrators (matching the :func:`apply_secret_egress_dnat` precedent): the
-    browser path carries its own ``sandbox.browser_egress_*`` log events so an
-    operator alert never mis-attributes a browser-plane egress failure to a
-    session networking-policy violation.
-
-    Takes NO ``runtime``: a browser is provisioned only under the default
-    container runtime — the registry rejects a custom runtime before create,
-    because this netns-sidecar iptables path does not initialize under runsc's
-    netstack — so the sidecar always runs under the default runtime too.
-
-    **Fails closed**: on a sidecar infra error, a nonzero apply, or a failed
-    read-back verify, :class:`SandboxBackendError` propagates and the registry
-    tears the just-created container down rather than handing back a browser
-    whose untrusted web content can reach the cloud-metadata endpoint or
-    internal services.
-    """
-    settings = get_settings()
-    try:
-        result = await backend.run_netns_sidecar(
-            handle.sandbox_id,
-            image=settings.docker_image,
-            script=build_browser_deny_internal_script(),
-            timeout_seconds=30,
-            max_output_bytes=settings.bash_max_output_bytes,
-        )
-    except SandboxBackendError:
-        log.warning("sandbox.browser_egress_sidecar_error", owner_id=handle.owner_id)
-        raise
-
-    if result.exit_code != 0:
-        log.warning(
-            "sandbox.browser_egress_failed",
-            owner_id=handle.owner_id,
-            exit_code=result.exit_code,
-            stderr=result.stderr[:500],
-        )
-        raise SandboxBackendError(
-            f"browser deny-internal egress failed (exit {result.exit_code}) for "
-            f"{handle.owner_id}; refusing to run a browser whose untrusted web content "
-            f"can reach internal/metadata endpoints"
-        )
-
-    try:
-        verify = await backend.run_netns_sidecar(
-            handle.sandbox_id,
-            image=settings.docker_image,
-            script=build_browser_deny_internal_verify_script(),
-            timeout_seconds=15,
-            max_output_bytes=settings.bash_max_output_bytes,
-        )
-    except SandboxBackendError:
-        log.warning("sandbox.browser_egress_verify_error", owner_id=handle.owner_id)
-        raise
-    if verify.exit_code != 0:
-        log.warning(
-            "sandbox.browser_egress_verify_failed",
-            owner_id=handle.owner_id,
-            exit_code=verify.exit_code,
-        )
-        raise SandboxBackendError(
-            f"browser deny-internal egress verification failed for {handle.owner_id}: "
-            "an internal-range DROP rule is missing after apply; refusing to run a "
-            "browser with unverified egress isolation"
-        )
-
-    log.info("sandbox.browser_egress_applied", owner_id=handle.owner_id)
