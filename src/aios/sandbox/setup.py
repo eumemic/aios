@@ -369,8 +369,7 @@ def _credential_host_fence_lines(dnat_hosts: Sequence[str], *, insert: bool) -> 
     for host in sorted(set(dnat_hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do")
         lines.append(
-            f'  "$IPT" {flag} OUTPUT -d "$ip" -p tcp --dport 443 '
-            "-j REJECT --reject-with tcp-reset"
+            f'  "$IPT" {flag} OUTPUT -d "$ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset'
         )
         lines.append("done")
     return lines

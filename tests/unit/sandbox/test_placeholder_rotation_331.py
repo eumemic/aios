@@ -418,9 +418,7 @@ class TestUnexchangeablePlaceholderIsRefused:
 
         proxy, captured = await make_proxy([cred])
         with caplog.at_level(logging.WARNING):
-            res = await _request(
-                proxy, "api.github.com", "/user", headers={"Authorization": PH_B}
-            )
+            res = await _request(proxy, "api.github.com", "/user", headers={"Authorization": PH_B})
 
         assert res.status_code == 421, "an indistinguishable residual must fail closed"
         assert captured == []
@@ -485,9 +483,7 @@ class TestPlaceholderShapeIsBounded:
 
         proxy, captured = await make_proxy([cred])
         body = b"see AIOS_SECRET_PLACEHOLDER_notactuallyhex and " + PH_A.encode() + b"0123"
-        res = await _request(
-            proxy, "api.github.com", "/graphql", method="POST", content=body
-        )
+        res = await _request(proxy, "api.github.com", "/graphql", method="POST", content=body)
 
         assert res.status_code == 200
         assert len(captured) == 1
