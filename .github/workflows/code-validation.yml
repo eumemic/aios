@@ -491,26 +491,25 @@ jobs:
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            # The first attempt can leave testcontainer Postgres and sandbox
-            # containers alive after an abrupt fixture failure.  Retrying in
-            # that dirty daemon reproduces port/name/resource conflicts rather
-            # than the failed test, so reset this job's dedicated Docker daemon
-            # before pytest recreates its fixtures.
-            # Remove each stale container independently. Testcontainers may
-            # auto-remove one between listing and deletion; ignoring that one
-            # race must not skip cleanup of the remaining containers or abort
-            # the shell before pytest gets its retry.
-            while read -r container; do
-              docker rm -f "$container" || true
-            done < <(docker ps -aq)
-            # Abrupt fixture teardown can also strand per-test Postgres volumes
-            # and bridge networks.  The runner daemon is dedicated to this job,
-            # so prune those resources before rebuilding the failed fixtures.
-            # Do not prune images: the sandbox image was pulled/built above and
-            # the retry must exercise that exact image.
+            # A failed session-scoped testcontainer startup marks the entire
+            # shard as last-failed, so ``--lf`` merely repeats the contaminated
+            # session. Restart this job's dedicated daemon to reap containerd
+            # tasks and stale port allocations that ``docker rm`` cannot see,
+            # then recreate the shard from a clean session. Images survive the
+            # restart, preserving the exact sandbox image selected above.
+            sudo systemctl restart docker
+            for attempt in {1..30}; do
+              docker info >/dev/null 2>&1 && break
+              if [[ "$attempt" == 30 ]]; then
+                echo "::error::Docker did not recover after restart"
+                exit 1
+              fi
+              sleep 1
+            done
+            docker container prune -f
             docker network prune -f
             docker volume prune -af
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf
+            uv run pytest tests/e2e -q -m "docker and not perf"
           fi
 
       - name: Upload docker E2E flake-retry marker
