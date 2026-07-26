@@ -472,12 +472,10 @@ jobs:
         # scoped ``shared_docker_harness`` fixture which would be torn
         # down + rebuilt per test under the default ``load`` dist.
         #
-        # Keep this below the runner's four logical CPUs. Each worker owns a
-        # testcontainer Postgres plus several sandbox/operator containers; four
-        # workers repeatedly exhausted the shared runner's Docker resources and
-        # the serial ``--lf`` retry then inherited half-torn-down containers.
-        # Two workers leave capacity for dockerd and Postgres while still
-        # amortizing setup over whole test files.
+        # Run this shard serially. Each xdist worker owns a testcontainer
+        # Postgres plus several sandbox/operator containers; even two workers
+        # can exhaust a shared runner and leave half-torn-down containers for
+        # the retry. File-scoped fixtures still amortize setup in serial order.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -493,7 +491,7 @@ jobs:
         # failures on shared runners. Retry only the recorded failures once; a
         # deterministic regression still fails the required check.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
