@@ -238,6 +238,13 @@ _PLACEHOLDER_SUBSTITUTION_FAILED_BODY = (
     b"Note: a placeholder in the URL PATH or QUERY is never substituted (the\n"
     b"request-target is forwarded verbatim), so it is always refused. Send the\n"
     b"credential in a header or the request body instead.\n"
+    b"\n"
+    b"Note: this fence keys on the placeholder SHAPE, and a whole delimited\n"
+    b"placeholder is refused even when it is legitimate payload data (a log\n"
+    b"line, a diff, a config file being uploaded). That false positive is\n"
+    b"deliberate -- an unexchangeable placeholder is indistinguishable from\n"
+    b"one, and guessing wrong transmits a credential-shaped token. Encode or\n"
+    b"redact such content (base64, escaping, masking) to send it.\n"
 )
 
 # Matches the minted placeholder shape: the greppable prefix plus the 32 hex
@@ -254,6 +261,45 @@ _PLACEHOLDER_SUBSTITUTION_FAILED_BODY = (
 # ``[0-9A-Za-z_]`` is the boundary alphabet because the placeholder itself is
 # drawn from it (prefix has ``_``, body is hex); anything else — quote, colon,
 # space, comma, brace, ``/``, end-of-string — is a legitimate delimiter.
+#
+# THE REMAINING FALSE POSITIVE, AND WHY IT STAYS (the deliberate decision on
+# the MEDIUM finding). Boundary anchoring kills the *embedded-window* class (a
+# longer opaque token, prose that merely mentions the prefix). It does NOT and
+# CANNOT kill the *delimited* class: a request whose legitimate payload
+# contains a whole, delimited, placeholder-shaped token — a log line being
+# shipped to an observability API, a diff of a `.env` file, an issue comment
+# quoting one — is refused with 421 even though nothing is wrong with it.
+#
+# We keep that refusal, on purpose:
+#
+#   * The two cases are NOT DISTINGUISHABLE HERE. The scan runs POST-swap on a
+#     request whose provenance is gone: a placeholder that no rule exchanged
+#     and a placeholder-shaped literal the sandbox typed are the same bytes in
+#     the same position. There is no signal left to separate them — not the
+#     header, not the content type, not the position (a real miss can sit in a
+#     JSON body, and legitimate data can sit in ``Authorization``).
+#   * The two errors are NOT SYMMETRIC. Refusing legitimate content costs a
+#     421 with a body that names the cause and the workaround — loud, local,
+#     immediately actionable, and the caller can encode/redact the value.
+#     Forwarding a real miss puts a credential-shaped token on the wire and
+#     draws a 401 that is indistinguishable from a bad secret — the exact
+#     silent, weeks-long misdiagnosis eumemic/eumemic-ops#331 exists to end.
+#     A fence that fails open on ambiguity is not a fence.
+#   * Any narrowing we could write would be a GUESS about intent (allow it in
+#     bodies but not headers? only under some content types? only when it
+#     doesn't look like a credential?), and every such guess is a rule an
+#     attacker — or an unlucky legitimate miss — can land on. Cheap
+#     availability cost, uncapped confidentiality cost: take the availability
+#     cost.
+#   * The false positive is BOUNDED and RARE by construction: it needs a whole
+#     ``AIOS_SECRET_PLACEHOLDER_`` + exactly-32-hex token, delimited, in an
+#     outbound request. That string is minted by this system; it does not occur
+#     in the wild by accident.
+#
+# So this is a fail-closed-on-ambiguity trade, not an oversight, and
+# ``test_legitimate_delimited_placeholder_shaped_payload_is_refused_by_design``
+# pins it AS a trade — naming the cost, asserting the operator gets a
+# self-explaining refusal, and asserting the encoded workaround passes.
 _PLACEHOLDER_BODY = re.escape(SECRET_PLACEHOLDER_PREFIX) + r"[0-9a-f]{32}"
 _PLACEHOLDER_RE = re.compile(r"(?<![0-9A-Za-z_])" + _PLACEHOLDER_BODY + r"(?![0-9A-Za-z_])")
 _PLACEHOLDER_BODY_BYTES = re.escape(SECRET_PLACEHOLDER_PREFIX.encode()) + rb"[0-9a-f]{32}"

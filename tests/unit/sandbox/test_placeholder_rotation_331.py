@@ -489,12 +489,88 @@ class TestPlaceholderShapeIsBounded:
         assert len(captured) == 1
 
     @pytest.mark.asyncio
+    async def test_legitimate_delimited_placeholder_shaped_payload_is_refused_by_design(
+        self, cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """THE DELIBERATE TRADE (the MEDIUM finding), pinned as a trade.
+
+        This is a FALSE POSITIVE and we are keeping it. The body below is
+        innocent payload — a log line being shipped to an API that happens to
+        quote a whole, delimited placeholder — and it is refused with 421.
+
+        Why refusing is correct rather than merely convenient:
+
+        * The scan runs POST-swap, so provenance is gone. An unexchangeable
+          placeholder and a placeholder-shaped literal the sandbox typed are
+          the same bytes in the same position; nothing left in the request
+          separates them. Any narrowing (allow it in bodies but not headers,
+          key on content type, ...) would be a GUESS about intent, and a fence
+          that guesses is a fence an unlucky miss walks through.
+        * The errors are not symmetric. This refusal costs a loud, local 421
+          whose body names the cause and the workaround. The other direction
+          puts a credential-shaped token on the wire and draws a 401 that
+          cannot be told apart from a bad secret — the silent misdiagnosis
+          eumemic/eumemic-ops#331 exists to end.
+
+        So the assertions here are about the COST BEING PAID WELL, not about
+        the refusal being desirable: the caller must be told exactly what
+        happened, and a workaround must exist.
+        """
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        legitimate_payload = b'{"log": "worker booted with TOKEN=' + PH_A.encode() + b' (masked)"}'
+        res = await _request(
+            proxy, "api.github.com", "/graphql", method="POST", content=legitimate_payload
+        )
+
+        # Fail closed on ambiguity: not sent, even though it was innocent.
+        assert res.status_code == 421
+        assert captured == [], "the ambiguous request must not reach the upstream"
+        # The cost is only acceptable because it is SELF-EXPLAINING: the caller
+        # must learn that the shape is what tripped it and that encoding is the
+        # way out, without reading our source.
+        assert res.headers["x-aios-egress-error"] == "placeholder_substitution_failed"
+        assert "SHAPE" in res.text, "the refusal must say it keys on the shape"
+        assert "deliberate" in res.text, "...and that the false positive is intended"
+        assert "base64" in res.text, "...and name the workaround"
+
+    @pytest.mark.asyncio
+    async def test_the_documented_workaround_actually_works(
+        self, cred: ResolvedEnvVarCredential, make_proxy: Any
+    ) -> None:
+        """The trade is only defensible if the refusal body's advice is true.
+
+        The 421 tells the caller to encode or redact placeholder-shaped
+        payload. Assert that a caller who does so gets through — otherwise the
+        false positive is an unfixable dead end rather than a cost with a
+        remedy.
+        """
+        import base64
+
+        from tests.unit.sandbox.test_secret_egress_proxy import _request
+
+        proxy, captured = await make_proxy([cred])
+        encoded = base64.b64encode(PH_A.encode())
+        res = await _request(
+            proxy,
+            "api.github.com",
+            "/graphql",
+            method="POST",
+            content=b'{"log": "' + encoded + b'"}',
+        )
+
+        assert res.status_code == 200, "the workaround the refusal advertises must work"
+        assert len(captured) == 1
+
+    @pytest.mark.asyncio
     async def test_a_delimited_placeholder_in_prose_is_still_refused(
         self, cred: ResolvedEnvVarCredential, make_proxy: Any
     ) -> None:
-        """The relaxation is bounded: a WHOLE placeholder surrounded by ordinary
-        delimiters (quotes, spaces, JSON punctuation) is still a miss — that is
-        how it appears in every real transport."""
+        """The boundary relaxation is bounded: a WHOLE placeholder surrounded by
+        ordinary delimiters (quotes, spaces, JSON punctuation) is still refused
+        — that is how a genuine substitution miss appears in every real
+        transport, so relaxing here would reopen the bug."""
         from tests.unit.sandbox.test_secret_egress_proxy import _request
 
         proxy, captured = await make_proxy([cred])

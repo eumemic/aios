@@ -1381,3 +1381,214 @@ class TestCredentialHostFailsClosed:
         fence_at = next(i for i, line in enumerate(lines) if self.FENCE in line and "-D" in line)
         dnat_at = next(i for i, line in enumerate(lines) if "-j DNAT" in line and "-D" in line)
         assert dnat_at < fence_at
+
+
+# ── behavioural egress verdict: what happens to a packet, not what the rule
+#    text says (finding 4 / eumemic/aios#2042) ──────────────────────────────────
+
+
+class TestCredentialHostEgressVerdict:
+    """Evaluate the GENERATED ruleset against a packet.
+
+    Every other test in this file asserts *rule syntax* — that some string is
+    present in the script. That is exactly why the Unrestricted fail-open in
+    finding 4 survived a fix round: the fence rule was emitted, the syntax
+    assertions passed, and nobody asked what happens to a packet addressed to
+    an IP the sampler never returned. This class asks that question.
+
+    Method: run the real generated script under ``bash`` against fake
+    ``iptables``/``getent`` shims that RECORD the rules instead of installing
+    them, then replay the recorded ruleset against a packet the way netfilter
+    would — nat OUTPUT first (a DNAT match rewrites the destination), then
+    filter OUTPUT, first-match-wins, falling through to the chain policy. The
+    verdict is one of:
+
+    * ``proxied``  — rewritten to the secret-egress proxy (safe: the swap fires),
+    * ``blocked``  — REJECTed or DROPped (safe: nothing leaves),
+    * ``direct``   — leaves the netns toward the real upstream (UNSAFE for a
+      credential host: this is the literal placeholder on the wire).
+
+    ``SAMPLED_IP`` is an address the in-sandbox resolver returned when the
+    rules were generated; ``UNSAMPLED_IP`` is a live pool member it never
+    returned (a rotating DNS pool serves only a subset per query, so this is
+    the ordinary case, not an exotic one).
+    """
+
+    HOST = "api.secret.com"
+    SAMPLED_IP = "140.82.112.5"
+    UNSAMPLED_IP = "140.82.113.22"
+    PROXY_IP = "10.0.0.9"
+    PROXY_PORT = 49152
+
+    def _record_rules(self, script: str) -> list[tuple[str, list[str]]]:
+        """Run the generated script with recording shims; return (table, argv)."""
+        bindir = tempfile.mkdtemp()
+        log = os.path.join(bindir, "rules.log")
+        # getent ahostsv4 <host> answers with the SAMPLED address only — the
+        # subset the resolver happened to return at rule-generation time.
+        getent = (
+            "#!/usr/bin/env bash\n"
+            f'if [ "$2" = "{self.HOST}" ]; then echo "{self.SAMPLED_IP} STREAM {self.HOST}"; fi\n'
+            f'if [ "$2" = "aios-worker" ]; then echo "{self.PROXY_IP} STREAM aios-worker"; fi\n'
+            "exit 0\n"
+        )
+        # iptables shim: append the argv of every mutating call to the log.
+        # -S/-C/-D calls are answered so the script's guards behave (nothing is
+        # installed, so -C "rule exists?" is false and -D is a no-op).
+        ipt = (
+            "#!/usr/bin/env bash\n"
+            f'printf "%s\\n" "$*" >> {log}\n'
+            'for a in "$@"; do\n'
+            '  case "$a" in -S) exit 0;; -C) exit 1;; -D) exit 1;; esac\n'
+            "done\n"
+            "exit 0\n"
+        )
+        for name, body in (
+            ("getent", getent),
+            ("iptables-legacy", ipt),
+            ("iptables", ipt),
+            ("ip6tables-legacy", ipt),
+            ("ip6tables", ipt),
+        ):
+            p = os.path.join(bindir, name)
+            with open(p, "w") as f:
+                f.write(body)
+            os.chmod(p, 0o755)
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+        assert proc.returncode == 0, f"apply script failed: {proc.stderr}"
+        recorded: list[tuple[str, list[str]]] = []
+        if os.path.exists(log):
+            with open(log) as f:
+                for line in f:
+                    argv = line.split()
+                    is_nat = "-t" in argv and argv[argv.index("-t") + 1] == "nat"
+                    recorded.append(("nat" if is_nat else "filter", argv))
+        return recorded
+
+    def _verdict(self, rules: list[tuple[str, list[str]]], dest_ip: str, dport: int = 443) -> str:
+        """Replay the recorded ruleset against one packet, netfilter-style."""
+
+        def _chain(table: str) -> list[list[str]]:
+            """OUTPUT rules for ``table`` in traversal order (-I prepends)."""
+            chain: list[list[str]] = []
+            for t, argv in rules:
+                if t != table or "OUTPUT" not in argv:
+                    continue
+                if "-A" in argv:
+                    chain.append(argv)
+                elif "-I" in argv:
+                    chain.insert(0, argv)
+            return chain
+
+        def _matches(argv: list[str], ip: str, port: int) -> bool:
+            if "-d" in argv and argv[argv.index("-d") + 1] != ip:
+                return False
+            if "--dport" in argv and argv[argv.index("--dport") + 1] != str(port):
+                return False
+            # Rules that gate on something this model doesn't carry (loopback
+            # interface, conntrack state, a different protocol) can't match a
+            # fresh outbound TCP packet to a remote address.
+            if "-o" in argv or "conntrack" in argv:
+                return False
+            return not ("-p" in argv and argv[argv.index("-p") + 1] != "tcp")
+
+        # nat OUTPUT: a DNAT match rewrites the destination.
+        for argv in _chain("nat"):
+            if _matches(argv, dest_ip, dport) and "DNAT" in argv:
+                return "proxied"
+        # filter OUTPUT: first match wins, else the chain policy.
+        for argv in _chain("filter"):
+            if not _matches(argv, dest_ip, dport):
+                continue
+            if "REJECT" in argv or "DROP" in argv:
+                return "blocked"
+            if "ACCEPT" in argv:
+                return "direct"
+        policy = "ACCEPT"
+        for _t, argv in rules:
+            if argv[:3] == ["-P", "OUTPUT", "DROP"]:
+                policy = "DROP"
+        return "direct" if policy == "ACCEPT" else "blocked"
+
+    # ── the sampled address behaves, in both modes ────────────────────────────
+
+    def test_limited_sampled_address_is_proxied(self) -> None:
+        rules = self._record_rules(
+            build_iptables_script(
+                allowed_hosts={self.HOST},
+                dnat_hosts=[self.HOST],
+                dnat_target=("aios-worker", self.PROXY_PORT),
+            )
+        )
+        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
+
+    def test_unrestricted_sampled_address_is_proxied(self) -> None:
+        rules = self._record_rules(
+            build_secret_egress_dnat_script(
+                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
+            )
+        )
+        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
+
+    # ── the unsampled address: the whole point ────────────────────────────────
+
+    def test_limited_unsampled_address_never_egresses(self) -> None:
+        """Limited networking is genuinely closed: an address the sampler never
+        saw carries no DNAT and no ACCEPT, so it falls through to the terminal
+        ``-P OUTPUT DROP``. No placeholder leaves the netns."""
+        rules = self._record_rules(
+            build_iptables_script(
+                allowed_hosts={self.HOST},
+                dnat_hosts=[self.HOST],
+                dnat_target=("aios-worker", self.PROXY_PORT),
+            )
+        )
+        assert self._verdict(rules, self.UNSAMPLED_IP) == "blocked"
+
+    def test_unrestricted_unsampled_address_still_egresses_directly(self) -> None:
+        """KNOWN RESIDUAL — eumemic/aios#2042. This asserts the BUG, on purpose.
+
+        Under Unrestricted the filter policy stays ACCEPT and BOTH the DNAT and
+        the REJECT fence are generated only for LEARNED addresses. An address
+        that never appeared in a DNS sample matches neither, so it leaves via
+        the default-ACCEPT policy carrying the literal placeholder. That is a
+        fail-open, it is not fixed in this PR, and the fix (deny-by-default for
+        credential hosts, with the learned set as an ALLOW-list) needs
+        name-based interception — tracked in #2042.
+
+        Pinned as a failing-safety expectation rather than left undiscovered:
+        when #2042 lands, this assertion flips to ``blocked``/``proxied`` and
+        the flip is the acceptance signal. Until then nobody can believe the
+        Unrestricted path is closed, because the test says it isn't.
+        """
+        rules = self._record_rules(
+            build_secret_egress_dnat_script(
+                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
+            )
+        )
+        verdict = self._verdict(rules, self.UNSAMPLED_IP)
+        assert verdict == "direct", (
+            "expected the KNOWN #2042 residual; a different verdict means the "
+            "fail-open was closed — delete this test and update the PR/issue"
+        )
+
+    def test_the_fence_only_covers_what_the_sampler_saw(self) -> None:
+        """The property behind #2042, stated directly: the fence is IP-keyed, so
+        its coverage is exactly the sampled set — not the host. An earlier
+        review round described it as 'needing no knowledge of the pool', which
+        is what made the residual look closed; it inherits the sample's
+        incompleteness like the DNAT does."""
+        rules = self._record_rules(
+            build_secret_egress_dnat_script(
+                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
+            )
+        )
+        fenced = {
+            argv[argv.index("-d") + 1]
+            for table, argv in rules
+            if table == "filter" and "REJECT" in argv and "-d" in argv
+        }
+        assert fenced == {self.SAMPLED_IP}
+        assert self.UNSAMPLED_IP not in fenced

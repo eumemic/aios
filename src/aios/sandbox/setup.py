@@ -289,11 +289,16 @@ _RESOLVE_IPV4_FN = (
 )
 
 
-# The credential-host fail-closed fence (eumemic/eumemic-ops#331 fix C).
+# The credential-host fence (eumemic/eumemic-ops#331 fix C).
 #
-# THE INVARIANT: for a credential host, **no DNAT ⇒ no egress**. A packet to a
-# credential host on :443 either gets rewritten to the secret-egress proxy or it
-# is DROPPED — it is never allowed to reach the real upstream directly.
+# THE INTENDED INVARIANT: for a credential host, **no DNAT ⇒ no egress**. A
+# packet to a credential host on :443 either gets rewritten to the secret-egress
+# proxy or it is refused — it is never allowed to reach the real upstream
+# directly.
+#
+# THAT INVARIANT HOLDS UNDER LIMITED ONLY. Under Unrestricted it holds for every
+# address we sampled and FAILS OPEN for one we did not (eumemic/aios#2042). Read
+# the "What this fence DOES and DOES NOT buy" block below before trusting it.
 #
 # Why this replaces DNS sampling. The provision/refresh DNAT rules are keyed on
 # RESOLVED IPs, and a rotating pool (api.github.com serves a ~60s-TTL set and
@@ -306,11 +311,38 @@ _RESOLVE_IPV4_FN = (
 # straight to the real upstream carrying the literal placeholder (and, worse,
 # whatever the sandbox put in an Authorization header of its own).
 #
-# So sampling is demoted from a security control to a latency/availability
-# optimization, and the security property is carried by a rule that needs no
-# knowledge of the pool at all: a terminal per-credential-host REJECT on :443 in
-# the *filter* table, appended AFTER the per-host ACCEPTs. Ordering is what makes
-# it work in both modes:
+# What this fence DOES and DOES NOT buy — stated precisely, because an earlier
+# round of this comment claimed it "needs no knowledge of the pool at all" and
+# that claim is FALSE. The fence is a per-credential-host REJECT on :443 in the
+# *filter* table, and it is keyed on RESOLVED IPs exactly like the DNAT is. Its
+# coverage is therefore exactly the SAMPLED SET, and it inherits the sample's
+# incompleteness.
+#
+#   * It DOES guarantee that every address we LEARNED is proxied-or-refused, so
+#     drift can never silently degrade a known address to direct egress, and
+#     (with the refresh sweep's fence-before-DNAT ordering) a newly learned
+#     address is never in the allowed-but-unproxied state.
+#   * It DOES close the proxy-alias DNS-miss case: with no $PROXY_IP the whole
+#     nat block is guarded out, and the fence — emitted outside that guard —
+#     refuses credential-host egress instead of sending every credential
+#     request straight to the real upstream.
+#   * It does NOT cover an address that never appeared in any DNS sample. Under
+#     LIMITED that is harmless: the terminal ``-P OUTPUT DROP`` catches it. Under
+#     UNRESTRICTED the filter policy stays ACCEPT, so such a packet matches
+#     neither the DNAT nor the fence and LEAVES DIRECTLY, carrying the literal
+#     placeholder. That is a live fail-open, tracked in eumemic/aios#2042, and
+#     pinned behaviourally (packet verdict, not rule syntax) by
+#     ``TestCredentialHostEgressVerdict`` in tests/unit/test_networking.py.
+#
+# Closing #2042 requires inverting the default for credential hosts —
+# deny-by-default with the learned set as an ALLOW-list rather than
+# allow-by-default with the learned set as a fence — which cannot be done at
+# the IP layer for an address we have never seen. It needs name-based
+# interception (a worker-controlled resolver answering credential hosts with
+# the proxy address, or an in-netns SNI-aware TPROXY on :443); see the issue
+# for the four options and why each is larger than this PR.
+#
+# Ordering is what makes the fence work in the cases it does cover:
 #
 #   * nat OUTPUT runs BEFORE filter OUTPUT, so a packet that DID match a DNAT
 #     rule arrives at filter with its destination rewritten to $PROXY_IP:<port>
@@ -327,25 +359,26 @@ _RESOLVE_IPV4_FN = (
 # #331 is turning a silent misleading failure into an immediate visible one. The
 # reset is also distinguishable in-sandbox from the proxy's own 421.
 #
-# Residual (explicitly, not silently): DNS drift now costs AVAILABILITY (a
-# credential-host request on an unsampled IP is reset, and the model sees a hard
-# connection error) instead of CONFIDENTIALITY (the placeholder / a
-# sandbox-supplied credential going out un-proxied). The refresh sweep's
-# multi-probe sampling is what keeps that availability cost small; the fence is
-# what makes the failure mode safe. Fully eliminating the availability residual
-# needs name-based (not IP-based) interception — e.g. resolving credential hosts
-# only through a worker-controlled resolver that answers with the proxy address,
-# or an in-netns TPROXY on :443 — which is a larger change than this PR.
+# Residual, restated so it cannot be misread as closed: UNDER LIMITED, DNS
+# drift now costs AVAILABILITY (a credential-host request on an unsampled IP is
+# reset and the model sees a hard connection error) rather than
+# CONFIDENTIALITY. UNDER UNRESTRICTED IT STILL COSTS CONFIDENTIALITY — an
+# unsampled address matches neither rule and egresses directly with the literal
+# placeholder (eumemic/aios#2042). Multi-probe sampling narrows that window and
+# cannot close it; only name-based interception can.
 _CREDENTIAL_HOST_FENCE_COMMENT = (
-    "# FAIL CLOSED for credential hosts (#331): an un-DNATed :443 packet to a\n"
-    "# credential host must never reach the real upstream carrying a placeholder.\n"
-    "# nat runs before filter, so a DNATed packet is already rewritten to the\n"
-    "# proxy and does not match these rules; only unsampled-IP packets do."
+    "# Credential-host fence (#331): an un-DNATed :443 packet to a LEARNED\n"
+    "# credential-host address is reset instead of reaching the real upstream\n"
+    "# with a placeholder. nat runs before filter, so a DNATed packet is already\n"
+    "# rewritten to the proxy and does not match these rules.\n"
+    "# NOT COMPLETE: these rules are IP-keyed, so an address that never appeared\n"
+    "# in a DNS sample matches neither them nor the DNAT. Under Unrestricted\n"
+    "# (policy ACCEPT) such a packet still egresses directly — eumemic/aios#2042."
 )
 
 
 def _credential_host_fence_lines(dnat_hosts: Sequence[str], *, insert: bool) -> list[str]:
-    """Per-credential-host terminal REJECT on :443 (the no-DNAT ⇒ no-egress fence).
+    """Per-credential-host REJECT on :443 for each LEARNED address (#331).
 
     ``insert=True`` emits ``-I OUTPUT`` (head insertion) for the Limited
     lockdown, where per-host ``ACCEPT`` rules for the same IPs already sit in
@@ -355,14 +388,18 @@ def _credential_host_fence_lines(dnat_hosts: Sequence[str], *, insert: bool) -> 
     append is terminal there because nothing else matches.
 
     Resolution here is best-effort in exactly the same way the DNAT is, and for
-    the same reason: both key on IPs. It is NOT the security property on its
-    own — see :data:`_CREDENTIAL_HOST_FENCE_COMMENT`. What it guarantees is that
-    every IP we *did* learn is either proxied or refused, so drift can never
-    silently degrade to direct egress for a known address; and because the
-    refresh sweep installs the fence for every newly learned IP alongside the
-    DNAT (:func:`build_egress_refresh_script`), a newly appearing pool member
-    becomes proxied-or-refused as soon as it is observed, never
-    allowed-and-unproxied.
+    the same reason: both key on IPs. So this fence is NOT a complete control —
+    see :data:`_CREDENTIAL_HOST_FENCE_COMMENT`. What it guarantees is that every
+    IP we *did* learn is either proxied or refused, so drift can never silently
+    degrade to direct egress for a known address; and because the refresh sweep
+    installs the fence for every newly learned IP alongside the DNAT
+    (:func:`build_egress_refresh_script`), a newly appearing pool member becomes
+    proxied-or-refused as soon as it is observed, never allowed-and-unproxied.
+
+    What it does NOT cover is an address that never appeared in any DNS sample.
+    Under Limited the terminal ``-P OUTPUT DROP`` catches that packet; under
+    Unrestricted the policy is ACCEPT and it egresses DIRECTLY with the literal
+    placeholder — the open fail-open tracked in eumemic/aios#2042.
     """
     flag = "-I" if insert else "-A"
     lines = ["", *_CREDENTIAL_HOST_FENCE_COMMENT.split("\n")]
@@ -538,7 +575,7 @@ def build_egress_refresh_script(
     # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
     # DNAT shape so -C/-D match the installed rules exactly.
     dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
-    # The no-DNAT ⇒ no-egress fence tail (#331), byte-identical to the shape the
+    # The credential-host fence tail (#331), byte-identical to the shape the
     # provision-time apply installs so -C/-D match the installed rules exactly.
     fence_tail = "-p tcp --dport 443 -j REJECT --reject-with tcp-reset"
     lines = ["set -e", _IPTABLES_BACKEND_SELECT]
@@ -627,15 +664,15 @@ def build_iptables_script(
     (iptables ``--to-destination`` needs an IP, not a DNS name) and the
     whole nat block is guarded by ``if [ -n "$PROXY_IP" ]`` so a
     proxy-alias DNS miss emits no malformed rule. On such a miss the
-    behavior is fail-open-to-placeholder, NOT fail-closed: dnat_hosts ⊆
-    networking.allowed_hosts (enforced by the #879 provision gate), so the
-    credential host's :443 is still filter-ACCEPTed and traffic reaches
-    the real upstream carrying the opaque placeholder — an authentication
-    failure, never a secret leak (the real secret never enters the
-    container). A non-functional credentialed sandbox is acceptable here;
-    a WORKER_NETWORK_ALIAS miss already implies the proxy infrastructure
-    is broken. ``dnat_target`` of ``None`` (the default) emits NO nat
-    rules, preserving every existing caller.
+    behavior is now fail-CLOSED (eumemic/eumemic-ops#331): the guard's
+    ``else`` branch installs the credential-host REJECT fence with no
+    DNAT, so credential-host :443 egress is refused instead of reaching
+    the real upstream with the opaque placeholder (and with whatever
+    Authorization header the sandbox set itself). A non-functional
+    credentialed sandbox is the right trade; a WORKER_NETWORK_ALIAS miss
+    already implies the proxy infrastructure is broken. ``dnat_target``
+    of ``None`` (the default) emits NO nat rules, preserving every
+    existing caller.
 
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
     only) so embedding them in the script is safe; ``proxy_port`` is an int.
@@ -683,7 +720,7 @@ def build_iptables_script(
         # lockdown script and the Unrestricted DNAT-only script emit a
         # byte-identical rule shape.
         lines.extend(_nat_dnat_lines(dnat_hosts, dnat_target))
-        # …and the fail-closed fence (#331). ``insert=True``: the per-host
+        # …and the credential-host fence (#331). ``insert=True``: the per-host
         # ACCEPTs above already cover these IPs on :443 and iptables is
         # first-match-wins, so the REJECT must be inserted at the HEAD of
         # OUTPUT to win. A DNATed packet is already rewritten to the proxy by
@@ -739,9 +776,11 @@ def build_secret_egress_dnat_script(dnat_hosts: Sequence[str], dnat_target: tupl
             # filter rule (the chain is otherwise not ours under Unrestricted).
             *_credential_host_fence_flush_lines(dnat_hosts),
             *_nat_dnat_lines(dnat_hosts, dnat_target),
-            # The fail-closed fence (#331) applies under Unrestricted too: a
-            # credential host's un-DNATed :443 packet must be refused, not
+            # The credential-host fence (#331) applies under Unrestricted too:
+            # a SAMPLED address's un-DNATed :443 packet is refused rather than
             # allowed out by the default-ACCEPT policy carrying a placeholder.
+            # An UNSAMPLED address matches neither this nor the DNAT and still
+            # egresses directly — the open fail-open, eumemic/aios#2042.
             # ``insert=False`` (append) is terminal here — this chain carries no
             # generated ACCEPTs for these IPs to shadow it.
             *_credential_host_fence_lines(dnat_hosts, insert=False),
@@ -794,9 +833,10 @@ def build_lockdown_verify_script(
 
     When ``dnat_hosts`` is non-empty it ALSO asserts (a) the nat table carries
     at least one ``DNAT`` OUTPUT rule and (b) the filter table carries the
-    credential-host fail-closed fence (a ``--dport 443 -j REJECT`` rule,
-    eumemic/eumemic-ops#331) — so the no-DNAT ⇒ no-egress invariant is proven
-    installed, not assumed. Without this, a credential host whose
+    credential-host fence (a ``--dport 443 -j REJECT`` rule,
+    eumemic/eumemic-ops#331) — so the fence is proven installed, not assumed.
+    (Installed for the sampled addresses; its coverage limit under Unrestricted
+    is eumemic/aios#2042.) Without this, a credential host whose
     ``getent`` returns zero IPs emits no DNAT rule and no error: apply exits 0,
     a filter-only verify passes, and the session runs WITHOUT DNAT for that host
     — the placeholder goes direct to the real upstream and auth fails with no
@@ -804,8 +844,8 @@ def build_lockdown_verify_script(
     into a fail-closed provision error. (Coverage is asserted at the table
     level, not per-host: any host resolving to zero IPs with NO other DNAT rule
     present fails the verify; the proxy-alias DNS-miss case — where the whole
-    nat block is guarded out — is the documented fail-open-to-placeholder path
-    in :func:`build_iptables_script` and is out of scope here.)
+    nat block is guarded out — installs the fence instead and is refused, not
+    forwarded, per :func:`build_iptables_script`.)
 
     Under DNAT-only (``assert_drop=False``) the caller always passes a
     non-empty ``dnat_hosts`` — it only runs when there are credentials — so the
@@ -846,8 +886,8 @@ def build_lockdown_verify_script(
         )
     if dnat_hosts:
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'")
-        # …and the fail-closed fence actually landed (#331). Without this the
-        # no-DNAT ⇒ no-egress invariant would be unverified — the exact "green
+        # …and the credential-host fence actually landed (#331). Without this
+        # the fence would be unverified — the exact "green
         # verify while open" shape the DROP read-back already closes one layer
         # up. A credential host whose fence failed to install is a host whose
         # unsampled pool addresses would egress DIRECTLY with a placeholder, so
