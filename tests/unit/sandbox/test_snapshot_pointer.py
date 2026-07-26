@@ -291,3 +291,45 @@ async def test_over_limit_notice_append_failure_does_not_propagate(
     kinds = [t[0] for t in timeline]
     assert "pointer_set" in kinds, "snapshot + pointer succeeded"
     assert "destroy" in kinds, "corpse must still be removed despite the notice append failure"
+
+
+@pytest.mark.asyncio
+async def test_resolve_opaque_pre_331_snapshot_cold_starts(
+    harness: tuple[SandboxRegistry, FakeBackend, list[Any]],
+) -> None:
+    """A snapshot recording NEITHER placeholder-keys NOR env-keys is opaque.
+
+    Pre-#331 artifacts carry no ``aios.vault_placeholder_keys`` label, so the
+    stale-key diff has nothing to diff against — and a pre-#331 snapshot is
+    precisely the artifact that may have baked a placeholder for a
+    since-archived credential. With no env-key inventory either we cannot
+    enumerate what it baked, so we cannot prove it holds no stale placeholder.
+
+    Fail safe: cold-start (costing recoverable, model-visible filesystem state)
+    rather than resume an image that may re-inject an unexchangeable
+    placeholder into a credential path.
+    """
+    registry, backend, timeline = harness
+    from aios.sandbox.backends.base import Mount, SandboxSpec
+
+    ref = "aios-sbx-default-sess_x:latest"
+    backend.image_labels_by_ref[ref] = {"aios.base_image": "IMG"}
+    spec = SandboxSpec(
+        session_id="sess_x",
+        instance_id="default",
+        workspace=Mount(host_path=cast(Any, "/tmp/w"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={"GITHUB_TOKEN": "AIOS_SECRET_PLACEHOLDER_" + "b" * 32},
+        labels={},
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image="IMG",  # base matches: this is NOT drift, it is unverifiability
+        snapshot_image=ref,
+    )
+
+    resolved = await registry._resolve_snapshot("sess_x", spec)
+
+    assert resolved.snapshot_image is None, "an unverifiable snapshot must not resume"
+    assert ("fs_event", "sandbox_fs_reset", "unverifiable_placeholder_env") in timeline
+    # The current provision's own placeholder is still injected as usual.
+    assert resolved.environment["GITHUB_TOKEN"].startswith("AIOS_SECRET_PLACEHOLDER_")

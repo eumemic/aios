@@ -9,9 +9,12 @@ connection (the host comes from the TLS ClientHello SNI), mints a leaf cert
 for that host from the aios egress CA (which every sandbox already trusts,
 #875), reads the request, replaces the opaque per-session placeholder token
 with the real secret as a literal substring **in request headers + body
-only** (never the URL path/query — the URL carries the placeholder
+only** (never the URL path/query — the request-target is forwarded
 verbatim), forwards to the real host over a freshly-verified upstream TLS
-connection, and streams the response straight back.
+connection, and streams the response straight back. Because the target is
+never swapped, a placeholder-shaped token there can only ever be
+transmitted literally, so the residual fence SCANS the target too and
+refuses the request rather than forwarding it (eumemic/eumemic-ops#331).
 
 Security posture:
 
@@ -76,7 +79,7 @@ from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
 from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
-from aios.services.vaults import ResolvedEnvVarCredential
+from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, ResolvedEnvVarCredential
 
 log = get_logger("aios.sandbox.secret_egress_proxy")
 
@@ -194,6 +197,179 @@ def _apply_swaps_bytes(data: bytes, swaps: list[tuple[str, str]]) -> bytes:
     for placeholder, secret in swaps:
         data = data.replace(placeholder.encode(), secret.encode())
     return data
+
+
+# ── unexchangeable-placeholder fence (eumemic/eumemic-ops#331) ───────────────
+#
+# A placeholder that survives the swap is a SUBSTITUTION MISS, not a credential
+# the upstream can evaluate: the sandbox holds an opaque stand-in whose real
+# secret this proxy could not supply (an archived/recreated credential id, a
+# snapshot-resumed env carrying a dead placeholder, a host/path gate that
+# excluded the only cred that could have swapped it). Forwarding it emits the
+# LITERAL ``AIOS_SECRET_PLACEHOLDER_…`` string to the remote, which answers
+# ``401 Bad credentials`` — indistinguishable from a genuinely bad secret, and
+# the single reason this class of bug reads as "random intermittent auth
+# failure" for weeks. So we refuse the request HERE with a distinguishable
+# status + machine-readable reason, and never open the upstream connection.
+#
+# 421 Misdirected Request is deliberate: it is not 401 (never conflatable with
+# an upstream credential verdict), not 5xx (this is not an upstream/plumbing
+# outage), and semantically apt — the request was routed to a proxy that
+# cannot serve the credential it carries.
+_PLACEHOLDER_SUBSTITUTION_FAILED_STATUS = 421
+_PLACEHOLDER_SUBSTITUTION_FAILED_HEADER = "x-aios-egress-error"
+_PLACEHOLDER_SUBSTITUTION_FAILED_CODE = "placeholder_substitution_failed"
+_PLACEHOLDER_SUBSTITUTION_FAILED_BODY = (
+    b"aios egress refused this request: placeholder substitution failed.\n"
+    b"\n"
+    b"An AIOS_SECRET_PLACEHOLDER_* token in this request could not be exchanged\n"
+    b"for its vaulted secret, so the request was NOT sent upstream (sending it\n"
+    b"would transmit the literal placeholder and draw a misleading 401).\n"
+    b"\n"
+    b"Cause: the placeholder is not bound to any ACTIVE environment_variable\n"
+    b"credential for this sandbox -- typically a credential that was rotated,\n"
+    b"archived or recreated after this sandbox's environment was materialized\n"
+    b"(placeholders are keyed on credential id), or a credential whose\n"
+    b"allowed_hosts / path prefix do not cover this request.\n"
+    b"\n"
+    b"Fix: re-provision the sandbox so the CURRENT credential's placeholder is\n"
+    b"injected, or widen the credential's allowed_hosts to cover this host.\n"
+    b"\n"
+    b"Note: a placeholder in the URL PATH or QUERY is never substituted (the\n"
+    b"request-target is forwarded verbatim), so it is always refused. Send the\n"
+    b"credential in a header or the request body instead.\n"
+    b"\n"
+    b"Note: this fence keys on the placeholder SHAPE, and a whole delimited\n"
+    b"placeholder is refused even when it is legitimate payload data (a log\n"
+    b"line, a diff, a config file being uploaded). That false positive is\n"
+    b"deliberate -- an unexchangeable placeholder is indistinguishable from\n"
+    b"one, and guessing wrong transmits a credential-shaped token. Encode or\n"
+    b"redact such content (base64, escaping, masking) to send it.\n"
+)
+
+# Matches the minted placeholder shape: the greppable prefix plus the 32 hex
+# chars ``mint_secret_placeholder`` emits, ANCHORED at both ends on a
+# non-placeholder-alphabet boundary. The prefix+hex alone is not enough: a
+# 33rd hex char (or a longer opaque blob that merely happens to embed the
+# prefix) would match a 32-char window inside it and refuse legitimate
+# traffic. A real minted placeholder is always delimited — it is a whole env
+# var value, a whole Bearer token, a JSON string, a Basic user/pass field — so
+# requiring the boundary keeps every genuine miss while dropping the
+# false-positive class (MEDIUM finding: user data / code samples that merely
+# CONTAIN a placeholder-shaped substring).
+#
+# ``[0-9A-Za-z_]`` is the boundary alphabet because the placeholder itself is
+# drawn from it (prefix has ``_``, body is hex); anything else — quote, colon,
+# space, comma, brace, ``/``, end-of-string — is a legitimate delimiter.
+#
+# THE REMAINING FALSE POSITIVE, AND WHY IT STAYS (the deliberate decision on
+# the MEDIUM finding). Boundary anchoring kills the *embedded-window* class (a
+# longer opaque token, prose that merely mentions the prefix). It does NOT and
+# CANNOT kill the *delimited* class: a request whose legitimate payload
+# contains a whole, delimited, placeholder-shaped token — a log line being
+# shipped to an observability API, a diff of a `.env` file, an issue comment
+# quoting one — is refused with 421 even though nothing is wrong with it.
+#
+# We keep that refusal, on purpose:
+#
+#   * The two cases are NOT DISTINGUISHABLE HERE. The scan runs POST-swap on a
+#     request whose provenance is gone: a placeholder that no rule exchanged
+#     and a placeholder-shaped literal the sandbox typed are the same bytes in
+#     the same position. There is no signal left to separate them — not the
+#     header, not the content type, not the position (a real miss can sit in a
+#     JSON body, and legitimate data can sit in ``Authorization``).
+#   * The two errors are NOT SYMMETRIC. Refusing legitimate content costs a
+#     421 with a body that names the cause and the workaround — loud, local,
+#     immediately actionable, and the caller can encode/redact the value.
+#     Forwarding a real miss puts a credential-shaped token on the wire and
+#     draws a 401 that is indistinguishable from a bad secret — the exact
+#     silent, weeks-long misdiagnosis eumemic/eumemic-ops#331 exists to end.
+#     A fence that fails open on ambiguity is not a fence.
+#   * Any narrowing we could write would be a GUESS about intent (allow it in
+#     bodies but not headers? only under some content types? only when it
+#     doesn't look like a credential?), and every such guess is a rule an
+#     attacker — or an unlucky legitimate miss — can land on. Cheap
+#     availability cost, uncapped confidentiality cost: take the availability
+#     cost.
+#   * The false positive is BOUNDED and RARE by construction: it needs a whole
+#     ``AIOS_SECRET_PLACEHOLDER_`` + exactly-32-hex token, delimited, in an
+#     outbound request. That string is minted by this system; it does not occur
+#     in the wild by accident.
+#
+# So this is a fail-closed-on-ambiguity trade, not an oversight, and
+# ``test_legitimate_delimited_placeholder_shaped_payload_is_refused_by_design``
+# pins it AS a trade — naming the cost, asserting the operator gets a
+# self-explaining refusal, and asserting the encoded workaround passes.
+_PLACEHOLDER_BODY = re.escape(SECRET_PLACEHOLDER_PREFIX) + r"[0-9a-f]{32}"
+_PLACEHOLDER_RE = re.compile(r"(?<![0-9A-Za-z_])" + _PLACEHOLDER_BODY + r"(?![0-9A-Za-z_])")
+_PLACEHOLDER_BODY_BYTES = re.escape(SECRET_PLACEHOLDER_PREFIX.encode()) + rb"[0-9a-f]{32}"
+_PLACEHOLDER_RE_BYTES = re.compile(
+    rb"(?<![0-9A-Za-z_])" + _PLACEHOLDER_BODY_BYTES + rb"(?![0-9A-Za-z_])"
+)
+
+
+# Where a residual placeholder was found. NON-SECRET by construction: it names
+# a REGION of the request, never any request-derived byte. This is the ONLY
+# scan-derived value that may ever be logged.
+#
+# WHY THE MATCHED BYTES MAY NEVER BE LOGGED (the CRITICAL finding on the first
+# cut of this fence): the scan runs POST-swap, so the content it inspects
+# contains REAL SECRETS. A vault secret is arbitrary operator-supplied text —
+# nothing stops one from being, or containing, a placeholder-shaped string. In
+# that case a SUCCESSFUL substitution is misread as a residual placeholder and
+# logging "the matched token" writes the real credential to the log. There is
+# no safe prefix either (a prefix of a secret is still secret material). So the
+# refusal log carries the FACT, the REGION, and a count — never a byte, never a
+# prefix, never a length-revealing field derived from the match.
+_RESIDUAL_IN_AUTHORIZATION = "authorization_header"
+_RESIDUAL_IN_BASIC_CREDENTIAL = "authorization_basic_credential"
+_RESIDUAL_IN_HEADER = "header_value"
+_RESIDUAL_IN_BODY = "body"
+_RESIDUAL_IN_REQUEST_TARGET = "request_target"
+
+
+def _residual_placeholder_region(
+    headers: list[tuple[str, str]], body: bytes, target: str | None = None
+) -> str | None:
+    """The REGION of the post-swap request holding an unexchanged placeholder.
+
+    Runs on the ALREADY-SWAPPED headers, body and (unswappable by design)
+    request target, so anything it finds is either a placeholder no rule in
+    this session's swap set could exchange, or — indistinguishably from here —
+    a real secret that happens to have the placeholder shape. Both outcomes
+    must refuse: forwarding case 1 transmits the literal placeholder (the bug),
+    and case 2 cannot be told apart from it without comparing against secret
+    material, which is exactly what we refuse to do in a decision that gets
+    logged.
+
+    ``Authorization: Basic`` values are decoded before the scan for the same
+    reason ``_swap_header_value`` decodes them: base64 shifts byte boundaries,
+    so a placeholder riding inside a Basic credential is not a literal
+    substring of the header and a raw scan would miss the exact case
+    (git-over-HTTPS, ``curl -u``) that motivated this fence.
+
+    Returns a fixed REGION LABEL from the ``_RESIDUAL_IN_*`` set — a constant
+    chosen from a closed vocabulary, carrying **zero** request-derived bytes
+    and therefore safe to log — or ``None`` when the request is clean.
+    """
+    if target is not None and _PLACEHOLDER_RE.search(target) is not None:
+        return _RESIDUAL_IN_REQUEST_TARGET
+    for name, value in headers:
+        lname = name.lower()
+        if lname == "authorization":
+            decoded = _decode_basic_credential(value)
+            if decoded is not None:
+                if _PLACEHOLDER_RE.search(decoded) is not None:
+                    return _RESIDUAL_IN_BASIC_CREDENTIAL
+                continue
+            if _PLACEHOLDER_RE.search(value) is not None:
+                return _RESIDUAL_IN_AUTHORIZATION
+            continue
+        if _PLACEHOLDER_RE.search(value) is not None:
+            return _RESIDUAL_IN_HEADER
+    if _PLACEHOLDER_RE_BYTES.search(body) is not None:
+        return _RESIDUAL_IN_BODY
+    return None
 
 
 def _swap_header_value(name: str, value: str, swaps: list[tuple[str, str]]) -> str:
@@ -489,6 +665,44 @@ class SecretEgressProxy:
 
         fwd_headers = self._forward_headers(request.headers.raw_items(), host, swaps)
         swapped_body = _apply_swaps_bytes(body, swaps)
+
+        # FAIL LOUD on a substitution miss (eumemic/eumemic-ops#331). Anything
+        # still matching the placeholder shape after the swap is a placeholder
+        # this session's swap set could not exchange. Historically it rode out
+        # to the remote verbatim and came back as the upstream's ``401 Bad
+        # credentials`` — an upstream verdict on a credential the upstream
+        # never actually received, which is why a substitution miss was
+        # indistinguishable from a real auth failure. Refuse it here: no
+        # upstream connection is opened, so the literal placeholder is never
+        # transmitted, and the caller gets an error that NAMES the cause.
+        #
+        # The REQUEST TARGET (path + query) is scanned too even though it is
+        # deliberately never swapped. Excluding it from the scan while still
+        # forwarding it verbatim is a live transmission path: a credential
+        # carried in a query parameter (``?token=<placeholder>``,
+        # ``?access_token=…``) would go upstream literally — the exact leak the
+        # fence exists to stop, one field over. Scanning it makes the invariant
+        # whole: NOTHING placeholder-shaped reaches ``self._client.send``.
+        residual_region = _residual_placeholder_region(fwd_headers, swapped_body, target)
+        if residual_region is not None:
+            log.warning(
+                "secret_egress_proxy.placeholder_substitution_failed",
+                host=host,
+                # NOTHING request-derived is logged. The scan runs POST-swap,
+                # so its input contains real secrets, and a real secret with
+                # the placeholder shape makes a SUCCESSFUL swap look residual —
+                # logging the matched bytes (or any prefix of them) would then
+                # write the credential to the log. ``region`` is a constant
+                # from a closed vocabulary; ``swap_rule_count`` counts this
+                # session's rules, not request content. ``path`` is dropped
+                # too: it is sandbox-controlled and, per the request-target
+                # scan above, may itself be where the token sits.
+                region=residual_region,
+                swap_rule_count=len(swaps),
+            )
+            await self._send_substitution_failure(conn, writer)
+            return
+
         # The URL carries the request-target verbatim — the placeholder is
         # NEVER swapped in the path/query, only in headers and body.
         url = f"https://{_bracket(pinned)}:{_UPSTREAM_PORT}{target}"
@@ -619,6 +833,38 @@ class SecretEgressProxy:
         writer.write(_h11_send(conn, h11.EndOfMessage()))
         await writer.drain()
 
+    async def _send_substitution_failure(
+        self, conn: h11.Connection, writer: asyncio.StreamWriter
+    ) -> None:
+        """Refuse a request carrying an unexchangeable placeholder.
+
+        Distinguishable from every other outcome on this path by construction:
+        a dedicated status (``421``, never ``401``/``502``) AND a machine-
+        readable ``x-aios-egress-error: placeholder_substitution_failed``
+        header, so a caller can branch on the cause without parsing prose.
+        """
+        body = _PLACEHOLDER_SUBSTITUTION_FAILED_BODY
+        if conn.our_state is not h11.SEND_RESPONSE:
+            return
+        headers = [
+            (b"content-length", str(len(body)).encode()),
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (
+                _PLACEHOLDER_SUBSTITUTION_FAILED_HEADER.encode(),
+                _PLACEHOLDER_SUBSTITUTION_FAILED_CODE.encode(),
+            ),
+            (b"connection", b"close"),
+        ]
+        writer.write(
+            _h11_send(
+                conn,
+                h11.Response(status_code=_PLACEHOLDER_SUBSTITUTION_FAILED_STATUS, headers=headers),
+            )
+        )
+        writer.write(_h11_send(conn, h11.Data(data=body)))
+        writer.write(_h11_send(conn, h11.EndOfMessage()))
+        await writer.drain()
+
     async def _send_simple(
         self, conn: h11.Connection, writer: asyncio.StreamWriter, status: int, body: bytes
     ) -> None:
@@ -631,4 +877,15 @@ class SecretEgressProxy:
         await writer.drain()
 
 
-__all__ = ["SecretEgressProxy"]
+__all__ = [
+    "PLACEHOLDER_SUBSTITUTION_FAILED_CODE",
+    "PLACEHOLDER_SUBSTITUTION_FAILED_HEADER",
+    "PLACEHOLDER_SUBSTITUTION_FAILED_STATUS",
+    "SecretEgressProxy",
+]
+
+# Public aliases for the fence's wire contract, so callers/tests assert against
+# the module's exported names rather than private constants.
+PLACEHOLDER_SUBSTITUTION_FAILED_STATUS = _PLACEHOLDER_SUBSTITUTION_FAILED_STATUS
+PLACEHOLDER_SUBSTITUTION_FAILED_HEADER = _PLACEHOLDER_SUBSTITUTION_FAILED_HEADER
+PLACEHOLDER_SUBSTITUTION_FAILED_CODE = _PLACEHOLDER_SUBSTITUTION_FAILED_CODE

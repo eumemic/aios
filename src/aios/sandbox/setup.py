@@ -289,6 +289,56 @@ _RESOLVE_IPV4_FN = (
 )
 
 
+# KNOWN RESIDUAL — credential-host egress fails OPEN under Unrestricted
+# networking (eumemic/aios#2042). Documented here, deliberately NOT
+# half-mitigated here.
+#
+# The credential-host rules below are the nat-OUTPUT DNAT redirect, and they are
+# generated ONLY for RESOLVED (learned) addresses: the ``for ip in $(resolve_ipv4
+# <host>)`` loop installs one rule per address the sidecar's DNS query happened
+# to return. A rotating pool — api.github.com serves a ~60s-TTL set and returns
+# only a SUBSET per query — means that set is a SAMPLE, not the pool.
+#
+# Consequence, stated as the failure it is:
+#
+#   * LIMITED networking is closed. An unsampled address matches no DNAT and no
+#     per-host ACCEPT, so it falls through to the terminal ``-P OUTPUT DROP``.
+#     Nothing leaves.
+#   * UNRESTRICTED networking is OPEN. The filter policy stays ``ACCEPT``, so an
+#     unsampled address matches no DNAT and egresses DIRECTLY to the real
+#     upstream carrying the literal ``AIOS_SECRET_PLACEHOLDER_*`` — never
+#     reaching the secret-egress proxy, so neither the swap nor the #331
+#     fail-loud fence in ``secret_egress_proxy.py`` ever runs on it.
+#
+# Why nothing is done about it HERE. An earlier round of this PR added a
+# per-credential-host filter REJECT for the learned addresses and called it a
+# fence. It was withdrawn on review, and the reasoning is worth keeping because
+# it is the reason this block is a comment and not code: that rule is IP-keyed
+# exactly like the DNAT, so its coverage is exactly the same sample, and the
+# unsampled address — the ordinary case against a rotating pool, not an exotic
+# one — walks past it. It reads as a fence to the next person who greps for one
+# while leaving the hole open. A DOCUMENTED hole is safer than a DISGUISED one:
+# a reader who finds this comment knows the exposure is live, whereas a reader
+# who finds a REJECT rule reasonably concludes it is closed. More DNS probing
+# has the same defect one level down — it narrows the window and cannot close
+# it, so it would be mitigation theatre with a security-shaped name.
+#
+# The correct shape INVERTS the default for credential hosts: deny-by-default
+# with the learned set as an ALLOW-list, rather than allow-by-default with the
+# learned set as a fence. That cannot be decided at the IP layer for an address
+# we have never seen; it needs name-based interception (a worker-controlled
+# resolver answering credential hosts with the proxy address, or an in-netns
+# SNI-aware TPROXY on :443). eumemic/aios#2042 carries the four options
+# considered and why each is a larger change than this PR.
+#
+# The residual is pinned BEHAVIOURALLY, not only in prose:
+# ``TestCredentialHostEgressVerdict`` (tests/unit/test_networking.py) runs the
+# real generated script against recording ``iptables``/``getent`` shims and
+# replays the ruleset against a packet — asserting Limited BLOCKS an unsampled
+# address and that Unrestricted still routes it DIRECT. That assertion failing
+# is the acceptance signal for #2042, not a regression.
+
+
 def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> list[str]:
     """The nat-OUTPUT DNAT block: credential-host :443 → secret-egress proxy.
 
