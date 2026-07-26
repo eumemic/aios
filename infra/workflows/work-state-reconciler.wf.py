@@ -242,10 +242,7 @@ async def _read_items(repos):
             for row in body:
                 raw_labels = _check_issue_row(repo, row)
                 labels = sorted(
-                    [
-                        x.get("name", "") if isinstance(x, dict) else str(x)
-                        for x in raw_labels
-                    ]
+                    [x.get("name", "") if isinstance(x, dict) else str(x) for x in raw_labels]
                 )
                 # C5: unlabelled items are KEPT. LAGGING is defined by the ABSENCE of an
                 # in-flight assertion, so filtering enumeration on presence-of-some-label
