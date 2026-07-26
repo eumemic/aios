@@ -491,6 +491,15 @@ jobs:
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
+            # The first attempt can leave testcontainer Postgres and sandbox
+            # containers alive after an abrupt fixture failure.  Retrying in
+            # that dirty daemon reproduces port/name/resource conflicts rather
+            # than the failed test, so reset this job's dedicated Docker daemon
+            # before pytest recreates its fixtures.
+            containers=$(docker ps -aq)
+            if [[ -n "$containers" ]]; then
+              docker rm -f $containers
+            fi
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
