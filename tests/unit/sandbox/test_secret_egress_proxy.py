@@ -16,6 +16,7 @@ import asyncio
 import base64
 import socket
 import ssl
+import struct
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import cast
@@ -71,6 +72,23 @@ def _fixed_resolver(ip: str | None) -> Callable[[str, int], Awaitable[str | None
         return ip
 
     return _resolve
+
+
+def test_original_ipv4_parses_linux_sockaddr_in() -> None:
+    """SO_ORIGINAL_DST's family field uses native, not network, byte order."""
+    raw = struct.pack("=H", socket.AF_INET) + struct.pack("!H4s", 443, socket.inet_aton(PINNED_IP))
+
+    class _Socket:
+        def getsockopt(self, level: int, option: int, size: int) -> bytes:
+            assert (level, option, size) == (socket.SOL_IP, sep._SO_ORIGINAL_DST, 16)
+            return raw.ljust(size, b"\0")
+
+    class _Writer:
+        def get_extra_info(self, name: str) -> object | None:
+            assert name == "socket"
+            return _Socket()
+
+    assert sep._original_ipv4(cast(asyncio.StreamWriter, _Writer())) == PINNED_IP
 
 
 @pytest.fixture

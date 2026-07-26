@@ -110,7 +110,11 @@ def _original_ipv4(writer: asyncio.StreamWriter) -> str | None:
         return None
     try:
         raw = sock.getsockopt(socket.SOL_IP, _SO_ORIGINAL_DST, 16)
-        family, _port, address = struct.unpack_from("!HH4s", raw)
+        # ``sockaddr_in.sin_family`` is host-endian while the port and address
+        # are network-endian.  Parsing the whole structure as network-endian
+        # turns AF_INET (02 00 on Linux) into 512 and rejects every connection.
+        family = struct.unpack_from("=H", raw)[0]
+        address = raw[4:8]
     except (OSError, TypeError, ValueError, struct.error):
         return None
     if family != socket.AF_INET:
