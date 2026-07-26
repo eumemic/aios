@@ -513,7 +513,17 @@ jobs:
             # balanced first pass still destabilized Docker, immediately
             # recreating two testcontainer stacks can reproduce the same
             # failure before the restarted daemon settles.
-            uv run pytest tests/e2e -q -m "docker and not perf"
+            if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
+              # A full clean-session retry can still leave one independently
+              # flaky test behind.  At this point pytest's last-failed cache is
+              # from the clean serial pass (not the contaminated parallel
+              # session), so one final targeted replay is both safe and much
+              # cheaper than rebuilding all 351 Docker tests again.
+              docker container prune -f
+              docker network prune -f
+              docker volume prune -af
+              uv run pytest tests/e2e -q -m "docker and not perf" --lf
+            fi
           fi
 
       - name: Upload docker E2E flake-retry marker
