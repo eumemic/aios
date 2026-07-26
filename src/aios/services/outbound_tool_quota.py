@@ -74,7 +74,7 @@ _PURGE_SQL = """
     DELETE FROM outbound_tool_reservations
     WHERE session_id = $1
       AND verb = $2
-      AND created_at <= now() - make_interval(secs => $3::bigint)
+      AND created_at <= now() - make_interval(secs => $3::double precision)
 """
 
 _COUNT_SQL = """
@@ -82,7 +82,7 @@ _COUNT_SQL = """
     FROM outbound_tool_reservations
     WHERE session_id = $1
       AND verb = $2
-      AND created_at > now() - make_interval(secs => $3::bigint)
+      AND created_at > now() - make_interval(secs => $3::double precision)
 """
 
 _INSERT_SQL = """
