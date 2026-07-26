@@ -322,6 +322,21 @@ class TestBuildIptablesScript:
         )
         assert "--dport 80 -j DNAT" not in script
 
+    def test_dns_dnat_enables_route_localnet_first(self) -> None:
+        """Docker DNS is 127.0.0.11, so DNAT away from loopback requires the
+        netns route_localnet switch or the kernel drops the rewritten packet."""
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        enable = "printf '1\\n' > /proc/sys/net/ipv4/conf/all/route_localnet"
+        dns_dnat = '"$IPT" -t nat -I OUTPUT -p udp --dport 53'
+        assert enable in script
+        assert script.index(enable) < script.index(dns_dnat)
+        assert "could not enable route_localnet" in script
+
 
 # ── IPv6 belt-and-suspenders egress DROP (#1207) ──────────────────────────────
 
@@ -1471,6 +1486,11 @@ class TestCredentialHostEgressVerdict:
             os.chmod(p, 0o755)
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + env["PATH"]
+        # The recording harness has no netns and its /proc is read-only. Point
+        # the generated route_localnet write at a scratch file; the real Docker
+        # smoke path exercises the namespaced kernel setting.
+        route_localnet = os.path.join(bindir, "route_localnet")
+        script = script.replace("/proc/sys/net/ipv4/conf/all/route_localnet", route_localnet)
         proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
         assert proc.returncode == 0, f"apply script failed: {proc.stderr}"
         recorded: list[tuple[str, list[str]]] = []
