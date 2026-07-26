@@ -466,10 +466,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Run serially. Each xdist worker owns a testcontainer Postgres plus
-        # several sandbox/operator containers; even two concurrent stacks have
-        # repeatedly exhausted dockerd/containerd on hosted runners and left a
-        # later retry unable to recover reliably.
+        # Keep module-scoped Docker harnesses together and isolate test files
+        # between two worker-local Postgres stacks. A single serial session lets
+        # a failed Docker fixture contaminate every later file, while four stacks
+        # oversubscribe dockerd on hosted runners.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -481,12 +481,11 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Do not restart dockerd between passes: that kills the session-scoped
-        # testcontainer Postgres and turns a recoverable sandbox flake into a
-        # deterministic retry failure. Retry only pytest's recorded failures in
-        # the still-live test environment.
+        # Do not restart dockerd between passes: that kills each worker's
+        # session-scoped testcontainer Postgres. Retry pytest's recorded failures
+        # in the still-live worker environment.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
