@@ -232,19 +232,38 @@ class CredentialDnsResolver:
             raise CredentialDnsError("credential DNS resolver has no IPv4 upstream")
 
         loop = asyncio.get_running_loop()
+        udp_sock: socket.socket | None = None
+        tcp_sock: socket.socket | None = None
         try:
+            # Asking UDP for an ephemeral port and subsequently binding TCP to
+            # that number races any concurrent TCP bind (and used to make the
+            # full unit suite intermittently fail with EADDRINUSE). Reserve the
+            # TCP port first, then reserve the same number in UDP before handing
+            # either socket to asyncio. TCP and UDP have independent port
+            # spaces, so both reservations can coexist.
+            tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_sock.setblocking(False)
+            tcp_sock.bind(("0.0.0.0", 0))
+            port = tcp_sock.getsockname()[1]
+
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_sock.setblocking(False)
-            udp_sock.bind(("0.0.0.0", 0))
-            port = udp_sock.getsockname()[1]
+            udp_sock.bind(("0.0.0.0", port))
+
             transport, protocol = await loop.create_datagram_endpoint(
                 lambda: _UdpProtocol(self), sock=udp_sock
             )
+            udp_sock = None  # ownership transferred to the transport
             self._udp_transport = transport
             self._udp_protocol = protocol
-            self._tcp_server = await asyncio.start_server(self._handle_tcp, "0.0.0.0", port)
+            self._tcp_server = await asyncio.start_server(self._handle_tcp, sock=tcp_sock)
+            tcp_sock = None  # ownership transferred to the server
             self._port = port
         except BaseException as exc:
+            if udp_sock is not None:
+                udp_sock.close()
+            if tcp_sock is not None:
+                tcp_sock.close()
             await self.stop()
             raise CredentialDnsError("credential DNS resolver failed to bind") from exc
         log.info(
