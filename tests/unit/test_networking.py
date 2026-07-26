@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
+import struct
 import subprocess
 import tempfile
 from collections.abc import Sequence
@@ -25,6 +27,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
 )
 from aios.sandbox.backends.docker import DockerBackend
+from aios.sandbox.credential_dns import CREDENTIAL_SENTINEL_IP, CredentialDnsResolver
 from aios.sandbox.setup import (
     apply_network_lockdown,
     apply_secret_egress_dnat,
@@ -143,6 +146,7 @@ class TestBuildIptablesScript:
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert '"$IPT" -t nat -F OUTPUT' in script
         # The nat flush precedes the DNAT rules, so re-running the script
@@ -187,6 +191,7 @@ class TestBuildIptablesScript:
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         for line in script.splitlines():
             stripped = line.strip()
@@ -199,23 +204,70 @@ class TestBuildIptablesScript:
 
     # ── nat-table DNAT to the secret-egress proxy (#878) ──────────────────────
 
-    def test_dnat_rule_emitted_per_credential_host_on_443(self) -> None:
+    def test_sentinel_dnat_rule_emitted_on_443(self) -> None:
+        """ONE credential DNAT, keyed on the sentinel — not one per resolved IP.
+
+        Post-#2042 the credential hosts no longer appear in a resolution loop
+        at all: every credential name resolves to
+        :data:`CREDENTIAL_SENTINEL_IP` inside the sandbox, so a single rule
+        covers all of them completely.
+        """
         script = build_iptables_script(
             allowed_hosts=set(),
             dnat_hosts=["api.secret.com", "data.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert '"$IPT" -t nat -A OUTPUT' in script
-        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "resolve_ipv4 api.secret.com" in script
-        assert "resolve_ipv4 data.secret.com" in script
+        assert (
+            f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 "
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
+        # No credential host is resolved to generate rules any more — that
+        # sampling IS the #2042 defect.
+        assert "resolve_ipv4 api.secret.com" not in script
+        assert "resolve_ipv4 data.secret.com" not in script
+
+    def test_dns_intercepted_to_worker_resolver(self) -> None:
+        """All sandbox :53 is redirected to this session's resolver, inserted at
+        the TOP of nat OUTPUT so no in-netns resolver answers a credential name
+        first (#2042)."""
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        for proto in ("udp", "tcp"):
+            assert (
+                f'"$IPT" -t nat -I OUTPUT -p {proto} --dport 53 -j DNAT '
+                '--to-destination "$PROXY_IP:53535"'
+            ) in script
+
+    def test_proxy_alias_miss_is_a_hard_failure(self) -> None:
+        """A ``$PROXY_IP`` miss must abort the apply, not skip the block.
+
+        The old code guarded the whole nat section behind ``if [ -n
+        "$PROXY_IP" ]``, so an alias miss silently produced a credentialed
+        sandbox with NO interception and every request went to the real
+        upstream carrying the literal placeholder. Fail closed instead.
+        """
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        assert 'if [ -z "$PROXY_IP" ]; then' in script
+        assert "  exit 1" in script
 
     def test_dnat_not_redirect(self) -> None:
         script = build_iptables_script(
             allowed_hosts=set(),
             dnat_hosts=["api.secret.com", "data.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "DNAT" in script
         assert "--to-port" not in script
@@ -236,6 +288,7 @@ class TestBuildIptablesScript:
             allowed_hosts=set(),
             dnat_hosts=[],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "-t nat -A OUTPUT" not in script
         assert "DNAT" not in script
@@ -251,17 +304,21 @@ class TestBuildIptablesScript:
             allowed_hosts={"plain.example.com"},
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert '"$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
         assert "resolve_ipv4 plain.example.com" in script
-        # Only the credential host is DNAT'd; the plain allowed host is not.
-        assert script.count("-j DNAT --to-destination") == 1
+        # The plain allowed host is never DNAT'd. Three DNATs are expected now
+        # (#2042): udp/tcp :53 to the resolver + the single sentinel :443.
+        assert script.count("-j DNAT --to-destination") == 3
+        assert '-d "$ip" -p tcp --dport 443 -j DNAT' not in script
 
     def test_dnat_only_on_443_not_80(self) -> None:
         script = build_iptables_script(
             allowed_hosts=set(),
             dnat_hosts=["api.secret.com", "data.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "--dport 80 -j DNAT" not in script
 
@@ -328,6 +385,7 @@ class TestIPv6EgressLockdown:
             allowed_hosts={"api.example.com"},
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         for line in script.splitlines():
             stripped = line.strip()
@@ -346,6 +404,7 @@ class TestIPv6EgressLockdown:
             extra_host_ports=[("aios-worker", 8765)],
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert '"$IP6T" -P OUTPUT DROP' in script
 
@@ -354,7 +413,9 @@ class TestIPv6EgressLockdown:
         must NOT install a v6 DROP (which would deny v6 egress in an otherwise
         open box)."""
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "ip6tables" not in script
         assert "-P OUTPUT DROP" not in script
@@ -387,9 +448,12 @@ class TestIPv4OnlyResolution:
                 extra_host_ports=[("aios-worker", 8765)],
                 dnat_hosts=["api.secret.com"],
                 dnat_target=("aios-worker", 49152),
+                dns_port=53535,
             ),
             "dnat_only": build_secret_egress_dnat_script(
-                dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+                dns_port=53535,
             ),
         }
 
@@ -424,22 +488,29 @@ class TestIPv4OnlyResolution:
         )
         assert "for ip in $(resolve_ipv4 aios-worker); do" in script
 
-    def test_dnat_loop_and_proxy_alias_use_helper(self) -> None:
+    def test_proxy_alias_uses_helper_and_credential_hosts_are_not_resolved(self) -> None:
+        """The proxy ALIAS is still resolved (iptables needs an IP for
+        ``--to-destination``); the credential HOSTS no longer are (#2042)."""
         script = build_iptables_script(
             allowed_hosts=set(),
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "PROXY_IP=$(resolve_ipv4 aios-worker | head -n1)" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        assert "resolve_ipv4 api.secret.com" not in script
 
     def test_dnat_only_script_defines_and_uses_helper(self) -> None:
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "resolve_ipv4()" in script
         assert "getent ahostsv4" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        # Only the proxy alias is resolved; the credential host is not.
+        assert "PROXY_IP=$(resolve_ipv4 aios-worker | head -n1)" in script
+        assert "resolve_ipv4 api.secret.com" not in script
 
     def test_helper_defined_before_first_use(self) -> None:
         """The helper definition must precede every call so the script runs
@@ -464,21 +535,50 @@ class TestBuildSecretEgressDnatScript:
     """The Unrestricted DNAT-only script installs the credential-host → proxy
     swap chokepoint while leaving general egress open (no ``-P OUTPUT DROP``)."""
 
-    def test_emits_nat_dnat_rule(self) -> None:
+    def test_emits_sentinel_dnat_and_dns_interception(self) -> None:
+        """The Unrestricted chokepoint: :53 to the resolver, sentinel :443 to
+        the proxy — and NO per-credential-host resolution (#2042)."""
         script = build_secret_egress_dnat_script(
             dnat_hosts=["api.secret.com", "data.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
-        assert '"$IPT" -t nat -A OUTPUT' in script
-        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "resolve_ipv4 api.secret.com" in script
-        assert "resolve_ipv4 data.secret.com" in script
+        assert (
+            f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in script
+        for proto in ("udp", "tcp"):
+            assert (
+                f'"$IPT" -t nat -I OUTPUT -p {proto} --dport 53 -j DNAT '
+                '--to-destination "$PROXY_IP:53535"'
+            ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
+        assert "resolve_ipv4 api.secret.com" not in script
+        assert "resolve_ipv4 data.secret.com" not in script
+
+    def test_sentinel_reject_is_unconditional(self) -> None:
+        """The fail-closed filter REJECT for the sentinel is emitted flat — not
+        inside a resolution loop — so its coverage cannot depend on what DNS
+        returned (the #2042 defect in its previous, IP-keyed form)."""
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        reject = (
+            f'"$IPT" -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -j REJECT '
+            "--reject-with icmp-port-unreachable"
+        )
+        assert reject in script
+        # Not nested in any `for ip in $(...)` loop.
+        assert "for ip in" not in script
 
     def test_no_drop_policy(self) -> None:
         # The whole point: general egress stays open under Unrestricted.
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "-P OUTPUT DROP" not in script
 
@@ -486,7 +586,9 @@ class TestBuildSecretEgressDnatScript:
         # No per-host filter ACCEPTs and no loopback/DNS/established ACCEPTs —
         # the filter policy is left at its default ACCEPT (no lockdown).
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "-A OUTPUT -o lo -j ACCEPT" not in script
         assert "--dport 53 -j ACCEPT" not in script
@@ -495,7 +597,9 @@ class TestBuildSecretEgressDnatScript:
 
     def test_flushes_nat_output_only_not_filter(self) -> None:
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert '"$IPT" -t nat -F OUTPUT' in script
         # The filter OUTPUT chain is deliberately NOT flushed (would disturb a
@@ -504,7 +608,9 @@ class TestBuildSecretEgressDnatScript:
 
     def test_uses_selected_backend_no_bare_iptables(self) -> None:
         script = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         assert "command -v iptables-legacy" in script
         for line in script.splitlines():
@@ -520,12 +626,15 @@ class TestBuildSecretEgressDnatScript:
         # byte-identical to the Limited lockdown's — proven here by extracting
         # the DNAT line from each and comparing.
         dnat_only = build_secret_egress_dnat_script(
-            dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
         lockdown = build_iptables_script(
             allowed_hosts=set(),
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
 
         def _dnat_line(script: str) -> str:
@@ -549,15 +658,22 @@ class TestBuildLockdownVerifyScript:
         assert "-t nat" not in script
         assert "DNAT" not in script
 
-    def test_asserts_nat_dnat_coverage_when_dnat_hosts_present(self) -> None:
-        """#984: a credential host whose getent returns zero IPs emits no DNAT
-        rule and no error — apply exits 0 and a filter-only verify passes,
-        silently running the session without DNAT. When dnat_hosts is non-empty
-        the verify must ALSO assert the nat table carries a DNAT OUTPUT rule, so
-        the zero-IP omission fails the verify (and thus the provision) instead of
-        passing silently."""
+    def test_asserts_every_rule_of_the_name_based_chokepoint(self) -> None:
+        """#984 + #2042: the read-back must prove the WHOLE chokepoint landed.
+
+        Asserting only that "some ``-j DNAT`` exists" (the pre-#2042 check)
+        passes on a half-installed ruleset — DNS intercepted but the sentinel
+        unrouted, or the reverse — i.e. a green verify over unprotected
+        credential egress. All four rules are asserted individually.
+        """
         script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
+        assert (
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+        ) in script
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'" in script
+        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'" in script
+        assert f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'" in script
         # The filter-table DROP assertion is still present.
         assert "OUTPUT DROP" in script
 
@@ -620,7 +736,10 @@ class TestBuildLockdownVerifyScript:
         script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
         assert "OUTPUT DROP" not in script
         assert "IP6T" not in script
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in script
+        assert (
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+        ) in script
 
     def test_assert_drop_true_is_default(self) -> None:
         # Backward-compat: the Limited callers pass no assert_drop and must keep
@@ -958,15 +1077,23 @@ class TestApplyNetworkLockdown:
             extra_host_ports=[("aios-worker", 49152)],
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
 
         apply_script, verify_script = self._sidecar_scripts(backend)
-        assert '"$IPT" -t nat -A OUTPUT' in apply_script
-        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "resolve_ipv4 api.secret.com" in apply_script
-        # #984: with dnat_hosts present, the read-back verify also asserts the
-        # nat table carries a DNAT rule — a zero-IP host fails closed.
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
+        assert (
+            f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in apply_script
+        assert '--dport 53 -j DNAT --to-destination "$PROXY_IP:53535"' in apply_script
+        # No credential host is resolved to build the rules any more (#2042).
+        assert "resolve_ipv4 api.secret.com" not in apply_script
+        # #984 + #2042: with dnat_hosts present the read-back verify asserts
+        # every rule of the chokepoint — a partial install fails closed.
+        assert (
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+        ) in verify_script
 
     @pytest.mark.asyncio
     async def test_verify_omits_nat_assertion_without_dnat_hosts(self) -> None:
@@ -1133,15 +1260,25 @@ class TestApplySecretEgressDnat:
             handle,
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
 
         apply_script, verify_script = self._sidecar_scripts(backend)
-        # DNAT installed, but general egress stays open (no DROP, no per-host ACCEPT).
-        assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "resolve_ipv4 api.secret.com" in apply_script
+        # Chokepoint installed, but general egress stays open (no DROP, no
+        # per-host ACCEPT). Interception is keyed on the sentinel, and no
+        # credential host is resolved to build it (#2042).
+        assert (
+            f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 "
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in apply_script
+        assert '--dport 53 -j DNAT --to-destination "$PROXY_IP:53535"' in apply_script
+        assert "resolve_ipv4 api.secret.com" not in apply_script
         assert "-P OUTPUT DROP" not in apply_script
-        # The verify asserts nat DNAT coverage but NOT a DROP policy.
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
+        # The verify asserts the chokepoint landed but NOT a DROP policy.
+        assert (
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+        ) in verify_script
         assert "OUTPUT DROP" not in verify_script
 
     @pytest.mark.asyncio
@@ -1152,7 +1289,11 @@ class TestApplySecretEgressDnat:
         handle = make_handle()
 
         await apply_secret_egress_dnat(
-            backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )
 
         apply_script = self._sidecar_scripts(backend)[0]
@@ -1168,6 +1309,7 @@ class TestApplySecretEgressDnat:
             handle,
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
+            dns_port=53535,
             runtime="runsc",
         )
 
@@ -1190,7 +1332,11 @@ class TestApplySecretEgressDnat:
 
         with pytest.raises(SandboxBackendError, match="secret-egress DNAT failed"):
             await apply_secret_egress_dnat(
-                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+                backend,
+                handle,
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+                dns_port=53535,
             )
 
     @pytest.mark.asyncio
@@ -1205,7 +1351,11 @@ class TestApplySecretEgressDnat:
 
         with pytest.raises(SandboxBackendError, match="secret-egress DNAT verification failed"):
             await apply_secret_egress_dnat(
-                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+                backend,
+                handle,
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+                dns_port=53535,
             )
 
     @pytest.mark.asyncio
@@ -1218,7 +1368,11 @@ class TestApplySecretEgressDnat:
 
         with pytest.raises(SandboxBackendError, match="daemon hiccup"):
             await apply_secret_egress_dnat(
-                backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+                backend,
+                handle,
+                dnat_hosts=["api.secret.com"],
+                dnat_target=("aios-worker", 49152),
+                dns_port=53535,
             )
 
     @pytest.mark.asyncio
@@ -1227,7 +1381,11 @@ class TestApplySecretEgressDnat:
         handle = make_handle()
 
         await apply_secret_egress_dnat(
-            backend, handle, dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
         )  # must not raise
 
 
@@ -1236,7 +1394,7 @@ class TestApplySecretEgressDnat:
 
 
 class TestCredentialHostEgressVerdict:
-    """Evaluate the GENERATED ruleset against a packet.
+    """Evaluate the GENERATED ruleset against a packet the sandbox would send.
 
     Every other test in this file asserts *rule syntax* — that some string is
     present in the script. That is exactly why the Unrestricted fail-open in
@@ -1244,12 +1402,14 @@ class TestCredentialHostEgressVerdict:
     assertions passed, and nobody asked what happens to a packet addressed to
     an IP the sampler never returned. This class asks that question.
 
-    Method: run the real generated script under ``bash`` against fake
-    ``iptables``/``getent`` shims that RECORD the rules instead of installing
-    them, then replay the recorded ruleset against a packet the way netfilter
-    would — nat OUTPUT first (a DNAT match rewrites the destination), then
-    filter OUTPUT, first-match-wins, falling through to the chain policy. The
-    verdict is one of:
+    Method, post-#2042, is end-to-end in the one way that matters: the sandbox
+    reaches a credential host **by name**, so the harness RESOLVES THE NAME THE
+    WAY THE SANDBOX WOULD — through the real
+    :class:`~aios.sandbox.credential_dns.CredentialDnsResolver` that the netns
+    ``:53`` DNAT points at — and only then replays the resulting packet against
+    the recorded ruleset the way netfilter would: nat OUTPUT first (a DNAT match
+    rewrites the destination), then filter OUTPUT, first-match-wins, falling
+    through to the chain policy. Verdicts:
 
     * ``proxied``  — rewritten to the secret-egress proxy (safe: the swap fires),
     * ``blocked``  — REJECTed or DROPped (safe: nothing leaves),
@@ -1259,7 +1419,9 @@ class TestCredentialHostEgressVerdict:
     ``SAMPLED_IP`` is an address the in-sandbox resolver returned when the
     rules were generated; ``UNSAMPLED_IP`` is a live pool member it never
     returned (a rotating DNS pool serves only a subset per query, so this is
-    the ordinary case, not an exotic one).
+    the ordinary case, not an exotic one). The whole point of #2042 is that
+    this distinction no longer exists downstream of resolution: NEITHER address
+    is what the name resolves to inside the sandbox any more.
     """
 
     HOST = "api.secret.com"
@@ -1267,13 +1429,18 @@ class TestCredentialHostEgressVerdict:
     UNSAMPLED_IP = "140.82.113.22"
     PROXY_IP = "10.0.0.9"
     PROXY_PORT = 49152
+    DNS_PORT = 53535
+
+    # ── harness ───────────────────────────────────────────────────────────────
 
     def _record_rules(self, script: str) -> list[tuple[str, list[str]]]:
         """Run the generated script with recording shims; return (table, argv)."""
         bindir = tempfile.mkdtemp()
         log = os.path.join(bindir, "rules.log")
         # getent ahostsv4 <host> answers with the SAMPLED address only — the
-        # subset the resolver happened to return at rule-generation time.
+        # subset the resolver happened to return at rule-generation time. Post
+        # #2042 the credential host is not looked up at all; the shim still
+        # answers so any regression that reintroduces sampling is visible.
         getent = (
             "#!/usr/bin/env bash\n"
             f'if [ "$2" = "{self.HOST}" ]; then echo "{self.SAMPLED_IP} STREAM {self.HOST}"; fi\n'
@@ -1314,6 +1481,48 @@ class TestCredentialHostEgressVerdict:
                     is_nat = "-t" in argv and argv[argv.index("-t") + 1] == "nat"
                     recorded.append(("nat" if is_nat else "filter", argv))
         return recorded
+
+    def _resolve_in_sandbox(self, host: str, *, pool: Sequence[str]) -> str | None:
+        """Resolve ``host`` the way a process INSIDE the sandbox would.
+
+        All sandbox ``:53`` is DNATed to the session's
+        :class:`CredentialDnsResolver`, so this drives the real resolver with a
+        real wire-format query. ``pool`` is what the upstream would answer for a
+        NON-credential name — including addresses no sampler ever returned; if
+        the resolver ever forwarded a credential name, the sandbox would learn
+        one of these and the fix would be a fiction.
+
+        Returns the dotted-quad the sandbox gets back, or ``None`` for NODATA.
+        """
+        query = (
+            struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+            + b"".join(bytes([len(x)]) + x.encode() for x in host.split("."))
+            + b"\x00"
+            + struct.pack("!HH", 1, 1)  # A / IN
+        )
+
+        async def _drive() -> bytes:
+            resolver = CredentialDnsResolver([self.HOST], upstream=None)
+
+            # Stub the forward path: a name the resolver does NOT own is
+            # answered from the live rotating pool.
+            async def _forward(q: bytes) -> bytes:
+                return (
+                    struct.pack("!HHHHHH", 0x1234, 0x8180, 1, 1, 0, 0)
+                    + q[12:]
+                    + struct.pack("!HHHIH", 0xC00C, 1, 1, 60, 4)
+                    + socket.inet_aton(pool[0])
+                )
+
+            resolver._forward = _forward  # type: ignore[assignment]
+            return await resolver.answer(query)
+
+        response = asyncio.run(_drive())
+        (ancount,) = struct.unpack_from("!H", response, 6)
+        if ancount == 0:
+            return None
+        rdata_start = len(response) - 4
+        return socket.inet_ntoa(response[rdata_start:])
 
     def _verdict(self, rules: list[tuple[str, list[str]]], dest_ip: str, dport: int = 443) -> str:
         """Replay the recorded ruleset against one packet, netfilter-style."""
@@ -1360,101 +1569,166 @@ class TestCredentialHostEgressVerdict:
                 policy = "DROP"
         return "direct" if policy == "ACCEPT" else "blocked"
 
-    # ── the sampled address behaves, in both modes ────────────────────────────
-
-    def test_limited_sampled_address_is_proxied(self) -> None:
-        rules = self._record_rules(
+    def _limited_rules(self) -> list[tuple[str, list[str]]]:
+        return self._record_rules(
             build_iptables_script(
                 allowed_hosts={self.HOST},
                 dnat_hosts=[self.HOST],
                 dnat_target=("aios-worker", self.PROXY_PORT),
+                dns_port=self.DNS_PORT,
             )
         )
-        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
 
-    def test_unrestricted_sampled_address_is_proxied(self) -> None:
-        rules = self._record_rules(
+    def _unrestricted_rules(self) -> list[tuple[str, list[str]]]:
+        return self._record_rules(
             build_secret_egress_dnat_script(
-                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
-            )
-        )
-        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
-
-    # ── the unsampled address: the whole point ────────────────────────────────
-
-    def test_limited_unsampled_address_never_egresses(self) -> None:
-        """Limited networking is genuinely closed: an address the sampler never
-        saw carries no DNAT and no ACCEPT, so it falls through to the terminal
-        ``-P OUTPUT DROP``. No placeholder leaves the netns."""
-        rules = self._record_rules(
-            build_iptables_script(
-                allowed_hosts={self.HOST},
                 dnat_hosts=[self.HOST],
                 dnat_target=("aios-worker", self.PROXY_PORT),
+                dns_port=self.DNS_PORT,
             )
         )
-        assert self._verdict(rules, self.UNSAMPLED_IP) == "blocked"
 
-    def test_unrestricted_unsampled_address_still_egresses_directly(self) -> None:
-        """KNOWN RESIDUAL — eumemic/aios#2042. This asserts the BUG, on purpose.
+    # ── resolution: the name no longer yields ANY real address ────────────────
 
-        Under Unrestricted the filter policy stays ACCEPT and BOTH the DNAT and
-        the REJECT fence are generated only for LEARNED addresses. An address
-        that never appeared in a DNS sample matches neither, so it leaves via
-        the default-ACCEPT policy carrying the literal placeholder. That is a
-        fail-open, it is not fixed in this PR, and the fix (deny-by-default for
-        credential hosts, with the learned set as an ALLOW-list) needs
-        name-based interception — tracked in #2042.
+    def test_credential_host_resolves_only_to_the_sentinel(self) -> None:
+        """Inside the sandbox the credential name resolves to the sentinel — no
+        matter what the live pool holds, sampled or not (#2042)."""
+        got = self._resolve_in_sandbox(self.HOST, pool=[self.UNSAMPLED_IP, self.SAMPLED_IP])
+        assert got == CREDENTIAL_SENTINEL_IP
 
-        Pinned as a failing-safety expectation rather than left undiscovered:
-        when #2042 lands, this assertion flips to ``blocked``/``proxied`` and
-        the flip is the acceptance signal. Until then nobody can believe the
-        Unrestricted path is closed, because the test says it isn't.
+    def test_non_credential_host_resolution_is_untouched(self) -> None:
+        """Ordinary names still resolve normally — the resolver forwards them
+        verbatim, so this is interception, not a general DNS blackhole."""
+        got = self._resolve_in_sandbox("plain.example.com", pool=[self.UNSAMPLED_IP])
+        assert got == self.UNSAMPLED_IP
+
+    def test_aaaa_and_https_records_cannot_smuggle_a_real_address(self) -> None:
+        """``AAAA``/``HTTPS`` for a credential host are NODATA.
+
+        An ``AAAA``, or the ``ipv4hint`` in an ``HTTPS``/``SVCB`` record, would
+        hand the sandbox a real pool address behind the resolver's back — an
+        IP-keyed hole reopened through a different record type.
         """
-        rules = self._record_rules(
-            build_secret_egress_dnat_script(
-                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
+
+        async def _ask(qtype: int) -> bytes:
+            resolver = CredentialDnsResolver([self.HOST], upstream=None)
+            query = (
+                struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+                + b"".join(bytes([len(x)]) + x.encode() for x in self.HOST.split("."))
+                + b"\x00"
+                + struct.pack("!HH", qtype, 1)
             )
+            return await resolver.answer(query)
+
+        for qtype in (28, 65, 64):  # AAAA, HTTPS, SVCB
+            response = asyncio.run(_ask(qtype))
+            (ancount,) = struct.unpack_from("!H", response, 6)
+            assert ancount == 0, f"qtype {qtype} returned an answer record"
+            assert struct.unpack_from("!H", response, 2)[0] & 0x000F == 0  # NOERROR
+
+    def test_query_name_case_cannot_evade_the_match(self) -> None:
+        """DNS 0x20 case randomization must not slip a credential host past."""
+        got = self._resolve_in_sandbox("API.SeCrEt.CoM", pool=[self.UNSAMPLED_IP])
+        assert got == CREDENTIAL_SENTINEL_IP
+
+    # ── the verdict: what actually happens to the packet ──────────────────────
+
+    def test_limited_credential_host_is_proxied(self) -> None:
+        rules = self._limited_rules()
+        dest = self._resolve_in_sandbox(self.HOST, pool=[self.UNSAMPLED_IP])
+        assert dest is not None
+        assert self._verdict(rules, dest) == "proxied"
+
+    def test_unrestricted_credential_host_is_proxied(self) -> None:
+        rules = self._unrestricted_rules()
+        dest = self._resolve_in_sandbox(self.HOST, pool=[self.UNSAMPLED_IP])
+        assert dest is not None
+        assert self._verdict(rules, dest) == "proxied"
+
+    # ── the unsampled address: the whole point of #2042 ───────────────────────
+
+    def test_unrestricted_unsampled_address_is_proxied(self) -> None:
+        """FLIPPED by #2042 — this used to assert the BUG on purpose.
+
+        Before: under Unrestricted the filter policy stayed ACCEPT and both the
+        DNAT and the fence were generated only for LEARNED addresses, so an
+        address that never appeared in a DNS sample matched nothing and left
+        via the default-ACCEPT policy carrying the literal placeholder. The
+        old assertion was ``verdict == "direct"``, pinned as a deliberately
+        failing-safety expectation and named as this issue's acceptance signal.
+
+        After: the sandbox reaches the credential host by NAME, that name
+        resolves ONLY to the sentinel, and the sentinel's only route out is the
+        DNAT to the secret-egress proxy. Here the upstream pool contains ONLY
+        the address no sampler ever returned — the case that used to fail open —
+        and the verdict is ``proxied``.
+        """
+        rules = self._unrestricted_rules()
+        dest = self._resolve_in_sandbox(self.HOST, pool=[self.UNSAMPLED_IP])
+        assert dest == CREDENTIAL_SENTINEL_IP, (
+            "the sandbox learned a real pool address for a credential host"
         )
-        verdict = self._verdict(rules, self.UNSAMPLED_IP)
-        assert verdict == "direct", (
-            "expected the KNOWN #2042 residual; a different verdict means the "
-            "fail-open was closed — delete this test and update the PR/issue"
+        assert self._verdict(rules, dest) == "proxied", (
+            "an address no sampler ever saw must still be proxied (#2042)"
         )
 
-    def test_credential_host_rules_only_cover_what_the_sampler_saw(self) -> None:
-        """The property behind #2042, stated directly: the credential-host rules
-        are IP-keyed, so their coverage is exactly the SAMPLED SET — not the
-        host. This is why no IP-keyed rule can close the hole, and why this PR
-        adds none: a rule that covers only the addresses we already learned
-        would read as a fence to the next reader while the unsampled address —
-        the ordinary case against a rotating pool — walks straight past it."""
-        rules = self._record_rules(
-            build_secret_egress_dnat_script(
-                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
-            )
-        )
-        covered = {
-            argv[argv.index("-d") + 1]
-            for table, argv in rules
-            if table == "nat" and "DNAT" in argv and "-d" in argv
-        }
-        assert covered == {self.SAMPLED_IP}
-        assert self.UNSAMPLED_IP not in covered
+    def test_limited_unsampled_address_is_proxied_not_merely_dropped(self) -> None:
+        """Limited was already safe (its terminal ``-P OUTPUT DROP`` caught the
+        unsampled address), but safe-by-denial meant credential requests to an
+        unsampled address simply failed. Name-based interception upgrades that
+        from ``blocked`` to ``proxied`` — and #2042 must not regress Limited."""
+        rules = self._limited_rules()
+        dest = self._resolve_in_sandbox(self.HOST, pool=[self.UNSAMPLED_IP])
+        assert dest is not None
+        assert self._verdict(rules, dest) == "proxied"
 
-    def test_no_ip_keyed_filter_fence_is_installed(self) -> None:
-        """Round 4 scope decision, pinned so it cannot silently come back.
+    def test_no_credential_rule_is_keyed_on_a_resolved_address(self) -> None:
+        """The property behind #2042, inverted.
 
-        An earlier round added a per-credential-host filter REJECT for the
-        LEARNED addresses. It was withdrawn: it protects only what was already
-        sampled, so it reads as a fence without being one, and a future reader
-        finding it in the diff would reasonably conclude #2042 was closed. A
-        DOCUMENTED hole is safer than a DISGUISED one. If a REJECT reappears
-        here it must be part of a real deny-by-default design (#2042), which
-        would also flip the ``direct`` assertion above."""
-        rules = self._record_rules(
-            build_secret_egress_dnat_script(
-                dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
-            )
-        )
-        assert not [argv for table, argv in rules if table == "filter" and "REJECT" in argv]
+        The old assertion was that credential-host rule coverage equalled the
+        SAMPLED SET — which is why no IP-keyed rule could ever close the hole.
+        Now NO credential rule references a resolved address at all: the only
+        destination-keyed credential rules name our own sentinel constant, so
+        coverage is a property of the ruleset rather than of what DNS returned.
+        """
+        for rules in (self._unrestricted_rules(), self._limited_rules()):
+            credential_dests = {
+                argv[argv.index("-d") + 1]
+                for table, argv in rules
+                if table == "nat" and "DNAT" in argv and "-d" in argv
+            }
+            assert credential_dests == {CREDENTIAL_SENTINEL_IP}
+            assert self.SAMPLED_IP not in credential_dests
+            assert self.UNSAMPLED_IP not in credential_dests
+
+    def test_sentinel_is_not_routable_so_a_broken_rule_fails_closed(self) -> None:
+        """The sentinel is RFC 3927 link-local and routed nowhere.
+
+        This is what makes a missing/malformed DNAT fail CLOSED: the packet
+        dies in the sandbox's own stack instead of reaching a real upstream
+        with a placeholder. Verified by dropping the nat table entirely and
+        confirming the surviving filter rules never say ``direct``.
+        """
+        assert CREDENTIAL_SENTINEL_IP.startswith("169.254.")
+        filter_only = [(t, argv) for t, argv in self._unrestricted_rules() if t != "nat"]
+        assert self._verdict(filter_only, CREDENTIAL_SENTINEL_IP) == "blocked"
+        # Non-443 sentinel traffic (e.g. :80) is refused in both modes.
+        for rules in (self._unrestricted_rules(), self._limited_rules()):
+            assert self._verdict(rules, CREDENTIAL_SENTINEL_IP, dport=80) == "blocked"
+
+    def test_dns_interception_precedes_any_in_netns_resolver(self) -> None:
+        """The :53 DNAT is INSERTED at the top of nat OUTPUT.
+
+        Appending it would leave Docker's embedded resolver (127.0.0.11, whose
+        own DNAT Docker installs in this chain) free to answer a credential
+        name first with a real pool address.
+        """
+        for rules in (self._unrestricted_rules(), self._limited_rules()):
+            dns_rules = [
+                argv
+                for table, argv in rules
+                if table == "nat" and "--dport" in argv and argv[argv.index("--dport") + 1] == "53"
+            ]
+            assert dns_rules, "no DNS interception rule emitted"
+            for argv in dns_rules:
+                assert "-I" in argv, f"DNS interception appended, not inserted: {argv}"

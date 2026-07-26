@@ -805,6 +805,11 @@ class SandboxRegistry:
         Returns ``([], None)`` when the plan carries no secret proxy (no env-var
         credentials), so the caller can cleanly skip DNAT wiring.
 
+        The host list no longer generates per-address rules (#2042) — the netns
+        chokepoint is keyed on the sentinel that the worker-controlled resolver
+        returns for these NAMES. It still drives the interception's presence,
+        the resolver's host set, and the refresh state.
+
         Each credential's ``allowed_hosts`` holds canonical entries (a bare host
         or a ``host/path-prefix``); the DNAT keys on the bare host only, de-dup'd.
         """
@@ -829,13 +834,19 @@ class SandboxRegistry:
         Three cases (#1153):
 
         - **Limited** networking → full iptables lockdown (``-P OUTPUT DROP`` +
-          per-host ACCEPTs), plus the credential-host → proxy DNAT when the plan
-          carries env-var credentials. Today's path, unchanged.
+          per-host ACCEPTs), plus the name-based credential chokepoint when the
+          plan carries env-var credentials.
         - **Unrestricted / no-networking-config WITH env-var credentials** →
-          DNAT-only: install the credential-host → proxy swap chokepoint while
-          leaving general egress open (no DROP). The secret swap fires; the env
+          chokepoint only: intercept credential-host egress while leaving
+          general egress open (no DROP). The secret swap fires; the env
           allowlist is not the containment boundary (the operator's CMA-faithful
           choice).
+
+        In BOTH cases the chokepoint is keyed on the credential NAMES, not on
+        sampled addresses (#2042): sandbox ``:53`` is redirected to this
+        session's worker-controlled resolver, which answers those names with a
+        non-routable sentinel whose only route out is the DNAT to the
+        secret-egress proxy.
         - **Unrestricted / no config WITHOUT credentials** → nothing (today's
           early return: no proxy, no DNAT).
         """
@@ -844,6 +855,22 @@ class SandboxRegistry:
 
         networking = plan.env_config.networking if plan.env_config else None
         dnat_hosts, dnat_target = self._secret_dnat(plan)
+        # The credential resolver is owned by the secret proxy and started as
+        # part of its ``start()``, so a running proxy always has a port here
+        # (#2042). ``dnat_target is not None`` ⟺ ``plan.secret_proxy is not
+        # None``, so the two are read together.
+        dns_port = plan.secret_proxy.dns_port if plan.secret_proxy is not None else None
+
+        if dnat_target is not None and dns_port is None:
+            # Unreachable via the plan builder (the proxy owns the resolver), so
+            # this is the fail-closed backstop for a future caller that wires a
+            # DNAT target without a resolver: refuse rather than fall back to
+            # any address-keyed shape.
+            raise SandboxBackendError(
+                f"credential resolver port missing for session {handle.owner_id}; "
+                "refusing to run an env-var-credentialed sandbox without "
+                "name-based credential-host interception (#2042)"
+            )
 
         if isinstance(networking, LimitedNetworking):
             extra_host_ports: list[tuple[str, int]] = [
@@ -862,6 +889,10 @@ class SandboxRegistry:
                 extra_host_ports=extra_host_ports,
                 dnat_hosts=dnat_hosts,
                 dnat_target=dnat_target,
+                # Port of this session's worker-controlled credential resolver
+                # (#2042): ALL sandbox :53 is DNATed here so credential names
+                # resolve to the sentinel and never to a real pool address.
+                dns_port=dns_port,
                 # Pin the lockdown sidecar to the same container runtime as the
                 # sandbox it locks down (#1014) — sourced from the sandbox's own
                 # provisioning spec, never ambient config.
@@ -869,12 +900,16 @@ class SandboxRegistry:
             )
         elif dnat_target is not None:
             # Unrestricted (or no networking config) WITH env-var credentials:
-            # install the DNAT-only swap chokepoint, leaving general egress open.
+            # install the chokepoint only, leaving general egress open. This is
+            # the #2042 path: with interception keyed on the NAME, the open
+            # filter policy can no longer let an unsampled address out.
+            assert dns_port is not None  # guarded above; re-stated for the checker
             await apply_secret_egress_dnat(
                 self._backend,
                 handle,
                 dnat_hosts=dnat_hosts,
                 dnat_target=dnat_target,
+                dns_port=dns_port,
                 runtime=plan.spec.runtime,
             )
         # else: Unrestricted, no credentials → nothing (today's early return).

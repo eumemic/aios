@@ -78,6 +78,7 @@ from aios.config import get_settings
 from aios.logging import get_logger
 from aios.models.vaults import parse_allowed_host_entry
 from aios.pinned_transport import resolve_pinned_ip
+from aios.sandbox.credential_dns import CredentialDnsResolver
 from aios.sandbox.egress_ca import EgressCA, get_egress_ca, mint_server_leaf
 from aios.services.vaults import SECRET_PLACEHOLDER_PREFIX, ResolvedEnvVarCredential
 
@@ -477,6 +478,13 @@ class SecretEgressProxy:
         self._secret = secrets.token_urlsafe(32)
         self._server: asyncio.Server | None = None
         self._port: int | None = None
+        # Worker-controlled resolver for THIS session's credential names
+        # (#2042). Seeded from the same host set that gates leaf minting, so
+        # the names we hijack and the names we will terminate TLS for can never
+        # drift apart. Its lifecycle is this proxy's lifecycle: a resolver that
+        # cannot start fails ``start()``, which fails the provision — a sandbox
+        # that cannot protect a credential must not be able to send one.
+        self._dns = CredentialDnsResolver(self._allowed_hosts)
         # In-flight connection handlers, tracked so stop() can cancel them
         # (releasing the secret map) rather than block on wait_closed().
         self._conns: set[asyncio.Task[None]] = set()
@@ -490,14 +498,32 @@ class SecretEgressProxy:
         assert self._port is not None, "SecretEgressProxy.start() has not completed"
         return self._port
 
+    @property
+    def dns_port(self) -> int:
+        """Port of this session's credential resolver (#2042).
+
+        The netns DNAT sends ALL sandbox ``:53`` here, so credential names
+        resolve to :data:`~aios.sandbox.credential_dns.CREDENTIAL_SENTINEL_IP`
+        and can never resolve to a real upstream address — which is what makes
+        an address no sampler ever saw structurally incapable of bypassing this
+        proxy.
+        """
+        return self._dns.port
+
     async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` and begin serving TLS. ``asyncio.start_server``
+        """Start the credential resolver, then bind ``0.0.0.0:0`` and serve TLS. ``asyncio.start_server``
         binds synchronously, so the port is available the instant the await
         returns and a bind failure raises immediately (no async bind window
         to poll)."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.sni_callback = self._sni_callback
         try:
+            # The resolver comes up FIRST and its failure is fatal (#2042): if
+            # credential names cannot be pinned to the sentinel, the sandbox
+            # would learn real pool addresses and could reach them directly, so
+            # there must be no sandbox at all. ``CredentialDnsError`` propagates
+            # out of ``start()`` exactly like a bind failure below.
+            await self._dns.start()
             self._server = await asyncio.start_server(self._handle, "0.0.0.0", 0, ssl=ctx)
             self._port = self._server.sockets[0].getsockname()[1]
         except BaseException:
@@ -534,6 +560,8 @@ class SecretEgressProxy:
             # they are otherwise only reclaimed when the proxy object is GC'd.
             self._rules = []
             self._leaf_ctx = {}
+            with contextlib.suppress(Exception):
+                await self._dns.stop()
             await self._client.aclose()
         log.info("secret_egress_proxy.stopped", port=self._port)
 

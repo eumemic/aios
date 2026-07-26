@@ -80,8 +80,11 @@ class FakeSecretProxy:
     exposes a fake ``port`` so registry lifecycle paths can be exercised
     without booting a real TLS server (#877)."""
 
-    def __init__(self, port: int = 49152) -> None:
+    def __init__(self, port: int = 49152, dns_port: int = 53535) -> None:
         self.port = port
+        # The real proxy owns this session's credential resolver and exposes
+        # its port so the netns can DNAT all :53 to it (#2042).
+        self.dns_port = dns_port
         self.stop = AsyncMock()
 
 
@@ -540,6 +543,50 @@ class TestSecretProxyDnatThreading:
         assert kwargs["dnat_target"] == ("aios-worker", 49152)
         # The ``/v1`` path prefix is stripped and the bare hosts de-dup'd.
         assert set(kwargs["dnat_hosts"]) == {"api.secret.com", "data.secret.com"}
+        # #2042: the session's credential-resolver port is threaded through, so
+        # the netns DNATs all :53 to it and credential names resolve only to
+        # the sentinel — interception keyed on the NAME, not on sampled IPs.
+        assert kwargs["dns_port"] == 53535
+
+    async def test_missing_resolver_port_fails_closed(self) -> None:
+        """A credentialed sandbox with no resolver must not be provisioned.
+
+        The fail-closed backstop for #2042: rather than silently fall back to
+        an address-keyed shape (which IS the defect), provisioning raises — a
+        sandbox that cannot protect a credential must not be able to send one.
+        """
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        cred = ResolvedEnvVarCredential(
+            credential_id="cred_1",
+            secret_name="API_TOKEN",
+            secret_value="real-secret",
+            allowed_hosts=("api.secret.com",),
+            updated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            placeholder="AIOS_SECRET_PLACEHOLDER_deadbeef",
+        )
+        base = _provisioning_plan_limited("sess_X")
+        proxy = FakeSecretProxy(port=49152)
+        proxy.dns_port = None  # type: ignore[assignment]
+        plan = ProvisioningPlan(
+            spec=base.spec,
+            env_config=base.env_config,
+            memory_echoes=base.memory_echoes,
+            github_echoes=base.github_echoes,
+            git_proxy=base.git_proxy,
+            env_var_credentials=(cred,),
+            secret_proxy=cast(Any, proxy),
+        )
+        lockdown = AsyncMock()
+
+        with (
+            self._provision_patches(plan, lockdown),
+            pytest.raises(SandboxBackendError, match="credential resolver port missing"),
+        ):
+            await registry.get_or_provision("sess_X")
+
+        # Nothing was wired: no half-installed, address-keyed egress path.
+        lockdown.assert_not_awaited()
 
     async def test_no_dnat_when_no_secret_proxy(self) -> None:
         backend = FakeBackend()
@@ -699,6 +746,10 @@ class TestUnrestrictedSecretEgressDnat:
         # The ``/v1`` path prefix is stripped and bare hosts de-dup'd — same
         # extraction the Limited path uses (shared ``_secret_dnat`` helper).
         assert set(kwargs["dnat_hosts"]) == {"api.secret.com", "data.secret.com"}
+        # #2042: Unrestricted gets the same name-based interception as Limited —
+        # all :53 DNATed to this session's credential resolver. This is the mode
+        # that used to fail open on an unsampled address.
+        assert kwargs["dns_port"] == 53535
 
     async def test_runtime_threaded_to_dnat_only(self) -> None:
         backend = FakeBackend()
