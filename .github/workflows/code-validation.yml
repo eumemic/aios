@@ -493,12 +493,11 @@ jobs:
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            # A failed session-scoped testcontainer startup marks the entire
-            # shard as last-failed, so ``--lf`` merely repeats the contaminated
-            # session. Restart this job's dedicated daemon to reap containerd
-            # tasks and stale port allocations that ``docker rm`` cannot see,
-            # then recreate the shard from a clean session. Images survive the
-            # restart, preserving the exact sandbox image selected above.
+            # Restart this job's dedicated daemon to reap containerd tasks and
+            # stale port allocations that ``docker rm`` cannot see. Images
+            # survive the restart, preserving the exact sandbox image selected
+            # above. The pytest cache also survives, so retry only failed tests:
+            # repeating the whole serial shard can exceed the job time budget.
             sudo systemctl restart docker
             for attempt in {1..30}; do
               docker info >/dev/null 2>&1 && break
@@ -511,12 +510,10 @@ jobs:
             docker container prune -f
             docker network prune -f
             docker volume prune -af
-            # Start a fresh pytest session after the daemon restart, but replay
-            # only the failures recorded by the serial first pass. Re-running
-            # all Docker tests here needlessly recreates hundreds of containers
-            # and can exhaust the recovered daemon before reaching the original
-            # failure. If collection/setup failed before pytest identified an
-            # individual test, --lf safely falls back to the full selection.
+            # The cache is from the serial first pass, so this reruns only the
+            # independently failing tests in a clean Docker session. A broad
+            # second pass both wastes the hosted-runner budget and can obscure
+            # the original failure with fresh resource exhaustion.
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
