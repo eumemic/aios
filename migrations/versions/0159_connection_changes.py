@@ -14,6 +14,17 @@ same transaction as its DELETE; absence of a row means "never pruned" (0).
 A derived ``MIN(seq)`` floor cannot provide this: it fails open the moment
 retention empties the table, and it is global where the cursor is per-stream.
 
+Both ``account_id`` foreign keys are ``ON DELETE CASCADE``.  These are
+audit/retention rows, not resources: with a plain (RESTRICT-by-default) FK
+the compliance hard-delete path (``queries.hard_delete_account`` ->
+``services.accounts.purge_account``) would be permanently blocked for any
+account that ever attached a connection, since ledger rows outlive the
+archived connections they describe and a horizon row *survives the deletes
+it describes* by design — so it would block the purge forever, even after
+retention emptied the ledger.  This matches the cascading transient/audit
+tables the hard-delete docstring already calls out (``oauth_flows`` 0061,
+the workflow tables 0064, ``wf_run_vaults`` 0073, ``trigger_runs`` 0086).
+
 Revision ID: 0159
 Revises: 0157
 """
@@ -30,7 +41,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE connection_changes (
             seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-            account_id TEXT NOT NULL REFERENCES accounts(id),
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             connector TEXT NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('added', 'removed')),
             connection_id TEXT NOT NULL,
@@ -44,7 +55,7 @@ def upgrade() -> None:
     """)
     op.execute("""
         CREATE TABLE connection_change_horizons (
-            account_id TEXT NOT NULL REFERENCES accounts(id),
+            account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             connector TEXT NOT NULL,
             pruned_through_seq BIGINT NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

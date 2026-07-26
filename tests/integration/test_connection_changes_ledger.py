@@ -162,3 +162,107 @@ class TestPruningWatermark:
             )
             == 0
         )
+
+
+class TestAccountHardDeleteCascade:
+    """The compliance hard-delete path must not be blocked by ledger rows.
+
+    ``connection_changes`` / ``connection_change_horizons`` are durable
+    audit/retention rows that outlive the connections they describe, so a
+    plain (RESTRICT-by-default) FK to ``accounts`` would permanently wedge
+    ``queries.hard_delete_account`` for any account that ever attached a
+    connection — and the horizon row, which *survives the deletes it
+    describes* by design, would keep wedging it even after retention had
+    emptied the ledger.  Migration 0159 declares both FKs ``ON DELETE
+    CASCADE`` (same posture as the other transient/audit tables listed in
+    ``hard_delete_account``'s docstring).
+    """
+
+    async def test_purge_succeeds_with_retained_ledger_rows(
+        self, conn_two_accounts: asyncpg.Connection[Any]
+    ) -> None:
+        conn = conn_two_accounts
+        await _insert(conn, connection_id="con_1")
+        await _insert(conn, connector="signal", connection_id="con_2")
+        await queries.set_connection_change_pruned_through(
+            conn, account_id="acc_a", connector="matrix", pruned_through_seq=1
+        )
+
+        await conn.execute("UPDATE accounts SET archived_at = now() WHERE id = 'acc_a'")
+        assert await queries.hard_delete_account(conn, "acc_a") is True
+
+        # Cascade actually removed the rows — no orphans left behind.
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM connection_changes WHERE account_id = 'acc_a'"
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM connection_change_horizons WHERE account_id = 'acc_a'"
+            )
+            == 0
+        )
+
+    async def test_purge_succeeds_with_only_a_surviving_horizon(
+        self, conn_two_accounts: asyncpg.Connection[Any]
+    ) -> None:
+        """The regime the review called out specifically: retention has
+        emptied the ledger, so the *only* remaining reference is the horizon
+        watermark row, which is designed to outlive its deletes."""
+        conn = conn_two_accounts
+        seq = await _insert(conn, connection_id="con_1")
+        await queries.set_connection_change_pruned_through(
+            conn, account_id="acc_a", connector="matrix", pruned_through_seq=seq
+        )
+        await conn.execute("DELETE FROM connection_changes WHERE account_id = 'acc_a'")
+        assert (
+            await queries.get_connection_change_pruned_through(
+                conn, account_id="acc_a", connector="matrix"
+            )
+            == seq
+        )
+
+        await conn.execute("UPDATE accounts SET archived_at = now() WHERE id = 'acc_a'")
+        assert await queries.hard_delete_account(conn, "acc_a") is True
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM connection_change_horizons WHERE account_id = 'acc_a'"
+            )
+            == 0
+        )
+
+    async def test_cascade_is_scoped_to_the_purged_account(
+        self, conn_two_accounts: asyncpg.Connection[Any]
+    ) -> None:
+        """A purge must not take another tenant's ledger with it."""
+        conn = conn_two_accounts
+        await _insert(conn, connection_id="con_a")
+        await queries.insert_connection_change(
+            conn,
+            account_id="acc_b",
+            connector="matrix",
+            kind="added",
+            connection_id="con_b",
+            external_account_id="ext",
+        )
+        await queries.set_connection_change_pruned_through(
+            conn, account_id="acc_b", connector="matrix", pruned_through_seq=1
+        )
+
+        await conn.execute("UPDATE accounts SET archived_at = now() WHERE id = 'acc_a'")
+        assert await queries.hard_delete_account(conn, "acc_a") is True
+
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM connection_changes WHERE account_id = 'acc_b'"
+            )
+            == 1
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM connection_change_horizons WHERE account_id = 'acc_b'"
+            )
+            == 1
+        )
