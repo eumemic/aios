@@ -481,34 +481,50 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Do not restart dockerd between passes: that can race fixture teardown.
-        # Keep the first retry file-distributed too; a serial --lf pass put every
-        # recorded failure into one fresh Postgres/Docker fixture stack, so one
-        # residual fixture failure could contaminate all remaining retries. If
-        # that pass still leaves failures, replay each residual node in its own
-        # pytest process so every one gets an independent session fixture stack.
+        # Run each test module in its own process. Several Docker E2E modules
+        # have session-scoped Postgres/container fixtures; reusing an xdist
+        # worker after one of those fixtures fails contaminates unrelated files.
+        # A two-process shell pool retains parallelism without sharing fixture
+        # state across modules. Retry only failed modules, again in fresh
+        # processes, so a repeated failure remains blocking.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          mapfile -t docker_files < <(
+            uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
+              sed -n 's#^\(tests/e2e/[^:]*\)::.*#\1#p' | sort -u
+          )
+          ((${#docker_files[@]})) || {
+            echo "::error::No Docker E2E tests were collected"
+            exit 1
+          }
+
+          run_modules() {
+            local result_dir="$1"
+            shift
+            rm -rf "$result_dir"
+            mkdir -p "$result_dir"
+            printf '%s\0' "$@" | xargs -0 -r -n 1 -P 2 bash -c '
+              file="$1"
+              key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
+              if uv run pytest -q -m "docker and not perf" "$file"; then
+                : > "'"$result_dir"'/ok-$key"
+              else
+                printf "%s\n" "$file" > "'"$result_dir"'/failed-$key"
+              fi
+            ' _
+          }
+
+          run_modules .docker-e2e-first "${docker_files[@]}"
+          mapfile -t failed_files < <(
+            cat .docker-e2e-first/failed-* 2>/dev/null || true
+          )
+          if ((${#failed_files[@]})); then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            if ! uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 2 --dist=loadfile; then
-              mapfile -t residuals < <(uv run python - <<'PY'
-          import json
-          from pathlib import Path
-
-          cache = Path(".pytest_cache/v/cache/lastfailed")
-          failed = json.loads(cache.read_text()) if cache.exists() else {}
-          print("\n".join(node for node, is_failed in failed.items() if is_failed))
-          PY
-              )
-              ((${#residuals[@]})) || {
-                echo "::error::Docker E2E retry failed without recording residual tests"
-                exit 1
-              }
-              for node in "${residuals[@]}"; do
-                uv run pytest -q -m "docker and not perf" "$node"
-              done
+            run_modules .docker-e2e-retry "${failed_files[@]}"
+            if compgen -G '.docker-e2e-retry/failed-*' >/dev/null; then
+              cat .docker-e2e-retry/failed-* >&2
+              exit 1
             fi
           fi
 
