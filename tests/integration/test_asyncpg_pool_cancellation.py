@@ -45,6 +45,7 @@ async def _run_cancelled(
         timeout=_SETTLE_TIMEOUT,
     )
     assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1] is None, "canceller did not reach the requested lifecycle stage"
 
 
 async def test_pool_cancellation_storm_returns_every_connection(db_url: str) -> None:
