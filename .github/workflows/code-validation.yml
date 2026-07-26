@@ -468,15 +468,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
-        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
-        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
-        # scoped ``shared_docker_harness`` fixture which would be torn
-        # down + rebuilt per test under the default ``load`` dist.  Four
-        # workers matches public-repo ubuntu-latest runners (4 vCPU /
-        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
-        # Each worker amortizes its own testcontainer-Postgres + Docker
-        # setup over ~55 tests.
+        # Run this shard serially. Each xdist worker owns a testcontainer
+        # Postgres plus several sandbox/operator containers; parallel workers
+        # exhaust shared-runner Docker resources and leave half-torn-down
+        # containers that also poison the serial retry.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -492,7 +487,7 @@ jobs:
         # failures on shared runners. Retry only the recorded failures once; a
         # deterministic regression still fails the required check.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
