@@ -305,6 +305,26 @@ class TestFailClosed:
         await r.stop()
         await r.stop()
 
+    @pytest.mark.asyncio
+    async def test_stop_reaps_in_flight_udp_queries(self) -> None:
+        """Shutdown must not leak UDP response tasks into later tests."""
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
+        started = asyncio.Event()
+
+        async def _blocked_forward(query: bytes) -> bytes:
+            started.set()
+            await asyncio.Event().wait()
+            return query
+
+        r._forward = _blocked_forward  # type: ignore[method-assign]
+        await r.start()
+        ask = asyncio.create_task(_udp_ask(r.port, _query("ordinary.example")))
+        await started.wait()
+        await r.stop()
+        ask.cancel()
+        await asyncio.gather(ask, return_exceptions=True)
+        assert r._udp_protocol is None
+
 
 class TestNoRequestContentIsLogged:
     """#2041 round-1 defect must not reappear one layer down: query names are

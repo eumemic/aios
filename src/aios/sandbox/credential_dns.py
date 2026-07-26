@@ -260,6 +260,9 @@ class CredentialDnsResolver:
         if self._udp_transport is not None:
             self._udp_transport.close()
             self._udp_transport = None
+        if self._udp_protocol is not None:
+            await self._udp_protocol.stop()
+            self._udp_protocol = None
         if self._tcp_server is not None:
             self._tcp_server.close()
             for task in list(self._tcp_conns):
@@ -378,6 +381,8 @@ class _UdpProtocol(asyncio.DatagramProtocol):
     async def _respond(self, data: bytes, addr: tuple[str | int, ...]) -> None:
         try:
             response = await self._resolver.answer(data)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             log.warning("credential_dns.udp_error", error_type=type(exc).__name__)
             response = _servfail(data)
@@ -385,6 +390,16 @@ class _UdpProtocol(asyncio.DatagramProtocol):
             # Truncate rather than fragment; a client that needs the full
             # answer retries over TCP, which we also serve.
             self._transport.sendto(response[:_MAX_UDP_RESPONSE], addr)
+
+    async def stop(self) -> None:
+        """Cancel and reap every in-flight datagram task."""
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._transport = None
 
 
 class _ForwardProtocol(asyncio.DatagramProtocol):
