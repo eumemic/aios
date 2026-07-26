@@ -14,14 +14,14 @@ same transaction as its DELETE; absence of a row means "never pruned" (0).
 A derived ``MIN(seq)`` floor cannot provide this: it fails open the moment
 retention empties the table, and it is global where the cursor is per-stream.
 
-Revision ID: 0156
-Revises: 0155
+Revision ID: 0158
+Revises: 0157
 """
 
 from alembic import op
 
-revision = "0156"
-down_revision = "0155"
+revision = "0158"
+down_revision = "0157"
 branch_labels = None
 depends_on = None
 
