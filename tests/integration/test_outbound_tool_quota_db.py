@@ -208,6 +208,33 @@ class TestRollingWindowAccounting:
         recovered = await reserve_outbound_tool_quota(pool, sid, "matrix_send")
         assert recovered.reservation_id is not None
 
+    async def test_cancellation_after_admission_retains_capacity(
+        self, quota_pool: tuple[asyncpg.Pool[Any], str], monkeypatch: Any
+    ) -> None:
+        """Cancellation after admission is an unknown invocation outcome.
+
+        The durable row must survive task cancellation so a retry cannot replay
+        a connector side effect that may already have started.
+        """
+        pool, sid = quota_pool
+        _set_quota(monkeypatch, {"matrix_send": (3600, 1)})
+        invoked = asyncio.Event()
+
+        async def admitted_then_cancelled() -> None:
+            admission = await reserve_outbound_tool_quota(pool, sid, "matrix_send")
+            assert admission.reservation_id is not None
+            invoked.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(admitted_then_cancelled())
+        await invoked.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        retry = await reserve_outbound_tool_quota(pool, sid, "matrix_send")
+        assert retry.refusal == "quota_exceeded: matrix_send 1/1 per hour"
+
     async def test_completion_mark_is_observability_not_accounting(
         self, quota_pool: tuple[asyncpg.Pool[Any], str], monkeypatch: Any
     ) -> None:
