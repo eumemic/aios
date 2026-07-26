@@ -25,15 +25,11 @@ Everything else is forwarded verbatim to the worker's own upstream resolver, so
 ordinary sandbox name resolution (including Docker network aliases such as
 ``aios-worker``) is unchanged.
 
-The netns then carries exactly one credential rule, and it is keyed on a
-constant this worker chose:
-
-    -t nat -A OUTPUT -d <sentinel> -p tcp --dport 443 \
-        -j DNAT --to-destination <proxy_ip>:<proxy_port>
-
-so **an address nobody ever sampled is structurally incapable of bypassing the
-proxy** — not because we enumerated it, but because the name can no longer
-resolve to it inside the sandbox.
+The netns sends the sentinel to the credential proxy.  In Unrestricted mode it
+also sends every HTTPS connection through that proxy, which passes ordinary SNI
+through unchanged; in Limited mode its default-deny filter blocks raw addresses.
+Together these rules provide a destination-side floor for clients that bypass
+DNS through a cached address, DoH, or ``/etc/hosts``.
 
 Fail-closed by construction, at three layers:
 
