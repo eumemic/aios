@@ -247,6 +247,26 @@ class FakeBackend:
         # Absent key OR explicit None value ⇒ verified-not-found.
         return self.image_labels_by_ref.get(image)
 
+    async def start_credential_resolver(
+        self,
+        target_sandbox_id: str,
+        *,
+        image: str,
+        hosts: list[str],
+        runtime: str | None = None,
+    ) -> None:
+        self.calls.append(
+            (
+                "start_credential_resolver",
+                {
+                    "target_sandbox_id": target_sandbox_id,
+                    "image": image,
+                    "hosts": hosts,
+                    "runtime": runtime,
+                },
+            )
+        )
+
     async def run_netns_sidecar(
         self,
         target_sandbox_id: str,

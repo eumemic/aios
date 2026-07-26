@@ -41,6 +41,7 @@ from aios.models.environments import (
 )
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import MemoryStoreResourceEcho
+from aios.models.vaults import parse_allowed_host_entry
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
@@ -1176,6 +1177,15 @@ def _assemble_plan(
         # Optional sandbox runtime (#1014). ``None`` leaves Docker's default in
         # place; operators can select gVisor with AIOS_SANDBOX_RUNTIME=runsc.
         runtime=settings.sandbox_runtime,
+        credential_hosts=tuple(
+            sorted(
+                {
+                    parse_allowed_host_entry(entry)[0].lower()
+                    for credential in env_var_credentials
+                    for entry in credential.allowed_hosts
+                }
+            )
+        ),
     )
 
     return ProvisioningPlan(

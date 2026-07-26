@@ -37,7 +37,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from aios.config import get_settings
 from aios.db import queries
@@ -844,6 +844,17 @@ class SandboxRegistry:
 
         networking = plan.env_config.networking if plan.env_config else None
         dnat_hosts, dnat_target = self._secret_dnat(plan)
+
+        if dnat_target is not None:
+            # Resolver startup is part of the security gate in both network
+            # modes: failure propagates and provision tears the sandbox down.
+            resolver_backend = cast(Any, self._backend)
+            await resolver_backend.start_credential_resolver(
+                handle.sandbox_id,
+                image=get_settings().docker_image,
+                hosts=dnat_hosts,
+                runtime=plan.spec.runtime,
+            )
 
         if isinstance(networking, LimitedNetworking):
             extra_host_ports: list[tuple[str, int]] = [

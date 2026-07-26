@@ -131,6 +131,9 @@ class SandboxSpec:
     # default runtime in place (local/CI no-op); DockerBackend translates a value
     # such as ``runsc`` into ``docker run --runtime runsc``.
     runtime: str | None = None
+    # Credential names are resolved by a worker-controlled resolver on loopback.
+    # Empty means Docker's ordinary resolver remains unchanged.
+    credential_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

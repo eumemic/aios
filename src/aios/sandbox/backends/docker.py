@@ -50,6 +50,7 @@ from aios.sandbox.backends.base import (
     SnapshotOutcome,
     split_label_list,
 )
+from aios.sandbox.credential_dns import CREDENTIAL_DNS_IP
 from aios.sandbox.network import SANDBOX_NETWORK_NAME
 
 log = get_logger("aios.sandbox.backends.docker")
@@ -195,6 +196,10 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        if spec.credential_hosts:
+            # The resolver sidecar joins this netns and binds loopback:53. Docker
+            # writes this server into resolv.conf before the sandbox starts.
+            argv.extend(["--dns", CREDENTIAL_DNS_IP])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
@@ -907,6 +912,48 @@ class DockerBackend:
     async def image_labels(self, image: str) -> dict[str, str] | None:
         fields = await self._inspect_image_fields(image)
         return None if fields is None else fields[3]
+
+    async def start_credential_resolver(
+        self,
+        target_sandbox_id: str,
+        *,
+        image: str,
+        hosts: list[str],
+        runtime: str | None = None,
+    ) -> None:
+        """Start the authoritative credential resolver in the sandbox netns."""
+        argv = [
+            "docker",
+            "run",
+            "--detach",
+            "--rm",
+            "--network",
+            f"container:{target_sandbox_id}",
+            # Joining the target's PID namespace ties resolver lifetime to PID 1:
+            # Docker kills namespace peers when the sandbox exits, and --rm then
+            # removes the resolver container instead of leaking it.
+            "--pid",
+            f"container:{target_sandbox_id}",
+        ]
+        if runtime:
+            argv.extend(["--runtime", runtime])
+        argv.extend(
+            [
+                image,
+                "python",
+                "-m",
+                "aios.sandbox.credential_dns",
+                "--upstream",
+                "127.0.0.11",
+                *hosts,
+            ]
+        )
+        rc, _, stderr, timed_out = await run_subprocess_with_timeout(argv, timeout_s=15)
+        if timed_out or rc != 0:
+            raise SandboxBackendError(
+                "credential resolver failed to start: "
+                + stderr.decode("utf-8", errors="replace").strip()
+            )
 
     async def run_netns_sidecar(
         self,

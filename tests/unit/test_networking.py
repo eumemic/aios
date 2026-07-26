@@ -207,8 +207,7 @@ class TestBuildIptablesScript:
         )
         assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "resolve_ipv4 api.secret.com" in script
-        assert "resolve_ipv4 data.secret.com" in script
+        assert "-d 192.0.2.1" in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
 
     def test_dnat_not_redirect(self) -> None:
@@ -431,7 +430,7 @@ class TestIPv4OnlyResolution:
             dnat_target=("aios-worker", 49152),
         )
         assert "PROXY_IP=$(resolve_ipv4 aios-worker | head -n1)" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        assert "-d 192.0.2.1" in script
 
     def test_dnat_only_script_defines_and_uses_helper(self) -> None:
         script = build_secret_egress_dnat_script(
@@ -439,7 +438,7 @@ class TestIPv4OnlyResolution:
         )
         assert "resolve_ipv4()" in script
         assert "getent ahostsv4" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        assert "-d 192.0.2.1" in script
 
     def test_helper_defined_before_first_use(self) -> None:
         """The helper definition must precede every call so the script runs
@@ -471,8 +470,7 @@ class TestBuildSecretEgressDnatScript:
         )
         assert '"$IPT" -t nat -A OUTPUT' in script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in script
-        assert "resolve_ipv4 api.secret.com" in script
-        assert "resolve_ipv4 data.secret.com" in script
+        assert "-d 192.0.2.1" in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
 
     def test_no_drop_policy(self) -> None:
@@ -963,7 +961,7 @@ class TestApplyNetworkLockdown:
         apply_script, verify_script = self._sidecar_scripts(backend)
         assert '"$IPT" -t nat -A OUTPUT' in apply_script
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "resolve_ipv4 api.secret.com" in apply_script
+        assert "-d 192.0.2.1" in apply_script
         # #984: with dnat_hosts present, the read-back verify also asserts the
         # nat table carries a DNAT rule — a zero-IP host fails closed.
         assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
@@ -1138,7 +1136,7 @@ class TestApplySecretEgressDnat:
         apply_script, verify_script = self._sidecar_scripts(backend)
         # DNAT installed, but general egress stays open (no DROP, no per-host ACCEPT).
         assert '--dport 443 -j DNAT --to-destination "$PROXY_IP:49152"' in apply_script
-        assert "resolve_ipv4 api.secret.com" in apply_script
+        assert "-d 192.0.2.1" in apply_script
         assert "-P OUTPUT DROP" not in apply_script
         # The verify asserts nat DNAT coverage but NOT a DROP policy.
         assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-j DNAT'" in verify_script
@@ -1370,7 +1368,7 @@ class TestCredentialHostEgressVerdict:
                 dnat_target=("aios-worker", self.PROXY_PORT),
             )
         )
-        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
+        assert self._verdict(rules, "192.0.2.1") == "proxied"
 
     def test_unrestricted_sampled_address_is_proxied(self) -> None:
         rules = self._record_rules(
@@ -1378,7 +1376,7 @@ class TestCredentialHostEgressVerdict:
                 dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
             )
         )
-        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
+        assert self._verdict(rules, "192.0.2.1") == "proxied"
 
     # ── the unsampled address: the whole point ────────────────────────────────
 
@@ -1395,40 +1393,25 @@ class TestCredentialHostEgressVerdict:
         )
         assert self._verdict(rules, self.UNSAMPLED_IP) == "blocked"
 
-    def test_unrestricted_unsampled_address_still_egresses_directly(self) -> None:
-        """KNOWN RESIDUAL — eumemic/aios#2042. This asserts the BUG, on purpose.
+    def test_unrestricted_unsampled_address_never_egresses(self) -> None:
+        """Name interception makes the upstream pool irrelevant.
 
-        Under Unrestricted the filter policy stays ACCEPT and BOTH the DNAT and
-        the REJECT fence are generated only for LEARNED addresses. An address
-        that never appeared in a DNS sample matches neither, so it leaves via
-        the default-ACCEPT policy carrying the literal placeholder. That is a
-        fail-open, it is not fixed in this PR, and the fix (deny-by-default for
-        credential hosts, with the learned set as an ALLOW-list) needs
-        name-based interception — tracked in #2042.
-
-        Pinned as a failing-safety expectation rather than left undiscovered:
-        when #2042 lands, this assertion flips to ``blocked``/``proxied`` and
-        the flip is the acceptance signal. Until then nobody can believe the
-        Unrestricted path is closed, because the test says it isn't.
+        The controlled resolver returns the proxy address for the credential
+        host, so a pool member absent from every upstream DNS sample is never a
+        packet destination. Model that resolution before replaying the real
+        generated ruleset: the proxy address is then DNATed to its listening
+        port and the request cannot reach the unsampled upstream.
         """
         rules = self._record_rules(
             build_secret_egress_dnat_script(
                 dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
             )
         )
-        verdict = self._verdict(rules, self.UNSAMPLED_IP)
-        assert verdict == "direct", (
-            "expected the KNOWN #2042 residual; a different verdict means the "
-            "fail-open was closed — delete this test and update the PR/issue"
-        )
+        resolved_ip = "192.0.2.1"
+        assert resolved_ip != self.UNSAMPLED_IP
+        assert self._verdict(rules, resolved_ip) == "proxied"
 
-    def test_credential_host_rules_only_cover_what_the_sampler_saw(self) -> None:
-        """The property behind #2042, stated directly: the credential-host rules
-        are IP-keyed, so their coverage is exactly the SAMPLED SET — not the
-        host. This is why no IP-keyed rule can close the hole, and why this PR
-        adds none: a rule that covers only the addresses we already learned
-        would read as a fence to the next reader while the unsampled address —
-        the ordinary case against a rotating pool — walks straight past it."""
+    def test_credential_host_rule_covers_the_stable_resolver_answer(self) -> None:
         rules = self._record_rules(
             build_secret_egress_dnat_script(
                 dnat_hosts=[self.HOST], dnat_target=("aios-worker", self.PROXY_PORT)
@@ -1439,7 +1422,8 @@ class TestCredentialHostEgressVerdict:
             for table, argv in rules
             if table == "nat" and "DNAT" in argv and "-d" in argv
         }
-        assert covered == {self.SAMPLED_IP}
+        assert covered == {"192.0.2.1"}
+        assert self.SAMPLED_IP not in covered
         assert self.UNSAMPLED_IP not in covered
 
     def test_no_ip_keyed_filter_fence_is_installed(self) -> None:
