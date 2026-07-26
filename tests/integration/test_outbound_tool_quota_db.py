@@ -232,9 +232,12 @@ class TestRollingWindowAccounting:
             await asyncio.Event().wait()
 
         task = asyncio.create_task(invocation())
-        async with asyncio.timeout(5):
-            await invocation_started.wait()
-        task.cancel()
+        try:
+            async with asyncio.timeout(5):
+                await invocation_started.wait()
+        finally:
+            # Never leak the synthetic invocation when the handshake fails.
+            task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
