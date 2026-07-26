@@ -125,12 +125,15 @@ def _parse_question(message: bytes) -> tuple[str, int, int, int] | None:
             return None
         length = message[offset]
         # Compression pointers are illegal in a question section; refuse to
-        # interpret rather than guess.
-        if length & 0xC0:
+        # interpret rather than guess. RFC 1035 labels are at most 63 octets.
+        if length & 0xC0 or length > 63:
             return None
         offset += 1
         if length == 0:
             break
+        # The encoded name, including length octets and root, is <=255 bytes.
+        if offset + length + 1 - 12 > 255:
+            return None
         label = message[offset : offset + length]
         if len(label) != length:
             return None

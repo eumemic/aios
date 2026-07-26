@@ -438,7 +438,12 @@ class SecretEgressProxy:
     secret map is dropped.
     """
 
-    def __init__(self, credentials: Iterable[ResolvedEnvVarCredential]) -> None:
+    def __init__(
+        self,
+        credentials: Iterable[ResolvedEnvVarCredential],
+        *,
+        passthrough_https: bool = False,
+    ) -> None:
         # Flatten (cred, allowed-host entry) into swap rules. The host is
         # lowercased ONCE here so the SNI gate and the swap map compare
         # against a normalized host — parse_allowed_host_entry stores the
@@ -454,6 +459,10 @@ class SecretEgressProxy:
         # ever reaches the mint path, so a hostile sandbox can't flood
         # distinct SNIs to balloon the leaf cache.
         self._allowed_hosts: frozenset[str] = frozenset(h for h, _, _, _ in self._rules)
+        # Unrestricted sandboxes route all HTTPS through this proxy so raw and
+        # independently resolved credential-host addresses cannot bypass it.
+        # Non-credential SNI is passed through without any swap.
+        self._passthrough_https = passthrough_https
         # Hard cap on the whole-buffered request body (the placeholder→secret
         # swap needs the body buffered, but the sandbox is untrusted, so an
         # over-cap body 413s before any upstream connection). Snapshot the int
@@ -579,7 +588,7 @@ class SecretEgressProxy:
             if not server_name:
                 return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
             host = server_name.lower()
-            if host not in self._allowed_hosts:
+            if host not in self._allowed_hosts and not self._passthrough_https:
                 return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
             sslobj.context = self._leaf_context(host)
             self._sni[sslobj] = host

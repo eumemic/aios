@@ -349,6 +349,7 @@ def _nat_dnat_lines(
     dns_port: int,
     *,
     filter_accepts: bool = False,
+    intercept_all_https: bool = False,
 ) -> list[str]:
     """The name-based credential-interception block (#2042).
 
@@ -366,8 +367,10 @@ def _nat_dnat_lines(
     2. The DNS interception: udp+tcp ``:53`` DNATed to the worker-controlled
        resolver, inserted with ``-I`` at the TOP of nat OUTPUT so nothing in
        the netns can answer a credential name first.
-    3. One credential DNAT keyed on :data:`CREDENTIAL_SENTINEL_IP` — the single
-       address every credential name now resolves to inside the sandbox.
+    3. A destination-independent HTTPS DNAT.  The proxy forwards ordinary SNI
+       hosts unchanged, swaps credential hosts, and refuses absent SNI.  This is
+       the destination-side floor for raw, cached, DoH, and ``/etc/hosts``
+       addresses that never passed through the credential resolver.
     4. A filter REJECT for any other sentinel-addressed packet (the ``:443``
        flow is already rewritten to the proxy by the nat table, which runs
        first, so this cannot catch it).
@@ -395,11 +398,18 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
-        "# The ONE credential rule: every credential name resolves to this sentinel",
-        "# inside the sandbox, so this covers the DNS path completely (#2042).",
+        "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
     ]
+    if intercept_all_https:
+        lines.extend(
+            [
+                "# Unrestricted destination-side floor for raw/cached/DoH addresses.",
+                f'"$IPT" -t nat -A OUTPUT -p tcp --dport 443 '
+                f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
+            ]
+        )
     if filter_accepts:
         lines.extend(
             [
@@ -675,7 +685,7 @@ def build_secret_egress_dnat_script(
             "# stack duplicates; the append below reinstates it.",
             f'"$IPT" -D OUTPUT -d {CREDENTIAL_SENTINEL_IP} -j REJECT '
             "--reject-with icmp-port-unreachable 2>/dev/null || true",
-            *_nat_dnat_lines(dnat_hosts, dnat_target, dns_port),
+            *_nat_dnat_lines(dnat_hosts, dnat_target, dns_port, intercept_all_https=True),
             # NO `-P OUTPUT DROP`, NO per-allowed-host filter ACCEPTs — the
             # filter policy stays ACCEPT so general egress remains open.
         ]

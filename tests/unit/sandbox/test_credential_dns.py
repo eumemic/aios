@@ -266,8 +266,19 @@ class TestFailClosed:
             struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
             + b"\xc0\x0c"
             + struct.pack("!HH", QTYPE_A, 1),
+            # RFC 1035 limits an individual label to 63 octets.
+            struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+            + bytes([64])
+            + b"a" * 64
+            + b"\0"
+            + struct.pack("!HH", QTYPE_A, 1),
+            # Four maximal labels exceed the 255-octet encoded-name limit.
+            struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+            + (bytes([63]) + b"a" * 63) * 4
+            + b"\0"
+            + struct.pack("!HH", QTYPE_A, 1),
         ],
-        ids=["multiple-questions", "compressed-question"],
+        ids=["multiple-questions", "compressed-question", "long-label", "long-name"],
     )
     async def test_unparseable_query_is_not_forwarded(
         self,

@@ -1671,6 +1671,10 @@ class TestCredentialHostEgressVerdict:
         assert self._verdict(rules, dest) == "proxied", (
             "an address no sampler ever saw must still be proxied (#2042)"
         )
+        # The destination-side floor is independent of the DNS path: a raw,
+        # cached, DoH, or /etc/hosts address is intercepted too.
+        assert self._verdict(rules, self.UNSAMPLED_IP) == "proxied"
+        assert self._verdict(rules, self.SAMPLED_IP) == "proxied"
 
     def test_limited_unsampled_address_is_proxied_not_merely_dropped(self) -> None:
         """Limited was already safe (its terminal ``-P OUTPUT DROP`` caught the
