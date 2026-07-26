@@ -484,9 +484,11 @@ jobs:
         # Run each test module in its own process. Several Docker E2E modules
         # have session-scoped Postgres/container fixtures; reusing an xdist
         # worker after one of those fixtures fails contaminates unrelated files.
-        # A two-process shell pool retains parallelism without sharing fixture
-        # state across modules. Retry only failed modules, again in fresh
-        # processes, so a repeated failure remains blocking.
+        # Run those fresh module processes serially. Even two independent
+        # Postgres/container stacks race for the hosted runner's Docker daemon
+        # and can make healthy container startup exceed its watchdog. Retry only
+        # failed modules, again in fresh processes, so a repeated failure remains
+        # blocking.
         run: |
           mapfile -t docker_files < <(
             uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
@@ -502,7 +504,7 @@ jobs:
             shift
             rm -rf "$result_dir"
             mkdir -p "$result_dir"
-            printf '%s\0' "$@" | xargs -0 -r -n 1 -P 2 bash -c '
+            printf '%s\0' "$@" | xargs -0 -r -n 1 bash -c '
               file="$1"
               key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
               if uv run pytest -q -m "docker and not perf" "$file"; then
