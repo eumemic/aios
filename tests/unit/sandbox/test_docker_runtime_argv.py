@@ -25,9 +25,10 @@ def _spec(*, runtime: str | None = None, credentialed: bool = False) -> SandboxS
         MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
         INSTANCE_LABEL_KEY: "inst_runtime",
         SESSION_LABEL_KEY: "sess_runtime",
+        # Production specs always carry this label; an empty value means the
+        # sandbox has no credential DNS chokepoint and must not get the sysctl.
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: "GITHUB_TOKEN" if credentialed else "",
     }
-    if credentialed:
-        labels[VAULT_PLACEHOLDER_KEYS_LABEL_KEY] = "GITHUB_TOKEN"
     return SandboxSpec(
         session_id="sess_runtime",
         instance_id="inst_runtime",
