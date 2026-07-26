@@ -503,6 +503,13 @@ jobs:
             while read -r container; do
               docker rm -f "$container" || true
             done < <(docker ps -aq)
+            # Abrupt fixture teardown can also strand per-test Postgres volumes
+            # and bridge networks.  The runner daemon is dedicated to this job,
+            # so prune those resources before rebuilding the failed fixtures.
+            # Do not prune images: the sandbox image was pulled/built above and
+            # the retry must exercise that exact image.
+            docker network prune -f
+            docker volume prune -af
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
