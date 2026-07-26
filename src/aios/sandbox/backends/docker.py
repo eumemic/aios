@@ -202,7 +202,13 @@ class DockerBackend:
         # sidecar. Applying the sysctl to every sandbox needlessly changes the
         # networking contract and is unsupported by some runtimes.
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
+            # Docker applies OCI sysctls before attaching the container's eth0.
+            # ``conf.all`` changes interfaces that already exist (normally only
+            # lo at that point), while ``conf.default`` supplies the value to
+            # interfaces created later. Set both so the DNS packet's eventual
+            # egress interface permits the loopback-origin DNAT on real hosts.
             argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+            argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is

@@ -81,8 +81,11 @@ async def test_create_enables_route_localnet_for_credentials(
 
     await DockerBackend().create(_spec(credentialed=True))
 
-    sysctl = calls[0].index("--sysctl")
-    assert calls[0][sysctl + 1] == "net.ipv4.conf.all.route_localnet=1"
+    sysctls = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--sysctl"]
+    assert sysctls == [
+        "net.ipv4.conf.all.route_localnet=1",
+        "net.ipv4.conf.default.route_localnet=1",
+    ]
 
 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
