@@ -252,6 +252,34 @@ class TestOrdinaryResolutionIsUnaffected:
 
 class TestFailClosed:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # An upstream may interpret the first question even though our policy
+            # requires exactly one. Never forward this parser differential.
+            _query(CREDENTIAL_HOST)[:4]
+            + struct.pack("!H", 2)
+            + _query(CREDENTIAL_HOST)[6:]
+            + _query("pypi.org")[12:],
+            # A compression pointer in the question is rejected by our parser;
+            # an upstream must not get a chance to interpret it differently.
+            struct.pack("!HHHHHH", 0x4242, 0x0100, 1, 0, 0, 0)
+            + b"\xc0\x0c"
+            + struct.pack("!HH", QTYPE_A, 1),
+        ],
+        ids=["multiple-questions", "compressed-question"],
+    )
+    async def test_unparseable_query_is_not_forwarded(
+        self,
+        resolver: CredentialDnsResolver,
+        upstream: _StubUpstream,
+        query: bytes,
+    ) -> None:
+        response = await _udp_ask(resolver.port, query)
+        assert struct.unpack_from("!H", response, 2)[0] & 0x000F == 2  # SERVFAIL
+        assert upstream.queries == []
+
+    @pytest.mark.asyncio
     async def test_malformed_query_does_not_crash_the_resolver(self) -> None:
         r = CredentialDnsResolver([CREDENTIAL_HOST], upstream="127.0.0.1")
         await r.start()
