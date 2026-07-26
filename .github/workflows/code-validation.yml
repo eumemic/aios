@@ -494,27 +494,36 @@ jobs:
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
             # Restart this job's dedicated daemon to reap containerd tasks and
-            # stale port allocations that ``docker rm`` cannot see. Images
-            # survive the restart, preserving the exact sandbox image selected
-            # above. The pytest cache also survives, so retry only failed tests:
-            # repeating the whole serial shard can exceed the job time budget.
-            sudo systemctl restart docker
-            for attempt in {1..30}; do
-              docker info >/dev/null 2>&1 && break
-              if [[ "$attempt" == 30 ]]; then
-                echo "::error::Docker did not recover after restart"
+            # stale port allocations that ``docker rm`` cannot see. Images and
+            # pytest's last-failed cache survive, so each recovery pass runs only
+            # the residual failures rather than repeating the whole serial shard.
+            # Two passes are deliberately bounded: hosted Docker occasionally
+            # needs one failed startup after a daemon reset before its networks
+            # are usable, but a test failing three times is a blocking signal.
+            for retry in 1 2; do
+              sudo systemctl restart docker
+              for attempt in {1..30}; do
+                if docker info >/dev/null 2>&1; then
+                  break
+                fi
+                if [[ "$attempt" == 30 ]]; then
+                  echo "::error::Docker did not recover after restart"
+                  exit 1
+                fi
+                sleep 1
+              done
+              docker container prune -f
+              docker network prune -f
+              docker volume prune -af
+              if uv run pytest tests/e2e -q -m "docker and not perf" --lf; then
+                break
+              fi
+              if [[ "$retry" == 2 ]]; then
+                echo "::error::Docker E2E failures persisted through two clean recovery passes"
                 exit 1
               fi
-              sleep 1
+              echo "::warning::Docker E2E still has residual failures; resetting once more"
             done
-            docker container prune -f
-            docker network prune -f
-            docker volume prune -af
-            # The cache is from the serial first pass, so this reruns only the
-            # independently failing tests in a clean Docker session. A broad
-            # second pass both wastes the hosted-runner budget and can obscure
-            # the original failure with fresh resource exhaustion.
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
