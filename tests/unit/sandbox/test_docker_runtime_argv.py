@@ -13,24 +13,28 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     Mount,
     SandboxSpec,
 )
 from aios.sandbox.backends.docker import DockerBackend
 
 
-def _spec(*, runtime: str | None = None) -> SandboxSpec:
+def _spec(*, runtime: str | None = None, credentialed: bool = False) -> SandboxSpec:
+    labels = {
+        MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
+        INSTANCE_LABEL_KEY: "inst_runtime",
+        SESSION_LABEL_KEY: "sess_runtime",
+    }
+    if credentialed:
+        labels[VAULT_PLACEHOLDER_KEYS_LABEL_KEY] = "GITHUB_TOKEN"
     return SandboxSpec(
         session_id="sess_runtime",
         instance_id="inst_runtime",
         workspace=Mount(host_path=Path("/tmp/ws"), sandbox_path="/workspace"),
         extra_mounts=(),
         environment={},
-        labels={
-            MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
-            INSTANCE_LABEL_KEY: "inst_runtime",
-            SESSION_LABEL_KEY: "sess_runtime",
-        },
+        labels=labels,
         network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image="aios-sandbox:test",
@@ -57,6 +61,25 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     await DockerBackend().create(_spec())
 
     assert _runtime_values(calls[0]) == []
+    assert "--sysctl" not in calls[0]
+
+
+async def test_create_enables_route_localnet_for_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s, snapshot_timeout
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(credentialed=True))
+
     sysctl = calls[0].index("--sysctl")
     assert calls[0][sysctl + 1] == "net.ipv4.conf.all.route_localnet=1"
 
