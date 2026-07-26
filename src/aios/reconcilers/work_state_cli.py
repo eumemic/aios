@@ -47,12 +47,15 @@ from aios.reconcilers.work_state import (
     SourceFailed,
     SourceOk,
     SourceRead,
+    TransferEvidence,
     WorkItem,
     build_report,
     is_pipeline_state_label,
+    parse_issue_ref,
     render_json,
     render_markdown,
     run_record_from_payload,
+    stale_run_keys,
 )
 
 #: The repos whose pipeline labels are in scope (#2043).
@@ -77,6 +80,10 @@ _REQUEST_TIMEOUT_S = 30
 _MAX_ISSUE_PAGES = 50
 _MAX_RUN_PAGES = 200
 _PER_PAGE = 100
+#: Ceiling on the C4 stale-key probes issued per reconcile. Hitting it is NOT
+#: silently ignored: an explicit note says how many keys went UNPROBED, so a
+#: transfer that we did not look for is visible as a gap rather than as a zombie.
+_MAX_TRANSFER_PROBES = 400
 
 
 class ObserveOnlyViolation(RuntimeError):
@@ -383,6 +390,113 @@ def read_github_items(
     )
 
 
+# ─── C4: the INVERTED stale-join-key probe ───────────────────────────────────
+
+
+def probe_transfer(
+    repo: str,
+    number: int,
+    *,
+    token: str,
+    getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
+) -> tuple[str, str | None]:
+    """GET the STALE coordinates directly. Returns ``(destination, unparseable_reason)``.
+
+    ``destination`` is ``""`` when the coordinates still resolve to themselves (no
+    transfer). GET-only, like every other read here.
+
+    Why this direction. A transfer is invisible from the new coordinates (they answer
+    200 as themselves) and invisible from enumeration (which only ever returns the new
+    pair). It is visible from exactly one place — the OLD pair, which survives only in
+    ``run.input``. The first cut of C4 probed an ENUMERATED issue and waited for a
+    redirect, a world production cannot present, so every one of the 68 issues that
+    moved repos on 2026-07-25 still became a FALSE ZOMBIE. Hence: ask about the stale
+    coordinates.
+
+    Two forms of authoritative evidence, because urllib follows the 301 silently:
+
+    * the transport reports a FINAL URL different from the one we asked for; or
+    * the body answers with different coordinates than the ones requested
+      (``url``/``html_url``/``repository_url`` + ``number``) — which is what a
+      followed redirect looks like once the hop itself is invisible.
+    """
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "aios-work-state-reconciler",
+    }
+    url = f"{_GITHUB_API}/repos/{repo}/issues/{number}"
+    body, resp_headers = getter(url, headers)
+    final = resp_headers.get(_FINAL_URL_HEADER)
+    if final and parse_issue_ref(final) not in (None, (repo, number)):
+        return str(final), None
+    if isinstance(body, Mapping):
+        for field in ("url", "html_url"):
+            ref = parse_issue_ref(body.get(field))
+            if ref is not None and ref != (repo, number):
+                return str(body[field]), None
+    if final and final != url:
+        # A hop we cannot name is still a hop; report it verbatim rather than guess.
+        return str(final), None
+    return "", None
+
+
+def probe_stale_keys(
+    items: Sequence[WorkItem],
+    runs: Sequence[RunRecord],
+    *,
+    token: str,
+    getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
+    max_probes: int = _MAX_TRANSFER_PROBES,
+) -> tuple[tuple[TransferEvidence, ...], tuple[str, ...]]:
+    """Probe every run join key that matched NO enumerated item (C4). GET-only.
+
+    Returns ``(evidence, notes)``. A key that still resolves to itself yields nothing
+    — most stale keys are simply runs against CLOSED issues, which is normal.
+
+    A 404/410 is NOT a failure here and must not ALARM the whole reconcile: a run
+    against a deleted or invisible issue is an expected shape of history, and the run
+    is already reported as unmatched. Only the transfer signal is extracted.
+    """
+    stale = stale_run_keys(items, runs)
+    notes: list[str] = []
+    evidence: list[TransferEvidence] = []
+    keys = list(stale.items())
+    if len(keys) > max_probes:
+        notes.append(
+            f"C4 stale-key probe capped at {max_probes} of {len(keys)} stale join key(s) — "
+            f"{len(keys) - max_probes} were NOT probed, so a transfer among them would be "
+            "unreported. Counts involving ZOMBIE are therefore floors for those items."
+        )
+        keys = keys[:max_probes]
+    for (repo, number), run_ids in keys:
+        try:
+            destination, _ = probe_transfer(repo, number, token=token, getter=getter)
+        except ReadFailure as exc:
+            # 404/410/403 on a stale coordinate is history, not a broken source.
+            notes.append(
+                f"C4 stale-key probe could not read {repo}#{number} ({exc}) — a transfer "
+                "there would be unreported; the run(s) holding this key remain listed as "
+                f"unmatched ({', '.join(run_ids)})"
+            )
+            continue
+        if not destination:
+            continue
+        ref = parse_issue_ref(destination)
+        evidence.append(
+            TransferEvidence(
+                stale_repo=repo,
+                stale_number=number,
+                destination=destination,
+                new_repo=None if ref is None else ref[0],
+                new_number=None if ref is None else ref[1],
+                run_ids=run_ids,
+            )
+        )
+    return tuple(evidence), tuple(notes)
+
+
 # ─── aios: runs of the pipeline workflows ────────────────────────────────────
 
 
@@ -478,6 +592,7 @@ def reconcile(
     getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
     now: str | None = None,
     enrich_linked_prs: bool = True,
+    probe_transfers: bool = True,
 ) -> ReconcileReport:
     """Read both sources and build the report. Missing credentials ⇒ ALARM.
 
@@ -508,12 +623,45 @@ def reconcile(
             base_url=aios_url, api_key=aios_api_key, workflow_ids=workflow_ids, getter=getter
         )
 
+    # C4 — the INVERTED probe. It needs BOTH sources (the join keys that matched no
+    # enumerated item are only knowable once both are read), so it runs here rather
+    # than inside either reader. Skipped when either read failed: the report already
+    # ALARMs, and probing coordinates derived from a partial read would attach
+    # confident transfer evidence to an unreliable join.
+    transfers: tuple[TransferEvidence, ...] = ()
+    if (
+        probe_transfers
+        and github_token
+        and isinstance(items_read, SourceOk)
+        and isinstance(runs_read, SourceOk)
+    ):
+        items = tuple(i for i in items_read.items if isinstance(i, WorkItem))
+        runs = tuple(r for r in runs_read.items if isinstance(r, RunRecord))
+        try:
+            transfers, probe_notes = probe_stale_keys(
+                items, runs, token=github_token, getter=getter
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            transfers, probe_notes = (), (
+                f"C4 stale-key probe failed: {type(exc).__name__}: {exc} — a transferred "
+                "issue among the stale join keys would be unreported",
+            )
+        if probe_notes:
+            items_read = SourceOk(
+                name=items_read.name,
+                items=items_read.items,
+                exhaustive=items_read.exhaustive,
+                pages_read=items_read.pages_read,
+                notes=items_read.notes + probe_notes,
+            )
+
     return build_report(
         items_read=items_read,
         runs_read=runs_read,
         generated_at=generated_at,
         repos_scanned=repos,
         meta={"workflow_ids": list(workflow_ids), "phase": "1-observe-only", "writes_performed": 0},
+        transfers=transfers,
     )
 
 
@@ -540,6 +688,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="skip the per-issue timeline read used to qualify ZOMBIE verdicts",
     )
+    parser.add_argument(
+        "--no-transfer-probe",
+        action="store_true",
+        help=(
+            "skip the C4 stale-join-key probe (GET of the coordinates no enumerated item "
+            "matched); a transferred issue then reads as a ZOMBIE"
+        ),
+    )
     args = parser.parse_args(argv)
 
     report = reconcile(
@@ -549,6 +705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         aios_api_key=os.environ.get("AIOS_API_KEY"),
         workflow_ids=tuple(args.workflow_ids or (DEV_PIPELINE_WORKFLOW_ID,)),
         enrich_linked_prs=not args.no_linked_prs,
+        probe_transfers=not args.no_transfer_probe,
     )
 
     out = render_json(report) if args.format == "json" else render_markdown(report)

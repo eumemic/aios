@@ -36,15 +36,18 @@ from aios.reconcilers.work_state import (
     RunRecord,
     SourceFailed,
     SourceOk,
+    TransferEvidence,
     WorkItem,
     build_report,
     classify_item,
     index_runs,
     is_pipeline_state_label,
     normalise_repo,
+    parse_issue_ref,
     render_json,
     render_markdown,
     run_record_from_payload,
+    stale_run_keys,
 )
 from aios.reconcilers.work_state import (
     TERMINAL_RUN_STATUSES as RECON_TERMINAL,
@@ -56,6 +59,7 @@ from aios.reconcilers.work_state_cli import (
     _get,
     _next_link,
     fetch_repo_items,
+    probe_stale_keys,
     read_aios_runs,
     read_github_items,
     reconcile,
@@ -1044,38 +1048,381 @@ def test_malformed_run_row_is_a_read_failure() -> None:
 # ---- C4: a transferred issue is DETECTED, not silently turned into a zombie. ----
 
 
-def test_C4_a_redirect_on_the_issue_read_is_surfaced_as_a_transfer() -> None:
-    """68 issues were transferred between repos on 2026-07-25. A transfer gives the issue
-    a NEW (repo, number) while every run.input still holds the OLD one, so the join key
-    is stale and the item reads as a false ZOMBIE. urllib follows the 301 silently, so the
-    transport reports where it actually landed and the report says so."""
-    from aios.reconcilers.work_state_cli import _FINAL_URL_HEADER
+def test_C4_the_INVERTED_probe_finds_a_transfer_from_a_REALIZABLE_world() -> None:
+    """THE C4 fixture, rebuilt so it describes a world production can actually present.
 
-    def getter(url: str, headers: Any) -> Any:
-        if "/issues?" in url or url.endswith("/issues"):
-            return [
+    The world, exactly as GitHub serves it after a completed transfer:
+
+    * a RUN whose ``input`` names the OLD coordinates (company#71) — 68 issues moved
+      repos on 2026-07-25, so every one of their runs carries a stale key right now;
+    * enumeration that returns ONLY the NEW coordinates (ops#900). The OLD pair is
+      *never enumerated* — that is the whole point, and it is why the previous fixture
+      (start from an enumerated issue, follow a redirect on its timeline) asserted a
+      world that cannot occur. Agreement on an impossible fixture is not evidence.
+
+    So the probe is INVERTED: the reconciler takes the run join keys that matched NO
+    enumerated item and GETs those STALE coordinates. company#71 redirects to ops#900,
+    which is authoritative evidence of the transfer — and ops#900, which would
+    otherwise be a textbook false ZOMBIE (in-flight label, no run keyed to it), is
+    kept OUT of counts['ZOMBIE'].
+    """
+    world = _github_world(
+        # Enumeration NEVER returns the old pair. Only the new coordinates exist.
+        issues={
+            "eumemic/eumemic-ops": [
                 {
-                    "number": 71,
+                    "number": 900,
+                    "title": "moved here from company#71",
+                    "labels": [{"name": "autodev:in-progress"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ],
+            "eumemic/eumemic-company": [],
+        },
+        timelines={"eumemic/eumemic-ops/issues/900": []},
+        moved={
+            "eumemic/eumemic-company/issues/71": (
+                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            )
+        },
+    )
+    # The run still holds the OLD coordinates. This is the stale join key.
+    runs = [
+        {
+            "id": "run_stale",
+            "status": "completed",
+            "input": {"repo": "eumemic/eumemic-company", "issue_number": 71},
+        }
+    ]
+    source, transfers, paths = _cli_reader(
+        world, ["eumemic/eumemic-ops", "eumemic/eumemic-company"], runs
+    )
+
+    # 1. The probe actually asked about the STALE coordinates — the one place a
+    #    completed transfer is visible.
+    assert "/repos/eumemic/eumemic-company/issues/71" in paths, (
+        "the reconciler never probed the stale join key, so a real transfer is invisible"
+    )
+
+    # 2. The redirect is read as authoritative evidence, resolved to NEW coordinates.
+    (evidence,) = transfers
+    assert (evidence.stale_repo, evidence.stale_number) == ("eumemic/eumemic-company", 71)
+    assert (evidence.new_repo, evidence.new_number) == ("eumemic/eumemic-ops", 900)
+    assert evidence.run_ids == ("run_stale",)
+
+    report = build_report(
+        items_read=source,
+        runs_read=SourceOk(
+            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
+        ),
+        transfers=transfers,
+    )
+
+    # 3. THE payoff: the issue at the new coordinates is NOT a zombie.
+    counts = report.counts or {}
+    assert counts["ZOMBIE"] == 0, "a transferred issue STILL became a false ZOMBIE"
+    assert counts["AMBIGUOUS"] == 1
+    (d,) = report.disagreements
+    assert d.classification == "AMBIGUOUS"
+    assert (d.repo, d.number) == ("eumemic/eumemic-ops", 900)
+    assert "transferred-stale-join-key" in d.caveats
+    assert "excluded-from-zombie-count" in d.caveats
+    assert "eumemic/eumemic-company#71" in d.detail
+    assert "run_stale" in d.detail
+
+    # 4. And the stale key is visible as DATA and as prose.
+    assert any("STALE JOIN KEY" in n for n in report.notes)
+    payload = json.loads(render_json(report))
+    assert payload["transfers"][0]["stale_number"] == 71
+    assert payload["transfers"][0]["new_number"] == 900
+    assert "TRANSFERRED" in render_markdown(report)
+
+
+def test_C4_the_OLD_probe_direction_could_not_have_seen_this_world() -> None:
+    """Why the inversion was necessary, pinned as a test rather than left as a claim.
+
+    In the realizable world the OLD coordinates are never enumerated, so a
+    detector that only inspects ENUMERATED items — the previous design — issues no
+    request that could ever observe the transfer. Here: enumeration touches only
+    ops#900 and its timeline, and neither answers with a redirect. Without the probe
+    of the stale key, ops#900 is a ZOMBIE.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/eumemic-ops": [
+                {
+                    "number": 900,
                     "title": "moved",
                     "labels": [{"name": "dispatched"}],
                     "html_url": "",
                     "updated_at": "",
                 }
-            ], {}
-        return [], {
-            _FINAL_URL_HEADER: "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            ]
+        },
+        timelines={"eumemic/eumemic-ops/issues/900": []},
+        moved={
+            "eumemic/eumemic-company/issues/71": (
+                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            )
+        },
+    )
+    runs = [
+        {
+            "id": "run_stale",
+            "status": "completed",
+            "input": {"repo": "eumemic/eumemic-company", "issue_number": 71},
         }
+    ]
+    # Enumeration-only (no stale-key probe): NOTHING redirects, so no transfer is seen.
+    source, _transfers, enum_paths = _cli_reader(world, ["eumemic/eumemic-ops"], [])
+    assert not any("issues/71" in p for p in enum_paths)
+    blind = build_report(
+        items_read=source,
+        runs_read=SourceOk(
+            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
+        ),
+    )
+    assert (blind.counts or {})["ZOMBIE"] == 1, (
+        "this fixture must reproduce the FALSE ZOMBIE, or it is not testing the defect"
+    )
+
+    # With the inverted probe, the same world yields AMBIGUOUS instead.
+    _s, transfers, _p = _cli_reader(world, ["eumemic/eumemic-ops"], runs)
+    fixed = build_report(
+        items_read=_s,
+        runs_read=SourceOk(
+            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
+        ),
+        transfers=transfers,
+    )
+    assert (fixed.counts or {})["ZOMBIE"] == 0
+    assert (fixed.counts or {})["AMBIGUOUS"] == 1
+
+
+def test_C4_stale_run_keys_is_exactly_the_probe_list() -> None:
+    """The probe list is the runs that joined to nothing — not the enumerated items."""
+    items = [item(900, repo="eumemic/eumemic-ops")]
+    runs = [
+        run("completed", repo="eumemic/eumemic-company", number=71, run_id="r_a"),
+        run("errored", repo="eumemic/eumemic-company", number=71, run_id="r_b"),
+        run("running", repo="eumemic/eumemic-ops", number=900, run_id="r_joined"),
+        run("errored", repo=None, number=None, run_id="r_unkeyable"),
+    ]
+    assert stale_run_keys(items, runs) == {("eumemic/eumemic-company", 71): ("r_a", "r_b")}
+
+
+def test_C4_a_stale_key_that_resolves_to_ITSELF_is_not_a_transfer() -> None:
+    """Most stale keys are runs against CLOSED issues. That must NOT read as a transfer.
+
+    Without this, "probe the stale keys" could be satisfied by something that reports a
+    transfer for every closed issue — which would move real zombies out of the count
+    and bury the defect the tool exists to surface.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/aios": [
+                {
+                    "number": 2000,
+                    "title": "z",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ]
+        },
+        timelines={"eumemic/aios/issues/2000": []},
+    )
+    runs = [
+        {"id": "r_closed", "status": "completed", "input": {"repo": "eumemic/aios", "issue": 111}}
+    ]
+    source, transfers, paths = _cli_reader(world, ["eumemic/aios"], runs)
+    assert "/repos/eumemic/aios/issues/111" in paths
+    assert transfers == ()
+    report = build_report(
+        items_read=source,
+        runs_read=SourceOk(
+            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
+        ),
+        transfers=transfers,
+    )
+    assert (report.counts or {})["ZOMBIE"] == 1, "a real zombie must stay a zombie"
+    assert (report.counts or {})["AMBIGUOUS"] == 0
+
+
+def test_C4_probe_read_error_is_a_NOTE_not_an_ALARM() -> None:
+    """A 404 on a stale coordinate is HISTORY (deleted/invisible issue), not an outage.
+
+    It must not ALARM the whole reconcile — but it must not be silent either, since an
+    unprobed key is a transfer we did not look for.
+    """
+    def getter(url: str, headers: Any) -> Any:
+        raise ReadFailure(f"GET {url} → HTTP 404: gone")
+
+    transfers, notes = probe_stale_keys(
+        [item(1)],
+        [run("completed", repo="eumemic/aios", number=4242, run_id="r_x")],
+        token="t",
+        getter=getter,
+    )
+    assert transfers == ()
+    assert any("404" in n and "eumemic/aios#4242" in n for n in notes)
+
+
+def test_C4_probe_cap_is_reported_as_a_gap_not_ignored() -> None:
+    """Hitting the probe ceiling says so. An unprobed key is an unseen transfer."""
+    def getter(url: str, headers: Any) -> Any:
+        return {"number": 1, "url": url}, {}
+
+    runs = [
+        run("completed", repo="eumemic/aios", number=n, run_id=f"r{n}") for n in range(10, 20)
+    ]
+    transfers, notes = probe_stale_keys([], runs, token="t", getter=getter, max_probes=3)
+    assert transfers == ()
+    assert any("capped at 3 of 10" in n and "NOT probed" in n for n in notes)
+
+
+def test_C4_a_transfer_OUTSIDE_the_scanned_repos_still_emits_its_note() -> None:
+    """The destination may be a repo we do not scan. There is then no item to caveat, so
+    the note is the ONLY trace the stale key leaves — and it must survive."""
+    evidence = TransferEvidence(
+        stale_repo="eumemic/eumemic-company",
+        stale_number=71,
+        destination="https://api.github.com/repos/other-org/private/issues/5",
+        new_repo="other-org/private",
+        new_number=5,
+        run_ids=("run_stale",),
+    )
+    report = build_report(
+        items_read=SourceOk(name="github", items=()),
+        runs_read=SourceOk(name="aios-runs", items=()),
+        transfers=(evidence,),
+    )
+    assert report.verdict == "OK"
+    assert any("STALE JOIN KEY" in n for n in report.notes)
+    assert "other-org/private" in "\n".join(report.notes)
+
+
+# ---- ITEM 2: the change detector must SEE a transfer-caveat change. ----
+
+
+def _transfer(dest_number: int = 900, run_id: str = "run_stale") -> TransferEvidence:
+    return TransferEvidence(
+        stale_repo="eumemic/eumemic-company",
+        stale_number=71,
+        destination=f"https://api.github.com/repos/eumemic/eumemic-ops/issues/{dest_number}",
+        new_repo="eumemic/eumemic-ops",
+        new_number=dest_number,
+        run_ids=(run_id,),
+    )
+
+
+def test_ITEM2_transfer_notes_are_folded_into_the_disagreement_hash() -> None:
+    """A transfer caveat appearing must WAKE the seat.
+
+    A stale key whose destination lies outside the scanned repos produces no
+    disagreement at all, so a hash computed only over disagreements would read a
+    newly-discovered transfer as "unchanged, nothing to say" and stay silent about the
+    exact fact a triager needs.
+    """
+    def report(transfers: tuple[TransferEvidence, ...]) -> ReconcileReport:
+        return build_report(
+            items_read=SourceOk(name="github", items=()),
+            runs_read=SourceOk(name="aios-runs", items=()),
+            transfers=transfers,
+        )
+
+    none_seen = report(())
+    one_seen = report((_transfer(),))
+    moved_elsewhere = report((_transfer(dest_number=901),))
+    other_run = report((_transfer(run_id="run_other"),))
+
+    assert none_seen.disagreement_hash() != one_seen.disagreement_hash(), (
+        "a NEW transfer caveat did not change the hash — the seat would never be woken"
+    )
+    assert one_seen.disagreement_hash() != moved_elsewhere.disagreement_hash()
+    assert one_seen.disagreement_hash() != other_run.disagreement_hash()
+    # Stable for the same evidence: it must not spam the seat every cron tick.
+    assert one_seen.disagreement_hash() == report((_transfer(),)).disagreement_hash()
+    # Order of evidence is not a change.
+    a = report((_transfer(), _transfer(dest_number=901)))
+    b = report((_transfer(dest_number=901), _transfer()))
+    assert a.disagreement_hash() == b.disagreement_hash()
+
+
+def test_ITEM2_transfer_notes_change_the_hash_on_the_ALARM_path_too() -> None:
+    """An outage must not mask a newly-discovered stale key."""
+    def alarm(transfers: tuple[TransferEvidence, ...]) -> ReconcileReport:
+        return build_report(
+            items_read=SourceFailed(name="github", reason="HTTP 500"),
+            runs_read=SourceOk(name="aios-runs", items=()),
+            transfers=transfers,
+        )
+
+    assert alarm(()).verdict == "ALARM"
+    assert alarm(()).disagreement_hash() != alarm((_transfer(),)).disagreement_hash()
+
+
+def test_ITEM2_both_forms_agree_on_the_hash_WITH_transfers() -> None:
+    """The mirror must fold transfer notes in identically, or the two wake differently."""
+    wf = _load_wf_module()
+    evidence = _transfer()
+    lib = build_report(
+        items_read=SourceOk(name="github", items=()),
+        runs_read=SourceOk(name="aios-runs", items=()),
+        transfers=(evidence,),
+    )
+    wf_report = wf.build(
+        [],
+        True,
+        [],
+        True,
+        [],
+        [],
+        [
+            {
+                "stale_repo": evidence.stale_repo,
+                "stale_number": evidence.stale_number,
+                "destination": evidence.destination,
+                "new_repo": evidence.new_repo,
+                "new_number": evidence.new_number,
+                "run_ids": list(evidence.run_ids),
+            }
+        ],
+    )
+    assert wf.disagreement_hash(wf_report) == lib.disagreement_hash()
+    # And the mirror's hash moves when the evidence does.
+    bare = wf.build([], True, [], True, [], [], [])
+    assert wf.disagreement_hash(bare) != wf.disagreement_hash(wf_report)
+
+
+def test_C4_parse_issue_ref_never_guesses() -> None:
+    assert parse_issue_ref("https://api.github.com/repos/eumemic/aios/issues/12") == (
+        "eumemic/aios",
+        12,
+    )
+    assert parse_issue_ref("https://github.com/eumemic/aios/issues/12") == ("eumemic/aios", 12)
+    for bad in (None, "", "https://api.github.com/repos/eumemic/aios", "nonsense", 7):
+        assert parse_issue_ref(bad) is None
+
+
+def test_C4_a_repo_RENAME_on_the_list_path_is_still_surfaced() -> None:
+    """The list-path redirect IS realizable (a repo rename/move) and is retained.
+
+    Distinct from the issue-transfer case: here the redirect happens on a request we
+    genuinely make, so following it silently while saying nothing would hide that the
+    enumerated coordinates are not the ones we asked for.
+    """
+    from aios.reconcilers.work_state_cli import _FINAL_URL_HEADER
+
+    def getter(url: str, headers: Any) -> Any:
+        return [], {_FINAL_URL_HEADER: "https://api.github.com/repos/eumemic/renamed/issues"}
 
     source = read_github_items(
-        repos=["eumemic/eumemic-company"], token="t", getter=getter, enrich_linked_prs=True
+        repos=["eumemic/oldname"], token="t", getter=getter, enrich_linked_prs=False
     )
     assert isinstance(source, SourceOk)
-    assert any("TRANSFERRED" in n for n in source.notes)
-    assert any("eumemic-ops/issues/900" in n for n in source.notes)
-    report = build_report(items_read=source, runs_read=SourceOk(name="aios-runs", items=()))
-    assert any("TRANSFERRED" in n for n in report.notes)
-    assert "TRANSFERRED" in render_markdown(report)
-    assert any("TRANSFERRED" in n for n in json.loads(render_json(report))["notes"])
+    assert any("TRANSFERRED" in n and "renamed" in n for n in source.notes)
 
 
 # ---- the drift guard now asserts the TRANSPORT, not source text. ----
@@ -1124,6 +1471,7 @@ def _github_world(
     issues: dict[str, list[dict[str, Any]]],
     timelines: dict[str, list[dict[str, Any]]] | None = None,
     redirects: dict[str, str] | None = None,
+    moved: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One recorded GitHub, replayable through EITHER transport.
 
@@ -1137,6 +1485,11 @@ def _github_world(
         "issues": issues,
         "timelines": timelines or {},
         "redirects": redirects or {},
+        # C4 — ``moved`` records TRANSFERS as GitHub actually presents them:
+        # ``{"owner/name/issues/N": "<url of the NEW coordinates>"}``. The OLD pair
+        # answers with a redirect; the NEW pair is what enumeration returns. This is
+        # the realizable world — see ``_resolve``.
+        "moved": moved or {},
     }
 
 
@@ -1159,11 +1512,33 @@ def _resolve(world: dict[str, Any], path: str) -> tuple[str, Any]:
     if "/issues?" in path:
         repo = path.split("/repos/", 1)[1].split("/issues?")[0]
         return "ok", world["issues"].get(repo, [])
+    if "/issues/" in path:
+        # A single-issue read — the C4 stale-key PROBE. ``moved`` entries redirect (a
+        # transfer); anything else answers as ITSELF, which is what a stale key
+        # belonging to a merely-closed issue does.
+        key = path.split("/repos/", 1)[1]  # "owner/name/issues/N"
+        if key in world["moved"]:
+            return "redirect", world["moved"][key]
+        repo, number = key.split("/issues/")
+        return "ok", {
+            "number": int(number),
+            "url": f"https://api.github.com/repos/{repo}/issues/{number}",
+            "html_url": f"https://github.com/{repo}/issues/{number}",
+            "state": "closed",
+            "labels": [],
+        }
     raise AssertionError(f"the recorded world has no entry for {path!r}")
 
 
-def _cli_reader(world: dict[str, Any], repos: list[str]) -> tuple[SourceOk, list[str]]:
-    """Drive the LIBRARY/CLI read path over ``world``. Returns (source, paths_requested)."""
+def _cli_reader(
+    world: dict[str, Any], repos: list[str], runs: list[dict[str, Any]] | None = None
+) -> tuple[SourceOk, tuple[TransferEvidence, ...], list[str]]:
+    """Drive the LIBRARY/CLI read path over ``world``, INCLUDING the C4 stale-key probe.
+
+    Returns ``(source, transfers, paths_requested)``. ``runs`` are raw run payloads, so
+    the probe list is derived exactly as production derives it — from join keys that
+    matched no enumerated item — rather than being handed to the test.
+    """
     from aios.reconcilers.work_state_cli import _FINAL_URL_HEADER
 
     seen: list[str] = []
@@ -1180,11 +1555,26 @@ def _cli_reader(world: dict[str, Any], repos: list[str]) -> tuple[SourceOk, list
 
     source = read_github_items(repos, token="t", getter=getter, enrich_linked_prs=True)
     assert isinstance(source, SourceOk), getattr(source, "reason", source)
-    return source, seen
+    records = [run_record_from_payload(r) for r in (runs or [])]
+    items = [i for i in source.items if isinstance(i, WorkItem)]
+    transfers, probe_notes = probe_stale_keys(items, records, token="t", getter=getter)
+    if probe_notes:
+        source = SourceOk(
+            name=source.name,
+            items=source.items,
+            exhaustive=source.exhaustive,
+            notes=source.notes + probe_notes,
+        )
+    return source, transfers, seen
 
 
-def _wf_reader(world: dict[str, Any], repos: list[str]) -> tuple[Any, list[str]]:
-    """Drive the WORKFLOW read path over the SAME ``world``. Returns (result, paths)."""
+def _wf_reader(
+    world: dict[str, Any], repos: list[str], runs: list[dict[str, Any]] | None = None
+) -> tuple[Any, list[str]]:
+    """Drive the WORKFLOW read path over the SAME ``world``, INCLUDING the C4 probe.
+
+    Returns ``((wf, items, exhaustive, notes, transfers), paths)``.
+    """
     wf = _load_wf_module()
     seen: list[str] = []
 
@@ -1203,20 +1593,35 @@ def _wf_reader(world: dict[str, Any], repos: list[str]) -> tuple[Any, list[str]]
 
     wf.tool = fake_tool
     items, exhaustive, notes = asyncio.run(wf._read_items(repos))
-    return (wf, items, exhaustive, notes), seen
+    transfers, probe_notes = asyncio.run(wf._probe_stale_keys(items, runs or []))
+    notes = list(notes) + list(probe_notes)
+    return (wf, items, exhaustive, notes, transfers), seen
 
 
-def _assert_forms_agree(world: dict[str, Any], repos: list[str]) -> tuple[Any, Any]:
+def _assert_forms_agree(
+    world: dict[str, Any], repos: list[str], runs: list[dict[str, Any]] | None = None
+) -> tuple[Any, Any]:
     """THE guard. Both forms read the same world; every observable must match.
 
     Compares the ACQUIRED evidence, the classifications, the notes and the hash. A
-    capability that exists in only one form cannot survive this.
+    capability that exists in only one form cannot survive this. ``runs`` are raw run
+    payloads fed to BOTH forms, so the C4 stale-key probe list is derived by each form
+    from the same join, never handed to it.
     """
-    source, cli_paths = _cli_reader(world, repos)
-    (wf, wf_items, wf_exhaustive, wf_notes), wf_paths = _wf_reader(world, repos)
+    runs = runs or []
+    source, cli_transfers, cli_paths = _cli_reader(world, repos, runs)
+    (wf, wf_items, wf_exhaustive, wf_notes, wf_transfers), wf_paths = _wf_reader(
+        world, repos, runs
+    )
 
-    lib_report = build_report(items_read=source, runs_read=SourceOk(name="aios-runs", items=()))
-    wf_report = wf.build(wf_items, wf_exhaustive, [], True, [], wf_notes)
+    lib_report = build_report(
+        items_read=source,
+        runs_read=SourceOk(
+            name="aios-runs", items=tuple(run_record_from_payload(r) for r in runs)
+        ),
+        transfers=cli_transfers,
+    )
+    wf_report = wf.build(wf_items, wf_exhaustive, runs, True, [], wf_notes, wf_transfers)
 
     # 1. The same ITEMS, with the same ACQUIRED linked-PR evidence.
     assert [(i.repo, i.number) for i in source.items] == [
@@ -1234,6 +1639,16 @@ def _assert_forms_agree(world: dict[str, Any], repos: list[str]) -> tuple[Any, A
 
     # 3. The same NOTES (C4 transfers) — byte for byte.
     assert sorted(lib_report.notes) == sorted(wf_report["notes"])
+
+    # 3b. The same C4 stale-key EVIDENCE, as structured data. Notes are prose; this is
+    #     what phase 2 will act on, so it must match field for field.
+    assert [
+        (e.stale_repo, e.stale_number, e.new_repo, e.new_number, list(e.run_ids))
+        for e in cli_transfers
+    ] == [
+        (t["stale_repo"], t["stale_number"], t["new_repo"], t["new_number"], t["run_ids"])
+        for t in wf_transfers
+    ], "the two forms disagree about which join keys are STALE"
 
     # 4. The same change-detection HASH.
     assert wf.disagreement_hash(wf_report) == lib_report.disagreement_hash()
@@ -1336,7 +1751,7 @@ def test_C2_workflow_read_path_actually_requests_the_timeline() -> None:
             ]
         },
     )
-    (wf, items, _, _), paths = _wf_reader(world, ["eumemic/eumemic-company"])
+    (wf, items, _, _, _), paths = _wf_reader(world, ["eumemic/eumemic-company"])
     assert any("/issues/135/timeline" in p for p in paths), (
         "the workflow read path did not FETCH the linked-PR evidence"
     )
@@ -1421,69 +1836,183 @@ def test_C2_a_truncated_timeline_is_a_READ_FAILURE_not_a_quiet_zombie() -> None:
 # ---- C4 in the WORKFLOW form. ----
 
 
-def test_C4_workflow_form_detects_a_transfer_and_does_not_call_it_a_zombie() -> None:
-    """C4 in the mirror. A 3xx on the issue read is a TRANSFER, surfaced as a note.
+def test_C4_workflow_form_finds_a_transfer_from_the_SAME_REALIZABLE_world() -> None:
+    """C4 in the mirror, on the world production can actually present.
 
-    68 issues changed repos on 2026-07-25, so a stale (repo, number) join key is live
-    reality. The signal existed only in the urllib CLI; the workflow's `_gh` had no
-    equivalent, so on the form that runs on cron a transfer silently became a false
-    ZOMBIE.
+    Same fixture shape as the library test: a run naming the OLD coordinates
+    (company#71) and an enumeration that returns ONLY the new ones (ops#900). The old
+    mirror fixture put a redirect on the TIMELINE of an ENUMERATED issue — a world that
+    cannot occur, because after a transfer the old pair is never enumerated and the new
+    pair resolves normally. The mirror must invert the probe exactly as the library does
+    or the form that actually runs on cron keeps manufacturing false ZOMBIEs.
     """
     world = _github_world(
         issues={
-            "eumemic/eumemic-company": [
+            "eumemic/eumemic-ops": [
                 {
-                    "number": 71,
-                    "title": "moved",
-                    "labels": [{"name": "dispatched"}],
+                    "number": 900,
+                    "title": "moved here from company#71",
+                    "labels": [{"name": "autodev:in-progress"}],
                     "html_url": "",
                     "updated_at": "",
                 }
             ]
         },
-        redirects={
-            "/repos/eumemic/eumemic-company/issues/71/timeline": (
+        timelines={"eumemic/eumemic-ops/issues/900": []},
+        moved={
+            "eumemic/eumemic-company/issues/71": (
                 "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
             )
         },
     )
-    (wf, items, _, notes), _paths = _wf_reader(world, ["eumemic/eumemic-company"])
-    assert any("TRANSFERRED" in n for n in notes), "the mirror missed the transfer entirely"
-    assert any("eumemic-ops/issues/900" in n for n in notes)
-    report = wf.build(items, True, [], True, [], notes)
-    assert any("TRANSFERRED" in n for n in report["notes"])
-    # And it is not silently swallowed into the ALARM path either.
+    runs = [
+        {
+            "id": "run_stale",
+            "status": "completed",
+            "input": {"repo": "eumemic/eumemic-company", "issue_number": 71},
+        }
+    ]
+    (wf, items, _, notes, transfers), paths = _wf_reader(world, ["eumemic/eumemic-ops"], runs)
+
+    # The mirror asked about the STALE coordinates — the inverted probe, in the form
+    # that runs on cron.
+    assert "/repos/eumemic/eumemic-company/issues/71" in paths, (
+        "the mirror never probed the stale join key, so a real transfer is invisible to it"
+    )
+    assert transfers == [
+        {
+            "stale_repo": "eumemic/eumemic-company",
+            "stale_number": 71,
+            "destination": "https://api.github.com/repos/eumemic/eumemic-ops/issues/900",
+            "new_repo": "eumemic/eumemic-ops",
+            "new_number": 900,
+            "run_ids": ["run_stale"],
+        }
+    ]
+
+    report = wf.build(items, True, runs, True, [], notes, transfers)
     assert report["verdict"] == "OK"
+    assert report["counts"]["ZOMBIE"] == 0, "the mirror STILL turned a transfer into a zombie"
+    assert report["counts"]["AMBIGUOUS"] == 1
+    (d,) = report["disagreements"]
+    assert d["classification"] == "AMBIGUOUS"
+    assert (d["repo"], d["number"]) == ("eumemic/eumemic-ops", 900)
+    assert "transferred-stale-join-key" in d["caveats"]
+    assert "excluded-from-zombie-count" in d["caveats"]
+    assert "eumemic/eumemic-company#71" in d["detail"]
+    assert any("STALE JOIN KEY" in n for n in report["notes"])
 
 
-def test_C4_both_forms_emit_the_SAME_transfer_note() -> None:
-    """Parity on the C4 signal: same world, same note, from two different mechanisms.
+def test_C4_both_forms_agree_on_the_REALIZABLE_transfer_world() -> None:
+    """Parity on the C4 signal from two different transports, on the realizable world.
 
-    urllib follows the 301 and reports `geturl()`; `http_request` does not follow and
-    returns a literal 301 + Location. The transports differ by construction — the
-    OBSERVATION must not.
+    urllib follows the 301 silently and reports `geturl()`; `http_request` does not
+    follow and returns a literal 301 + Location. The transports differ by construction —
+    the stale-key EVIDENCE, the notes, the classifications and the HASH must not.
     """
     world = _github_world(
         issues={
-            "eumemic/eumemic-company": [
+            "eumemic/eumemic-ops": [
                 {
-                    "number": 71,
+                    "number": 900,
                     "title": "moved",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ],
+            "eumemic/eumemic-company": [],
+        },
+        timelines={"eumemic/eumemic-ops/issues/900": []},
+        moved={
+            "eumemic/eumemic-company/issues/71": (
+                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            )
+        },
+    )
+    runs = [
+        {
+            "id": "run_stale",
+            "status": "completed",
+            "input": {"repo": "eumemic/eumemic-company", "issue_number": 71},
+        }
+    ]
+    lib_report, wf_report = _assert_forms_agree(
+        world, ["eumemic/eumemic-ops", "eumemic/eumemic-company"], runs
+    )
+    assert any("STALE JOIN KEY" in n for n in wf_report["notes"])
+    assert wf_report["counts"]["ZOMBIE"] == 0
+    assert wf_report["counts"]["AMBIGUOUS"] == 1
+    assert (lib_report.counts or {})["AMBIGUOUS"] == 1
+
+
+def test_C4_mirror_stale_key_that_resolves_to_itself_is_not_a_transfer() -> None:
+    """A stale key belonging to a merely-CLOSED issue must not read as a transfer."""
+    world = _github_world(
+        issues={
+            "eumemic/aios": [
+                {
+                    "number": 2000,
+                    "title": "z",
                     "labels": [{"name": "dispatched"}],
                     "html_url": "",
                     "updated_at": "",
                 }
             ]
         },
-        redirects={
-            "/repos/eumemic/eumemic-company/issues/71/timeline": (
-                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
-            )
-        },
+        timelines={"eumemic/aios/issues/2000": []},
     )
-    lib_report, wf_report = _assert_forms_agree(world, ["eumemic/eumemic-company"])
-    assert any("TRANSFERRED" in n for n in wf_report["notes"])
-    assert sorted(lib_report.notes) == sorted(wf_report["notes"])
+    runs = [
+        {"id": "r_closed", "status": "errored", "input": {"repo": "eumemic/aios", "issue": 111}}
+    ]
+    _lib_report, wf_report = _assert_forms_agree(world, ["eumemic/aios"], runs)
+    assert wf_report["counts"]["ZOMBIE"] == 1, "a real zombie must stay a zombie in the mirror"
+    assert wf_report["counts"]["AMBIGUOUS"] == 0
+
+
+def test_C4_mirror_probe_read_error_is_a_NOTE_not_an_ALARM() -> None:
+    """A 404 on a stale coordinate is history, not an outage — but it is never silent."""
+    wf = _load_wf_module()
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": 404, "headers": [], "body": "{}"}
+
+    wf.tool = fake_tool
+    transfers, notes = asyncio.run(
+        wf._probe_stale_keys(
+            [],
+            [{"id": "r_x", "status": "completed", "input": {"repo": "eumemic/aios", "issue": 4242}}],
+        )
+    )
+    assert transfers == []
+    assert any("404" in n and "eumemic/aios#4242" in n for n in notes)
+
+
+def test_C4_mirror_probe_cap_is_reported_as_a_gap() -> None:
+    """Hitting the ceiling says how many keys went UNPROBED, in the mirror too."""
+    wf = _load_wf_module()
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        path = args["path"]
+        return {
+            "status": 200,
+            "headers": [],
+            "body": json.dumps({"number": 1, "url": f"https://api.github.com{path}"}),
+        }
+
+    wf.tool = fake_tool
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(wf, "MAX_TRANSFER_PROBES", 3)
+        runs = [
+            {"id": f"r{n}", "status": "completed", "input": {"repo": "eumemic/aios", "issue": n}}
+            for n in range(10, 20)
+        ]
+        transfers, notes = asyncio.run(wf._probe_stale_keys([], runs))
+    finally:
+        monkey.undo()
+    assert transfers == []
+    assert any("capped at 3 of 10" in n and "NOT probed" in n for n in notes)
 
 
 def test_C4_a_redirect_without_a_location_is_a_read_failure_not_a_guess() -> None:
@@ -1600,7 +2129,7 @@ def test_the_workflow_mirror_can_REACH_every_class_from_fetched_data() -> None:
             "eumemic/aios/issues/4": [],
         },
     )
-    (wf, items, _, notes), _ = _wf_reader(world, ["eumemic/aios"])
+    (wf, items, _, notes, _t), _ = _wf_reader(world, ["eumemic/aios"])
     runs = [
         {"id": "r3", "status": "errored", "input": {"repo": "eumemic/aios", "issue_number": 3}},
         {"id": "r4", "status": "suspended", "input": {"repo": "eumemic/aios", "issue_number": 4}},

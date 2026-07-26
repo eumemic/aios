@@ -149,8 +149,9 @@ Classification = Literal["ZOMBIE", "DEAD", "MISLABELLED", "LAGGING", "AMBIGUOUS"
 
 #: Stable ordering for rendering + the change-detection hash.
 #:
-#: ``AMBIGUOUS`` (C2) is a FIRST-CLASS class, not a footnote: an item asserting
-#: in-flight with no run BUT with linked PRs cannot be a zombie and must not be
+#: ``AMBIGUOUS`` (C2/C4) is a FIRST-CLASS class, not a footnote: an item asserting
+#: in-flight with no run BUT with linked PRs — or one whose run is keyed to STALE
+#: coordinates because the issue was TRANSFERRED — cannot be a zombie and must not be
 #: counted as one. A caveat does not undo a count — phase 2 will act on the class,
 #: so the class has to be right. ``counts["ZOMBIE"]`` therefore excludes them.
 CLASSES: tuple[Classification, ...] = ("ZOMBIE", "AMBIGUOUS", "DEAD", "MISLABELLED", "LAGGING")
@@ -171,6 +172,101 @@ ZOMBIE_MEANS = (
 def is_pipeline_state_label(label: str) -> bool:
     """True iff ``label`` asserts something about pipeline work state."""
     return label in PIPELINE_STATE_LABELS or label.startswith(PIPELINE_STATE_LABEL_PREFIXES)
+
+
+# ─── C4: the STALE-JOIN-KEY probe (transferred issues) ───────────────────────
+#
+# A transfer is only ever visible from the OLD coordinates, and the old coordinates
+# are the one place enumeration never looks.
+#
+# The first cut of C4 detected a transfer by starting from an ENUMERATED issue and
+# noticing a redirect on its timeline read. **That world cannot occur.** Once a
+# transfer has completed, GitHub serves the issue at its NEW (repo, number) and
+# enumeration of the new repo returns exactly that — the OLD pair is never
+# enumerated, so nothing ever asks GitHub about it and no redirect is ever seen. The
+# real transferred issue therefore still became a FALSE ZOMBIE: it is enumerated at
+# its new coordinates, no run is keyed there (every ``run.input`` still holds the old
+# pair), and "no run" reads as "nothing ever picked it up".
+#
+# So the probe is INVERTED. The stale coordinates are known — they are exactly the
+# run join keys that matched NO enumerated item (:func:`stale_run_keys`). The I/O
+# shell GETs those coordinates directly (``GET /repos/{repo}/issues/{n}``, still
+# GET-only) and a redirect — or a body that answers from different coordinates than
+# the ones asked for — is authoritative evidence of a transfer. The evidence is fed
+# back in as :class:`TransferEvidence`, which moves the item at the NEW coordinates
+# out of ZOMBIE and into AMBIGUOUS/NEEDS-TRIAGE.
+
+
+def parse_issue_ref(url: Any) -> tuple[str, int] | None:
+    """``(repo, number)`` from a GitHub issue API **or** HTML url; ``None`` if unreadable.
+
+    Used to turn a redirect destination into the issue's NEW coordinates. Returns
+    ``None`` rather than guessing: a guessed join key manufactures a phantom "agree",
+    which is the failure this whole module exists to prevent.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    parts = [p for p in url.split("?", 1)[0].rstrip("/").split("/") if p]
+    if len(parts) < 4 or parts[-2] not in ("issues", "pull", "pulls"):
+        return None
+    number = _coerce_issue_number(parts[-1])
+    owner, name = parts[-4], parts[-3]
+    if number is None or owner in ("repos", "github.com", "api.github.com"):
+        return None
+    return (f"{owner}/{name}", number)
+
+
+def stale_key_transfer_note(
+    stale_repo: str, stale_number: int, dest: str, run_ids: Sequence[str] = ()
+) -> str:
+    """The C4 note for an INVERTED probe hit, in ONE place.
+
+    Byte-identical to the workflow mirror's ``stale_key_transfer_note`` — the reader
+    drift guard compares the emitted strings, so the two forms cannot describe the
+    same transfer differently.
+    """
+    ids = ", ".join(sorted(run_ids)) or "(none)"
+    return (
+        f"STALE JOIN KEY: {stale_repo}#{stale_number} — held by run(s) {ids} — RESOLVES to "
+        f"{dest}. The issue was TRANSFERRED, so that run can never join, and the issue at "
+        "its NEW coordinates would otherwise read as a FALSE ZOMBIE (C4)"
+    )
+
+
+@dataclass(frozen=True)
+class TransferEvidence:
+    """Authoritative evidence that a run's stored ``(repo, issue_number)`` is STALE.
+
+    Produced by the inverted probe: we asked GitHub about the STALE coordinates and
+    GitHub answered from somewhere else (a 301, or a body whose own coordinates
+    differ). Either way the issue moved.
+    """
+
+    stale_repo: str
+    stale_number: int
+    #: Where the probe actually landed (redirect ``Location`` / final url / body url).
+    destination: str
+    #: The NEW coordinates, when the destination could be parsed. ``None`` means we
+    #: know a transfer happened but not where to — still reported, never guessed.
+    new_repo: str | None = None
+    new_number: int | None = None
+    #: The run(s) whose join key is stale. Named on the finding so a triager can act.
+    run_ids: tuple[str, ...] = ()
+
+    @property
+    def stale_key(self) -> tuple[str, int]:
+        return (self.stale_repo, self.stale_number)
+
+    @property
+    def new_key(self) -> tuple[str, int] | None:
+        if self.new_repo is None or self.new_number is None:
+            return None
+        return (self.new_repo, self.new_number)
+
+    def note(self) -> str:
+        return stale_key_transfer_note(
+            self.stale_repo, self.stale_number, self.destination, self.run_ids
+        )
 
 
 # ─── inputs ──────────────────────────────────────────────────────────────────
@@ -378,6 +474,10 @@ class ReconcileReport:
     truncated_sources: tuple[str, ...] = ()
     #: Non-fatal read observations (C4 transfers, etc.). Never suppressed.
     notes: tuple[str, ...] = ()
+    #: The C4 stale-join-key evidence behind the transfer notes. Kept as structured
+    #: data (not only prose) because the change detector hashes it — see
+    #: :meth:`disagreement_hash`.
+    transfers: tuple[TransferEvidence, ...] = ()
     items_scanned: int = 0
     runs_scanned: int = 0
     repos_scanned: tuple[str, ...] = ()
@@ -409,6 +509,17 @@ class ReconcileReport:
     def by_class(self, classification: Classification) -> tuple[Disagreement, ...]:
         return tuple(d for d in self.disagreements if d.classification == classification)
 
+    @property
+    def transfer_notes(self) -> tuple[str, ...]:
+        """Just the C4 transfer notes, sorted — the part of ``notes`` the hash folds in.
+
+        A transfer note is the ONLY output for a stale key whose destination is
+        outside the scanned repos: there is no item to hang a caveat on, so if the
+        hash ignored these, a newly-discovered stale key would read as "unchanged,
+        nothing to say" and never wake the seat.
+        """
+        return tuple(sorted({e.note() for e in self.transfers}))
+
     def disagreement_hash(self) -> str:
         """Stable hash of the disagreement SET — the seat-wake change detector.
 
@@ -417,10 +528,19 @@ class ReconcileReport:
         for the same reason is the same hash tomorrow. On ALARM the hash folds in
         the failure reasons, so a persistent outage does not read as "unchanged,
         nothing to say" — a NEW failure wakes the seat.
+
+        The C4 transfer notes are folded in for the same reason (ITEM 2): a transfer
+        caveat that appears, moves or disappears is a real change in what a triager
+        must act on, and a hash blind to it would leave the seat asleep. They are
+        hashed as their own SORTED section so that adding transfer detection cannot
+        collide with a disagreement identity.
         """
         parts = sorted(d.identity() for d in self.disagreements)
+        transfer_parts = list(self.transfer_notes)
         if self.alarmed:
             parts = ["ALARM", *sorted(f"{f.name}:{f.reason}" for f in self.failures)]
+        if transfer_parts:
+            parts = [*parts, "TRANSFERS", *transfer_parts]
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
@@ -437,6 +557,19 @@ class ReconcileReport:
             "exhaustive": self.exhaustive,
             "truncated_sources": list(self.truncated_sources),
             "notes": list(self.notes),
+            # C4 — the stale-key evidence as DATA, not only prose, so a phase-2
+            # consumer can act on the transfer without parsing a sentence.
+            "transfers": [
+                {
+                    "stale_repo": e.stale_repo,
+                    "stale_number": e.stale_number,
+                    "destination": e.destination,
+                    "new_repo": e.new_repo,
+                    "new_number": e.new_number,
+                    "run_ids": list(e.run_ids),
+                }
+                for e in self.transfers
+            ],
             "items_scanned": self.items_scanned,
             "runs_scanned": self.runs_scanned,
             "repos_scanned": list(self.repos_scanned),
@@ -580,6 +713,32 @@ def index_runs(runs: Iterable[RunRecord]) -> dict[tuple[str, int], list[RunRecor
     return index
 
 
+def stale_run_keys(
+    items: Iterable[WorkItem], runs: Iterable[RunRecord]
+) -> dict[tuple[str, int], tuple[str, ...]]:
+    """The C4 probe list: every run join key that matched NO enumerated item.
+
+    This is the INVERSION that makes transfer detection possible at all. A completed
+    transfer is invisible from the new coordinates (they resolve normally) and
+    invisible from enumeration (which only ever returns the new pair). It is visible
+    from exactly one place: the OLD pair, which survives only in ``run.input``. Those
+    pairs are precisely the keys below, so these — not the enumerated items — are the
+    coordinates worth probing.
+
+    Returns ``{stale_key: (run_id, ...)}``, sorted for determinism. Unkeyable runs are
+    absent by construction (they have no coordinates to probe) and are reported as
+    :class:`UnmatchedRun` instead.
+    """
+    open_keys = {i.key for i in items}
+    stale: dict[tuple[str, int], list[str]] = {}
+    for run in runs:
+        key = run.key
+        if key is None or key in open_keys:
+            continue
+        stale.setdefault(key, []).append(run.run_id)
+    return {k: tuple(sorted(v)) for k, v in sorted(stale.items())}
+
+
 # ─── the classifier ──────────────────────────────────────────────────────────
 
 
@@ -587,7 +746,12 @@ def _statuses(runs: Sequence[RunRecord]) -> tuple[str, ...]:
     return tuple(sorted({r.status for r in runs}))
 
 
-def classify_item(item: WorkItem, runs: Sequence[RunRecord]) -> Disagreement | None:
+def classify_item(
+    item: WorkItem,
+    runs: Sequence[RunRecord],
+    *,
+    transfer: TransferEvidence | None = None,
+) -> Disagreement | None:
     """Classify ONE item against every run keyed to it. ``None`` == the labels agree.
 
     **What "the label claims work is in flight" means (C1).** Not ``dispatched``.
@@ -607,6 +771,12 @@ def classify_item(item: WorkItem, runs: Sequence[RunRecord]) -> Disagreement | N
     may well BE live under a new name, so it can never be evidence of death — not
     even alongside a corpse. Only with no live, no suspended and no unknown run is
     the item DEAD/ZOMBIE/AMBIGUOUS.
+
+    ``transfer`` (C4) is evidence from the INVERTED probe that this item is the
+    destination of a transfer: a run exists, but keyed to the issue's OLD
+    coordinates, so it cannot join here. That is a join-key fact, not a dead issue,
+    so the item becomes AMBIGUOUS/NEEDS-TRIAGE and is kept OUT of
+    ``counts["ZOMBIE"]``.
     """
     live = [r for r in runs if r.is_live]
     suspended = [r for r in runs if r.is_suspended]
@@ -693,6 +863,31 @@ def classify_item(item: WorkItem, runs: Sequence[RunRecord]) -> Disagreement | N
         )
 
     # No run at all — subject to the B3 caveat that we can only see UNARCHIVED runs.
+    if transfer is not None:
+        # C4: a run DOES exist for this work; it is keyed to the coordinates this issue
+        # had BEFORE it was transferred, so it cannot join here. "No run" is therefore
+        # false, and calling this a ZOMBIE would be a manufactured verdict about a
+        # stale join key. Its own class, excluded from counts["ZOMBIE"], exactly as
+        # the linked-PR case below — phase 2 acts on the class, not on a footnote.
+        moved_from = f"{transfer.stale_repo}#{transfer.stale_number}"
+        ids = ", ".join(transfer.run_ids) or "(none)"
+        prs = (
+            " Linked PR(s): "
+            + ", ".join("#" + str(n) for n in item.linked_pr_numbers)
+            + "."
+            if item.linked_pr_numbers
+            else ""
+        )
+        return _mk(
+            "AMBIGUOUS",
+            f"{claim} and no unarchived run at THESE coordinates — BUT {moved_from} "
+            f"RESOLVES here, i.e. this issue was TRANSFERRED and run(s) {ids} still hold "
+            f"the OLD join key. The key is stale, not the work missing.{prs} "
+            "NEEDS TRIAGE — deliberately NOT counted as a ZOMBIE.",
+            (),
+            caveats=("transferred-stale-join-key", "excluded-from-zombie-count"),
+        )
+
     if item.linked_pr_numbers:
         # C2: "no run ever" AND "a PR exists" cannot both be true of healthy work, so
         # this is NOT a zombie — it is a join-key question. It gets its OWN class,
@@ -727,6 +922,7 @@ def build_report(
     generated_at: str = "",
     repos_scanned: Sequence[str] = (),
     meta: Mapping[str, Any] | None = None,
+    transfers: Sequence[TransferEvidence] = (),
 ) -> ReconcileReport:
     """Join the two sources and classify. **Any failed source ⇒ ALARM, no counts.**
 
@@ -736,12 +932,19 @@ def build_report(
     immediately — no classification is attempted, no zeros are produced, and
     :attr:`ReconcileReport.counts` is ``None``. A caller cannot accidentally print
     health, because there is nothing healthy-shaped to print.
+
+    ``transfers`` (C4) carries the result of the INVERTED stale-key probe run by the
+    I/O shell (see :func:`stale_run_keys`). Each piece of evidence is matched to the
+    item at the transfer's NEW coordinates, which then classifies AMBIGUOUS rather
+    than ZOMBIE, and every piece of evidence emits a note — including ones whose
+    destination is outside the scanned repos, where there is no item to attach to.
     """
     failures = tuple(s for s in (items_read, runs_read) if isinstance(s, SourceFailed))
     if failures:
         return ReconcileReport(
             verdict="ALARM",
             failures=failures,
+            transfers=tuple(transfers),
             repos_scanned=tuple(repos_scanned),
             generated_at=generated_at,
             meta=dict(meta or {}),
@@ -772,9 +975,21 @@ def build_report(
     run_index = index_runs(runs)
     items_by_key = {i.key: i for i in items}
 
+    # C4: index the transfer evidence by the item it lands ON (the NEW coordinates),
+    # since that is the item facing a false ZOMBIE verdict.
+    transfers_by_new_key: dict[tuple[str, int], TransferEvidence] = {}
+    for evidence in transfers:
+        new_key = evidence.new_key
+        if new_key is not None:
+            transfers_by_new_key.setdefault(new_key, evidence)
+
     disagreements: list[Disagreement] = []
     for item in sorted(items, key=lambda i: (i.repo, i.number)):
-        verdict = classify_item(item, run_index.get(item.key, []))
+        verdict = classify_item(
+            item,
+            run_index.get(item.key, []),
+            transfer=transfers_by_new_key.get(item.key),
+        )
         if verdict is not None:
             disagreements.append(verdict)
 
@@ -813,7 +1028,12 @@ def build_report(
             )
 
     truncated = tuple(s.name for s in (items_read, runs_read) if not s.exhaustive)
-    notes = tuple(n for src in (items_read, runs_read) for n in src.notes)
+    # C4 notes come LAST and are never suppressed — including for a transfer whose
+    # destination lies outside the scanned repos, where no item exists to carry the
+    # caveat and the note is the only trace the stale key leaves.
+    notes = tuple(n for src in (items_read, runs_read) for n in src.notes) + tuple(
+        e.note() for e in transfers
+    )
 
     order = {c: n for n, c in enumerate(CLASSES)}
     disagreements.sort(key=lambda d: (order[d.classification], d.repo, d.number))
@@ -825,6 +1045,7 @@ def build_report(
         failures=(),
         truncated_sources=truncated,
         notes=notes,
+        transfers=tuple(transfers),
         items_scanned=len(items),
         runs_scanned=len(runs),
         repos_scanned=tuple(repos_scanned),
@@ -885,7 +1106,10 @@ def render_markdown(report: ReconcileReport, *, limit_per_class: int = 50) -> st
     lines.append("|---|---:|---|")
     meaning = {
         "ZOMBIE": "claims in-flight, **no UNARCHIVED run** — nothing visible picked it up",
-        "AMBIGUOUS": "claims in-flight, no run, **but linked PRs exist** — NOT a zombie; triage",
+        "AMBIGUOUS": (
+            "claims in-flight, no run, **but linked PRs exist or the issue was "
+            "TRANSFERRED** — NOT a zombie; triage"
+        ),
         "DEAD": "claims in-flight, every run terminal",
         "MISLABELLED": "claims in-flight, run suspended at a gate (parked ≠ running)",
         "LAGGING": "live run, but NO in-flight label — the projection lags",
@@ -916,7 +1140,8 @@ def render_markdown(report: ReconcileReport, *, limit_per_class: int = 50) -> st
         lines.append("")
         if c == "AMBIGUOUS":
             lines.append(
-                "_Deliberately NOT counted as ZOMBIE: each of these has linked PRs, so work "
+                "_Deliberately NOT counted as ZOMBIE: each of these has linked PRs, or is the "
+                "destination of a TRANSFER whose run still holds the old coordinates. Work "
                 "demonstrably happened and the join key (or run archival) is the suspect._"
             )
             lines.append("")

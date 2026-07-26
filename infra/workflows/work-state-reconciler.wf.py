@@ -20,6 +20,11 @@ Input::
 Output: the report dict from ``aios.reconcilers.work_state.ReconcileReport.to_dict``,
 plus ``changed`` / ``wake_seat``.
 
+C4 note on the read surface: besides the issue-list and timeline reads, the run also
+GETs ``/repos/{repo}/issues/{n}`` for each run join key that matched NO enumerated
+item (the stale-key probe). Still GET, still under the same GET-only ``github``
+http_server route.
+
 WRITES NOTHING. Only ``GET`` is ever issued (``_gh`` hard-refuses any other verb),
 and the github http_server this runs under is declared GET-only. No label edit, no
 comment on a reconciled item, no re-dispatch, no close. Phase 2 (demotion) is gated
@@ -94,6 +99,11 @@ MAX_TIMELINE_PAGES = 20
 #: silent following in the CLI so the two forms enumerate the same items.
 MAX_REDIRECT_HOPS = 5
 
+#: Ceiling on the C4 stale-join-key probes issued per run. Hitting it is NOT silently
+#: ignored: a note says how many keys went UNPROBED, so a transfer we did not look for
+#: is visible as a gap rather than as a zombie.
+MAX_TRANSFER_PROBES = 400
+
 #: A GitHub 3xx on an issue read IS the transfer signal (C4). ``http_request`` does
 #: NOT follow redirects (httpx defaults ``follow_redirects=False``), so a
 #: transferred issue comes back as a literal 301 carrying ``Location``; the urllib
@@ -113,6 +123,37 @@ def transfer_note(repo, number, dest):
     return (
         f"{repo}#{number} was REDIRECTED to {dest} — the issue appears to have been TRANSFERRED, "
         "so any run keyed to these coordinates cannot join (C4)"
+    )
+
+
+def parse_issue_ref(url):
+    """``(repo, number)`` from a GitHub issue API/HTML url; ``None`` when unreadable.
+
+    Mirror of ``aios.reconcilers.work_state.parse_issue_ref``. Never guesses — a
+    guessed join key manufactures a phantom 'agree', the exact false health this
+    reconciler exists to prevent.
+    """
+    if not isinstance(url, str) or not url:
+        return None
+    parts = [p for p in url.split("?", 1)[0].rstrip("/").split("/") if p]
+    if len(parts) < 4 or parts[-2] not in ("issues", "pull", "pulls"):
+        return None
+    number = _issue_number(parts[-1])
+    owner, name = parts[-4], parts[-3]
+    if number is None or owner in ("repos", "github.com", "api.github.com"):
+        return None
+    return (f"{owner}/{name}", number)
+
+
+def stale_key_transfer_note(stale_repo, stale_number, dest, run_ids=()):
+    """The C4 note for an INVERTED probe hit. Byte-identical to the library form —
+    pinned by the reader drift guard, so the two forms cannot describe the same
+    transfer differently."""
+    ids = ", ".join(sorted(run_ids)) or "(none)"
+    return (
+        f"STALE JOIN KEY: {stale_repo}#{stale_number} — held by run(s) {ids} — RESOLVES to "
+        f"{dest}. The issue was TRANSFERRED, so that run can never join, and the issue at "
+        "its NEW coordinates would otherwise read as a FALSE ZOMBIE (C4)"
     )
 
 
@@ -408,6 +449,102 @@ async def _read_items(repos, enrich_linked_prs=True):
     return items, exhaustive, notes
 
 
+# ─── C4: the INVERTED stale-join-key probe (the mirror of probe_stale_keys) ──
+
+
+def _stale_run_keys(items, runs):
+    """Every run join key that matched NO enumerated item — the C4 probe list.
+
+    This INVERSION is what makes transfer detection possible at all. A completed
+    transfer is invisible from the new coordinates (they answer 200 as themselves) and
+    invisible from enumeration (which only ever returns the new pair). It survives in
+    exactly one place: the OLD pair held in ``run.input``. The first cut of C4 started
+    from an ENUMERATED issue and waited for a redirect — a world production cannot
+    present — so all 68 issues that moved repos on 2026-07-25 still became false
+    ZOMBIEs. Returns ``{(repo, number): [run_id, ...]}``.
+    """
+    open_keys = {(i["repo"], i["number"]) for i in items}
+    stale = {}
+    for run in runs:
+        repo, number = _run_key(run)
+        if repo is None or number is None or (repo, number) in open_keys:
+            continue
+        stale.setdefault((repo, number), []).append(run.get("id", ""))
+    return {k: sorted(v) for k, v in sorted(stale.items())}
+
+
+async def _probe_transfer(repo, number):
+    """GET the STALE coordinates directly (GET-only). Returns the destination or ``""``.
+
+    ``http_request`` does not follow redirects, so a TRANSFERRED issue answers with a
+    literal 3xx + ``Location`` — the authoritative evidence. A 200 whose body names
+    DIFFERENT coordinates than the ones asked for is the same event seen through a
+    transport that did follow the hop (which is what the urllib CLI sees), so both are
+    accepted and the two forms observe the same transfer.
+    """
+    path = f"/repos/{repo}/issues/{number}"
+    body, _link, location = await _gh(path, allow_redirect=True)
+    if location:
+        ref = parse_issue_ref(location)
+        if ref is None or ref != (repo, number):
+            return location
+        return ""
+    if isinstance(body, dict):
+        for field in ("url", "html_url"):
+            ref = parse_issue_ref(body.get(field))
+            if ref is not None and ref != (repo, number):
+                return body[field]
+    return ""
+
+
+async def _probe_stale_keys(items, runs):
+    """Probe every stale join key (C4). Returns ``(transfers, notes)``. GET-only.
+
+    A key that resolves to itself yields nothing — most stale keys are just runs
+    against CLOSED issues, which is normal and not a finding.
+
+    A read error here is a NOTE, not an ALARM: a run against a deleted or invisible
+    issue is an expected shape of history and the run is already reported as unmatched.
+    Failing the whole reconcile on it would turn routine history into an outage.
+    """
+    stale = _stale_run_keys(items, runs)
+    keys = list(stale.items())
+    notes = []
+    transfers = []
+    if len(keys) > MAX_TRANSFER_PROBES:
+        notes.append(
+            f"C4 stale-key probe capped at {MAX_TRANSFER_PROBES} of {len(keys)} stale join "
+            f"key(s) — {len(keys) - MAX_TRANSFER_PROBES} were NOT probed, so a transfer among "
+            "them would be unreported. Counts involving ZOMBIE are therefore floors for "
+            "those items."
+        )
+        keys = keys[:MAX_TRANSFER_PROBES]
+    for (repo, number), run_ids in keys:
+        try:
+            destination = await _probe_transfer(repo, number)
+        except ReadFailure as exc:
+            notes.append(
+                f"C4 stale-key probe could not read {repo}#{number} ({exc}) — a transfer "
+                "there would be unreported; the run(s) holding this key remain listed as "
+                "unmatched ({})".format(", ".join(run_ids))
+            )
+            continue
+        if not destination:
+            continue
+        ref = parse_issue_ref(destination)
+        transfers.append(
+            {
+                "stale_repo": repo,
+                "stale_number": number,
+                "destination": destination,
+                "new_repo": None if ref is None else ref[0],
+                "new_number": None if ref is None else ref[1],
+                "run_ids": list(run_ids),
+            }
+        )
+    return transfers, notes
+
+
 def _normalise_repo(raw, default_owner="eumemic"):
     """Canonicalise a repo reference from ``run.input``; ``None`` when unreadable.
 
@@ -511,7 +648,7 @@ async def _read_runs(workflow_ids):
     return runs, exhaustive
 
 
-def classify(item, runs):
+def classify(item, runs, transfer=None):
     """Classify one item against its runs. ``None`` == the labels agree.
 
     MIRROR of ``aios.reconcilers.work_state.classify_item`` — kept in lockstep by
@@ -521,6 +658,9 @@ def classify(item, runs):
       literal ``dispatched``. The trigger label(s) ride on the finding.
     * C3 — precedence is live > suspended > UNKNOWN > terminal. An unrecognised
       status is never evidence of death, not even beside a terminal sibling.
+    * C4 — ``transfer`` is evidence from the INVERTED probe that a run exists but is
+      keyed to this issue's OLD coordinates. A stale join key is not a dead issue:
+      AMBIGUOUS/NEEDS-TRIAGE, kept OUT of ``counts["ZOMBIE"]``.
     """
     labels = item["labels"]
     triggers = in_flight_assertions(labels)
@@ -599,6 +739,25 @@ def classify(item, runs):
             f"{claim} but every run is terminal ({_statuses(terminal)})",
             terminal,
         )
+    if transfer is not None:
+        # C4: a run DOES exist for this work — under the coordinates the issue had
+        # before it was TRANSFERRED, so it cannot join here. "No run" is false, and
+        # ZOMBIE would be a verdict manufactured out of a stale join key.
+        moved_from = "{}#{}".format(transfer["stale_repo"], transfer["stale_number"])
+        ids = ", ".join(transfer.get("run_ids") or []) or "(none)"
+        linked_now = item.get("linked_pr_numbers") or []
+        prs = (
+            " Linked PR(s): " + ", ".join([f"#{n}" for n in linked_now]) + "." if linked_now else ""
+        )
+        return mk(
+            "AMBIGUOUS",
+            f"{claim} and no unarchived run at THESE coordinates — BUT {moved_from} "
+            f"RESOLVES here, i.e. this issue was TRANSFERRED and run(s) {ids} still hold "
+            f"the OLD join key. The key is stale, not the work missing.{prs} "
+            "NEEDS TRIAGE — deliberately NOT counted as a ZOMBIE.",
+            [],
+            ("transferred-stale-join-key", "excluded-from-zombie-count"),
+        )
     linked = item.get("linked_pr_numbers") or []
     if linked:
         # C2: linked PRs mean work demonstrably happened, so this is NOT a zombie and
@@ -621,7 +780,17 @@ def classify(item, runs):
     )
 
 
-def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=()):
+def _transfer_note_of(evidence):
+    """Render ONE piece of C4 stale-key evidence as its note (single source of truth)."""
+    return stale_key_transfer_note(
+        evidence["stale_repo"],
+        evidence["stale_number"],
+        evidence["destination"],
+        evidence.get("run_ids") or [],
+    )
+
+
+def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=(), transfers=()):
     """Join + classify. **Any failure ⇒ ALARM with counts:null.**
 
     The counts key is ``None`` — not ``{}``, not zeros — on ALARM, so a consumer
@@ -634,7 +803,10 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=()):
             "zombie_means": ZOMBIE_MEANS,
             "total_disagreements": None,
             "failures": failures,
-            "notes": list(notes),
+            # C4 evidence rides even on the ALARM path so a NEWLY-found stale key still
+            # changes the hash and wakes the seat.
+            "transfers": list(transfers),
+            "notes": list(notes) + [_transfer_note_of(t) for t in transfers],
             "disagreements": [],
             "unmatched_runs": [],
             "exhaustive": False,
@@ -650,9 +822,23 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=()):
         index.setdefault((repo, number), []).append(run)
 
     open_keys = {(i["repo"], i["number"]) for i in items}
+
+    # C4: index the transfer evidence by the item it LANDS ON (the new coordinates) —
+    # that is the item otherwise facing a false ZOMBIE verdict.
+    transfers_by_new_key = {}
+    for evidence in transfers:
+        if evidence.get("new_repo") and evidence.get("new_number"):
+            transfers_by_new_key.setdefault(
+                (evidence["new_repo"], evidence["new_number"]), evidence
+            )
+
     disagreements = []
     for item in sorted(items, key=lambda i: (i["repo"], i["number"])):
-        verdict = classify(item, index.get((item["repo"], item["number"]), []))
+        verdict = classify(
+            item,
+            index.get((item["repo"], item["number"]), []),
+            transfers_by_new_key.get((item["repo"], item["number"])),
+        )
         if verdict is not None:
             disagreements.append(verdict)
 
@@ -700,8 +886,11 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=()):
         "failures": [],
         # C4 — transfer notes ride on the report, never suppressed. A stale join key
         # is DATA a triager must see; swallowing it is how a transfer masquerades as
-        # a zombie.
-        "notes": list(notes),
+        # a zombie. Notes are emitted for EVERY piece of evidence, including a
+        # transfer whose destination is outside the scanned repos, where no item
+        # exists to carry the caveat and the note is the only trace.
+        "notes": list(notes) + [_transfer_note_of(t) for t in transfers],
+        "transfers": list(transfers),
         "disagreements": disagreements,
         "unmatched_runs": unmatched,
         "exhaustive": bool(items_exhaustive and runs_exhaustive),
@@ -741,6 +930,15 @@ def disagreement_hash(report):
                 for d in report["disagreements"]
             ]
         )
+    # ITEM 2 / C4 — the transfer notes are part of the change identity. A stale key
+    # whose destination is outside the scanned repos produces NO disagreement at all,
+    # so a hash blind to these would read a newly-discovered transfer as "unchanged,
+    # nothing to say" and leave the seat asleep. Hashed as their own SORTED section so
+    # adding them cannot collide with a disagreement identity. Mirrors
+    # ReconcileReport.transfer_notes / disagreement_hash in the library.
+    transfer_parts = sorted({_transfer_note_of(t) for t in report.get("transfers") or []})
+    if transfer_parts:
+        parts = [*list(parts), "TRANSFERS", *transfer_parts]
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
@@ -767,8 +965,25 @@ async def main(input):
     except ReadFailure as exc:
         failures.append({"source": "aios-runs", "reason": str(exc)})
 
+    # C4 — the INVERTED probe. It needs BOTH sources (a stale join key is only knowable
+    # once enumeration and the run list are both in hand), so it runs here. Skipped when
+    # either read failed: the report already ALARMs, and probing coordinates derived
+    # from a partial read would attach confident transfer evidence to an unreliable join.
+    phase("probe-stale-keys")  # noqa: F821
+    transfers = []
+    if not failures:
+        try:
+            transfers, probe_notes = await _probe_stale_keys(items, runs)
+            notes = list(notes) + list(probe_notes)
+        except ReadFailure as exc:
+            notes = [
+                *list(notes),
+                f"C4 stale-key probe failed: {exc} — a transferred issue among the stale "
+                "join keys would be unreported",
+            ]
+
     phase("join")  # noqa: F821
-    report = build(items, items_exhaustive, runs, runs_exhaustive, failures, notes)
+    report = build(items, items_exhaustive, runs, runs_exhaustive, failures, notes, transfers)
     current_hash = disagreement_hash(report)
     report["disagreement_hash"] = current_hash
     report["changed"] = previous_hash != current_hash
