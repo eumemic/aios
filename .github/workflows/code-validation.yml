@@ -199,10 +199,12 @@ jobs:
         run: uv sync --dev
 
       - name: Unit tests
-        # Keep concurrency below the runner's memory ceiling. Image-resize tests
-        # cache large noisy pixel buffers per process, so four xdist workers can
-        # be OOM-killed even though the suite is otherwise xdist-safe.
-        run: uv run pytest tests/unit -q -n 2
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  The suite is xdist-safe by construction: no DB, no
+        # fixed ports (broker tests bind port 0 / mkdtemp UDS paths),
+        # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
+        # Measured locally: 45 s serial → 17 s at ``-n 4``.
+        run: uv run pytest tests/unit -q -n 4
 
   connectors:
     needs: detect
@@ -466,10 +468,15 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Keep this below the runner's four logical CPUs. Each xdist worker owns
-        # a testcontainer Postgres plus several sandbox/operator containers;
-        # two workers leave capacity for dockerd while amortizing setup over
-        # whole test files.
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -481,49 +488,15 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Docker-backed tests each provision Postgres plus sandbox/operator
-        # containers. Run this shard serially: two concurrent stacks have
-        # repeatedly exhausted dockerd/containerd on the four-core hosted
-        # runner, and a later serial retry cannot reliably recover a daemon
-        # after that resource collapse. A clean serial first pass keeps the
-        # required check deterministic; the retry remains a bounded recovery
-        # for genuine transient daemon startup failures.
+        # Docker-backed E2E occasionally sees transient daemon/container startup
+        # failures on shared runners. Retry only the recorded failures once; a
+        # deterministic regression still fails the required check.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            # Restart this job's dedicated daemon to reap containerd tasks and
-            # stale port allocations that ``docker rm`` cannot see. Images and
-            # pytest's last-failed cache survive, so each recovery pass runs only
-            # the residual failures rather than repeating the whole serial shard.
-            # Two passes are deliberately bounded: hosted Docker occasionally
-            # needs one failed startup after a daemon reset before its networks
-            # are usable, but a test failing three times is a blocking signal.
-            for retry in 1 2; do
-              sudo systemctl restart docker
-              for attempt in {1..30}; do
-                if docker info >/dev/null 2>&1; then
-                  break
-                fi
-                if [[ "$attempt" == 30 ]]; then
-                  echo "::error::Docker did not recover after restart"
-                  exit 1
-                fi
-                sleep 1
-              done
-              docker container prune -f
-              docker network prune -f
-              docker volume prune -af
-              if uv run pytest tests/e2e -q -m "docker and not perf" --lf; then
-                break
-              fi
-              if [[ "$retry" == 2 ]]; then
-                echo "::error::Docker E2E failures persisted through two clean recovery passes"
-                exit 1
-              fi
-              echo "::warning::Docker E2E still has residual failures; resetting once more"
-            done
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
