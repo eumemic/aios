@@ -218,16 +218,22 @@ class TestRollingWindowAccounting:
         """
         pool, sid = quota_pool
         _set_quota(monkeypatch, {"matrix_send": (3600, 1)})
-        invoked = asyncio.Event()
+        # Complete admission before simulating cancellation.  This keeps the
+        # regression focused on the contract boundary (a committed admission
+        # followed by cancellation) and, importantly, cannot strand the test
+        # waiting on a handshake if admission itself raises.
+        admission = await reserve_outbound_tool_quota(pool, sid, "matrix_send")
+        assert admission.reservation_id is not None
 
-        async def admitted_then_cancelled() -> None:
-            admission = await reserve_outbound_tool_quota(pool, sid, "matrix_send")
-            assert admission.reservation_id is not None
-            invoked.set()
+        invocation_started = asyncio.Event()
+
+        async def invocation() -> None:
+            invocation_started.set()
             await asyncio.Event().wait()
 
-        task = asyncio.create_task(admitted_then_cancelled())
-        await invoked.wait()
+        task = asyncio.create_task(invocation())
+        async with asyncio.timeout(5):
+            await invocation_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
