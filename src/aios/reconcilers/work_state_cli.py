@@ -180,6 +180,16 @@ def _item_from_payload(
     )
 
 
+def transfer_note(repo: str, number: Any, dest: str) -> str:
+    """The C4 note, in ONE place. Byte-identical to the workflow mirror's
+    ``transfer_note`` — the reader drift guard compares the emitted strings, so the
+    two forms cannot describe the same transfer differently."""
+    return (
+        f"{repo}#{number} was REDIRECTED to {dest} — the issue appears to have been "
+        "TRANSFERRED, so any run keyed to these coordinates cannot join (C4)"
+    )
+
+
 def fetch_repo_items(
     repo: str,
     *,
@@ -187,6 +197,7 @@ def fetch_repo_items(
     getter: Callable[[str, Mapping[str, str]], tuple[Any, Mapping[str, str]]] = _get,
     max_pages: int = _MAX_ISSUE_PAGES,
     keep_unlabelled: bool = True,
+    notes: list[str] | None = None,
 ) -> tuple[list[WorkItem], bool]:
     """Every OPEN issue/PR in ``repo``.
 
@@ -223,6 +234,11 @@ def fetch_repo_items(
         if pages >= max_pages:
             return items, False  # cap hit — caller must render "at least N"
         body, resp_headers = getter(url, headers)
+        if resp_headers.get(_FINAL_URL_HEADER) and notes is not None:
+            # C4 on the LIST path: the repo itself was renamed/moved and urllib followed
+            # the 301 silently. Say so — the workflow mirror emits the same note for the
+            # same event, and the reader drift guard compares them.
+            notes.append(transfer_note(repo, "*", str(resp_headers[_FINAL_URL_HEADER])))
         if not isinstance(body, list):
             raise ReadFailure(f"GET {url} did not return a JSON array (got {type(body).__name__})")
         pages += 1
@@ -306,9 +322,10 @@ def read_github_items(
     """
     all_items: list[WorkItem] = []
     exhaustive = True
+    notes: list[str] = []
     try:
         for repo in repos:
-            items, repo_exhaustive = fetch_repo_items(repo, token=token, getter=getter)
+            items, repo_exhaustive = fetch_repo_items(repo, token=token, getter=getter, notes=notes)
             exhaustive = exhaustive and repo_exhaustive
             all_items.extend(items)
     except ReadFailure as exc:
@@ -355,15 +372,14 @@ def read_github_items(
         except ReadFailure as exc:
             return SourceFailed(name="github-timeline", reason=str(exc))
 
+    for (repo_name, number), dest in sorted(transferred.items()):
+        notes.append(transfer_note(repo_name, number, dest))
+
     return SourceOk(
         name="github",
         items=tuple(all_items),
         exhaustive=exhaustive,
-        notes=tuple(
-            f"{repo}#{number} was REDIRECTED to {dest} — the issue appears to have been "
-            "TRANSFERRED, so any run keyed to these coordinates cannot join (C4)"
-            for (repo, number), dest in sorted(transferred.items())
-        ),
+        notes=tuple(notes),
     )
 
 

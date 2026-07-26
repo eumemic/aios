@@ -18,6 +18,7 @@ tested against the SAME fixtures as the library core, so the two cannot drift.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -1099,3 +1100,554 @@ def test_drift_guard_catches_a_data_kwarg_that_would_silently_become_a_POST() ->
         assert "OBSERVE-ONLY" in str(excinfo.value)
     finally:
         monkey.undo()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# (13) READER PARITY — the drift guard that would have CAUGHT C2 and C4.
+#
+# The previous guard only ever called `classify()` / `build()`, so it compared
+# the two forms' arithmetic while never comparing what they can ACQUIRE. That is
+# precisely how C2 and C4 shipped: the library could fetch linked PRs and detect a
+# transfer, the workflow could not, and every classifier-level assertion still
+# passed because the test HANDED the workflow the evidence its production path
+# could never obtain.
+#
+# So the guard now drives BOTH READ PATHS over ONE recorded GitHub world and
+# requires: identical items, identical classifications, identical hashes, identical
+# notes — AND that each form actually issued the request that acquires the evidence.
+# A capability present in one form and absent in the other now FAILS THE BUILD.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _github_world(
+    *,
+    issues: dict[str, list[dict[str, Any]]],
+    timelines: dict[str, list[dict[str, Any]]] | None = None,
+    redirects: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """One recorded GitHub, replayable through EITHER transport.
+
+    Keyed by the API path (never the full URL) because the two forms address the
+    same endpoint differently: the CLI builds absolute ``https://api.github.com/...``
+    URLs for urllib, the workflow passes a bare path to the ``github`` http_server.
+    Same bytes, same endpoints, two transports — which is the only way a comparison
+    between them means anything.
+    """
+    return {
+        "issues": issues,
+        "timelines": timelines or {},
+        "redirects": redirects or {},
+    }
+
+
+def _path_of(url: str) -> str:
+    return url.split("api.github.com", 1)[1] if "api.github.com" in url else url
+
+
+def _resolve(world: dict[str, Any], path: str) -> tuple[str, Any]:
+    """Resolve one recorded request. Returns ``(kind, payload)``.
+
+    ``kind`` is ``"redirect"`` (payload = destination URL) or ``"ok"`` (payload = the
+    JSON body). Shared by both adapters so neither form can be fed a different world.
+    """
+    for prefix, dest in world["redirects"].items():
+        if path.startswith(prefix):
+            return "redirect", dest
+    if "/timeline" in path:
+        key = path.split("/repos/", 1)[1].split("/timeline")[0]  # "owner/name/issues/N"
+        return "ok", world["timelines"].get(key, [])
+    if "/issues?" in path:
+        repo = path.split("/repos/", 1)[1].split("/issues?")[0]
+        return "ok", world["issues"].get(repo, [])
+    raise AssertionError(f"the recorded world has no entry for {path!r}")
+
+
+def _cli_reader(world: dict[str, Any], repos: list[str]) -> tuple[SourceOk, list[str]]:
+    """Drive the LIBRARY/CLI read path over ``world``. Returns (source, paths_requested)."""
+    from aios.reconcilers.work_state_cli import _FINAL_URL_HEADER
+
+    seen: list[str] = []
+
+    def getter(url: str, headers: Any) -> Any:
+        path = _path_of(url)
+        seen.append(path)
+        kind, payload = _resolve(world, path)
+        if kind == "redirect":
+            # urllib FOLLOWS the 301 silently and reports where it landed; that
+            # synthetic header is the CLI's transfer signal.
+            return [], {_FINAL_URL_HEADER: payload}
+        return payload, {}
+
+    source = read_github_items(repos, token="t", getter=getter, enrich_linked_prs=True)
+    assert isinstance(source, SourceOk), getattr(source, "reason", source)
+    return source, seen
+
+
+def _wf_reader(world: dict[str, Any], repos: list[str]) -> tuple[Any, list[str]]:
+    """Drive the WORKFLOW read path over the SAME ``world``. Returns (result, paths)."""
+    wf = _load_wf_module()
+    seen: list[str] = []
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        assert name == "http_request"
+        assert args["method"] == "GET", "OBSERVE-ONLY: the mirror may only ever GET"
+        assert "body" not in args, "OBSERVE-ONLY: a GET carries no request body"
+        path = args["path"]
+        seen.append(path)
+        kind, payload = _resolve(world, path)
+        if kind == "redirect":
+            # http_request does NOT follow redirects, so the transfer arrives as a
+            # literal 301 + Location. Different mechanism from urllib, same event.
+            return {"status": 301, "headers": [["Location", payload]], "body": ""}
+        return {"status": 200, "headers": [], "body": json.dumps(payload)}
+
+    wf.tool = fake_tool
+    items, exhaustive, notes = asyncio.run(wf._read_items(repos))
+    return (wf, items, exhaustive, notes), seen
+
+
+def _assert_forms_agree(world: dict[str, Any], repos: list[str]) -> tuple[Any, Any]:
+    """THE guard. Both forms read the same world; every observable must match.
+
+    Compares the ACQUIRED evidence, the classifications, the notes and the hash. A
+    capability that exists in only one form cannot survive this.
+    """
+    source, cli_paths = _cli_reader(world, repos)
+    (wf, wf_items, wf_exhaustive, wf_notes), wf_paths = _wf_reader(world, repos)
+
+    lib_report = build_report(items_read=source, runs_read=SourceOk(name="aios-runs", items=()))
+    wf_report = wf.build(wf_items, wf_exhaustive, [], True, [], wf_notes)
+
+    # 1. The same ITEMS, with the same ACQUIRED linked-PR evidence.
+    assert [(i.repo, i.number) for i in source.items] == [
+        (i["repo"], i["number"]) for i in wf_items
+    ]
+    assert [list(i.linked_pr_numbers) for i in source.items] == [
+        list(i["linked_pr_numbers"]) for i in wf_items
+    ], "linked-PR evidence differs between the two forms"
+
+    # 2. The same CLASSIFICATIONS and the same COUNTS.
+    assert dict(lib_report.counts or {}) == wf_report["counts"]
+    assert [(d.classification, d.repo, d.number) for d in lib_report.disagreements] == [
+        (d["classification"], d["repo"], d["number"]) for d in wf_report["disagreements"]
+    ]
+
+    # 3. The same NOTES (C4 transfers) — byte for byte.
+    assert sorted(lib_report.notes) == sorted(wf_report["notes"])
+
+    # 4. The same change-detection HASH.
+    assert wf.disagreement_hash(wf_report) == lib_report.disagreement_hash()
+
+    # 5. Both forms actually WENT AND GOT IT. Equal outputs from unequal effort is
+    #    exactly the shape C2 shipped in: one form fetched the evidence, the other
+    #    was handed it by a test.
+    assert sorted(cli_paths) == sorted(wf_paths), (
+        "the two forms issued DIFFERENT requests for the same world — one of them is "
+        f"not acquiring evidence it appears to have.\nCLI: {sorted(cli_paths)}\n"
+        f"WF : {sorted(wf_paths)}"
+    )
+    return lib_report, wf_report
+
+
+def test_drift_guard_C2_both_forms_FETCH_the_linked_pr_evidence() -> None:
+    """C2, as a SYSTEM test: nothing is injected. Both forms must go and get it.
+
+    The five known-good items with their real linked PRs. The workflow used never to
+    fetch a timeline at all, so `linked_pr_numbers` stayed empty and AMBIGUOUS was
+    UNREACHABLE with real data — all five classified ZOMBIE on the form that runs on
+    cron. The old test passed anyway because it INJECTED `linked_pr_numbers` into
+    `classify()`. Here the only source of that evidence is the recorded timeline, so
+    a form that does not fetch it CANNOT reach AMBIGUOUS.
+    """
+    known_good = {
+        ("eumemic/eumemic-company", 71): [67, 68, 69, 100, 101],
+        ("eumemic/eumemic-company", 50): [96, 204, 206],
+        ("eumemic/eumemic-company", 135): [212],
+        ("eumemic/eumemic-ops", 337): [1977, 1979, 2016],
+        ("eumemic/eumemic-ops", 331): [1995, 2041],
+    }
+    issues: dict[str, list[dict[str, Any]]] = {}
+    timelines: dict[str, list[dict[str, Any]]] = {}
+    for (repo, number), prs in known_good.items():
+        issues.setdefault(repo, []).append(
+            {
+                "number": number,
+                "title": f"item {number}",
+                # The REAL current labels: `dispatched` was stripped on 2026-07-26.
+                "labels": [{"name": "approved"}, {"name": "autodev:in-progress"}],
+                "html_url": "",
+                "updated_at": "",
+            }
+        )
+        timelines[f"{repo}/issues/{number}"] = [
+            {"event": "cross-referenced", "source": {"issue": {"number": n, "pull_request": {}}}}
+            for n in prs
+        ] + [
+            {"event": "labeled"},
+            {"event": "cross-referenced", "source": {"issue": {"number": 9}}},
+        ]
+
+    world = _github_world(issues=issues, timelines=timelines)
+    repos = ["eumemic/eumemic-company", "eumemic/eumemic-ops"]
+    lib_report, wf_report = _assert_forms_agree(world, repos)
+
+    # The payoff, in BOTH forms, from FETCHED evidence only.
+    assert wf_report["counts"]["ZOMBIE"] == 0, (
+        "the five known-good items must not be zombies in the WORKFLOW form — this is "
+        "the assertion the injected-input test could never make"
+    )
+    assert wf_report["counts"]["AMBIGUOUS"] == 5
+    assert (lib_report.counts or {})["ZOMBIE"] == 0
+    assert (lib_report.counts or {})["AMBIGUOUS"] == 5
+    assert {(d["repo"], d["number"]) for d in wf_report["disagreements"]} == set(known_good)
+    for d in wf_report["disagreements"]:
+        assert d["classification"] == "AMBIGUOUS"
+        assert "excluded-from-zombie-count" in d["caveats"]
+        # The ACQUIRED PR numbers are named in the finding, not merely counted.
+        for n in known_good[(d["repo"], d["number"])]:
+            assert f"#{n}" in d["detail"]
+
+
+def test_C2_workflow_read_path_actually_requests_the_timeline() -> None:
+    """The fetch itself, pinned. `_read_items` must issue the timeline GET.
+
+    Stated separately from the parity guard because this is the exact regression:
+    the mirror's read path never asked for a timeline, so no amount of classifier
+    correctness could produce an AMBIGUOUS from real workflow data.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/eumemic-company": [
+                {
+                    "number": 135,
+                    "title": "t",
+                    "labels": [{"name": "autodev:in-progress"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ]
+        },
+        timelines={
+            "eumemic/eumemic-company/issues/135": [
+                {
+                    "event": "cross-referenced",
+                    "source": {"issue": {"number": 212, "pull_request": {}}},
+                }
+            ]
+        },
+    )
+    (wf, items, _, _), paths = _wf_reader(world, ["eumemic/eumemic-company"])
+    assert any("/issues/135/timeline" in p for p in paths), (
+        "the workflow read path did not FETCH the linked-PR evidence"
+    )
+    assert items[0]["linked_pr_numbers"] == [212]
+    assert wf.classify(items[0], [])["classification"] == "AMBIGUOUS"
+
+
+def test_C2_a_zombie_stays_a_zombie_when_the_fetch_finds_no_linked_pr() -> None:
+    """The enrichment must not turn everything AMBIGUOUS. An empty timeline ⇒ ZOMBIE.
+
+    Without this, 'fetch the timeline' could be satisfied by a call that always
+    reports linkage, which would bury the nine real zombies instead of the five
+    known-good items. Both forms, same world.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/aios": [
+                {
+                    "number": 2000,
+                    "title": "t",
+                    "labels": [{"name": "autodev:in-progress"}, {"name": "needs:human/build"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ]
+        },
+        timelines={"eumemic/aios/issues/2000": [{"event": "labeled"}]},
+    )
+    lib_report, wf_report = _assert_forms_agree(world, ["eumemic/aios"])
+    assert wf_report["counts"]["ZOMBIE"] == 1
+    assert wf_report["counts"]["AMBIGUOUS"] == 0
+    assert (lib_report.counts or {})["ZOMBIE"] == 1
+    (d,) = wf_report["disagreements"]
+    assert d["trigger_labels"] == ["autodev:in-progress", "needs:human/build"]
+
+
+def test_C2_a_truncated_timeline_is_a_READ_FAILURE_not_a_quiet_zombie() -> None:
+    """A timeline we could not read to the end cannot decide ZOMBIE vs AMBIGUOUS.
+
+    The unread page is exactly where the PR that disproves the ZOMBIE would be, so
+    stopping quietly manufactures the false ZOMBIE this whole reconciler exists to
+    catch. Fail loud instead.
+    """
+    wf = _load_wf_module()
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        path = args["path"]
+        if "/timeline" in path:
+            return {
+                "status": 200,
+                "headers": [
+                    [
+                        "Link",
+                        "<https://api.github.com/repos/eumemic/aios/issues/1/timeline"
+                        '?page=2>; rel="next"',
+                    ]
+                ],
+                "body": "[]",
+            }
+        return {
+            "status": 200,
+            "headers": [],
+            "body": json.dumps(
+                [
+                    {
+                        "number": 1,
+                        "title": "t",
+                        "labels": [{"name": "dispatched"}],
+                        "html_url": "",
+                        "updated_at": "",
+                    }
+                ]
+            ),
+        }
+
+    wf.tool = fake_tool
+    with pytest.raises(wf.ReadFailure) as excinfo:
+        asyncio.run(wf._read_items(["eumemic/aios"]))
+    assert "TRUNCATED" in str(excinfo.value)
+
+
+# ---- C4 in the WORKFLOW form. ----
+
+
+def test_C4_workflow_form_detects_a_transfer_and_does_not_call_it_a_zombie() -> None:
+    """C4 in the mirror. A 3xx on the issue read is a TRANSFER, surfaced as a note.
+
+    68 issues changed repos on 2026-07-25, so a stale (repo, number) join key is live
+    reality. The signal existed only in the urllib CLI; the workflow's `_gh` had no
+    equivalent, so on the form that runs on cron a transfer silently became a false
+    ZOMBIE.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/eumemic-company": [
+                {
+                    "number": 71,
+                    "title": "moved",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ]
+        },
+        redirects={
+            "/repos/eumemic/eumemic-company/issues/71/timeline": (
+                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            )
+        },
+    )
+    (wf, items, _, notes), _paths = _wf_reader(world, ["eumemic/eumemic-company"])
+    assert any("TRANSFERRED" in n for n in notes), "the mirror missed the transfer entirely"
+    assert any("eumemic-ops/issues/900" in n for n in notes)
+    report = wf.build(items, True, [], True, [], notes)
+    assert any("TRANSFERRED" in n for n in report["notes"])
+    # And it is not silently swallowed into the ALARM path either.
+    assert report["verdict"] == "OK"
+
+
+def test_C4_both_forms_emit_the_SAME_transfer_note() -> None:
+    """Parity on the C4 signal: same world, same note, from two different mechanisms.
+
+    urllib follows the 301 and reports `geturl()`; `http_request` does not follow and
+    returns a literal 301 + Location. The transports differ by construction — the
+    OBSERVATION must not.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/eumemic-company": [
+                {
+                    "number": 71,
+                    "title": "moved",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                }
+            ]
+        },
+        redirects={
+            "/repos/eumemic/eumemic-company/issues/71/timeline": (
+                "https://api.github.com/repos/eumemic/eumemic-ops/issues/900"
+            )
+        },
+    )
+    lib_report, wf_report = _assert_forms_agree(world, ["eumemic/eumemic-company"])
+    assert any("TRANSFERRED" in n for n in wf_report["notes"])
+    assert sorted(lib_report.notes) == sorted(wf_report["notes"])
+
+
+def test_C4_a_redirect_without_a_location_is_a_read_failure_not_a_guess() -> None:
+    """A redirect with nowhere to go cannot be named. Refuse rather than invent."""
+    wf = _load_wf_module()
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": 301, "headers": [], "body": ""}
+
+    wf.tool = fake_tool
+    with pytest.raises(wf.ReadFailure) as excinfo:
+        asyncio.run(wf._read_items(["eumemic/aios"]))
+    assert "no Location" in str(excinfo.value)
+
+
+def test_C4_a_non_redirect_error_status_still_ALARMS() -> None:
+    """Making 3xx a signal must not make 4xx/5xx one. A 404 is still a FAILED read."""
+    wf = _load_wf_module()
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return {"status": 404, "headers": [], "body": "{}"}
+
+    wf.tool = fake_tool
+    with pytest.raises(wf.ReadFailure) as excinfo:
+        asyncio.run(wf._read_items(["eumemic/aios"]))
+    assert "404" in str(excinfo.value)
+
+
+# ---- the CAPABILITY guard: present in one form, absent in the other ⇒ FAIL. ----
+
+
+#: Every read-path capability that must exist in BOTH forms, with the probe that
+#: proves it. The previous drift guard compared only `classify()`/`build()`, so a
+#: capability could live in the library alone and every test still passed — which is
+#: exactly how C2 and C4 shipped. Adding a capability to one form now requires
+#: adding it to the other, or this table fails the build.
+_READ_CAPABILITIES: list[tuple[str, str]] = [
+    ("linked-PR enrichment (C2)", "linked_pr_numbers"),
+    ("transfer/redirect detection (C4)", "transfer_note"),
+]
+
+
+@pytest.mark.parametrize(("capability", "marker"), _READ_CAPABILITIES)
+def test_every_read_capability_exists_in_BOTH_forms(capability: str, marker: str) -> None:
+    """Structural backstop to the behavioural parity guard above.
+
+    Behaviour is the real test; this catches the case where someone deletes a
+    capability from the mirror and also deletes the fixture that exercised it — a
+    green build for a mirror that can no longer see what the library sees.
+    """
+    wf_source = Path("infra/workflows/work-state-reconciler.wf.py").read_text()
+    cli_source = Path("src/aios/reconcilers/work_state_cli.py").read_text()
+    lib_source = Path("src/aios/reconcilers/work_state.py").read_text()
+    assert marker in wf_source, f"{capability} is MISSING from the durable workflow mirror"
+    assert marker in cli_source or marker in lib_source, (
+        f"{capability} is MISSING from the library core"
+    )
+
+
+def test_the_workflow_mirror_can_REACH_every_class_from_fetched_data() -> None:
+    """Reachability, not just correctness: every class must be producible by the
+    workflow's own READ PATH.
+
+    AMBIGUOUS was unreachable in the mirror — the classifier had a branch for it that
+    no production input could ever satisfy. A class that only a test can reach is a
+    class that does not ship, so reachability is asserted from the reader outward.
+    """
+    world = _github_world(
+        issues={
+            "eumemic/aios": [
+                # ZOMBIE: asserts in flight, no run, timeline shows no PR.
+                {
+                    "number": 1,
+                    "title": "z",
+                    "labels": [{"name": "autodev:in-progress"}],
+                    "html_url": "",
+                    "updated_at": "",
+                },
+                # AMBIGUOUS: same, but the timeline HAS a PR.
+                {
+                    "number": 2,
+                    "title": "a",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                },
+                # DEAD / MISLABELLED / LAGGING come from the run side.
+                {
+                    "number": 3,
+                    "title": "d",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                },
+                {
+                    "number": 4,
+                    "title": "m",
+                    "labels": [{"name": "dispatched"}],
+                    "html_url": "",
+                    "updated_at": "",
+                },
+                {"number": 5, "title": "l", "labels": [], "html_url": "", "updated_at": ""},
+            ]
+        },
+        timelines={
+            "eumemic/aios/issues/1": [],
+            "eumemic/aios/issues/2": [
+                {
+                    "event": "cross-referenced",
+                    "source": {"issue": {"number": 99, "pull_request": {}}},
+                }
+            ],
+            "eumemic/aios/issues/3": [],
+            "eumemic/aios/issues/4": [],
+        },
+    )
+    (wf, items, _, notes), _ = _wf_reader(world, ["eumemic/aios"])
+    runs = [
+        {"id": "r3", "status": "errored", "input": {"repo": "eumemic/aios", "issue_number": 3}},
+        {"id": "r4", "status": "suspended", "input": {"repo": "eumemic/aios", "issue_number": 4}},
+        {"id": "r5", "status": "running", "input": {"repo": "eumemic/aios", "issue_number": 5}},
+    ]
+    report = wf.build(items, True, runs, True, [], notes)
+    assert report["counts"] == {
+        "ZOMBIE": 1,
+        "AMBIGUOUS": 1,
+        "DEAD": 1,
+        "MISLABELLED": 1,
+        "LAGGING": 1,
+    }, "a class the workflow's own read path cannot reach is a class that does not ship"
+
+
+def test_workflow_read_path_is_OBSERVE_ONLY_end_to_end() -> None:
+    """Gate 1, asserted on the READ PATH rather than by grepping the source.
+
+    Every request the mirror issues while reading a full world — issue pages AND the
+    new timeline fetches — must be a GET with no body.
+    """
+    wf = _load_wf_module()
+    verbs: list[str] = []
+
+    async def fake_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        verbs.append(args.get("method", ""))
+        assert "body" not in args
+        if "/timeline" in args["path"]:
+            return {"status": 200, "headers": [], "body": "[]"}
+        return {
+            "status": 200,
+            "headers": [],
+            "body": json.dumps(
+                [
+                    {
+                        "number": 1,
+                        "title": "t",
+                        "labels": [{"name": "dispatched"}],
+                        "html_url": "",
+                        "updated_at": "",
+                    }
+                ]
+            ),
+        }
+
+    wf.tool = fake_tool
+    asyncio.run(wf._read_items(["eumemic/aios"]))
+    assert verbs and set(verbs) == {"GET"}
+    with pytest.raises(wf.ReadFailure):
+        asyncio.run(wf._gh("/repos/eumemic/aios/issues/1", method="PATCH"))

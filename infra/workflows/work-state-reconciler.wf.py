@@ -85,6 +85,35 @@ PIPELINE_PREFIXES = ("needs:human/", "autodev:", "pipeline:")
 
 MAX_ISSUE_PAGES = 50
 MAX_RUN_PAGES = 200
+#: Timeline pages read per issue when acquiring the linked-PR evidence (C2). A
+#: TRUNCATED timeline is a FAILED read, not a short one: the page we did not read
+#: is exactly where the PR that disproves a ZOMBIE would be, so stopping quietly
+#: manufactures the false ZOMBIE this reconciler exists to catch.
+MAX_TIMELINE_PAGES = 20
+#: Redirect hops followed on the issue-LIST path (a renamed repo). Mirrors urllib's
+#: silent following in the CLI so the two forms enumerate the same items.
+MAX_REDIRECT_HOPS = 5
+
+#: A GitHub 3xx on an issue read IS the transfer signal (C4). ``http_request`` does
+#: NOT follow redirects (httpx defaults ``follow_redirects=False``), so a
+#: transferred issue comes back as a literal 301 carrying ``Location``; the urllib
+#: CLI sees the same event as a silent hop and reports ``resp.geturl()``. Different
+#: mechanism, SAME note — which is what the reader drift guard pins.
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def transfer_note(repo, number, dest):
+    """The C4 note. Byte-identical to the library/CLI form — pinned by the drift guard.
+
+    68 issues changed repos on 2026-07-25. A transfer gives the issue a NEW
+    (repo, number) while every ``run.input`` still holds the OLD one, so the join
+    key is stale and the item reads as a FALSE ZOMBIE. Detection only in phase 1:
+    we report the stale key, we do not rewrite it.
+    """
+    return (
+        f"{repo}#{number} was REDIRECTED to {dest} — the issue appears to have been TRANSFERRED, "
+        "so any run keyed to these coordinates cannot join (C4)"
+    )
 
 
 class ReadFailure(Exception):
@@ -100,13 +129,14 @@ def _check_issue_row(repo, row):
     """
     if not isinstance(row, dict):
         raise ReadFailure(
-            "issue list for %s contained a non-object row (%s)" % (repo, type(row).__name__)
+            f"issue list for {repo} contained a non-object row ({type(row).__name__})"
         )
     raw_labels = row.get("labels")
     if raw_labels is not None and not isinstance(raw_labels, list):
         raise ReadFailure(
-            "issue row %s#%s has a non-list 'labels' (%s)"
-            % (repo, row.get("number"), type(raw_labels).__name__)
+            "issue row {}#{} has a non-list 'labels' ({})".format(
+                repo, row.get("number"), type(raw_labels).__name__
+            )
         )
     return raw_labels or []
 
@@ -114,7 +144,7 @@ def _check_issue_row(repo, row):
 def _check_run_row(row):
     """Validate ONE run row. Same contract as :func:`_check_issue_row`."""
     if not isinstance(row, dict):
-        raise ReadFailure("list_runs returned a non-object run row (%s)" % type(row).__name__)
+        raise ReadFailure(f"list_runs returned a non-object run row ({type(row).__name__})")
     return row
 
 
@@ -132,9 +162,9 @@ def _paginate_check(rows):
     after = rows[-1].get("id")
     if not after:
         raise ReadFailure(
-            "list_runs returned a full page (%d rows) whose last row has no 'id' — no "
-            "pagination cursor, so the run history is TRUNCATED. Refusing to report a "
-            "truncated read as exhaustive." % len(rows)
+            f"list_runs returned a full page ({len(rows)} rows) whose last row has no "
+            "'id' — no pagination cursor, so the run history is TRUNCATED. Refusing to "
+            "report a truncated read as exhaustive."
         )
     return after
 
@@ -145,10 +175,7 @@ def is_in_flight_label(label):
         return False
     if label in IN_FLIGHT_LABELS:
         return True
-    for prefix in IN_FLIGHT_PREFIXES:
-        if label.startswith(prefix):
-            return True
-    return False
+    return any(label.startswith(prefix) for prefix in IN_FLIGHT_PREFIXES)
 
 
 def in_flight_assertions(labels):
@@ -159,45 +186,73 @@ def in_flight_assertions(labels):
 def is_pipeline_label(label):
     if label in PIPELINE_LABELS:
         return True
-    for prefix in PIPELINE_PREFIXES:
-        if label.startswith(prefix):
-            return True
-    return False
+    return any(label.startswith(prefix) for prefix in PIPELINE_PREFIXES)
 
 
-async def _gh(path, method="GET"):
+def _header(result, name):
+    """One header value out of http_request's ``[[name, value], ...]`` pair list.
+
+    A pair LIST, not a dict, because HTTP permits repeated header names; we take the
+    last occurrence, which is what a dict would have kept anyway.
+    """
+    found = ""
+    for pair in result.get("headers") or []:
+        if len(pair) == 2 and isinstance(pair[0], str) and pair[0].lower() == name:
+            found = pair[1]
+    return found
+
+
+async def _gh(path, method="GET", allow_redirect=False):
     """One GitHub GET through the declared ``github`` http_server.
+
+    Returns ``(parsed_body, link_header, redirect_location_or_None)``.
 
     Refuses any other verb outright: phase 1 is observe-only and this is the single
     door to GitHub, so the constraint is enforced at the door rather than by
     reviewer vigilance over call sites.
+
+    C4 — ``allow_redirect=True`` turns a 3xx from an ERROR into a SIGNAL. The
+    ``http_request`` tool does not follow redirects, so a TRANSFERRED issue answers
+    with a literal 301 + ``Location``; without this the workflow's only options were
+    "raise" (an ALARM for a routine transfer) or, worse, nothing at all — which is
+    what shipped, so 68 transferred issues would have read as false ZOMBIEs. The
+    urllib CLI observes the same event as a silently-followed hop and reports
+    ``resp.geturl()``; the mechanisms differ, the emitted note does not.
     """
     if method != "GET":
-        raise ReadFailure("phase-1 reconciler is OBSERVE-ONLY: refusing %s %s" % (method, path))
+        raise ReadFailure(f"phase-1 reconciler is OBSERVE-ONLY: refusing {method} {path}")
     result = await tool(  # noqa: F821 - injected capability
         "http_request", {"server_ref": "github", "path": path, "method": "GET"}
     )
     # tool() returns errors as VALUES. An unchecked error here would parse as an
     # empty page — the exact silent-degradation this reconciler exists to detect.
     if not isinstance(result, dict):
-        raise ReadFailure("http_request returned %r for %s" % (type(result), path))
+        raise ReadFailure(f"http_request returned {type(result)!r} for {path}")
     if "error" in result:
-        raise ReadFailure("GET %s failed: %s" % (path, result["error"]))
+        raise ReadFailure("GET {} failed: {}".format(path, result["error"]))
     if result.get("truncated"):
-        raise ReadFailure("GET %s response was TRUNCATED — a cut body is not a page" % path)
+        raise ReadFailure(f"GET {path} response was TRUNCATED — a cut body is not a page")
     status = result.get("status")
+    if isinstance(status, int) and status in REDIRECT_STATUSES:
+        location = _header(result, "location")
+        if not allow_redirect:
+            raise ReadFailure(f"GET {path} → HTTP {status} (redirect to {location!r})")
+        if not location:
+            # A redirect with nowhere to go is a FAILED read, not a transfer we can
+            # name. Refusing beats inventing a destination.
+            raise ReadFailure(
+                f"GET {path} → HTTP {status} with no Location header — cannot tell where this "
+                "issue moved to, and guessing would manufacture a join key"
+            )
+        return None, "", location
     if not isinstance(status, int) or not (200 <= status < 300):
-        raise ReadFailure("GET %s → HTTP %s" % (path, status))
+        raise ReadFailure(f"GET {path} → HTTP {status}")
     body = result.get("body")
     try:
         parsed = json.loads(body) if body else None
     except Exception as exc:
-        raise ReadFailure("GET %s returned unparseable JSON: %s" % (path, exc))
-    link = ""
-    for pair in result.get("headers") or []:
-        if len(pair) == 2 and pair[0].lower() == "link":
-            link = pair[1]
-    return parsed, link
+        raise ReadFailure(f"GET {path} returned unparseable JSON: {exc}") from exc
+    return parsed, _header(result, "link"), None
 
 
 def _next_link(link_header):
@@ -218,26 +273,99 @@ def _path_of(url):
     return url
 
 
-async def _read_items(repos):
-    """Open issues/PRs carrying any pipeline state label, across ``repos``.
+async def _fetch_linked_prs(repo, number):
+    """PRs cross-referencing an issue + any redirect seen — the ACQUIRED evidence (C2/C4).
+
+    Returns ``(linked_pr_numbers, redirect_location_or_None)``.
+
+    This is the half the mirror was missing. Without it ``linked_pr_numbers`` was
+    never populated in the workflow, so AMBIGUOUS was UNREACHABLE with real data and
+    the five known-good items (company#71/#50/#135, ops#337/#331) classified ZOMBIE
+    on the form that actually runs on cron. The classifier was right; the system
+    never handed it the evidence. Read-only: the timeline endpoint under GET.
+
+    A truncated timeline is a FAILED read (:data:`MAX_TIMELINE_PAGES`), because the
+    unread page is exactly where the PR that disproves the ZOMBIE would be.
+    """
+    path = f"/repos/{repo}/issues/{number}/timeline?per_page=100"
+    found = set()
+    redirected_to = None
+    pages = 0
+    while path is not None:
+        if pages >= MAX_TIMELINE_PAGES:
+            raise ReadFailure(
+                f"timeline for {repo}#{number} exceeded {MAX_TIMELINE_PAGES} pages — "
+                "refusing to decide ZOMBIE vs AMBIGUOUS on a TRUNCATED timeline, since "
+                "the unread page is exactly where the PR that disproves a ZOMBIE would be"
+            )
+        body, link, location = await _gh(path, allow_redirect=True)
+        if location:
+            return tuple(sorted(found)), location
+        if not isinstance(body, list):
+            raise ReadFailure(f"timeline for {repo}#{number} was not a JSON array")
+        pages += 1
+        for event in body:
+            if not isinstance(event, dict) or event.get("event") != "cross-referenced":
+                continue
+            source = event.get("source")
+            issue = source.get("issue") if isinstance(source, dict) else None
+            if isinstance(issue, dict) and "pull_request" in issue:
+                num = issue.get("number")
+                if isinstance(num, int) and not isinstance(num, bool):
+                    found.add(num)
+        nxt = _next_link(link)
+        path = _path_of(nxt) if nxt else None
+    return tuple(sorted(found)), redirected_to
+
+
+async def _read_items(repos, enrich_linked_prs=True):
+    """Open issues/PRs across ``repos``, ENRICHED with the linked-PR evidence.
+
+    Returns ``(items, exhaustive, notes)``.
 
     Enumerates ALL open items and filters locally: the LAGGING class is defined by
     the ABSENCE of ``dispatched``, so a server-side ``?labels=dispatched`` filter
     would be structurally incapable of finding it — the same defect as the stall
     detectors that could not see the zombies because they trusted the lying label.
+
+    Two signals are ACQUIRED here rather than assumed, and the reader drift guard
+    fails the build if either goes missing from one form:
+
+    * **C2** — every item that ASSERTS in flight gets its timeline read, so
+      ``linked_pr_numbers`` is evidence the production path actually fetched. A
+      classifier that can only reach AMBIGUOUS when a test hands it the answer is
+      the defect family this PR exists to kill: evidence asserted, not acquired.
+    * **C4** — a 3xx on either read is a TRANSFER, surfaced as an explicit note
+      instead of being allowed to masquerade as a zombie.
     """
     items = []
     exhaustive = True
+    notes = []
+    transferred = {}
     for repo in repos:
-        path = "/repos/%s/issues?state=open&per_page=100&sort=created&direction=desc" % repo
+        path = f"/repos/{repo}/issues?state=open&per_page=100&sort=created&direction=desc"
         pages = 0
+        hops = 0
         while path is not None:
             if pages >= MAX_ISSUE_PAGES:
                 exhaustive = False
                 break
-            body, link = await _gh(path)
+            body, link, location = await _gh(path, allow_redirect=True)
+            if location:
+                # C4 on the LIST path: the repo itself was renamed/moved. Follow it (the
+                # CLI's urllib does so silently) but SAY SO, so the join key that no
+                # longer resolves is visible as data rather than as a shrinking count.
+                hops += 1
+                if hops > MAX_REDIRECT_HOPS:
+                    raise ReadFailure(
+                        f"issue list for {repo} redirected more than "
+                        f"{MAX_REDIRECT_HOPS} times — refusing to chase a redirect loop"
+                    )
+                notes.append(transfer_note(repo, "*", location))
+                path = _path_of(location)
+                continue
             if not isinstance(body, list):
-                raise ReadFailure("issue list for %s was not a JSON array" % repo)
+                raise ReadFailure(f"issue list for {repo} was not a JSON array")
             pages += 1
             for row in body:
                 raw_labels = _check_issue_row(repo, row)
@@ -256,11 +384,28 @@ async def _read_items(repos):
                         "labels": labels,
                         "url": row.get("html_url", ""),
                         "updated_at": row.get("updated_at", ""),
+                        "linked_pr_numbers": [],
                     }
                 )
             nxt = _next_link(link)
             path = _path_of(nxt) if nxt else None
-    return items, exhaustive
+
+    if enrich_linked_prs:
+        for it in items:
+            # C1: enrich on the UNION of in-flight assertions. Keying this on
+            # `dispatched` alone would mean the nine issues that now assert in-flight
+            # via `autodev:in-progress` never had their linked PRs read, so AMBIGUOUS
+            # could never fire for them — the C1 bug wearing a C2 hat.
+            if it["kind"] != "issue" or not in_flight_assertions(it["labels"]):
+                continue
+            linked, redirected = await _fetch_linked_prs(it["repo"], it["number"])
+            it["linked_pr_numbers"] = list(linked)
+            if redirected:
+                transferred[(it["repo"], it["number"])] = redirected
+
+    for key in sorted(transferred):
+        notes.append(transfer_note(key[0], key[1], transferred[key]))
+    return items, exhaustive, notes
 
 
 def _normalise_repo(raw, default_owner="eumemic"):
@@ -273,7 +418,7 @@ def _normalise_repo(raw, default_owner="eumemic"):
         owner = raw.get("owner")
         name = raw.get("name") or raw.get("repo")
         if isinstance(owner, str) and isinstance(name, str) and owner and name:
-            return "%s/%s" % (owner.strip("/"), name.strip("/"))
+            return "{}/{}".format(owner.strip("/"), name.strip("/"))
         raw = name
     if not isinstance(raw, str):
         return None
@@ -287,15 +432,15 @@ def _normalise_repo(raw, default_owner="eumemic"):
             name = parts[1]
             if name.endswith(".git"):
                 name = name[:-4]
-            return "%s/%s" % (parts[0], name)
+            return f"{parts[0]}/{name}"
         return None
     if text.endswith(".git"):
         text = text[:-4]
     parts = [p for p in text.strip("/").split("/") if p]
     if len(parts) == 1:
-        return "%s/%s" % (default_owner, parts[0])
+        return f"{default_owner}/{parts[0]}"
     if len(parts) == 2:
-        return "%s/%s" % (parts[0], parts[1])
+        return f"{parts[0]}/{parts[1]}"
     return None
 
 
@@ -349,9 +494,9 @@ async def _read_runs(workflow_ids):
                 args["after"] = after
             result = await tool("list_runs", args)  # noqa: F821 - injected capability
             if not isinstance(result, dict):
-                raise ReadFailure("list_runs returned %r" % type(result))
+                raise ReadFailure(f"list_runs returned {type(result)!r}")
             if "error" in result:
-                raise ReadFailure("list_runs failed: %s" % result["error"])
+                raise ReadFailure("list_runs failed: {}".format(result["error"]))
             rows = result.get("runs")
             if not isinstance(rows, list):
                 # A missing 'runs' key is a CONTRACT failure, not an empty page.
@@ -414,14 +559,14 @@ def classify(item, runs):
         if live:
             return mk(
                 "LAGGING",
-                "%d live run(s) (%s) but NO in-flight label (no `dispatched`, no "
-                "`autodev:in-progress`, no `needs:human/*`)" % (len(live), _statuses(live)),
+                f"{len(live)} live run(s) ({_statuses(live)}) but NO in-flight label "
+                "(no `dispatched`, no `autodev:in-progress`, no `needs:human/*`)",
                 live,
                 trigger_labels=[],
             )
         return None
 
-    claim = ", ".join(["`%s`" % x for x in triggers])
+    claim = ", ".join([f"`{x}`" for x in triggers])
 
     if live:
         return None
@@ -432,53 +577,51 @@ def classify(item, runs):
         extra = ""
         if others:
             extra = (
-                " (alongside %d run(s) in %s — a terminal sibling does NOT make an "
-                "unknown status dead)" % (len(others), _statuses(others))
+                f" (alongside {len(others)} run(s) in {_statuses(others)} — a terminal "
+                "sibling does NOT make an unknown status dead)"
             )
         return mk(
             "MISLABELLED",
-            "%s and run(s) in unrecognised status (%s) — cannot prove live; treat as "
-            "parked pending triage%s" % (claim, _statuses(unknown), extra),
+            f"{claim} and run(s) in unrecognised status ({_statuses(unknown)}) — cannot prove live; treat as "
+            f"parked pending triage{extra}",
             unknown + others,
             ("unrecognised-run-status",),
         )
     if suspended:
         return mk(
             "MISLABELLED",
-            "%s but %d run(s) suspended at a gate — parked is NOT running"
-            % (claim, len(suspended)),
+            f"{claim} but {len(suspended)} run(s) suspended at a gate — parked is NOT running",
             suspended,
         )
     if terminal:
         return mk(
             "DEAD",
-            "%s but every run is terminal (%s)" % (claim, _statuses(terminal)),
+            f"{claim} but every run is terminal ({_statuses(terminal)})",
             terminal,
         )
     linked = item.get("linked_pr_numbers") or []
     if linked:
         # C2: linked PRs mean work demonstrably happened, so this is NOT a zombie and
         # must not land in counts["ZOMBIE"]. Its own class; phase 2 acts on the class.
-        prs = ", ".join(["#%s" % n for n in linked])
+        prs = ", ".join([f"#{n}" for n in linked])
         return mk(
             "AMBIGUOUS",
-            "%s and no unarchived run — BUT PR(s) %s reference this issue. Work "
+            f"{claim} and no unarchived run — BUT PR(s) {prs} reference this issue. Work "
             "demonstrably happened, so the join key (or the run's archival) is the "
-            "suspect, not the item. NEEDS TRIAGE — deliberately NOT counted as a ZOMBIE."
-            % (claim, prs),
+            "suspect, not the item. NEEDS TRIAGE — deliberately NOT counted as a ZOMBIE.",
             [],
             ("has-linked-prs", "excluded-from-zombie-count"),
         )
     return mk(
         "ZOMBIE",
-        "%s but NO unarchived run exists for this issue — nothing (visible) ever "
-        "picked it up" % claim,
+        f"{claim} but NO unarchived run exists for this issue — nothing (visible) ever "
+        "picked it up",
         [],
         ("zombie-means-no-unarchived-run",),
     )
 
 
-def build(items, items_exhaustive, runs, runs_exhaustive, failures):
+def build(items, items_exhaustive, runs, runs_exhaustive, failures, notes=()):
     """Join + classify. **Any failure ⇒ ALARM with counts:null.**
 
     The counts key is ``None`` — not ``{}``, not zeros — on ALARM, so a consumer
@@ -491,6 +634,7 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures):
             "zombie_means": ZOMBIE_MEANS,
             "total_disagreements": None,
             "failures": failures,
+            "notes": list(notes),
             "disagreements": [],
             "unmatched_runs": [],
             "exhaustive": False,
@@ -554,6 +698,10 @@ def build(items, items_exhaustive, runs, runs_exhaustive, failures):
         + [x + "*" for x in IN_FLIGHT_PREFIXES],
         "total_disagreements": len(disagreements),
         "failures": [],
+        # C4 — transfer notes ride on the report, never suppressed. A stale join key
+        # is DATA a triager must see; swallowing it is how a transfer masquerades as
+        # a zombie.
+        "notes": list(notes),
         "disagreements": disagreements,
         "unmatched_runs": unmatched,
         "exhaustive": bool(items_exhaustive and runs_exhaustive),
@@ -571,14 +719,19 @@ def disagreement_hash(report):
     hashed instead, so a NEW outage still wakes the seat.
     """
     if report["verdict"] == "ALARM":
-        parts = ["ALARM"] + sorted(
-            ["%s:%s" % (f.get("source", ""), f.get("reason", "")) for f in report["failures"]]
-        )
+        parts = [
+            "ALARM",
+            *sorted(
+                [
+                    "{}:{}".format(f.get("source", ""), f.get("reason", ""))
+                    for f in report["failures"]
+                ]
+            ),
+        ]
     else:
         parts = sorted(
             [
-                "%s:%s#%s:%s:%s"
-                % (
+                "{}:{}#{}:{}:{}".format(
                     d["classification"],
                     d["repo"],
                     d["number"],
@@ -599,9 +752,9 @@ async def main(input):
 
     phase("read-github")  # noqa: F821 - injected capability
     failures = []
-    items, items_exhaustive = [], True
+    items, items_exhaustive, notes = [], True, []
     try:
-        items, items_exhaustive = await _read_items(repos)
+        items, items_exhaustive, notes = await _read_items(repos)
     except ReadFailure as exc:
         # A failed read is recorded as a FAILURE, never swallowed into an empty
         # list. The report below will ALARM and carry counts:null.
@@ -615,7 +768,7 @@ async def main(input):
         failures.append({"source": "aios-runs", "reason": str(exc)})
 
     phase("join")  # noqa: F821
-    report = build(items, items_exhaustive, runs, runs_exhaustive, failures)
+    report = build(items, items_exhaustive, runs, runs_exhaustive, failures, notes)
     current_hash = disagreement_hash(report)
     report["disagreement_hash"] = current_hash
     report["changed"] = previous_hash != current_hash
@@ -627,10 +780,11 @@ async def main(input):
     report["repos_scanned"] = list(repos)
 
     if report["verdict"] == "ALARM":
-        log("ALARM: work-state reconciler could not read its sources: %s" % json.dumps(failures))  # noqa: F821
+        log(f"ALARM: work-state reconciler could not read its sources: {json.dumps(failures)}")  # noqa: F821
     else:
         log(  # noqa: F821
-            "work-state: %s (exhaustive=%s, changed=%s)"
-            % (json.dumps(report["counts"]), report["exhaustive"], report["changed"])
+            "work-state: {} (exhaustive={}, changed={})".format(
+                json.dumps(report["counts"]), report["exhaustive"], report["changed"]
+            )
         )
     return report
