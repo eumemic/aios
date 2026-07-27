@@ -398,6 +398,10 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
+        "# Give the sentinel a local route so the kernel reaches nat OUTPUT before",
+        "# deciding whether the original destination is reachable. The filter REJECT",
+        "# below remains the fail-closed floor if the DNAT is absent or malformed.",
+        f"ip route replace {CREDENTIAL_SENTINEL_IP}/32 dev eth0",
         "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
