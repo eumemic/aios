@@ -196,15 +196,19 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        # Credential DNS rewrites Docker's loopback resolver destination
+        # (127.0.0.11) to the worker. Set route_localnet while Docker creates
+        # credentialed sandboxes: /proc/sys is read-only in the later NET_ADMIN
+        # sidecar. Applying the sysctl to every sandbox needlessly changes the
+        # networking contract and is unsupported by some runtimes.
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
-            # Docker normally writes its loopback resolver (127.0.0.11) into
-            # resolv.conf. Rewriting that destination out of 127/8 in nat OUTPUT
-            # is rejected as martian traffic on real kernels unless route_localnet
-            # is enabled correctly for every eventual egress interface. Avoid
-            # that kernel/runtime dependency altogether: this documentation-only
-            # address has a normal route lookup, and every :53 packet is DNATed
-            # to the per-session resolver before it can leave the netns.
-            argv.extend(["--dns", "192.0.2.53"])
+            # Docker applies OCI sysctls before attaching the container's eth0.
+            # ``conf.all`` changes interfaces that already exist (normally only
+            # lo at that point), while ``conf.default`` supplies the value to
+            # interfaces created later. Set both so the DNS packet's eventual
+            # egress interface permits the loopback-origin DNAT on real hosts.
+            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+            argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
