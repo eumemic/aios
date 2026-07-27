@@ -491,6 +491,12 @@ jobs:
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
+            # Failed Docker fixtures can leave containers, networks, and volumes
+            # behind. Remove that contaminated state before replaying failures;
+            # the hosted runner has no workflow-owned service containers.
+            docker ps -aq | xargs -r docker rm -f >/dev/null
+            docker network prune -f >/dev/null
+            docker volume prune -af >/dev/null
             uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 4 --dist=loadfile
           fi
 
