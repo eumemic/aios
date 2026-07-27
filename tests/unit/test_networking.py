@@ -308,6 +308,7 @@ class TestBuildIptablesScript:
         )
         assert '"$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT' in script
         assert "resolve_ipv4 plain.example.com" in script
+        assert '"$IPT" -A OUTPUT -d "$PROXY_IP" -p tcp --dport 49152 -j ACCEPT' in script
         # The plain allowed host is never DNAT'd. Three DNATs are expected now
         # (#2042): udp/tcp :53 to the resolver + the single sentinel :443.
         assert script.count("-j DNAT --to-destination") == 3

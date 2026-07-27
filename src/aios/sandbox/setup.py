@@ -417,10 +417,11 @@ def _nat_dnat_lines(
     if filter_accepts:
         lines.extend(
             [
-                "# Limited only: -P OUTPUT DROP would otherwise drop the post-DNAT DNS",
-                "# flow to the worker resolver (filter sees the REWRITTEN destination).",
+                "# Limited only: -P OUTPUT DROP would otherwise drop flows after nat",
+                "# rewrites them to the worker (filter sees the REWRITTEN destination).",
                 f'"$IPT" -A OUTPUT -d "$PROXY_IP" -p udp --dport {dns_port} -j ACCEPT',
                 f'"$IPT" -A OUTPUT -d "$PROXY_IP" -p tcp --dport {dns_port} -j ACCEPT',
+                f'"$IPT" -A OUTPUT -d "$PROXY_IP" -p tcp --dport {proxy_port} -j ACCEPT',
             ]
         )
     lines.extend(
