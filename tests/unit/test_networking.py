@@ -554,6 +554,10 @@ class TestBuildSecretEgressDnatScript:
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "route_localnet" not in script
+        assert f"ip address replace {CREDENTIAL_SENTINEL_IP}/32 dev lo" in script
+        assert script.index("ip address replace") < script.index(
+            f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443"
+        )
         assert "ip route replace" not in script
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
@@ -1462,6 +1466,7 @@ class TestCredentialHostEgressVerdict:
         )
         for name, body in (
             ("getent", getent),
+            ("ip", "#!/usr/bin/env bash\nexit 0\n"),
             ("iptables-legacy", ipt),
             ("iptables", ipt),
             ("ip6tables-legacy", ipt),
