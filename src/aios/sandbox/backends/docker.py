@@ -197,15 +197,12 @@ class DockerBackend:
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
-            # Docker keeps 127.0.0.11 in resolv.conf on user-defined networks
-            # even when --dns is supplied (that option only changes the embedded
-            # resolver's upstream). Credential DNS DNAT rewrites that loopback
-            # destination to the worker, so permit the resulting packet on the
-            # concrete bridge interface. Setting only conf.all/conf.default is
-            # racy with Docker's interface creation and left real E2E packets
-            # subject to martian filtering; eth0 is present before OCI sysctls
-            # are applied and is the interface the rewritten packet traverses.
-            argv.extend(["--sysctl", "net.ipv4.conf.eth0.route_localnet=1"])
+            # Credential DNS rewrites Docker's loopback resolver destination
+            # (127.0.0.11) to the worker. OCI sysctls are applied before Docker
+            # creates eth0, so naming eth0 makes container creation fail. Apply
+            # to existing interfaces and inherit the value on later interfaces.
+            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+            argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
