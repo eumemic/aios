@@ -497,13 +497,22 @@ jobs:
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
             mapfile -t failed < <(uv run python scripts/failed_pytest_nodes.py "$report")
             ((${#failed[@]})) || { echo "::error::No failed E2E nodes in report"; exit 1; }
-            # Failed Docker fixtures can leave containers, networks, and volumes
-            # behind. Remove that contaminated state before replaying failures;
-            # the hosted runner has no workflow-owned service containers.
-            docker ps -aq | xargs -r docker rm -f >/dev/null
-            docker network prune -f >/dev/null
-            docker volume prune -af >/dev/null
-            uv run pytest -q -n 2 --dist=loadfile "${failed[@]}"
+            # Retry each exact failure in a fresh, serial pytest process. A
+            # shared xdist retry leaves multiple worker-local Postgres stacks
+            # competing with dockerd and lets one failed fixture contaminate
+            # the other worker. Clean workflow-owned Docker state between nodes
+            # and retain every repeated failure as a blocking result.
+            retry_failed=0
+            for node in "${failed[@]}"; do
+              docker ps -aq | xargs -r docker rm -f >/dev/null
+              docker network prune -f >/dev/null
+              docker volume prune -af >/dev/null
+              if ! uv run pytest -q "$node"; then
+                echo "::error::Docker E2E retry failed: $node"
+                retry_failed=1
+              fi
+            done
+            ((retry_failed == 0))
           fi
 
       - name: Upload docker E2E flake-retry marker
