@@ -487,10 +487,10 @@ jobs:
         # Run those fresh module processes serially. Even two independent
         # Postgres/container stacks race for the hosted runner's Docker daemon
         # and can make healthy container startup exceed its watchdog. Retry each
-        # failed module in another fresh process. Do not derive retry nodes from
-        # pytest's shared lastfailed cache: every module process rewrites that
-        # cache, so a later successful module can erase earlier failures. A
-        # module that fails cleanly a second time remains blocking.
+        # failed node in another fresh process. Give every module its own pytest
+        # cache: the default shared lastfailed cache is rewritten by each process,
+        # so a later successful module can erase earlier failures. A node that
+        # fails cleanly a second time remains blocking.
         run: |
           mapfile -t docker_files < <(
             uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
@@ -509,10 +509,12 @@ jobs:
             printf '%s\0' "$@" | xargs -0 -r -n 1 bash -c '
               file="$1"
               key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
-              if uv run pytest -q -m "docker and not perf" "$file"; then
+              cache_dir="'"$result_dir"'/cache-$key"
+              if uv run pytest -q -o "cache_dir=$cache_dir" -m "docker and not perf" "$file"; then
                 : > "'"$result_dir"'/ok-$key"
               else
                 printf "%s\n" "$file" > "'"$result_dir"'/failed-$key"
+                uv run python -c '"'"'import json,sys; from pathlib import Path; failed=json.loads(Path(sys.argv[1]).read_text()); Path(sys.argv[2]).write_text("".join(node+"\\n" for node,value in failed.items() if value))'"'"' "$cache_dir/v/cache/lastfailed" "'"$result_dir"'/nodes-$key"
               fi
             ' _
           }
@@ -526,7 +528,14 @@ jobs:
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
 
-            run_modules .docker-e2e-retry "${failed_files[@]}"
+            mapfile -t failed_nodes < <(
+              cat .docker-e2e-first/nodes-* 2>/dev/null || true
+            )
+            ((${#failed_nodes[@]})) || {
+              echo "::error::Docker E2E failed without recording failed nodes"
+              exit 1
+            }
+            run_modules .docker-e2e-retry "${failed_nodes[@]}"
             if compgen -G '.docker-e2e-retry/failed-*' >/dev/null; then
               cat .docker-e2e-retry/failed-* >&2
               exit 1
