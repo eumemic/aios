@@ -398,10 +398,6 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
-        "# Ensure the TEST-NET sentinel has a route before curl connects. Docker's",
-        "# default route normally covers it, but installing an explicit link route",
-        "# keeps the interception independent of image/network route defaults.",
-        f"ip route replace {CREDENTIAL_SENTINEL_IP}/32 dev eth0",
         "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
