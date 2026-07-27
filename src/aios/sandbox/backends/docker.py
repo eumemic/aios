@@ -197,14 +197,15 @@ class DockerBackend:
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
-            # Docker normally writes its loopback resolver (127.0.0.11) into
-            # resolv.conf. Rewriting that destination out of 127/8 in nat OUTPUT
-            # is rejected as martian traffic on real kernels unless route_localnet
-            # is enabled correctly for every eventual egress interface. Avoid
-            # that kernel/runtime dependency altogether: this documentation-only
-            # address has a normal route lookup, and every :53 packet is DNATed
-            # to the per-session resolver before it can leave the netns.
-            argv.extend(["--dns", "192.0.2.53"])
+            # Docker keeps 127.0.0.11 in resolv.conf on user-defined networks
+            # even when --dns is supplied (that option only changes the embedded
+            # resolver's upstream). Credential DNS DNAT rewrites that loopback
+            # destination to the worker, so permit the resulting packet on the
+            # concrete bridge interface. Setting only conf.all/conf.default is
+            # racy with Docker's interface creation and left real E2E packets
+            # subject to martian filtering; eth0 is present before OCI sysctls
+            # are applied and is the interface the rewritten packet traverses.
+            argv.extend(["--sysctl", "net.ipv4.conf.eth0.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
