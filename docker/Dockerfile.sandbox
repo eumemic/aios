@@ -53,7 +53,6 @@ RUN apt-get -o Acquire::Retries=5 update \
         coreutils \
         curl \
         git \
-        iproute2 \
         iptables \
         jq \
         nodejs \
