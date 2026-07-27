@@ -468,9 +468,10 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Use loadfile workers so module-scoped Docker fixtures stay on one
-        # worker. The hosted runner has four CPUs; using all four keeps both the
-        # initial pass and a targeted retry within the CI watchdog.
+        # Keep Docker below the runner's four logical CPUs. Each xdist worker
+        # owns a testcontainer Postgres and drives several Docker containers;
+        # using all four CPUs starves dockerd and causes fixture teardown races.
+        # loadfile keeps module-scoped Docker fixtures on one worker.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -482,12 +483,11 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Each worker owns a testcontainer Postgres and drives Docker. Retry
-        # pytest's recorded failures with the same distribution so the retry
-        # does not become a serial full-shard run when xdist's cache has no
-        # usable last-failed state on the controller.
+        # Retry recorded failures once after a clean serial pass. Keeping the
+        # retry serial avoids reproducing the daemon contention that caused the
+        # first pass to fail, while --lf avoids rerunning healthy modules.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
@@ -497,7 +497,7 @@ jobs:
             docker ps -aq | xargs -r docker rm -f >/dev/null
             docker network prune -f >/dev/null
             docker volume prune -af >/dev/null
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 4 --dist=loadfile
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
