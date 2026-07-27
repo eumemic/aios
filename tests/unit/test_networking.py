@@ -555,6 +555,11 @@ class TestBuildSecretEgressDnatScript:
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "route_localnet" not in script
         assert "DEFAULT_GW=$(ip route show default dev eth0" in script
+        assert 'if [ -z "$DEFAULT_GW" ]; then' in script
+        assert 'echo "credential interception: eth0 has no default gateway" >&2' in script
+        assert script.index('if [ -z "$DEFAULT_GW" ]; then') < script.index(
+            f'ip route replace {CREDENTIAL_SENTINEL_IP}/32 via "$DEFAULT_GW" dev eth0'
+        )
         assert f'ip route replace {CREDENTIAL_SENTINEL_IP}/32 via "$DEFAULT_GW" dev eth0' in script
         assert script.index("ip route replace") < script.index(
             f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443"
