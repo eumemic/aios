@@ -197,12 +197,11 @@ class DockerBackend:
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
-            # Credential DNS rewrites Docker's loopback resolver destination
-            # (127.0.0.11) to the worker. OCI sysctls are applied before Docker
-            # creates eth0, so naming eth0 makes container creation fail. Apply
-            # to existing interfaces and inherit the value on later interfaces.
-            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
-            argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
+            # Credential DNS rewrites Docker's 127.0.0.11 resolver destination
+            # to the worker. Docker substitutes IFNAME with the container's
+            # actual interface name when it creates the endpoint, avoiding both
+            # the pre-eth0 OCI-sysctl race and assumptions about interface names.
+            argv.extend(["--sysctl", "net.ipv4.conf.IFNAME.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is

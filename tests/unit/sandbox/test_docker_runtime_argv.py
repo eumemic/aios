@@ -82,10 +82,7 @@ async def test_create_enables_route_localnet_on_credential_egress_interface(
     await DockerBackend().create(_spec(credentialed=True))
 
     sysctls = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--sysctl"]
-    assert sysctls == [
-        "net.ipv4.conf.all.route_localnet=1",
-        "net.ipv4.conf.default.route_localnet=1",
-    ]
+    assert sysctls == ["net.ipv4.conf.IFNAME.route_localnet=1"]
     assert "--dns" not in calls[0]
 
 
