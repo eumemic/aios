@@ -198,10 +198,13 @@ class DockerBackend:
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
         if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
             # Credential DNS intercepts every :53 packet before this address is
-            # reached. Use a non-loopback resolver destination so redirecting
-            # DNS to the worker does not depend on route_localnet or writable
-            # netns sysctls (and works identically on Docker and runsc).
-            argv.extend(["--dns", "192.0.2.53"])
+            # reached. Use a routable, non-loopback resolver destination so the
+            # kernel has an egress route before nat OUTPUT rewrites the packet
+            # to the worker. TEST-NET addresses are not reliably routed by
+            # Docker/runsc and caused every credential swap E2E to time out.
+            # The fail-closed apply + read-back gate runs before the sandbox is
+            # handed to a tenant, so no query can reach this nominal resolver.
+            argv.extend(["--dns", "1.1.1.1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is

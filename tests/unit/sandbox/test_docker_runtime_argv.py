@@ -83,7 +83,7 @@ async def test_create_uses_non_loopback_dns_for_credentials(
     await DockerBackend().create(_spec(credentialed=True))
 
     dns_servers = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--dns"]
-    assert dns_servers == ["192.0.2.53"]
+    assert dns_servers == ["1.1.1.1"]
     assert "--sysctl" not in calls[0]
 
 
