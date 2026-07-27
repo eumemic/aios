@@ -102,9 +102,10 @@ async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.Monke
     )
 
     assert _runtime_values(calls[0]) == ["runsc"]
-    # The flag lands before the image (i.e. on the docker run options, not
-    # inside the in-container command).
+    assert "systempaths=unconfined" in calls[0]
+    # Docker options land before the image, not inside the container command.
     assert calls[0].index("--runtime") < calls[0].index("aios-sandbox:test")
+    assert calls[0].index("systempaths=unconfined") < calls[0].index("aios-sandbox:test")
 
 
 async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyPatch) -> None:

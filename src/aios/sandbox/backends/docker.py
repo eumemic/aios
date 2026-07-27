@@ -937,6 +937,13 @@ class DockerBackend:
             f"container:{target_sandbox_id}",
             "--cap-add",
             "NET_ADMIN",
+            # The credential-DNS apply script sets route_localnet in the shared
+            # netns after Docker has created its endpoint. Docker otherwise
+            # mounts /proc/sys read-only in this sidecar, even with NET_ADMIN,
+            # so every credentialed provision fails before installing rules.
+            # Keep capabilities narrow; only relax Docker's system-path mount.
+            "--security-opt",
+            "systempaths=unconfined",
         ]
         if runtime:
             argv.extend(["--runtime", runtime])
