@@ -452,11 +452,14 @@ jobs:
         # preserving a second failure as a blocking signal.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          if ! uv run pytest tests/e2e -q -m "not docker" -n 4; then
+          report="$(mktemp)"
+          if ! uv run pytest tests/e2e -q -m "not docker" -n 4 --junitxml="$report"; then
             echo "::warning::FLAKE_RETRY e2e-non-docker"
             echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
-            uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
+            mapfile -t failed < <(uv run python scripts/failed_pytest_nodes.py "$report")
+            ((${#failed[@]})) || { echo "::error::No failed E2E nodes in report"; exit 1; }
+            uv run pytest -q -n 4 "${failed[@]}"
           fi
 
       - name: Upload non-docker E2E flake-retry marker
@@ -483,23 +486,24 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Retry recorded failures with the same two-worker distribution. The
-        # xdist controller does not reliably retain worker last-failed state, so
-        # --lf can become a full-shard replay; running that replay serially
-        # exceeds the shard watchdog. Two workers keep dockerd below saturation
-        # while leaving enough time for a clean retry.
+        # Capture exact failed nodes in JUnit XML. The xdist controller does not
+        # reliably retain worker last-failed state, so --lf can become a full
+        # shard replay and exceed the watchdog.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          report="$(mktemp)"
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile --junitxml="$report"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
+            mapfile -t failed < <(uv run python scripts/failed_pytest_nodes.py "$report")
+            ((${#failed[@]})) || { echo "::error::No failed E2E nodes in report"; exit 1; }
             # Failed Docker fixtures can leave containers, networks, and volumes
             # behind. Remove that contaminated state before replaying failures;
             # the hosted runner has no workflow-owned service containers.
             docker ps -aq | xargs -r docker rm -f >/dev/null
             docker network prune -f >/dev/null
             docker volume prune -af >/dev/null
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 2 --dist=loadfile
+            uv run pytest -q -n 2 --dist=loadfile "${failed[@]}"
           fi
 
       - name: Upload docker E2E flake-retry marker
