@@ -509,6 +509,17 @@ jobs:
             mkdir -p "$result_dir"
             local file key cache_dir nodes_file
             for file in "$@"; do
+              # A crashed pytest process can strand its Postgres/sandbox
+              # containers. Remove those before starting the next isolated
+              # process; otherwise the first infrastructure failure consumes
+              # runner resources and makes every later module (and its retry)
+              # fail for an unrelated reason. This job owns the runner and no
+              # service containers are declared, so every running container is
+              # test-owned. Images are deliberately retained.
+              docker ps -aq | xargs -r docker rm -f >/dev/null
+              docker network prune -f >/dev/null
+              docker volume prune -f >/dev/null
+
               key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
               cache_dir="$result_dir/cache-$key"
               nodes_file="$result_dir/nodes-$key"
