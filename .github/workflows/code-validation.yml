@@ -199,19 +199,12 @@ jobs:
         run: uv sync --dev
 
       - name: Unit tests
-        # Keep concurrency below the runner's memory ceiling. Image-resize tests
-        # cache large noisy pixel buffers per process, so four xdist workers can
-        # be OOM-killed even though the suite is otherwise xdist-safe. Retry only
-        # the recorded failures once in a fresh, serial process: this tolerates a
-        # runner-contention timeout without hiding a repeatable test failure.
-        run: |
-          set +e
-          uv run pytest tests/unit -q -n 2
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            uv run pytest tests/unit -q --lf
-          fi
+        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
+        # runners.  The suite is xdist-safe by construction: no DB, no
+        # fixed ports (broker tests bind port 0 / mkdtemp UDS paths),
+        # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
+        # Measured locally: 45 s serial → 17 s at ``-n 4``.
+        run: uv run pytest tests/unit -q -n 4
 
   connectors:
     needs: detect
@@ -475,10 +468,15 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Keep module-scoped Docker harnesses together and isolate test files
-        # between two worker-local Postgres stacks. A single serial session lets
-        # a failed Docker fixture contaminate every later file, while four stacks
-        # oversubscribe dockerd on hosted runners.
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -490,83 +488,15 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Run each test module in its own process. Several Docker E2E modules
-        # have session-scoped Postgres/container fixtures; reusing an xdist
-        # worker after one of those fixtures fails contaminates unrelated files.
-        # Run those fresh module processes serially. Even two independent
-        # Postgres/container stacks race for the hosted runner's Docker daemon
-        # and can make healthy container startup exceed its watchdog. Retry each
-        # failed node in another fresh process. Give every module its own pytest
-        # cache: the default shared lastfailed cache is rewritten by each process,
-        # so a later successful module can erase earlier failures. A node that
-        # fails cleanly a second time remains blocking.
+        # Docker-backed E2E occasionally sees transient daemon/container startup
+        # failures on shared runners. Retry only the recorded failures once; a
+        # deterministic regression still fails the required check.
         run: |
-          mapfile -t docker_files < <(
-            uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
-              sed -n 's#^\(tests/e2e/[^:]*\)::.*#\1#p' | sort -u
-          )
-          ((${#docker_files[@]})) || {
-            echo "::error::No Docker E2E tests were collected"
-            exit 1
-          }
-          echo "Running ${#docker_files[@]} isolated Docker E2E modules"
-
-          run_modules() {
-            local result_dir="$1"
-            shift
-            rm -rf "$result_dir"
-            mkdir -p "$result_dir"
-            local file key cache_dir nodes_file
-            for file in "$@"; do
-              # A crashed pytest process can strand its Postgres/sandbox
-              # containers. Remove those before starting the next isolated
-              # process; otherwise the first infrastructure failure consumes
-              # runner resources and makes every later module (and its retry)
-              # fail for an unrelated reason. This job owns the runner and no
-              # service containers are declared, so every running container is
-              # test-owned. Images are deliberately retained.
-              docker ps -aq | xargs -r docker rm -f >/dev/null
-              docker network prune -f >/dev/null
-              docker volume prune -f >/dev/null
-
-              key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
-              cache_dir="$result_dir/cache-$key"
-              nodes_file="$result_dir/nodes-$key"
-              if uv run pytest -q -o "cache_dir=$cache_dir" -m "docker and not perf" "$file"; then
-                : > "$result_dir/ok-$key"
-              else
-                printf "%s\n" "$file" > "$result_dir/failed-$key"
-                if [[ -f "$cache_dir/v/cache/lastfailed" ]]; then
-                  uv run python -c 'import json,sys; from pathlib import Path; failed=json.loads(Path(sys.argv[1]).read_text()); Path(sys.argv[2]).write_text("".join(node+"\n" for node,value in failed.items() if value))' "$cache_dir/v/cache/lastfailed" "$nodes_file" || true
-                fi
-                # Collection/setup crashes may not create lastfailed. Retrying
-                # the whole module is still isolated and preserves the failure.
-                [[ -s "$nodes_file" ]] || printf "%s\n" "$file" > "$nodes_file"
-              fi
-            done
-          }
-
-          run_modules .docker-e2e-first "${docker_files[@]}"
-          mapfile -t failed_files < <(
-            cat .docker-e2e-first/failed-* 2>/dev/null || true
-          )
-          if ((${#failed_files[@]})); then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-
-            mapfile -t failed_nodes < <(
-              cat .docker-e2e-first/nodes-* 2>/dev/null | sort -u || true
-            )
-            ((${#failed_nodes[@]})) || {
-              echo "::error::Docker E2E failed without recording failed nodes"
-              exit 1
-            }
-            run_modules .docker-e2e-retry "${failed_nodes[@]}"
-            if compgen -G '.docker-e2e-retry/failed-*' >/dev/null; then
-              cat .docker-e2e-retry/failed-* >&2
-              exit 1
-            fi
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
