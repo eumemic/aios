@@ -67,11 +67,10 @@ _SCRIPT = f"""async def main(input):
     return await tool('bash', {{"command": 'printf "%s" "${_SECRET_NAME}"'}})
 """
 
-# Swap-firing credential host. Must be DNS-resolvable inside the sandbox so the
-# DNAT sidecar can pin a ``-d <ip>`` rule on it (the chokepoint that routes the
-# request to the proxy); the proxy's *upstream* hop is then redirected to the
-# in-process recorder (see ``redirect_secret_egress_upstream``), so no traffic
-# ever actually reaches the real host.
+# Swap-firing credential host. Curl pins this name to the credential sentinel,
+# whose destination-floor DNAT routes the request to the proxy. The proxy's
+# *upstream* hop is redirected to the in-process recorder (see
+# ``redirect_secret_egress_upstream``), so no traffic reaches the real host.
 _SWAP_HOST = "api.github.com"
 _SWAP_SECRET = "ghp_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # A run script that drives a real outbound HTTPS request carrying the
