@@ -398,11 +398,6 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
-        "# Make the reserved sentinel locally reachable. Some Docker hosts have no",
-        "# usable route for TEST-NET destinations; assigning it to loopback ensures",
-        "# the connect reaches nat OUTPUT without loopback-routing sysctls (the original",
-        "# destination is not 127/8). The filter REJECT remains the fail-closed floor.",
-        f"ip address replace {CREDENTIAL_SENTINEL_IP}/32 dev lo",
         "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
