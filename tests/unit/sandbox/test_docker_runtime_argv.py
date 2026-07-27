@@ -65,6 +65,29 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     assert "--sysctl" not in calls[0]
 
 
+async def test_create_enables_route_localnet_for_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s, snapshot_timeout
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(credentialed=True))
+
+    sysctls = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--sysctl"]
+    assert sysctls == [
+        "net.ipv4.conf.all.route_localnet=1",
+        "net.ipv4.conf.default.route_localnet=1",
+    ]
+
+
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 

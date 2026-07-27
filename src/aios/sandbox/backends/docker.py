@@ -40,6 +40,7 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     CommandResult,
     ManagedImage,
     ManagedSandboxRef,
@@ -195,6 +196,13 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
+            # Credential DNS rewrites Docker's loopback resolver destination
+            # (127.0.0.11) to the worker. Seed existing and future interfaces
+            # before the first sandbox process can issue DNS; the netns sidecar
+            # repeats this after endpoint creation and on resume.
+            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+            argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
