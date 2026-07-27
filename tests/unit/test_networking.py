@@ -1707,13 +1707,13 @@ class TestCredentialHostEgressVerdict:
             assert self.SAMPLED_IP not in credential_dests
             assert self.UNSAMPLED_IP not in credential_dests
 
-    def test_reserved_sentinel_and_filter_reject_fail_closed(self) -> None:
-        """The TEST-NET sentinel cannot identify a real credential endpoint.
+    def test_routable_sentinel_and_filter_reject_fail_closed(self) -> None:
+        """The sentinel reaches nat OUTPUT through the ordinary default route.
 
         A missing/malformed DNAT reaches the surviving filter REJECT rather
-        than a real upstream. Verify by dropping the nat table entirely.
+        than an upstream. Verify by dropping the nat table entirely.
         """
-        assert CREDENTIAL_SENTINEL_IP.startswith("192.0.2.")
+        assert CREDENTIAL_SENTINEL_IP == "1.1.1.1"
         filter_only = [(t, argv) for t, argv in self._unrestricted_rules() if t != "nat"]
         assert self._verdict(filter_only, CREDENTIAL_SENTINEL_IP) == "blocked"
         # Non-443 sentinel traffic (e.g. :80) is refused in both modes.

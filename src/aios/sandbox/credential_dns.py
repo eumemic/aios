@@ -33,9 +33,9 @@ DNS through a cached address, DoH, or ``/etc/hosts``.
 
 Fail-closed by construction, at three layers:
 
-* the sentinel is an RFC 5737 TEST-NET address that cannot identify a real
-  credential endpoint. If the DNAT is missing or malformed, the filter-table
-  REJECT denies it before egress. A broken rule can only deny, never leak;
+* the sentinel is a deliberately routable bootstrap address, so every supported
+  netstack reaches nat OUTPUT without synthetic route mutation. If the DNAT is
+  missing or malformed, the filter-table REJECT denies it before egress;
 * if this resolver cannot start, :class:`~aios.sandbox.secret_egress_proxy.SecretEgressProxy`
   start fails, provisioning raises, and the sandbox is never handed back — a
   sandbox that cannot protect a credential is not allowed to send one;
@@ -66,13 +66,11 @@ log = get_logger("aios.sandbox.credential_dns")
 
 # The single address every credential host resolves to inside a sandbox.
 #
-# RFC 3927 link-local, deliberately NOT routable: the sandbox has no route that
-# carries it off the box, so the ONLY way a packet addressed here reaches
-# anything is the nat-OUTPUT DNAT that rewrites it to the secret-egress proxy.
-# A missing/mis-installed DNAT therefore fails CLOSED (the connection dies in
-# the sandbox's own stack) instead of failing open to the real upstream, which
-# is exactly the property the sampled-IP scheme lacked.
-CREDENTIAL_SENTINEL_IP = "192.0.2.53"
+# Use a globally routable bootstrap destination so Docker and gVisor always
+# submit the connect through nat OUTPUT; TEST-NET/link-local destinations proved
+# runtime-dependent. The filter-table REJECT is the fail-closed floor when the
+# DNAT is absent, so no packet can leave for this address.
+CREDENTIAL_SENTINEL_IP = "1.1.1.1"
 
 # TTL on the sentinel answer. Short so a client that caches across a sandbox
 # recycle re-asks, but the value is not load-bearing: the netns interception

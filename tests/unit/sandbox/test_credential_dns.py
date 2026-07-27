@@ -317,9 +317,9 @@ class TestFailClosed:
         with pytest.raises(CredentialDnsError):
             await r.start()
 
-    def test_sentinel_is_reserved_test_net(self) -> None:
-        """The sentinel cannot identify a real credential endpoint."""
-        assert CREDENTIAL_SENTINEL_IP.startswith("192.0.2.")
+    def test_sentinel_uses_an_ordinary_routable_destination(self) -> None:
+        """The sentinel reaches nat OUTPUT without runtime-specific routes."""
+        assert CREDENTIAL_SENTINEL_IP == "1.1.1.1"
 
     @pytest.mark.asyncio
     async def test_stop_is_idempotent(self) -> None:

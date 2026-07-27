@@ -324,8 +324,8 @@ _RESOLVE_IPV4_FN = (
 # depends on.
 #
 # FAIL CLOSED, three ways:
-#   * the sentinel is an RFC 5737 TEST-NET address, so it cannot identify a real
-#     credential endpoint. A missing/malformed DNAT reaches the filter REJECT
+#   * the sentinel uses the ordinary default route so every supported netstack
+#     reaches nat OUTPUT. A missing/malformed DNAT reaches the filter REJECT
 #     instead of sending a placeholder upstream. A broken rule can only DENY;
 #   * a filter REJECT catches any other sentinel-addressed traffic (e.g. :80).
 #     It is NOT an IP-keyed fence over a sampled set — the address it names is
@@ -398,10 +398,10 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
-        "# TEST-NET is covered by the sandbox's ordinary default route. Do not add",
-        "# an explicit route here: the netfilter sidecar shares the network namespace",
-        "# but not the sandbox's userspace runtime, and route mutation introduced a",
-        "# second runtime-dependent prerequisite before nat OUTPUT could do the DNAT.",
+        "# The bootstrap sentinel follows the sandbox's ordinary default route. Do not",
+        "# mutate routes here: the sidecar shares the network namespace but not the",
+        "# sandbox runtime, and route mutation adds a runtime-dependent prerequisite",
+        "# before nat OUTPUT can do the DNAT.",
         "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
