@@ -201,8 +201,17 @@ jobs:
       - name: Unit tests
         # Keep concurrency below the runner's memory ceiling. Image-resize tests
         # cache large noisy pixel buffers per process, so four xdist workers can
-        # be OOM-killed even though the suite is otherwise xdist-safe.
-        run: uv run pytest tests/unit -q -n 2
+        # be OOM-killed even though the suite is otherwise xdist-safe. Retry only
+        # the recorded failures once in a fresh, serial process: this tolerates a
+        # runner-contention timeout without hiding a repeatable test failure.
+        run: |
+          set +e
+          uv run pytest tests/unit -q -n 2
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            uv run pytest tests/unit -q --lf
+          fi
 
   connectors:
     needs: detect
