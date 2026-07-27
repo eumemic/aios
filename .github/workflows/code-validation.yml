@@ -468,9 +468,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Run this shard serially. Each xdist worker owns a testcontainer
-        # Postgres and drives Docker; even two workers can exhaust dockerd on
-        # the hosted runner and leave no capacity for a meaningful retry.
+        # Use two loadfile workers so module-scoped Docker fixtures stay on one
+        # worker while the shard remains within the CI watchdog. Serial runs
+        # exceed that bound before pytest can finish and report a useful result.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -482,14 +482,12 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Docker-backed E2E runs serially because each test worker also owns a
-        # testcontainer Postgres and drives dockerd. Parallel workers have
-        # repeatedly exhausted the hosted runner before pytest can report a
-        # useful failure. Retry pytest's recorded failures against the still-live
-        # session-scoped Postgres; pruning all containers here destroys that
-        # fixture and makes every recovery pass fail deterministically.
+        # Each worker owns a testcontainer Postgres and drives Docker. Two
+        # workers leave capacity for dockerd while meeting the job watchdog.
+        # Retry pytest's recorded failures against the still-live worker-scoped
+        # databases; pruning containers would invalidate those fixtures.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
