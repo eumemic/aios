@@ -935,15 +935,13 @@ class DockerBackend:
             "--rm",
             "--network",
             f"container:{target_sandbox_id}",
-            "--cap-add",
-            "NET_ADMIN",
-            # The credential-DNS apply script sets route_localnet in the shared
-            # netns after Docker has created its endpoint. Docker otherwise
-            # mounts /proc/sys read-only in this sidecar, even with NET_ADMIN,
-            # so every credentialed provision fails before installing rules.
-            # Keep capabilities narrow; only relax Docker's system-path mount.
-            "--security-opt",
-            "systempaths=unconfined",
+            # The operator-owned sidecar must both edit netfilter and set
+            # route_localnet in the target's already-created network namespace.
+            # Docker mounts /proc/sys read-only for a non-privileged container
+            # joined with --network=container, even with NET_ADMIN and
+            # systempaths=unconfined.  Privileged mode makes that existing netns
+            # sysctl writable; the durable tenant sandbox remains unprivileged.
+            "--privileged",
         ]
         if runtime:
             argv.extend(["--runtime", runtime])
