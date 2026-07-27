@@ -487,10 +487,10 @@ jobs:
         # Run those fresh module processes serially. Even two independent
         # Postgres/container stacks race for the hosted runner's Docker daemon
         # and can make healthy container startup exceed its watchdog. Retry each
-        # failed module in another fresh process. Pytest rewrites ``lastfailed``
-        # on every module invocation, so deriving nodes from that shared cache
-        # loses failures from earlier modules. A module that fails cleanly a
-        # second time remains blocking.
+        # failed module in another fresh process. Do not derive retry nodes from
+        # pytest's shared lastfailed cache: every module process rewrites that
+        # cache, so a later successful module can erase earlier failures. A
+        # module that fails cleanly a second time remains blocking.
         run: |
           mapfile -t docker_files < <(
             uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
