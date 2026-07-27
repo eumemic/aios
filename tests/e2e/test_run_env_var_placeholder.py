@@ -75,12 +75,14 @@ _SCRIPT = f"""async def main(input):
 _SWAP_HOST = "api.github.com"
 _SWAP_SECRET = "ghp_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # A run script that drives a real outbound HTTPS request carrying the
-# placeholder in an Authorization header. ``--resolve`` is deliberately NOT
-# used: curl resolves the host itself, hits the nat-OUTPUT DNAT, and is
-# redirected to the proxy — exercising the real chokepoint. ``-w`` echoes the
-# upstream status so the run output proves the request completed end to end.
+# placeholder in an Authorization header. Pin curl to the resolver's sentinel:
+# this keeps the test independent of the runner/Docker DNS implementation while
+# still exercising the real nat-OUTPUT destination floor and TLS proxy. The DNS
+# interception itself is covered by the resolver and ruleset tests. ``-w`` echoes
+# the upstream status so the run output proves the request completed end to end.
 _SWAP_SCRIPT = f"""async def main(input):
     return await tool('bash', {{"command": 'curl -sS --max-time 25 -o /tmp/body \
+--resolve {_SWAP_HOST}:443:{CREDENTIAL_SENTINEL_IP} \
 -w "HTTP_STATUS=%{{http_code}}" -H "Authorization: Bearer ${_SECRET_NAME}" \
 https://{_SWAP_HOST}/swap-probe; echo; cat /tmp/body'}})
 """

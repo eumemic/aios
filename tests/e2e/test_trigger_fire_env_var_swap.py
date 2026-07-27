@@ -78,12 +78,13 @@ _SWAP_SECRET = "ghp_TRIGGER_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 
 # A bash command (the sandbox_command action's payload) that drives a real
 # outbound HTTPS request carrying the placeholder in an Authorization header.
-# ``--resolve`` is deliberately NOT used: curl resolves the host itself, hits
-# the nat-OUTPUT DNAT, and is redirected to the proxy — exercising the real
-# chokepoint. The body is written to /tmp (never stdout) so the recorder's
-# echo, not the swapped header, is all that could surface in the audit trail.
+# Pin curl to the resolver's sentinel so this proxy/DNAT E2E is independent of
+# runner/Docker DNS behavior; resolver interception has dedicated coverage. The
+# body is written to /tmp (never stdout) so the recorder's echo, not the swapped
+# header, is all that could surface in the audit trail.
 _SWAP_COMMAND = (
     f"curl -sS --max-time 25 -o /tmp/body "
+    f"--resolve {_SWAP_HOST}:443:{CREDENTIAL_SENTINEL_IP} "
     f'-H "Authorization: Bearer ${_SECRET_NAME}" '
     f"https://{_SWAP_HOST}/trigger-swap-probe"
 )
