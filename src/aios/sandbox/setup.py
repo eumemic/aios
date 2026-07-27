@@ -324,9 +324,9 @@ _RESOLVE_IPV4_FN = (
 # depends on.
 #
 # FAIL CLOSED, three ways:
-#   * the sentinel is RFC 3927 link-local and routed nowhere, so a missing or
-#     malformed DNAT kills the connection in the sandbox's own stack instead of
-#     sending a placeholder to the real upstream. A broken rule can only DENY;
+#   * the sentinel is an RFC 5737 TEST-NET address, so it cannot identify a real
+#     credential endpoint. A missing/malformed DNAT reaches the filter REJECT
+#     instead of sending a placeholder upstream. A broken rule can only DENY;
 #   * a filter REJECT catches any other sentinel-addressed traffic (e.g. :80).
 #     It is NOT an IP-keyed fence over a sampled set — the address it names is
 #     our own constant, and it covers the host completely because the host has
@@ -398,10 +398,6 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
-        "# Give the sentinel a local route so the kernel reaches nat OUTPUT before",
-        "# deciding whether the original destination is reachable. The filter REJECT",
-        "# below remains the fail-closed floor if the DNAT is absent or malformed.",
-        f"ip route replace {CREDENTIAL_SENTINEL_IP}/32 dev eth0",
         "# Credential names resolve to the sentinel.",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',

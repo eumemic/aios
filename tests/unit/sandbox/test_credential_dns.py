@@ -317,11 +317,9 @@ class TestFailClosed:
         with pytest.raises(CredentialDnsError):
             await r.start()
 
-    def test_sentinel_is_link_local_and_unroutable(self) -> None:
-        """The sentinel must not be routable anywhere: that is what makes a
-        missing DNAT fail CLOSED (the packet dies in the sandbox's own stack)
-        rather than fail open to the real upstream."""
-        assert CREDENTIAL_SENTINEL_IP.startswith("169.254.")
+    def test_sentinel_is_reserved_test_net(self) -> None:
+        """The sentinel cannot identify a real credential endpoint."""
+        assert CREDENTIAL_SENTINEL_IP.startswith("192.0.2.")
 
     @pytest.mark.asyncio
     async def test_stop_is_idempotent(self) -> None:

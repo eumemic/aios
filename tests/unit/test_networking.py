@@ -554,10 +554,7 @@ class TestBuildSecretEgressDnatScript:
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "route_localnet" not in script
-        assert f"ip route replace {CREDENTIAL_SENTINEL_IP}/32 dev eth0" in script
-        assert script.index("ip route replace") < script.index(
-            f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443"
-        )
+        assert "ip route replace" not in script
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
 
@@ -1465,7 +1462,6 @@ class TestCredentialHostEgressVerdict:
         )
         for name, body in (
             ("getent", getent),
-            ("ip", "#!/usr/bin/env bash\nexit 0\n"),
             ("iptables-legacy", ipt),
             ("iptables", ipt),
             ("ip6tables-legacy", ipt),
@@ -1711,15 +1707,13 @@ class TestCredentialHostEgressVerdict:
             assert self.SAMPLED_IP not in credential_dests
             assert self.UNSAMPLED_IP not in credential_dests
 
-    def test_sentinel_is_not_routable_so_a_broken_rule_fails_closed(self) -> None:
-        """The sentinel is RFC 3927 link-local and routed nowhere.
+    def test_reserved_sentinel_and_filter_reject_fail_closed(self) -> None:
+        """The TEST-NET sentinel cannot identify a real credential endpoint.
 
-        This is what makes a missing/malformed DNAT fail CLOSED: the packet
-        dies in the sandbox's own stack instead of reaching a real upstream
-        with a placeholder. Verified by dropping the nat table entirely and
-        confirming the surviving filter rules never say ``direct``.
+        A missing/malformed DNAT reaches the surviving filter REJECT rather
+        than a real upstream. Verify by dropping the nat table entirely.
         """
-        assert CREDENTIAL_SENTINEL_IP.startswith("169.254.")
+        assert CREDENTIAL_SENTINEL_IP.startswith("192.0.2.")
         filter_only = [(t, argv) for t, argv in self._unrestricted_rules() if t != "nat"]
         assert self._verdict(filter_only, CREDENTIAL_SENTINEL_IP) == "blocked"
         # Non-443 sentinel traffic (e.g. :80) is refused in both modes.
