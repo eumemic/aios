@@ -553,9 +553,7 @@ class TestBuildSecretEgressDnatScript:
                 '--to-destination "$PROXY_IP:53535"'
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
-        assert "for ROUTE_LOCALNET in /proc/sys/net/ipv4/conf/*/route_localnet; do" in script
-        assert "printf '1\\n' > \"$ROUTE_LOCALNET\"" in script
-        assert script.index("route_localnet; do") < script.index("--dport 53 -j DNAT")
+        assert "route_localnet" not in script
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
 
@@ -1472,22 +1470,9 @@ class TestCredentialHostEgressVerdict:
             with open(p, "w") as f:
                 f.write(body)
             os.chmod(p, 0o755)
-        # The real sidecar has NET_ADMIN and a writable netns sysctl tree. Point
-        # the generated write at a fixture file when replaying it unprivileged.
-        sysctl_dir = os.path.join(bindir, "sysctl", "eth0")
-        os.makedirs(sysctl_dir)
-        sysctl_path = os.path.join(sysctl_dir, "route_localnet")
-        with open(sysctl_path, "w") as f:
-            f.write("0\n")
-        replay_script = script.replace(
-            "/proc/sys/net/ipv4/conf/*/route_localnet",
-            os.path.join(bindir, "sysctl", "*", "route_localnet"),
-        )
         env = dict(os.environ)
         env["PATH"] = bindir + os.pathsep + env["PATH"]
-        proc = subprocess.run(
-            ["bash", "-c", replay_script], env=env, capture_output=True, text=True
-        )
+        proc = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
         assert proc.returncode == 0, f"apply script failed: {proc.stderr}"
         recorded: list[tuple[str, list[str]]] = []
         if os.path.exists(log):

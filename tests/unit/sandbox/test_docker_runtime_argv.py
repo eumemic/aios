@@ -63,6 +63,28 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
 
     assert _runtime_values(calls[0]) == []
     assert "--sysctl" not in calls[0]
+    assert "--dns" not in calls[0]
+
+
+async def test_create_uses_non_loopback_dns_for_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s, snapshot_timeout
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(credentialed=True))
+
+    dns_servers = [calls[0][i + 1] for i, token in enumerate(calls[0]) if token == "--dns"]
+    assert dns_servers == ["192.0.2.53"]
+    assert "--sysctl" not in calls[0]
 
 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,10 +124,11 @@ async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.Monke
     )
 
     assert _runtime_values(calls[0]) == ["runsc"]
-    assert "--privileged" in calls[0]
+    assert "NET_ADMIN" in calls[0]
+    assert "--privileged" not in calls[0]
     # Docker options land before the image, not inside the container command.
     assert calls[0].index("--runtime") < calls[0].index("aios-sandbox:test")
-    assert calls[0].index("--privileged") < calls[0].index("aios-sandbox:test")
+    assert calls[0].index("NET_ADMIN") < calls[0].index("aios-sandbox:test")
 
 
 async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyPatch) -> None:

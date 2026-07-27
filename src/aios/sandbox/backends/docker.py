@@ -40,6 +40,7 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     CommandResult,
     ManagedImage,
     ManagedSandboxRef,
@@ -195,6 +196,12 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
+            # Credential DNS intercepts every :53 packet before this address is
+            # reached. Use a non-loopback resolver destination so redirecting
+            # DNS to the worker does not depend on route_localnet or writable
+            # netns sysctls (and works identically on Docker and runsc).
+            argv.extend(["--dns", "192.0.2.53"])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
@@ -935,11 +942,11 @@ class DockerBackend:
             "--rm",
             "--network",
             f"container:{target_sandbox_id}",
-            # This operator-owned sidecar edits netfilter and route_localnet in
-            # the target's already-created network namespace. Docker mounts
-            # /proc/sys read-only for an ordinary netns-sharing container, so
-            # privileged mode is required; the durable tenant stays unprivileged.
-            "--privileged",
+            # Only netfilter administration is required. Credentialed sandboxes
+            # use a non-loopback DNS destination, so no netns sysctl write (and
+            # therefore no privileged sidecar) is needed.
+            "--cap-add",
+            "NET_ADMIN",
         ]
         if runtime:
             argv.extend(["--runtime", runtime])
