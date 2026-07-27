@@ -468,9 +468,15 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # Use loadfile workers so module-scoped Docker fixtures stay on one
-        # worker. The hosted runner has four CPUs; using all four keeps both the
-        # initial pass and a targeted retry within the CI watchdog.
+        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
+        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
+        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
+        # scoped ``shared_docker_harness`` fixture which would be torn
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -482,16 +488,15 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Each worker owns a testcontainer Postgres and drives Docker. Retry
-        # pytest's recorded failures with the same distribution so the retry
-        # does not become a serial full-shard run when xdist's cache has no
-        # usable last-failed state on the controller.
+        # Docker-backed E2E occasionally sees transient daemon/container startup
+        # failures on shared runners. Retry only the recorded failures once; a
+        # deterministic regression still fails the required check.
         run: |
           if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 4 --dist=loadfile
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
       - name: Upload docker E2E flake-retry marker
