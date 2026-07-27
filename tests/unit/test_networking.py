@@ -553,9 +553,9 @@ class TestBuildSecretEgressDnatScript:
                 '--to-destination "$PROXY_IP:53535"'
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
-        assert "for ROUTE_LOCALNET in /proc/sys/net/ipv4/conf/*/route_localnet; do" in script
-        assert "printf '1\\n' > \"$ROUTE_LOCALNET\"" in script
-        assert script.index("route_localnet; do") < script.index("--dport 53 -j DNAT")
+        # route_localnet is configured atomically when Docker attaches the
+        # credentialed sandbox endpoint, not from the netfilter sidecar.
+        assert "route_localnet" not in script
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
 
