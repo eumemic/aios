@@ -44,8 +44,11 @@ FROM python:3.13-slim-bookworm
 # iptables is required for environments with "limited" networking mode.
 # If you customize the sandbox image and only use unrestricted networking,
 # you can omit it.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+# Shared CI runners occasionally lose a Debian mirror connection mid-build.
+# Retry package index and payload downloads so that transient mirror failures do
+# not strand the required Docker E2E shard before its tests can start.
+RUN apt-get -o Acquire::Retries=5 update \
+ && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         ca-certificates \
         coreutils \
         curl \
