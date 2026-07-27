@@ -554,7 +554,8 @@ class TestBuildSecretEgressDnatScript:
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "route_localnet" not in script
-        assert f'ip route replace {CREDENTIAL_SENTINEL_IP}/32 via "$PROXY_IP" dev eth0' in script
+        assert "DEFAULT_GW=$(ip route show default dev eth0" in script
+        assert f'ip route replace {CREDENTIAL_SENTINEL_IP}/32 via "$DEFAULT_GW" dev eth0' in script
         assert script.index("ip route replace") < script.index(
             f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443"
         )
@@ -1465,7 +1466,13 @@ class TestCredentialHostEgressVerdict:
         )
         for name, body in (
             ("getent", getent),
-            ("ip", "#!/usr/bin/env bash\nexit 0\n"),
+            (
+                "ip",
+                "#!/usr/bin/env bash\n"
+                'if [ "$1 $2 $3 $4" = "route show default dev" ]; then '
+                'echo "default via 172.18.0.1 dev eth0"; fi\n'
+                "exit 0\n",
+            ),
             ("iptables-legacy", ipt),
             ("iptables", ipt),
             ("ip6tables-legacy", ipt),
