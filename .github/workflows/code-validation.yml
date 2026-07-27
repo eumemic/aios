@@ -485,21 +485,14 @@ jobs:
         # Docker-backed E2E runs serially because each test worker also owns a
         # testcontainer Postgres and drives dockerd. Parallel workers have
         # repeatedly exhausted the hosted runner before pytest can report a
-        # useful failure. A bounded clean retry still distinguishes transient
-        # daemon failures from deterministic regressions.
+        # useful failure. Retry pytest's recorded failures against the still-live
+        # session-scoped Postgres; pruning all containers here destroys that
+        # fixture and makes every recovery pass fail deterministically.
         run: |
           if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            # A failed worker can leave its testcontainer Postgres or sandbox
-            # alive.  Retrying against that contaminated daemon makes an
-            # infrastructure flake repeat even in the otherwise-isolated serial
-            # pass.  This hosted runner has no workflow service containers, so
-            # all containers and anonymous test volumes are owned by this job.
-            docker ps -aq | xargs -r docker rm -f >/dev/null
-            docker network prune -f >/dev/null
-            docker volume prune -af >/dev/null
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
