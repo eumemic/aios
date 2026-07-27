@@ -554,7 +554,7 @@ class TestBuildSecretEgressDnatScript:
             ) in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "route_localnet" not in script
-        assert f"ip route replace {CREDENTIAL_SENTINEL_IP}/32 dev eth0" in script
+        assert f'ip route replace {CREDENTIAL_SENTINEL_IP}/32 via "$PROXY_IP" dev eth0' in script
         assert script.index("ip route replace") < script.index(
             f"-d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443"
         )
