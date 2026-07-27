@@ -500,6 +500,7 @@ jobs:
             echo "::error::No Docker E2E tests were collected"
             exit 1
           }
+          echo "Running ${#docker_files[@]} isolated Docker E2E modules"
 
           run_modules() {
             local result_dir="$1"
