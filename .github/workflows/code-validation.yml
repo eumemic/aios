@@ -529,7 +529,7 @@ jobs:
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
 
             mapfile -t failed_nodes < <(
-              cat .docker-e2e-first/nodes-* 2>/dev/null || true
+              cat .docker-e2e-first/nodes-* 2>/dev/null | sort -u || true
             )
             ((${#failed_nodes[@]})) || {
               echo "::error::Docker E2E failed without recording failed nodes"
