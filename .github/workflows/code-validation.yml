@@ -468,15 +468,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
-        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
-        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
-        # scoped ``shared_docker_harness`` fixture which would be torn
-        # down + rebuilt per test under the default ``load`` dist.  Keep this
-        # below the runner's CPU count: each worker also drives Docker and a
-        # testcontainer Postgres, so four pytest workers can exhaust daemon
-        # capacity even when Python itself is not CPU-bound.  Each worker
-        # amortizes its setup over its assigned tests.
+        # Run this shard serially. Each xdist worker owns a testcontainer
+        # Postgres and drives Docker; even two workers can exhaust dockerd on
+        # the hosted runner and leave no capacity for a meaningful retry.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -488,11 +482,13 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Docker-backed E2E occasionally sees transient daemon/container startup
-        # failures on shared runners. Retry only the recorded failures once; a
-        # deterministic regression still fails the required check.
+        # Docker-backed E2E runs serially because each test worker also owns a
+        # testcontainer Postgres and drives dockerd. Parallel workers have
+        # repeatedly exhausted the hosted runner before pytest can report a
+        # useful failure. A bounded clean retry still distinguishes transient
+        # daemon failures from deterministic regressions.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf"; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
