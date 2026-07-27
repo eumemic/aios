@@ -506,17 +506,23 @@ jobs:
             shift
             rm -rf "$result_dir"
             mkdir -p "$result_dir"
-            printf '%s\0' "$@" | xargs -0 -r -n 1 bash -c '
-              file="$1"
+            local file key cache_dir nodes_file
+            for file in "$@"; do
               key=$(printf "%s" "$file" | sha256sum | cut -d" " -f1)
-              cache_dir="'"$result_dir"'/cache-$key"
+              cache_dir="$result_dir/cache-$key"
+              nodes_file="$result_dir/nodes-$key"
               if uv run pytest -q -o "cache_dir=$cache_dir" -m "docker and not perf" "$file"; then
-                : > "'"$result_dir"'/ok-$key"
+                : > "$result_dir/ok-$key"
               else
-                printf "%s\n" "$file" > "'"$result_dir"'/failed-$key"
-                uv run python -c '"'"'import json,sys; from pathlib import Path; failed=json.loads(Path(sys.argv[1]).read_text()); Path(sys.argv[2]).write_text("".join(node+"\\n" for node,value in failed.items() if value))'"'"' "$cache_dir/v/cache/lastfailed" "'"$result_dir"'/nodes-$key"
+                printf "%s\n" "$file" > "$result_dir/failed-$key"
+                if [[ -f "$cache_dir/v/cache/lastfailed" ]]; then
+                  uv run python -c 'import json,sys; from pathlib import Path; failed=json.loads(Path(sys.argv[1]).read_text()); Path(sys.argv[2]).write_text("".join(node+"\n" for node,value in failed.items() if value))' "$cache_dir/v/cache/lastfailed" "$nodes_file" || true
+                fi
+                # Collection/setup crashes may not create lastfailed. Retrying
+                # the whole module is still isolated and preserves the failure.
+                [[ -s "$nodes_file" ]] || printf "%s\n" "$file" > "$nodes_file"
               fi
-            ' _
+            done
           }
 
           run_modules .docker-e2e-first "${docker_files[@]}"
