@@ -472,11 +472,11 @@ jobs:
         # xdist workers, one whole-file at a time.  ``loadfile`` is load-
         # bearing: ``test_memory_cross_session_sync.py`` uses a module-
         # scoped ``shared_docker_harness`` fixture which would be torn
-        # down + rebuilt per test under the default ``load`` dist.  Keep this
-        # below the runner's CPU count: each worker also drives Docker and a
-        # testcontainer Postgres, so four pytest workers can exhaust daemon
-        # capacity even when Python itself is not CPU-bound.  Each worker
-        # amortizes its setup over its assigned tests.
+        # down + rebuilt per test under the default ``load`` dist.  Four
+        # workers matches public-repo ubuntu-latest runners (4 vCPU /
+        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
+        # Each worker amortizes its own testcontainer-Postgres + Docker
+        # setup over ~55 tests.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -492,18 +492,10 @@ jobs:
         # failures on shared runners. Retry only the recorded failures once; a
         # deterministic regression still fails the required check.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            # A failed worker can leave its testcontainer Postgres or sandbox
-            # alive.  Retrying against that contaminated daemon makes an
-            # infrastructure flake repeat even in the otherwise-isolated serial
-            # pass.  This hosted runner has no workflow service containers, so
-            # all containers and anonymous test volumes are owned by this job.
-            docker ps -aq | xargs -r docker rm -f >/dev/null
-            docker network prune -f >/dev/null
-            docker volume prune -af >/dev/null
             uv run pytest tests/e2e -q -m "docker and not perf" --lf
           fi
 
