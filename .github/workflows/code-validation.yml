@@ -483,9 +483,11 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Retry recorded failures once after a clean serial pass. Keeping the
-        # retry serial avoids reproducing the daemon contention that caused the
-        # first pass to fail, while --lf avoids rerunning healthy modules.
+        # Retry recorded failures with the same two-worker distribution. The
+        # xdist controller does not reliably retain worker last-failed state, so
+        # --lf can become a full-shard replay; running that replay serially
+        # exceeds the shard watchdog. Two workers keep dockerd below saturation
+        # while leaving enough time for a clean retry.
         run: |
           if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile; then
             echo "::warning::FLAKE_RETRY e2e-docker"
@@ -497,7 +499,7 @@ jobs:
             docker ps -aq | xargs -r docker rm -f >/dev/null
             docker network prune -f >/dev/null
             docker volume prune -af >/dev/null
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf
+            uv run pytest tests/e2e -q -m "docker and not perf" --lf -n 2 --dist=loadfile
           fi
 
       - name: Upload docker E2E flake-retry marker
