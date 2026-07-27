@@ -65,7 +65,7 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     assert "--sysctl" not in calls[0]
 
 
-async def test_create_enables_route_localnet_for_credentials(
+async def test_create_sets_route_localnet_for_credentialed_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
@@ -85,6 +85,7 @@ async def test_create_enables_route_localnet_for_credentials(
     assert sysctls == [
         "net.ipv4.conf.all.route_localnet=1",
         "net.ipv4.conf.default.route_localnet=1",
+        "net.ipv4.conf.IFNAME.route_localnet=1",
     ]
 
 
@@ -125,10 +126,11 @@ async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.Monke
     )
 
     assert _runtime_values(calls[0]) == ["runsc"]
-    assert "--privileged" in calls[0]
+    assert "NET_ADMIN" in calls[0]
+    assert "--privileged" not in calls[0]
     # Docker options land before the image, not inside the container command.
     assert calls[0].index("--runtime") < calls[0].index("aios-sandbox:test")
-    assert calls[0].index("--privileged") < calls[0].index("aios-sandbox:test")
+    assert calls[0].index("NET_ADMIN") < calls[0].index("aios-sandbox:test")
 
 
 async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyPatch) -> None:

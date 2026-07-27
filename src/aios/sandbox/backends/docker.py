@@ -204,6 +204,12 @@ class DockerBackend:
             argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
             argv.extend(["--sysctl", "net.ipv4.conf.default.route_localnet=1"])
 
+        # Credential DNS redirects Docker's loopback resolver off-loopback.
+        # Docker expands IFNAME when attaching the endpoint, avoiding OCI's
+        # pre-interface sysctl race while keeping the tenant netns immutable.
+        if spec.labels.get(VAULT_PLACEHOLDER_KEYS_LABEL_KEY):
+            argv.extend(["--sysctl", "net.ipv4.conf.IFNAME.route_localnet=1"])
+
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
         # applied from an ephemeral operator-image sidecar that joins this
@@ -943,13 +949,11 @@ class DockerBackend:
             "--rm",
             "--network",
             f"container:{target_sandbox_id}",
-            # The operator-owned sidecar must both edit netfilter and set
-            # route_localnet in the target's already-created network namespace.
-            # Docker mounts /proc/sys read-only for a non-privileged container
-            # joined with --network=container, even with NET_ADMIN and
-            # systempaths=unconfined.  Privileged mode makes that existing netns
-            # sysctl writable; the durable tenant sandbox remains unprivileged.
-            "--privileged",
+            # Only netfilter administration is required here. route_localnet
+            # is set atomically by Docker while attaching the tenant endpoint;
+            # never grant this sidecar unrestricted worker capabilities.
+            "--cap-add",
+            "NET_ADMIN",
         ]
         if runtime:
             argv.extend(["--runtime", runtime])
