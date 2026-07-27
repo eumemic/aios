@@ -56,6 +56,7 @@ from aios.models.triggers import (
 )
 from aios.models.vaults import VaultCredentialCreate
 from aios.sandbox import secret_egress_proxy as sep
+from aios.sandbox.credential_dns import CREDENTIAL_SENTINEL_IP
 from aios.sandbox.egress_ca import get_egress_ca
 from aios.services import triggers as trig_service
 from aios.services import vaults as vaults_service
@@ -124,6 +125,10 @@ def redirect_secret_egress_upstream(
 
     monkeypatch.setattr(sep, "_resolve_pinned_ip", _pinned)
     monkeypatch.setattr(sep, "_UPSTREAM_PORT", recorder.port)
+    # Credential traffic arrives at the proxy from the DNS sentinel. Preserve
+    # the production original-destination check while the upstream resolver is
+    # deliberately redirected to the recorder's loopback address.
+    monkeypatch.setattr(sep, "_original_ipv4", lambda writer: CREDENTIAL_SENTINEL_IP)
 
     orig_init = sep.SecretEgressProxy.__init__
 
