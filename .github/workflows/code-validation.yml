@@ -486,11 +486,11 @@ jobs:
         # worker after one of those fixtures fails contaminates unrelated files.
         # Run those fresh module processes serially. Even two independent
         # Postgres/container stacks race for the hosted runner's Docker daemon
-        # and can make healthy container startup exceed its watchdog. On retry,
-        # isolate each failed node in a fresh process: replaying its whole module
-        # can deterministically recreate the fixture contamination that caused a
-        # later test to fail. A node that fails cleanly a second time remains
-        # blocking.
+        # and can make healthy container startup exceed its watchdog. Retry each
+        # failed module in another fresh process. Pytest rewrites ``lastfailed``
+        # on every module invocation, so deriving nodes from that shared cache
+        # loses failures from earlier modules. A module that fails cleanly a
+        # second time remains blocking.
         run: |
           mapfile -t docker_files < <(
             uv run pytest tests/e2e --collect-only -q -m "docker and not perf" |
@@ -526,22 +526,7 @@ jobs:
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
 
-            mapfile -t failed_nodes < <(
-              uv run python - "${failed_files[@]}" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          failed = json.loads(Path(".pytest_cache/v/cache/lastfailed").read_text())
-          modules = tuple(f"{path}::" for path in sys.argv[1:])
-          print("\n".join(node for node, is_failed in failed.items() if is_failed and node.startswith(modules)))
-          PY
-            )
-            ((${#failed_nodes[@]})) || {
-              echo "::error::Docker E2E failed without recording failed nodes"
-              exit 1
-            }
-            run_modules .docker-e2e-retry "${failed_nodes[@]}"
+            run_modules .docker-e2e-retry "${failed_files[@]}"
             if compgen -G '.docker-e2e-retry/failed-*' >/dev/null; then
               cat .docker-e2e-retry/failed-* >&2
               exit 1
