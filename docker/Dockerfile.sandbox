@@ -50,6 +50,7 @@ RUN apt-get update \
         coreutils \
         curl \
         git \
+        iproute2 \
         iptables \
         jq \
         nodejs \
