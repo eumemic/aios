@@ -175,6 +175,64 @@ async def test_tail_resets_even_when_ledger_is_empty(monkeypatch: pytest.MonkeyP
         await gen.__anext__()
 
 
+async def test_fresh_cursor_survives_empty_ledger_horizon_then_tails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh snapshot must produce a cursor that tail will not reset.
+
+    Retention can leave only the durable horizon behind, while MAX(seq) over
+    the now-empty ledger reports zero.  Exercise the complete fresh-to-tail
+    handoff to ensure the emitted cursor accounts for that horizon.
+    """
+
+    async def empty(*args: object, **kwargs: object) -> AsyncGenerator[Connection]:
+        return
+        yield
+
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=100)
+    )
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", empty)
+
+    fresh = connection_discovery_stream(_sub(), _pool(), "matrix", account_id="acct", arm="fresh")
+    cursor_event = _data(await fresh.__anext__())
+    assert cursor_event == {"event": "cursor", "change_seq": 100}
+    assert _data(await fresh.__anext__()) == {"event": "snapshot_complete"}
+    await fresh.aclose()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        "aios.api.sse.queries.list_connection_changes",
+        AsyncMock(
+            return_value=[
+                {
+                    "seq": 101,
+                    "kind": "added",
+                    "connection_id": "con_a",
+                    "external_account_id": "x",
+                }
+            ]
+        ),
+    )
+    tail = connection_discovery_stream(
+        _sub(),
+        _pool(),
+        "matrix",
+        account_id="acct",
+        arm="tail",
+        after_change_seq=cast(int, cursor_event["change_seq"]),
+    )
+    assert _data(await tail.__anext__()) == {
+        "event": "added",
+        "change_seq": 101,
+        "connection_id": "con_a",
+        "external_account_id": "x",
+    }
+    await tail.aclose()  # type: ignore[attr-defined]
+
+
 async def test_tail_at_watermark_boundary_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     """``after_change_seq == pruned_through`` is sound: rows ``<= cursor``
     were already consumed, so pruning through exactly the cursor loses

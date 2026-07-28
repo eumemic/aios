@@ -594,7 +594,10 @@ async def connection_discovery_stream(
                 return
             cursor = after_change_seq
         else:
-            cursor = high_water
+            # Retention may have emptied the ledger while its durable horizon
+            # survives, making MAX(seq) (and therefore high_water) zero.  A
+            # fresh cursor must still be immediately safe to use for tail.
+            cursor = max(high_water, pruned_through)
             if arm == "fresh":
                 yield event({"event": "cursor", "change_seq": cursor})
             async for connection in connections_service.iter_all_connections(
