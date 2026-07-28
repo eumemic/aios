@@ -19,6 +19,55 @@ calls on an (almost) unchanged slate cost ~0 after the first warm pass.
 The call site (``loop.py``) additionally runs the pair off the event
 loop via ``asyncio.to_thread`` since ``Encoding.encode`` releases the
 GIL and is stateless (safe to call concurrently from threads).
+
+WHY WE TOKENIZE WITH NO ``model=`` (read this before "fixing" it)
+----------------------------------------------------------------
+``approx_tokens`` deliberately calls ``litellm.token_counter`` WITHOUT a
+``model`` argument, so every count is produced by one default tokenizer.
+This is not an oversight and it is not laziness:
+
+    The number we persist (``cumulative_tokens``) is a MODEL-AGNOSTIC
+    BASELINE. A stored context must remain re-processable against ANY
+    model at any time — switching an agent's model, replaying a session
+    on a different provider, or fanning one context out across models.
+    If we tokenized per-model at write time, the stored count would be
+    pinned to whichever model happened to be configured then, and every
+    model switch would invalidate the entire history.
+
+The per-model correction happens at READ time instead: the learned
+per-class coefficients (issue #1609, ``model_token_class_ratios``)
+scale the baseline into a model-specific estimate inside
+``read_windowed_events``. Baseline at write, scaling at read. Do not
+"improve" this by passing ``model=`` here — that trades a correctable
+approximation for an uncorrectable one.
+
+This design has been re-litigated more than once. It is sound. For
+text it is accurate to a few percent, which is exactly what the
+scaling layer is sized for.
+
+WHAT IT CANNOT DO: uncounted content (issue #2050)
+--------------------------------------------------
+The scaling layer corrects a RATIO. It can only correct terms that are
+non-zero in the baseline. Any content this function does not count at
+all is invisible to calibration forever, because no coefficient
+multiplied by zero reaches a positive number.
+
+Measured instance, 2026-07-27: message ``content`` parts of
+``type: "image_url"`` were not counted. Only the sibling ``text`` part
+was, so a tool result carrying a base64 data-URI screenshot contributed
+~16 tokens locally while the provider charged ~125,000 for it (it
+tokenizes the data-URI as text). Ten such images in one context:
+160 tokens counted vs 1,193,821 charged — a 7,461x under-count that
+put a live agent permanently over its context ceiling. Calibration
+looked perfectly healthy throughout (fitted 1.0000 vs measured 1.032
+over 3,684 samples) because it was correctly calibrating the text it
+could see.
+
+INVARIANT: every byte that goes on the wire must contribute to the
+baseline. If you add a new content part type, count it here — and add
+a CONTENT_CLASS for it if providers price it differently, so the
+read-time coefficients can scale it. Silently skipping an unknown part
+type is the bug; a rough count is always better than a zero.
 """
 
 from __future__ import annotations

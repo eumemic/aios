@@ -45,10 +45,12 @@ from aios.ids import is_run_owner_id
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
+    ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
     FLATTENED_LABEL_VALUE,
     PREWARM_LABEL_KEY,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     CommandResult,
     ManagedImage,
     SandboxBackend,
@@ -56,6 +58,7 @@ from aios.sandbox.backends.base import (
     SandboxHandle,
     SandboxSnapshotTimeoutError,
     SandboxSpec,
+    split_label_list,
 )
 from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
@@ -1611,7 +1614,177 @@ class SandboxRegistry:
 
         # Valid resume: make the ref locally runnable (identity for v1).
         local_tag = await self._store.get(ref)
-        return dataclasses.replace(spec, snapshot_image=local_tag)
+        resumed = self._neutralize_stale_placeholder_env(
+            dataclasses.replace(spec, snapshot_image=local_tag), snap_labels
+        )
+        if resumed is None:
+            # Unlabeled snapshot whose stale placeholder keys cannot be
+            # determined: cold-start rather than resume an image that may bake
+            # an unexchangeable placeholder (see the method docstring).
+            await self._reset_snapshot(session_id, reason="unverifiable_placeholder_env")
+            return dataclasses.replace(spec, snapshot_image=None)
+        return resumed
+
+    @staticmethod
+    def _neutralize_stale_placeholder_env(
+        spec: SandboxSpec, snap_labels: dict[str, str]
+    ) -> SandboxSpec | None:
+        """Ensure a resumed container inherits NO vault placeholder from its snapshot.
+
+        Returns the resume spec, or ``None`` meaning **do not resume this
+        snapshot** (the caller cold-starts) because its stale placeholder keys
+        cannot be determined.
+
+        The invariant (eumemic/eumemic-ops#331): a sandbox's vault-credential
+        placeholder env vars are **re-derived from the currently-active
+        credentials on every sandbox start — provision AND snapshot-resume —
+        and are never restored or reused from the snapshot.**
+
+        ``spec.environment`` is already re-derived: ``build_spec_from_session``
+        calls ``resolve_session_env_var_credentials`` against ACTIVE credentials
+        on every provision, and ``docker run --env`` overrides the image's baked
+        ENV. Placeholders are a deterministic function of (salt, owner,
+        credential id), so re-deriving is idempotent — a no-op when the
+        credentials are unchanged, and a self-heal when a credential was
+        RECREATED (same ``secret_name``, new credential id ⇒ new placeholder
+        overriding the old one).
+
+        The residual hole this closes is the credential that was ARCHIVED and
+        not replaced. Its ``secret_name`` is absent from the current
+        placeholder set, so no ``--env`` is emitted for that key and the
+        resumed container silently inherits the value baked into the snapshot
+        by the provision that minted it — a placeholder bound to a dead
+        credential id. The egress proxy builds its swap set from ACTIVE
+        credentials only, so that placeholder can never be exchanged: before
+        the fail-loud fence it rode out to the remote literally and drew a
+        misleading ``401``.
+
+        So: every key the snapshot recorded as a vault placeholder that the
+        CURRENT provision does not re-inject is explicitly set to the empty
+        string. Empty (not merely absent) is required — ``docker run --env
+        K=`` is what actually overrides a baked ``ENV K=<stale>``; omitting the
+        key would let the snapshot's value survive, which is the bug.
+
+        **A PRESENT but EMPTY label is not the same as an ABSENT one.** Every
+        post-#331 provision stamps ``aios.vault_placeholder_keys``, and it
+        stamps the empty string when the sandbox had no vault env credentials
+        to inject. That empty value is EVIDENCE — the snapshot positively
+        recorded that it baked no placeholder — so the correct action is to
+        scrub nothing and resume unchanged. Only an ABSENT label means "unknown
+        provenance" and takes the legacy path below. The branch is therefore on
+        label PRESENCE, not on the parsed list's truthiness: treating
+        present-empty as legacy costs a needless env scrub or, when the snapshot
+        also records no env keys, a COLD START that discards the session's
+        filesystem for a snapshot already proven clean.
+
+        **The unlabeled (pre-#331) snapshot.** A snapshot committed before this
+        fix carries no ``aios.vault_placeholder_keys`` label at all, so the
+        stale-key diff has nothing to diff against. Treating that as "nothing
+        to neutralize" PRESERVES THE ORIGINAL VULNERABILITY for exactly the
+        population that has it: a pre-#331 snapshot is precisely the artifact
+        that could have baked a placeholder for a since-archived credential,
+        and resuming it unchanged re-injects that dead placeholder. Absence of
+        evidence is not evidence of absence, and this is a credential path, so
+        the unlabeled case must not fail open.
+
+        We resolve it WITHOUT needing the label, by scrubbing on SHAPE rather
+        than on name: the image's own baked ENV is inspected
+        (``snap_labels[aios.env_keys]`` records every env key the snapshot
+        carries) and any key whose value the current provision does not
+        re-inject is emptied when it could plausibly hold a placeholder. When
+        the snapshot records no env-key inventory either — nothing to inspect,
+        nothing to scrub, and no way to bound the risk — we return ``None`` and
+        the caller COLD-STARTS. Cold-start is the correct fallback: it costs
+        the session's filesystem state, which is recoverable and visible (an
+        ``fs_reset`` event the model sees), whereas the alternative is silently
+        shipping an unexchangeable credential placeholder to a remote, which is
+        neither.
+        """
+        # Branch on label PRESENCE, never on truthiness. ``split_label_list``
+        # maps BOTH a missing label and a present-but-empty one to ``[]``, but
+        # those are different states with different correct behaviours:
+        #
+        #   * PRESENT-AND-EMPTY — a post-#331 provision stamped the label and
+        #     recorded that it injected NO placeholder keys (a sandbox with no
+        #     active environment_variable credentials). That is a positive,
+        #     verified statement about the snapshot: there is no stale
+        #     placeholder to neutralize, so scrub NOTHING and resume as-is.
+        #   * ABSENT — a pre-#331 snapshot whose provenance is unknown. It may
+        #     have baked a placeholder for a since-archived credential, so it
+        #     takes the legacy handling below.
+        #
+        # Conflating them (``if not recorded``) sent every fully-verifiable
+        # empty-label snapshot down the legacy path: with a non-empty
+        # ``aios.env_keys`` it needlessly EMPTIES baked env the current
+        # provision does not re-inject, and with an empty one it COLD-STARTS —
+        # discarding a user's sandbox filesystem to defend against a stale
+        # placeholder the label already proved is not there. Avoidable
+        # filesystem loss is not a safe default; it is a bug.
+        if VAULT_PLACEHOLDER_KEYS_LABEL_KEY not in snap_labels:
+            return SandboxRegistry._neutralize_unlabeled_placeholder_env(spec, snap_labels)
+        recorded = split_label_list(snap_labels[VAULT_PLACEHOLDER_KEYS_LABEL_KEY])
+        stale = sorted(key for key in recorded if key not in spec.environment)
+        if not stale:
+            return spec
+        log.info(
+            "sandbox.stale_placeholder_env_neutralized",
+            owner_id=spec.session_id,
+            # Names only — never a placeholder value or a credential id.
+            secret_names=stale,
+        )
+        return dataclasses.replace(
+            spec, environment={**spec.environment, **dict.fromkeys(stale, "")}
+        )
+
+    @staticmethod
+    def _neutralize_unlabeled_placeholder_env(
+        spec: SandboxSpec, snap_labels: dict[str, str]
+    ) -> SandboxSpec | None:
+        """Handle a snapshot with no ``aios.vault_placeholder_keys`` label.
+
+        Two sub-cases, both fail-safe:
+
+        * The snapshot DOES record its env-key inventory (``aios.env_keys``,
+          which predates #331 and is stamped by every provision that also bakes
+          ENV). Every recorded key the CURRENT provision does not re-inject is
+          emptied — a superset of the placeholder keys, which is exactly the
+          right side to err on: a baked env var the current provision no longer
+          sets is start-time-derived state the resume must not inherit, and the
+          only keys with a legitimate claim to survive are the ones the current
+          provision re-injects (which it does, by ``--env``). Ordinary
+          operator/session env is unaffected because the current provision
+          still sets it.
+        * The snapshot records NOTHING (a truly opaque pre-#331 artifact, or a
+          non-aios base). ``None`` ⇒ cold start. We cannot enumerate what it
+          baked, so we cannot prove it holds no stale placeholder, so we do not
+          resume it.
+
+        Either way the pre-#331 hole is closed rather than preserved, and the
+        first snapshot this session takes afterwards carries the label — so
+        this path is self-clearing, not a permanent tax.
+        """
+        baked = split_label_list(snap_labels.get(ENV_KEYS_LABEL_KEY))
+        if not baked:
+            log.warning(
+                "sandbox.unlabeled_snapshot_cold_start",
+                owner_id=spec.session_id,
+                # No names to report — the snapshot recorded no inventory. That
+                # IS the reason, and it is why this cold-starts.
+                reason="no_placeholder_or_env_key_label",
+            )
+            return None
+        stale = sorted(key for key in baked if key not in spec.environment)
+        if not stale:
+            return spec
+        log.info(
+            "sandbox.unlabeled_snapshot_env_scrubbed",
+            owner_id=spec.session_id,
+            # Names only — never a value.
+            env_keys=stale,
+        )
+        return dataclasses.replace(
+            spec, environment={**spec.environment, **dict.fromkeys(stale, "")}
+        )
 
     async def _reset_snapshot(self, session_id: str, *, reason: str) -> None:
         """Clear the snapshot pointer and append a model-visible reset notice."""

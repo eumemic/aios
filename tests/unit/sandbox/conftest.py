@@ -1,4 +1,9 @@
-"""Shared fixtures for the in-sandbox ``bin/tool`` CLI tests.
+"""Shared fixtures for the sandbox unit tests.
+
+Hosts the in-sandbox ``bin/tool`` CLI loader fixture, and re-exports the
+secret-egress-proxy fixtures so more than one module can boot a real proxy
+(``test_secret_egress_proxy`` owns the definitions; the #331 rotation
+acceptance suite consumes them).
 
 The CLI script has no ``.py`` extension and is conventionally invoked
 as an executable; ``importlib.util.spec_from_file_location`` is the
@@ -28,3 +33,12 @@ def tool_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# Re-exported so any module in this package can request a booted proxy by
+# fixture name. The defining module keeps its own copies (an identical
+# module-level shadow), so its behaviour is unchanged.
+from tests.unit.sandbox.test_secret_egress_proxy import (  # noqa: E402, F401
+    crypto_box_runtime,
+    make_proxy,
+)
