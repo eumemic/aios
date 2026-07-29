@@ -273,6 +273,7 @@ The harness turns the event log into a running agent. There is no controller loo
 | `AIOS_TOOL_RESULT_MAX_CHARS` | Inline tool-result cap (default 200k); larger results spill to a readable attachment file with an inline stub. |
 | `AIOS_DEFAULT_SPEND_LIMIT_USD` | Default effective spend ceiling; the step's pre-flight admission latches errored on a subtree breach. |
 | `AIOS_INBOUND_DEBOUNCE_SECONDS` | Debounce connector-inbound wakes so rapid messages collapse into one step. |
+| `AIOS_OUTBOUND_TOOL_QUOTAS` | JSON map of connector verb to `[window_seconds, max_per_window]`; empty by default (for example `{"matrix_invite":[3600,20],"matrix_create_room":[3600,20],"matrix_join":[3600,20],"matrix_send":[3600,500]}`). Calls at the cap become model-visible `quota_exceeded` tool errors before connector publish. Keep homeserver/appservice rate limiting enabled as an independent backstop; upstream `M_LIMIT_EXCEEDED` errors are surfaced without retries. |
 | `AIOS_DUMP_CONTEXT` / `AIOS_DUMP_CONTEXT_DIR` | Dump the exact chat-completions payload sent to LiteLLM per step. |
 
 </details>
