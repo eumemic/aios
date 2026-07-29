@@ -1224,8 +1224,14 @@ class TestDiscoveryLoopReconnectsOnStaleStream:
 
         attempts = {"n": 0}
 
-        async def _fake_stream(httpx_client: Any, connector: str):
-            del httpx_client, connector
+        async def _fake_stream(
+            httpx_client: Any,
+            connector: str,
+            *,
+            arm: str | None = None,
+            after_change_seq: int | None = None,
+        ):
+            del httpx_client, connector, arm, after_change_seq
             attempts["n"] += 1
             if attempts["n"] == 1:
                 # First connection goes silently half-open: the bounded
@@ -1271,6 +1277,145 @@ class TestDiscoveryLoopReconnectsOnStaleStream:
         # It backed off between the failed attempt and the reconnect
         # (rather than busy-looping).
         assert sleeps and sleeps[0] >= 1.0
+
+
+class TestDiscoveryCursorAndResetRecovery:
+    """M5 acceptance: the runner resumes with ``tail(after_change_seq)``
+    once it holds a complete view, and reacts to a server ``reset`` by
+    dropping the cursor and re-running ``fresh`` (issue #1905)."""
+
+    @staticmethod
+    def _msg(payload: dict[str, Any]):
+        from aios_sdk import SseMessage
+
+        return SseMessage(event="connection", data=json.dumps(payload))
+
+    async def _drive(self, connector: HttpConnector, scripts: list[list[dict[str, Any]]]):
+        """Run ``_discovery_loop`` against successive scripted streams.
+
+        Each inner list is one stream lifetime's payloads; after the last
+        scripted stream, the fake stream idles forever.  Returns the list
+        of ``(arm, after_change_seq)`` tuples the loop subscribed with.
+        """
+        subscribes: list[tuple[str | None, int | None]] = []
+        done = asyncio.Event()
+
+        async def _fake_stream(
+            httpx_client: Any,
+            connector_name: str,
+            *,
+            arm: str | None = None,
+            after_change_seq: int | None = None,
+        ):
+            del httpx_client, connector_name
+            subscribes.append((arm, after_change_seq))
+            if not scripts:
+                done.set()
+                await asyncio.Event().wait()
+            for payload in scripts.pop(0):
+                yield self._msg(payload)
+            # Stream ends (server closed) → loop reconnects.
+
+        _real_sleep = asyncio.sleep
+
+        async def _fake_sleep(delay: float) -> None:
+            del delay
+            await _real_sleep(0)
+
+        with (
+            patch("aios_connector_http.runner.stream_connection_discovery", new=_fake_stream),
+            patch("aios_connector_http.runner.asyncio.sleep", new=_fake_sleep),
+        ):
+            mock_tg = MagicMock()
+            loop_task = asyncio.create_task(connector._discovery_loop(mock_tg))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=5.0)
+            finally:
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await loop_task
+        return subscribes
+
+    async def test_first_subscribe_is_fresh_then_tail_from_watermark(self) -> None:
+        """cursor(S₀) → snapshot_complete commits S₀; the reconnect resumes
+        as ``tail(after_change_seq=S₀)`` — O(Δ), no snapshot."""
+        c = _ProbeConnector()
+        c._on_connection_added = AsyncMock()  # type: ignore[method-assign]
+        subscribes = await self._drive(
+            c,
+            [
+                [
+                    {"event": "cursor", "change_seq": 42},
+                    {"event": "snapshot_complete"},
+                ],
+            ],
+        )
+        assert subscribes[0] == ("fresh", None)
+        assert subscribes[1] == ("tail", 42)
+
+    async def test_ledger_events_advance_the_resume_cursor(self) -> None:
+        c = _ProbeConnector()
+        c._on_connection_added = AsyncMock()  # type: ignore[method-assign]
+        subscribes = await self._drive(
+            c,
+            [
+                [
+                    {"event": "cursor", "change_seq": 42},
+                    {"event": "snapshot_complete"},
+                    {
+                        "event": "added",
+                        "change_seq": 45,
+                        "connection_id": "con_x",
+                        "external_account_id": "acct",
+                    },
+                ],
+            ],
+        )
+        assert subscribes[1] == ("tail", 45)
+
+    async def test_mid_snapshot_disconnect_reruns_fresh(self) -> None:
+        """A watermark without its sentinel is NOT a resume point: the view
+        is incomplete, so the reconnect must re-run ``fresh``, not tail from
+        S₀ (which would skip the unstreamed snapshot rows forever)."""
+        c = _ProbeConnector()
+        c._on_connection_added = AsyncMock()  # type: ignore[method-assign]
+        subscribes = await self._drive(
+            c,
+            [
+                [{"event": "cursor", "change_seq": 42}],  # dies mid-snapshot
+            ],
+        )
+        assert subscribes[0] == ("fresh", None)
+        assert subscribes[1] == ("fresh", None)
+
+    async def test_reset_drops_cursor_and_reruns_fresh(self) -> None:
+        """Server ``reset`` (stale tail cursor below the pruning horizon):
+        the runner drops its cursor and the next subscribe is ``fresh``."""
+        c = _ProbeConnector()
+        c._on_connection_added = AsyncMock()  # type: ignore[method-assign]
+        removed = AsyncMock()
+        c._on_connection_removed = removed  # type: ignore[method-assign]
+        subscribes = await self._drive(
+            c,
+            [
+                [
+                    {"event": "cursor", "change_seq": 42},
+                    {"event": "snapshot_complete"},
+                ],
+                [{"event": "reset"}],
+                [
+                    {"event": "cursor", "change_seq": 99},
+                    {"event": "snapshot_complete"},
+                ],
+            ],
+        )
+        assert subscribes[0] == ("fresh", None)
+        assert subscribes[1] == ("tail", 42)
+        # reset → cursor dropped → fresh re-run, then tail from the new S₀.
+        assert subscribes[2] == ("fresh", None)
+        assert subscribes[3] == ("tail", 99)
+        # §12.4: the reset pass tears nothing down.
+        removed.assert_not_awaited()
 
 
 class TestDeadWorkerRespawn:
