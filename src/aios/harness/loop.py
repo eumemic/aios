@@ -236,6 +236,17 @@ _MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
 )
 
 
+def _terminal_error_stop_message(provider_error: dict[str, Any]) -> str:
+    """Include the provider diagnosis in the console-visible failure message."""
+    exception_class = provider_error["exception_class"]
+    http_status = provider_error["http_status"]
+    status = f" (HTTP {http_status})" if http_status is not None else ""
+    return (
+        f"{_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE}\n\n"
+        f"Provider error: {exception_class}{status}: {provider_error['message']}"
+    )
+
+
 def _retry_delay_for_attempt(attempt: int) -> float | None:
     """Return the backoff delay for ``attempt``, or ``None`` if the budget is spent."""
     if attempt >= len(_RETRY_BACKOFF_SECONDS):
@@ -1464,18 +1475,20 @@ async def _run_session_step_body(
                     session_id=session_id,
                     error_class=type(exc).__name__,
                 )
+                provider_error = _provider_error_detail(exc)
                 await _append_model_request_error_span(
                     pool,
                     session_id,
                     start_event_id=start_event.id,
                     account_id=account_id,
-                    provider_error=_provider_error_detail(exc),
+                    provider_error=provider_error,
                 )
                 await _latch_errored_turn(
                     pool,
                     session_id,
                     error_kind="model_terminal_error",
-                    stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                    stop_message=_terminal_error_stop_message(provider_error),
+                    provider_error=provider_error,
                     account_id=account_id,
                 )
                 return _StepResult()  # no retry_delay → no defer_wake → session parks errored
@@ -2251,6 +2264,7 @@ async def _latch_errored_turn(
     error_kind: str,
     stop_message: str | None = None,
     finish_reason: str | None = None,
+    provider_error: dict[str, Any] | None = None,
     account_id: str,
 ) -> None:
     """Land a session in the terminal ``errored`` state (#353).
@@ -2282,6 +2296,8 @@ async def _latch_errored_turn(
         stop_reason["message"] = stop_message
     if finish_reason is not None:
         stop_reason["finish_reason"] = finish_reason
+    if provider_error is not None:
+        stop_reason["provider_error"] = provider_error
     await sessions_service.set_session_stop_reason(
         pool, session_id, stop_reason, account_id=account_id
     )
