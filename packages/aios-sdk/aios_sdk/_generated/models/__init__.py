@@ -123,6 +123,7 @@ from .list_response_workflow_version import ListResponseWorkflowVersion
 from .list_session_events_chat_type_type_0 import ListSessionEventsChatTypeType0
 from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
+from .list_sessions_order_by_type_0 import ListSessionsOrderByType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
@@ -461,6 +462,7 @@ __all__ = (
     "ListSessionEventsChatTypeType0",
     "ListSessionEventsDir",
     "ListSessionEventsKindType0",
+    "ListSessionsOrderByType0",
     "ListSessionsStatusType0",
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
