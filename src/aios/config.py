@@ -220,6 +220,11 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum interval without bytes moving through a Docker flatten pipeline.",
     )
+    sandbox_docker_cli_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Timeout for individual Docker CLI management calls.",
+    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,
@@ -262,13 +267,6 @@ class Settings(BaseSettings):
         default=15 * 1024 * 1024 * 1024,
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
-    )
-    sandbox_snapshot_ttl_seconds: int = Field(
-        default=2_592_000,  # 30 days
-        ge=60,
-        description="Dormancy threshold for non-destructive maintenance and pressure reporting. "
-        "keyed on the session's ``(session_id, last_event_seq)`` event row. "
-        "It never authorizes deletion of canonical non-archived state.",
     )
     sandbox_snapshot_pool_bytes: int | None = Field(
         default=None,

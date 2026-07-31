@@ -342,3 +342,16 @@ def test_workflow_max_inflight_children_per_run_rejects_below_one(
 
     with pytest.raises(ValidationError):
         Settings(_env_file=(str(secrets),))
+
+
+def test_docker_cli_timeout_default_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_SANDBOX_DOCKER_CLI_TIMEOUT_SECONDS", raising=False)
+    assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 30.0
+    monkeypatch.setenv("AIOS_SANDBOX_DOCKER_CLI_TIMEOUT_SECONDS", "45")
+    assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 45.0

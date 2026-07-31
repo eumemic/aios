@@ -67,6 +67,10 @@ _HOST_BACKSTOP_MARGIN_S = 5
 # from a timeout, and a command that exits 124 on its own is not a timeout.
 _CONTAINER_TIMEOUT_EXIT_CODE = 137
 
+# Metadata enumeration must remain recoverable even when the managed population
+# is large enough that one inspect would exceed the CLI deadline.
+_MANAGED_INSPECT_BATCH_SIZE = 100
+
 # Chain-depth backstop for the snapshot verb. The overlay2 graphdriver
 # hard-fails ``docker commit`` at ~125 stacked layers; the production
 # **containerd image store** has no such wall (a chain committed and ran
@@ -433,22 +437,40 @@ class DockerBackend:
             return []
 
         fmt = '{{.Id}}\t{{.State.Running}}\t{{index .Config.Labels "' + SESSION_LABEL_KEY + '"}}'
-        inspect_argv = ["docker", "inspect", "--format", fmt, *container_ids]
-        rc, stdout_bytes, stderr_bytes = await run_docker_cli(inspect_argv)
-        if rc != 0:
-            raise SandboxBackendError(
-                f"docker inspect failed (exit {rc}): "
-                f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
-            )
         out: list[ManagedSandboxRef] = []
-        for line in stdout_bytes.decode("utf-8").splitlines():
-            if not line.strip():
+        for offset in range(0, len(container_ids), _MANAGED_INSPECT_BATCH_SIZE):
+            batch = container_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
+            try:
+                rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+                    ["docker", "inspect", "--format", fmt, *batch]
+                )
+            except SandboxBackendError as err:
+                log.warning(
+                    "sandbox.container_inspect_batch_failed",
+                    offset=offset,
+                    size=len(batch),
+                    error=str(err),
+                )
                 continue
-            parts = line.split("\t", 2)
-            cid = parts[0].strip()
-            running = len(parts) > 1 and parts[1].strip() == "true"
-            sid = parts[2].strip() if len(parts) > 2 else ""
-            out.append(ManagedSandboxRef(sandbox_id=cid, session_id=sid or None, running=running))
+            if rc != 0:
+                log.warning(
+                    "sandbox.container_inspect_batch_failed",
+                    offset=offset,
+                    size=len(batch),
+                    exit_code=rc,
+                    stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+                )
+                continue
+            for line in stdout_bytes.decode("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split("\t", 2)
+                cid = parts[0].strip()
+                running = len(parts) > 1 and parts[1].strip() == "true"
+                sid = parts[2].strip() if len(parts) > 2 else ""
+                out.append(
+                    ManagedSandboxRef(sandbox_id=cid, session_id=sid or None, running=running)
+                )
         return out
 
     async def force_remove(self, sandbox_id: str) -> None:
@@ -858,33 +880,48 @@ class DockerBackend:
         # direct ``{{json .Config.Labels}}`` errors on label-less images under
         # Docker inspect's ``missingkey=error``.
         fmt = "{{.Id}}\t{{.Parent}}\t{{.Size}}\t{{json .RepoTags}}\t{{json .Config}}"
-        rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-            ["docker", "image", "inspect", "--format", fmt, *image_ids]
-        )
-        if rc != 0:
-            raise SandboxBackendError(
-                f"docker image inspect failed (exit {rc}): "
-                f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
-            )
         out: list[ManagedImage] = []
-        for line in stdout_bytes.decode("utf-8").splitlines():
-            if not line.strip():
-                continue
-            parts = line.split("\t", 4)
-            image_id = parts[0].strip()
-            parent = parts[1].strip() if len(parts) > 1 else ""
-            size = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
-            repo_tags = _parse_json_str_list(parts[3]) if len(parts) > 3 else ()
-            img_labels = _labels_from_config_json(parts[4]) if len(parts) > 4 else {}
-            out.append(
-                ManagedImage(
-                    image_id=image_id,
-                    repo_tags=repo_tags,
-                    parent_id=parent or None,
-                    size_bytes=size,
-                    labels=img_labels,
+        for offset in range(0, len(image_ids), _MANAGED_INSPECT_BATCH_SIZE):
+            batch = image_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
+            try:
+                rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+                    ["docker", "image", "inspect", "--format", fmt, *batch]
                 )
-            )
+            except SandboxBackendError as err:
+                log.warning(
+                    "sandbox.image_inspect_batch_failed",
+                    offset=offset,
+                    size=len(batch),
+                    error=str(err),
+                )
+                continue
+            if rc != 0:
+                log.warning(
+                    "sandbox.image_inspect_batch_failed",
+                    offset=offset,
+                    size=len(batch),
+                    exit_code=rc,
+                    stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+                )
+                continue
+            for line in stdout_bytes.decode("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split("\t", 4)
+                image_id = parts[0].strip()
+                parent = parts[1].strip() if len(parts) > 1 else ""
+                size = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                repo_tags = _parse_json_str_list(parts[3]) if len(parts) > 3 else ()
+                img_labels = _labels_from_config_json(parts[4]) if len(parts) > 4 else {}
+                out.append(
+                    ManagedImage(
+                        image_id=image_id,
+                        repo_tags=repo_tags,
+                        parent_id=parent or None,
+                        size_bytes=size,
+                        labels=img_labels,
+                    )
+                )
         return out
 
     async def remove_image(self, ref: str) -> bool:

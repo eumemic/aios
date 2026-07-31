@@ -113,6 +113,8 @@ _STOP_ALL_TIMEOUT_S = 8.0
 # GC reconciler tick interval (durable session sandboxes, §5.5): hourly, with
 # an immediate first tick at boot (replacing the old boot-time orphan reap).
 _GC_INTERVAL_SECONDS = 3600.0
+# Bound daemon churn when a recovered GC encounters a large lifecycle backlog.
+_GC_IMAGE_REMOVAL_LIMIT = 200
 _EGRESS_REFRESH_INTERVAL_SECONDS = 30.0
 _EGRESS_EVICT_AFTER_SUCCESSES = 3
 
@@ -2424,14 +2426,20 @@ class SandboxRegistry:
     ) -> list[GcImageVerdict]:
         """Remove every non-retained image (under per-session locks); return the retained."""
         retained: list[GcImageVerdict] = []
+        removal_count = 0
         for v in verdicts:
             if v.verdict == "retain":
+                retained.append(v)
+                continue
+            if removal_count >= _GC_IMAGE_REMOVAL_LIMIT:
                 retained.append(v)
                 continue
             sid = v.session_id
             if sid is None:
                 # Residue with no session label — remove directly.
-                await self._backend.remove_image(v.removal_ref)
+                removal_count += 1
+                if not await self._backend.remove_image(v.removal_ref):
+                    retained.append(v)
                 continue
             async with self._lock_for(sid):
                 # Re-check under the lock: a waking session may now hold a
@@ -2467,6 +2475,7 @@ class SandboxRegistry:
                     # Publication raced the scan: it is current now, not residue.
                     retained.append(v)
                     continue
+                removal_count += 1
                 removed = await self._backend.remove_image(v.removal_ref)
                 if not removed:
                     # Refused (a child still references it) — retain this tick.
@@ -2477,7 +2486,14 @@ class SandboxRegistry:
                         sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
                     )
                 if v.is_canonical:
-                    await self._clear_pointer_if_owned(sid, instance_id, states)
+                    await self._clear_pointer_if_owned(sid, v.removal_ref, instance_id, states)
+        if removal_count:
+            log.info(
+                "sandbox.gc_image_removal_progress",
+                attempted=removal_count,
+                limit=_GC_IMAGE_REMOVAL_LIMIT,
+                remaining=sum(v.verdict == "remove" for v in retained),
+            )
         return retained
 
     async def _gc_pool_budget_pass(
@@ -2594,7 +2610,11 @@ class SandboxRegistry:
         return max(0, image.size_bytes - base_sizes[base_ref])
 
     async def _clear_pointer_if_owned(
-        self, session_id: str, instance_id: str, states: dict[str, SessionSnapshotState]
+        self,
+        session_id: str,
+        removed_ref: str,
+        instance_id: str,
+        states: dict[str, SessionSnapshotState],
     ) -> None:
         """Clear a session's pointer when removing its canonical artifact.
 
@@ -2610,4 +2630,6 @@ class SandboxRegistry:
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_clear_session_snapshot(conn, session_id)
+            await queries.unscoped_clear_session_snapshot_if_matches(
+                conn, session_id, ref=removed_ref, host=instance_id
+            )
