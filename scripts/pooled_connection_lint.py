@@ -280,6 +280,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.sum_account_session_tokens",
         "queries.try_record_inbound_ack",
         "queries.unscoped_clear_session_snapshot",
+        "queries.unscoped_clear_session_snapshot_if_matches",
         "queries.unscoped_get_session_account_id",
         "queries.unscoped_get_session_snapshot_bytes",
         "queries.unscoped_get_session_spec_version",

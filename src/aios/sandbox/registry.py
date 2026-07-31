@@ -2486,7 +2486,7 @@ class SandboxRegistry:
                         sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
                     )
                 if v.is_canonical:
-                    await self._clear_pointer_if_owned(sid, instance_id, states)
+                    await self._clear_pointer_if_owned(sid, v.removal_ref, instance_id, states)
         if removal_count:
             log.info(
                 "sandbox.gc_image_removal_progress",
@@ -2610,7 +2610,11 @@ class SandboxRegistry:
         return max(0, image.size_bytes - base_sizes[base_ref])
 
     async def _clear_pointer_if_owned(
-        self, session_id: str, instance_id: str, states: dict[str, SessionSnapshotState]
+        self,
+        session_id: str,
+        removed_ref: str,
+        instance_id: str,
+        states: dict[str, SessionSnapshotState],
     ) -> None:
         """Clear a session's pointer when removing its canonical artifact.
 
@@ -2626,4 +2630,6 @@ class SandboxRegistry:
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_clear_session_snapshot(conn, session_id)
+            await queries.unscoped_clear_session_snapshot_if_matches(
+                conn, session_id, ref=removed_ref, host=instance_id
+            )

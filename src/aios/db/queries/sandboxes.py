@@ -120,8 +120,9 @@ async def unscoped_get_session_snapshot_bytes(
 async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session_id: str) -> None:
     """Clear a session's snapshot pointer (all four columns NULL).
 
-    Used on a detected reset (snapshot-missing / base-image drift) and by the
-    GC pass-4 reconcile when a canonical artifact is removed.
+    Used on a detected reset (snapshot-missing / base-image drift). Destructive
+    GC uses :func:`unscoped_clear_session_snapshot_if_matches` instead so a
+    concurrently published replacement cannot be erased by a stale clear.
     """
     await conn.execute(
         """
@@ -134,6 +135,32 @@ async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session
         """,
         session_id,
     )
+
+
+async def unscoped_clear_session_snapshot_if_matches(
+    conn: asyncpg.Connection[Any], session_id: str, *, ref: str, host: str
+) -> bool:
+    """Atomically clear exactly the snapshot pointer GC just removed.
+
+    A concurrent publication changes ``snapshot_ref`` and/or ``snapshot_host``;
+    the predicate then matches zero rows and preserves the replacement pointer.
+    """
+    result = await conn.execute(
+        """
+        UPDATE sessions
+           SET snapshot_ref = NULL,
+               snapshot_host = NULL,
+               snapshot_bytes = NULL,
+               snapshot_updated_at = now()
+         WHERE id = $1
+           AND snapshot_ref = $2
+           AND snapshot_host = $3
+        """,
+        session_id,
+        ref,
+        host,
+    )
+    return bool(result == "UPDATE 1")
 
 
 async def unscoped_live_session_ids(
