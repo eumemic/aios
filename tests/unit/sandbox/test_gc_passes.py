@@ -497,3 +497,30 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
 
     registry._snapshot_and_record.assert_awaited_once()
     assert any(call[0] == "force_remove" for call in backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_image_pass_caps_removals_and_retains_live_canonical_under_pressure() -> None:
+    """A tick bounds rmi churn, while pool pressure never widens lifecycle eligibility."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    removals = [
+        GcImageVerdict(
+            ManagedImage(f"img-{i}", (), None, 1, {}), None, False, f"img-{i}", "remove", "residue"
+        )
+        for i in range(250)
+    ]
+    live = _canonical_verdict("live", size_bytes=10_000_000)
+
+    retained = await registry._gc_image_pass([*removals, live], {}, get_settings().instance_id)
+    pressure = await registry._gc_pool_budget_pass(
+        [live],
+        {"live": _acct_state("live", account_id="acct", days_dormant=999)},
+        1,
+        get_settings().instance_id,
+    )
+
+    assert len(backend.removed_image_refs) == 200
+    assert len([v for v in retained if v.verdict == "remove"]) == 50
+    assert pressure.pressured
+    assert live.removal_ref not in backend.removed_image_refs
