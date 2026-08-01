@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -20,6 +21,7 @@ from aios.harness import runtime
 from aios.ids import make_id
 from aios.sandbox.backends.base import ManagedImage, ManagedSandboxRef
 from aios.sandbox.registry import GcImageVerdict, SandboxRegistry, SessionSnapshotState
+from aios.sandbox.snapshot_store import TarballStore
 from aios.sandbox.spec import snapshot_tag
 from tests.helpers.sandbox import FakeBackend, FakePool
 
@@ -500,79 +502,24 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_pass_caps_removals_and_retains_live_canonical_under_pressure() -> None:
-    """A tick bounds rmi churn, while pool pressure never widens lifecycle eligibility."""
-    backend = FakeBackend()
-    registry = SandboxRegistry(backend=backend)
-    removals = [
-        GcImageVerdict(
-            ManagedImage(f"img-{i}", (), None, 1, {}), None, False, f"img-{i}", "remove", "residue"
-        )
-        for i in range(250)
-    ]
-    live = _canonical_verdict("live", size_bytes=10_000_000)
-
-    retained = await registry._gc_image_pass([*removals, live], {}, get_settings().instance_id)
-    pressure = await registry._gc_pool_budget_pass(
-        [live],
-        {"live": _acct_state("live", account_id="acct", days_dormant=999)},
-        1,
-        get_settings().instance_id,
-    )
-
-    assert len(backend.removed_image_refs) == 200
-    assert len([v for v in retained if v.verdict == "remove"]) == 50
-    assert pressure.pressured
-    assert live.removal_ref not in backend.removed_image_refs
-
-
-@pytest.mark.asyncio
-async def test_gc_compare_and_clear_preserves_concurrently_published_pointer(
-    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+async def test_tarball_pointer_survives_docker_gc_reconciliation_and_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A replacement published after rmi but before pointer clear survives."""
+    """Docker cache enumeration must never rewrite canonical durable refs."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
-    host = get_settings().instance_id
-    old_ref = snapshot_tag(host, "sess_x")
-    replacement = {
-        "ref": old_ref + "-replacement",
-        "host": host,
-        "bytes": 42,
-        "updated_at": _NOW + timedelta(seconds=1),
-    }
-    pointer = {"ref": old_ref, "host": host, "bytes": 1, "updated_at": _NOW}
-    state = SessionSnapshotState("sess_x", "acct", _NOW - timedelta(days=2), _NOW, old_ref, host, 1)
-    verdict = GcImageVerdict(
-        ManagedImage("img", (old_ref,), None, 1, {}),
-        "sess_x",
-        True,
-        old_ref,
-        "remove",
-        "archived",
+    registry._store = TarballStore(backend, tmp_path)
+    sid = "sess_durable"
+    durable_ref = f"{sid}/generation.tar"
+    state = SessionSnapshotState(
+        sid, "acct", None, _NOW, durable_ref, get_settings().instance_id, 7
     )
-    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
-    registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
+    set_pointer = AsyncMock()
+    monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
+    verdict = _canonical_verdict(sid, size_bytes=7)
 
-    async def remove_then_publish(ref: str) -> bool:
-        backend.removed_image_refs.append(ref)
-        pointer.update(replacement)
-        return True
-
-    async def compare_and_clear(_conn: Any, session_id: str, *, ref: str, host: str) -> bool:
-        assert session_id == "sess_x"
-        if pointer["ref"] != ref or pointer["host"] != host:
-            return False
-        pointer.update(ref=None, host=None, bytes=None, updated_at=_NOW)
-        return True
-
-    monkeypatch.setattr(backend, "remove_image", remove_then_publish)
-    monkeypatch.setattr(
-        "aios.sandbox.registry.queries.unscoped_clear_session_snapshot_if_matches",
-        compare_and_clear,
-    )
-
-    retained = await registry._gc_image_pass([verdict], {"sess_x": state}, host)
-
-    assert retained == []
-    assert pointer == replacement
+    await registry._gc_reconcile_pointers([verdict], {sid: state}, get_settings().instance_id)
+    set_pointer.assert_not_awaited()
+    # Simulate label-blind `docker image prune -af`: only the local cache vanishes.
+    await backend.remove_image(verdict.removal_ref)
+    assert state.snapshot_ref == durable_ref

@@ -227,6 +227,13 @@ class FakeBackend:
         self.calls.append(("list_managed_images", {"instance_id": instance_id}))
         return list(self.managed_images)
 
+    async def save_image(self, image: str, path: Path) -> None:
+        self.calls.append(("save_image", {"image": image, "path": path}))
+        path.write_bytes(b"fake docker archive")  # noqa: ASYNC240 -- in-memory test fake
+
+    async def load_image(self, path: Path) -> None:
+        self.calls.append(("load_image", {"path": path}))
+
     async def remove_image(self, ref: str) -> bool:
         self.calls.append(("remove_image", {"ref": ref}))
         if ref in self.refuse_remove_refs:

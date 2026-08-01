@@ -43,8 +43,33 @@ def harness(
     async def _clear(_conn: Any, session_id: str) -> None:
         timeline.append(("pointer_clear", session_id))
 
+    async def _cas_clear(_conn: Any, session_id: str, *, expected_ref: str) -> bool:
+        timeline.append(("pointer_clear", session_id))
+        return True
+
+    async def _cas_set(
+        _conn: Any,
+        session_id: str,
+        *,
+        observed_ref: str | None,
+        observed_updated_at: object,
+        ref: str,
+        host: str,
+        snapshot_bytes: int,
+    ) -> bool:
+        timeline.append(("pointer_set", ref, snapshot_bytes))
+        return True
+
     monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", _set)
     monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_clear_session_snapshot", _clear)
+    monkeypatch.setattr(
+        "aios.sandbox.registry.queries.unscoped_compare_and_clear_session_snapshot",
+        _cas_clear,
+    )
+    monkeypatch.setattr(
+        "aios.sandbox.registry.queries.unscoped_compare_and_set_session_snapshot",
+        _cas_set,
+    )
     monkeypatch.setattr(
         "aios.sandbox.registry.queries.unscoped_get_session_snapshot_bytes",
         AsyncMock(return_value=None),
