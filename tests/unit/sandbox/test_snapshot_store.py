@@ -10,12 +10,13 @@ idle's lineage gate discard its post-hiccup work).
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
 from aios.sandbox.backends.base import SandboxBackendError
-from aios.sandbox.snapshot_store import LocalDaemonStore
+from aios.sandbox.snapshot_store import LocalDaemonStore, TarballStore
 from tests.helpers.sandbox import FakeBackend
 
 
@@ -91,3 +92,132 @@ class TestLocalDaemonStore:
         backend.image_sizes_by_ref["ref:latest"] = 12345
         store = LocalDaemonStore(backend)
         assert await store.size("ref:latest") == 12345
+
+
+class TestTarballStore:
+    @pytest.mark.asyncio
+    async def test_put_publishes_verified_immutable_artifact(self, tmp_path: Path) -> None:
+        backend = FakeBackend()
+
+        async def save(_tag: str, path: Path) -> None:
+            path.write_bytes(b"docker image archive")  # noqa: ASYNC240 -- tiny fixture
+
+        backend.save_image = AsyncMock(side_effect=save)  # type: ignore[method-assign]
+        store = TarballStore(backend, tmp_path)
+        ref = store.make_ref("sess_ABC", "aios-sbx-local")
+
+        assert await store.put("aios-sbx-local", ref) == ref
+        assert await store.exists(ref) is True
+        assert await store.size(ref) == len(b"docker image archive")
+        assert not list(tmp_path.rglob("*.tmp"))  # noqa: ASYNC240 -- test assertion
+
+    @pytest.mark.asyncio
+    async def test_get_loads_verified_archive_on_cache_miss(self, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        store = TarballStore(backend, tmp_path)
+        ref = store.make_ref("sess_ABC", "aios-sbx-local")
+        backend.save_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda _tag, path: path.write_bytes(b"archive")
+        )
+        await store.put("aios-sbx-local", ref)
+        backend.image_labels_by_ref.clear()
+        backend.load_image = AsyncMock()  # type: ignore[method-assign]
+
+        assert await store.get(ref) == "aios-sbx-local"
+        backend.load_image.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_replaces_cached_generation_sharing_local_tag(self, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        store = TarballStore(backend, tmp_path)
+        local_tag = "aios-sbx-local"
+        ref_a = store.make_ref("sess_ABC", local_tag)
+        ref_b = store.make_ref("sess_ABC", local_tag)
+        generations = iter((b"generation-a", b"generation-b"))
+        backend.save_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda _tag, path: path.write_bytes(next(generations))
+        )
+        await store.put(local_tag, ref_a)
+        await store.put(local_tag, ref_b)
+        # Simulate generation A already cached under the shared deterministic tag.
+        backend.image_labels_by_ref[local_tag] = {"aios.managed": "true"}
+        loaded: list[bytes] = []
+        backend.load_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda path: loaded.append(path.read_bytes())
+        )
+
+        assert await store.get(ref_a) == local_tag
+        assert await store.get(ref_b) == local_tag
+        assert loaded == [b"generation-a", b"generation-b"]
+
+    @pytest.mark.asyncio
+    async def test_get_rejects_corrupt_artifact(self, tmp_path: Path) -> None:
+        backend = FakeBackend()
+        store = TarballStore(backend, tmp_path)
+        ref = store.make_ref("sess_ABC", "aios-sbx-local")
+        backend.save_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda _tag, path: path.write_bytes(b"archive")
+        )
+        await store.put("aios-sbx-local", ref)
+        (tmp_path / ref).write_bytes(b"corrupt")
+        with pytest.raises(SandboxBackendError, match="integrity"):
+            await store.get(ref)
+
+    @pytest.mark.asyncio
+    async def test_rejects_traversal_ref(self, tmp_path: Path) -> None:
+        store = TarballStore(FakeBackend(), tmp_path)
+        with pytest.raises(SandboxBackendError, match="invalid snapshot ref"):
+            await store.exists("../escape.tar")
+
+
+class TestLegacyMigration:
+    """End-to-end legacy → migrate → docker image prune -af → resume-intact."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_migrate_prune_resume_intact(self, tmp_path: Path) -> None:
+        """A legacy Docker-only pointer survives migration + full Docker prune."""
+        backend = FakeBackend()
+        store = TarballStore(backend, tmp_path)
+
+        # Legacy ref is a plain Docker tag (no "/" and no ".tar" suffix).
+        legacy_ref = "aios-sbx-deploy-sess_LEGACY:latest"
+        assert store.is_legacy_ref(legacy_ref)
+
+        # Simulate docker save producing archive bytes.
+        archive_bytes = b"legacy docker archive content for test"
+        backend.save_image = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda _tag, path: path.write_bytes(archive_bytes)
+        )
+        backend.load_image = AsyncMock()  # type: ignore[method-assign]
+
+        # Step 1: Migrate — put the legacy image into the canonical store.
+        durable_ref = store.make_ref("sess_LEGACY", legacy_ref)
+        assert not store.is_legacy_ref(durable_ref)
+        await store.put(legacy_ref, durable_ref)
+
+        # Step 2: Verify — get() test-loads the archive and returns the local tag.
+        local_tag = await store.get(durable_ref)
+        assert local_tag == legacy_ref
+        backend.load_image.assert_awaited_once()
+
+        # Step 3: Simulate `docker image prune -af` — wipe ALL Docker state.
+        backend.image_labels_by_ref.clear()
+        backend.image_sizes_by_ref.clear()
+
+        # Step 4: The canonical store artifact survives the Docker prune.
+        assert await store.exists(durable_ref) is True
+        assert await store.size(durable_ref) == len(archive_bytes)
+
+        # Step 5: Resume — get() reloads from the durable archive.
+        backend.load_image.reset_mock()
+        resumed_tag = await store.get(durable_ref)
+        assert resumed_tag == legacy_ref
+        backend.load_image.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_is_legacy_ref_classification(self) -> None:
+        """Verify legacy vs tarball ref classification."""
+        assert TarballStore.is_legacy_ref("aios-sbx-deploy-sess:latest")
+        assert TarballStore.is_legacy_ref("some-image:tag")
+        assert not TarballStore.is_legacy_ref("sess_ABC/deadbeef.tar")
+        assert not TarballStore.is_legacy_ref("sess/gen.tar")
