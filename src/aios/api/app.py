@@ -91,6 +91,9 @@ def create_app() -> FastAPI:
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
         async with pool.acquire() as conn:
             await queries.audit_credentialless_root(conn)
+        from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+
+        await validate_workspace_root_against_sessions(pool, service="api")
         await procrastinate_app.open_async()
         app.state.pool = pool
         app.state.crypto_box = crypto_box
