@@ -19,7 +19,7 @@ def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _pool(rows: list[dict[str, str]]) -> MagicMock:
     conn = AsyncMock()
-    conn.fetch.return_value = rows
+    conn.fetch.side_effect = [rows, []]
     acquired = AsyncMock()
     acquired.__aenter__.return_value = conn
     pool = MagicMock()
@@ -75,3 +75,39 @@ async def test_absolute_legacy_row_remains_accepted(workspace_root: Path) -> Non
         "workspace_volume_path": str(workspace_root / "sess_legacy"),
     }
     await validate_workspace_root_against_sessions(_pool([row]), service="worker")
+
+
+@pytest.mark.asyncio
+async def test_scans_live_rows_in_bounded_keyset_pages(
+    workspace_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aios.sandbox.workspace_root_startup as module
+
+    monkeypatch.setattr(module, "_WORKSPACE_SCAN_PAGE_SIZE", 2)
+    rows = [
+        {
+            "id": f"sess_{index}",
+            "account_id": "acc_a",
+            "workspace_volume_path": str(workspace_root / "acc_a" / f"sess_{index}"),
+        }
+        for index in range(3)
+    ]
+    conn = AsyncMock()
+    conn.fetch.side_effect = [rows[:2], rows[2:], []]
+    acquired = AsyncMock()
+    acquired.__aenter__.return_value = conn
+    pool = MagicMock()
+    pool.acquire.return_value = acquired
+
+    await validate_workspace_root_against_sessions(pool, service="api")
+
+    assert [call.args[0] for call in conn.fetch.await_args_list] == [
+        conn.fetch.await_args_list[0].args[0],
+        conn.fetch.await_args_list[1].args[0],
+        conn.fetch.await_args_list[2].args[0],
+    ]
+    assert [call.args[1:] for call in conn.fetch.await_args_list] == [
+        (None, 2),
+        ("sess_1", 2),
+        ("sess_2", 2),
+    ]

@@ -285,6 +285,8 @@ async def run_production_watchdogs(
     max_specimens: int = 20,
     sandbox_registry: Any | None = None,
     standing_session_id: str | None = None,
+    filesystem_probe_interval_seconds: float = 300.0,
+    filesystem_probe_timeout_seconds: float = 120.0,
 ) -> None:
     """Run fail-open observers on a reconnecting, dedicated connection."""
     inspector: Any = None
@@ -299,11 +301,13 @@ async def run_production_watchdogs(
             pool,
             standing_session_id,
             rate_limit_seconds=rate_limit_seconds,
-            operation_timeout_seconds=operation_timeout_seconds,
+            operation_timeout_seconds=filesystem_probe_timeout_seconds,
         )
         if sandbox_registry is not None and standing_session_id
         else None
     )
+
+    next_filesystem_probe_at = time.monotonic()
 
     while True:
         try:
@@ -363,8 +367,10 @@ async def run_production_watchdogs(
             await asyncio.sleep(interval_seconds)
             assert watchdog is not None
             await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
-            if filesystem_probe is not None:
-                await filesystem_probe.check_once()
+            now = time.monotonic()
+            if filesystem_probe is not None and now >= next_filesystem_probe_at:
+                await filesystem_probe.check_once(now=now)
+                next_filesystem_probe_at = now + filesystem_probe_interval_seconds
             row = await inspector.fetchrow(
                 "SELECT (SELECT count(*) FROM procrastinate_jobs "
                 "WHERE status = 'doing' AND task_name IN "
