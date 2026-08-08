@@ -394,6 +394,14 @@ class Settings(BaseSettings):
     worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
     worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
     worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
+    standing_session_filesystem_probe_session_id: str | None = Field(
+        default=None,
+        description="Optional canonical standing session whose real sandbox is periodically "
+        "provisioned and checked for workspace write/read, repository read, and mounted-memory "
+        "read capability. Disabled when unset.",
+    )
+    standing_session_filesystem_probe_interval_seconds: float = Field(default=300.0, gt=0)
+    standing_session_filesystem_probe_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(

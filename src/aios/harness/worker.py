@@ -378,6 +378,9 @@ async def worker_main() -> None:
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
         async with pool.acquire() as conn:
             await queries.audit_credentialless_root(conn)
+        from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+
+        await validate_workspace_root_against_sessions(pool, service="worker")
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
@@ -632,6 +635,14 @@ async def worker_main() -> None:
                 operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
                 activity_limit=settings.worker_watchdog_activity_rows,
                 max_specimens=settings.worker_watchdog_max_specimens,
+                sandbox_registry=sandbox_registry,
+                standing_session_id=settings.standing_session_filesystem_probe_session_id,
+                filesystem_probe_interval_seconds=(
+                    settings.standing_session_filesystem_probe_interval_seconds
+                ),
+                filesystem_probe_timeout_seconds=(
+                    settings.standing_session_filesystem_probe_timeout_seconds
+                ),
             ),
             name="production_watchdogs",
         )

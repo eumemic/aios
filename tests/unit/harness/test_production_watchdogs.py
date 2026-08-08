@@ -232,3 +232,83 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
     runner.cancel()
     with pytest.raises(asyncio.CancelledError):
         await runner
+
+
+@pytest.mark.asyncio
+async def test_standing_session_probe_uses_live_sandbox_and_checks_all_mounts() -> None:
+    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
+    from aios.sandbox.backends.base import CommandResult
+
+    registry = MagicMock()
+    registry.get_or_provision = AsyncMock(return_value="handle")
+    registry.exec = AsyncMock(
+        return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
+    )
+    alarm = MagicMock()
+    pool = object()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        pool,
+        "sess_canonical",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+        alarm=alarm,
+    )
+
+    assert await probe.check_once(now=0)
+    registry.get_or_provision.assert_awaited_once_with("sess_canonical", pool=pool)
+    command = registry.exec.await_args.args[1]
+    assert "mktemp /workspace/" in command
+    assert 'cat "$probe"' in command
+    assert "*/.git/HEAD" in command
+    assert "find /mnt/memory" in command
+    alarm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_standing_session_probe_alarms_and_rate_limits_failures() -> None:
+    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
+
+    registry = MagicMock()
+    registry.get_or_provision = AsyncMock(side_effect=ValueError("workspace rejected"))
+    alarm = MagicMock()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_canonical",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+        alarm=alarm,
+    )
+
+    assert not await probe.check_once(now=0)
+    assert not await probe.check_once(now=30)
+    assert not await probe.check_once(now=61)
+    assert alarm.call_count == 2
+    assert alarm.call_args.args[0] == "standing_session_filesystem_probe"
+    assert alarm.call_args.args[1]["session_id"] == "sess_canonical"
+
+
+@pytest.mark.asyncio
+async def test_standing_session_probe_alarms_on_nonzero_exec() -> None:
+    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
+    from aios.sandbox.backends.base import CommandResult
+
+    registry = MagicMock()
+    registry.get_or_provision = AsyncMock(return_value="handle")
+    registry.exec = AsyncMock(
+        return_value=CommandResult(1, "", "memory mount unreadable", False, False)
+    )
+    alarm = MagicMock()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_canonical",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+        alarm=alarm,
+    )
+
+    assert not await probe.check_once(now=0)
+    assert alarm.call_args.args[1]["exit_code"] == 1
+    assert "memory mount unreadable" in alarm.call_args.args[1]["stderr"]
