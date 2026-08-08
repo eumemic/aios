@@ -198,6 +198,78 @@ class ThroughputDeadMan:
         return True
 
 
+_FILESYSTEM_PROBE_COMMAND = r"""set -eu
+probe=$(mktemp /workspace/.aios-fs-probe.XXXXXX)
+trap 'rm -f "$probe"' EXIT
+printf aios-fs-probe > "$probe"
+test "$(cat "$probe")" = aios-fs-probe
+repo_head=$(find /workspace -maxdepth 4 -path '*/.git/HEAD' -type f -readable -print -quit)
+test -n "$repo_head"
+head -c 1 "$repo_head" >/dev/null
+memory_file=$(find /mnt/memory -maxdepth 3 -type f -readable -print -quit)
+test -n "$memory_file"
+head -c 1 "$memory_file" >/dev/null
+"""
+
+
+class StandingSessionFilesystemProbe:
+    """Exercise the real sandbox and mounts of one configured standing session."""
+
+    def __init__(
+        self,
+        registry: Any,
+        pool: Any,
+        session_id: str,
+        *,
+        rate_limit_seconds: float,
+        operation_timeout_seconds: float,
+        alarm: Callable[[str, dict[str, Any]], None] = _emit_alarm,
+    ) -> None:
+        self.registry = registry
+        self.pool = pool
+        self.session_id = session_id
+        self.rate_limit_seconds = rate_limit_seconds
+        self.operation_timeout_seconds = operation_timeout_seconds
+        self.alarm = alarm
+        self._last_alarm = float("-inf")
+
+    async def check_once(self, *, now: float | None = None) -> bool:
+        stamp = time.monotonic() if now is None else now
+        try:
+            handle = await asyncio.wait_for(
+                self.registry.get_or_provision(self.session_id, pool=self.pool),
+                self.operation_timeout_seconds,
+            )
+            result = await asyncio.wait_for(
+                self.registry.exec(
+                    handle,
+                    _FILESYSTEM_PROBE_COMMAND,
+                    timeout_seconds=max(1, int(self.operation_timeout_seconds)),
+                    max_output_bytes=4096,
+                ),
+                self.operation_timeout_seconds,
+            )
+            if result.exit_code == 0 and not result.timed_out:
+                return True
+            detail = {
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "stderr": result.stderr[-1024:],
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            detail = {"error_type": type(exc).__name__, "error": str(exc)[-1024:]}
+
+        if stamp - self._last_alarm >= self.rate_limit_seconds:
+            self.alarm(
+                "standing_session_filesystem_probe",
+                {"session_id": self.session_id, **detail},
+            )
+            self._last_alarm = stamp
+        return False
+
+
 async def run_production_watchdogs(
     pool: Any,
     db_url: str,
@@ -211,6 +283,8 @@ async def run_production_watchdogs(
     operation_timeout_seconds: float = 5.0,
     activity_limit: int = 100,
     max_specimens: int = 20,
+    sandbox_registry: Any | None = None,
+    standing_session_id: str | None = None,
 ) -> None:
     """Run fail-open observers on a reconnecting, dedicated connection."""
     inspector: Any = None
@@ -218,6 +292,17 @@ async def run_production_watchdogs(
     watchdog: HeldConnectionWatchdog | None = None
     dead_man = ThroughputDeadMan(
         threshold_seconds=dead_man_threshold_seconds, rate_limit_seconds=rate_limit_seconds
+    )
+    filesystem_probe = (
+        StandingSessionFilesystemProbe(
+            sandbox_registry,
+            pool,
+            standing_session_id,
+            rate_limit_seconds=rate_limit_seconds,
+            operation_timeout_seconds=operation_timeout_seconds,
+        )
+        if sandbox_registry is not None and standing_session_id
+        else None
     )
 
     while True:
@@ -278,6 +363,8 @@ async def run_production_watchdogs(
             await asyncio.sleep(interval_seconds)
             assert watchdog is not None
             await asyncio.wait_for(watchdog.check_once(), operation_timeout_seconds * 3)
+            if filesystem_probe is not None:
+                await filesystem_probe.check_once()
             row = await inspector.fetchrow(
                 "SELECT (SELECT count(*) FROM procrastinate_jobs "
                 "WHERE status = 'doing' AND task_name IN "

@@ -635,6 +635,8 @@ async def worker_main() -> None:
                 operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
                 activity_limit=settings.worker_watchdog_activity_rows,
                 max_specimens=settings.worker_watchdog_max_specimens,
+                sandbox_registry=sandbox_registry,
+                standing_session_id=settings.standing_session_filesystem_probe_session_id,
             ),
             name="production_watchdogs",
         )
