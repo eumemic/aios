@@ -666,9 +666,15 @@ async def test_exec_unsettled_surfaces_orphan_no_release() -> None:
     task (finding #2)."""
     from aios.sandbox.backends.base import CommandResult
 
+    # A flag the test sets after assertions to let the orphaned task exit
+    # cleanly.  Without this the task runs forever (swallowing every
+    # CancelledError) and the xdist worker hangs waiting for event-loop
+    # shutdown.
+    stop = asyncio.Event()
+
     async def unkillable_exec(*args: object, **kwargs: object) -> CommandResult:
         # Swallow cancellation: the task refuses to settle within grace.
-        while True:
+        while not stop.is_set():
             try:
                 await asyncio.sleep(100)
             except asyncio.CancelledError:
@@ -702,6 +708,11 @@ async def test_exec_unsettled_surfaces_orphan_no_release() -> None:
     # Must have surfaced an orphan for the reaper.
     orphan_alarms = [c for c in alarm.call_args_list if c.args and "orphan" in c.args[0]]
     assert orphan_alarms, f"expected an orphan alarm, got {alarm.call_args_list}"
+
+    # Let the orphaned background task exit so it doesn't hang the event loop
+    # (and the xdist worker) on shutdown.
+    stop.set()
+    await asyncio.sleep(0)  # yield so the task sees the flag
 
 
 @pytest.mark.asyncio
