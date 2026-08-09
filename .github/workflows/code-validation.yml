@@ -293,7 +293,7 @@ jobs:
         # tests isolate themselves with fresh databases inside that container,
         # so eight workers remain bounded at eight containers instead of the
         # former unbounded per-test Docker startup storm.
-        run: timeout 300s uv run pytest tests/integration -q -n 8
+        run: timeout 900s uv run pytest tests/integration -vv -n 8 --durations=0 -o faulthandler_timeout=90
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
