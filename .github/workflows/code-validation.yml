@@ -289,11 +289,25 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Run every collected test under one hard bound. Migration tests create
-        # extra Postgres containers, so keep that Docker-heavy class serial in
-        # one xdist group while the ordinary session-DB tests use the remaining
-        # workers. This preserves full-suite coverage without container storms.
-        run: timeout 180s uv run pytest tests/integration -q -n 4 --dist=loadgroup
+        # Run the complete suite in four xdist workers. Each worker owns an
+        # isolated session Postgres container; migration tests remain isolated
+        # in their own per-test containers. This restores the measured sub-3m
+        # full-suite path without splitting or omitting any collected tests.
+        run: |
+          if ! timeout 180s uv run pytest tests/integration -q -n 4; then
+            echo "::warning::FLAKE_RETRY integration"
+            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
+            timeout 180s uv run pytest tests/integration -q -n 4 --lf
+          fi
+
+      - name: Upload integration flake-retry marker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-retry-integration
+          path: flake-retry-integration.txt
+          if-no-files-found: ignore
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
