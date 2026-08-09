@@ -65,9 +65,7 @@ class TestCanonicalPathAcceptedWithRealSandbox:
     actual bash/read/write/scratch tool handlers inside a Docker sandbox.
     """
 
-    async def test_bash_roundtrip_canonical_workspace(
-        self, docker_harness: Harness
-    ) -> None:
+    async def test_bash_roundtrip_canonical_workspace(self, docker_harness: Harness) -> None:
         """bash tool writes and reads a scratch file through the real
         bind-mounted workspace at the canonical account-scoped path."""
         session = await docker_harness.start("scratch roundtrip", tools=["bash"])
@@ -135,9 +133,7 @@ class TestCanonicalPathAcceptedWithRealSandbox:
         assert host_file.exists(), f"host-side file not found at {host_file}"
         assert host_file.read_text().strip() == "workspace-root-regression-probe"
 
-    async def test_startup_validation_passes_aligned_root(
-        self, docker_harness: Harness
-    ) -> None:
+    async def test_startup_validation_passes_aligned_root(self, docker_harness: Harness) -> None:
         """``validate_workspace_root_against_sessions`` passes when the
         session's canonical workspace path is under the process's
         configured ``AIOS_WORKSPACE_ROOT``.  Exercises the real DB path
@@ -146,9 +142,7 @@ class TestCanonicalPathAcceptedWithRealSandbox:
         _session = await docker_harness.start("validation probe", tools=["bash"])
 
         # Run the startup validation against the real pool — must pass
-        await validate_workspace_root_against_sessions(
-            docker_harness._pool, service="test"
-        )
+        await validate_workspace_root_against_sessions(docker_harness._pool, service="test")
         # If we get here without RuntimeError, the canonical path was accepted
 
 
@@ -194,8 +188,7 @@ class TestDivergentRootFailsBeforeReadiness:
             assert "workspace-root startup validation failed" in message, message
             assert "service='worker'" in message, message
             assert str(divergent_root) in message, (
-                f"diagnostic should contain the divergent root "
-                f"{divergent_root!r}: {message}"
+                f"diagnostic should contain the divergent root {divergent_root!r}: {message}"
             )
             assert "account_id=" in message, message
             assert "session_id=" in message, message
