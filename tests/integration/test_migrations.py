@@ -82,11 +82,7 @@ def _run_alembic(
     Subsequent upgrades/downgrades on already-migrated DBs always run the
     real Alembic path so upgrade→insert→upgrade and downgrade chains work.
     """
-    if (
-        _cache is not None
-        and args[0] == "upgrade"
-        and _is_virgin(db_url)
-    ):
+    if _cache is not None and args[0] == "upgrade" and _is_virgin(db_url):
         revision = args[1]
         cache_key = _resolve_head() if revision == "head" else revision
 
@@ -107,9 +103,7 @@ def _run_alembic(
             # Ensure template exists, then clone.
             tmpl_name = _cache._ensure_template(cache_key, extra_env=extra_env)
             with psycopg.connect(admin_url, autocommit=True) as adm:
-                adm.execute(
-                    f'CREATE DATABASE "{target_dbname}" TEMPLATE "{tmpl_name}"'
-                )
+                adm.execute(f'CREATE DATABASE "{target_dbname}" TEMPLATE "{tmpl_name}"')
             return subprocess.CompletedProcess(args, 0, "", "")
 
     return _run_alembic_raw(args, db_url, extra_env=extra_env)
@@ -164,7 +158,7 @@ def _run_alembic_raw(
 
 @pytest.fixture(autouse=True, scope="session")
 def _install_migration_cache(
-    migration_template_cache: "MigrationTemplateCache",
+    migration_template_cache: MigrationTemplateCache,
 ) -> None:
     """Wire the session-scoped template cache into ``_run_alembic``."""
     install_cache(migration_template_cache)

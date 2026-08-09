@@ -35,9 +35,7 @@ def _run_alembic_with_env(
     shared ``_run_alembic`` with ``extra_env``, benefiting from the
     template-clone cache on virgin DBs.
     """
-    return _run_alembic(
-        args, db_url, extra_env={"AIOS_WORKSPACE_ROOT": workspace_root}
-    )
+    return _run_alembic(args, db_url, extra_env={"AIOS_WORKSPACE_ROOT": workspace_root})
 
 
 async def _list_workspace_paths(db_url: str) -> list[tuple[str, str]]:

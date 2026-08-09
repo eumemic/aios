@@ -124,7 +124,13 @@ def postgres_container() -> Iterator[Any]:
         pytest.skip("Docker not available")
     from testcontainers.postgres import PostgresContainer
 
-    with PostgresContainer("postgres:16-alpine") as pg:
+    # Migration tests exercise every schema transition, not crash durability.
+    # Disabling synchronous disk persistence removes fsync latency from the
+    # 100+ Alembic runs while preserving PostgreSQL's SQL/transaction behavior.
+    container = PostgresContainer("postgres:16-alpine").with_command(
+        "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+    )
+    with container as pg:
         yield pg
 
 
@@ -232,9 +238,7 @@ class MigrationTemplateCache:
                     "WHERE datname = %s AND pid <> pg_backend_pid()",
                     (tmpl_name,),
                 )
-                adm.execute(
-                    f'ALTER DATABASE "{tmpl_name}" WITH is_template = true'
-                )
+                adm.execute(f'ALTER DATABASE "{tmpl_name}" WITH is_template = true')
 
             self._templates[revision] = tmpl_name
             _tmpl_log.info("template_cache: template %s ready", tmpl_name)
@@ -294,14 +298,10 @@ class MigrationTemplateCache:
                         "WHERE datname = %s AND pid <> pg_backend_pid()",
                         (tmpl_name,),
                     )
-                    adm.execute(
-                        f'ALTER DATABASE "{tmpl_name}" WITH is_template = false'
-                    )
+                    adm.execute(f'ALTER DATABASE "{tmpl_name}" WITH is_template = false')
                     adm.execute(f'DROP DATABASE IF EXISTS "{tmpl_name}"')
             except Exception:
-                _tmpl_log.warning(
-                    "template_cache: failed to drop %s", tmpl_name, exc_info=True
-                )
+                _tmpl_log.warning("template_cache: failed to drop %s", tmpl_name, exc_info=True)
             else:
                 del self._templates[revision]
 
