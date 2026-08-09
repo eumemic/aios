@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 import asyncpg
 import pytest
@@ -26,21 +28,30 @@ def _alembic_url(pg: object) -> str:
 
 
 def _run_alembic(args: list[str], db_url: str) -> subprocess.CompletedProcess[str]:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise FileNotFoundError("uv not found on PATH")
-    return subprocess.run(
-        [uv, "run", "alembic", *args],
-        cwd=PROJECT_ROOT,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
-            "AIOS_DB_URL": db_url,
-            "HOME": str(Path.home()),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    """Run Alembic in-process, avoiding 132 repeated ``uv`` interpreter boots."""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    stdout = StringIO()
+    stderr = StringIO()
+    try:
+        with (
+            mock.patch.dict(os.environ, {"AIOS_DB_URL": db_url}),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            if args[0] == "upgrade":
+                command.upgrade(cfg, args[1])
+            elif args[0] == "downgrade":
+                command.downgrade(cfg, args[1])
+            else:
+                raise ValueError(f"unsupported alembic command: {args}")
+    except Exception as exc:
+        stderr.write(str(exc))
+        return subprocess.CompletedProcess(args, 1, stdout.getvalue(), stderr.getvalue())
+    return subprocess.CompletedProcess(args, 0, stdout.getvalue(), stderr.getvalue())
 
 
 @needs_docker
