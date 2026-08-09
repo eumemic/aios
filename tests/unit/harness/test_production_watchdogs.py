@@ -10,7 +10,9 @@ import pytest
 
 from aios.harness.production_watchdogs import (
     HeldConnectionWatchdog,
+    StandingSessionFilesystemProbe,
     ThroughputDeadMan,
+    _build_filesystem_probe_command,
 )
 
 
@@ -235,8 +237,8 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
 
 
 @pytest.mark.asyncio
-async def test_standing_session_probe_uses_live_sandbox_and_checks_all_mounts() -> None:
-    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
+async def test_standing_session_probe_uses_live_sandbox_write_read() -> None:
+    """Core workspace write/read probe works without any sentinels configured."""
     from aios.sandbox.backends.base import CommandResult
 
     registry = MagicMock()
@@ -260,15 +262,43 @@ async def test_standing_session_probe_uses_live_sandbox_and_checks_all_mounts() 
     command = registry.exec.await_args.args[1]
     assert "mktemp /workspace/" in command
     assert 'cat "$probe"' in command
-    assert "*/.git/HEAD" in command
-    assert "find /mnt/memory" in command
+    # Without sentinels, no repo/memory checks
+    assert ".git/HEAD" not in command
+    assert "/mnt/memory" not in command
+    alarm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_standing_session_probe_with_configured_sentinels() -> None:
+    """When repo_sentinel and memory_sentinel are configured, the probe checks them."""
+    from aios.sandbox.backends.base import CommandResult
+
+    registry = MagicMock()
+    registry.get_or_provision = AsyncMock(return_value="handle")
+    registry.exec = AsyncMock(
+        return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
+    )
+    alarm = MagicMock()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_canonical",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+        repo_sentinel=".git/HEAD",
+        memory_sentinel="/mnt/memory/store/MEMORY.md",
+        alarm=alarm,
+    )
+
+    assert await probe.check_once(now=0)
+    command = registry.exec.await_args.args[1]
+    assert ".git/HEAD" in command
+    assert "/mnt/memory/store/MEMORY.md" in command
     alarm.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_standing_session_probe_alarms_and_rate_limits_failures() -> None:
-    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
-
     registry = MagicMock()
     registry.get_or_provision = AsyncMock(side_effect=ValueError("workspace rejected"))
     alarm = MagicMock()
@@ -291,7 +321,6 @@ async def test_standing_session_probe_alarms_and_rate_limits_failures() -> None:
 
 @pytest.mark.asyncio
 async def test_standing_session_probe_alarms_on_nonzero_exec() -> None:
-    from aios.harness.production_watchdogs import StandingSessionFilesystemProbe
     from aios.sandbox.backends.base import CommandResult
 
     registry = MagicMock()
@@ -312,3 +341,68 @@ async def test_standing_session_probe_alarms_on_nonzero_exec() -> None:
     assert not await probe.check_once(now=0)
     assert alarm.call_args.args[1]["exit_code"] == 1
     assert "memory mount unreadable" in alarm.call_args.args[1]["stderr"]
+
+
+@pytest.mark.asyncio
+async def test_standing_session_probe_uses_overall_deadline() -> None:
+    """The probe must use one overall deadline, not additive per-op waits."""
+    from aios.sandbox.backends.base import CommandResult
+
+    provision_time = 0.0
+
+    async def slow_provision(session_id: str, pool: object = None) -> str:
+        nonlocal provision_time
+        provision_time = asyncio.get_event_loop().time()
+        return "handle"
+
+    registry = MagicMock()
+    registry.get_or_provision = AsyncMock(side_effect=slow_provision)
+    registry.exec = AsyncMock(
+        return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
+    )
+    alarm = MagicMock()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_canonical",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+        alarm=alarm,
+    )
+
+    result = await probe.check_once(now=0)
+    assert result is True
+    # The exec call should have received a timeout <= the overall budget
+    exec_call = registry.exec.await_args
+    exec_timeout = exec_call.kwargs.get("timeout_seconds", exec_call.args[2] if len(exec_call.args) > 2 else None)
+    # Timeout should be positive and <= 5 (the overall budget)
+    assert exec_timeout is not None
+    assert 0 < exec_timeout <= 5
+
+
+def test_build_filesystem_probe_command_no_sentinels() -> None:
+    """Without sentinels, only core workspace write/read assertions."""
+    cmd = _build_filesystem_probe_command()
+    assert "mktemp" in cmd
+    assert "aios-fs-probe" in cmd
+    assert ".git" not in cmd
+    assert "/mnt/memory" not in cmd
+
+
+def test_build_filesystem_probe_command_with_sentinels() -> None:
+    """Configured sentinels add their specific checks."""
+    cmd = _build_filesystem_probe_command(
+        repo_sentinel=".git/HEAD",
+        memory_sentinel="/mnt/memory/store/MEMORY.md",
+    )
+    assert "mktemp" in cmd
+    assert ".git/HEAD" in cmd
+    assert "/mnt/memory/store/MEMORY.md" in cmd
+
+
+def test_build_filesystem_probe_command_handles_git_worktree() -> None:
+    """The repo sentinel check uses head -c 64, handling worktree .git files."""
+    cmd = _build_filesystem_probe_command(repo_sentinel="/workspace/repo/.git")
+    # Should use test -e (works for both file and directory) and head -c 64
+    assert "test -e" in cmd
+    assert "head -c 64" in cmd

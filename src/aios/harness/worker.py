@@ -643,6 +643,12 @@ async def worker_main() -> None:
                 filesystem_probe_timeout_seconds=(
                     settings.standing_session_filesystem_probe_timeout_seconds
                 ),
+                filesystem_probe_repo_sentinel=(
+                    settings.standing_session_filesystem_probe_repo_sentinel
+                ),
+                filesystem_probe_memory_sentinel=(
+                    settings.standing_session_filesystem_probe_memory_sentinel
+                ),
             ),
             name="production_watchdogs",
         )

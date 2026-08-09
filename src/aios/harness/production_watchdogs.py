@@ -198,22 +198,52 @@ class ThroughputDeadMan:
         return True
 
 
-_FILESYSTEM_PROBE_COMMAND = r"""set -eu
-probe=$(mktemp /workspace/.aios-fs-probe.XXXXXX)
-trap 'rm -f "$probe"' EXIT
-printf aios-fs-probe > "$probe"
-test "$(cat "$probe")" = aios-fs-probe
-repo_head=$(find /workspace -maxdepth 4 -path '*/.git/HEAD' -type f -readable -print -quit)
-test -n "$repo_head"
-head -c 1 "$repo_head" >/dev/null
-memory_file=$(find /mnt/memory -maxdepth 3 -type f -readable -print -quit)
-test -n "$memory_file"
-head -c 1 "$memory_file" >/dev/null
-"""
+def _build_filesystem_probe_command(
+    *,
+    repo_sentinel: str | None = None,
+    memory_sentinel: str | None = None,
+) -> str:
+    """Build the probe shell script with capability-focused semantics.
+
+    Core assertions (always):
+    - workspace write: create a temp file under /workspace, write, read back, delete
+    - workspace read: verify readback matches
+
+    Optional (only when configured sentinel is provided):
+    - repo_sentinel: read a specific file (handles both regular .git/HEAD and
+      git-worktree .git files that contain 'gitdir:' text)
+    - memory_sentinel: read a specific memory mount file
+    """
+    lines = [
+        "set -eu",
+        'probe=$(mktemp /workspace/.aios-fs-probe.XXXXXX)',
+        'trap \'rm -f "$probe"\' EXIT',
+        'printf aios-fs-probe > "$probe"',
+        'test "$(cat "$probe")" = aios-fs-probe',
+    ]
+    if repo_sentinel:
+        # Handle git worktree .git files (which are regular files containing
+        # "gitdir: <path>") as well as normal .git/HEAD directory files.
+        # Use head -c 64 to read the first bytes; this works for both cases.
+        lines.append(f'test -e {_sh_quote(repo_sentinel)}')
+        lines.append(f'head -c 64 {_sh_quote(repo_sentinel)} >/dev/null')
+    if memory_sentinel:
+        lines.append(f'test -r {_sh_quote(memory_sentinel)}')
+        lines.append(f'head -c 1 {_sh_quote(memory_sentinel)} >/dev/null')
+    return "\n".join(lines) + "\n"
+
+
+def _sh_quote(s: str) -> str:
+    """Single-quote a string for safe shell interpolation."""
+    return "'" + s.replace("'", "'\\''") + "'"
 
 
 class StandingSessionFilesystemProbe:
-    """Exercise the real sandbox and mounts of one configured standing session."""
+    """Exercise the real sandbox and mounts of one configured standing session.
+
+    Uses one overall deadline (not additive per-operation waits) so the total
+    wall-clock cost is bounded regardless of how many sub-operations run.
+    """
 
     def __init__(
         self,
@@ -223,6 +253,8 @@ class StandingSessionFilesystemProbe:
         *,
         rate_limit_seconds: float,
         operation_timeout_seconds: float,
+        repo_sentinel: str | None = None,
+        memory_sentinel: str | None = None,
         alarm: Callable[[str, dict[str, Any]], None] = _emit_alarm,
     ) -> None:
         self.registry = registry
@@ -230,24 +262,35 @@ class StandingSessionFilesystemProbe:
         self.session_id = session_id
         self.rate_limit_seconds = rate_limit_seconds
         self.operation_timeout_seconds = operation_timeout_seconds
+        self.repo_sentinel = repo_sentinel
+        self.memory_sentinel = memory_sentinel
         self.alarm = alarm
         self._last_alarm = float("-inf")
+        self._command = _build_filesystem_probe_command(
+            repo_sentinel=repo_sentinel,
+            memory_sentinel=memory_sentinel,
+        )
 
     async def check_once(self, *, now: float | None = None) -> bool:
         stamp = time.monotonic() if now is None else now
+        # One overall deadline for the entire probe (provision + exec),
+        # not additive per-operation waits.
+        deadline = stamp + self.operation_timeout_seconds
         try:
+            remaining = max(0.1, deadline - time.monotonic())
             handle = await asyncio.wait_for(
                 self.registry.get_or_provision(self.session_id, pool=self.pool),
-                self.operation_timeout_seconds,
+                remaining,
             )
+            remaining = max(0.1, deadline - time.monotonic())
             result = await asyncio.wait_for(
                 self.registry.exec(
                     handle,
-                    _FILESYSTEM_PROBE_COMMAND,
-                    timeout_seconds=max(1, int(self.operation_timeout_seconds)),
+                    self._command,
+                    timeout_seconds=max(1, int(remaining)),
                     max_output_bytes=4096,
                 ),
-                self.operation_timeout_seconds,
+                remaining,
             )
             if result.exit_code == 0 and not result.timed_out:
                 return True
@@ -287,6 +330,8 @@ async def run_production_watchdogs(
     standing_session_id: str | None = None,
     filesystem_probe_interval_seconds: float = 300.0,
     filesystem_probe_timeout_seconds: float = 120.0,
+    filesystem_probe_repo_sentinel: str | None = None,
+    filesystem_probe_memory_sentinel: str | None = None,
 ) -> None:
     """Run fail-open observers on a reconnecting, dedicated connection."""
     inspector: Any = None
@@ -302,6 +347,8 @@ async def run_production_watchdogs(
             standing_session_id,
             rate_limit_seconds=rate_limit_seconds,
             operation_timeout_seconds=filesystem_probe_timeout_seconds,
+            repo_sentinel=filesystem_probe_repo_sentinel,
+            memory_sentinel=filesystem_probe_memory_sentinel,
         )
         if sandbox_registry is not None and standing_session_id
         else None

@@ -88,13 +88,19 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("api.startup", db_url=_redact_dsn(settings.db_url))
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-        crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-        async with pool.acquire() as conn:
-            await queries.audit_credentialless_root(conn)
-        from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+        try:
+            crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+            async with pool.acquire() as conn:
+                await queries.audit_credentialless_root(conn)
+            from aios.sandbox.workspace_root_startup import (
+                validate_workspace_root_against_sessions,
+            )
 
-        await validate_workspace_root_against_sessions(pool, service="api")
-        await procrastinate_app.open_async()
+            await validate_workspace_root_against_sessions(pool, service="api")
+            await procrastinate_app.open_async()
+        except BaseException:
+            await pool.close()
+            raise
         app.state.pool = pool
         app.state.crypto_box = crypto_box
         app.state.procrastinate = procrastinate_app
