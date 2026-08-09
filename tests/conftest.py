@@ -127,12 +127,457 @@ def postgres_container() -> Iterator[Any]:
     # Migration tests exercise every schema transition, not crash durability.
     # Disabling synchronous disk persistence removes fsync latency from the
     # 100+ Alembic runs while preserving PostgreSQL's SQL/transaction behavior.
-    container = (
-        PostgresContainer("postgres:16-alpine")
-        .with_command("postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off")
-        # Keep ephemeral database files out of overlayfs.  The suite validates
-        # SQL and every migration transition, not persistence across restarts.
-        .with_kwargs(tmpfs={"/var/lib/postgresql/data": "rw"})
+    container = PostgresContainer("postgres:16-alpine").with_command(
+        "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
     )
     with container as pg:
         yield pg
+
+
+@dataclass
+class IsolatedPostgres:
+    """PostgresContainer-compatible connection metadata for an isolated DB."""
+
+    container: Any
+    dbname: str
+
+    @property
+    def username(self) -> str:
+        return str(self.container.username)
+
+    @property
+    def password(self) -> str:
+        return str(self.container.password)
+
+    def get_container_host_ip(self) -> str:
+        return str(self.container.get_container_host_ip())
+
+    def get_exposed_port(self, port: int) -> str:
+        return str(self.container.get_exposed_port(port))
+
+
+def _admin_url(container: Any) -> str:
+    """Return a psycopg-compatible admin URL for the container's default DB."""
+    return (
+        f"postgresql://{container.username}:{container.password}@"
+        f"{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
+    )
+
+
+class MigrationTemplateCache:
+    """Session-scoped cache of pre-migrated PostgreSQL template databases.
+
+    Each unique Alembic revision is migrated exactly once into a template
+    DB (``tmpl_<rev>``).  Test databases are then created via
+    ``CREATE DATABASE ... TEMPLATE tmpl_<rev>`` — an O(fsync) copy that
+    skips the full migration replay.
+
+    Thread-safe: multiple xdist workers in the same process (or parallel
+    fixture setup) serialize on ``_lock``.
+    """
+
+    def __init__(self, container: Any) -> None:
+        self._container = container
+        self._admin_url = _admin_url(container)
+        self._lock = threading.Lock()
+        # revision -> template dbname
+        self._templates: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def clone_for_revision(
+        self,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> IsolatedPostgres:
+        """Return an ``IsolatedPostgres`` cloned from the template at *revision*.
+
+        If no template exists for *revision* yet, one is created (migrate
+        from scratch, then mark ``is_template = true``).  The returned DB
+        is a private copy the caller can mutate freely.
+        """
+        tmpl_name = self._ensure_template(revision, extra_env=extra_env)
+        return self._clone_from(tmpl_name)
+
+    def has_template(self, revision: str) -> bool:
+        return revision in self._templates
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _ensure_template(
+        self,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        with self._lock:
+            if revision in self._templates:
+                return self._templates[revision]
+
+            import psycopg
+
+            tmpl_name = f"tmpl_{revision}"
+            _tmpl_log.info("template_cache: creating template %s", tmpl_name)
+
+            with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                adm.execute(f'CREATE DATABASE "{tmpl_name}"')
+
+            # Run migrations on the template DB.
+            tmpl_url = self._db_url(tmpl_name)
+            self._migrate(tmpl_url, revision, extra_env=extra_env)
+
+            # Terminate all connections before marking as template.
+            with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                adm.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (tmpl_name,),
+                )
+                adm.execute(f'ALTER DATABASE "{tmpl_name}" WITH is_template = true')
+
+            self._templates[revision] = tmpl_name
+            _tmpl_log.info("template_cache: template %s ready", tmpl_name)
+            return tmpl_name
+
+    def _clone_from(self, tmpl_name: str) -> IsolatedPostgres:
+        import psycopg
+
+        dbname = f"test_{secrets.token_hex(8)}"
+        with psycopg.connect(self._admin_url, autocommit=True) as adm:
+            adm.execute(f'CREATE DATABASE "{dbname}" TEMPLATE "{tmpl_name}"')
+        return IsolatedPostgres(self._container, dbname)
+
+    def _db_url(self, dbname: str) -> str:
+        c = self._container
+        return (
+            f"postgresql://{c.username}:{c.password}@"
+            f"{c.get_container_host_ip()}:{c.get_exposed_port(5432)}/{dbname}"
+        )
+
+    @staticmethod
+    def _migrate(
+        db_url: str,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        """Run Alembic upgrade to *revision* in-process."""
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+        env_patch = {"AIOS_DB_URL": db_url}
+        if extra_env:
+            env_patch.update(extra_env)
+        with (
+            mock.patch.dict(os.environ, env_patch),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            command.upgrade(cfg, revision)
+
+    def cleanup(self) -> None:
+        """Drop all template databases.  Called at session teardown."""
+        import psycopg
+
+        for revision, tmpl_name in list(self._templates.items()):
+            try:
+                with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                    adm.execute(
+                        "SELECT pg_terminate_backend(pid) "
+                        "FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (tmpl_name,),
+                    )
+                    adm.execute(f'ALTER DATABASE "{tmpl_name}" WITH is_template = false')
+                    adm.execute(f'DROP DATABASE IF EXISTS "{tmpl_name}"')
+            except Exception:
+                _tmpl_log.warning("template_cache: failed to drop %s", tmpl_name, exc_info=True)
+            else:
+                del self._templates[revision]
+
+
+def _isolated_postgres(container: Any) -> Iterator[IsolatedPostgres]:
+    """Create a fresh database inside the worker's reusable Postgres container."""
+    import psycopg
+
+    dbname = f"test_{secrets.token_hex(8)}"
+    admin = _admin_url(container)
+    with psycopg.connect(admin, autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{dbname}"')
+    try:
+        yield IsolatedPostgres(container, dbname)
+    finally:
+        with psycopg.connect(admin, autocommit=True) as conn:
+            conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (dbname,),
+            )
+            conn.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+
+
+@pytest.fixture(scope="session")
+def migration_template_cache(postgres_container: Any) -> Iterator[MigrationTemplateCache]:
+    """Session-scoped template DB cache for migration tests.
+
+    Revisions are migrated once; tests get cheap ``CREATE DATABASE ... TEMPLATE``
+    clones instead of replaying the full migration chain from scratch.
+    """
+    cache = MigrationTemplateCache(postgres_container)
+    yield cache
+    cache.cleanup()
+
+
+@pytest.fixture
+def postgres(postgres_container: Any) -> Iterator[IsolatedPostgres]:
+    """Fresh database per migration test, reusing one worker container."""
+    yield from _isolated_postgres(postgres_container)
+
+
+@pytest.fixture(scope="module")
+def module_postgres(postgres_container: Any) -> Iterator[IsolatedPostgres]:
+    """Fresh database for read-only migration modules, reusing one container."""
+    yield from _isolated_postgres(postgres_container)
+
+
+@pytest.fixture(scope="session")
+def db_url(postgres_container: Any) -> str:
+    host = postgres_container.get_container_host_ip()
+    port = postgres_container.get_exposed_port(5432)
+    user = postgres_container.username
+    password = postgres_container.password
+    db = postgres_container.dbname
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+
+@pytest.fixture(scope="session")
+def migrated_db_url(db_url: str) -> str:
+    """Run alembic upgrade head against the testcontainer, then apply the
+    procrastinate schema and the aios lock-release trigger. Returns the URL."""
+    import asyncio
+
+    from aios.db.migrations import apply_procrastinate_schema, upgrade_to_head
+
+    upgrade_to_head(db_url)
+    asyncio.run(apply_procrastinate_schema(db_url))
+    return db_url
+
+
+@pytest.fixture(scope="session")
+def _truncate_sql(migrated_db_url: str) -> str:
+    """Pre-built ``TRUNCATE`` statement covering every public-schema table.
+
+    The schema is fixed once :func:`migrated_db_url` has run, so the
+    ``pg_tables`` lookup belongs at session scope, not in every
+    :func:`_reset_db_state` call.  Eliminating the per-test catalog scan
+    shaves ~3 ms per test off the e2e suite.
+    """
+    import asyncio
+
+    import asyncpg
+
+    async def fetch() -> str:
+        conn = await asyncpg.connect(migrated_db_url)
+        try:
+            rows = await conn.fetch(
+                # ``alembic_version`` is schema-version *metadata*, not test
+                # data: it is stamped once by :func:`migrated_db_url` and must
+                # survive the per-test reset.  Truncating it leaves the DB
+                # reading as "unmigrated" (``version_num`` empty), which the
+                # boot-admission gate (tests/integration/test_boot_admission_gate_db.py)
+                # correctly treats as behind every ``contract_rev`` — so the
+                # clean-DB case wrongly raises ``DatabaseBehindContract``.
+                # Exclude it from the truncate so reset clears rows, not schema.
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+            )
+        finally:
+            await conn.close()
+        if not rows:
+            return ""
+        quoted = ", ".join(f'"{r["tablename"]}"' for r in rows)
+        return f"TRUNCATE {quoted} RESTART IDENTITY CASCADE"
+
+    return asyncio.run(fetch())
+
+
+@pytest.fixture
+async def _reset_db_state(migrated_db_url: str, _truncate_sql: str) -> AsyncIterator[Any]:
+    """TRUNCATE every public-schema table before each test, yielding the
+    connection so downstream fixtures (``aios_env``) can reuse it instead
+    of opening their own.
+
+    Restores the cross-test isolation that module-scoped Postgres used to
+    provide.  ``TRUNCATE`` is metadata-only in Postgres, so this is
+    O(tables) regardless of row count.
+    """
+    import asyncpg
+
+    conn = await asyncpg.connect(migrated_db_url)
+    try:
+        if _truncate_sql:
+            await conn.execute(_truncate_sql)
+        yield conn
+    finally:
+        await conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _reset_sse_starlette_shutdown_state() -> Iterator[None]:
+    """Neutralize sse-starlette's cross-test ``AppStatus.should_exit`` contamination.
+
+    ``sse-starlette.sse.AppStatus`` is a module-level class with a class-attribute
+    ``should_exit`` flag plus a per-thread background watcher that polls a captured
+    ``uvicorn.Server`` instance.  When an in-process uvicorn fixture's teardown sets
+    ``server.should_exit = True``, the watcher (if it has had time to poll —
+    interval is 0.5 s) latches the global ``AppStatus.should_exit = True`` and is
+    never reset.  Every later test's first SSE request then sees
+    ``AppStatus.should_exit`` is True at the top of
+    :func:`sse_starlette.sse._listen_for_exit_signal`, which returns immediately,
+    triggering :func:`cancel_on_finish` in the SSE :class:`EventSourceResponse`'s
+    task group and killing the SSE generator before its body iterator yields
+    anything.  The client sees ``peer closed connection without sending complete
+    message body``; the server logs ``ASGI callable returned without completing
+    response.``
+
+    The watcher firing is timing-dependent — fast hosts (developer laptops) often
+    finish a test before the next 0.5 s poll, so contamination doesn't latch.  CI
+    hosts (slower Ubuntu runners) routinely lose the race, which is why the three
+    connector e2e tests (signal register/captcha, telegram multi-connection) flaked
+    in CI but never locally.  Tearing the flag back to False before each test
+    breaks the contamination chain without disabling the watcher entirely (kept
+    on so production deployments still observe SIGTERM-triggered graceful drain).
+    See aios#365.
+    """
+    from sse_starlette.sse import AppStatus
+
+    AppStatus.should_exit = False
+    yield
+    AppStatus.should_exit = False
+
+
+@pytest.fixture
+def aios_env_minimal(
+    migrated_db_url: str, _reset_db_state: Any, tmp_path: Path
+) -> Iterator[dict[str, str]]:
+    """Set the env vars the FastAPI app needs, without seeding any data.
+
+    Use this when the test specifically needs a fresh-install state —
+    e.g. the bootstrap-endpoint tests, which expect no root account
+    to exist yet. Most tests want :func:`aios_env`, which layers a
+    bootstrapped root on top so the auth dep accepts ``AIOS_API_KEY``
+    as a bearer token without further setup.
+    """
+    env_vars = {
+        "AIOS_API_KEY": "aios_" + secrets.token_urlsafe(32),
+        "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        "AIOS_DB_URL": migrated_db_url,
+        "AIOS_WORKSPACE_ROOT": str(tmp_path / "workspaces"),
+        # Tests exercise the production default. Legacy env-key behavior is opt-in.
+        "AIOS_INFERENCE_CREDENTIAL_POLICY": "account_only",
+        # Issue #807: point the docker_harness-driven e2e provisions at the
+        # repo's authored seccomp profile. The config default resolves to the
+        # baked /app/docker path, which doesn't exist on the host running the
+        # tests; this overrides it to the in-tree file so seccomp is actually
+        # enforced on e2e sandboxes (e.g. the Limited-provision regression).
+        "AIOS_SANDBOX_SECCOMP_PROFILE": str(
+            Path(__file__).parents[1] / "docker" / "seccomp-sandbox.json"
+        ),
+    }
+    with mock.patch.dict(os.environ, env_vars):
+        from aios.config import get_settings
+
+        get_settings.cache_clear()
+        yield env_vars
+        get_settings.cache_clear()
+
+
+@pytest.fixture
+async def aios_env(aios_env_minimal: dict[str, str], _reset_db_state: Any) -> dict[str, str]:
+    """Env vars + a bootstrapped root whose key is ``AIOS_API_KEY``.
+
+    Auth looks the bearer token up against ``account_keys``, so any
+    test that hits an authenticated route needs a matching DB row.
+    This fixture seeds that row using ``AIOS_API_KEY``'s sha256 hash.
+
+    Reuses the connection yielded by :func:`_reset_db_state` to dodge
+    a second ``asyncpg.connect`` round-trip per test (~27 ms).
+
+    Async so the seed step runs on the same event loop pytest-asyncio
+    drives the test on — avoids the spurious ``asyncio.run`` event-loop
+    isolation that caused ASGI-callable teardown flakiness in CI.
+    """
+    from aios.services.accounts import hash_key
+
+    plaintext = aios_env_minimal["AIOS_API_KEY"]
+    conn = _reset_db_state
+
+    # PR 6: insert ``acc_test_stub`` as the root account itself and bind
+    # the bootstrap API key directly to it, so auth resolves the bearer
+    # to the same account_id every test body uses as its scoping arg.
+    # Bypasses ``bootstrap_root_account`` (which would generate a fresh
+    # ULID we'd have to thread back through 44 test files).
+    await conn.execute(
+        """
+        INSERT INTO accounts
+            (id, parent_account_id, can_mint_children, display_name)
+        VALUES ('acc_test_stub', NULL, TRUE, 'test-root')
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO account_keys (key_id, account_id, hash, label)
+        VALUES ('akey_test', 'acc_test_stub', $1, 'test-root')
+        """,
+        hash_key(plaintext),
+    )
+    return aios_env_minimal
+
+
+@pytest.fixture(autouse=True)
+def _configure_structlog_for_tests() -> Iterator[None]:
+    """Configure structlog before every test so caplog captures all messages.
+
+    Two changes vs. structlog's bare default (which is what tests see when
+    nothing calls aios.logging.configure_logging at process start):
+
+    1. logger_factory=structlog.stdlib.LoggerFactory() — routes log records
+       through Python's stdlib logging, which is what caplog hooks. The bare
+       default uses PrintLoggerFactory, which writes to stdout and is invisible
+       to caplog.
+
+    2. cache_logger_on_first_use=False — modules with module-level
+       log = structlog.get_logger() bind their config on first call. Caching
+       freezes that binding, so tests reconfiguring structlog (e.g., here)
+       cannot affect already-bound loggers. Disabling caching costs ~1us
+       per call to rebind — negligible at test-suite scale.
+
+    Function scope (not session) is deliberate: mid-suite code reconfigures
+    structlog and would otherwise leak across tests. ``aios.api.app.create_app``
+    calls ``aios.logging.configure_logging`` (which sets
+    cache_logger_on_first_use=True), and the ``capture_logs`` fixtures in
+    test_db_pool.py / test_worker_exit_diagnostics.py call
+    ``structlog.reset_defaults()`` in teardown. A once-per-session fixture
+    cannot defend against either — re-applying before each test does.
+    """
+    current = structlog.get_config()
+    structlog.configure(
+        **{
+            **current,
+            "logger_factory": structlog.stdlib.LoggerFactory(),
+            "cache_logger_on_first_use": False,
+        }
+    )
+    yield
+    structlog.configure(**current)
