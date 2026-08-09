@@ -454,13 +454,60 @@ class SandboxRegistry:
         step — same as before this fix. The probe removes the *steady-
         state* staleness (a container that died turns sweeps earlier),
         not every TOCTOU window.
+
+        **Probe ownership revocation (issue #2064, finding #1 warm-hit
+        race):** both the lock-free warm-hit early return and the
+        under-lock warm-hit path atomically revoke any probe ownership
+        token before returning.  The lock-free path checks
+        ``_probe_generations`` without the lock (the common case has no
+        token — fast path stays lock-free) and takes the per-session lock
+        only when a token exists.  Under the lock it revokes the token
+        AND revalidates that the handle is still current in ``_handles``:
+        if ``probe_release`` won the lock first and released handle A,
+        the consumer must NOT return the stale reference — it falls
+        through to the cold-provision path.  The lock-free membership
+        check is safe because ``probe_acquire`` only stamps a token when
+        ``_handles`` is empty under the same lock, so no new token can
+        race into existence for an already-resident handle.
         """
         handle = self._handles.get(session_id)
         spec_version_drifted = False
         if handle is not None and await self._backend.is_alive(handle):
             if pool is None or not await self._spec_version_changed(session_id, handle, pool):
                 self._last_used[session_id] = time.monotonic()
-                return handle
+                # Atomically revoke any probe ownership so a subsequent
+                # probe_release cannot tear down the sandbox this real
+                # consumer just reused.  The revocation MUST be under the
+                # per-session lock because probe_release's check-then-act
+                # (read token -> compare handle -> call release) is itself
+                # serialised by that lock.
+                #
+                # Lock-free membership check is safe: a new probe token
+                # cannot race into existence for an already-resident handle
+                # because probe_acquire takes the same per-session lock and
+                # only stamps a token when _handles is empty under the lock.
+                # So if handle is in _handles here, no concurrent
+                # probe_acquire can stamp a NEW token for it.
+                #
+                # Under the lock we must REVALIDATE that handle is still
+                # current: if probe_release won the lock first, it may have
+                # released/destroyed handle A.  In that case we must NOT
+                # return the stale handle — fall through to the cold-
+                # provision path below instead.
+                if session_id in self._probe_generations:
+                    async with self._lock_for(session_id):
+                        self._probe_generations.pop(session_id, None)
+                        current = self._handles.get(session_id)
+                        if current is not handle:
+                            # probe_release won the lock and released our
+                            # handle.  Fall through to re-provision below
+                            # (stale/handle variables are set for the cold
+                            # path; spec_version_drifted stays False).
+                            pass
+                        else:
+                            return handle
+                else:
+                    return handle
             spec_version_drifted = True
             log.info(
                 "sandbox.spec_version_drift_recycling",
@@ -481,6 +528,7 @@ class SandboxRegistry:
             current = self._handles.get(session_id)
             if current is not None and current is not stale:
                 self._last_used[session_id] = time.monotonic()
+                self._probe_generations.pop(session_id, None)
                 return current
             if current is not None:
                 if spec_version_drifted:

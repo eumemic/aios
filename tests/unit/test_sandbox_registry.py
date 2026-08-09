@@ -1926,3 +1926,169 @@ class TestProbeAtomicLease:
         assert lease.owned is False
         assert lease.handle is consumer_handle
         assert not gate.is_set()
+
+
+class TestProbeWarmHitRevocation:
+    """Exact regression for the warm-hit probe ownership race (issue #2064,
+    reviewer comment #5231938571).
+
+    The race: probe cold-provisions A with token T → real consumer calls
+    ``get_or_provision``, takes the lock-free warm-hit path, reuses the
+    SAME handle A → ``probe_release(T)`` sees token and handle still
+    match → releases A under the consumer.
+
+    The fix: ``get_or_provision`` acquires the per-session lock when a
+    probe generation exists, revokes the token, and REVALIDATES that
+    the handle is still current under the lock.  If ``probe_release``
+    won the lock first and released/destroyed the handle, the consumer
+    falls through to cold-provision a replacement rather than returning
+    the stale reference.
+    """
+
+    async def test_probe_cold_provisions_then_warm_hit_reuse_then_release_noop(self) -> None:
+        """Exact sequence required by the reviewer:
+        1. probe cold-provisions A with token T
+        2. real get_or_provision reuses SAME A (warm hit)
+        3. probe_release(T) is a no-op and A remains resident
+        """
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        probe_handle = make_handle(session_id="sess_race", sandbox_id="handle_A")
+
+        with patch.object(
+            registry,
+            "_provision_with_span",
+            AsyncMock(return_value=probe_handle),
+        ):
+            lease = await registry.probe_acquire("sess_race")
+
+        assert lease.owned is True
+        assert lease.token is not None
+        token_T = lease.token
+        assert registry._probe_generations.get("sess_race") == (token_T, probe_handle)
+
+        # Step 2: real consumer warm-hit.  Must atomically revoke token.
+        result = await registry.get_or_provision("sess_race")
+        assert result is probe_handle
+        assert "sess_race" not in registry._probe_generations
+
+        # Step 3: probe_release(T) must be a no-op.
+        released = await registry.probe_release("sess_race", token_T)
+        assert released is False
+        assert registry._handles.get("sess_race") is probe_handle
+
+    async def test_consumer_wins_lock_release_noop_A_survives(self) -> None:
+        """Deterministic interleave: consumer wins the lock first.
+
+        Sequence:
+        1. probe cold-provisions A with T
+        2. consumer warm-hit sees token, acquires lock FIRST, revokes
+           token, revalidates A still current, returns A
+        3. probe_release(T) finds no token → no-op, A survives
+        """
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        probe_handle = make_handle(session_id="sess_cw", sandbox_id="handle_A")
+
+        with patch.object(
+            registry,
+            "_provision_with_span",
+            AsyncMock(return_value=probe_handle),
+        ):
+            lease = await registry.probe_acquire("sess_cw")
+        token_T = lease.token
+
+        # Consumer goes first (sequential — deterministic "consumer wins"):
+        result = await registry.get_or_provision("sess_cw")
+        assert result is probe_handle
+        assert "sess_cw" not in registry._probe_generations
+
+        # probe_release after consumer — no-op, A survives:
+        released = await registry.probe_release("sess_cw", token_T)
+        assert released is False
+        assert registry._handles.get("sess_cw") is probe_handle
+
+    async def test_release_wins_lock_consumer_provisions_replacement(self) -> None:
+        """Deterministic interleave: probe_release wins the lock first.
+
+        Sequence:
+        1. probe cold-provisions A with T
+        2. consumer warm-hit sees A alive, sees token in
+           _probe_generations, prepares to acquire lock
+        3. probe_release(T) acquires lock FIRST, releases/destroys A
+        4. consumer acquires lock, revalidates: A is no longer in
+           _handles → falls through to cold-provision path, provisions
+           replacement B
+        5. consumer returns B (NOT stale A)
+        """
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        probe_handle = make_handle(session_id="sess_rw", sandbox_id="handle_A")
+
+        with patch.object(
+            registry,
+            "_provision_with_span",
+            AsyncMock(return_value=probe_handle),
+        ):
+            lease = await registry.probe_acquire("sess_rw")
+        token_T = lease.token
+
+        # probe_release goes first (sequential — deterministic "release wins"):
+        released = await registry.probe_release("sess_rw", token_T)
+        assert released is True
+        assert "sess_rw" not in registry._handles
+
+        # Consumer now calls get_or_provision.  A is gone, so it must
+        # cold-provision a replacement.
+        replacement = make_handle(session_id="sess_rw", sandbox_id="handle_B")
+        with patch.object(
+            registry,
+            "_provision_with_span",
+            AsyncMock(return_value=replacement),
+        ):
+            result = await registry.get_or_provision("sess_rw")
+
+        assert result is replacement
+        assert result is not probe_handle, "must NOT return stale released A"
+        assert registry._handles.get("sess_rw") is replacement
+
+    async def test_under_lock_warm_hit_also_revokes_probe_ownership(self) -> None:
+        """The under-lock warm-hit path (a concurrent caller already
+        recycled+reprovisioned while we waited for the lock) must also
+        revoke probe ownership."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        handle_a = make_handle(session_id="sess_lock", sandbox_id="handle_A")
+        registry._handles["sess_lock"] = handle_a
+        registry._last_used["sess_lock"] = 0.0
+        registry._probe_generations["sess_lock"] = (42, handle_a)
+
+        # Mark handle_a as dead so get_or_provision takes the lock path,
+        # then simulate a concurrent caller having replaced it under the lock.
+        backend.dead_sandbox_ids.add("handle_A")
+
+        new_handle = make_handle(session_id="sess_lock", sandbox_id="handle_B")
+        original_lock_for = registry._lock_for
+
+        class _InjectNewHandle:
+            def __init__(self, session_id: str):
+                self._real = original_lock_for(session_id)
+
+            async def __aenter__(self):
+                result = await self._real.__aenter__()
+                registry._handles["sess_lock"] = new_handle
+                registry._last_used["sess_lock"] = 1.0
+                return result
+
+            async def __aexit__(self, *args: Any):
+                return await self._real.__aexit__(*args)
+
+        with patch.object(registry, "_lock_for", lambda sid: _InjectNewHandle(sid)):
+            result = await registry.get_or_provision("sess_lock")
+
+        assert result is new_handle
+        assert "sess_lock" not in registry._probe_generations
