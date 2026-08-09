@@ -127,8 +127,12 @@ def postgres_container() -> Iterator[Any]:
     # Migration tests exercise every schema transition, not crash durability.
     # Disabling synchronous disk persistence removes fsync latency from the
     # 100+ Alembic runs while preserving PostgreSQL's SQL/transaction behavior.
-    container = PostgresContainer("postgres:16-alpine").with_command(
-        "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+    container = (
+        PostgresContainer("postgres:16-alpine")
+        .with_command(
+            "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+        )
+        .with_kwargs(tmpfs={"/var/lib/postgresql/data": "rw"})
     )
     with container as pg:
         yield pg
