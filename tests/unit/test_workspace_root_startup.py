@@ -506,76 +506,127 @@ async def test_conn_release_timeout_raises_scan_timeout(
 
 # ── Finding 5: Process/lifespan-level divergent-root regression ───────────
 #
-# These tests exercise the REAL API lifespan and worker_main entrypoints,
-# injecting a divergent workspace root that causes
-# ``validate_workspace_root_against_sessions`` to raise the production
-# ``RuntimeError`` with the full diagnostic.  They prove:
+# These tests exercise the REAL API lifespan and worker_main entrypoints
+# with a GENUINELY divergent configured workspace root and a real persisted
+# session row, flowing through the REAL
+# ``validate_workspace_root_against_sessions`` /
+# ``validate_workspace_path``.  The validator is NEVER mocked or given an
+# injected ``side_effect`` — the ``RuntimeError`` is produced by the
+# production code path itself (a row written under one root, evaluated
+# against a divergent configured root).  They prove:
 #   - The API lifespan never reaches ``yield`` (readiness/serving).
 #   - The worker never emits ``"worker.startup"`` (readiness).
-#   - The expected diagnostic message propagates to the caller.
+#   - The production diagnostic (with the divergent root) propagates.
 #   - Resources opened before the failure are cleaned up.
 #
-# This supersedes the prior structural-only (AST position) assertions.
-
+# This supersedes the prior AST-position AND the injected-AsyncMock-validator
+# variants (aios#2064 finding #5): only the DB pool and unrelated
+# process-startup infrastructure are stubbed; the workspace-root validator
+# is the genuine article.
 
 # Diagnostic message fragment that the production validator emits on
 # divergent-root failure.  Tests match against this to confirm the real
-# error propagated, not a substitute.
+# validator produced the error.
 _DIVERGENT_ROOT_DIAGNOSTIC = "workspace-root startup validation failed"
+
+
+def _divergent_root_pool(*, session_row: dict[str, str]) -> MagicMock:
+    """A fake asyncpg pool whose single live session row drives the REAL
+    validator to reject.
+
+    ``session_row["workspace_volume_path"]`` is written under the *original*
+    workspace root; the caller has already repointed ``get_settings()``'s
+    ``workspace_root`` at a divergent directory, so
+    ``validate_workspace_path`` — running for real inside
+    ``validate_workspace_root_against_sessions`` — resolves the row outside
+    the (new, divergent) account root and raises.  Only the pool/connection
+    plumbing is faked; the validator is untouched.
+
+    Unlike :func:`_pool_releasing_conn`, this pool is robust to *other*
+    ``pool.acquire()`` callers in the same startup path (e.g. the
+    credentialless-root audit at ``worker_main`` / lifespan boot, which
+    acquires a connection to run ``audit_credentialless_root`` before the
+    validator).  Each acquired connection carries its OWN independent page
+    cursor: its first ``fetch`` returns the single session row and its next
+    returns ``[]``.  So the validator always sees exactly one page with the
+    drifting row regardless of how many unrelated acquisitions preceded it —
+    the audit's connection (which calls ``fetchval`` / ``execute``, not
+    ``fetch``) cannot consume the validator's row.
+    """
+
+    def _make_acquired() -> AsyncMock:
+        conn = AsyncMock()
+        # Per-connection page cursor: row first, then empty.
+        pages = iter([[session_row], []])
+
+        async def _fetch(*args: object, **kwargs: object) -> list[dict[str, str]]:
+            return next(pages, [])
+
+        conn.fetch.side_effect = _fetch
+        acquired = AsyncMock()
+        acquired.__aenter__.return_value = conn
+        return acquired
+
+    pool = MagicMock()
+    pool.acquire.side_effect = _make_acquired
+    return pool
 
 
 @pytest.mark.asyncio
 async def test_api_lifespan_fails_before_readiness_on_divergent_root(
-    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run the REAL API lifespan with a divergent-root RuntimeError from
-    ``validate_workspace_root_against_sessions`` and prove:
+    """Run the REAL API lifespan against a genuine divergent configured root
+    and a real persisted row flowing through the REAL validator, and prove:
       1. The lifespan never reaches ``yield`` (readiness / serving).
-      2. The RuntimeError with the full diagnostic propagates.
-      3. The pool is closed (resource cleanup).
+      2. The production divergent-root RuntimeError propagates.
+      3. The pool is closed (pre-yield resource cleanup).
+      4. Runtime globals are restored.
 
-    Uses the same ``create_app`` + ``lifespan_context`` pattern as
-    ``test_api_lifespan_resource_safety.py`` — actually executing the
-    lifespan, not reading its source.
+    The validator is NOT mocked.  A session row is persisted with a path
+    under ``original_root``; ``get_settings().workspace_root`` is then
+    repointed at ``divergent_root``; the real
+    ``validate_workspace_root_against_sessions`` resolves the row outside the
+    divergent account root and raises on its own.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from aios.api.app import create_app
     from aios.harness import runtime
 
-    # Save / restore runtime globals the lifespan mutates.
     orig_crypto = runtime.crypto_box
     orig_tp = runtime.tool_provider
 
-    # Build a fake pool and procrastinate so the lifespan can run up to
-    # the validate call without needing a real Postgres.
-    fake_pool = MagicMock()
+    # 1) A real row written under the ORIGINAL root.
+    original_root = tmp_path / "original_workspaces"
+    original_root.mkdir()
+    session_row = {
+        "id": "sess_bad",
+        "account_id": "acc_a",
+        "workspace_volume_path": str(original_root / "acc_a" / "sess_bad"),
+    }
+
+    # 2) A genuinely DIVERGENT configured root — the crux of the regression.
+    divergent_root = tmp_path / "divergent_workspaces"
+    divergent_root.mkdir()
+    monkeypatch.setattr(get_settings(), "workspace_root", divergent_root)
+
+    # The pool the lifespan will hand the REAL validator.
+    fake_pool = _divergent_root_pool(session_row=session_row)
     fake_pool.close = AsyncMock()
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=MagicMock(fetchval=AsyncMock()))
-    cm.__aexit__ = AsyncMock(return_value=None)
-    fake_pool.acquire.return_value = cm
 
     fake_procrastinate = MagicMock()
     fake_procrastinate.open_async = AsyncMock()
     fake_procrastinate.close_async = AsyncMock()
 
-    # The RuntimeError that the real validator raises on divergent root.
-    divergent_error = RuntimeError(
-        f"{_DIVERGENT_ROOT_DIAGNOSTIC}: "
-        f"service='api', workspace_root='/tmp/divergent', "
-        f"account_root='/tmp/divergent/acc_a', "
-        f"raw_path='/srv/aios/workspaces/acc_a/sess_bad', "
-        f"resolved_path='/srv/aios/workspaces/acc_a/sess_bad', "
-        f"account_id='acc_a', session_id='sess_bad'"
-    )
-
-    # Construct the app with MCP / DB infrastructure stubbed out.
+    # Construct the app.  Only startup infrastructure (pool factory, the
+    # credentialless-root audit, procrastinate, MCP mount) is stubbed — the
+    # workspace-root validator is left entirely real.
     construction_patches = {
         "aios.api.app.create_pool": AsyncMock(return_value=fake_pool),
         "aios.api.app.queries.audit_credentialless_root": AsyncMock(),
         "aios.api.app.procrastinate_app": fake_procrastinate,
-        "aios.sandbox.workspace_root_startup.validate_workspace_root_against_sessions": AsyncMock(),
         "aios.api.app._mount_mcp": lambda app: None,
     }
     ctxs = [patch(k, v) for k, v in construction_patches.items()]
@@ -587,25 +638,25 @@ async def test_api_lifespan_fails_before_readiness_on_divergent_root(
         for c in ctxs:
             c.stop()
 
-    # Now run the lifespan with the REAL divergent-root error injected
-    # at the validate call.  The validator is a late import inside the
-    # lifespan, so we patch the module it's imported from.
     reached_yield = False
     with (
         patch("aios.api.app.create_pool", AsyncMock(return_value=fake_pool)),
         patch("aios.api.app.queries.audit_credentialless_root", AsyncMock()),
         patch("aios.api.app.procrastinate_app", fake_procrastinate),
-        patch(
-            "aios.sandbox.workspace_root_startup.validate_workspace_root_against_sessions",
-            AsyncMock(side_effect=divergent_error),
-        ),
-        pytest.raises(RuntimeError, match=_DIVERGENT_ROOT_DIAGNOSTIC),
+        # NOTE: validate_workspace_root_against_sessions is deliberately NOT
+        # patched — the RuntimeError below is produced by the real validator.
+        pytest.raises(RuntimeError, match=_DIVERGENT_ROOT_DIAGNOSTIC) as exc_info,
     ):
         async with app.router.lifespan_context(app):
             reached_yield = True
             pytest.fail("lifespan must not reach yield (readiness) on divergent root")
 
-    # The lifespan must NOT have reached readiness.
+    # The diagnostic is the production one and names the divergent root.
+    message = str(exc_info.value)
+    assert "service='api'" in message, message
+    assert str(divergent_root) in message, message
+
+    # The lifespan must NOT have reached readiness / yield.
     assert not reached_yield, "lifespan reached yield despite divergent-root error"
 
     # The pool must have been closed (pre-yield cleanup).
@@ -618,50 +669,48 @@ async def test_api_lifespan_fails_before_readiness_on_divergent_root(
 
 @pytest.mark.asyncio
 async def test_worker_startup_fails_before_readiness_on_divergent_root(
-    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Run the REAL ``worker_main()`` coroutine with a divergent-root
-    RuntimeError from ``validate_workspace_root_against_sessions`` and prove:
-      1. ``worker_main`` raises RuntimeError before ``"worker.startup"`` is logged.
-      2. The diagnostic message propagates.
-      3. No ``SandboxRegistry`` is created (it comes after the validator).
+    """Run the REAL ``worker_main()`` against a genuine divergent configured
+    root and a real persisted row through the REAL validator, and prove:
+      1. ``worker_main`` raises before ``"worker.startup"`` is logged
+         (readiness) AND before a ``SandboxRegistry`` is created.
+      2. The production divergent-root diagnostic propagates.
+      3. The pool and advisory-lock connection are closed.
 
-    This exercises the actual ``worker_main`` function — not AST inspection —
-    with the DB/lock infrastructure mocked so it can run without Postgres,
-    but the validator raising the real divergent-root RuntimeError.
+    The validator is NOT mocked; only DB/lock/logging infrastructure is.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from aios.harness import worker as worker_module
 
-    # The RuntimeError the production validator raises on divergent root.
-    divergent_error = RuntimeError(
-        f"{_DIVERGENT_ROOT_DIAGNOSTIC}: "
-        f"service='worker', workspace_root='/tmp/divergent', "
-        f"account_root='/tmp/divergent/acc_a', "
-        f"raw_path='/srv/aios/workspaces/acc_a/sess_bad', "
-        f"resolved_path='/srv/aios/workspaces/acc_a/sess_bad', "
-        f"account_id='acc_a', session_id='sess_bad'"
-    )
+    # A real row under the ORIGINAL root.
+    original_root = tmp_path / "original_workspaces"
+    original_root.mkdir()
+    session_row = {
+        "id": "sess_bad",
+        "account_id": "acc_a",
+        "workspace_volume_path": str(original_root / "acc_a" / "sess_bad"),
+    }
 
-    # Fake pool
-    fake_pool = MagicMock()
+    # Genuinely divergent configured root.
+    divergent_root = tmp_path / "divergent_workspaces"
+    divergent_root.mkdir()
+    monkeypatch.setattr(get_settings(), "workspace_root", divergent_root)
+
+    fake_pool = _divergent_root_pool(session_row=session_row)
     fake_pool.close = AsyncMock()
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=MagicMock(fetchval=AsyncMock()))
-    cm.__aexit__ = AsyncMock(return_value=None)
-    fake_pool.acquire.return_value = cm
 
-    # Fake lock connection (returned by _acquire_worker_lock)
     fake_lock_conn = MagicMock()
     fake_lock_conn.close = AsyncMock()
     fake_lock_conn.add_termination_listener = MagicMock()
 
-    # Track whether "worker.startup" readiness log is reached.
+    # Track readiness (worker.startup) and any SandboxRegistry construction.
     startup_logged = False
+    registry_created = False
 
     def _tracking_log_factory(name: str) -> MagicMock:
-        """Return a logger that tracks the worker.startup event."""
         logger = MagicMock()
 
         def _info(event: str, **kwargs: object) -> None:
@@ -675,28 +724,38 @@ async def test_worker_startup_fails_before_readiness_on_divergent_root(
         logger.exception = MagicMock()
         return logger
 
+    def _tracking_registry(*args: object, **kwargs: object) -> MagicMock:
+        nonlocal registry_created
+        registry_created = True
+        return MagicMock()
+
     with (
         patch.object(worker_module, "_acquire_worker_lock", AsyncMock(return_value=fake_lock_conn)),
         patch("aios.harness.worker.create_pool", AsyncMock(return_value=fake_pool)),
         patch("aios.harness.worker.queries.audit_credentialless_root", AsyncMock()),
-        patch(
-            "aios.sandbox.workspace_root_startup.validate_workspace_root_against_sessions",
-            AsyncMock(side_effect=divergent_error),
-        ),
+        # Validator NOT patched — divergent root + real row produces the error.
+        patch("aios.harness.worker.SandboxRegistry", side_effect=_tracking_registry),
         patch("aios.harness.worker.get_logger", side_effect=_tracking_log_factory),
         patch("aios.harness.worker.configure_logging", MagicMock()),
         patch("aios.harness.worker.install_exit_diagnostics", MagicMock()),
-        pytest.raises(RuntimeError, match=_DIVERGENT_ROOT_DIAGNOSTIC),
+        pytest.raises(RuntimeError, match=_DIVERGENT_ROOT_DIAGNOSTIC) as exc_info,
     ):
         await worker_module.worker_main()
 
-    # The worker must NOT have reached readiness.
+    message = str(exc_info.value)
+    assert "service='worker'" in message, message
+    assert str(divergent_root) in message, message
+
+    # Never reached readiness, never built a SandboxRegistry (which is
+    # constructed strictly after the validator in worker_main).
     assert not startup_logged, (
         "worker emitted 'worker.startup' despite divergent-root validation failure"
     )
+    assert not registry_created, (
+        "worker constructed a SandboxRegistry despite divergent-root failure "
+        "(validator must gate before it)"
+    )
 
-    # The pool must have been closed in the finally block.
+    # Pool + advisory lock connection must have been closed.
     fake_pool.close.assert_awaited_once()
-
-    # The advisory lock connection must have been closed.
     fake_lock_conn.close.assert_awaited_once()

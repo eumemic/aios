@@ -318,30 +318,27 @@ class StandingSessionFilesystemProbe:
             memory_sentinel=memory_sentinel,
         )
 
-    async def _release_owned(self, provision_handle: object | None) -> None:
-        """Release the sandbox only if the probe still owns it.
+    async def _release_owned(self, token: int | None) -> None:
+        """Compare-and-release the probe-owned sandbox under the registry lock.
 
-        Ownership is verified by comparing the current peek() handle's
-        identity against ``provision_handle``.  If a concurrent consumer
-        re-provisioned, peek() returns a different object and the release
-        is skipped — the concurrent consumer owns that handle.
-
-        Best-effort: a release failure is logged but never propagated — the
-        idle reaper will converge.
+        Delegates to :meth:`SandboxRegistry.probe_release`, which decides
+        ownership atomically under the per-session lock: it releases iff the
+        stored probe generation token still equals ``token`` AND the resident
+        handle is still the exact object the probe provisioned. If a
+        concurrent real consumer provisioned (or re-provisioned) the sandbox,
+        ``probe_release`` is a no-op and returns ``False`` — the consumer
+        keeps its sandbox.  Best-effort: teardown failures are swallowed by
+        ``probe_release`` (the idle reaper converges).
         """
-        if provision_handle is None:
+        if token is None:
             return
-        current = self.registry.peek(self.session_id)
-        if current is not provision_handle:
-            # A concurrent consumer replaced our handle — do not release.
-            return
-        try:
-            await self.registry.release(self.session_id)
-        except Exception as err:
-            log.warning(
-                "standing_session_probe.release_failed",
-                session_id=self.session_id,
-                error=str(err),
+        # Bound and shield the release itself so a hung registry teardown
+        # cannot wedge the probe loop, and external cancellation cannot leave
+        # the compare-and-release half-applied (finding #2).
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(
+                asyncio.shield(self.registry.probe_release(self.session_id, token)),
+                timeout=_CLEANUP_GRACE_SECONDS,
             )
 
     @staticmethod
@@ -357,11 +354,33 @@ class StandingSessionFilesystemProbe:
 
     async def _settle_task(
         self, task: asyncio.Task[Any], grace: float = _CLEANUP_GRACE_SECONDS
-    ) -> None:
-        """Cancel *task* and await it within *grace* seconds."""
+    ) -> bool:
+        """Cancel *task* and await it within *grace* seconds.
+
+        Returns ``True`` iff the task actually finished (settled) within the
+        grace.  Returns ``False`` when the grace expired and the task is
+        STILL running — the caller must NOT release the sandbox underneath a
+        live provision/exec; it surfaces an orphan for the reaper instead
+        (finding #2).
+        """
         task.cancel()
         with contextlib.suppress(BaseException):
             await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+        return task.done()
+
+    def _surface_orphan(self, reason: str) -> None:
+        """Alarm an un-settled probe task so the idle reaper reclaims it.
+
+        Called when settlement grace expired with the provision/exec still
+        alive. The probe deliberately does NOT release the sandbox in this
+        state — releasing underneath a running task would race the very
+        operation still mutating it. The idle reaper (which holds the
+        per-session lock) is the safe reclaimer of record.
+        """
+        self.alarm(
+            "standing_session_probe_orphan",
+            {"session_id": self.session_id, "reason": reason},
+        )
 
     async def check_once(self, *, now: float | None = None) -> bool:
         mono = time.monotonic()
@@ -373,33 +392,35 @@ class StandingSessionFilesystemProbe:
         # comparisons are consistent; ``stamp`` is only for rate-limit bookkeeping.
         deadline = mono + self.operation_timeout_seconds
 
-        # Ownership probe: is the sandbox already warm (owned by another
-        # consumer)?  peek() is synchronous and lock-free.
-        pre_handle = self.registry.peek(self.session_id)
-        was_warm = pre_handle is not None
-
         # Track the in-flight coroutine so cancellation can settle it before
-        # cleanup (no overlap / orphan).
-        provision_task: asyncio.Task[Any] | None = None
+        # cleanup (no overlap / orphan). ``lease`` carries the atomic ownership
+        # token from ``probe_acquire``; ``_release_owned`` compares-and-releases
+        # against it under the registry's per-session lock.
+        acquire_task: asyncio.Task[Any] | None = None
         exec_task: asyncio.Task[Any] | None = None
-        provision_handle: object | None = None
+        lease: Any = None
+        token: int | None = None
         try:
             remaining = self._remaining_or_fail(deadline)
-            provision_coro = self.registry.get_or_provision(self.session_id, pool=self.pool)
-            provision_task = asyncio.ensure_future(provision_coro)
+            # Atomic lease: ownership (owned/token) is decided under the
+            # registry's per-session lock, closing the cold-peek → concurrent
+            # real-consumer-provision → probe-gets-same-handle race (finding #1).
+            acquire_coro = self.registry.probe_acquire(self.session_id, pool=self.pool)
+            acquire_task = asyncio.ensure_future(acquire_coro)
             try:
-                handle = await asyncio.wait_for(asyncio.shield(provision_task), remaining)
+                lease = await asyncio.wait_for(asyncio.shield(acquire_task), remaining)
             except (TimeoutError, _DeadlineExceeded):
-                # Settle the in-flight provision before cleanup so no
-                # overlap with a subsequent release.
-                await self._settle_task(provision_task)
-                provision_task = None
+                # Settle the in-flight acquire before cleanup. If it does not
+                # settle in time it may still complete and cache a handle we
+                # own; surface an orphan rather than release underneath it.
+                settled = await self._settle_task(acquire_task)
+                acquire_task = None
+                if not settled:
+                    self._surface_orphan("acquire_unsettled")
                 raise
-            provision_task = None  # completed normally
-
-            if not was_warm:
-                # We cold-provisioned — record the handle for ownership checks.
-                provision_handle = handle
+            acquire_task = None  # completed normally
+            token = lease.token  # non-None only when we cold-provisioned
+            handle = lease.handle
 
             remaining = self._remaining_or_fail(deadline)
             exec_coro = self.registry.exec(
@@ -412,14 +433,19 @@ class StandingSessionFilesystemProbe:
             try:
                 result = await asyncio.wait_for(asyncio.shield(exec_task), remaining)
             except (TimeoutError, _DeadlineExceeded):
-                await self._settle_task(exec_task)
+                settled = await self._settle_task(exec_task)
                 exec_task = None
+                if not settled:
+                    # exec still running against our sandbox: do not release
+                    # beneath it. Surface the orphan and skip release entirely.
+                    self._surface_orphan("exec_unsettled")
+                    token = None
                 raise
             exec_task = None  # completed normally
 
             if result.exit_code == 0 and not result.timed_out:
                 # Success: release if we cold-provisioned solely for monitoring.
-                await self._release_owned(provision_handle)
+                await self._release_owned(token)
                 return True
             detail = {
                 "exit_code": result.exit_code,
@@ -428,27 +454,22 @@ class StandingSessionFilesystemProbe:
             }
         except asyncio.CancelledError:
             # External cancellation: settle any in-flight operation before
-            # cleanup so no provision/exec overlaps with the release.
-            for task in (provision_task, exec_task):
-                if task is not None and not task.done():
-                    await self._settle_task(task)
-            # If we cold-provisioned (or provision completed during cancel),
-            # release only if we still own the handle.
-            if provision_handle is None and not was_warm:
-                # Provision may have completed before cancel settled;
-                # check if a handle now exists that we created.
-                post = self.registry.peek(self.session_id)
-                if post is not None:
-                    provision_handle = post
-            await self._release_owned(provision_handle)
+            # cleanup so no acquire/exec overlaps with the release. If a task
+            # will not settle, do NOT release beneath it — surface an orphan.
+            for label, task in (("acquire", acquire_task), ("exec", exec_task)):
+                if task is not None and not task.done() and not await self._settle_task(task):
+                    self._surface_orphan(f"{label}_unsettled_on_cancel")
+                    token = None
+            await self._release_owned(token)
             raise
         except _DeadlineExceeded as exc:
             detail = {"error_type": "DeadlineExceeded", "error": str(exc)[-1024:]}
         except Exception as exc:
             detail = {"error_type": type(exc).__name__, "error": str(exc)[-1024:]}
 
-        # Failure / timeout: release if we cold-provisioned solely for monitoring.
-        await self._release_owned(provision_handle)
+        # Failure / timeout: release if we cold-provisioned solely for monitoring
+        # and the operation actually settled (token cleared on orphan above).
+        await self._release_owned(token)
 
         if stamp - self._last_alarm >= self.rate_limit_seconds:
             self.alarm(
