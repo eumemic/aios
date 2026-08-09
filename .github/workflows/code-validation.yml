@@ -289,27 +289,11 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Run serially: each xdist worker owns a session Postgres container,
-        # while migration tests start additional containers. Even two workers
-        # can exhaust hosted-runner Docker resources and make healthy container
-        # startups time out. Retry only pytest's recorded failures once so a
-        # transient testcontainer startup cannot fail the entire suite; a real
-        # regression fails both attempts and remains blocking.
-        run: |
-          if ! uv run pytest tests/integration -q; then
-            echo "::warning::FLAKE_RETRY integration"
-            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
-            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
-            uv run pytest tests/integration -q --lf
-          fi
-
-      - name: Upload integration flake-retry marker
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake-retry-integration
-          path: flake-retry-integration.txt
-          if-no-files-found: ignore
+        # Each xdist worker reuses one session Postgres container. Migration
+        # tests isolate themselves with fresh databases inside that container,
+        # so eight workers remain bounded at eight containers instead of the
+        # former unbounded per-test Docker startup storm.
+        run: timeout 300s uv run pytest tests/integration -q -n 8
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)

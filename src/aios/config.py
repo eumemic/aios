@@ -394,6 +394,41 @@ class Settings(BaseSettings):
     worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
     worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
     worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
+    standing_session_filesystem_probe_session_id: str | None = Field(
+        default=None,
+        description="Optional canonical standing session whose real sandbox is periodically "
+        "provisioned and checked for workspace write/read, repository read, and mounted-memory "
+        "read capability. Disabled when unset.",
+    )
+    standing_session_filesystem_probe_interval_seconds: float = Field(default=300.0, gt=0)
+    standing_session_filesystem_probe_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+    standing_session_filesystem_probe_repo_sentinel: str | None = Field(
+        default=None,
+        description="Optional sandbox-relative path to a repository sentinel file "
+        "(e.g. '.git/HEAD'). When set, the probe verifies this file is readable. "
+        "When unset, the repository-read assertion is skipped.",
+    )
+    standing_session_filesystem_probe_memory_sentinel: str | None = Field(
+        default=None,
+        description="Optional sandbox-absolute path to a memory sentinel file "
+        "(e.g. '/mnt/memory/some-store/MEMORY.md'). When set, the probe verifies "
+        "this file is readable. When unset, the memory-read assertion is skipped.",
+    )
+    workspace_scan_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="Overall wall-clock budget for the startup workspace-root scan. "
+        "The scan validates every live session row against this process's configured "
+        "workspace root; this cap prevents an unbounded scan from blocking startup "
+        "indefinitely on high-cardinality deployments.",
+    )
+    workspace_scan_query_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=60,
+        description="Per-page DB query timeout for the startup workspace-root scan.",
+    )
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(

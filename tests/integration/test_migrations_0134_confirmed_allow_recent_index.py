@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
@@ -44,7 +43,7 @@ import pytest
 
 from aios.db.queries.events import confirmed_unresolved_predicate
 from aios.harness.sweep import CONFIRMED_ROWS_SQL
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 _INDEX_NAME = "events_tool_confirmed_allow_recent_idx"
@@ -104,17 +103,6 @@ FROM generate_series(1, {_NOISE_ROW_COUNT}) AS i;
 # same rendering ``find_sessions_needing_inference`` performs (scope_clause
 # empty for the unscoped sweep pass, age_param as $1).
 _CONFIRMED_ROWS_SQL_TEXT = CONFIRMED_ROWS_SQL.format(scope_clause="", age_param="$1")
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

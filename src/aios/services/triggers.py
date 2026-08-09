@@ -340,7 +340,7 @@ async def update_trigger(
         # one UPDATE (the iff CHECK catches forgotten kind conversions; a
         # same-kind workflow→workflow replacement with a stale column would be
         # silent without this).
-        environment_id: str | None | EllipsisType = ...
+        environment_id: str | EllipsisType | None = ...
         if update.source is not None or update.action is not None:
             resolved = await validate_trigger_spec(
                 conn, update.source, update.action, session_id=session_id, account_id=account_id
@@ -351,7 +351,7 @@ async def update_trigger(
         new_enabled = update.enabled if update.enabled is not None else current.enabled
         merged_source = update.source if update.source is not None else current.source
 
-        next_fire: datetime | None | EllipsisType = ...  # ... = leave alone
+        next_fire: datetime | EllipsisType | None = ...  # ... = leave alone
         reenabled = new_enabled and not current.enabled
         # The arming invariant ("an enabled schedulable trigger always has
         # non-NULL next_fire") is enforced by the triggers_schedulable_enabled_armed
@@ -399,7 +399,7 @@ async def update_trigger(
         # alone — Ellipsis sentinel). Replace TO external_event mints+surfaces
         # (re-mint of an already-external_event source is rotation); replace
         # AWAY NULLs the hash (the iff CHECK would otherwise reject the row).
-        ingest_token_hash: str | None | EllipsisType = ...
+        ingest_token_hash: str | EllipsisType | None = ...
         ingest_plaintext: str | None = None
         if source_provided:
             if isinstance(update.source, ExternalEventSource):

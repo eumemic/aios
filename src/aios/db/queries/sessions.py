@@ -1735,8 +1735,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
-    title: str | None | EllipsisType = ...,
+    agent_version: int | EllipsisType | None = ...,
+    title: str | EllipsisType | None = ...,
     metadata: dict[str, Any] | None = None,
     outbound_suppression: str | None = None,
 ) -> Session:
