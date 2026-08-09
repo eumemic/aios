@@ -289,18 +289,16 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Run serially: each xdist worker owns a session Postgres container,
-        # while migration tests start additional containers. Even two workers
-        # can exhaust hosted-runner Docker resources and make healthy container
-        # startups time out. Retry only pytest's recorded failures once so a
-        # transient testcontainer startup cannot fail the entire suite; a real
-        # regression fails both attempts and remains blocking.
+        # Run the complete suite in four xdist workers. Each worker owns an
+        # isolated session Postgres container; migration tests remain isolated
+        # in their own per-test containers. This restores the measured sub-3m
+        # full-suite path without splitting or omitting any collected tests.
         run: |
-          if ! uv run pytest tests/integration -q; then
+          if ! timeout 180s uv run pytest tests/integration -q -n 4; then
             echo "::warning::FLAKE_RETRY integration"
             echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
-            uv run pytest tests/integration -q --lf
+            timeout 180s uv run pytest tests/integration -q -n 4 --lf
           fi
 
       - name: Upload integration flake-retry marker
