@@ -2078,14 +2078,13 @@ class TestProbeWarmHitRevocation:
             def __init__(self, session_id: str):
                 self._real = original_lock_for(session_id)
 
-            async def __aenter__(self):
-                result = await self._real.__aenter__()
+            async def __aenter__(self) -> None:
+                await self._real.__aenter__()
                 registry._handles["sess_lock"] = new_handle
                 registry._last_used["sess_lock"] = 1.0
-                return result
 
-            async def __aexit__(self, *args: Any):
-                return await self._real.__aexit__(*args)
+            async def __aexit__(self, *args: Any) -> None:
+                await self._real.__aexit__(*args)
 
         with patch.object(registry, "_lock_for", lambda sid: _InjectNewHandle(sid)):
             result = await registry.get_or_provision("sess_lock")
