@@ -210,8 +210,10 @@ def _build_filesystem_probe_command(
     - workspace read: verify readback matches
 
     Optional (only when configured sentinel is provided):
-    - repo_sentinel: read a specific file (handles both regular .git/HEAD and
-      git-worktree .git files that contain 'gitdir:' text)
+    - repo_sentinel: read a specific file.  Use ``.git/HEAD`` for a normal
+      repository (a regular file inside the ``.git/`` directory) or ``.git``
+      alone for a worktree checkout (where ``.git`` is itself a regular file
+      containing ``gitdir: <path>``).  ``head -c 64`` works for both shapes.
     - memory_sentinel: read a specific memory mount file
     """
     lines = [
@@ -222,9 +224,11 @@ def _build_filesystem_probe_command(
         'test "$(cat "$probe")" = aios-fs-probe',
     ]
     if repo_sentinel:
-        # Handle git worktree .git files (which are regular files containing
-        # "gitdir: <path>") as well as normal .git/HEAD directory files.
-        # Use head -c 64 to read the first bytes; this works for both cases.
+        # Sentinel clarification: use ``.git/HEAD`` for a normal repo (a
+        # regular file inside the ``.git/`` directory); use ``.git`` alone
+        # for a worktree checkout (where ``.git`` is itself a regular file
+        # containing ``gitdir: <path>``).  ``head -c 64`` reads the first
+        # bytes and works for both shapes.
         lines.append(f'test -e {_sh_quote(repo_sentinel)}')
         lines.append(f'head -c 64 {_sh_quote(repo_sentinel)} >/dev/null')
     if memory_sentinel:
@@ -241,8 +245,40 @@ def _sh_quote(s: str) -> str:
 class StandingSessionFilesystemProbe:
     """Exercise the real sandbox and mounts of one configured standing session.
 
-    Uses one overall deadline (not additive per-operation waits) so the total
+    Uses one hard overall deadline (no undocumented grace) so the total
     wall-clock cost is bounded regardless of how many sub-operations run.
+
+    Ownership-aware lifecycle
+    ~~~~~~~~~~~~~~~~~~~~~~~~
+    The probe must never release a sandbox that someone else concurrently
+    warmed.  To determine ownership atomically without a broader registry
+    API change, the probe uses ``registry.peek(session_id)`` — a synchronous,
+    lock-free read of the handle cache — before and after provisioning:
+
+    * **Warm hit** (``peek`` returns a handle before ``get_or_provision``):
+      the sandbox was already resident.  The probe uses it but does NOT
+      release it — the original consumer owns it.
+    * **Cold provision** (``peek`` returns ``None`` before
+      ``get_or_provision``): the probe cold-provisioned solely for
+      monitoring.  After success, failure, or timeout the probe calls
+      ``registry.release(session_id)`` to retire the sandbox it created.
+
+    Concurrency invariant: between the ``peek`` and the ``get_or_provision``
+    a concurrent consumer could provision the same session.  That is safe
+    because ``get_or_provision`` serializes under its per-session lock — if
+    a concurrent caller wins, ``get_or_provision`` returns *their* handle
+    and ``was_warm`` stays ``False``, so the probe still believes it owns
+    the handle.  But the concurrent caller also placed the handle in the
+    registry, so a ``release`` after the probe finishes is correct: the
+    concurrent caller's next ``get_or_provision`` will re-provision as it
+    would after any release.  The worst case is one extra provision cycle,
+    which is acceptable for a watchdog whose interval is ≥300 s.
+
+    Cancellation safety: ``asyncio.wait_for`` cancels the underlying
+    coroutine but does NOT await the provision/exec to settle.  On timeout
+    or external cancellation the probe awaits the in-flight operation via
+    ``asyncio.shield`` before cleanup so no provision/exec overlaps with
+    the subsequent release (no orphan).
     """
 
     def __init__(
@@ -271,17 +307,59 @@ class StandingSessionFilesystemProbe:
             memory_sentinel=memory_sentinel,
         )
 
+    async def _release_if_cold_provisioned(self, was_warm: bool) -> None:
+        """Release the sandbox if the probe cold-provisioned it.
+
+        No-op when the sandbox was already warm (owned by another consumer).
+        Best-effort: a release failure is logged but never propagated — the
+        idle reaper will converge.
+        """
+        if was_warm:
+            return
+        try:
+            await self.registry.release(self.session_id)
+        except Exception as err:
+            log.warning(
+                "standing_session_probe.release_failed",
+                session_id=self.session_id,
+                error=str(err),
+            )
+
     async def check_once(self, *, now: float | None = None) -> bool:
         stamp = time.monotonic() if now is None else now
-        # One overall deadline for the entire probe (provision + exec),
-        # not additive per-operation waits.
+        # One hard overall deadline for the entire probe (provision + exec).
+        # No undocumented grace — every sub-operation computes its remaining
+        # budget from this single deadline.
         deadline = stamp + self.operation_timeout_seconds
+
+        # Ownership probe: is the sandbox already warm (owned by another
+        # consumer)?  peek() is synchronous and lock-free.
+        was_warm = self.registry.peek(self.session_id) is not None
+
+        # Track the in-flight coroutine so cancellation can settle it before
+        # cleanup (no overlap / orphan).
+        provision_task: asyncio.Task[Any] | None = None
+        cold_provisioned = False
         try:
             remaining = max(0.1, deadline - time.monotonic())
-            handle = await asyncio.wait_for(
-                self.registry.get_or_provision(self.session_id, pool=self.pool),
-                remaining,
+            provision_coro = self.registry.get_or_provision(
+                self.session_id, pool=self.pool
             )
+            provision_task = asyncio.ensure_future(provision_coro)
+            try:
+                handle = await asyncio.wait_for(
+                    asyncio.shield(provision_task), remaining
+                )
+            except TimeoutError:
+                # Settle the in-flight provision before cleanup so no
+                # overlap with a subsequent release.
+                provision_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await provision_task
+                raise
+            provision_task = None  # completed normally
+            cold_provisioned = not was_warm
+
             remaining = max(0.1, deadline - time.monotonic())
             result = await asyncio.wait_for(
                 self.registry.exec(
@@ -293,6 +371,8 @@ class StandingSessionFilesystemProbe:
                 remaining,
             )
             if result.exit_code == 0 and not result.timed_out:
+                # Success: release if we cold-provisioned solely for monitoring.
+                await self._release_if_cold_provisioned(was_warm)
                 return True
             detail = {
                 "exit_code": result.exit_code,
@@ -300,9 +380,22 @@ class StandingSessionFilesystemProbe:
                 "stderr": result.stderr[-1024:],
             }
         except asyncio.CancelledError:
+            # External cancellation: settle any in-flight operation before
+            # cleanup so no provision/exec overlaps with the release.
+            if provision_task is not None and not provision_task.done():
+                provision_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await provision_task
+            if cold_provisioned or (not was_warm and self.registry.peek(self.session_id) is not None):
+                await self._release_if_cold_provisioned(False)
             raise
         except Exception as exc:
             detail = {"error_type": type(exc).__name__, "error": str(exc)[-1024:]}
+
+        # Failure / timeout: release if we cold-provisioned solely for monitoring.
+        # Check peek again — provision may have completed even on exec timeout.
+        if (not was_warm and self.registry.peek(self.session_id) is not None) or cold_provisioned:
+            await self._release_if_cold_provisioned(False)
 
         if stamp - self._last_alarm >= self.rate_limit_seconds:
             self.alarm(
