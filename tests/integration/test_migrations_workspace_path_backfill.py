@@ -19,25 +19,13 @@ import asyncio
 import os
 import shutil
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 def _run_alembic_with_env(

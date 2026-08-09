@@ -11,12 +11,11 @@ Covers the two halves the migration must get right:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # Two pre-existing workflows at different versions (0075-era in-place updates: the
@@ -29,16 +28,6 @@ INSERT INTO workflows (id, account_id, name, version, script)
 VALUES ('wf_a', 'acc_root', 'alpha', 1, 'SCRIPT_A'),
        ('wf_b', 'acc_root', 'beta', 5, 'SCRIPT_B');
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _fetch(db_url: str, sql: str, *args: object) -> list[asyncpg.Record]:

@@ -26,6 +26,7 @@ import os
 import secrets
 import subprocess
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -121,6 +122,63 @@ def postgres_container() -> Iterator[Any]:
 
     with PostgresContainer("postgres:16-alpine") as pg:
         yield pg
+
+
+@dataclass
+class IsolatedPostgres:
+    """PostgresContainer-compatible connection metadata for an isolated DB."""
+
+    container: Any
+    dbname: str
+
+    @property
+    def username(self) -> str:
+        return str(self.container.username)
+
+    @property
+    def password(self) -> str:
+        return str(self.container.password)
+
+    def get_container_host_ip(self) -> str:
+        return str(self.container.get_container_host_ip())
+
+    def get_exposed_port(self, port: int) -> str:
+        return str(self.container.get_exposed_port(port))
+
+
+def _isolated_postgres(container: Any) -> Iterator[IsolatedPostgres]:
+    """Create a fresh database inside the worker's reusable Postgres container."""
+    import psycopg
+
+    dbname = f"test_{secrets.token_hex(8)}"
+    admin_url = (
+        f"postgresql://{container.username}:{container.password}@"
+        f"{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
+    )
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{dbname}"')
+    try:
+        yield IsolatedPostgres(container, dbname)
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as conn:
+            conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (dbname,),
+            )
+            conn.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+
+
+@pytest.fixture
+def postgres(postgres_container: Any) -> Iterator[IsolatedPostgres]:
+    """Fresh database per migration test, reusing one worker container."""
+    yield from _isolated_postgres(postgres_container)
+
+
+@pytest.fixture(scope="module")
+def module_postgres(postgres_container: Any) -> Iterator[IsolatedPostgres]:
+    """Fresh database for read-only migration modules, reusing one container."""
+    yield from _isolated_postgres(postgres_container)
 
 
 @pytest.fixture(scope="session")

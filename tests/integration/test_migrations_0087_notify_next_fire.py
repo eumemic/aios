@@ -19,12 +19,11 @@ Each test mutates ``alembic_version``, so the container is function-scoped.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # FK chain required to land a ``triggers`` row at revision 0087:
@@ -60,17 +59,6 @@ VALUES (
 _NEXT_FIRE_ONLY_UPDATE = (
     "UPDATE triggers SET next_fire = next_fire + interval '7 minutes' WHERE id = 'trg_nf'"
 )
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

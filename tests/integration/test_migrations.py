@@ -5,37 +5,23 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.fixture(scope="module")
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 def _alembic_url(pg: object) -> str:
     """Return the connection URL alembic env.py expects."""
-    from testcontainers.postgres import PostgresContainer
-
-    assert isinstance(pg, PostgresContainer)
-    host = pg.get_container_host_ip()
-    port = pg.get_exposed_port(5432)
-    user = pg.username
-    password = pg.password
-    db = pg.dbname
+    host = pg.get_container_host_ip()  # type: ignore[attr-defined]
+    port = pg.get_exposed_port(5432)  # type: ignore[attr-defined]
+    user = pg.username  # type: ignore[attr-defined]
+    password = pg.password  # type: ignore[attr-defined]
+    db = pg.dbname  # type: ignore[attr-defined]
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 

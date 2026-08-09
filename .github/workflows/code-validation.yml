@@ -264,10 +264,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     env:
       # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
@@ -293,13 +289,10 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Whole-file assignment prevents xdist's per-worker session containers
-        # and concurrent migration containers from exhausting one Docker daemon.
-        # The partitioner asserts complete, duplicate-free file coverage.
-        run: |
-          mapfile -t files < <(uv run python scripts/partition_integration_files.py \
-            --shard '${{ matrix.shard }}' --count 8)
-          timeout 180s uv run pytest -q "${files[@]}"
+        # Each xdist worker now reuses one session Postgres container. Migration
+        # tests isolate themselves with fresh databases inside that container,
+        # avoiding the former per-test Docker startup storm.
+        run: timeout 180s uv run pytest tests/integration -q -n 4
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)

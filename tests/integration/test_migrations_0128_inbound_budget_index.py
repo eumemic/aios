@@ -22,13 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # A minimal account/agent/env/session chain so admitted-inbound ``role=user``
@@ -89,17 +88,6 @@ WHERE account_id = $1
 """
 
 _INDEX_NAME = "events_inbound_budget_idx"
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

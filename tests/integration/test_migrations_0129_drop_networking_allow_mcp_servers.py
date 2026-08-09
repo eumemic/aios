@@ -20,13 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any, cast
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # acc → three environments:
@@ -49,16 +48,6 @@ VALUES
    '{"networking": {"type": "unrestricted"}}'::jsonb,
    'acc_mig');
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _fetch_config(db_url: str, env_id: str) -> dict[str, Any]:
