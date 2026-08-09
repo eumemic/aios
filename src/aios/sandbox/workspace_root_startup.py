@@ -15,14 +15,27 @@ from aios.sandbox.volumes import validate_workspace_path
 
 _WORKSPACE_SCAN_PAGE_SIZE = 1000
 
+# Upper bound on a single Path.resolve() offloaded to a thread.  Symlink-heavy
+# trees can stall resolve() for seconds; this cap ensures the per-row cost is
+# bounded and the overall scan deadline remains honest.
+_PATH_RESOLVE_TIMEOUT_SECONDS: float = 2.0
 
-def _workspace_diagnostic(raw_path: str, account_id: str) -> tuple[str, str, str]:
-    workspace_root = get_settings().workspace_root.resolve()
-    return (
-        str(workspace_root),
-        str((workspace_root / account_id).resolve()),
-        str(Path(raw_path).resolve()),
-    )
+# Upper bound on the connection-release (__aexit__) call.  Normally instant,
+# but a misbehaving pool could block; bounding it keeps the startup budget
+# honest.
+_CONN_RELEASE_TIMEOUT_SECONDS: float = 5.0
+
+
+async def _resolve_in_thread(
+    p: Path, *, resolve_timeout: float = _PATH_RESOLVE_TIMEOUT_SECONDS
+) -> Path:
+    """Offload ``Path.resolve()`` to a thread with a bounded timeout.
+
+    ``Path.resolve()`` is synchronous and can block on symlink-heavy or
+    NFS-backed trees.  Offloading to a thread and capping the wall-clock
+    cost keeps the startup scan budget honest.
+    """
+    return await asyncio.wait_for(asyncio.to_thread(p.resolve), timeout=resolve_timeout)
 
 
 def _remaining(deadline: float) -> float:
@@ -67,8 +80,14 @@ async def validate_workspace_root_against_sessions(
       holds a connection across the full row set.
     - Pool acquisition is wrapped in ``asyncio.wait_for`` with the remaining
       budget so a blocked/contended pool cannot exceed the overall deadline.
+    - Connection release (``__aexit__``) is bounded by
+      ``_CONN_RELEASE_TIMEOUT_SECONDS`` so a misbehaving pool cannot stall
+      the scan past its deadline.
     - Each DB fetch honours ``min(query_timeout_seconds, remaining_budget)``
       so a slow query cannot exceed the overall deadline.
+    - ``Path.resolve()`` is offloaded to a thread and bounded by
+      ``_PATH_RESOLVE_TIMEOUT_SECONDS`` so symlink-heavy trees cannot
+      accumulate past the contract.
     - The deadline is checked between rows during validation so slow path
       resolution cannot accumulate past the contract.
     - The overall scan honours ``scan_timeout_seconds`` (defaults from config)
@@ -117,7 +136,18 @@ async def validate_workspace_root_against_sessions(
             )
         finally:
             # Always release the connection, even on fetch failure.
-            await ctx.__aexit__(None, None, None)
+            # Bounded so a misbehaving pool cannot stall the scan.
+            try:
+                await asyncio.wait_for(
+                    ctx.__aexit__(None, None, None),
+                    timeout=_CONN_RELEASE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError as release_exc:
+                raise WorkspaceScanTimeoutError(
+                    f"workspace-root startup scan: connection release timed out "
+                    f"after {_CONN_RELEASE_TIMEOUT_SECONDS}s "
+                    f"(service={service!r}, last_id={last_id!r})"
+                ) from release_exc
 
         if not rows:
             return
@@ -132,14 +162,29 @@ async def validate_workspace_root_against_sessions(
             try:
                 validate_workspace_path(raw_path, account_id, session_id=session_id)
             except ForbiddenError as exc:
-                workspace_root, account_root, resolved_path = _workspace_diagnostic(
-                    raw_path, account_id
-                )
+                try:
+                    resolved_root = await _resolve_in_thread(
+                        get_settings().workspace_root,
+                        resolve_timeout=min(_PATH_RESOLVE_TIMEOUT_SECONDS, _remaining(deadline)),
+                    )
+                    resolved_account = await _resolve_in_thread(
+                        get_settings().workspace_root / account_id,
+                        resolve_timeout=min(_PATH_RESOLVE_TIMEOUT_SECONDS, _remaining(deadline)),
+                    )
+                    resolved_path = await _resolve_in_thread(
+                        Path(raw_path),
+                        resolve_timeout=min(_PATH_RESOLVE_TIMEOUT_SECONDS, _remaining(deadline)),
+                    )
+                except (TimeoutError, OSError):
+                    # Diagnostic resolve failed — use un-resolved strings.
+                    resolved_root = get_settings().workspace_root
+                    resolved_account = get_settings().workspace_root / account_id
+                    resolved_path = Path(raw_path)
                 raise RuntimeError(
                     "workspace-root startup validation failed: "
-                    f"service={service!r}, workspace_root={workspace_root!r}, "
-                    f"account_root={account_root!r}, raw_path={raw_path!r}, "
-                    f"resolved_path={resolved_path!r}, account_id={account_id!r}, "
+                    f"service={service!r}, workspace_root={str(resolved_root)!r}, "
+                    f"account_root={str(resolved_account)!r}, raw_path={raw_path!r}, "
+                    f"resolved_path={str(resolved_path)!r}, account_id={account_id!r}, "
                     f"session_id={session_id!r}"
                 ) from exc
         last_id = rows[-1]["id"]

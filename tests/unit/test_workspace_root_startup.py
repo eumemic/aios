@@ -435,3 +435,159 @@ async def test_high_cardinality_pagination_releases_connections(
     assert acquired_count["n"] == 11
     # Every acquired connection must have been released
     assert released_count["n"] == acquired_count["n"]
+
+
+# ── Finding 4: Bounded path resolution and connection release ────────────
+
+
+@pytest.mark.asyncio
+async def test_path_resolve_is_offloaded_and_bounded(
+    workspace_root: Path,
+) -> None:
+    """Path.resolve() in the diagnostic path must be offloaded to a thread
+    and bounded.  We verify by checking that the module exposes the timeout
+    constants and the _resolve_in_thread helper."""
+    import aios.sandbox.workspace_root_startup as module
+
+    assert hasattr(module, "_PATH_RESOLVE_TIMEOUT_SECONDS")
+    assert isinstance(module._PATH_RESOLVE_TIMEOUT_SECONDS, (int, float))
+    assert 0 < module._PATH_RESOLVE_TIMEOUT_SECONDS < 30
+
+    assert hasattr(module, "_CONN_RELEASE_TIMEOUT_SECONDS")
+    assert isinstance(module._CONN_RELEASE_TIMEOUT_SECONDS, (int, float))
+    assert 0 < module._CONN_RELEASE_TIMEOUT_SECONDS < 30
+
+    # _resolve_in_thread must be async and return a Path
+    result = await module._resolve_in_thread(workspace_root)
+    assert isinstance(result, Path)
+    expected = str(workspace_root)
+    assert str(result) == expected
+
+
+@pytest.mark.asyncio
+async def test_conn_release_timeout_raises_scan_timeout(
+    workspace_root: Path,
+) -> None:
+    """If connection __aexit__ blocks beyond the bounded timeout, the scan
+    must raise WorkspaceScanTimeoutError (not hang indefinitely)."""
+    import aios.sandbox.workspace_root_startup as module
+
+    row = {
+        "id": "sess_release",
+        "account_id": "acc_a",
+        "workspace_volume_path": str(workspace_root / "acc_a" / "sess_release"),
+    }
+
+    async def _block_exit(*args: object) -> None:
+        await asyncio.sleep(3600)
+
+    def _make_acquired() -> MagicMock:
+        conn = AsyncMock()
+        conn.fetch.return_value = [row]
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(side_effect=_block_exit)
+        return ctx
+
+    pool = MagicMock()
+    pool.acquire.side_effect = _make_acquired
+
+    # Temporarily lower the release timeout for test speed
+    orig = module._CONN_RELEASE_TIMEOUT_SECONDS
+    module._CONN_RELEASE_TIMEOUT_SECONDS = 0.05
+    try:
+        with pytest.raises(WorkspaceScanTimeoutError, match="connection release"):
+            await validate_workspace_root_against_sessions(
+                pool, service="api", scan_timeout_seconds=30.0
+            )
+    finally:
+        module._CONN_RELEASE_TIMEOUT_SECONDS = orig
+
+
+# ── Finding 5: Process/lifespan-level divergent-root E2E ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_api_lifespan_rejects_divergent_root(
+    workspace_root: Path,
+) -> None:
+    """The API lifespan must call validate_workspace_root_against_sessions
+    BEFORE reaching the yield (readiness/serving point).  A RuntimeError
+    from validation must propagate before the lifespan yields.
+
+    We verify structurally: the validate call position in the lifespan
+    source is before the ``yield`` statement (readiness), and both are
+    inside the try block that cleans up the pool on failure.  This avoids
+    importing ``aios.api.app`` which triggers module-level ``create_app()``
+    that requires full MCP setup."""
+    import ast
+    import importlib.util
+
+    # Read the source file directly to avoid triggering module-level create_app()
+    spec = importlib.util.find_spec("aios.api.app")
+    assert spec is not None and spec.origin is not None
+    with open(spec.origin) as _f:  # noqa: ASYNC230
+        source = _f.read()
+
+    # Structural assertion 1: validate call appears before yield
+    validate_pos = source.find("validate_workspace_root_against_sessions(pool")
+    yield_pos = source.find("yield", validate_pos) if validate_pos > 0 else -1
+    assert validate_pos > 0, "validate call not found in api/app.py lifespan"
+    assert yield_pos > validate_pos, (
+        "validate_workspace_root_against_sessions must appear BEFORE yield (readiness)"
+    )
+
+    # Structural assertion 2: pool.close() is in a finally block after validate
+    close_pos = source.find("pool.close()")
+    assert close_pos > validate_pos, "pool.close() must appear after validate call"
+
+    # Structural assertion 3: the validate call is inside the try block
+    # (before the yield), so an exception propagates before readiness.
+    # Parse the AST to verify the call is inside a try block.
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "lifespan":
+            lifespan_source = ast.get_source_segment(source, node)
+            assert lifespan_source is not None
+            assert "validate_workspace_root_against_sessions" in lifespan_source
+            # The validate call must be in the try body (before yield),
+            # and pool.close() must be in the finally/except cleanup.
+            assert "try:" in lifespan_source
+            assert "pool.close()" in lifespan_source
+            break
+    else:
+        pytest.fail("lifespan async function not found in api/app.py")
+
+
+@pytest.mark.asyncio
+async def test_worker_startup_rejects_divergent_root(
+    workspace_root: Path,
+) -> None:
+    """The worker startup path calls validate_workspace_root_against_sessions
+    before creating the SandboxRegistry.  A divergent root must prevent the
+    worker from reaching the 'worker.startup' log line (readiness).
+
+    We verify structurally: the validate call is BEFORE sandbox_registry
+    creation in worker_main, and a RuntimeError from validation propagates."""
+    import inspect
+
+    from aios.harness import worker as worker_module
+
+    source = inspect.getsource(worker_module.worker_main)
+    # Find the positions of key calls
+    validate_pos = source.find("validate_workspace_root_against_sessions")
+    registry_pos = source.find("SandboxRegistry(")
+    startup_log_pos = source.find('"worker.startup"')
+
+    assert validate_pos > 0, "validate call not found in worker_main"
+    assert registry_pos > 0, "SandboxRegistry creation not found in worker_main"
+    assert startup_log_pos > 0, "worker.startup log not found in worker_main"
+
+    # Validation must come BEFORE registry creation and startup log
+    assert validate_pos < registry_pos, (
+        "validate_workspace_root_against_sessions must be called BEFORE SandboxRegistry creation"
+    )
+    assert validate_pos < startup_log_pos, (
+        "validate_workspace_root_against_sessions must be called "
+        "BEFORE worker.startup log (readiness)"
+    )

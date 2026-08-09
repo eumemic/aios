@@ -242,43 +242,54 @@ def _sh_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+# Bounded grace period for cleanup operations (release, cancel-settle)
+# after the main operation deadline expires.  This is the ONLY post-deadline
+# allowance; sub-operations that compute ``remaining`` get zero budget once
+# the deadline passes, and the probe fails immediately.
+_CLEANUP_GRACE_SECONDS: float = 5.0
+
+
+class _DeadlineExceeded(Exception):
+    """The probe's hard overall deadline has passed — fail immediately."""
+
+
 class StandingSessionFilesystemProbe:
     """Exercise the real sandbox and mounts of one configured standing session.
 
-    Uses one hard overall deadline (no undocumented grace) so the total
-    wall-clock cost is bounded regardless of how many sub-operations run.
+    Uses one hard overall deadline so the total wall-clock cost is bounded
+    regardless of how many sub-operations run.  When the remaining budget
+    hits zero, the probe raises ``_DeadlineExceeded`` immediately — there
+    is no undocumented minimum grace on the operation path.  Cleanup
+    (cancel-settle, release) runs under a separate, bounded
+    ``_CLEANUP_GRACE_SECONDS`` cap that is explicitly tested.
 
-    Ownership-aware lifecycle
-    ~~~~~~~~~~~~~~~~~~~~~~~~
-    The probe must never release a sandbox that someone else concurrently
-    warmed.  To determine ownership atomically without a broader registry
-    API change, the probe uses ``registry.peek(session_id)`` — a synchronous,
-    lock-free read of the handle cache — before and after provisioning:
+    Ownership-aware lifecycle — generation token
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    The probe must never release a sandbox that a concurrent consumer
+    provisioned (or re-provisioned after the probe's peek).  Ownership is
+    tracked via a **generation token**: the object identity of the handle
+    returned by ``peek()`` before provisioning (``pre_handle``) vs. the
+    handle returned by ``get_or_provision`` (``provision_handle``).
 
-    * **Warm hit** (``peek`` returns a handle before ``get_or_provision``):
-      the sandbox was already resident.  The probe uses it but does NOT
-      release it — the original consumer owns it.
-    * **Cold provision** (``peek`` returns ``None`` before
-      ``get_or_provision``): the probe cold-provisioned solely for
-      monitoring.  After success, failure, or timeout the probe calls
-      ``registry.release(session_id)`` to retire the sandbox it created.
+    * **Warm hit** (``pre_handle is not None``): the sandbox was already
+      resident.  The probe uses it but does NOT release it.
+    * **Cold provision** (``pre_handle is None``): the probe cold-started
+      a sandbox.  After success/failure/timeout the probe re-peeks and
+      releases **only if the current handle is the same object** it
+      received from ``get_or_provision`` (``post_handle is provision_handle``).
+      If a concurrent consumer re-provisioned between the probe's provision
+      and its release, ``post_handle`` will be a *different* object and the
+      release is skipped — the concurrent consumer owns that handle.
 
-    Concurrency invariant: between the ``peek`` and the ``get_or_provision``
-    a concurrent consumer could provision the same session.  That is safe
-    because ``get_or_provision`` serializes under its per-session lock — if
-    a concurrent caller wins, ``get_or_provision`` returns *their* handle
-    and ``was_warm`` stays ``False``, so the probe still believes it owns
-    the handle.  But the concurrent caller also placed the handle in the
-    registry, so a ``release`` after the probe finishes is correct: the
-    concurrent caller's next ``get_or_provision`` will re-provision as it
-    would after any release.  The worst case is one extra provision cycle,
-    which is acceptable for a watchdog whose interval is ≥300 s.
-
-    Cancellation safety: ``asyncio.wait_for`` cancels the underlying
-    coroutine but does NOT await the provision/exec to settle.  On timeout
-    or external cancellation the probe awaits the in-flight operation via
-    ``asyncio.shield`` before cleanup so no provision/exec overlaps with
-    the subsequent release (no orphan).
+    Cancellation / timeout safety
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    On timeout or external cancellation the probe:
+    1. Cancels the in-flight provision/exec task.
+    2. Awaits (settles) it under ``_CLEANUP_GRACE_SECONDS`` so no
+       provision/exec overlaps with a subsequent release.
+    3. Releases only if the generation token still matches (see above).
+    4. Re-raises ``CancelledError`` so the caller's cancellation
+       propagates.
     """
 
     def __init__(
@@ -307,14 +318,22 @@ class StandingSessionFilesystemProbe:
             memory_sentinel=memory_sentinel,
         )
 
-    async def _release_if_cold_provisioned(self, was_warm: bool) -> None:
-        """Release the sandbox if the probe cold-provisioned it.
+    async def _release_owned(self, provision_handle: object | None) -> None:
+        """Release the sandbox only if the probe still owns it.
 
-        No-op when the sandbox was already warm (owned by another consumer).
+        Ownership is verified by comparing the current peek() handle's
+        identity against ``provision_handle``.  If a concurrent consumer
+        re-provisioned, peek() returns a different object and the release
+        is skipped — the concurrent consumer owns that handle.
+
         Best-effort: a release failure is logged but never propagated — the
         idle reaper will converge.
         """
-        if was_warm:
+        if provision_handle is None:
+            return
+        current = self.registry.peek(self.session_id)
+        if current is not provision_handle:
+            # A concurrent consumer replaced our handle — do not release.
             return
         try:
             await self.registry.release(self.session_id)
@@ -325,50 +344,82 @@ class StandingSessionFilesystemProbe:
                 error=str(err),
             )
 
+    @staticmethod
+    def _remaining_or_fail(deadline: float) -> float:
+        """Return seconds until *deadline*; raise immediately if ≤ 0.
+
+        Uses ``time.monotonic()`` — *deadline* must be on the same clock.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _DeadlineExceeded("probe deadline exceeded")
+        return remaining
+
+    async def _settle_task(
+        self, task: asyncio.Task[Any], grace: float = _CLEANUP_GRACE_SECONDS
+    ) -> None:
+        """Cancel *task* and await it within *grace* seconds."""
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(asyncio.shield(task), timeout=grace)
+
     async def check_once(self, *, now: float | None = None) -> bool:
-        stamp = time.monotonic() if now is None else now
+        mono = time.monotonic()
+        stamp = mono if now is None else now
         # One hard overall deadline for the entire probe (provision + exec).
-        # No undocumented grace — every sub-operation computes its remaining
-        # budget from this single deadline.
-        deadline = stamp + self.operation_timeout_seconds
+        # When remaining hits zero the probe fails immediately — no implicit
+        # minimum grace.  Cleanup runs under _CLEANUP_GRACE_SECONDS.
+        # The deadline always uses real monotonic time so _remaining_or_fail
+        # comparisons are consistent; ``stamp`` is only for rate-limit bookkeeping.
+        deadline = mono + self.operation_timeout_seconds
 
         # Ownership probe: is the sandbox already warm (owned by another
         # consumer)?  peek() is synchronous and lock-free.
-        was_warm = self.registry.peek(self.session_id) is not None
+        pre_handle = self.registry.peek(self.session_id)
+        was_warm = pre_handle is not None
 
         # Track the in-flight coroutine so cancellation can settle it before
         # cleanup (no overlap / orphan).
         provision_task: asyncio.Task[Any] | None = None
-        cold_provisioned = False
+        exec_task: asyncio.Task[Any] | None = None
+        provision_handle: object | None = None
         try:
-            remaining = max(0.1, deadline - time.monotonic())
+            remaining = self._remaining_or_fail(deadline)
             provision_coro = self.registry.get_or_provision(self.session_id, pool=self.pool)
             provision_task = asyncio.ensure_future(provision_coro)
             try:
                 handle = await asyncio.wait_for(asyncio.shield(provision_task), remaining)
-            except TimeoutError:
+            except (TimeoutError, _DeadlineExceeded):
                 # Settle the in-flight provision before cleanup so no
                 # overlap with a subsequent release.
-                provision_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await provision_task
+                await self._settle_task(provision_task)
+                provision_task = None
                 raise
             provision_task = None  # completed normally
-            cold_provisioned = not was_warm
 
-            remaining = max(0.1, deadline - time.monotonic())
-            result = await asyncio.wait_for(
-                self.registry.exec(
-                    handle,
-                    self._command,
-                    timeout_seconds=max(1, int(remaining)),
-                    max_output_bytes=4096,
-                ),
-                remaining,
+            if not was_warm:
+                # We cold-provisioned — record the handle for ownership checks.
+                provision_handle = handle
+
+            remaining = self._remaining_or_fail(deadline)
+            exec_coro = self.registry.exec(
+                handle,
+                self._command,
+                timeout_seconds=max(1, int(remaining)),
+                max_output_bytes=4096,
             )
+            exec_task = asyncio.ensure_future(exec_coro)
+            try:
+                result = await asyncio.wait_for(asyncio.shield(exec_task), remaining)
+            except (TimeoutError, _DeadlineExceeded):
+                await self._settle_task(exec_task)
+                exec_task = None
+                raise
+            exec_task = None  # completed normally
+
             if result.exit_code == 0 and not result.timed_out:
                 # Success: release if we cold-provisioned solely for monitoring.
-                await self._release_if_cold_provisioned(was_warm)
+                await self._release_owned(provision_handle)
                 return True
             detail = {
                 "exit_code": result.exit_code,
@@ -378,22 +429,26 @@ class StandingSessionFilesystemProbe:
         except asyncio.CancelledError:
             # External cancellation: settle any in-flight operation before
             # cleanup so no provision/exec overlaps with the release.
-            if provision_task is not None and not provision_task.done():
-                provision_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await provision_task
-            if cold_provisioned or (
-                not was_warm and self.registry.peek(self.session_id) is not None
-            ):
-                await self._release_if_cold_provisioned(False)
+            for task in (provision_task, exec_task):
+                if task is not None and not task.done():
+                    await self._settle_task(task)
+            # If we cold-provisioned (or provision completed during cancel),
+            # release only if we still own the handle.
+            if provision_handle is None and not was_warm:
+                # Provision may have completed before cancel settled;
+                # check if a handle now exists that we created.
+                post = self.registry.peek(self.session_id)
+                if post is not None:
+                    provision_handle = post
+            await self._release_owned(provision_handle)
             raise
+        except _DeadlineExceeded as exc:
+            detail = {"error_type": "DeadlineExceeded", "error": str(exc)[-1024:]}
         except Exception as exc:
             detail = {"error_type": type(exc).__name__, "error": str(exc)[-1024:]}
 
         # Failure / timeout: release if we cold-provisioned solely for monitoring.
-        # Check peek again — provision may have completed even on exec timeout.
-        if (not was_warm and self.registry.peek(self.session_id) is not None) or cold_provisioned:
-            await self._release_if_cold_provisioned(False)
+        await self._release_owned(provision_handle)
 
         if stamp - self._last_alarm >= self.rate_limit_seconds:
             self.alarm(

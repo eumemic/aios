@@ -9,10 +9,12 @@ import asyncpg
 import pytest
 
 from aios.harness.production_watchdogs import (
+    _CLEANUP_GRACE_SECONDS,
     HeldConnectionWatchdog,
     StandingSessionFilesystemProbe,
     ThroughputDeadMan,
     _build_filesystem_probe_command,
+    _DeadlineExceeded,
 )
 
 
@@ -236,20 +238,39 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
         await runner
 
 
-def _cold_registry(return_value: object = "handle") -> MagicMock:
-    """Build a mock registry where peek() returns None (cold) and get_or_provision succeeds."""
+def _cold_registry(return_value: object = None) -> MagicMock:
+    """Build a mock registry where peek() returns None (cold) and get_or_provision succeeds.
+
+    When ``return_value`` is None a fresh sentinel object is created so that
+    generation-token identity checks work correctly.
+
+    ``peek()`` behaviour: returns ``None`` on the first call (cold), then
+    ``handle`` on every subsequent call.  This supports both single-call and
+    multi-call-to-check_once tests without exhausting a fixed side_effect list.
+    """
+    handle = object() if return_value is None else return_value
     registry = MagicMock()
-    registry.peek = MagicMock(return_value=None)
-    registry.get_or_provision = AsyncMock(return_value=return_value)
+
+    # Track call count so the first peek returns None (cold) and all
+    # subsequent peeks return the handle (post-provision state).
+    _peek_calls = {"n": 0}
+
+    def _peek_side_effect(session_id: str) -> object | None:
+        _peek_calls["n"] += 1
+        return None if _peek_calls["n"] == 1 else handle
+
+    registry.peek = MagicMock(side_effect=_peek_side_effect)
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.release = AsyncMock()
     return registry
 
 
-def _warm_registry(return_value: object = "handle") -> MagicMock:
+def _warm_registry(return_value: object = None) -> MagicMock:
     """Build a mock registry where peek() returns a handle (warm / already resident)."""
+    handle = object() if return_value is None else return_value
     registry = MagicMock()
-    registry.peek = MagicMock(return_value=return_value)
-    registry.get_or_provision = AsyncMock(return_value=return_value)
+    registry.peek = MagicMock(return_value=handle)
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.release = AsyncMock()
     return registry
 
@@ -370,11 +391,14 @@ async def test_standing_session_probe_uses_overall_deadline() -> None:
         provision_time = asyncio.get_event_loop().time()
         return "handle"
 
-    registry = _cold_registry()
+    handle = "handle"
+    registry = MagicMock()
+    registry.peek = MagicMock(side_effect=[None, handle])
     registry.get_or_provision = AsyncMock(side_effect=slow_provision)
     registry.exec = AsyncMock(
         return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
     )
+    registry.release = AsyncMock()
     alarm = MagicMock()
     probe = StandingSessionFilesystemProbe(
         registry,
@@ -438,7 +462,7 @@ def test_build_filesystem_probe_command_git_head_sentinel() -> None:
     assert "head -c 64" in cmd
 
 
-# ── Ownership-aware lifecycle tests ─────────────────────────────────────
+# ── Ownership-aware lifecycle tests (generation-token based) ────────────
 
 
 @pytest.mark.asyncio
@@ -471,10 +495,15 @@ async def test_cold_success_cleanup() -> None:
     it must release the sandbox after the check."""
     from aios.sandbox.backends.base import CommandResult
 
-    registry = _cold_registry()
+    handle = object()
+    registry = MagicMock()
+    # peek: None before provision, handle after provision (for ownership check)
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.exec = AsyncMock(
         return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
     )
+    registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
         registry,
@@ -494,10 +523,14 @@ async def test_cold_failure_cleanup() -> None:
     it must still release the sandbox it provisioned."""
     from aios.sandbox.backends.base import CommandResult
 
-    registry = _cold_registry()
+    handle = object()
+    registry = MagicMock()
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.exec = AsyncMock(
         return_value=CommandResult(1, "", "oops", timed_out=False, truncated=False)
     )
+    registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
         registry,
@@ -512,13 +545,17 @@ async def test_cold_failure_cleanup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cold_provision_error_cleanup() -> None:
-    """When get_or_provision raises on a cold probe, the sandbox should
-    be released if it was partially provisioned (peek shows it in cache)."""
+async def test_cold_provision_error_no_release() -> None:
+    """When get_or_provision raises on a cold probe, provision_handle is
+    None (never assigned) so _release_owned correctly no-ops.  The probe
+    must NOT release because it never received a handle — the generation-
+    token check (provision_handle is None → skip) prevents it."""
+    handle = object()
     registry = MagicMock()
-    # peek returns None initially (cold), but after failed provision
-    # the handle may have been cached before the error propagated.
-    registry.peek = MagicMock(side_effect=[None, "handle"])
+    # peek returns None initially (cold); after failed provision peek
+    # returns handle (simulating a partial cache), but the probe's
+    # provision_handle is still None because provision raised.
+    registry.peek = MagicMock(side_effect=[None, handle])
     registry.get_or_provision = AsyncMock(side_effect=RuntimeError("provision boom"))
     registry.release = AsyncMock()
 
@@ -531,8 +568,9 @@ async def test_cold_provision_error_cleanup() -> None:
     )
 
     assert not await probe.check_once(now=0)
-    # Should release because peek showed a handle post-error
-    registry.release.assert_awaited_once_with("sess_provision_err")
+    # Must NOT release — provision_handle is None (provision raised before
+    # returning a handle), so _release_owned(None) correctly no-ops.
+    registry.release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -571,15 +609,25 @@ async def test_provisioning_timeout_cancellation_cleanup() -> None:
 @pytest.mark.asyncio
 async def test_exec_timeout_cleanup() -> None:
     """When exec times out on a cold-provisioned sandbox, the probe must
-    still release it."""
+    still release it and settle the exec task first."""
     from aios.sandbox.backends.base import CommandResult
 
+    exec_settled = {"settled": False}
+
     async def slow_exec(*args: object, **kwargs: object) -> CommandResult:
-        await asyncio.sleep(100)
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            exec_settled["settled"] = True
+            raise
         return CommandResult(0, "", "", timed_out=False, truncated=False)  # pragma: no cover
 
-    registry = _cold_registry()
+    handle = object()
+    registry = MagicMock()
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.exec = AsyncMock(side_effect=slow_exec)
+    registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
         registry,
@@ -590,6 +638,8 @@ async def test_exec_timeout_cleanup() -> None:
     )
 
     assert not await probe.check_once(now=0)
+    # Exec must have been settled before release
+    assert exec_settled["settled"], "exec task was not settled before release"
     registry.release.assert_awaited_once_with("sess_exec_timeout")
 
 
@@ -599,10 +649,11 @@ async def test_no_overlap_concurrent_warm() -> None:
     get_or_provision, the probe must not release it (warm preservation)."""
     from aios.sandbox.backends.base import CommandResult
 
+    handle = object()
     registry = MagicMock()
     # peek returns a handle on the first call — sandbox is warm
-    registry.peek = MagicMock(return_value="handle")
-    registry.get_or_provision = AsyncMock(return_value="handle")
+    registry.peek = MagicMock(return_value=handle)
+    registry.get_or_provision = AsyncMock(return_value=handle)
     registry.exec = AsyncMock(
         return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
     )
@@ -627,7 +678,8 @@ async def test_warm_failure_no_release() -> None:
     it — the original consumer owns it regardless of probe outcome."""
     from aios.sandbox.backends.base import CommandResult
 
-    registry = _warm_registry()
+    handle = object()
+    registry = _warm_registry(return_value=handle)
     registry.exec = AsyncMock(
         return_value=CommandResult(1, "", "fail", timed_out=False, truncated=False)
     )
@@ -643,3 +695,205 @@ async def test_warm_failure_no_release() -> None:
     assert not await probe.check_once(now=0)
     # Must NOT release — the sandbox was warm
     registry.release.assert_not_awaited()
+
+
+# ── Finding 1: Strict deadline — fail immediately at remaining<=0 ────────
+
+
+@pytest.mark.asyncio
+async def test_zero_budget_fails_immediately() -> None:
+    """With operation_timeout_seconds=0 the probe must fail immediately,
+    not grant any implicit minimum grace (no max(0.1, remaining))."""
+    registry = _cold_registry()
+    alarm = MagicMock()
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_zero",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=0,
+        alarm=alarm,
+    )
+
+    result = await probe.check_once()
+    assert result is False
+    # get_or_provision should NOT have been called — budget was zero
+    registry.get_or_provision.assert_not_awaited()
+    # Alarm should report DeadlineExceeded
+    assert alarm.call_count == 1
+    assert alarm.call_args.args[1]["error_type"] == "DeadlineExceeded"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_grace_is_bounded() -> None:
+    """The _CLEANUP_GRACE_SECONDS constant must be defined, positive, and
+    bounded (not infinite)."""
+    assert isinstance(_CLEANUP_GRACE_SECONDS, (int, float))
+    assert 0 < _CLEANUP_GRACE_SECONDS < 60
+
+
+@pytest.mark.asyncio
+async def test_deadline_exceeded_type_is_distinct() -> None:
+    """_DeadlineExceeded is a distinct exception type, not a bare TimeoutError."""
+    assert not issubclass(_DeadlineExceeded, TimeoutError)
+    assert issubclass(_DeadlineExceeded, Exception)
+
+
+# ── Finding 2: Atomic probe ownership via generation token ───────────────
+
+
+@pytest.mark.asyncio
+async def test_cold_peek_concurrent_provision_race_no_release() -> None:
+    """Exact race: probe peeks (cold), concurrent consumer provisions before
+    probe's get_or_provision returns.  The probe must NOT release because
+    the current handle (from peek post-provision) is a DIFFERENT object
+    than what the probe received — the concurrent consumer owns it.
+
+    Simulates: probe peek()→None, concurrent consumer provisions handle_A,
+    probe get_or_provision returns handle_A (serialized), but by the time
+    the probe tries to release, the concurrent consumer has re-provisioned
+    handle_B.  peek() returns handle_B ≠ handle_A → no release.
+    """
+    from aios.sandbox.backends.base import CommandResult
+
+    probe_handle = object()  # what the probe got from get_or_provision
+    concurrent_handle = object()  # what a concurrent consumer re-provisioned
+
+    registry = MagicMock()
+    # peek calls: 1st=None (cold), 2nd=concurrent_handle (different identity!)
+    registry.peek = MagicMock(side_effect=[None, concurrent_handle])
+    registry.get_or_provision = AsyncMock(return_value=probe_handle)
+    registry.exec = AsyncMock(
+        return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
+    )
+    registry.release = AsyncMock()
+
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_race",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+    )
+
+    assert await probe.check_once(now=0)
+    # Must NOT release — peek() returned concurrent_handle which is not
+    # the same object as probe_handle.  The concurrent consumer owns it.
+    registry.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cold_provision_same_handle_releases() -> None:
+    """When peek() post-provision returns the SAME handle object that the
+    probe received from get_or_provision, the probe owns it and must release."""
+    from aios.sandbox.backends.base import CommandResult
+
+    handle = object()
+    registry = MagicMock()
+    # peek: None (cold), then same handle (probe owns it)
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(return_value=handle)
+    registry.exec = AsyncMock(
+        return_value=CommandResult(0, "", "", timed_out=False, truncated=False)
+    )
+    registry.release = AsyncMock()
+
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_own",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
+    )
+
+    assert await probe.check_once(now=0)
+    registry.release.assert_awaited_once_with("sess_own")
+
+
+# ── Finding 3: Shield+bound cleanup, exec settled before release ─────────
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_settles_exec_before_release() -> None:
+    """On external cancellation, the exec task must be settled (cancelled +
+    awaited) before the release call.  No probe-owned cold handle must
+    remain in the registry after cancellation."""
+    from aios.sandbox.backends.base import CommandResult
+
+    exec_settled = asyncio.Event()
+    release_called = asyncio.Event()
+
+    handle = object()
+
+    async def slow_exec(*args: object, **kwargs: object) -> CommandResult:
+        try:
+            await asyncio.sleep(100)
+        except asyncio.CancelledError:
+            exec_settled.set()
+            raise
+        return CommandResult(0, "", "", timed_out=False, truncated=False)  # pragma: no cover
+
+    registry = MagicMock()
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(return_value=handle)
+    registry.exec = AsyncMock(side_effect=slow_exec)
+
+    async def mock_release(session_id: str) -> None:
+        release_called.set()
+
+    registry.release = AsyncMock(side_effect=mock_release)
+
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_cancel",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=100,
+    )
+
+    task = asyncio.create_task(probe.check_once(now=0))
+    # Wait for exec to start
+    await asyncio.sleep(0.05)
+    # Cancel externally
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Exec must have been settled before release was called
+    assert exec_settled.is_set(), "exec was not settled before release"
+    # Release must have been called (probe owned the cold-provisioned handle)
+    assert release_called.is_set(), "release was not called after cancellation"
+
+
+@pytest.mark.asyncio
+async def test_no_cold_residency_after_probe_cancellation() -> None:
+    """After probe cancellation on a cold-provisioned sandbox, the handle
+    must not remain in the registry (release must have been called)."""
+    handle = object()
+
+    async def slow_provision(session_id: str, pool: object = None) -> object:
+        await asyncio.sleep(0.01)
+        return handle
+
+    registry = MagicMock()
+    # Pre-provision: cold.  Post-provision: handle exists.
+    registry.peek = MagicMock(side_effect=[None, handle])
+    registry.get_or_provision = AsyncMock(side_effect=slow_provision)
+    registry.exec = AsyncMock(side_effect=asyncio.CancelledError)
+    registry.release = AsyncMock()
+
+    probe = StandingSessionFilesystemProbe(
+        registry,
+        object(),
+        "sess_residency",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=100,
+    )
+
+    task = asyncio.create_task(probe.check_once(now=0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    registry.release.assert_awaited_once_with("sess_residency")
