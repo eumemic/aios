@@ -264,11 +264,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1]
 
     env:
       # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
@@ -294,30 +289,26 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Keep each process serial (one session Postgres container), but split
-        # the collected suite across independent runners. The full serial suite
-        # takes about 16 minutes and can be superseded indefinitely by routine
-        # PR pushes; two deterministic shards finish with bounded wall time.
-        # Retry only pytest's recorded failures once so a transient testcontainer
-        # startup cannot fail the entire suite.
+        # Run serially: each xdist worker owns a session Postgres container,
+        # while migration tests start additional containers. Even two workers
+        # can exhaust hosted-runner Docker resources and make healthy container
+        # startups time out. Retry only pytest's recorded failures once so a
+        # transient testcontainer startup cannot fail the entire suite; a real
+        # regression fails both attempts and remains blocking.
         run: |
-          SHARD_EXPR="$(uv run pytest tests/integration --collect-only -q \
-            | awk -v shard='${{ matrix.shard }}' '/^tests\// { if (n++ % 2 == shard) print }')"
-          test -n "$SHARD_EXPR"
-          if ! printf '%s\n' "$SHARD_EXPR" | xargs uv run pytest -q; then
-            echo "::warning::FLAKE_RETRY integration shard ${{ matrix.shard }}"
-            echo "FLAKE_RETRY integration shard ${{ matrix.shard }}" >> "$GITHUB_STEP_SUMMARY"
-            echo "FLAKE_RETRY integration shard ${{ matrix.shard }}" \
-              >> "flake-retry-integration-${{ matrix.shard }}.txt"
-            printf '%s\n' "$SHARD_EXPR" | xargs uv run pytest -q --lf
+          if ! uv run pytest tests/integration -q; then
+            echo "::warning::FLAKE_RETRY integration"
+            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
+            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
+            uv run pytest tests/integration -q --lf
           fi
 
       - name: Upload integration flake-retry marker
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flake-retry-integration-${{ matrix.shard }}
-          path: flake-retry-integration-${{ matrix.shard }}.txt
+          name: flake-retry-integration
+          path: flake-retry-integration.txt
           if-no-files-found: ignore
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
