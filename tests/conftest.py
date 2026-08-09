@@ -22,9 +22,11 @@ runs only the unit tests, which is what most local dev iterations use.
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import secrets
 import subprocess
+import threading
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,8 @@ from unittest import mock
 
 import pytest
 import structlog
+
+_tmpl_log = logging.getLogger("aios.test.template_cache")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -146,27 +150,192 @@ class IsolatedPostgres:
         return str(self.container.get_exposed_port(port))
 
 
+def _admin_url(container: Any) -> str:
+    """Return a psycopg-compatible admin URL for the container's default DB."""
+    return (
+        f"postgresql://{container.username}:{container.password}@"
+        f"{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
+    )
+
+
+class MigrationTemplateCache:
+    """Session-scoped cache of pre-migrated PostgreSQL template databases.
+
+    Each unique Alembic revision is migrated exactly once into a template
+    DB (``tmpl_<rev>``).  Test databases are then created via
+    ``CREATE DATABASE ... TEMPLATE tmpl_<rev>`` — an O(fsync) copy that
+    skips the full migration replay.
+
+    Thread-safe: multiple xdist workers in the same process (or parallel
+    fixture setup) serialize on ``_lock``.
+    """
+
+    def __init__(self, container: Any) -> None:
+        self._container = container
+        self._admin_url = _admin_url(container)
+        self._lock = threading.Lock()
+        # revision -> template dbname
+        self._templates: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def clone_for_revision(
+        self,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> IsolatedPostgres:
+        """Return an ``IsolatedPostgres`` cloned from the template at *revision*.
+
+        If no template exists for *revision* yet, one is created (migrate
+        from scratch, then mark ``is_template = true``).  The returned DB
+        is a private copy the caller can mutate freely.
+        """
+        tmpl_name = self._ensure_template(revision, extra_env=extra_env)
+        return self._clone_from(tmpl_name)
+
+    def has_template(self, revision: str) -> bool:
+        return revision in self._templates
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _ensure_template(
+        self,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        with self._lock:
+            if revision in self._templates:
+                return self._templates[revision]
+
+            import psycopg
+
+            tmpl_name = f"tmpl_{revision}"
+            _tmpl_log.info("template_cache: creating template %s", tmpl_name)
+
+            with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                adm.execute(f'CREATE DATABASE "{tmpl_name}"')
+
+            # Run migrations on the template DB.
+            tmpl_url = self._db_url(tmpl_name)
+            self._migrate(tmpl_url, revision, extra_env=extra_env)
+
+            # Terminate all connections before marking as template.
+            with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                adm.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (tmpl_name,),
+                )
+                adm.execute(
+                    f'ALTER DATABASE "{tmpl_name}" WITH is_template = true'
+                )
+
+            self._templates[revision] = tmpl_name
+            _tmpl_log.info("template_cache: template %s ready", tmpl_name)
+            return tmpl_name
+
+    def _clone_from(self, tmpl_name: str) -> IsolatedPostgres:
+        import psycopg
+
+        dbname = f"test_{secrets.token_hex(8)}"
+        with psycopg.connect(self._admin_url, autocommit=True) as adm:
+            adm.execute(f'CREATE DATABASE "{dbname}" TEMPLATE "{tmpl_name}"')
+        return IsolatedPostgres(self._container, dbname)
+
+    def _db_url(self, dbname: str) -> str:
+        c = self._container
+        return (
+            f"postgresql://{c.username}:{c.password}@"
+            f"{c.get_container_host_ip()}:{c.get_exposed_port(5432)}/{dbname}"
+        )
+
+    @staticmethod
+    def _migrate(
+        db_url: str,
+        revision: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> None:
+        """Run Alembic upgrade to *revision* in-process."""
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+        env_patch = {"AIOS_DB_URL": db_url}
+        if extra_env:
+            env_patch.update(extra_env)
+        with (
+            mock.patch.dict(os.environ, env_patch),
+            redirect_stdout(StringIO()),
+            redirect_stderr(StringIO()),
+        ):
+            command.upgrade(cfg, revision)
+
+    def cleanup(self) -> None:
+        """Drop all template databases.  Called at session teardown."""
+        import psycopg
+
+        for revision, tmpl_name in list(self._templates.items()):
+            try:
+                with psycopg.connect(self._admin_url, autocommit=True) as adm:
+                    adm.execute(
+                        "SELECT pg_terminate_backend(pid) "
+                        "FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (tmpl_name,),
+                    )
+                    adm.execute(
+                        f'ALTER DATABASE "{tmpl_name}" WITH is_template = false'
+                    )
+                    adm.execute(f'DROP DATABASE IF EXISTS "{tmpl_name}"')
+            except Exception:
+                _tmpl_log.warning(
+                    "template_cache: failed to drop %s", tmpl_name, exc_info=True
+                )
+            else:
+                del self._templates[revision]
+
+
 def _isolated_postgres(container: Any) -> Iterator[IsolatedPostgres]:
     """Create a fresh database inside the worker's reusable Postgres container."""
     import psycopg
 
     dbname = f"test_{secrets.token_hex(8)}"
-    admin_url = (
-        f"postgresql://{container.username}:{container.password}@"
-        f"{container.get_container_host_ip()}:{container.get_exposed_port(5432)}/{container.dbname}"
-    )
-    with psycopg.connect(admin_url, autocommit=True) as conn:
+    admin = _admin_url(container)
+    with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{dbname}"')
     try:
         yield IsolatedPostgres(container, dbname)
     finally:
-        with psycopg.connect(admin_url, autocommit=True) as conn:
+        with psycopg.connect(admin, autocommit=True) as conn:
             conn.execute(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                 "WHERE datname = %s AND pid <> pg_backend_pid()",
                 (dbname,),
             )
             conn.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+
+
+@pytest.fixture(scope="session")
+def migration_template_cache(postgres_container: Any) -> Iterator[MigrationTemplateCache]:
+    """Session-scoped template DB cache for migration tests.
+
+    Revisions are migrated once; tests get cheap ``CREATE DATABASE ... TEMPLATE``
+    clones instead of replaying the full migration chain from scratch.
+    """
+    cache = MigrationTemplateCache(postgres_container)
+    yield cache
+    cache.cleanup()
 
 
 @pytest.fixture
