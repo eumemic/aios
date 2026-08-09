@@ -680,6 +680,7 @@ async def test_exec_unsettled_surfaces_orphan_no_release() -> None:
             except asyncio.CancelledError:
                 # Deliberately do not re-raise: model a wedged exec.
                 continue
+        return CommandResult(exit_code=137, stdout="", stderr="killed", timed_out=False, truncated=False)
 
     registry = _cold_registry()
     registry.exec = AsyncMock(side_effect=unkillable_exec)
