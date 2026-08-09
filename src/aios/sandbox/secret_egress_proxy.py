@@ -757,7 +757,7 @@ class SecretEgressProxy:
 
     async def _read_body(
         self, conn: h11.Connection, reader: asyncio.StreamReader
-    ) -> bytes | None | _BodyTooLarge:
+    ) -> bytes | _BodyTooLarge | None:
         """Read the request body (h11 ``Data`` events) up to ``EndOfMessage``.
 
         The body is buffered whole so the placeholder can be swapped across
