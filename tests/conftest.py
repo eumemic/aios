@@ -129,9 +129,7 @@ def postgres_container() -> Iterator[Any]:
     # 100+ Alembic runs while preserving PostgreSQL's SQL/transaction behavior.
     container = (
         PostgresContainer("postgres:16-alpine")
-        .with_command(
-            "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
-        )
+        .with_command("postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off")
         .with_kwargs(tmpfs={"/var/lib/postgresql/data": "rw"})
     )
     with container as pg:
