@@ -113,6 +113,23 @@ needs_docker = pytest.mark.skipif(
 )
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Serialize tests that start additional Postgres containers under xdist.
+
+    Four workers may safely share their session containers, but concurrently
+    starting the migration tests' extra per-test containers overwhelms hosted
+    runner Docker and turns fast startups into repeated readiness timeouts.
+    ``loadgroup`` keeps only that container-heavy class on one worker.
+    """
+    source_cache: dict[Path, bool] = {}
+    for item in items:
+        path = Path(str(item.path))
+        if path not in source_cache:
+            source_cache[path] = "PostgresContainer(" in path.read_text(encoding="utf-8")
+        if source_cache[path]:
+            item.add_marker(pytest.mark.xdist_group("postgres_container_startup"))
+
+
 @pytest.fixture(scope="session")
 def postgres_container() -> Iterator[Any]:
     if not _docker_available():
