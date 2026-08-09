@@ -341,13 +341,13 @@ async def test_slow_validation_triggers_scan_timeout(
 
     call_count = {"n": 0}
 
-    original_validate = module.validate_workspace_path
+    original_validate = module.validate_workspace_path  # type: ignore[attr-defined]
 
-    def _slow_validate(raw_path: str, account_id: str, **kw: object) -> None:
+    def _slow_validate(raw_path: str, account_id: str, *, session_id: str | None = None) -> None:
         call_count["n"] += 1
         # Burn wall-clock time to push past deadline
         time.sleep(0.03)
-        return original_validate(raw_path, account_id, **kw)
+        original_validate(raw_path, account_id, session_id=session_id)
 
     monkeypatch.setattr(module, "validate_workspace_path", _slow_validate)
     monkeypatch.setattr(module, "_WORKSPACE_SCAN_PAGE_SIZE", 1000)

@@ -46,7 +46,7 @@ def _save_runtime_globals():
     runtime.tool_provider = orig_tp
 
 
-def _build_app_with_patches(extra_patches: dict[str, Any] | None = None):
+def _build_app_with_patches(extra_patches: dict[str, Any] | None = None) -> tuple[Any, Any, Any]:
     """Call ``create_app()`` with everything DB/MCP-related mocked out.
 
     Returns ``(app, fake_pool, fake_procrastinate)`` so the caller can
