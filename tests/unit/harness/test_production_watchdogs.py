@@ -16,7 +16,17 @@ from aios.harness.production_watchdogs import (
     _build_filesystem_probe_command,
     _DeadlineExceeded,
 )
+from aios.sandbox.backends.base import SandboxHandle
 from aios.sandbox.registry import ProbeLease
+
+
+def _dummy_handle() -> SandboxHandle:
+    """Return a minimal ``SandboxHandle`` suitable for probe-lease tests."""
+    return SandboxHandle(
+        owner_id="test-probe",
+        sandbox_id="ctr-probe-000",
+        workspace_path=Path("/tmp/probe-workspace"),
+    )
 
 
 class _Holder:
@@ -239,7 +249,7 @@ async def test_runner_counts_session_and_workflow_wake_completions_symmetrically
         await runner
 
 
-def _cold_registry(return_value: object = None) -> MagicMock:
+def _cold_registry(return_value: SandboxHandle | None = None) -> MagicMock:
     """Build a mock registry modelling a COLD probe under the atomic-lease API.
 
     The probe now leases via :meth:`SandboxRegistry.probe_acquire` (which
@@ -257,7 +267,7 @@ def _cold_registry(return_value: object = None) -> MagicMock:
     still reference them keep working, but the probe itself no longer calls
     them for lease/ownership decisions.
     """
-    handle = object() if return_value is None else return_value
+    handle: SandboxHandle = _dummy_handle() if return_value is None else return_value
     registry = MagicMock()
 
     _gen = {"n": 0}
@@ -276,7 +286,7 @@ def _cold_registry(return_value: object = None) -> MagicMock:
     return registry
 
 
-def _warm_registry(return_value: object = None) -> MagicMock:
+def _warm_registry(return_value: SandboxHandle | None = None) -> MagicMock:
     """Build a mock registry modelling a WARM probe under the atomic-lease API.
 
     A warm sandbox is already resident (a real consumer owns it), so
@@ -284,7 +294,7 @@ def _warm_registry(return_value: object = None) -> MagicMock:
     ``probe_release`` is a guaranteed no-op returning ``False`` — the probe
     must never tear down a sandbox it did not create.
     """
-    handle = object() if return_value is None else return_value
+    handle: SandboxHandle = _dummy_handle() if return_value is None else return_value
     registry = MagicMock()
 
     async def _probe_acquire(session_id: str, *, pool: object = None) -> ProbeLease:
@@ -408,7 +418,7 @@ async def test_standing_session_probe_uses_overall_deadline() -> None:
     """The probe must use one overall deadline, not additive per-op waits."""
     from aios.sandbox.backends.base import CommandResult
 
-    handle = "handle"
+    handle = _dummy_handle()
     registry = MagicMock()
     registry.probe_acquire = AsyncMock(return_value=ProbeLease(handle=handle, owned=True, token=1))
     registry.probe_release = AsyncMock(return_value=True)
@@ -590,7 +600,7 @@ async def test_provisioning_timeout_cancellation_cleanup() -> None:
         except asyncio.CancelledError:
             settled["settled"] = True
             raise
-        return ProbeLease(handle=object(), owned=True, token=1)  # pragma: no cover
+        return ProbeLease(handle=_dummy_handle(), owned=True, token=1)  # pragma: no cover
 
     registry = MagicMock()
     registry.probe_acquire = AsyncMock(side_effect=slow_acquire)
@@ -681,11 +691,11 @@ async def test_exec_unsettled_surfaces_orphan_no_release() -> None:
         alarm=alarm,
     )
     orig_grace = pw._CLEANUP_GRACE_SECONDS
-    pw._CLEANUP_GRACE_SECONDS = 0.05  # type: ignore[assignment]
+    pw._CLEANUP_GRACE_SECONDS = 0.05
     try:
         assert not await probe.check_once(now=0)
     finally:
-        pw._CLEANUP_GRACE_SECONDS = orig_grace  # type: ignore[assignment]
+        pw._CLEANUP_GRACE_SECONDS = orig_grace
 
     # Must NOT release beneath the live exec.
     registry.probe_release.assert_not_awaited()
@@ -724,7 +734,7 @@ async def test_warm_failure_no_release() -> None:
     it — the original consumer owns it regardless of probe outcome."""
     from aios.sandbox.backends.base import CommandResult
 
-    handle = object()
+    handle = _dummy_handle()
     registry = _warm_registry(return_value=handle)
     registry.exec = AsyncMock(
         return_value=CommandResult(1, "", "fail", timed_out=False, truncated=False)
@@ -803,7 +813,7 @@ async def test_cold_peek_concurrent_provision_race_no_release() -> None:
     """
     from aios.sandbox.backends.base import CommandResult
 
-    concurrent_handle = object()  # what the real consumer owns
+    concurrent_handle = _dummy_handle()  # what the real consumer owns
 
     registry = MagicMock()
     # Atomic acquire decides ownership: the sandbox is already resident, so
@@ -835,7 +845,7 @@ async def test_cold_provision_same_handle_releases() -> None:
     it owns the sandbox and must compare-and-release it via probe_release."""
     from aios.sandbox.backends.base import CommandResult
 
-    handle = object()
+    handle = _dummy_handle()
     registry = MagicMock()
     registry.probe_acquire = AsyncMock(return_value=ProbeLease(handle=handle, owned=True, token=7))
     registry.probe_release = AsyncMock(return_value=True)
@@ -868,7 +878,7 @@ async def test_external_cancellation_settles_exec_before_release() -> None:
     exec_settled = asyncio.Event()
     release_called = asyncio.Event()
 
-    handle = object()
+    handle = _dummy_handle()
 
     async def slow_exec(*args: object, **kwargs: object) -> CommandResult:
         try:
@@ -916,7 +926,7 @@ async def test_no_cold_residency_after_probe_cancellation() -> None:
     """After probe cancellation on a cold-provisioned sandbox whose exec
     settles cleanly, the probe must compare-and-release its token so no
     probe-owned handle stays resident."""
-    handle = object()
+    handle = _dummy_handle()
 
     async def slow_acquire(session_id: str, *, pool: object = None) -> ProbeLease:
         await asyncio.sleep(0.01)
