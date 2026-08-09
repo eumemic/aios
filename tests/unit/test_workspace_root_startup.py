@@ -73,9 +73,7 @@ async def test_accepts_canonical_account_scoped_rows(workspace_root: Path) -> No
         "account_id": "acc_a",
         "workspace_volume_path": str(workspace_root / "acc_a" / "sess_ok"),
     }
-    await validate_workspace_root_against_sessions(
-        _pool_releasing_conn([row]), service="worker"
-    )
+    await validate_workspace_root_against_sessions(_pool_releasing_conn([row]), service="worker")
 
 
 @pytest.mark.asyncio
@@ -107,9 +105,7 @@ async def test_cross_tenant_row_still_fails_closed(workspace_root: Path) -> None
         "workspace_volume_path": str(workspace_root / "acc_b" / "sess_b"),
     }
     with pytest.raises(RuntimeError):
-        await validate_workspace_root_against_sessions(
-            _pool_releasing_conn([row]), service="api"
-        )
+        await validate_workspace_root_against_sessions(_pool_releasing_conn([row]), service="api")
 
 
 @pytest.mark.asyncio
@@ -119,9 +115,7 @@ async def test_absolute_legacy_row_remains_accepted(workspace_root: Path) -> Non
         "account_id": "acc_a",
         "workspace_volume_path": str(workspace_root / "sess_legacy"),
     }
-    await validate_workspace_root_against_sessions(
-        _pool_releasing_conn([row]), service="worker"
-    )
+    await validate_workspace_root_against_sessions(_pool_releasing_conn([row]), service="worker")
 
 
 @pytest.mark.asyncio

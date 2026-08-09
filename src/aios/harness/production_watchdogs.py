@@ -218,8 +218,8 @@ def _build_filesystem_probe_command(
     """
     lines = [
         "set -eu",
-        'probe=$(mktemp /workspace/.aios-fs-probe.XXXXXX)',
-        'trap \'rm -f "$probe"\' EXIT',
+        "probe=$(mktemp /workspace/.aios-fs-probe.XXXXXX)",
+        "trap 'rm -f \"$probe\"' EXIT",
         'printf aios-fs-probe > "$probe"',
         'test "$(cat "$probe")" = aios-fs-probe',
     ]
@@ -229,11 +229,11 @@ def _build_filesystem_probe_command(
         # for a worktree checkout (where ``.git`` is itself a regular file
         # containing ``gitdir: <path>``).  ``head -c 64`` reads the first
         # bytes and works for both shapes.
-        lines.append(f'test -e {_sh_quote(repo_sentinel)}')
-        lines.append(f'head -c 64 {_sh_quote(repo_sentinel)} >/dev/null')
+        lines.append(f"test -e {_sh_quote(repo_sentinel)}")
+        lines.append(f"head -c 64 {_sh_quote(repo_sentinel)} >/dev/null")
     if memory_sentinel:
-        lines.append(f'test -r {_sh_quote(memory_sentinel)}')
-        lines.append(f'head -c 1 {_sh_quote(memory_sentinel)} >/dev/null')
+        lines.append(f"test -r {_sh_quote(memory_sentinel)}")
+        lines.append(f"head -c 1 {_sh_quote(memory_sentinel)} >/dev/null")
     return "\n".join(lines) + "\n"
 
 
@@ -342,14 +342,10 @@ class StandingSessionFilesystemProbe:
         cold_provisioned = False
         try:
             remaining = max(0.1, deadline - time.monotonic())
-            provision_coro = self.registry.get_or_provision(
-                self.session_id, pool=self.pool
-            )
+            provision_coro = self.registry.get_or_provision(self.session_id, pool=self.pool)
             provision_task = asyncio.ensure_future(provision_coro)
             try:
-                handle = await asyncio.wait_for(
-                    asyncio.shield(provision_task), remaining
-                )
+                handle = await asyncio.wait_for(asyncio.shield(provision_task), remaining)
             except TimeoutError:
                 # Settle the in-flight provision before cleanup so no
                 # overlap with a subsequent release.
@@ -386,7 +382,9 @@ class StandingSessionFilesystemProbe:
                 provision_task.cancel()
                 with contextlib.suppress(BaseException):
                     await provision_task
-            if cold_provisioned or (not was_warm and self.registry.peek(self.session_id) is not None):
+            if cold_provisioned or (
+                not was_warm and self.registry.peek(self.session_id) is not None
+            ):
                 await self._release_if_cold_provisioned(False)
             raise
         except Exception as exc:

@@ -218,9 +218,7 @@ class TestRejectionDiagnostic:
         with pytest.raises(ForbiddenError):
             validate_workspace_path(outside, "acc_a", session_id="sess_x")
 
-        events = [
-            e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"
-        ]
+        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
         assert len(events) == 1
         entry = events[0]
         assert entry["log_level"] == "warning"
@@ -242,9 +240,7 @@ class TestRejectionDiagnostic:
         with pytest.raises(ForbiddenError):
             validate_workspace_path("workspaces/sess_x", "acc_a", session_id="sess_x")
 
-        events = [
-            e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"
-        ]
+        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
         assert len(events) == 1
         entry = events[0]
         assert entry["log_level"] == "warning"
@@ -262,9 +258,7 @@ class TestRejectionDiagnostic:
         quiet on the happy path (no log spam, no false positives in
         aggregation/alerting)."""
         validate_workspace_path(str(workspace_root / "acc_a" / "shared"), "acc_a")
-        assert not [
-            e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"
-        ]
+        assert not [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
 
     def test_rejection_log_carries_no_credentialish_fields(
         self, workspace_root: Path, capture_logs: structlog.testing.LogCapture
@@ -276,9 +270,7 @@ class TestRejectionDiagnostic:
         with pytest.raises(ForbiddenError):
             validate_workspace_path("/etc", "acc_a")
 
-        events = [
-            e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"
-        ]
+        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
         assert len(events) == 1
         # structlog adds ``event`` and ``log_level``; the payload keys we
         # own are exactly these — no more.

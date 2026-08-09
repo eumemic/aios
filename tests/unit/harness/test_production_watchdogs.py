@@ -389,7 +389,9 @@ async def test_standing_session_probe_uses_overall_deadline() -> None:
     assert result is True
     # The exec call should have received a timeout <= the overall budget
     exec_call = registry.exec.await_args
-    exec_timeout = exec_call.kwargs.get("timeout_seconds", exec_call.args[2] if len(exec_call.args) > 2 else None)
+    exec_timeout = exec_call.kwargs.get(
+        "timeout_seconds", exec_call.args[2] if len(exec_call.args) > 2 else None
+    )
     # Timeout should be positive and <= 5 (the overall budget)
     assert exec_timeout is not None
     assert 0 < exec_timeout <= 5
@@ -451,8 +453,11 @@ async def test_warm_preservation_no_release() -> None:
     )
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_warm",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_warm",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert await probe.check_once(now=0)
@@ -472,8 +477,11 @@ async def test_cold_success_cleanup() -> None:
     )
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_cold_ok",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_cold_ok",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert await probe.check_once(now=0)
@@ -492,8 +500,11 @@ async def test_cold_failure_cleanup() -> None:
     )
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_cold_fail",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_cold_fail",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert not await probe.check_once(now=0)
@@ -512,8 +523,11 @@ async def test_cold_provision_error_cleanup() -> None:
     registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_provision_err",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_provision_err",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert not await probe.check_once(now=0)
@@ -542,8 +556,11 @@ async def test_provisioning_timeout_cancellation_cleanup() -> None:
     registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_timeout",
-        rate_limit_seconds=60, operation_timeout_seconds=0.05,
+        registry,
+        object(),
+        "sess_timeout",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=0.05,
     )
 
     assert not await probe.check_once(now=0)
@@ -565,8 +582,11 @@ async def test_exec_timeout_cleanup() -> None:
     registry.exec = AsyncMock(side_effect=slow_exec)
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_exec_timeout",
-        rate_limit_seconds=60, operation_timeout_seconds=0.05,
+        registry,
+        object(),
+        "sess_exec_timeout",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=0.05,
     )
 
     assert not await probe.check_once(now=0)
@@ -589,8 +609,11 @@ async def test_no_overlap_concurrent_warm() -> None:
     registry.release = AsyncMock()
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_concurrent",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_concurrent",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert await probe.check_once(now=0)
@@ -610,8 +633,11 @@ async def test_warm_failure_no_release() -> None:
     )
 
     probe = StandingSessionFilesystemProbe(
-        registry, object(), "sess_warm_fail",
-        rate_limit_seconds=60, operation_timeout_seconds=5,
+        registry,
+        object(),
+        "sess_warm_fail",
+        rate_limit_seconds=60,
+        operation_timeout_seconds=5,
     )
 
     assert not await probe.check_once(now=0)
