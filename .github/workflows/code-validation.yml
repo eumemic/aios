@@ -264,6 +264,10 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
 
     env:
       # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
@@ -289,27 +293,13 @@ jobs:
         run: uv sync --dev
 
       - name: Integration tests
-        # Run serially: each xdist worker owns a session Postgres container,
-        # while migration tests start additional containers. Even two workers
-        # can exhaust hosted-runner Docker resources and make healthy container
-        # startups time out. Retry only pytest's recorded failures once so a
-        # transient testcontainer startup cannot fail the entire suite; a real
-        # regression fails both attempts and remains blocking.
+        # Whole-file assignment prevents xdist's per-worker session containers
+        # and concurrent migration containers from exhausting one Docker daemon.
+        # The partitioner asserts complete, duplicate-free file coverage.
         run: |
-          if ! uv run pytest tests/integration -q; then
-            echo "::warning::FLAKE_RETRY integration"
-            echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
-            echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
-            uv run pytest tests/integration -q --lf
-          fi
-
-      - name: Upload integration flake-retry marker
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake-retry-integration
-          path: flake-retry-integration.txt
-          if-no-files-found: ignore
+          mapfile -t files < <(uv run python scripts/partition_integration_files.py \
+            --shard '${{ matrix.shard }}' --count 8)
+          timeout 180s uv run pytest -q "${files[@]}"
 
   # E2E runs as a two-shard matrix.  Tests carrying ``pytest.mark.docker``
   # (added at module scope on the 31 files that use the sandbox image)
