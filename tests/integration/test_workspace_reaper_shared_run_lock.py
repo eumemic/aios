@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -135,8 +136,8 @@ async def test_reaper_lock_survives_real_to_thread_delete(
     key = queries.workspace_advisory_lock_key(queries.normalized_workspace_path(path))
     owner = await asyncpg.connect(migrated_db_url)
     contender = await asyncpg.connect(migrated_db_url)
-    thread_entered = asyncio.Event()
-    release_thread = asyncio.Event()
+    thread_entered = threading.Event()
+    release_thread = threading.Event()
 
     def slow_delete() -> None:
         thread_entered.set()
@@ -152,7 +153,7 @@ async def test_reaper_lock_survives_real_to_thread_delete(
     try:
         await owner.execute("SELECT pg_advisory_lock($1::bigint)", key)
         delete_task = asyncio.create_task(asyncio.to_thread(slow_delete))
-        await thread_entered.wait()
+        assert await asyncio.wait_for(asyncio.to_thread(thread_entered.wait), timeout=1)
         blocked = asyncio.create_task(contender.execute("SELECT pg_advisory_lock($1::bigint)", key))
         await asyncio.sleep(0.05)
         assert not blocked.done(), "separate backend entered during to_thread deletion"
