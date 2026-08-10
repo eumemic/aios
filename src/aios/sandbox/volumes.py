@@ -190,23 +190,6 @@ def validate_workspace_path(
     in audit logs as such.
     """
     if not Path(raw_path).is_absolute():
-        # Emit the same non-secret diagnostic as the resolve-outside branch so
-        # BOTH rejection reasons are observable in aggregation.  A relative
-        # ``raw_path`` can't be ``resolve()``d meaningfully here (that's the
-        # whole point — ``resolve()`` would bind it to this process's CWD), so
-        # ``resolved_path`` is reported as ``None``.  This is the create-time /
-        # cold-start signal that pinpoints the offending row without a DB query
-        # (see aios#2064: every failing tool call must leave a legible trace).
-        log.warning(
-            "workspace.path_rejected",
-            reason="not_absolute",
-            raw_path=raw_path,
-            resolved_path=None,
-            workspace_root=str(get_settings().workspace_root),
-            account_root=None,
-            account_id=account_id,
-            session_id=session_id,
-        )
         raise ForbiddenError(
             "workspace_volume_path must be absolute (starts with '/'); got "
             f"non-absolute value {raw_path!r}. This usually indicates a "
@@ -223,25 +206,6 @@ def validate_workspace_path(
         legacy_path = (workspace_root / session_id).resolve()
         if path == legacy_path and legacy_path.is_relative_to(workspace_root):
             return
-    # Fail closed — but first record the resolved geometry that drove the
-    # rejection.  This is the exact diagnostic aios#2064 asks for: when the
-    # API and worker boot with divergent ``AIOS_WORKSPACE_ROOT`` values the
-    # two ``resolve()``d roots land in different real trees and every FS tool
-    # call rejects here silently.  Logging ``workspace_root`` + ``account_root``
-    # + ``resolved_path`` alongside the raw input makes the root drift legible
-    # from the logs alone (no path component is a secret; no credential or
-    # token is included).  Does NOT loosen the jail — the ``raise`` below is
-    # unchanged, so out-of-account and host-escape inputs stay fail-closed.
-    log.warning(
-        "workspace.path_rejected",
-        reason="outside_account_root",
-        raw_path=raw_path,
-        resolved_path=str(path),
-        workspace_root=str(workspace_root),
-        account_root=str(account_root),
-        account_id=account_id,
-        session_id=session_id,
-    )
     raise ForbiddenError(
         "workspace_path must resolve to within the account's workspace subdirectory",
         detail={"workspace_path": raw_path},

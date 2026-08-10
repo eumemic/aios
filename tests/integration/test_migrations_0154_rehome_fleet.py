@@ -13,6 +13,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -21,7 +22,7 @@ import asyncpg
 import pytest
 from nacl.secret import SecretBox
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
 
 pytestmark = pytest.mark.integration
@@ -108,6 +109,16 @@ def test_revision_and_transactional_upgrade_downgrade_contract() -> None:
     # Alembic/PostgreSQL supplies the transaction envelope; both directions
     # use the same rekey and inventory walkers, with source/destination swapped.
     assert migration.upgrade.__module__ == migration.downgrade.__module__
+
+
+@pytest.fixture
+def postgres() -> Iterator[Any]:
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 def _run_alembic(args: list[str], db_url: str, key: bytes) -> subprocess.CompletedProcess[str]:

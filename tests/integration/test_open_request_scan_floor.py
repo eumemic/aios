@@ -30,7 +30,7 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.models.sessions import Ok
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.conftest import seed_agent_env_session
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
@@ -321,6 +321,16 @@ def test_floor_bounded_false_allows_batch_any_sid() -> None:
 
 
 # ─── 7. migration plan-shape: partial index exists, valid, and is used ───────
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _execute(db_url: str, sql: str, *args: Any) -> None:

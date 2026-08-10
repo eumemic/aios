@@ -16,11 +16,12 @@ Modeled on tests/integration/test_migrations_0108_triggers_external_event.py.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # FK chain for seeding a trigger row at head (NOT-NULL-without-default columns).
@@ -97,6 +98,17 @@ VALUES
      '{"kind": "wake_owner", "content": "go"}'::jsonb,
      TRUE, NULL);
 """
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

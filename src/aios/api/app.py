@@ -88,79 +88,61 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("api.startup", db_url=_redact_dsn(settings.db_url))
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
-        procrastinate_opened = False
+        crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+        async with pool.acquire() as conn:
+            await queries.audit_credentialless_root(conn)
+        await procrastinate_app.open_async()
+        app.state.pool = pool
+        app.state.crypto_box = crypto_box
+        app.state.procrastinate = procrastinate_app
+        app.state.db_url = settings.db_url
+        # Readiness stays RED until the fail-closed boot-admission gate proves
+        # the live DB is safe for this code. ``/ready`` reads this flag, so a
+        # behind / residue-bearing / unreachable DB never lets the new
+        # container serve while the old one is still healthy (#1575).
+        app.state.retirements_ok = False
+
+        # #959: the api runs as uid 1000 and can't repair ownership (no
+        # CAP_CHOWN). If the worker (root) created a shared root first and
+        # left it root-owned, ``POST /sessions/{id}/files`` 500s on mkdir.
+        # The api can't fix it — but it can refuse to fail silently. Log
+        # loudly and keep serving non-FS routes; the worker's startup
+        # repair pass is what actually heals the tree.
+        euid = os.geteuid()
+        for p in (
+            settings.workspace_root,
+            uploads_root(),
+            attachments_root(),
+            memory_stores_root(),
+        ):
+            if p.exists() and not os.access(p, os.W_OK):
+                try:
+                    st_uid = p.stat().st_uid
+                except OSError:
+                    st_uid = -1
+                log.warning("api.workspace_unwritable", path=str(p), euid=euid, st_uid=st_uid)
+
+        # The ``/context`` endpoint (issue #60) reuses the worker's
+        # ``compose_step_context`` → ``compute_step_prelude`` path, which
+        # reaches for ``runtime.require_crypto_box()`` to decrypt per-vault
+        # MCP OAuth tokens and ``runtime.require_tool_provider()`` to merge
+        # connection-declared tools (#328 PR 4). Mirror the worker's
+        # globals on the API side so the shared composer works from either
+        # process.
+        from aios_connectors.providers import SubsystemToolProvider
+
         prev_crypto = runtime.crypto_box
         prev_tool_provider = runtime.tool_provider
-        runtime_globals_changed = False
-        try:
-            crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
-            async with pool.acquire() as conn:
-                await queries.audit_credentialless_root(conn)
-            from aios.sandbox.workspace_root_startup import (
-                validate_workspace_root_against_sessions,
-            )
+        runtime.crypto_box = crypto_box
+        runtime.tool_provider = SubsystemToolProvider()
 
-            await validate_workspace_root_against_sessions(pool, service="api")
-            await procrastinate_app.open_async()
-            procrastinate_opened = True
-            app.state.pool = pool
-            app.state.crypto_box = crypto_box
-            app.state.procrastinate = procrastinate_app
-            app.state.db_url = settings.db_url
-            # Readiness stays RED until the fail-closed boot-admission gate proves
-            # the live DB is safe for this code. ``/ready`` reads this flag, so a
-            # behind / residue-bearing / unreachable DB never lets the new
-            # container serve while the old one is still healthy (#1575).
-            app.state.retirements_ok = False
-
-            # #959: the api runs as uid 1000 and can't repair ownership (no
-            # CAP_CHOWN). If the worker (root) created a shared root first and
-            # left it root-owned, ``POST /sessions/{id}/files`` 500s on mkdir.
-            # The api can't fix it — but it can refuse to fail silently. Log
-            # loudly and keep serving non-FS routes; the worker's startup
-            # repair pass is what actually heals the tree.
-            euid = os.geteuid()
-            for p in (
-                settings.workspace_root,
-                uploads_root(),
-                attachments_root(),
-                memory_stores_root(),
-            ):
-                if p.exists() and not os.access(p, os.W_OK):
-                    try:
-                        st_uid = p.stat().st_uid
-                    except OSError:
-                        st_uid = -1
-                    log.warning("api.workspace_unwritable", path=str(p), euid=euid, st_uid=st_uid)
-
-            # The ``/context`` endpoint (issue #60) reuses the worker's
-            # ``compose_step_context`` → ``compute_step_prelude`` path, which
-            # reaches for ``runtime.require_crypto_box()`` to decrypt per-vault
-            # MCP OAuth tokens and ``runtime.require_tool_provider()`` to merge
-            # connection-declared tools (#328 PR 4). Mirror the worker's
-            # globals on the API side so the shared composer works from either
-            # process.
-            from aios_connectors.providers import SubsystemToolProvider
-
-            runtime.crypto_box = crypto_box
-            runtime.tool_provider = SubsystemToolProvider()
-            runtime_globals_changed = True
-
-            # Fail-closed boot-admission gate (#1575): block here — readiness RED —
-            # until the live DB is proven safe for this code (alembic at/past every
-            # contract_rev AND zero live residue on every registered surface). This
-            # runs on EVERY boot, including raw restores, and is never cached.
-            await _await_retirements_admissible(pool, log)
-            app.state.retirements_ok = True
-            log.info("api.boot_gate.admitted")
-        except BaseException:
-            if runtime_globals_changed:
-                runtime.crypto_box = prev_crypto
-                runtime.tool_provider = prev_tool_provider
-            if procrastinate_opened:
-                await procrastinate_app.close_async()
-            await pool.close()
-            raise
+        # Fail-closed boot-admission gate (#1575): block here — readiness RED —
+        # until the live DB is proven safe for this code (alembic at/past every
+        # contract_rev AND zero live residue on every registered surface). This
+        # runs on EVERY boot, including raw restores, and is never cached.
+        await _await_retirements_admissible(pool, log)
+        app.state.retirements_ok = True
+        log.info("api.boot_gate.admitted")
 
         try:
             yield

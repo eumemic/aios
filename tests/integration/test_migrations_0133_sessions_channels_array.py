@@ -14,11 +14,24 @@ Mirrors the testcontainer-Postgres/real-alembic-CLI pattern of
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _seed(db_url: str) -> None:

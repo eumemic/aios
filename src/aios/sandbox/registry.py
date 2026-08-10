@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import itertools
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -198,26 +197,6 @@ class GcPressureResult:
 PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
 
 
-@dataclass(frozen=True, slots=True)
-class ProbeLease:
-    """Outcome of :meth:`SandboxRegistry.probe_acquire` (issue #2064).
-
-    ``handle`` is the sandbox to run the probe against.
-
-    ``owned`` is ``True`` only when *this* ``probe_acquire`` call
-    cold-provisioned the sandbox solely for monitoring; then ``token`` is
-    the generation stamped under the per-session lock and
-    :meth:`probe_release` will tear the sandbox down iff that token still
-    matches. When the sandbox was already resident (a real consumer owns
-    it) ``owned`` is ``False`` and ``token`` is ``None`` — the probe uses
-    the handle but must never release it.
-    """
-
-    handle: SandboxHandle
-    owned: bool
-    token: int | None = None
-
-
 def _classify_images(
     images: list[ManagedImage],
     states: dict[str, SessionSnapshotState],
@@ -326,21 +305,6 @@ class SandboxRegistry:
         self._secret_proxies: dict[str, SecretEgressProxy] = {}
         self._last_used: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # Ownership tokens for probe-provisioned sandboxes (issue #2064,
-        # finding #1). When the standing-session probe cold-provisions a
-        # sandbox *solely for monitoring*, ``probe_acquire`` stamps a fresh
-        # generation token here under the per-session lock and returns it to
-        # the caller. ``probe_release`` compares-and-releases under the SAME
-        # lock: it only tears the sandbox down when the currently-cached
-        # handle is STILL the exact one the probe created AND the stored
-        # token still matches, so a concurrent real consumer that provisions
-        # (or re-provisions) between the probe's acquire and release keeps
-        # its sandbox. Object identity alone is not enough: a real consumer
-        # can legitimately receive the very same cached handle object, and
-        # the probe must not release that. The token is created-by-caller
-        # and is only ever present for probe-owned entries.
-        self._probe_generations: dict[str, tuple[int, SandboxHandle]] = {}
-        self._probe_generation_counter = itertools.count(1)
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
         self._egress_refresh_task: asyncio.Task[None] | None = None
@@ -454,60 +418,13 @@ class SandboxRegistry:
         step — same as before this fix. The probe removes the *steady-
         state* staleness (a container that died turns sweeps earlier),
         not every TOCTOU window.
-
-        **Probe ownership revocation (issue #2064, finding #1 warm-hit
-        race):** both the lock-free warm-hit early return and the
-        under-lock warm-hit path atomically revoke any probe ownership
-        token before returning.  The lock-free path checks
-        ``_probe_generations`` without the lock (the common case has no
-        token — fast path stays lock-free) and takes the per-session lock
-        only when a token exists.  Under the lock it revokes the token
-        AND revalidates that the handle is still current in ``_handles``:
-        if ``probe_release`` won the lock first and released handle A,
-        the consumer must NOT return the stale reference — it falls
-        through to the cold-provision path.  The lock-free membership
-        check is safe because ``probe_acquire`` only stamps a token when
-        ``_handles`` is empty under the same lock, so no new token can
-        race into existence for an already-resident handle.
         """
         handle = self._handles.get(session_id)
         spec_version_drifted = False
         if handle is not None and await self._backend.is_alive(handle):
             if pool is None or not await self._spec_version_changed(session_id, handle, pool):
                 self._last_used[session_id] = time.monotonic()
-                # Atomically revoke any probe ownership so a subsequent
-                # probe_release cannot tear down the sandbox this real
-                # consumer just reused.  The revocation MUST be under the
-                # per-session lock because probe_release's check-then-act
-                # (read token -> compare handle -> call release) is itself
-                # serialised by that lock.
-                #
-                # Lock-free membership check is safe: a new probe token
-                # cannot race into existence for an already-resident handle
-                # because probe_acquire takes the same per-session lock and
-                # only stamps a token when _handles is empty under the lock.
-                # So if handle is in _handles here, no concurrent
-                # probe_acquire can stamp a NEW token for it.
-                #
-                # Under the lock we must REVALIDATE that handle is still
-                # current: if probe_release won the lock first, it may have
-                # released/destroyed handle A.  In that case we must NOT
-                # return the stale handle — fall through to the cold-
-                # provision path below instead.
-                if session_id in self._probe_generations:
-                    async with self._lock_for(session_id):
-                        self._probe_generations.pop(session_id, None)
-                        current = self._handles.get(session_id)
-                        if current is not handle:
-                            # probe_release won the lock and released our
-                            # handle.  Fall through to re-provision below
-                            # (stale/handle variables are set for the cold
-                            # path; spec_version_drifted stays False).
-                            pass
-                        else:
-                            return handle
-                else:
-                    return handle
+                return handle
             spec_version_drifted = True
             log.info(
                 "sandbox.spec_version_drift_recycling",
@@ -528,7 +445,6 @@ class SandboxRegistry:
             current = self._handles.get(session_id)
             if current is not None and current is not stale:
                 self._last_used[session_id] = time.monotonic()
-                self._probe_generations.pop(session_id, None)
                 return current
             if current is not None:
                 if spec_version_drifted:
@@ -1972,104 +1888,6 @@ class SandboxRegistry:
             cwd=cwd,
         )
 
-    async def probe_acquire(
-        self,
-        session_id: str,
-        *,
-        pool: asyncpg.Pool[Any] | None = None,
-    ) -> ProbeLease:
-        """Atomically lease a sandbox for the standing-session probe (#2064).
-
-        Runs the peek-then-provision decision under the per-session lock so
-        the probe's ownership determination cannot race a real consumer.
-        The exact race this closes: a cold peek says the sandbox is absent,
-        a concurrent real consumer provisions handle ``A``, and the probe
-        then also receives ``A``. Object-identity comparison alone would
-        let the probe conclude it owns ``A`` and release it out from under
-        the consumer. Instead, ownership is decided HERE, under the lock:
-
-        * If a handle is already cached when the lock is taken, the probe
-          did NOT create it — the lease is ``owned=False`` / ``token=None``
-          and :meth:`probe_release` is a guaranteed no-op.
-        * Only when the cache is genuinely empty under the lock does the
-          probe cold-provision. A fresh generation ``token`` is stamped in
-          ``_probe_generations`` alongside the exact handle object created,
-          and the lease is ``owned=True``.
-
-        Because the whole decision is serialized by the same lock that
-        ``get_or_provision`` and ``release`` take, a real consumer either
-        provisions strictly before the probe (probe sees the warm handle,
-        owned=False) or strictly after (probe provisioned first; its
-        provision is what the consumer then reuses, and the probe's release
-        is gated on the token/handle still being unchanged — see
-        :meth:`probe_release`). There is no interleaving in which the probe
-        both provisions and hands the consumer's handle back to itself.
-        """
-        async with self._lock_for(session_id):
-            existing = self._handles.get(session_id)
-            if existing is not None:
-                # A real consumer (or a prior probe still in flight) owns the
-                # resident sandbox. Reuse it read-only; never release it.
-                self._last_used[session_id] = time.monotonic()
-                return ProbeLease(handle=existing, owned=False, token=None)
-            # Genuinely cold under the lock: the probe is the provisioner.
-            handle = await self._provision_with_span(session_id, pool=pool)
-            self._handles[session_id] = handle
-            self._last_used[session_id] = time.monotonic()
-            token = next(self._probe_generation_counter)
-            self._probe_generations[session_id] = (token, handle)
-            return ProbeLease(handle=handle, owned=True, token=token)
-
-    async def probe_release(self, session_id: str, token: int | None) -> bool:
-        """Compare-and-release a probe-owned sandbox under the lock (#2064).
-
-        Returns ``True`` iff the sandbox was actually released. The release
-        fires ONLY when, under the per-session lock:
-
-        1. ``token`` is not ``None`` (the caller cold-provisioned), and
-        2. the stored probe generation for this session equals ``token``
-           (no other probe superseded us), and
-        3. the currently-cached handle IS the exact object the probe
-           created (no real consumer replaced it via a recycle /
-           re-provision).
-
-        If any check fails the stored token is left untouched when it does
-        not belong to this caller, and the method returns ``False`` without
-        touching the sandbox — a concurrent real consumer owns it now.
-        Best-effort teardown: a ``release`` failure is logged and swallowed
-        (the idle reaper converges) but the generation entry is still
-        cleared so it cannot leak.
-        """
-        if token is None:
-            return False
-        async with self._lock_for(session_id):
-            stored = self._probe_generations.get(session_id)
-            if stored is None or stored[0] != token:
-                # Superseded by another probe, or never ours. Do not touch
-                # the token (it belongs to whoever stamped it).
-                return False
-            _stored_token, provisioned_handle = stored
-            current = self._handles.get(session_id)
-            if current is not provisioned_handle:
-                # A real consumer replaced our handle after we provisioned
-                # (recycle / re-provision). It owns the live sandbox now;
-                # drop only our stale ownership record.
-                self._probe_generations.pop(session_id, None)
-                return False
-            # Still exactly our sandbox: release it under the lock. Clear the
-            # ownership record first so a release failure cannot leak it.
-            self._probe_generations.pop(session_id, None)
-            try:
-                await self.release(session_id)
-            except Exception as err:
-                log.warning(
-                    "sandbox.probe_release_failed",
-                    session_id=session_id,
-                    error=str(err),
-                )
-                return False
-            return True
-
     async def release(self, session_id: str) -> None:
         """Tear down one session's sandbox + proxy. No-op if not cached.
 
@@ -2100,7 +1918,6 @@ class SandboxRegistry:
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
         self._egress_states.pop(session_id, None)
-        self._probe_generations.pop(session_id, None)
         # NOTE: do NOT pop self._locks[session_id] here.  The two
         # release()-callers (``release_if_mounts_changed`` and the
         # idle reaper) wrap this call in ``async with
@@ -2206,7 +2023,6 @@ class SandboxRegistry:
 
         self._last_used.pop(session_id, None)
         self._egress_states.pop(session_id, None)
-        self._probe_generations.pop(session_id, None)
         # NOTE: do NOT pop self._locks[session_id] here either — same
         # reason as ``release()``.  A concurrent ``get_or_provision``
         # that is already inside ``async with self._lock_for(sid)``
@@ -2264,7 +2080,6 @@ class SandboxRegistry:
         self._handles.clear()
         self._last_used.clear()
         self._egress_states.clear()
-        self._probe_generations.clear()
         self._locks.clear()
         self._git_proxies.clear()
         self._secret_proxies.clear()
