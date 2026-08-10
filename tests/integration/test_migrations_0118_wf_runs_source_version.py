@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 _SCRIPT_UNIQ = "async def main(input):\n    return 1\n"
@@ -51,6 +52,16 @@ VALUES
     ('run_ambiguous', 'wf_b', 'acc_root', 'env_root', '{_SCRIPT_DUP}',
      '{_SHA_DUP}', 0, 'completed');
 """
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _fetch(db_url: str, sql: str, *args: object) -> list[asyncpg.Record]:

@@ -16,13 +16,28 @@ case so each migration run gets an isolated ``alembic_version`` and
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import subprocess
+from collections.abc import Iterator
+from pathlib import Path
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import _docker_available, needs_docker
+from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 def _run_alembic_with_env(
@@ -31,11 +46,26 @@ def _run_alembic_with_env(
     """Like ``_run_alembic`` but also threads ``AIOS_WORKSPACE_ROOT`` through.
 
     The 0057 migration reads ``AIOS_WORKSPACE_ROOT`` to know the prefix it
-    should prepend to legacy relative paths.  Now runs in-process via the
-    shared ``_run_alembic`` with ``extra_env``, benefiting from the
-    template-clone cache on virgin DBs.
+    should prepend to legacy relative paths.  ``test_migrations._run_alembic``
+    starts from a clean env (only ``PATH`` / ``AIOS_DB_URL`` / ``HOME``) so we
+    can't reuse it directly.
     """
-    return _run_alembic(args, db_url, extra_env={"AIOS_WORKSPACE_ROOT": workspace_root})
+    uv = shutil.which("uv")
+    if uv is None:
+        raise FileNotFoundError("uv not found on PATH")
+    return subprocess.run(
+        [uv, "run", "alembic", *args],
+        cwd=PROJECT_ROOT,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
+            "AIOS_DB_URL": db_url,
+            "AIOS_WORKSPACE_ROOT": workspace_root,
+            "HOME": str(Path.home()),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 async def _list_workspace_paths(db_url: str) -> list[tuple[str, str]]:

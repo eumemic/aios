@@ -64,7 +64,7 @@ class _FakeConn:
         total_local: int | None,
         ratio_n: int,
         ratio_mean: float,
-        omission_row: dict[str, Any] | _Unset | None = _UNSET,
+        omission_row: dict[str, Any] | None | _Unset = _UNSET,
         ratio_rows: list[Any] | None = None,
         mass_row: dict[str, Any] | None = None,
     ) -> None:

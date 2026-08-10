@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # FK chain to head, then seed connections + chat_sessions + events at revision
@@ -89,6 +90,16 @@ _EVENTS_SQL = (
     + _user_event_sql("evt_grp", "signal/+15550000001/group/Zm9vYmFy==")
     + _user_event_sql("evt_other", "telegramX/bot_a/should_not_match")
 )
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

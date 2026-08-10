@@ -515,8 +515,8 @@ async def update_vault_credential(
     *,
     account_id: str,
     blob: EncryptedBlob | None = None,
-    display_name: str | EllipsisType | None = ...,
-    metadata: dict[str, Any] | EllipsisType | None = ...,
+    display_name: str | None | EllipsisType = ...,
+    metadata: dict[str, Any] | None | EllipsisType = ...,
 ) -> VaultCredential:
     # Pre-check + a WHERE ... archived_at IS NULL guard (mirrors update_vault,
     # :99-140): without it, a concurrent archive_vault_credential (which zeroes

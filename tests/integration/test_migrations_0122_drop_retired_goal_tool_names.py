@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from typing import Any, cast
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # wf_goal: both retired verbs amid a plain builtin + a custom tool.
@@ -38,6 +39,16 @@ VALUES
   ('wf_clean', 'acc_root', 'clean', 1, 'S',
    '[{"type":"bash"},{"type":"create_goal"}]'::jsonb);
 """
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _fetch_tools(db_url: str, wf_id: str) -> list[dict[str, Any]]:

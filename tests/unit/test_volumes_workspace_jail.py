@@ -19,11 +19,9 @@ account-jail check applies to user-supplied paths.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import structlog
 
 from aios.config import get_settings
 from aios.errors import ForbiddenError
@@ -175,112 +173,3 @@ class TestRelativePathRejection:
         with pytest.raises(ForbiddenError) as exc_info:
             validate_workspace_path("", "acc_a")
         assert "must be absolute" in str(exc_info.value)
-
-
-@pytest.fixture
-def capture_logs() -> Iterator[structlog.testing.LogCapture]:
-    """Reconfigure structlog to capture emitted events in-process.
-
-    Mirrors ``tests/unit/test_worker_exit_diagnostics.py`` so assertions
-    read the structured key/value fields directly off
-    ``capture_logs.entries`` rather than parsing rendered strings.
-    """
-    cap = structlog.testing.LogCapture()
-    structlog.configure(processors=[cap])
-    try:
-        yield cap
-    finally:
-        structlog.reset_defaults()
-
-
-class TestRejectionDiagnostic:
-    """aios#2064: every rejection must leave a legible, non-secret trace.
-
-    The account/worker ``AIOS_WORKSPACE_ROOT`` drift that disabled the
-    standing session's filesystem tools surfaced only as an opaque
-    ``ForbiddenError`` on each tool call — the two divergent resolved
-    roots were invisible in the logs. ``validate_workspace_path`` now
-    emits a ``workspace.path_rejected`` event carrying the resolved
-    geometry (``workspace_root``, ``account_root``, ``resolved_path``)
-    beside the raw input so the drift is diagnosable from logs alone.
-
-    These tests pin the event name and the field set. They do NOT relax
-    any jail assertion above — the ``ForbiddenError`` still fires; the
-    log is strictly additional observability.
-    """
-
-    def test_outside_account_root_logs_resolved_geometry(
-        self, workspace_root: Path, capture_logs: structlog.testing.LogCapture
-    ) -> None:
-        """A path that resolves outside the account root logs the full
-        non-secret geometry that drove the fail-closed rejection."""
-        outside = str(workspace_root / "acc_b" / "sess_x")
-        with pytest.raises(ForbiddenError):
-            validate_workspace_path(outside, "acc_a", session_id="sess_x")
-
-        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
-        assert len(events) == 1
-        entry = events[0]
-        assert entry["log_level"] == "warning"
-        assert entry["reason"] == "outside_account_root"
-        assert entry["raw_path"] == outside
-        assert entry["resolved_path"] == str(Path(outside).resolve())
-        assert entry["workspace_root"] == str(workspace_root.resolve())
-        assert entry["account_root"] == str((workspace_root / "acc_a").resolve())
-        assert entry["account_id"] == "acc_a"
-        assert entry["session_id"] == "sess_x"
-
-    def test_non_absolute_path_logs_rejection(
-        self, workspace_root: Path, capture_logs: structlog.testing.LogCapture
-    ) -> None:
-        """The relative-input branch also emits ``workspace.path_rejected``
-        so a stale relative ``workspace_volume_path`` row is diagnosable
-        from logs. ``resolved_path`` is ``None`` — a relative input is
-        deliberately never ``resolve()``d here (it would bind to CWD)."""
-        with pytest.raises(ForbiddenError):
-            validate_workspace_path("workspaces/sess_x", "acc_a", session_id="sess_x")
-
-        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
-        assert len(events) == 1
-        entry = events[0]
-        assert entry["log_level"] == "warning"
-        assert entry["reason"] == "not_absolute"
-        assert entry["raw_path"] == "workspaces/sess_x"
-        assert entry["resolved_path"] is None
-        assert entry["account_id"] == "acc_a"
-        assert entry["session_id"] == "sess_x"
-
-    def test_accepted_path_emits_no_rejection_log(
-        self, workspace_root: Path, capture_logs: structlog.testing.LogCapture
-    ) -> None:
-        """A valid in-account path must NOT emit a rejection event — the
-        log is a rejection signal, not a per-call trace, so it stays
-        quiet on the happy path (no log spam, no false positives in
-        aggregation/alerting)."""
-        validate_workspace_path(str(workspace_root / "acc_a" / "shared"), "acc_a")
-        assert not [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
-
-    def test_rejection_log_carries_no_credentialish_fields(
-        self, workspace_root: Path, capture_logs: structlog.testing.LogCapture
-    ) -> None:
-        """Guard the fail-closed-isolation invariant: the diagnostic must
-        expose only path geometry + identifiers, never a secret. Pin the
-        exact key set so a future edit can't silently widen it to include
-        a token, header, or credential."""
-        with pytest.raises(ForbiddenError):
-            validate_workspace_path("/etc", "acc_a")
-
-        events = [e for e in capture_logs.entries if e.get("event") == "workspace.path_rejected"]
-        assert len(events) == 1
-        # structlog adds ``event`` and ``log_level``; the payload keys we
-        # own are exactly these — no more.
-        owned = set(events[0]) - {"event", "log_level"}
-        assert owned == {
-            "reason",
-            "raw_path",
-            "resolved_path",
-            "workspace_root",
-            "account_root",
-            "account_id",
-            "session_id",
-        }

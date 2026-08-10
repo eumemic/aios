@@ -51,7 +51,7 @@ import asyncpg
 import pytest
 
 from aios.tools.search_events import _ALLOWED_RELATIONS
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # ---------------------------------------------------------------------------
@@ -569,13 +569,19 @@ def test_lifecycle_redaction_vocabulary_alignment() -> None:
 
 
 @pytest.fixture(scope="module")
-def db_url(module_postgres: object) -> Iterator[str]:
-    """One isolated database + one upgrade/seed for this read-only module."""
-    url = _alembic_url(module_postgres)
-    result = _run_alembic(["upgrade", "head"], url)
-    assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
-    asyncio.run(_seed(url))
-    yield url
+def db_url() -> Iterator[str]:
+    """One container + one ``upgrade head`` + one seed for the whole module —
+    every test below is read-only (the EXPLAIN test's DDL is rolled back)."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        url = _alembic_url(pg)
+        result = _run_alembic(["upgrade", "head"], url)
+        assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
+        asyncio.run(_seed(url))
+        yield url
 
 
 async def _seed(db_url: str) -> None:

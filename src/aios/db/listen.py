@@ -283,8 +283,8 @@ async def open_listen_for_events(
     *,
     queue_max: int = 1000,
     on_connected: Callable[[asyncpg.Connection[object]], Awaitable[None]]
-    | object
-    | None = _ACQUIRE_SUBSCRIBER_LOCK_DEFAULT,
+    | None
+    | object = _ACQUIRE_SUBSCRIBER_LOCK_DEFAULT,
 ) -> ListenSubscription:
     """Open a dedicated asyncpg connection, LISTEN events_<session_id>,
     acquire the SSE subscriber lock, and return a :class:`ListenSubscription`.

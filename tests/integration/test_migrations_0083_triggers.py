@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import needs_docker
+from tests.conftest import _docker_available, needs_docker
 from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 # The FK chain required to land a session_scheduled_tasks row at revision 0081
@@ -59,6 +60,17 @@ VALUES ('sched_wake', 'ses_mig', 'acc_mig', 'wake-row',
         '2026-06-12 09:00:00+00'::timestamptz,
         'tool wake_self ''{"content":"poll done"}''');
 """
+
+
+@pytest.fixture
+def postgres() -> Iterator[object]:
+    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
+    if not _docker_available():
+        pytest.skip("Docker not available")
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as pg:
+        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:

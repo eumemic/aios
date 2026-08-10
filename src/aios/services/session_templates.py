@@ -87,7 +87,7 @@ async def update_session_template(
     account_id: str,
     name: str | None = None,
     agent_id: str | None = None,
-    agent_version: int | EllipsisType | None = ...,
+    agent_version: int | None | EllipsisType = ...,
     environment_id: str | None = None,
     vault_ids: list[str] | None = None,
     memory_store_ids: list[str] | None = None,
