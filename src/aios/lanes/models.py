@@ -8,9 +8,8 @@ consumed by the ``lane_activate`` workflow script.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
-
 
 # ── Lock-file section models ────────────────────────────────────────────────
 
@@ -18,6 +17,7 @@ from typing import Any
 @dataclass(frozen=True)
 class LockProvenance:
     """``_provenance`` section — builder metadata, not applied to any live object."""
+
     builder_version: str
     resolved_agent_ids: dict[str, str] = field(default_factory=dict)
     spec_hash: str = ""
@@ -26,6 +26,7 @@ class LockProvenance:
 @dataclass(frozen=True)
 class LockWorkflow:
     """``workflow`` section — the workflow definition to create/update."""
+
     name: str
     script: str
     description: str | None = None
@@ -36,6 +37,7 @@ class LockWorkflow:
 @dataclass(frozen=True)
 class LockCronTriggerAction:
     """``cron_trigger.action`` — the WorkflowAction inside the trigger."""
+
     workflow_id: str
     input_template: dict[str, Any] | None = None
     vault_ids: list[str] = field(default_factory=list)
@@ -45,6 +47,7 @@ class LockCronTriggerAction:
 @dataclass(frozen=True)
 class LockCronTriggerSource:
     """``cron_trigger.source`` — the CronSource inside the trigger."""
+
     schedule: str
     timezone: str = "UTC"
 
@@ -52,6 +55,7 @@ class LockCronTriggerSource:
 @dataclass(frozen=True)
 class LockCronTrigger:
     """``cron_trigger`` section — the cron trigger to create/update."""
+
     name: str
     trigger_name: str
     action: LockCronTriggerAction
@@ -62,6 +66,7 @@ class LockCronTrigger:
 @dataclass(frozen=True)
 class LockLauncherAgent:
     """``launcher_agent`` section — the agent definition to create/update."""
+
     name: str
     model: str
     description: str | None = None
@@ -72,6 +77,7 @@ class LockLauncherAgent:
 @dataclass(frozen=True)
 class LockLauncherSession:
     """``launcher_session`` section — the session to create/update."""
+
     agent_id: str
     environment_id: str
     title: str | None = None
@@ -82,6 +88,7 @@ class LockLauncherSession:
 @dataclass(frozen=True)
 class LaneLock:
     """A fully parsed lane lock file."""
+
     provenance: LockProvenance
     workflow: LockWorkflow
     cron_trigger: LockCronTrigger
@@ -145,8 +152,9 @@ class LaneLock:
 # ── Activation result models ────────────────────────────────────────────────
 
 
-class ActivationOutcome(str, Enum):
+class ActivationOutcome(StrEnum):
     """Top-level outcome of a lane activation run."""
+
     ACTIVATED = "activated"
     NO_OP = "no_op"
     FAILED = "failed"
@@ -155,9 +163,10 @@ class ActivationOutcome(str, Enum):
 @dataclass
 class ObjectDelta:
     """What changed (or didn't) for one live object."""
-    object_kind: str   # "workflow" | "agent" | "session" | "trigger"
+
+    object_kind: str  # "workflow" | "agent" | "session" | "trigger"
     object_name: str
-    action: str        # "created" | "updated" | "unchanged"
+    action: str  # "created" | "updated" | "unchanged"
     object_id: str | None = None
     old_version: int | None = None
     new_version: int | None = None
@@ -167,6 +176,7 @@ class ObjectDelta:
 @dataclass
 class ActivationResult:
     """The typed return value of a ``lane_activate`` run."""
+
     outcome: ActivationOutcome
     lane: str
     merge_sha: str

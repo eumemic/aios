@@ -8,15 +8,14 @@ and follows the value-domain I/O contract.
 
 from __future__ import annotations
 
-import json
+from typing import Any
 
 import pytest
-
 
 # ── LaneLock parsing tests ──────────────────────────────────────────────────
 
 
-def _sample_lock() -> dict:
+def _sample_lock() -> dict[str, Any]:
     """A minimal valid lock-file dict."""
     return {
         "_provenance": {
@@ -265,7 +264,7 @@ class TestLaneActivateScript:
     def test_script_declares_main(self):
         from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 
-        namespace: dict = {}
+        namespace: dict[str, Any] = {}
         exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
         assert "main" in namespace
         assert callable(namespace["main"])
@@ -273,7 +272,7 @@ class TestLaneActivateScript:
     def test_script_declares_constants(self):
         from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 
-        namespace: dict = {}
+        namespace: dict[str, Any] = {}
         exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
         assert namespace["GITHUB_SERVER"] == "github"
         assert namespace["AIOS_SERVER"] == "aios"
@@ -283,7 +282,7 @@ class TestLaneActivateScript:
     def test_script_lock_path_template(self):
         from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 
-        namespace: dict = {}
+        namespace: dict[str, Any] = {}
         exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
         template = namespace["LOCK_PATH_TEMPLATE"]
         assert "{lane}" in template

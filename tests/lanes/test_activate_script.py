@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import textwrap
 
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 
@@ -62,5 +61,12 @@ class TestLaneActivateScript:
 
     def test_script_has_six_phases(self) -> None:
         """Should have phases: read-lock, ensure-workflow, ensure-agent, ensure-session, ensure-trigger, verify."""
-        for phase_name in ["read-lock", "ensure-workflow", "ensure-agent", "ensure-session", "ensure-trigger", "verify"]:
+        for phase_name in [
+            "read-lock",
+            "ensure-workflow",
+            "ensure-agent",
+            "ensure-session",
+            "ensure-trigger",
+            "verify",
+        ]:
             assert phase_name in LANE_ACTIVATE_SCRIPT, f"missing phase: {phase_name}"

@@ -2,26 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from aios.lanes.models import (
     ActivationOutcome,
     ActivationResult,
     LaneLock,
-    LockCronTrigger,
-    LockCronTriggerAction,
-    LockCronTriggerSource,
-    LockLauncherAgent,
-    LockLauncherSession,
-    LockProvenance,
-    LockWorkflow,
     ObjectDelta,
 )
 
-
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
-MINIMAL_LOCK_DICT: dict = {
+MINIMAL_LOCK_DICT: dict[str, Any] = {
     "_provenance": {
         "builder_version": "0.1.0",
         "resolved_agent_ids": {"my-agent": "ag_123"},
@@ -198,6 +192,6 @@ class TestActivationOutcome:
         assert ActivationOutcome.FAILED.value == "failed"
 
     def test_str_mixin(self) -> None:
-        # str(Enum) should give the value because of the (str, Enum) mixin
-        assert str(ActivationOutcome.ACTIVATED) == "ActivationOutcome.ACTIVATED"
-        assert ActivationOutcome.ACTIVATED == "activated"
+        # StrEnum members' str() gives the value; verify via .value
+        assert str(ActivationOutcome.ACTIVATED) == "activated"
+        assert ActivationOutcome.ACTIVATED.value == "activated"
