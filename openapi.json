@@ -8402,6 +8402,43 @@
         "operationId": "get_connection_discovery_v1_connectors_connections_get",
         "parameters": [
           {
+            "name": "arm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fresh",
+                    "tail"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm"
+            }
+          },
+          {
+            "name": "after_change_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After Change Seq"
+            }
+          },
+          {
             "name": "Authorization",
             "in": "header",
             "required": false,

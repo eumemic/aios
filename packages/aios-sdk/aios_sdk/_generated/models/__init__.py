@@ -73,6 +73,9 @@ from .gate_resume import GateResume
 from .get_calibration_telemetry_response_get_calibration_telemetry import (
     GetCalibrationTelemetryResponseGetCalibrationTelemetry,
 )
+from .get_connection_discovery_v1_connectors_connections_get_arm_type_0 import (
+    GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0,
+)
 from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
@@ -417,6 +420,7 @@ __all__ = (
     "FileUploadResponse",
     "GateResume",
     "GetCalibrationTelemetryResponseGetCalibrationTelemetry",
+    "GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0",
     "GetHealthResponseGetHealth",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
