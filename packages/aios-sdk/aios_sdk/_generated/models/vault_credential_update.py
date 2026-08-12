@@ -25,9 +25,10 @@ T = TypeVar("T", bound="VaultCredentialUpdate")
 class VaultCredentialUpdate:
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-    immutable — not accepted here. Omitted secret fields are preserved
-    (decrypt-merge-encrypt).
+    ``target_url`` and ``auth_type`` are immutable. For an
+    ``environment_variable`` credential, changing ``secret_name`` or
+    ``allowed_hosts`` atomically archives the old row and creates a replacement
+    with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
 
         Attributes:
             access_token (None | str | Unset):
@@ -46,6 +47,8 @@ class VaultCredentialUpdate:
             secret_value (None | str | Unset):
             display_name (None | str | Unset):
             metadata (None | Unset | VaultCredentialUpdateMetadataType0):
+            secret_name (None | str | Unset):
+            allowed_hosts (list[str] | None | Unset):
     """
 
     access_token: None | str | Unset = UNSET
@@ -70,6 +73,8 @@ class VaultCredentialUpdate:
     secret_value: None | str | Unset = UNSET
     display_name: None | str | Unset = UNSET
     metadata: None | Unset | VaultCredentialUpdateMetadataType0 = UNSET
+    secret_name: None | str | Unset = UNSET
+    allowed_hosts: list[str] | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.token_endpoint_auth_basic import TokenEndpointAuthBasic
@@ -185,6 +190,21 @@ class VaultCredentialUpdate:
         else:
             metadata = self.metadata
 
+        secret_name: None | str | Unset
+        if isinstance(self.secret_name, Unset):
+            secret_name = UNSET
+        else:
+            secret_name = self.secret_name
+
+        allowed_hosts: list[str] | None | Unset
+        if isinstance(self.allowed_hosts, Unset):
+            allowed_hosts = UNSET
+        elif isinstance(self.allowed_hosts, list):
+            allowed_hosts = self.allowed_hosts
+
+        else:
+            allowed_hosts = self.allowed_hosts
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update({})
@@ -220,6 +240,10 @@ class VaultCredentialUpdate:
             field_dict["display_name"] = display_name
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
+        if secret_name is not UNSET:
+            field_dict["secret_name"] = secret_name
+        if allowed_hosts is not UNSET:
+            field_dict["allowed_hosts"] = allowed_hosts
 
         return field_dict
 
@@ -443,6 +467,32 @@ class VaultCredentialUpdate:
 
         metadata = _parse_metadata(d.pop("metadata", UNSET))
 
+        def _parse_secret_name(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        secret_name = _parse_secret_name(d.pop("secret_name", UNSET))
+
+        def _parse_allowed_hosts(data: object) -> list[str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                allowed_hosts_type_0 = cast(list[str], data)
+
+                return allowed_hosts_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[str] | None | Unset, data)
+
+        allowed_hosts = _parse_allowed_hosts(d.pop("allowed_hosts", UNSET))
+
         vault_credential_update = cls(
             access_token=access_token,
             expires_at=expires_at,
@@ -460,6 +510,8 @@ class VaultCredentialUpdate:
             secret_value=secret_value,
             display_name=display_name,
             metadata=metadata,
+            secret_name=secret_name,
+            allowed_hosts=allowed_hosts,
         )
 
         return vault_credential_update

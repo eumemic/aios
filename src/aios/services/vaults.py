@@ -637,15 +637,61 @@ async def update_vault_credential(
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
         new_blob = subkey.encrypt_dict(merged)
 
-        updated = await queries.update_vault_credential(
-            conn,
-            vault_id,
-            credential_id,
-            blob=new_blob,
-            display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
-            metadata=body.metadata if "metadata" in body.model_fields_set else ...,
-            account_id=account_id,
+        scope_fields = {"secret_name", "allowed_hosts"} & body.model_fields_set
+        if scope_fields and cred.auth_type != "environment_variable":
+            raise ValidationError(
+                "secret_name and allowed_hosts apply only to environment_variable credentials",
+                detail={"auth_type": cred.auth_type, "fields": sorted(scope_fields)},
+            )
+        secret_name = body.secret_name if "secret_name" in scope_fields else cred.secret_name
+        allowed_hosts = (
+            body.allowed_hosts if "allowed_hosts" in scope_fields else cred.allowed_hosts
         )
+        rescoping = bool(
+            scope_fields
+            and (secret_name != cred.secret_name or allowed_hosts != cred.allowed_hosts)
+        )
+        if rescoping:
+            # The scope-bearing row is immutable: archive it (which also scrubs
+            # its ciphertext) and insert a replacement in the same transaction.
+            # We decrypted before archive, so the replacement can carry the
+            # secret without exposing or re-entering it. The new id also yields
+            # a new sandbox placeholder and therefore provision-time recycle.
+            await queries.archive_vault_credential(
+                conn, vault_id, credential_id, account_id=account_id
+            )
+            updated = await queries.insert_vault_credential(
+                conn,
+                vault_id=vault_id,
+                display_name=(
+                    body.display_name
+                    if "display_name" in body.model_fields_set
+                    else cred.display_name
+                ),
+                target_url=None,
+                secret_name=secret_name,
+                allowed_hosts=allowed_hosts,
+                auth_type=cred.auth_type,
+                blob=new_blob,
+                metadata=(
+                    body.metadata
+                    if "metadata" in body.model_fields_set and body.metadata is not None
+                    else cred.metadata
+                ),
+                account_id=account_id,
+            )
+        else:
+            updated = await queries.update_vault_credential(
+                conn,
+                vault_id,
+                credential_id,
+                blob=new_blob,
+                display_name=(
+                    body.display_name if "display_name" in body.model_fields_set else ...
+                ),
+                metadata=body.metadata if "metadata" in body.model_fields_set else ...,
+                account_id=account_id,
+            )
     # NOTIFY after commit (invariant 6) so the worker evicts the pooled MCP
     # session that still carries the pre-rotation secret (#1030).
     await _notify_evict_vault(pool, vault_id)
