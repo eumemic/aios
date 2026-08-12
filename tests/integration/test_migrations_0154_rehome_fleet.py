@@ -192,6 +192,11 @@ async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes,
             "VALUES ('acc_root','root',true,4242)"
         )
         await conn.execute(
+            "INSERT INTO accounts (id,parent_account_id,display_name) VALUES "
+            "('acc_existing','acc_root','existing'),"
+            "('acc_grandchild','acc_existing','grandchild')"
+        )
+        await conn.execute(
             "INSERT INTO account_keys (key_id,account_id,hash,label) VALUES "
             "('key_keep','acc_root',$1,'admin'),('key_move','acc_root',$2,'fleet')",
             os.urandom(32),
@@ -282,8 +287,35 @@ async def _seed_fleet(db_url: str, master: Any) -> dict[str, tuple[bytes, bytes,
     return secrets
 
 
+async def _accounts_with_provider_resolution(db_url: str) -> set[str]:
+    conn = await asyncpg.connect(db_url)
+    try:
+        rows = await conn.fetch(
+            """
+            WITH RECURSIVE ancestry(account_id, ancestor_id) AS (
+                SELECT id, id FROM accounts WHERE archived_at IS NULL
+                UNION ALL
+                SELECT ancestry.account_id, accounts.parent_account_id
+                FROM ancestry
+                JOIN accounts ON accounts.id = ancestry.ancestor_id
+                WHERE accounts.parent_account_id IS NOT NULL
+            )
+            SELECT DISTINCT ancestry.account_id
+            FROM ancestry
+            JOIN model_providers ON model_providers.account_id = ancestry.ancestor_id
+            WHERE model_providers.archived_at IS NULL
+            """
+        )
+        return {row["account_id"] for row in rows}
+    finally:
+        await conn.close()
+
+
 async def _assert_upgraded(
-    db_url: str, master: Any, expected: dict[str, tuple[bytes, bytes, str]]
+    db_url: str,
+    master: Any,
+    expected: dict[str, tuple[bytes, bytes, str]],
+    previously_resolved: set[str],
 ) -> str:
     conn = await asyncpg.connect(db_url)
     try:
@@ -291,6 +323,16 @@ async def _assert_upgraded(
             "SELECT id FROM accounts WHERE parent_account_id='acc_root' AND display_name='Eumemic'"
         )
         assert child
+        assert (
+            await conn.fetchval("SELECT parent_account_id FROM accounts WHERE id='acc_existing'")
+            == child
+        )
+        assert (
+            await conn.fetchval("SELECT parent_account_id FROM accounts WHERE id='acc_grandchild'")
+            == "acc_existing"
+        )
+        now_resolved = await _accounts_with_provider_resolution(db_url)
+        assert previously_resolved - {"acc_root"} <= now_resolved
         assert (
             await conn.fetchval(
                 "SELECT count(*) FROM account_keys WHERE account_id='acc_root' AND revoked_at IS NULL"
@@ -349,6 +391,10 @@ async def _assert_restored(
             await conn.fetchval("SELECT count(*) FROM accounts WHERE display_name='Eumemic'") == 0
         )
         assert (
+            await conn.fetchval("SELECT parent_account_id FROM accounts WHERE id='acc_existing'")
+            == "acc_root"
+        )
+        assert (
             await conn.fetchval("SELECT spent_microusd FROM accounts WHERE id='acc_root'") == 4242
         )
         for table, (ciphertext_column, nonce_column) in columns.items():
@@ -376,10 +422,11 @@ def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
     listed_fks = {(table, name) for table, name, _ in migration._COMPOSITE_FKS}
     assert listed_fks == expected_fks
     expected = asyncio.run(_seed_fleet(db_url, master))
+    previously_resolved = asyncio.run(_accounts_with_provider_resolution(db_url))
 
     result = _run_alembic(["upgrade", "0154"], db_url, key)
     assert result.returncode == 0, result.stderr
-    asyncio.run(_assert_upgraded(db_url, master, expected))
+    asyncio.run(_assert_upgraded(db_url, master, expected, previously_resolved))
 
     result = _run_alembic(["downgrade", "0152"], db_url, key)
     assert result.returncode == 0, result.stderr
@@ -387,4 +434,4 @@ def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
 
     result = _run_alembic(["upgrade", "0154"], db_url, key)
     assert result.returncode == 0, result.stderr
-    asyncio.run(_assert_upgraded(db_url, master, expected))
+    asyncio.run(_assert_upgraded(db_url, master, expected, previously_resolved))
