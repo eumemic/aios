@@ -492,6 +492,64 @@ class TestUpdateVaultCredentialCallSite:
         assert kwargs["blob"] is not None  # always re-encrypted
 
     @pytest.mark.asyncio
+    async def test_rescoping_env_var_archives_and_recreates_with_carried_secret(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        account_id = "acc_test_stub"
+        existing = VaultCredential(
+            id="vc_1",
+            vault_id="vlt_1",
+            display_name="mailgun",
+            target_url=None,
+            auth_type="environment_variable",
+            secret_name="MAILGUN_API_KEY",
+            allowed_hosts=["mailgun.com"],
+            metadata={"owner": "ops"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt_dict(
+            {"secret_value": "carried-secret"}
+        )
+        replacement = existing.model_copy(
+            update={"id": "vc_2", "allowed_hosts": ["api.mailgun.net"]}
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
+            ),
+            patch.object(
+                queries, "archive_vault_credential", AsyncMock(return_value=existing)
+            ) as archive,
+            patch.object(
+                queries, "insert_vault_credential", AsyncMock(return_value=replacement)
+            ) as insert,
+        ):
+            result = await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"]),
+                account_id=account_id,
+            )
+
+        assert result.id == "vc_2"
+        archive.assert_awaited_once_with(conn, "vlt_1", "vc_1", account_id=account_id)
+        assert insert.await_args is not None
+        kwargs = insert.await_args.kwargs
+        assert kwargs["secret_name"] == "MAILGUN_API_KEY"
+        assert kwargs["allowed_hosts"] == ["api.mailgun.net"]
+        assert crypto_box.derive_account_subkey(account_id).decrypt_dict(kwargs["blob"]) == {
+            "secret_value": "carried-secret"
+        }
+
+    @pytest.mark.asyncio
     async def test_passes_display_name_when_set_even_to_none(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()

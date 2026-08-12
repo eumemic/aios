@@ -5299,7 +5299,7 @@
           "vaults"
         ],
         "summary": "Update Credential",
-        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``target_url`` and ``auth_type`` are immutable\nand not accepted in the body. To rotate an OAuth refresh token, send\nonly the new ``refresh_token`` (and optional ``access_token`` /\n``expires_at``); other auth fields stay intact.",
+        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing\nan environment-variable credential's ``secret_name`` or ``allowed_hosts``\natomically archives the old row and creates a replacement with a new id,\ncarrying its encrypted secret unless ``secret_value`` is supplied. The new\nid changes sandbox placeholders, so affected sandboxes recycle on their next\nprovision. To rotate an OAuth refresh token, send only the new\n``refresh_token`` (and optional ``access_token`` / ``expires_at``); other\nauth fields stay intact.",
         "operationId": "update_vault_credential",
         "parameters": [
           {
@@ -19112,12 +19112,38 @@
               }
             ],
             "title": "Metadata"
+          },
+          "secret_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Name"
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Hosts"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "title": "VaultCredentialUpdate",
-        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are\nimmutable \u2014 not accepted here. Omitted secret fields are preserved\n(decrypt-merge-encrypt)."
+        "description": "Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.\n\n``target_url`` and ``auth_type`` are immutable. For an\n``environment_variable`` credential, changing ``secret_name`` or\n``allowed_hosts`` atomically archives the old row and creates a replacement\nwith a new id. Omitted secret fields are preserved (decrypt-merge-encrypt)."
       },
       "VaultUpdate": {
         "properties": {
