@@ -1539,6 +1539,7 @@ async def _run_session_step_body(
             "cost_usd": cost_usd,
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
+            "token_baseline_v": 2,
             "model": agent.model,
         },
         account_id=account_id,

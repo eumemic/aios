@@ -91,7 +91,7 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
 # subset of :data:`aios.harness.tokens.CONTENT_CLASSES` -- the ``system`` and
 # ``tools`` classes come from the caller's overhead split, never from a stored
 # message row, so they carry no cumulative column.
-_MESSAGE_CONTENT_CLASSES = ("text", "tool_result", "thinking", "tool_use")
+_MESSAGE_CONTENT_CLASSES = ("text", "tool_result", "thinking", "tool_use", "image")
 
 # Per-class cumulative-mass column names, keyed by content class. Kept next to
 # the classifier so the append-time increment and the read-time seek share one
@@ -101,6 +101,7 @@ _CLASS_MASS_COLUMN = {
     "tool_result": "cumulative_tool_result_mass",
     "thinking": "cumulative_thinking_mass",
     "tool_use": "cumulative_tool_use_mass",
+    "image": "cumulative_image_mass",
 }
 
 
@@ -159,7 +160,7 @@ async def _latest_cumulative_state(
     row = await conn.fetchrow(
         "SELECT cumulative_tokens, cumulative_messages, "
         "       cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
         "FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
         "AND cumulative_tokens IS NOT NULL "
@@ -180,6 +181,7 @@ async def _latest_cumulative_state(
             "tool_result": row["cumulative_tool_result_mass"],
             "thinking": row["cumulative_thinking_mass"],
             "tool_use": row["cumulative_tool_use_mass"],
+            "image": row["cumulative_image_mass"],
         },
     )
 
@@ -456,6 +458,7 @@ async def model_token_class_ratio_fit(
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND data->>'model' = $1
+          AND (data->>'token_baseline_v')::smallint = 2
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -518,6 +521,7 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND created_at >= now() - interval '24 hours'
+          AND (data->>'token_baseline_v')::smallint = 2
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -600,8 +604,9 @@ def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
     for idx, j in enumerate(active):
         c = coefs[idx]
         # Clamp to the physical range; the windower divides by the blend.
-        c = max(_MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
-        out[classes[j]] = c
+        cls = classes[j]
+        c = max(0.001 if cls == "image" else _MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
+        out[cls] = c
     return out
 
 
@@ -1401,7 +1406,7 @@ async def append_event(
             "            THEN channels || focal_channel "
             "        ELSE channels END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
-            "RETURNING last_event_seq, focal_channel",
+            "RETURNING last_event_seq, focal_channel, token_baseline_v",
             session_id,
             account_id,
             is_user_message,
@@ -1425,6 +1430,7 @@ async def append_event(
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
         seq = seq_row["last_event_seq"]
         focal_at_arrival: str | None = seq_row["focal_channel"]
+        token_baseline_v = int(seq_row["token_baseline_v"])
 
         # cumulative_tokens = prev running sum + the pre-computed per-event
         # delta.  ``prev`` is the ONLY query between the seq-allocating UPDATE
@@ -1458,15 +1464,15 @@ async def append_event(
             cum_tokens = (prev.tokens or 0) + delta
             counts_as_message = role in ("user", "assistant")
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
+            from aios.harness.tokens import approx_tokens_by_class
+
+            event_mass = approx_tokens_by_class([data])
+            # Reconcile rendering/envelope drift to the event's dominant class;
+            # image itself remains the exact mixed-part residual.
             cls = _message_content_class(role, data)
+            event_mass[cls] += delta - sum(event_mass[c] for c in _MESSAGE_CONTENT_CLASSES)
             for c in _MESSAGE_CONTENT_CLASSES:
-                base = prev.mass.get(c) or 0
-                # A negative ``delta`` cannot lower a class below its prior
-                # running sum: clamp per-event so the stored cumulative stays
-                # monotonic, matching the old query's ``if mass < 0: mass = 0``
-                # per-class flooring of the summed deltas.
-                add = delta if c == cls else 0
-                cum_mass[c] = max(0, base + add)
+                cum_mass[c] = max(0, (prev.mass.get(c) or 0) + event_mass[c])
 
         channel = _resolve_event_channel(
             kind, data, orig_channel, focal_at_arrival, resolved_tool_channel
@@ -1480,11 +1486,11 @@ async def append_event(
             "(id, session_id, seq, kind, data, cumulative_tokens, "
             " cumulative_messages, cumulative_text_mass, "
             " cumulative_tool_result_mass, cumulative_thinking_mass, "
-            " cumulative_tool_use_mass, "
+            " cumulative_tool_use_mass, cumulative_image_mass, token_baseline_v, "
             " orig_channel, focal_channel_at_arrival, channel, "
             " role, tool_name, is_error, sender_name, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, "
-            " $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *",
+            " $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -1496,6 +1502,8 @@ async def append_event(
             cum_mass["tool_result"],
             cum_mass["thinking"],
             cum_mass["tool_use"],
+            cum_mass["image"] if token_baseline_v == 2 else 0,
+            token_baseline_v,
             orig_channel,
             focal_at_arrival,
             channel,
@@ -2337,7 +2345,7 @@ async def _retained_class_mass(
     """
     row = await conn.fetchrow(
         "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
         "FROM events "
         "WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
@@ -2352,6 +2360,7 @@ async def _retained_class_mass(
         "tool_result": row["cumulative_tool_result_mass"],
         "thinking": row["cumulative_thinking_mass"],
         "tool_use": row["cumulative_tool_use_mass"],
+        "image": row["cumulative_image_mass"],
     }
     out: dict[str, float] = {}
     for cls, mass in stored.items():

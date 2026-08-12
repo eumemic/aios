@@ -301,6 +301,8 @@ EVENTS_POLICY: dict[str, Arm] = {
     "cumulative_tool_result_mass": Arm.COPY,
     "cumulative_thinking_mass": Arm.COPY,
     "cumulative_tool_use_mass": Arm.COPY,
+    "cumulative_image_mass": Arm.COPY,
+    "token_baseline_v": Arm.COPY,
 }
 
 

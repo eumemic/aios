@@ -145,6 +145,18 @@ def _message_body_tokens(msg: Mapping[str, Any]) -> int:
             return cached
 
     value = int(token_counter(messages=[msg], count_response_tokens=True))
+    # LiteLLM's model-neutral chat counter ignores image_url parts entirely.
+    # Price their URL separately with the same default tokenizer.  Data URIs
+    # therefore contribute their full encoded payload while ordinary remote
+    # URLs remain a small, stable baseline term.
+    content = msg.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, Mapping) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str):
+                value += int(token_counter(text=image_url["url"]))
 
     if key is not None:
         _cache_put(_BODY_CACHE, key, value)
@@ -241,6 +253,7 @@ CONTENT_CLASSES: tuple[str, ...] = (
     "tool_result",
     "thinking",
     "tool_use",
+    "image",
 )
 
 
@@ -331,7 +344,23 @@ def approx_tokens_by_class(
     if tool_list:
         by_class["tools"] = _count([], tools=tool_list)
 
-    for msg in msgs:
+    for original_msg in msgs:
+        msg = original_msg
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, Mapping) and part.get("type") == "image_url" for part in content
+        ):
+            # Split mixed-part messages without charging framing twice: count
+            # the image-free message normally and assign the exact residual of
+            # the full message to image.
+            msg = dict(msg)
+            msg["content"] = [
+                part
+                for part in content
+                if not (isinstance(part, Mapping) and part.get("type") == "image_url")
+            ]
+            by_class["image"] += _count([original_msg]) - _count([msg])
+
         role = msg.get("role")
         cls = content_class(role, msg)
         if cls == "system":
