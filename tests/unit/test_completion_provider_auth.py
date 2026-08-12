@@ -220,3 +220,31 @@ async def test_legacy_env_preserves_inline_precedence(monkeypatch: pytest.Monkey
     )
     assert captured["api_key"] == "sk-inline"
     assert captured["api_base"] == "https://inline.example"
+
+
+def test_stale_model_map_params_are_centrally_allowed() -> None:
+    kwargs = completion._build_litellm_kwargs(
+        model="xai/grok-4.6",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        auth=None,
+        extra={"reasoning_effort": "high"},
+        session_id=None,
+        stream=False,
+    )
+
+    assert "reasoning_effort" in kwargs["allowed_openai_params"]
+
+
+def test_explicit_allowed_params_are_merged_with_central_passthrough() -> None:
+    kwargs = completion._build_litellm_kwargs(
+        model="xai/grok-4.6",
+        messages=[],
+        tools=None,
+        auth=None,
+        extra={"reasoning_effort": "high", "allowed_openai_params": ["seed"]},
+        session_id=None,
+        stream=False,
+    )
+
+    assert kwargs["allowed_openai_params"] == ["reasoning_effort", "seed"]

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 
 from aios.api.deps import AccountIdDep, PoolDep
 from aios.models.agents import Agent, AgentCreate, AgentUpdate, AgentVersion
 from aios.models.common import ListResponse
 from aios.models.pagination import PageLimit, cursor_as_int, page_cursor, resolve_page_limit
 from aios.services import agents as service
+from aios.services.litellm_params import unsupported_openai_params
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
@@ -74,7 +75,11 @@ async def get(agent_id: str, pool: PoolDep, account_id: AccountIdDep) -> Agent:
 
 @router.put("/{agent_id}", operation_id="update_agent")
 async def update(
-    agent_id: str, body: AgentUpdate, pool: PoolDep, account_id: AccountIdDep
+    agent_id: str,
+    body: AgentUpdate,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    response: Response,
 ) -> Agent:
     """Update an agent, creating a new immutable version.
 
@@ -84,6 +89,18 @@ async def update(
     to the current version, no new version is created and the existing one
     is returned unchanged (no-op).
     """
+    current = await service.get_agent(pool, agent_id, account_id=account_id)
+    effective_model = body.model if body.model is not None else current.model
+    effective_extra = (
+        body.litellm_extra if body.litellm_extra is not None else current.litellm_extra
+    )
+    unsupported = unsupported_openai_params(effective_model, effective_extra)
+    if unsupported:
+        response.headers["Warning"] = (
+            '299 aios "LiteLLM model map does not list parameter(s): '
+            + ", ".join(unsupported)
+            + '; worker will pass them to the provider"'
+        )
     return await service.update_agent(
         pool,
         agent_id,
