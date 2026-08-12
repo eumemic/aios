@@ -187,10 +187,9 @@ async def test_prune_reclaims_ephemera_but_spares_sacred(
         conn, retention_days=settings.archived_definition_retention_days
     )
 
-    # The unreferenced terminal+archived run is gone — and so is its journal
-    # (dropped by the ON DELETE CASCADE, the unbounded-growth driver).
-    assert pruned_runs == 1
-    assert await _count(conn, "wf_runs", "id", run_id) == 0
+    # The compact run summary survives; only bounded child detail is reclaimed.
+    assert pruned_runs == 2
+    assert await _count(conn, "wf_runs", "id", run_id) == 1
     assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
 
     # The live-pinned agent + its version survived despite being archived & old.
@@ -211,9 +210,10 @@ async def test_run_prune_respects_retention_window(conn: asyncpg.Connection[Any]
     young = await _make_archived_run(conn, archived_age_days=5)
     old = await _make_archived_run(conn, archived_age_days=40)
     pruned = await prune_archived_runs(conn, retention_days=30)
-    assert pruned == 1
+    assert pruned == 2
     assert await _count(conn, "wf_runs", "id", young) == 1
-    assert await _count(conn, "wf_runs", "id", old) == 0
+    assert await _count(conn, "wf_runs", "id", old) == 1
+    assert await _count(conn, "wf_run_events", "run_id", old) == 0
 
 
 async def test_run_prune_skips_non_archived_terminal_run(
@@ -244,7 +244,7 @@ async def test_run_prune_is_idempotent(conn: asyncpg.Connection[Any]) -> None:
     await _make_archived_run(conn, archived_age_days=60)
     first = await prune_archived_runs(conn, retention_days=30)
     second = await prune_archived_runs(conn, retention_days=30)
-    assert first == 1
+    assert first == 2
     assert second == 0
 
 

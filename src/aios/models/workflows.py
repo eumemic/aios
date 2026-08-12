@@ -226,6 +226,8 @@ class WfRun(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+    terminal_summary: dict[str, Any] | None = None
+    journal_pruned_at: datetime | None = None
     # The realized per-run usage (#1324) — cost/tokens summed over child sessions,
     # plus iteration/wall-clock. Populated ONLY on the public read path (get_run /
     # list_runs); ``None`` on the internal step-loop read (``get_run_for_step``),

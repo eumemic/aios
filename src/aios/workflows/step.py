@@ -1548,6 +1548,14 @@ async def _commit_terminal_and_dispatch(
         await wf_queries.set_run_terminal(
             conn, run.id, status=status, output=output, account_id=run.account_id
         )
+        summary = {
+            key: payload[key]
+            for key in ("is_error", "error", "usage", "duration_ms", "cancelled")
+            if key in payload
+        }
+        await wf_queries.set_run_archived_terminal(
+            conn, run.id, terminal_summary=summary, account_id=run.account_id
+        )
         cascade_children = (
             await seed_outbound_cancel_conn(
                 conn, caller_kind="run", caller_id=run.id, account_id=run.account_id

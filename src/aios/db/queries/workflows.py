@@ -126,6 +126,8 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        terminal_summary=row.get("terminal_summary"),
+        journal_pruned_at=row.get("journal_pruned_at"),
     )
 
 
@@ -1073,6 +1075,24 @@ async def set_run_terminal(
     )
 
 
+async def set_run_archived_terminal(
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    *,
+    terminal_summary: dict[str, Any],
+    account_id: str,
+) -> None:
+    """Atomically start terminal-detail retention and preserve terminal facts."""
+    await conn.execute(
+        "UPDATE wf_runs SET archived_at = now(), terminal_summary = $3::jsonb, "
+        "updated_at = now() WHERE id = $1 AND account_id = $2 "
+        "AND status IN ('completed','errored','cancelled') AND archived_at IS NULL",
+        run_id,
+        account_id,
+        json.dumps(terminal_summary),
+    )
+
+
 async def list_run_ids_needing_step(
     conn: asyncpg.Connection[Any],
     *,
@@ -1347,18 +1367,9 @@ async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) ->
 
 
 async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[str, Any] | None:
-    """An errored run's ``{kind, …}`` error detail, or ``None``.
-
-    THE extraction of ``error`` from the ``run_completed`` journal payload —
-    shared by the run awaiter's completion record and the trigger fire path's
-    composed envelope (#819), so the two surfaces can never drift on where
-    ``error.kind`` lives (the row stores only ``status`` + ``output``).
-    """
-    completed = await get_run_completed_event(conn, run_id)
-    if completed is None:
-        return None
-    error: dict[str, Any] | None = completed.payload.get("error")
-    return error
+    """Return durable structured error detail for an errored run."""
+    summary = await conn.fetchval("SELECT terminal_summary FROM wf_runs WHERE id = $1", run_id)
+    return summary.get("error") if summary else None
 
 
 async def derive_run_response(
@@ -1386,29 +1397,22 @@ async def derive_run_response(
     was gated off for cancellation, leaving the liveness arm to mislabel it ``child_gone``).
     """
     row = await conn.fetchrow(
-        "SELECT r.status, (r.archived_at IS NOT NULL) AS archived, "
-        "       (SELECT e.payload FROM wf_run_events e "
-        "        WHERE e.run_id = r.id AND e.type = 'run_completed' "
-        "        ORDER BY e.seq DESC LIMIT 1) AS completed "
-        "FROM wf_runs r WHERE r.id = $1 AND r.account_id = $2",
+        "SELECT status, output, terminal_summary, (archived_at IS NOT NULL) AS archived "
+        "FROM wf_runs WHERE id = $1 AND account_id = $2",
         run_id,
         account_id,
     )
-    if row is None:  # the run vanished entirely → can never answer
+    if row is None:
         return Err(error={"kind": "child_gone"})
     status = row["status"]
     if status == "cancelled":
         return Err(error={"kind": "cancelled"})
     if status in ("completed", "errored"):
-        completed = row["completed"] if row["completed"] is not None else {}
-        # The run_completed bookend carries its OWN flat {output, is_error, error}
-        # triple (a second on-disk product, untouched here). Collapse it into the
-        # same Outcome kind at the read, rename-tolerant (output ↔ result), rather
-        # than re-pair the triple downstream.
-        if completed.get("is_error"):
-            return Err(error=completed["error"])
-        return Ok(result=completed.get("output"))
-    if row["archived"]:  # non-terminal but archived → can never answer
+        summary = row["terminal_summary"] or {}
+        if summary.get("is_error"):
+            return Err(error=summary["error"])
+        return Ok(result=row["output"])
+    if row["archived"]:
         return Err(error={"kind": "child_gone"})
     return None
 
