@@ -70,7 +70,7 @@ async def prune_archived_runs(
     )
     for row in rows:
         run_id = row["id"]
-        for table, order in (("wf_run_events", "seq"), ("wf_run_signals", "created_at")):
+        for table, order in (("wf_run_events", "seq"), ("wf_run_signals", "delivered_at")):
             result = await conn.execute(
                 f"""DELETE FROM {table} WHERE ctid IN (
                     SELECT child.ctid FROM {table} child JOIN wf_runs run ON run.id=child.run_id
