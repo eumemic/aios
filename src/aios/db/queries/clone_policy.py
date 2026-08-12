@@ -267,6 +267,9 @@ SESSIONS_POLICY: dict[str, Arm] = {
     # honest record here.
     "created_by_type": Arm.RESET_DEFAULT,
     "created_by_ref": Arm.RESET_DEFAULT,
+    # Keep the marker aligned with the copied events. Resetting a v2 clone to
+    # v1 would mix old-baseline appends with copied v2 cumulative counters.
+    "token_baseline_v": Arm.COPY,
 }
 
 
