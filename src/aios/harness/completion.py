@@ -33,6 +33,12 @@ import litellm
 
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
+from aios.harness.context_admission import (
+    AdmissionMode,
+    AdmissionReport,
+    admit_context,
+    route_attestation,
+)
 from aios.harness.request_body_budget import (
     body_limits_for_model,
     enforce_request_body_budget,
@@ -153,6 +159,7 @@ class LlmResponse:
     usage: dict[str, int]
     cost: float | None
     message: dict[str, Any]
+    admission_report: AdmissionReport | None = None
 
     @classmethod
     def from_message(
@@ -162,6 +169,7 @@ class LlmResponse:
         usage: dict[str, int],
         cost: float | None,
         finish_reason: str | None,
+        admission_report: AdmissionReport | None = None,
     ) -> LlmResponse:
         """Build from a normalized message dict + the unpacked usage/cost/finish.
 
@@ -177,6 +185,7 @@ class LlmResponse:
             usage=usage,
             cost=cost,
             message=message,
+            admission_report=admission_report,
         )
 
 
@@ -761,7 +770,13 @@ async def call_litellm(
     # receives. Limits are provider-scoped (``body_limits_for_model``) — a
     # provider that publishes no such cap is left untouched.
     enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
-    deadline_s = get_settings().model_call_deadline_s
+    settings = get_settings()
+    admission_report = admit_context(
+        kwargs,
+        mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+        attestation=route_attestation(model),
+    )
+    deadline_s = settings.model_call_deadline_s
     try:
         try:
             response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
@@ -771,6 +786,14 @@ async def call_litellm(
             trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
             if trimmed.media_removed == 0:
                 raise
+            # Media stripping mutates the final payload. The prior digest and
+            # count no longer authorize it, so bind a fresh decision before
+            # the retry reaches the wire.
+            admission_report = admit_context(
+                kwargs,
+                mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+                attestation=route_attestation(model),
+            )
             response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
     except TimeoutError as exc:
         raise ModelCallDeadlineError(
@@ -782,7 +805,13 @@ async def call_litellm(
     message, usage, cost, finish_reason = _unpack_litellm_response(
         response, source="litellm.acompletion"
     )
-    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
+    return LlmResponse.from_message(
+        message,
+        usage=usage,
+        cost=cost,
+        finish_reason=finish_reason,
+        admission_report=admission_report,
+    )
 
 
 async def stream_litellm(
@@ -830,7 +859,13 @@ async def stream_litellm(
     # receives. Limits are provider-scoped (``body_limits_for_model``) — a
     # provider that publishes no such cap is left untouched.
     enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
-    deadline_s = get_settings().model_call_deadline_s
+    settings = get_settings()
+    admission_report = admit_context(
+        kwargs,
+        mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+        attestation=route_attestation(model),
+    )
+    deadline_s = settings.model_call_deadline_s
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + deadline_s
     try:
@@ -844,6 +879,13 @@ async def stream_litellm(
         trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
         if trimmed.media_removed == 0:
             raise
+        # The retry is a different immutable payload and therefore requires a
+        # new route-bound decision and digest.
+        admission_report = admit_context(
+            kwargs,
+            mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+            attestation=route_attestation(model),
+        )
         response = await litellm.acompletion(**kwargs)
 
     # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
@@ -955,4 +997,10 @@ async def stream_litellm(
     # path: only fires when the wire actually carried a ``content_filter``.
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
-    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
+    return LlmResponse.from_message(
+        message,
+        usage=usage,
+        cost=cost,
+        finish_reason=finish_reason,
+        admission_report=admission_report,
+    )

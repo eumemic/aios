@@ -343,6 +343,12 @@ class Settings(BaseSettings):
         "after the multipart body is drained so the client sees a clean "
         "response rather than a transport reset.",
     )
+    context_admission_mode: Literal["observe", "enforce"] = Field(
+        default="observe",
+        description="Final-payload deterministic context admission mode. Observe records the "
+        "decision without changing provider-call behavior; enforce fails closed unless the "
+        "route has an independently reviewed exact-counter attestation.",
+    )
     model_call_deadline_s: float = Field(
         default=900.0,
         ge=1.0,
