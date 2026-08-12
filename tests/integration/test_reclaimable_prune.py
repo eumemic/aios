@@ -488,7 +488,7 @@ async def test_sweep_isolates_family_failure_and_spares_template_pinned_agent(
     # The whole sweep — no exception escapes, and the tally proves every OTHER
     # family still pruned in the same pass.
     result = await sweep_reclaimable_ephemera(pool)
-    assert result.runs == 1
+    assert result.runs == 2
     assert result.agents == 0  # the template-pinned agent is held, not deleted
     assert result.workflows == 1
     assert result.skills == 1
@@ -502,8 +502,9 @@ async def test_sweep_isolates_family_failure_and_spares_template_pinned_agent(
         )
         # The session_template that pinned it is untouched (it was never a target).
         assert await _count(conn, "session_templates", "id", "st_pin") == 1
-        # Every other family genuinely reclaimed its candidate.
-        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        # Every other family genuinely reclaimed its candidate. Run summaries
+        # are durable; only their event/signal detail is reclaimed.
+        assert await _count(conn, "wf_runs", "id", run_id) == 1
         assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
         assert await _count(conn, "workflows", "id", free_wf.id) == 0
         assert await _count(conn, "skills", "id", "sk_free") == 0
@@ -553,11 +554,12 @@ async def test_sweep_one_family_raise_does_not_disable_the_others(
     # The raise is caught per-family — the sweep returns normally.
     result = await sweep_reclaimable_ephemera(pool)
     assert result.agents == 0  # the failed family is skipped this tick
-    assert result.runs == 1  # the others still pruned
+    assert result.runs == 2  # both journal rows were reclaimed
     assert result.workflows == 1
     assert result.skills == 1
 
     async with pool.acquire() as conn:
-        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        assert await _count(conn, "wf_runs", "id", run_id) == 1
+        assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
         assert await _count(conn, "workflows", "id", free_wf.id) == 0
         assert await _count(conn, "skills", "id", "sk_free2") == 0
