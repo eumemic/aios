@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any
 
 import asyncpg
+import litellm
 import pytest
 
 from aios.harness import completion
@@ -58,7 +59,9 @@ async def pool_census(pool: asyncpg.Pool[Any], observer: asyncpg.Connection[Any]
 
 
 async def assert_recovered(
-    pool: asyncpg.Pool[Any], observer: asyncpg.Connection[Any], tasks: list[asyncio.Task[None]]
+    pool: asyncpg.Pool[Any],
+    observer: asyncpg.Connection[Any],
+    tasks: list[asyncio.Task[Any]],
 ) -> None:
     async with asyncio.timeout(TASK_BOUND):
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -142,7 +145,7 @@ async def test_completion_external_awaits_do_not_hold_notify_connections(
                     responses.append(response)
                     return response
 
-                monkeypatch.setattr(completion.litellm, "acompletion", fake_acompletion)
+                monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
                 calls = [
                     asyncio.create_task(
                         completion.stream_litellm(
