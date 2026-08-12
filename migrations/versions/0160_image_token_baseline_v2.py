@@ -1,12 +1,12 @@
 """Add image-aware token baseline v2 state.
 
-Revision ID: 0159
+Revision ID: 0160
 Revises: 0158
 """
 
 from alembic import op
 
-revision = "0159"
+revision = "0160"
 down_revision = "0158"
 branch_labels = None
 depends_on = None
