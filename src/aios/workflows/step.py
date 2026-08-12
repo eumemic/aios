@@ -1545,16 +1545,18 @@ async def _commit_terminal_and_dispatch(
         # event is written — the run is singly-inbound, so its terminal state already
         # carries the one outcome (§3.6); this also lets a cancelled run resolve as
         # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
-        await wf_queries.set_run_terminal(
-            conn, run.id, status=status, output=output, account_id=run.account_id
-        )
         summary = {
             key: payload[key]
             for key in ("is_error", "error", "usage", "duration_ms", "cancelled")
             if key in payload
         }
-        await wf_queries.set_run_archived_terminal(
-            conn, run.id, terminal_summary=summary, account_id=run.account_id
+        await wf_queries.set_run_terminal(
+            conn,
+            run.id,
+            status=status,
+            output=output,
+            account_id=run.account_id,
+            terminal_summary=summary,
         )
         cascade_children = (
             await seed_outbound_cancel_conn(

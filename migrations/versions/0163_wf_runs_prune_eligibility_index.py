@@ -1,13 +1,13 @@
 """Add the production-safe terminal-detail eligibility index.
 
-Revision ID: 0160
-Revises: 0159
+Revision ID: 0163
+Revises: 0162
 """
 
 from alembic import op
 
-revision = "0160"
-down_revision = "0159"
+revision = "0163"
+down_revision = "0162"
 branch_labels = None
 depends_on = None
 

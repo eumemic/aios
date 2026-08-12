@@ -321,6 +321,7 @@ from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
+from .wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
 from .wf_run_usage import WfRunUsage
 from .wf_run_workspace import WfRunWorkspace
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
@@ -638,6 +639,7 @@ __all__ = (
     "WfRunEventType",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
+    "WfRunTerminalSummaryType0",
     "WfRunUsage",
     "WfRunWorkspace",
     "WhatsappConfirmPairingRequest",

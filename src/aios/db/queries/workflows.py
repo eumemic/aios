@@ -1049,6 +1049,7 @@ async def set_run_terminal(
     status: WfRunStatus,
     output: Any,
     account_id: str,
+    terminal_summary: dict[str, Any] | None = None,
 ) -> None:
     """Flip a run to its terminal ``status`` and store ``output`` in one UPDATE.
 
@@ -1065,31 +1066,16 @@ async def set_run_terminal(
     statuses-filtered watcher's decision must agree with the final row).
     """
     await conn.execute(
-        "UPDATE wf_runs SET status = $3, output = $4::jsonb, updated_at = now() "
+        "UPDATE wf_runs SET status = $3, output = $4::jsonb, "
+        "archived_at = CASE WHEN $5::jsonb IS NULL THEN archived_at ELSE now() END, "
+        "terminal_summary = COALESCE($5::jsonb, terminal_summary), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 "
         "AND status NOT IN ('completed', 'errored', 'cancelled')",
         run_id,
         account_id,
         status,
         json.dumps(output) if output is not None else None,
-    )
-
-
-async def set_run_archived_terminal(
-    conn: asyncpg.Connection[Any],
-    run_id: str,
-    *,
-    terminal_summary: dict[str, Any],
-    account_id: str,
-) -> None:
-    """Atomically start terminal-detail retention and preserve terminal facts."""
-    await conn.execute(
-        "UPDATE wf_runs SET archived_at = now(), terminal_summary = $3::jsonb, "
-        "updated_at = now() WHERE id = $1 AND account_id = $2 "
-        "AND status IN ('completed','errored','cancelled') AND archived_at IS NULL",
-        run_id,
-        account_id,
-        json.dumps(terminal_summary),
+        json.dumps(terminal_summary) if terminal_summary is not None else None,
     )
 
 

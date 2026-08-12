@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..models.wf_run_request_output_schema_type_0 import (
         WfRunRequestOutputSchemaType0,
     )
+    from ..models.wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
     from ..models.wf_run_usage import WfRunUsage
 
 
@@ -74,6 +75,8 @@ class WfRun:
             default_child_model (None | str | Unset):
             call_llm_cost_microusd (int | Unset):  Default: 0.
             archived_at (datetime.datetime | None | Unset):
+            terminal_summary (None | Unset | WfRunTerminalSummaryType0):
+            journal_pruned_at (datetime.datetime | None | Unset):
             usage (None | Unset | WfRunUsage):
     """
 
@@ -106,6 +109,8 @@ class WfRun:
     default_child_model: None | str | Unset = UNSET
     call_llm_cost_microusd: int | Unset = 0
     archived_at: datetime.datetime | None | Unset = UNSET
+    terminal_summary: None | Unset | WfRunTerminalSummaryType0 = UNSET
+    journal_pruned_at: datetime.datetime | None | Unset = UNSET
     usage: None | Unset | WfRunUsage = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -114,6 +119,7 @@ class WfRun:
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
         )
+        from ..models.wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
         from ..models.wf_run_usage import WfRunUsage
 
         id = self.id
@@ -241,6 +247,22 @@ class WfRun:
         else:
             archived_at = self.archived_at
 
+        terminal_summary: dict[str, Any] | None | Unset
+        if isinstance(self.terminal_summary, Unset):
+            terminal_summary = UNSET
+        elif isinstance(self.terminal_summary, WfRunTerminalSummaryType0):
+            terminal_summary = self.terminal_summary.to_dict()
+        else:
+            terminal_summary = self.terminal_summary
+
+        journal_pruned_at: None | str | Unset
+        if isinstance(self.journal_pruned_at, Unset):
+            journal_pruned_at = UNSET
+        elif isinstance(self.journal_pruned_at, datetime.datetime):
+            journal_pruned_at = self.journal_pruned_at.isoformat()
+        else:
+            journal_pruned_at = self.journal_pruned_at
+
         usage: dict[str, Any] | None | Unset
         if isinstance(self.usage, Unset):
             usage = UNSET
@@ -303,6 +325,10 @@ class WfRun:
             field_dict["call_llm_cost_microusd"] = call_llm_cost_microusd
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
+        if terminal_summary is not UNSET:
+            field_dict["terminal_summary"] = terminal_summary
+        if journal_pruned_at is not UNSET:
+            field_dict["journal_pruned_at"] = journal_pruned_at
         if usage is not UNSET:
             field_dict["usage"] = usage
 
@@ -317,6 +343,7 @@ class WfRun:
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
         )
+        from ..models.wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
         from ..models.wf_run_usage import WfRunUsage
 
         d = dict(src_dict)
@@ -515,6 +542,42 @@ class WfRun:
 
         archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
 
+        def _parse_terminal_summary(
+            data: object,
+        ) -> None | Unset | WfRunTerminalSummaryType0:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                terminal_summary_type_0 = WfRunTerminalSummaryType0.from_dict(data)
+
+                return terminal_summary_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | WfRunTerminalSummaryType0, data)
+
+        terminal_summary = _parse_terminal_summary(d.pop("terminal_summary", UNSET))
+
+        def _parse_journal_pruned_at(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                journal_pruned_at_type_0 = isoparse(data)
+
+                return journal_pruned_at_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        journal_pruned_at = _parse_journal_pruned_at(d.pop("journal_pruned_at", UNSET))
+
         def _parse_usage(data: object) -> None | Unset | WfRunUsage:
             if data is None:
                 return data
@@ -562,6 +625,8 @@ class WfRun:
             default_child_model=default_child_model,
             call_llm_cost_microusd=call_llm_cost_microusd,
             archived_at=archived_at,
+            terminal_summary=terminal_summary,
+            journal_pruned_at=journal_pruned_at,
             usage=usage,
         )
 
