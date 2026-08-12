@@ -394,6 +394,24 @@ class Settings(BaseSettings):
     worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
     worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
     worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
+    workspace_root_validation: Literal["enforce", "warn", "off"] = Field(
+        default="warn",
+        description="Live-session workspace-root startup validation mode. warn reports every "
+        "violation without blocking startup; enforce reports all violations then fails; off "
+        "skips the scan. Keep warn during rollout until a clean full-fleet report exists.",
+    )
+    workspace_scan_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="Overall wall-clock budget for live-session workspace-root validation.",
+    )
+    workspace_scan_query_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=60,
+        description="Per-page database query timeout for workspace-root validation.",
+    )
 
     # ── container lifecycle ────────────────────────────────────────────────
     container_idle_timeout_seconds: int = Field(

@@ -378,6 +378,9 @@ async def worker_main() -> None:
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
         async with pool.acquire() as conn:
             await queries.audit_credentialless_root(conn)
+        from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+
+        await validate_workspace_root_against_sessions(pool, service="worker")
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
