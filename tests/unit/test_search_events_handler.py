@@ -11,6 +11,7 @@ from aios.tools.invoke import ToolBail
 from aios.tools.search_events import (
     MAX_ROWS,
     SEARCH_EVENTS_DESCRIPTION,
+    SEARCH_EVENTS_PARAMETERS_SCHEMA,
     _format_results,
     _validate_sql,
     search_events_handler,
@@ -29,6 +30,20 @@ class TestSearchEventsDescription:
         assert "hash-only manifest entries" in SEARCH_EVENTS_DESCRIPTION
         assert "work artifact" in SEARCH_EVENTS_DESCRIPTION
         assert "operator events API" in SEARCH_EVENTS_DESCRIPTION
+
+    def test_documents_connector_send_verification(self) -> None:
+        description = SEARCH_EVENTS_DESCRIPTION
+        parameter_description = SEARCH_EVENTS_PARAMETERS_SCHEMA["properties"]["query"][
+            "description"
+        ]
+
+        for text in (description, parameter_description):
+            assert "tool_calls_search" in text
+            assert "result_seq IS NOT NULL" in text
+            assert "result_is_error IS NOT TRUE" in text
+            assert "telegram_send" in text
+
+        assert "A composed reply is not a delivered reply" in description
 
 
 # ─── SQL Validation ──────────────────────────────────────────────────────────
