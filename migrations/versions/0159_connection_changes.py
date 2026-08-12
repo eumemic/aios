@@ -26,13 +26,13 @@ tables the hard-delete docstring already calls out (``oauth_flows`` 0061,
 the workflow tables 0064, ``wf_run_vaults`` 0073, ``trigger_runs`` 0086).
 
 Revision ID: 0159
-Revises: 0157
+Revises: 0158
 """
 
 from alembic import op
 
 revision = "0159"
-down_revision = "0157"
+down_revision = "0158"
 branch_labels = None
 depends_on = None
 
