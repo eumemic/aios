@@ -25,6 +25,9 @@ retention emptied the ledger.  This matches the cascading transient/audit
 tables the hard-delete docstring already calls out (``oauth_flows`` 0061,
 the workflow tables 0064, ``wf_run_vaults`` 0073, ``trigger_runs`` 0086).
 
+The revision follows 0158 so the migration graph remains a single linear
+upgrade path after outbound tool reservations landed on the base branch.
+
 Revision ID: 0159
 Revises: 0158
 """
