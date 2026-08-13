@@ -62,6 +62,24 @@ def test_refresh_script_adds_before_deleting_and_never_flushes() -> None:
     assert "--dport 443 -j DNAT --to-destination 172.18.0.2:49152" in script
 
 
+def test_refresh_script_keeps_rules_pinned_by_another_host() -> None:
+    """A host eviction must not delete a category rule another host still owns."""
+    old = {
+        "a.example": {"1.1.1.1"},
+        "b.example": {"1.1.1.1"},
+    }
+    script = build_egress_refresh_script(
+        old_ips=old,
+        new_ips={"a.example": {"2.2.2.2"}, "b.example": {"1.1.1.1"}},
+        credential_hosts={"a.example", "b.example"},
+        limited_hosts={"a.example", "b.example"},
+        dnat_target=_PROXY,
+    )
+
+    assert "-A OUTPUT -d 2.2.2.2" in script
+    assert "-D OUTPUT -d 1.1.1.1" not in script
+
+
 def test_refresh_script_ops_are_idempotent() -> None:
     """Every add is -C-guarded and every delete tolerates absence, so a
     retried old→new delta neither aborts under ``set -e`` nor accumulates

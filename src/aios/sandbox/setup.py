@@ -432,23 +432,26 @@ def build_egress_refresh_script(
     # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
     # DNAT shape so -C/-D match the installed rules exactly.
     dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
+
+    def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
+        return set().union(*(host_ips.get(host, set()) for host in hosts))
+
+    old_credential_ips = _category_ips(old_ips, credential_hosts)
+    new_credential_ips = _category_ips(new_ips, credential_hosts)
+    old_limited_ips = _category_ips(old_ips, limited_hosts)
+    new_limited_ips = _category_ips(new_ips, limited_hosts)
+
     lines = ["set -e", _IPTABLES_BACKEND_SELECT]
-    for host in sorted(new_ips):
-        added = new_ips[host] - old_ips.get(host, set())
-        for ip in sorted(added):
-            if host in limited_hosts:
-                lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
-            if host in credential_hosts:
-                lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
-    for host in sorted(old_ips):
-        removed = old_ips[host] - new_ips.get(host, set())
-        for ip in sorted(removed):
-            if host in credential_hosts:
-                lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
-            if host in limited_hosts:
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_limited_ips - old_limited_ips):
+        lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_credential_ips - old_credential_ips):
+        lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
+    for ip in sorted(old_credential_ips - new_credential_ips):
+        lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
+    for ip in sorted(old_limited_ips - new_limited_ips):
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     return "\n".join(lines)
 
 
