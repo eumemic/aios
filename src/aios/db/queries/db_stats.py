@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,6 +77,8 @@ async def monthly_buckets(
                 f"WHERE created_at >= '{start.isoformat()}'::timestamptz "
                 f"AND created_at < '{end.isoformat()}'::timestamptz"
             )
+            if isinstance(plan, str):
+                plan = json.loads(plan)
             estimate = int(plan[0]["Plan"]["Plan Rows"])
             approx = (
                 round(table.total_bytes * estimate / table.row_estimate)
