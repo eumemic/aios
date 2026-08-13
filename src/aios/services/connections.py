@@ -124,6 +124,10 @@ async def list_pending_inbound_grants(
     pool: asyncpg.Pool[Any], connection_id: str, *, account_id: str
 ) -> list[InboundGrant]:
     async with pool.acquire() as conn:
+        # Keep this connection-scoped list symmetric with list_bound_chats:
+        # an absent, archived, or foreign connection is a 404, not an
+        # indistinguishable empty list.
+        await queries.get_connection(conn, connection_id, account_id=account_id)
         return await queries.list_pending_inbound_grants(conn, connection_id, account_id=account_id)
 
 

@@ -50,28 +50,44 @@ async def approve_inbound_grant(
         """WITH locked AS (
                SELECT id, inbound_policy FROM connections
                 WHERE id = $1 AND account_id = $3 AND archived_at IS NULL FOR UPDATE
-           ), candidate AS (
+           ), pending AS (
                SELECT id FROM inbound_grants
                 WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
-                  AND status IN ('pending', 'revoked')
-                ORDER BY (status = 'pending') DESC, created_at DESC LIMIT 1 FOR UPDATE
-           ), updated AS (
+                  AND status = 'pending'
+                ORDER BY created_at DESC LIMIT 1 FOR UPDATE
+           ), promoted AS (
                UPDATE inbound_grants SET status = 'active', approved_by = $3,
                       approved_at = now(), approved_via_channel = 'operator_api', updated_at = now()
-                WHERE id = (SELECT id FROM candidate)
+                WHERE id = (SELECT id FROM pending)
                   AND (SELECT inbound_policy->>'kind' FROM locked) = 'require_approval'
                RETURNING *
+           ), inserted AS (
+               INSERT INTO inbound_grants (
+                   account_id, connection_id, chat_id, status,
+                   approved_by, approved_at, approved_via_channel
+               )
+               SELECT $3, $1, $2, 'active', $3, now(), 'operator_api'
+                WHERE NOT EXISTS (SELECT 1 FROM pending)
+                  AND (SELECT inbound_policy->>'kind' FROM locked) = 'require_approval'
+                  AND EXISTS (
+                      SELECT 1 FROM inbound_grants
+                       WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
+                         AND status = 'revoked'
+                  )
+               RETURNING *
+           ), granted AS (
+               SELECT * FROM promoted UNION ALL SELECT * FROM inserted
            ), policy AS (
                UPDATE connections SET inbound_policy = jsonb_set(
                    inbound_policy, '{approved}',
                    COALESCE(inbound_policy->'approved', '[]'::jsonb) || to_jsonb($2::text), true),
                    updated_at = now()
-                WHERE id = (SELECT id FROM locked) AND EXISTS (SELECT 1 FROM updated)
+                WHERE id = (SELECT id FROM locked) AND EXISTS (SELECT 1 FROM granted)
                   AND NOT COALESCE(inbound_policy->'approved', '[]'::jsonb) ? $2
            ), deleted AS (
                DELETE FROM chat_sessions WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
-                 AND EXISTS (SELECT 1 FROM updated)
-           ) SELECT * FROM updated""",
+                 AND EXISTS (SELECT 1 FROM granted)
+           ) SELECT * FROM granted""",
         connection_id,
         chat_id,
         account_id,
