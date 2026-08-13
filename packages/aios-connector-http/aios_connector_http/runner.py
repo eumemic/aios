@@ -60,7 +60,7 @@ import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import httpx
 import structlog
@@ -125,17 +125,12 @@ class ManagementHandlerError(Exception):
 
 
 def _is_fatal_inbound_status(status_code: int) -> bool:
-    """``emit_inbound`` raises for these; everything else (routine 4xx)
-    drops the envelope and returns ``None``.
+    """Raise only when runtime authentication is broken.
 
-    ``401`` / ``403`` mean the runtime token is busted (revoked or
-    misconfigured) — fatal for every connection the container serves.
-    ``5xx`` is a server-side outage / bug — also fatal so the
-    container crash-and-restarts.  Routine 4xx (``400``, ``422``)
-    indicates one specific envelope is malformed; dropping it lets
-    sibling connections keep serving.
+    A server error is logged and dropped per-message: allowing a transient
+    API outage to escape would terminate the connector's inbound feed.
     """
-    return status_code in (401, 403) or status_code >= 500
+    return status_code in (401, 403)
 
 
 def tool(
@@ -225,6 +220,9 @@ class _ConnectionState:
     external_account_id: str
     secrets: dict[str, str] = field(default_factory=dict)
     worker: asyncio.Task[None] | None = None
+    serve_status: Literal["serving", "restarting"] = "serving"
+    last_serve_error: str | None = None
+    serve_restart_count: int = 0
 
 
 class HttpConnector:
@@ -299,12 +297,12 @@ class HttpConnector:
         # consumer's job; container restarts simply re-run ``fresh``.
         self._discovery_cursor: int | None = None
 
-    # ── reconnect-backoff tunables (overridable on subclasses) ────────
+    # ── serve-restart tunables (overridable on subclasses) ────────────
+
     #
-    # Bounds the re-spawn rate of a connection whose ``serve_connection``
-    # keeps failing terminally.  The first (re)spawn after a failure
-    # sleeps ``RECONNECT_BACKOFF_INITIAL``; each subsequent consecutive
-    # failure doubles it up to ``RECONNECT_BACKOFF_MAX``.
+    # Bounds retries after ``serve_connection`` fails. The supervisor sleeps
+    # ``RECONNECT_BACKOFF_INITIAL`` after the first failure and doubles each
+    # subsequent delay up to ``RECONNECT_BACKOFF_MAX``.
     RECONNECT_BACKOFF_INITIAL: float = 1.0
     RECONNECT_BACKOFF_MAX: float = 60.0
     # Appservice-style connectors receive credentials via container env.
@@ -495,14 +493,11 @@ class HttpConnector:
         ``(filename, bytes, content_type)`` tuples that ride as
         multipart parts.
 
-        Routine 4xx responses (a 422 from one malformed envelope, a 400
-        from a stale connection_id mid-removal) drop the envelope and
-        return ``None`` so one bad inbound can't tear down the whole
-        container via the parent TaskGroup.  ``401`` / ``403`` (auth
-        broken — runtime token revoked or misconfigured) and ``5xx``
-        (server outage / bug) still raise: those are container-level
-        problems that warrant the crash-and-restart loop.  Callers that
-        need the bad-envelope to surface (e.g. integration-test tools
+        HTTP errors other than ``401`` / ``403`` drop the envelope and
+        return ``None`` so one bad inbound or transient API outage cannot
+        tear down the connection feed. Authentication failures still raise
+        because the runtime token is globally revoked or misconfigured.
+        Callers that need the bad-envelope to surface (e.g. integration-test tools
         that want loud validation failures) check for ``None`` and
         raise themselves.
         """
@@ -1102,107 +1097,60 @@ class HttpConnector:
         )
 
     async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-        """Run :meth:`serve_connection` with failure-isolated cleanup.
+        """Supervise one connection, restarting failed serves with capped backoff.
 
-        Catches any non-``CancelledError`` exception so a single bad
-        connection (typo'd secret, unregistered phone, revoked bot
-        token) can't tear down sibling connections via the parent
-        TaskGroup.  Always pops the user-state slot on exit so
-        connections cycling in/out don't leak stale state.
-
-        On a terminal (non-cancel) failure this ALSO pops
-        ``self._connections[connection_id]`` and clears the
-        ``_connection_served`` event, so the connection is no longer
-        treated as "already running": a subsequent discovery-backfill
-        ``added`` (or a manual re-add) re-spawns the worker with freshly
-        re-fetched secrets, rather than the connection becoming a
-        permanent zombie that ignores every ``added`` while process-level
-        health shows green (issue #1233).  A bounded exponential backoff
-        (:meth:`_arm_reconnect_backoff`) gates how fast that re-spawn
-        starts platform work, so a hard-failing connection backs off
-        instead of hot-looping on every backfill replay.
-
-        Cancellation (a ``removed`` event, or container shutdown) is NOT
-        a failure: it re-raises so the TaskGroup sees a clean cancel,
-        leaves ``_connections`` untouched here (``_on_connection_removed``
-        already owns that pop), and does not arm the backoff.
+        A clean return ends serving. Cancellation propagates immediately. Other
+        exceptions are isolated from sibling connections and retried in-task,
+        so recovery does not depend on discovery replaying an ``added`` event.
         """
-        # Re-spawn backoff: if this connection failed terminally on a
-        # previous spawn, sleep before doing platform work so a
-        # hard-failing connection doesn't hot-loop on every backfill
-        # ``added``.  Sleeping inside the worker task (not the discovery
-        # loop) keeps sibling connections' bring-up unblocked.  A
-        # CancelledError mid-sleep (connection ``removed`` while backing
-        # off) aborts the sleep and skips serve_connection cleanly.
-        delay = self._reconnect_backoff.get(connection_id, 0.0)
-        if delay:
-            log.info(
-                "connector.connection.reconnect_backoff",
-                connector=self.connector,
-                connection_id=connection_id,
-                delay=delay,
-            )
-            await asyncio.sleep(delay)
-        terminal_failure = False
+        backoff = self.RECONNECT_BACKOFF_INITIAL
         try:
-            await self.serve_connection(connection_id, secrets)
-        except asyncio.CancelledError:
-            # Cooperative cancellation (removed / shutdown): re-raise for
-            # a clean TaskGroup cancel and do NOT arm backoff or pop
-            # ``_connections`` — that's _on_connection_removed's job.
-            raise
-        except Exception as exc:
-            terminal_failure = True
-            log.exception(
-                "connector.connection.serve_failed",
-                connector=self.connector,
-                connection_id=connection_id,
-                error=type(exc).__name__,
-            )
+            while True:
+                try:
+                    state = self._connections.get(connection_id)
+                    if state is not None:
+                        state.serve_status = "serving"
+                    await self.serve_connection(connection_id, secrets)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception(
+                        "connector.connection.serve_failed",
+                        connector=self.connector,
+                        connection_id=connection_id,
+                        error=type(exc).__name__,
+                    )
+                    state = self._connections.get(connection_id)
+                    if state is not None:
+                        state.serve_status = "restarting"
+                        state.last_serve_error = f"{type(exc).__name__}: {exc}"
+                        state.serve_restart_count += 1
+                    try:
+                        await self.emit_lifecycle(
+                            connection_id=connection_id,
+                            event="connector.connection.serve_interrupted",
+                            reason=type(exc).__name__,
+                            data={"error": str(exc)},
+                        )
+                    except Exception:
+                        log.exception(
+                            "connector.connection.serve_interrupted_emit_failed",
+                            connector=self.connector,
+                            connection_id=connection_id,
+                        )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self.RECONNECT_BACKOFF_MAX)
         finally:
+            # Subclass state belongs to the whole serve lifetime; do not pop it
+            # between attempts while concurrent outbound calls may still read it.
             self.state.pop(connection_id, None)
-            if terminal_failure:
-                self._arm_reconnect_backoff(connection_id)
-                # Drop the live-connection slot so a later ``added``
-                # re-spawns the worker instead of short-circuiting on
-                # "already running".
-                self._connections.pop(connection_id, None)
-                if event := self._connection_served.get(connection_id):
-                    event.clear()
-                log.warning(
-                    "connector.connection.worker_terminated",
-                    connector=self.connector,
-                    connection_id=connection_id,
-                    reconnect_backoff=self._reconnect_backoff.get(connection_id),
-                )
-            else:
-                # Clean exit (serve_connection returned, or was cancelled):
-                # reset the failure backoff so the next bring-up is prompt.
-                self._reconnect_backoff.pop(connection_id, None)
-
-    def _arm_reconnect_backoff(self, connection_id: str) -> None:
-        """Bump the per-connection re-spawn backoff after a terminal failure.
-
-        Starts at :attr:`RECONNECT_BACKOFF_INITIAL` and doubles on each
-        consecutive terminal failure up to :attr:`RECONNECT_BACKOFF_MAX`.
-        Reset to absent by a clean serve / ``removed`` so an intermittent
-        connection doesn't accumulate stale backoff.
-        """
-        current = self._reconnect_backoff.get(connection_id)
-        if current is None:
-            self._reconnect_backoff[connection_id] = self.RECONNECT_BACKOFF_INITIAL
-        else:
-            self._reconnect_backoff[connection_id] = min(current * 2, self.RECONNECT_BACKOFF_MAX)
 
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
         state = self._connections.pop(connection_id, None)
         if event := self._connection_served.get(connection_id):
             event.clear()
-        # A genuine ``removed`` (operator deleted the connection) clears
-        # any armed re-spawn backoff so a later re-add of the same id
-        # starts fresh rather than inheriting a stale failure backoff.
-        self._reconnect_backoff.pop(connection_id, None)
         if state is None or state.worker is None:
             return
         state.worker.cancel()
