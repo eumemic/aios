@@ -51,6 +51,8 @@ from aios.models.sessions import (
     Obligation,
     Outcome,
     Session,
+    SessionEgressHost,
+    SessionEgressResponse,
     SessionStatus,
     SessionUsage,
 )
@@ -1418,6 +1420,44 @@ async def set_session_channels(
         channels,
         session_id,
         account_id,
+    )
+
+
+async def get_session_egress(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> SessionEgressResponse:
+    """Read the latest worker-stamped live egress metadata for a scoped session."""
+    row = await conn.fetchrow(
+        "SELECT e.hosts, e.provisioned_at, e.sandbox_generation "
+        "FROM session_egress_states e JOIN sessions s ON s.id = e.session_id "
+        "WHERE e.session_id = $1 AND s.account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        )
+    return SessionEgressResponse(
+        hosts=[SessionEgressHost.model_validate(host) for host in row["hosts"]],
+        provisioned_at=row["provisioned_at"],
+        sandbox_generation=row["sandbox_generation"],
+    )
+
+
+async def stamp_session_egress(
+    conn: asyncpg.Connection[Any], session_id: str, hosts: list[dict[str, Any]]
+) -> None:
+    """Atomically publish metadata derived from rules read back after provisioning."""
+    await conn.execute(
+        "INSERT INTO session_egress_states "
+        "(session_id, hosts, provisioned_at, sandbox_generation) "
+        "VALUES ($1, $2::jsonb, now(), 1) "
+        "ON CONFLICT (session_id) DO UPDATE SET "
+        "hosts = EXCLUDED.hosts, provisioned_at = EXCLUDED.provisioned_at, "
+        "sandbox_generation = session_egress_states.sandbox_generation + 1",
+        session_id,
+        json.dumps(hosts),
     )
 
 

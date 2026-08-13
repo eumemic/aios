@@ -156,6 +156,23 @@ acceptable for short test/cutover windows.
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
 
+class SessionEgressHost(BaseModel):
+    """Metadata identifying one host in a sandbox's live intercept set."""
+
+    host: str
+    intercepted: bool
+    source_credential_id: str
+    secret_name: str
+
+
+class SessionEgressResponse(BaseModel):
+    """Worker-observed egress state from the most recent live provisioning."""
+
+    hosts: list[SessionEgressHost]
+    provisioned_at: datetime
+    sandbox_generation: int
+
+
 class SessionUsage(BaseModel):
     """Cumulative token usage across all model calls in a session."""
 
