@@ -352,6 +352,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.runs_children_usage",
         "wf_queries.set_run_status",
         "wf_queries.set_run_terminal",
+        "wf_queries.signal_stale_suspended_runs",
         "wf_queries.set_run_vaults",
         "wf_queries.unarchive_workflow",
         "wf_queries.unscoped_terminal_run_ids",
