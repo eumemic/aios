@@ -304,7 +304,7 @@ async def test_secret_proxy_constructed_and_started_when_creds_present() -> None
         plan = await build_spec_from_session("sess_01TEST")
 
     # Constructed with the resolved creds and started exactly once.
-    proxy_cls.assert_called_once_with((_CRED,))
+    proxy_cls.assert_called_once_with((_CRED,), networking_mode="limited", owner_id="sess_01TEST")
     proxy_instance.start.assert_awaited_once()
     assert plan.secret_proxy is proxy_instance
 
