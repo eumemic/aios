@@ -74,6 +74,10 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
         "Machine-polled observability endpoint consumed by the off-substrate ops-agent; "
         "not an interactive operator workflow."
     ),
+    "get_database_stats": (
+        "Machine-polled root-only storage introspection consumed by watchdogs and "
+        "incident-response agents; the generated SDK is the intended client."
+    ),
     "get_ready": (
         "Readiness probe (SELECT 1 under a short timeout) consumed by the "
         "Docker/compose healthcheck and load balancers, not operators. "
