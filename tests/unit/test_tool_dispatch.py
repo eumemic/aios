@@ -374,6 +374,23 @@ class TestRejectUnofferedToolCalls:
         await self._drive(monkeypatch, [call], ["read"])
         invoke_builtin.assert_not_called()
 
+    async def test_empty_surface_denies_registered_metadata_builtin(self, monkeypatch: Any) -> None:
+        """Regression for #1683: registry membership is not dispatch authority.
+
+        A model-emitted call to a known metadata reader must not reach
+        ``invoke_builtin`` when the frozen session surface offered no tools.
+        """
+        call = {"id": "tc_1", "function": {"name": "trigger_list", "arguments": "{}"}}
+        invoke_builtin = AsyncMock(return_value=MagicMock())
+        monkeypatch.setattr(tool_dispatch, "invoke_builtin", invoke_builtin)
+
+        append_result = await self._drive(monkeypatch, [call], [])
+
+        invoke_builtin.assert_not_called()
+        error = append_result.await_args.kwargs["error"]
+        assert "trigger_list" in error
+        assert "none offered right now" in error
+
     async def test_per_call_granularity(self, monkeypatch: Any) -> None:
         """Only the unoffered calls in the batch are rejected — each independently."""
         calls = [

@@ -1692,7 +1692,7 @@ async def _run_session_step_body(
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
-        # ── harness invariant (#1773 defect 2): the callable set ≡ the offered set ──
+        # ── harness invariant (#1683, #1773 defect 2): callable set ≡ offered set ──
         #
         # ``tools`` (== ``step_ctx.tools``, above) is the FROZEN array actually sent
         # with THIS inference call — the model may only invoke a name present in it.
