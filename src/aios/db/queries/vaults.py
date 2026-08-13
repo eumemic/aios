@@ -848,6 +848,68 @@ async def resolve_run_credential(
     )
 
 
+class SessionVaultCredentialMetadata(NamedTuple):
+    """Non-secret metadata for a credential in a session-attached vault.
+
+    This read model deliberately has no ciphertext, nonce, or generic metadata
+    field. Archived rows are included so a session can diagnose stale
+    credential references without invoking any decrypt path.
+    """
+
+    credential_id: str
+    vault_id: str
+    display_name: str
+    auth_type: str
+    secret_name: str | None
+    allowed_hosts: tuple[str, ...]
+    target_url: str | None
+    created_at: datetime
+    archived_at: datetime | None
+
+
+async def list_session_vault_credentials(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    account_id: str,
+) -> list[SessionVaultCredentialMetadata]:
+    """List metadata for every credential in the session's attached vaults.
+
+    Identity comes from the trusted executing session at the tool boundary.
+    Both sides of the join are account-scoped, and archived credentials remain
+    visible because their state is essential diagnostic metadata.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT vc.id, vc.vault_id, vc.display_name, vc.auth_type,
+               vc.secret_name, vc.allowed_hosts, vc.target_url,
+               vc.created_at, vc.archived_at
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND sv.account_id = $2
+           AND vc.account_id = $2
+         ORDER BY sv.rank, vc.created_at, vc.id
+        """,
+        session_id,
+        account_id,
+    )
+    return [
+        SessionVaultCredentialMetadata(
+            credential_id=str(row["id"]),
+            vault_id=str(row["vault_id"]),
+            display_name=str(row["display_name"]),
+            auth_type=str(row["auth_type"]),
+            secret_name=str(row["secret_name"]) if row["secret_name"] is not None else None,
+            allowed_hosts=tuple(row["allowed_hosts"]),
+            target_url=str(row["target_url"]) if row["target_url"] is not None else None,
+            created_at=row["created_at"],
+            archived_at=row["archived_at"],
+        )
+        for row in rows
+    ]
+
+
 class EnvVarCredentialRow(NamedTuple):
     """One ``environment_variable`` credential resolved for a session.
 
