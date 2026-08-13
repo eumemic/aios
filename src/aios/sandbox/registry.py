@@ -2857,7 +2857,9 @@ class SandboxRegistry:
             ):
                 return False
 
-            if not await self._backend.remove_image(verdict.removal_ref):
+            if not await self._backend.remove_image(  # pooled-connection-await: allow — eumemic/aios#919
+                verdict.removal_ref
+            ):
                 return False
             await queries.unscoped_compare_and_clear_session_snapshot(
                 conn, session_id, expected_ref=verdict.removal_ref
