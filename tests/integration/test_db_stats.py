@@ -18,9 +18,7 @@ async def test_monthly_buckets_decodes_postgres_explain_json(
     migrated_db_url: str, _reset_db_state: None
 ) -> None:
     """The production pool has a jsonb codec, but EXPLAIN returns json text."""
-    pool: asyncpg.Pool[Any] = await create_pool(
-        migrated_db_url, min_size=1, max_size=1
-    )
+    pool: asyncpg.Pool[Any] = await create_pool(migrated_db_url, min_size=1, max_size=1)
     try:
         async with pool.acquire() as conn:
             buckets = await db_stats.monthly_buckets(

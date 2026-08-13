@@ -11,6 +11,7 @@ from aios.db.queries import db_stats as db_stats_queries
 from aios.models.db_stats import DatabaseStats
 
 CACHE_SECONDS = 300
+COLLECTION_TIMEOUT_SECONDS = 5
 _cache: tuple[float, DatabaseStats] | None = None
 _lock = asyncio.Lock()
 
@@ -24,13 +25,14 @@ async def collect_database_stats(pool: Any) -> DatabaseStats:
         now = monotonic()
         if _cache is not None and now - _cache[0] < CACHE_SECONDS:
             return _cache[1]
-        async with pool.acquire() as conn, conn.transaction(readonly=True):
-            await conn.execute(
-                f"SET LOCAL statement_timeout = '{db_stats_queries.STATEMENT_TIMEOUT_MS}ms'"
-            )
-            database_bytes = await db_stats_queries.database_size(conn)
-            tables = await db_stats_queries.table_storage_stats(conn)
-            buckets = await db_stats_queries.monthly_buckets(conn, tables)
+        async with asyncio.timeout(COLLECTION_TIMEOUT_SECONDS):
+            async with pool.acquire() as conn, conn.transaction(readonly=True):
+                await conn.execute(
+                    f"SET LOCAL statement_timeout = '{db_stats_queries.STATEMENT_TIMEOUT_MS}ms'"
+                )
+                database_bytes = await db_stats_queries.database_size(conn)
+                tables = await db_stats_queries.table_storage_stats(conn)
+                buckets = await db_stats_queries.monthly_buckets(conn, tables)
         result = DatabaseStats(
             generated_at=datetime.now(UTC),
             database_bytes=database_bytes,

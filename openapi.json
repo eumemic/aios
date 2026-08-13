@@ -838,56 +838,6 @@
         }
       }
     },
-    "/v1/admin/db-stats": {
-      "get": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Get Database Stats",
-        "description": "Return cached catalog and planner estimates of database storage use.\n\nRoot-account keys only. Non-root callers receive 404 so the global\nintrospection surface is not disclosed to tenants.",
-        "operationId": "get_database_stats",
-        "parameters": [
-          {
-            "name": "Authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DatabaseStats"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/environments": {
       "post": {
         "tags": [
@@ -12742,39 +12692,6 @@
         "title": "CronSource",
         "description": "Recurring source: a standard 5-field cron expression.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). The additive ``timezone`` field (IANA name)\ninterprets the cron wall-clock; absent = UTC."
       },
-      "DatabaseStats": {
-        "properties": {
-          "generated_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Generated At"
-          },
-          "database_bytes": {
-            "type": "integer",
-            "title": "Database Bytes"
-          },
-          "tables": {
-            "items": {
-              "$ref": "#/components/schemas/TableStorageStats"
-            },
-            "type": "array",
-            "title": "Tables"
-          },
-          "buckets": {
-            "items": {
-              "$ref": "#/components/schemas/MonthlyStorageBucket"
-            },
-            "type": "array",
-            "title": "Buckets"
-          }
-        },
-        "type": "object",
-        "required": [
-          "generated_at",
-          "database_bytes"
-        ],
-        "title": "DatabaseStats"
-      },
       "DenyAll": {
         "properties": {
           "kind": {
@@ -15330,34 +15247,6 @@
         "title": "ModelProviderUpdate",
         "description": "Request body for ``PUT /v1/model-providers/{id}``.\n\n``api_key`` omitted \u2192 keep the existing key (rotation is opt-in via an\nexplicit value; there is no way to clear it back to unset in v1 \u2014 archive\nand recreate instead). ``api_base`` omitted \u2192 keep; explicit ``null`` \u2192\nclear (checked via ``model_fields_set``, not a sentinel default, since\n``None`` is itself a valid target value)."
       },
-      "MonthlyStorageBucket": {
-        "properties": {
-          "table": {
-            "type": "string",
-            "title": "Table"
-          },
-          "month": {
-            "type": "string",
-            "title": "Month"
-          },
-          "row_estimate": {
-            "type": "integer",
-            "title": "Row Estimate"
-          },
-          "approx_bytes": {
-            "type": "integer",
-            "title": "Approx Bytes"
-          }
-        },
-        "type": "object",
-        "required": [
-          "table",
-          "month",
-          "row_estimate",
-          "approx_bytes"
-        ],
-        "title": "MonthlyStorageBucket"
-      },
       "NativeButtons": {
         "properties": {
           "max_buttons": {
@@ -17312,49 +17201,6 @@
         ],
         "title": "SkillVersionCreate",
         "description": "Request body for ``POST /v1/skills/{skill_id}/versions``.\n\nSame file format as :class:`SkillCreate`. The directory, name, and\ndescription are re-extracted from the new SKILL.md."
-      },
-      "TableStorageStats": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "total_bytes": {
-            "type": "integer",
-            "title": "Total Bytes"
-          },
-          "heap_bytes": {
-            "type": "integer",
-            "title": "Heap Bytes"
-          },
-          "index_bytes": {
-            "type": "integer",
-            "title": "Index Bytes"
-          },
-          "toast_bytes": {
-            "type": "integer",
-            "title": "Toast Bytes"
-          },
-          "row_estimate": {
-            "type": "integer",
-            "title": "Row Estimate"
-          },
-          "dead_tuple_estimate": {
-            "type": "integer",
-            "title": "Dead Tuple Estimate"
-          }
-        },
-        "type": "object",
-        "required": [
-          "name",
-          "total_bytes",
-          "heap_bytes",
-          "index_bytes",
-          "toast_bytes",
-          "row_estimate",
-          "dead_tuple_estimate"
-        ],
-        "title": "TableStorageStats"
       },
       "TaskHandle": {
         "properties": {
