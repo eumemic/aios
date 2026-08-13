@@ -39,7 +39,14 @@ from aios.jobs.app import defer_run_wake
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
+import json
+
+import jsonschema
+
+from aios.logging import get_logger
 from aios.tools.schema_errors import format_schema_violation
+
+log = get_logger(__name__)
 
 RETURN_TOOL_NAME = "return"
 ERROR_TOOL_NAME = "error"
@@ -201,20 +208,31 @@ def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
     )
 
 
-async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -> str | None:
-    """Validate ``value`` against the schema this request demands, if any.
+async def _enforce_output_schema(
+    session_id: str, request_id: Any, value: Any
+) -> tuple[Any, str | None]:
+    """Validate and, when safe, coerce ``value`` against the requested schema.
 
-    Returns a model-facing error string to bounce back (the child retries), or
-    ``None`` to proceed. A non-str ``request_id`` (or one matching no request) and a
-    non-child session resolve to no schema, leaving the rejection to
-    :func:`respond_to_request` (``unknown_request`` / ``not_a_child``); a request with
-    no ``output_schema`` (the common case) also passes.
+    A top-level JSON string is accepted as its parsed value only when that value
+    validates against the schema. The returned pair is the value to persist and
+    an optional model-facing validation error.
     """
     if not isinstance(request_id, str):
-        return None
+        return value, None
     async with runtime.require_pool().acquire() as conn:
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
-    return None if schema is None else _validate_value(value, schema)
+    if schema is None:
+        return value, None
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        else:
+            if jsonschema.Draft202012Validator(schema).is_valid(parsed):
+                log.info("return_value_stringified_json_coerced", site="workflow_completion.return")
+                value = parsed
+    return value, _validate_value(value, schema)
 
 
 def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | None = None) -> str:
@@ -302,13 +320,15 @@ async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
     # match it. A mismatch is a tool error the child retries on (no response written),
     # exactly like a malformed tool arg — so the workflow only ever harvests a
     # schema-valid value. error() is unconstrained (a child that can't conform bails).
-    schema_error = await _enforce_output_schema(session_id, request_id, arguments.get("value"))
+    value, schema_error = await _enforce_output_schema(
+        session_id, request_id, arguments.get("value")
+    )
     if schema_error is not None:
         return ToolResult(content=schema_error, is_error=True)
     return await _finish(
         session_id,
         request_id=request_id,
-        outcome=Ok(result=arguments.get("value")),
+        outcome=Ok(result=value),
     )
 
 
