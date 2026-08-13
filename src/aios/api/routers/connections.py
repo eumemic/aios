@@ -31,6 +31,7 @@ from aios.models.connections import (
     ConnectionSetSecrets,
     RecentChat,
 )
+from aios.models.inbound_grants import InboundGrant, InboundGrantAction
 from aios.models.inbound_policy import InboundPolicyReplace
 from aios.models.pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -132,6 +133,36 @@ async def set_inbound_policy(
     """
     return await service.set_inbound_policy(
         pool, connection_id, policy=body.root, account_id=account_id
+    )
+
+
+@router.post("/{connection_id}/inbound-grants/approve", operation_id="approve_inbound_grant")
+async def approve_grant(
+    connection_id: str, body: InboundGrantAction, pool: PoolDep, account_id: AccountIdDep
+) -> InboundGrant:
+    """Promote a pending grant and admit the chat, operator bearer only."""
+    return await service.approve_inbound_grant(
+        pool, connection_id, body.chat_id, account_id=account_id
+    )
+
+
+@router.post("/{connection_id}/inbound-grants/revoke", operation_id="revoke_inbound_grant")
+async def revoke_grant(
+    connection_id: str, body: InboundGrantAction, pool: PoolDep, account_id: AccountIdDep
+) -> InboundGrant:
+    """Revoke a pending or active grant, operator bearer only."""
+    return await service.revoke_inbound_grant(
+        pool, connection_id, body.chat_id, account_id=account_id
+    )
+
+
+@router.get("/{connection_id}/inbound-grants/pending", operation_id="list_pending_inbound_grants")
+async def pending_grants(
+    connection_id: str, pool: PoolDep, account_id: AccountIdDep
+) -> ListResponse[InboundGrant]:
+    """List denied strangers awaiting operator approval."""
+    return ListResponse[InboundGrant](
+        data=await service.list_pending_inbound_grants(pool, connection_id, account_id=account_id)
     )
 
 

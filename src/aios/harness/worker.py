@@ -48,6 +48,7 @@ from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
+from aios.harness.inbound_grants_reaper import sweep_inbound_grants
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.production_watchdogs import run_production_watchdogs
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
@@ -533,6 +534,11 @@ async def worker_main() -> None:
         )
         _supervise(mcp_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
+        inbound_grants_reaper_task = asyncio.create_task(
+            _inbound_grants_reaper_loop(pool), name="inbound_grants_reaper"
+        )
+        _supervise(inbound_grants_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start the idle host scratch-dir reaper (#1192): GC the
         # ``_session_repos`` working-tree clones and ``_runs`` per-run scratch
         # that otherwise grow monotonically with session/run count (the
@@ -875,6 +881,22 @@ async def _periodic_sweep(
             await sweep_trigger_fires(pool)
         except Exception:
             log.exception("periodic_sweep.failed")
+
+
+async def _inbound_grants_reaper_loop(pool: asyncpg.Pool[Any]) -> None:
+    log = get_logger("aios.worker.inbound_grants_reaper")
+    interval = get_settings().inbound_grants_reaper_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            removed = await sweep_inbound_grants(pool)
+            if removed:
+                log.info("inbound_grants_reaper.swept", removed=removed)
+        except Exception:
+            log.exception("inbound_grants_reaper.tick_failed")
 
 
 async def _host_dir_reaper_loop(pool: asyncpg.Pool[Any]) -> None:

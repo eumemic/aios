@@ -32,6 +32,7 @@ from aios.models.inbound_policy import (
     AllowList,
     AllowSenders,
     DenyAll,
+    RequireApproval,
     effective_inbound_policy,
 )
 from aios.services.inbound import (
@@ -82,6 +83,12 @@ def test_admits_allow_list_slash_bearing_chat_id() -> None:
 
 def test_admits_deny_all() -> None:
     assert _admits(DenyAll(), "anyone", "sender") is False
+
+
+def test_require_approval_allows_empty_and_admits_only_approved() -> None:
+    policy = RequireApproval(approved=[])
+    assert not _admits(policy, "stranger", "sender")
+    assert _admits(RequireApproval(approved=["known"]), "known", "sender")
 
 
 # ─── AllowList validation ────────────────────────────────────────────────────

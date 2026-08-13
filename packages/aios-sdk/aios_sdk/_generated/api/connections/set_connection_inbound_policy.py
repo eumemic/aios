@@ -12,13 +12,14 @@ from ...models.allow_senders import AllowSenders
 from ...models.connection import Connection
 from ...models.deny_all import DenyAll
 from ...models.http_validation_error import HTTPValidationError
+from ...models.require_approval import RequireApproval
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     connection_id: str,
     *,
-    body: AllowAll | AllowList | AllowSenders | DenyAll,
+    body: AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -37,6 +38,8 @@ def _get_kwargs(
     elif isinstance(body, AllowList):
         _kwargs["json"] = body.to_dict()
     elif isinstance(body, AllowSenders):
+        _kwargs["json"] = body.to_dict()
+    elif isinstance(body, RequireApproval):
         _kwargs["json"] = body.to_dict()
     else:
         _kwargs["json"] = body.to_dict()
@@ -81,7 +84,7 @@ def sync_detailed(
     connection_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: AllowAll | AllowList | AllowSenders | DenyAll,
+    body: AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Connection | HTTPValidationError]:
     r"""Set Inbound Policy
@@ -109,8 +112,8 @@ def sync_detailed(
     Args:
         connection_id (str):
         authorization (None | str | Unset):
-        body (AllowAll | AllowList | AllowSenders | DenyAll): Wire wrapper for ``PUT
-            /v1/connections/{id}/inbound-policy``.
+        body (AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval): Wire wrapper for
+            ``PUT /v1/connections/{id}/inbound-policy``.
 
             A ``RootModel`` over the :data:`InboundPolicy` discriminated union so the
             request body is the bare ``{"kind": ..., "chat_ids"?: [...]}`` shape (no
@@ -154,7 +157,7 @@ def sync(
     connection_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: AllowAll | AllowList | AllowSenders | DenyAll,
+    body: AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval,
     authorization: None | str | Unset = UNSET,
 ) -> Connection | HTTPValidationError | None:
     r"""Set Inbound Policy
@@ -182,8 +185,8 @@ def sync(
     Args:
         connection_id (str):
         authorization (None | str | Unset):
-        body (AllowAll | AllowList | AllowSenders | DenyAll): Wire wrapper for ``PUT
-            /v1/connections/{id}/inbound-policy``.
+        body (AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval): Wire wrapper for
+            ``PUT /v1/connections/{id}/inbound-policy``.
 
             A ``RootModel`` over the :data:`InboundPolicy` discriminated union so the
             request body is the bare ``{"kind": ..., "chat_ids"?: [...]}`` shape (no
@@ -222,7 +225,7 @@ async def asyncio_detailed(
     connection_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: AllowAll | AllowList | AllowSenders | DenyAll,
+    body: AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Connection | HTTPValidationError]:
     r"""Set Inbound Policy
@@ -250,8 +253,8 @@ async def asyncio_detailed(
     Args:
         connection_id (str):
         authorization (None | str | Unset):
-        body (AllowAll | AllowList | AllowSenders | DenyAll): Wire wrapper for ``PUT
-            /v1/connections/{id}/inbound-policy``.
+        body (AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval): Wire wrapper for
+            ``PUT /v1/connections/{id}/inbound-policy``.
 
             A ``RootModel`` over the :data:`InboundPolicy` discriminated union so the
             request body is the bare ``{"kind": ..., "chat_ids"?: [...]}`` shape (no
@@ -293,7 +296,7 @@ async def asyncio(
     connection_id: str,
     *,
     client: AuthenticatedClient | Client,
-    body: AllowAll | AllowList | AllowSenders | DenyAll,
+    body: AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval,
     authorization: None | str | Unset = UNSET,
 ) -> Connection | HTTPValidationError | None:
     r"""Set Inbound Policy
@@ -321,8 +324,8 @@ async def asyncio(
     Args:
         connection_id (str):
         authorization (None | str | Unset):
-        body (AllowAll | AllowList | AllowSenders | DenyAll): Wire wrapper for ``PUT
-            /v1/connections/{id}/inbound-policy``.
+        body (AllowAll | AllowList | AllowSenders | DenyAll | RequireApproval): Wire wrapper for
+            ``PUT /v1/connections/{id}/inbound-policy``.
 
             A ``RootModel`` over the :data:`InboundPolicy` discriminated union so the
             request body is the bare ``{"kind": ..., "chat_ids"?: [...]}`` shape (no

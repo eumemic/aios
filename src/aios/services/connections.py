@@ -31,6 +31,7 @@ from aios.models.connections import (
     RecentChat,
 )
 from aios.models.connectors import ConnectorCapabilities
+from aios.models.inbound_grants import InboundGrant
 from aios.models.inbound_policy import InboundPolicy
 from aios.services.sessions import _evict_sandbox_for_resource_change
 
@@ -116,6 +117,31 @@ async def set_inbound_policy(
     async with pool.acquire() as conn:
         return await queries.set_connection_inbound_policy(
             conn, connection_id, policy=policy, account_id=account_id
+        )
+
+
+async def list_pending_inbound_grants(
+    pool: asyncpg.Pool[Any], connection_id: str, *, account_id: str
+) -> list[InboundGrant]:
+    async with pool.acquire() as conn:
+        return await queries.list_pending_inbound_grants(conn, connection_id, account_id=account_id)
+
+
+async def approve_inbound_grant(
+    pool: asyncpg.Pool[Any], connection_id: str, chat_id: str, *, account_id: str
+) -> InboundGrant:
+    async with pool.acquire() as conn, conn.transaction():
+        return await queries.approve_inbound_grant(
+            conn, connection_id, chat_id, account_id=account_id
+        )
+
+
+async def revoke_inbound_grant(
+    pool: asyncpg.Pool[Any], connection_id: str, chat_id: str, *, account_id: str
+) -> InboundGrant:
+    async with pool.acquire() as conn, conn.transaction():
+        return await queries.revoke_inbound_grant(
+            conn, connection_id, chat_id, account_id=account_id
         )
 
 

@@ -62,6 +62,14 @@ class AllowSenders(BaseModel):
     sender_ids: list[str] = Field(min_length=1)
 
 
+class RequireApproval(BaseModel):
+    """Admit only chat IDs promoted by an operator; others become pending."""
+
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["require_approval"] = "require_approval"
+    approved: list[str]
+
+
 class DenyAll(BaseModel):
     """Explicit fail-closed — admit no one. The server default."""
 
@@ -70,7 +78,7 @@ class DenyAll(BaseModel):
 
 
 InboundPolicy = Annotated[
-    AllowAll | AllowList | AllowSenders | DenyAll,
+    AllowAll | AllowList | AllowSenders | RequireApproval | DenyAll,
     Field(discriminator="kind"),
 ]
 """Discriminated union over ``kind`` — the stored / read-model shape."""

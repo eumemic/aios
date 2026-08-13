@@ -86,6 +86,9 @@ from .http_route_spec import HttpRouteSpec
 from .http_route_spec_methods_type_0_item import HttpRouteSpecMethodsType0Item
 from .http_server_spec import HttpServerSpec
 from .http_validation_error import HTTPValidationError
+from .inbound_grant import InboundGrant
+from .inbound_grant_action import InboundGrantAction
+from .inbound_grant_status import InboundGrantStatus
 from .ingest_external_event_response_ingest_external_event import (
     IngestExternalEventResponseIngestExternalEvent,
 )
@@ -103,6 +106,7 @@ from .list_response_bound_chat import ListResponseBoundChat
 from .list_response_connection import ListResponseConnection
 from .list_response_environment import ListResponseEnvironment
 from .list_response_event import ListResponseEvent
+from .list_response_inbound_grant import ListResponseInboundGrant
 from .list_response_memory_store import ListResponseMemoryStore
 from .list_response_memory_version import ListResponseMemoryVersion
 from .list_response_model_provider import ListResponseModelProvider
@@ -179,6 +183,7 @@ from .post_connector_runtime_session_lifecycle_response_post_connector_runtime_s
     PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle,
 )
 from .recent_chat import RecentChat
+from .require_approval import RequireApproval
 from .run_completion_source import RunCompletionSource
 from .run_completion_source_replace import RunCompletionSourceReplace
 from .run_completion_source_replace_statuses_item import (
@@ -432,6 +437,9 @@ __all__ = (
     "HttpRouteSpecMethodsType0Item",
     "HttpServerSpec",
     "HTTPValidationError",
+    "InboundGrant",
+    "InboundGrantAction",
+    "InboundGrantStatus",
     "IngestExternalEventResponseIngestExternalEvent",
     "InlineScriptBody",
     "InlineScriptBodyInputSchemaType0",
@@ -445,6 +453,7 @@ __all__ = (
     "ListResponseConnection",
     "ListResponseEnvironment",
     "ListResponseEvent",
+    "ListResponseInboundGrant",
     "ListResponseMemoryStore",
     "ListResponseMemoryVersion",
     "ListResponseModelProvider",
@@ -511,6 +520,7 @@ __all__ = (
     "PostConnectorRuntimeLifecycleResponsePostConnectorRuntimeLifecycle",
     "PostConnectorRuntimeSessionLifecycleResponsePostConnectorRuntimeSessionLifecycle",
     "RecentChat",
+    "RequireApproval",
     "RunCompletionSource",
     "RunCompletionSourceReplace",
     "RunCompletionSourceReplaceStatusesItem",

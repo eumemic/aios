@@ -838,6 +838,13 @@ async def reparent_connection(
                    AND EXISTS (SELECT 1 FROM updated)
                 RETURNING connection_id
             ),
+            g_updated AS (
+                UPDATE inbound_grants
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING id
+            ),
             r_updated AS (
                 UPDATE routing_rules
                    SET account_id = $2

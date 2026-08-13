@@ -474,6 +474,10 @@ class Settings(BaseSettings):
         "old keyed entry; the idle reaper (checks every 60s) reclaims it.",
     )
 
+    inbound_grants_reaper_enabled: bool = True
+    inbound_grants_pending_ttl_seconds: int = Field(default=604800, ge=1)
+    inbound_grants_reaper_interval_seconds: float = Field(default=3600.0, gt=0)
+
     # ── host scratch-dir reaper (#1192) ────────────────────────────────────
     host_dir_reaper_enabled: bool = Field(
         default=True,

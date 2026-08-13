@@ -7331,6 +7331,203 @@
         }
       }
     },
+    "/v1/connections/{connection_id}/inbound-grants/approve": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Approve Grant",
+        "description": "Promote a pending grant and admit the chat, operator bearer only.",
+        "operationId": "approve_inbound_grant",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboundGrantAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundGrant"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connection_id}/inbound-grants/revoke": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Revoke Grant",
+        "description": "Revoke a pending or active grant, operator bearer only.",
+        "operationId": "revoke_inbound_grant",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboundGrantAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundGrant"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{connection_id}/inbound-grants/pending": {
+      "get": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "Pending Grants",
+        "description": "List denied strangers awaiting operator approval.",
+        "operationId": "list_pending_inbound_grants",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connection Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_InboundGrant_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connections/{connection_id}": {
       "get": {
         "tags": [
@@ -12375,6 +12572,9 @@
                     "$ref": "#/components/schemas/AllowSenders"
                   },
                   {
+                    "$ref": "#/components/schemas/RequireApproval"
+                  },
+                  {
                     "$ref": "#/components/schemas/DenyAll"
                   }
                 ],
@@ -12384,7 +12584,8 @@
                     "allow_all": "#/components/schemas/AllowAll",
                     "allow_list": "#/components/schemas/AllowList",
                     "allow_senders": "#/components/schemas/AllowSenders",
-                    "deny_all": "#/components/schemas/DenyAll"
+                    "deny_all": "#/components/schemas/DenyAll",
+                    "require_approval": "#/components/schemas/RequireApproval"
                   }
                 }
               },
@@ -12406,6 +12607,9 @@
                 "$ref": "#/components/schemas/AllowSenders"
               },
               {
+                "$ref": "#/components/schemas/RequireApproval"
+              },
+              {
                 "$ref": "#/components/schemas/DenyAll"
               }
             ],
@@ -12417,7 +12621,8 @@
                 "allow_all": "#/components/schemas/AllowAll",
                 "allow_list": "#/components/schemas/AllowList",
                 "allow_senders": "#/components/schemas/AllowSenders",
-                "deny_all": "#/components/schemas/DenyAll"
+                "deny_all": "#/components/schemas/DenyAll",
+                "require_approval": "#/components/schemas/RequireApproval"
               }
             }
           }
@@ -13426,6 +13631,106 @@
         "title": "HttpServerSpec",
         "description": "One entry in an agent's ``http_servers`` list.\n\nDeclares an authenticated HTTP endpoint the agent can reach via the\n``http_request`` built-in tool.  ``base_url`` is the common URL\nprefix the agent's ``path`` argument is appended to; ``routes`` is\nthe allowlist of path patterns the broker permits.  Credentials are\nresolved at request time from the session's bound vaults, keyed on\n``base_url``.  Secret never enters the sandbox \u2014 the worker authors\nthe ``Authorization`` header from the vault credential."
       },
+      "InboundGrant": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "account_id": {
+            "type": "string",
+            "title": "Account Id"
+          },
+          "connection_id": {
+            "type": "string",
+            "title": "Connection Id"
+          },
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active",
+              "revoked"
+            ],
+            "title": "Status"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "approved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "approved_via_channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Via Channel"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "account_id",
+          "connection_id",
+          "chat_id",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "InboundGrant",
+        "description": "Audited inbound approval state."
+      },
+      "InboundGrantAction": {
+        "properties": {
+          "chat_id": {
+            "type": "string",
+            "title": "Chat Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "chat_id"
+        ],
+        "title": "InboundGrantAction",
+        "description": "Identify the canonical chat whose grant is being changed."
+      },
       "InboundPolicyReplace": {
         "oneOf": [
           {
@@ -13436,6 +13741,9 @@
           },
           {
             "$ref": "#/components/schemas/AllowSenders"
+          },
+          {
+            "$ref": "#/components/schemas/RequireApproval"
           },
           {
             "$ref": "#/components/schemas/DenyAll"
@@ -13449,7 +13757,8 @@
             "allow_all": "#/components/schemas/AllowAll",
             "allow_list": "#/components/schemas/AllowList",
             "allow_senders": "#/components/schemas/AllowSenders",
-            "deny_all": "#/components/schemas/DenyAll"
+            "deny_all": "#/components/schemas/DenyAll",
+            "require_approval": "#/components/schemas/RequireApproval"
           }
         }
       },
@@ -13786,6 +14095,38 @@
           "data"
         ],
         "title": "ListResponse[Event]"
+      },
+      "ListResponse_InboundGrant_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/InboundGrant"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More",
+            "default": false
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "ListResponse[InboundGrant]"
       },
       "ListResponse_MemoryStore_": {
         "properties": {
@@ -15493,6 +15834,30 @@
         ],
         "title": "RecentChat",
         "description": "Distinct chat_id observed on a connection's account, with the\nmost-recent inbound timestamp.\n\nReturned by ``GET /v1/connections/{id}/recent-chats`` so operators\ncan find the chat_id for a specific peer without digging through\nevent logs before calling ``bind-chat`` or opening an ``AllowList``.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nexactly what the inbound-admission gate (``AllowList.chat_ids``) matches\non, so it is the value an operator copies into an allowlist. This view\ndeliberately does not present a connector-supplied ``display_name`` /\n``sender_name`` alongside it: that name is self-reported by the\nconnector and forgeable, never a verified identity."
+      },
+      "RequireApproval": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "require_approval",
+            "title": "Kind",
+            "default": "require_approval"
+          },
+          "approved": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Approved"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "approved"
+        ],
+        "title": "RequireApproval",
+        "description": "Admit only chat IDs promoted by an operator; others become pending."
       },
       "RunCompletionSource": {
         "properties": {

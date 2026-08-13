@@ -24,7 +24,14 @@ from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
 from aios.models.connections import inbound_orig_channel
-from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll, InboundPolicy
+from aios.models.inbound_policy import (
+    AllowAll,
+    AllowList,
+    AllowSenders,
+    DenyAll,
+    InboundPolicy,
+    RequireApproval,
+)
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
     AttachmentStagingError,
@@ -98,6 +105,8 @@ def _admits(policy: InboundPolicy, chat_id: str, sender_id: str | None) -> bool:
             return chat_id in set(policy.chat_ids)
         case AllowSenders():
             return sender_id in set(policy.sender_ids)
+        case RequireApproval():
+            return chat_id in set(policy.approved)
         case DenyAll():
             return False
 
@@ -154,6 +163,11 @@ async def handle_inbound(
     # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
     policy = connection.inbound_policy_effective
     if not _admits(policy, chat_id, sender.get("id")):
+        if isinstance(policy, RequireApproval):
+            async with pool.acquire() as conn:
+                await queries.upsert_pending_inbound_grant(
+                    conn, account_id=account_id, connection_id=connection_id, chat_id=chat_id
+                )
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
     # Per-counterparty inbound rate/cost budget (#1504). Admission decides
