@@ -18,12 +18,11 @@ refuses the request rather than forwarding it (eumemic/eumemic-ops#331).
 
 Security posture:
 
-* **Fail closed everywhere.** The leaf-mint host check is THE enforcement
-  point — the egress CA is unconstrained, so every sandbox trusts any leaf
-  it signs; the proxy refuses to mint a leaf for a host outside the
-  session's resolved allow-set (or for an absent SNI), so the handshake
-  aborts before anything terminates or swaps. A blocked upstream resolution
-  returns a 502 and makes no connection.
+* **Mode-aware SNI dispatch.** The proxy never mints a leaf outside the
+  credential allow-set. Limited networking and absent SNI fail closed;
+  Unrestricted networking blind-relays an unrecognized SNI after worker-side
+  resolution and SSRF validation, preserving the open-egress policy when a
+  credential host shares an IP with an unrelated host.
 * **SNI is authoritative.** The host is taken from the ClientHello SNI and
   drives the allow-set gate, the placeholder→secret swap, AND the upstream
   connection — never the request ``Host`` header, never the original
@@ -65,10 +64,12 @@ import contextlib
 import os
 import re
 import secrets
+import socket
 import ssl
 import tempfile
 import weakref
 from collections.abc import Iterable
+from typing import Literal
 
 import h11
 import httpx
@@ -437,7 +438,13 @@ class SecretEgressProxy:
     secret map is dropped.
     """
 
-    def __init__(self, credentials: Iterable[ResolvedEnvVarCredential]) -> None:
+    def __init__(
+        self,
+        credentials: Iterable[ResolvedEnvVarCredential],
+        *,
+        networking_mode: Literal["limited", "unrestricted"] = "limited",
+        owner_id: str | None = None,
+    ) -> None:
         # Flatten (cred, allowed-host entry) into swap rules. The host is
         # lowercased ONCE here so the SNI gate and the swap map compare
         # against a normalized host — parse_allowed_host_entry stores the
@@ -453,6 +460,8 @@ class SecretEgressProxy:
         # ever reaches the mint path, so a hostile sandbox can't flood
         # distinct SNIs to balloon the leaf cache.
         self._allowed_hosts: frozenset[str] = frozenset(h for h, _, _, _ in self._rules)
+        self._networking_mode = networking_mode
+        self._owner_id = owner_id
         # Hard cap on the whole-buffered request body (the placeholder→secret
         # swap needs the body buffered, but the sandbox is untrusted, so an
         # over-cap body 413s before any upstream connection). Snapshot the int
@@ -476,6 +485,8 @@ class SecretEgressProxy:
         # primitive, just limits blast radius if the port is exposed.
         self._secret = secrets.token_urlsafe(32)
         self._server: asyncio.Server | None = None
+        self._tls_server: asyncio.Server | None = None
+        self._tls_port: int | None = None
         self._port: int | None = None
         # In-flight connection handlers, tracked so stop() can cancel them
         # (releasing the secret map) rather than block on wait_closed().
@@ -491,21 +502,152 @@ class SecretEgressProxy:
         return self._port
 
     async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` and begin serving TLS. ``asyncio.start_server``
-        binds synchronously, so the port is available the instant the await
-        returns and a bind failure raises immediately (no async bind window
-        to poll)."""
+        """Bind the raw ClientHello dispatcher and private terminating listener."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.sni_callback = self._sni_callback
         try:
-            self._server = await asyncio.start_server(self._handle, "0.0.0.0", 0, ssl=ctx)
+            # TLS termination lives on loopback.  The public listener must see
+            # the ClientHello bytes before OpenSSL consumes them so it can send
+            # colliding, unrecognized names straight through under Unrestricted.
+            self._tls_server = await asyncio.start_server(self._handle, "127.0.0.1", 0, ssl=ctx)
+            self._tls_port = self._tls_server.sockets[0].getsockname()[1]
+            self._server = await asyncio.start_server(self._dispatch, "0.0.0.0", 0)
             self._port = self._server.sockets[0].getsockname()[1]
         except BaseException:
-            # Bind never completed; the caller drops its reference, so nothing
-            # else calls stop() — close the httpx client here or it leaks.
             await self.stop()
             raise
         log.info("secret_egress_proxy.started", port=self._port)
+
+    async def _dispatch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._conns.add(task)
+        upstream_writer: asyncio.StreamWriter | None = None
+        try:
+            hello, host = await self._read_client_hello(reader)
+            if host is None:
+                log.warning(
+                    "secret_egress_proxy.sni_refused",
+                    server_name=None,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                    networking_mode=self._networking_mode,
+                )
+                return
+            if host in self._allowed_hosts:
+                assert self._tls_port is not None
+                upstream_reader, upstream_writer = await asyncio.open_connection(
+                    "127.0.0.1", self._tls_port
+                )
+            elif self._networking_mode == "limited":
+                log.warning(
+                    "secret_egress_proxy.sni_refused",
+                    server_name=host,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                    networking_mode=self._networking_mode,
+                )
+                return
+            else:
+                pinned = await _resolve_pinned_ip(host, _UPSTREAM_PORT)
+                if pinned is None:
+                    log.warning(
+                        "secret_egress_proxy.sni_relay_blocked",
+                        server_name=host,
+                        credential_hosts=sorted(self._allowed_hosts),
+                        owner_id=self._owner_id,
+                    )
+                    return
+                upstream_reader, upstream_writer = await asyncio.open_connection(
+                    pinned, _UPSTREAM_PORT, family=socket.AF_INET if ":" not in pinned else 0
+                )
+                log.info(
+                    "secret_egress_proxy.sni_blind_relay",
+                    server_name=host,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                )
+            upstream_writer.write(hello)
+            await upstream_writer.drain()
+            await asyncio.gather(
+                self._pipe(reader, upstream_writer), self._pipe(upstream_reader, writer)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("secret_egress_proxy.dispatch_error", error_type=type(exc).__name__)
+        finally:
+            if task is not None:
+                self._conns.discard(task)
+            if upstream_writer is not None:
+                upstream_writer.close()
+                with contextlib.suppress(Exception):
+                    await upstream_writer.wait_closed()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    @staticmethod
+    async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while data := await reader.read(_READ_CHUNK):
+            writer.write(data)
+            await writer.drain()
+
+    @staticmethod
+    async def _read_client_hello(reader: asyncio.StreamReader) -> tuple[bytes, str | None]:
+        """Read bounded TLS records through one ClientHello and extract its SNI."""
+        wire = bytearray()
+        handshake = bytearray()
+        while len(wire) < 131072:
+            header = await asyncio.wait_for(reader.readexactly(5), _INBOUND_IDLE_TIMEOUT_S)
+            length = int.from_bytes(header[3:5], "big")
+            if header[0] != 22 or length > 65535:
+                return bytes(wire + header), None
+            payload = await asyncio.wait_for(reader.readexactly(length), _INBOUND_IDLE_TIMEOUT_S)
+            wire.extend(header)
+            wire.extend(payload)
+            handshake.extend(payload)
+            if len(handshake) < 4:
+                continue
+            hello_length = int.from_bytes(handshake[1:4], "big")
+            if handshake[0] != 1 or hello_length > 131072:
+                return bytes(wire), None
+            if len(handshake) >= hello_length + 4:
+                return bytes(wire), SecretEgressProxy._client_hello_sni(
+                    bytes(handshake[4 : hello_length + 4])
+                )
+        return bytes(wire), None
+
+    @staticmethod
+    def _client_hello_sni(hello: bytes) -> str | None:
+        try:
+            pos = 34  # version + random
+            session_len = hello[pos]
+            pos += 1 + session_len
+            cipher_len = int.from_bytes(hello[pos : pos + 2], "big")
+            pos += 2 + cipher_len
+            compression_len = hello[pos]
+            pos += 1 + compression_len
+            extensions_len = int.from_bytes(hello[pos : pos + 2], "big")
+            pos += 2
+            end = pos + extensions_len
+            if end > len(hello):
+                return None
+            while pos + 4 <= end:
+                kind = int.from_bytes(hello[pos : pos + 2], "big")
+                size = int.from_bytes(hello[pos + 2 : pos + 4], "big")
+                value = hello[pos + 4 : pos + 4 + size]
+                pos += 4 + size
+                if pos > end:
+                    return None
+                if kind == 0 and len(value) >= 5 and value[2] == 0:
+                    name_len = int.from_bytes(value[3:5], "big")
+                    if name_len != len(value) - 5:
+                        return None
+                    return value[5:].decode("ascii").lower()
+        except (IndexError, UnicodeDecodeError):
+            return None
+        return None
 
     async def stop(self) -> None:
         """Stop serving and drop the in-memory secret map.
@@ -520,15 +662,17 @@ class SecretEgressProxy:
         failed-bind start() can still clean up.
         """
         try:
-            if self._server is not None:
-                self._server.close()
-                self._server.abort_clients()
+            servers = [s for s in (self._server, self._tls_server) if s is not None]
+            for server in servers:
+                server.close()
+                server.abort_clients()
+            if servers:
                 tasks = list(self._conns)
                 for task in tasks:
                     task.cancel()
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-                await self._server.wait_closed()
+                await asyncio.gather(*(server.wait_closed() for server in servers))
         finally:
             # Drop the secret map and per-host leaves (the documented contract);
             # they are otherwise only reclaimed when the proxy object is GC'd.

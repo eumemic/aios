@@ -16,6 +16,7 @@ import asyncio
 import base64
 import socket
 import ssl
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import cast
@@ -23,6 +24,7 @@ from typing import cast
 import h11
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
 from aios import pinned_transport
@@ -30,7 +32,7 @@ from aios.crypto.vault import CryptoBox
 from aios.harness import runtime
 from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox import secret_egress_proxy as sep
-from aios.sandbox.egress_ca import get_egress_ca
+from aios.sandbox.egress_ca import get_egress_ca, mint_server_leaf
 from aios.sandbox.secret_egress_proxy import (
     PLACEHOLDER_SUBSTITUTION_FAILED_CODE,
     PLACEHOLDER_SUBSTITUTION_FAILED_HEADER,
@@ -104,6 +106,15 @@ async def _boot(
 def _client_ctx() -> ssl.SSLContext:
     """A client trust store containing only the aios egress CA."""
     return ssl.create_default_context(cadata=get_egress_ca().cert_pem)
+
+
+async def _echo_once(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        writer.write(await reader.read(4096))
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def _request(
@@ -466,7 +477,47 @@ class TestPathGating:
 
 
 class TestFailClosed:
-    async def test_unauthorized_sni_resets_handshake(
+    async def test_unrecognized_sni_blind_relays_under_unrestricted(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        upstream_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert, key = mint_server_leaf(get_egress_ca(), "collateral.test")
+        pem = cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        with tempfile.NamedTemporaryFile() as fh:
+            fh.write(pem)
+            fh.flush()
+            upstream_ctx.load_cert_chain(fh.name)
+        upstream = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(_echo_once(r, w)), "127.0.0.1", 0, ssl=upstream_ctx
+        )
+        port = upstream.sockets[0].getsockname()[1]
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", port)
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode="unrestricted",
+            owner_id="sess_collision",
+        )
+        await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", proxy.port, ssl=_client_ctx(), server_hostname="collateral.test"
+            )
+            writer.write(b"same-ip-different-sni")
+            await writer.drain()
+            assert await reader.readexactly(21) == b"same-ip-different-sni"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
+    async def test_unauthorized_sni_resets_handshake_under_limited(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
     ) -> None:
         proxy, captured = gh_proxy

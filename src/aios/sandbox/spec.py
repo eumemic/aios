@@ -750,7 +750,16 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # ``_materialize_github_clones``'s return value (only set on a clean
         # start).
         if env_var_credentials:
-            proxy = SecretEgressProxy(env_var_credentials)
+            proxy = SecretEgressProxy(
+                env_var_credentials,
+                networking_mode=(
+                    "limited"
+                    if env_config is not None
+                    and isinstance(env_config.networking, LimitedNetworking)
+                    else "unrestricted"
+                ),
+                owner_id=session_id,
+            )
             await proxy.start()
             secret_proxy = proxy
 
@@ -890,7 +899,16 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     broker_registered = False
     try:
         if env_var_credentials:
-            proxy = SecretEgressProxy(env_var_credentials)
+            proxy = SecretEgressProxy(
+                env_var_credentials,
+                networking_mode=(
+                    "limited"
+                    if env_config is not None
+                    and isinstance(env_config.networking, LimitedNetworking)
+                    else "unrestricted"
+                ),
+                owner_id=run_id,
+            )
             await proxy.start()
             secret_proxy = proxy
 
