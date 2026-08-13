@@ -218,15 +218,21 @@ _EVENTS: list[
         None,
     ),
     # Single-call assistant event with oversized arguments (cap + marker).
+    # Use a successful connector send so the model-visible delivery-verification
+    # example is exercised against the seeded fixture too.
     (
         "evt_x_6",
         "sess_x",
         6,
         "message",
-        {"role": "assistant", "content": "", "tool_calls": [_call("call_3", "bash", _ARGS_BIG)]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_call("call_3", "telegram_send", _ARGS_BIG)],
+        },
         "assistant",
         "telegram:chat/12345",
-        "bash",
+        "telegram_send",
         None,
         None,
         "telegram:chat/12345",
@@ -236,10 +242,15 @@ _EVENTS: list[
         "sess_x",
         7,
         "message",
-        {"role": "tool", "tool_call_id": "call_3", "name": "bash", "content": "done"},
+        {
+            "role": "tool",
+            "tool_call_id": "call_3",
+            "name": "telegram_send",
+            "content": '{"message_id": 42}',
+        },
         "tool",
         "telegram:chat/12345",
-        "bash",
+        "telegram_send",
         None,
         None,
         None,
@@ -810,6 +821,10 @@ def test_tool_calls_search_pairing_ordinality_and_cap(db_url: str) -> None:
     # args_len/args_sha256 stay pre-truncation (truncation always detectable,
     # equality survives it).
     c3 = by_call["call_3"]
+    assert c3["tool_name"] == "telegram_send"
+    assert c3["result_seq"] == 7
+    assert c3["result_is_error"] is None
+    assert '"message_id": 42' in c3["result_text"]
     assert c3["arguments_text"].endswith("…[truncated]")
     assert len(c3["arguments_text"].encode()) <= 16384
     assert c3["args_len"] == len(_ARGS_BIG.encode())

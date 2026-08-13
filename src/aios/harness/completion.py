@@ -40,6 +40,7 @@ from aios.harness.request_body_budget import (
 )
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
+from aios.services.litellm_params import openai_params_in
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
@@ -680,6 +681,14 @@ def _build_litellm_kwargs(
         kwargs["api_key"] = auth.api_key
         if auth.api_base is not None and api_base_of(effective_extra) is None:
             kwargs["api_base"] = auth.api_base
+    # LiteLLM's bundled model-capability map is advisory, not authoritative.
+    # Centrally allow every standard OpenAI-shaped param the caller supplied so
+    # new provider models are not rejected locally before reaching the wire.
+    # Preserve any operator-provided additions for non-standard adapter params.
+    passthrough = openai_params_in(effective_extra)
+    passthrough.update(effective_extra.get("allowed_openai_params") or [])
+    if passthrough:
+        effective_extra["allowed_openai_params"] = sorted(passthrough)
     if effective_extra:
         kwargs.update(effective_extra)
     _apply_provider_cache_hints(kwargs, model, session_id)
