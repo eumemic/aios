@@ -31,19 +31,18 @@ caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
+from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
-import json
-
-import jsonschema
-
-from aios.logging import get_logger
 from aios.tools.schema_errors import format_schema_violation
 
 log = get_logger(__name__)
