@@ -1098,7 +1098,6 @@ class HttpConnector:
             return {}
         return {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
 
-
     async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
         """Supervise one connection, restarting failed serves with capped backoff.
 
