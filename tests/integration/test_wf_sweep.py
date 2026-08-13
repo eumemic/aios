@@ -45,6 +45,10 @@ async def sweep_pool(
                 "INSERT INTO environments (id, name, config, account_id) "
                 "VALUES ('env_sw', 'sweep-env', '{}'::jsonb, 'acc_sw')"
             )
+            await conn.execute(
+                "INSERT INTO agents (id, name, model, account_id) "
+                "VALUES ('agn_sw', 'sweep-agent', 'fake/test', 'acc_sw')"
+            )
         yield pool
     finally:
         await pool.close()
@@ -361,8 +365,9 @@ async def test_reaper_keeps_stale_run_with_live_awaited_child(
     await _call_started(sweep_pool, run_id, "sha:a#0", "agent", age_seconds=172_800)
     async with sweep_pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO sessions (id, agent_id, environment_id, account_id) "
-            "VALUES ('ses_live_child', NULL, 'env_sw', 'acc_sw')"
+            "INSERT INTO sessions "
+            "(id, agent_id, environment_id, workspace_volume_path, account_id) "
+            "VALUES ('ses_live_child', 'agn_sw', 'env_sw', '/tmp/ses_live_child', 'acc_sw')"
         )
         await conn.execute(
             "UPDATE wf_run_events SET payload = payload || "
