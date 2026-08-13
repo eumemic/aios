@@ -2628,9 +2628,15 @@ class SandboxRegistry:
                     # Publication raced the scan: it is current now, not residue.
                     retained.append(v)
                     continue
-                removed = await self._backend.remove_image(v.removal_ref)
+                if v.is_canonical:
+                    removed = await self._remove_canonical_image_and_clear_pointer(
+                        v, instance_id, states
+                    )
+                else:
+                    removed = await self._backend.remove_image(v.removal_ref)
                 if not removed:
-                    # Refused (a child still references it) — retain this tick.
+                    # Refused, or the DB-locked lifecycle recheck no longer
+                    # permits removal — retain this tick.
                     retained.append(v)
                     continue
                 if v.reason == "archived":
@@ -2643,8 +2649,6 @@ class SandboxRegistry:
                         # image is already gone, so this courtesy notice must not
                         # abort the remaining bounded GC pass.
                         log.info("sandbox.gc_archived_fs_event_skipped", session_id=sid)
-                if v.is_canonical:
-                    await self._clear_pointer_if_owned(sid, instance_id, states)
         return retained
 
     async def _gc_canonical_store_pass(self, now: datetime) -> int:
@@ -2815,21 +2819,47 @@ class SandboxRegistry:
                 base_sizes[base_ref] = 0  # over-count is safe; never under-report
         return max(0, image.size_bytes - base_sizes[base_ref])
 
-    async def _clear_pointer_if_owned(
-        self, session_id: str, instance_id: str, states: dict[str, SessionSnapshotState]
-    ) -> None:
-        """Clear a session's pointer when removing its canonical artifact.
+    async def _remove_canonical_image_and_clear_pointer(
+        self,
+        verdict: GcImageVerdict,
+        instance_id: str,
+        states: dict[str, SessionSnapshotState],
+    ) -> bool:
+        """Remove a Docker-native canonical image and clear only its pointer.
 
-        Ownership-gated: skip when the pointer is owned by another host (a
-        local cache of a peer's artifact, never the canonical copy). A deleted
-        session (absent from ``states``) is cleared unconditionally — the
-        ``UPDATE`` is a harmless no-op against the vanished row.
+        The database row lock spans the final lifecycle check, Docker removal,
+        and exact-ref CAS.  It is intentionally held across the daemon call:
+        this is the conservative ordering that prevents another worker from
+        publishing a replacement between removal and pointer clearing.
         """
-        st = states.get(session_id)
-        if st is not None and st.snapshot_host not in (None, instance_id):
-            return
+        session_id = verdict.session_id
+        assert session_id is not None
         from aios.harness import runtime
 
         pool = runtime.require_pool()
-        async with pool.acquire() as conn:
-            await queries.unscoped_clear_session_snapshot(conn, session_id)
+        async with pool.acquire() as conn, conn.transaction():
+            row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
+            if verdict.reason == "archived":
+                candidate = states.get(session_id)
+                if (
+                    row is None
+                    or candidate is None
+                    or row["archived_at"] != candidate.archived_at
+                    or row["archived_at"] is None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                ):
+                    return False
+            elif (
+                verdict.reason == "residue"
+                and row is not None
+                and row["snapshot_ref"] in (verdict.removal_ref, *verdict.image.repo_tags)
+            ):
+                return False
+
+            if not await self._backend.remove_image(verdict.removal_ref):
+                return False
+            await queries.unscoped_compare_and_clear_session_snapshot(
+                conn, session_id, expected_ref=verdict.removal_ref
+            )
+            return True
