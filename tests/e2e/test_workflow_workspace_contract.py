@@ -65,11 +65,10 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
     registry = runtime.require_sandbox_registry()
     backend = registry._backend
     run_handle = await registry.get_or_provision_run(run.id)
-    marker = secrets.token_bytes(48)
-    marker_hex = marker.hex()
+    marker = secrets.token_hex(48)
     write = await backend.exec(
         run_handle,
-        f"printf %s {marker_hex} | xxd -r -p > marker.bin",
+        f"printf %s {marker} > marker.bin",
         timeout_seconds=30,
         max_output_bytes=10_000,
     )
@@ -84,21 +83,20 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
         first = await registry.get_or_provision(first_id, pool=docker_harness._pool)
         read = await backend.exec(
             first,
-            "xxd -p -c 256 marker.bin",
+            "cat marker.bin",
             timeout_seconds=30,
             max_output_bytes=10_000,
         )
-        assert read.exit_code == 0 and read.stdout.strip() == marker_hex
-        sibling_bytes = secrets.token_bytes(48)
-        sibling_hex = sibling_bytes.hex()
+        assert read.exit_code == 0 and read.stdout == marker
+        sibling = secrets.token_hex(48)
         wrote = await backend.exec(
             first,
-            f"printf %s {sibling_hex} | xxd -r -p > sibling.bin",
+            f"printf %s {sibling} > sibling.bin",
             timeout_seconds=30,
             max_output_bytes=10_000,
         )
         assert wrote.exit_code == 0
-        assert (run_handle.workspace_path / "sibling.bin").read_bytes() == sibling_bytes
+        assert (run_handle.workspace_path / "sibling.bin").read_text() == sibling
 
         await _finish_child(docker_harness._pool, first_id, "first-ok")
         await run_workflow_step(run.id)
@@ -106,24 +104,22 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
         second = await registry.get_or_provision(second_id, pool=docker_harness._pool)
         sees_both = await backend.exec(
             second,
-            f'test "$(xxd -p -c 256 marker.bin)" = {marker_hex} && '
-            f'test "$(xxd -p -c 256 sibling.bin)" = {sibling_hex}',
+            f'test "$(cat marker.bin)" = {marker} && test "$(cat sibling.bin)" = {sibling}',
             timeout_seconds=30,
             max_output_bytes=10_000,
         )
         assert sees_both.exit_code == 0
-        second_bytes = secrets.token_bytes(48)
-        second_hex = second_bytes.hex()
+        second_marker = secrets.token_hex(48)
         wrote_back = await backend.exec(
             second,
-            f"printf %s {second_hex} | xxd -r -p > second.bin",
+            f"printf %s {second_marker} > second.bin",
             timeout_seconds=30,
             max_output_bytes=10_000,
         )
         assert wrote_back.exit_code == 0
         first_sees_second = await backend.exec(
             first,
-            f'test "$(xxd -p -c 256 second.bin)" = {second_hex}',
+            f'test "$(cat second.bin)" = {second_marker}',
             timeout_seconds=30,
             max_output_bytes=10_000,
         )
