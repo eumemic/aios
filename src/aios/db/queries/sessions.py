@@ -518,7 +518,7 @@ async def get_session_frozen_surface(
         return None
     return Surface(
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
     )
 

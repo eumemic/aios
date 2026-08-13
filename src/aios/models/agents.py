@@ -13,11 +13,12 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from aios.actors import Actor
+from aios.logging import get_logger
 from aios.models.skills import AgentSkillRef
-from aios.models.target_urls import validate_outbound_target_url
+from aios.models.target_urls import OutboundTargetBlockedError, validate_outbound_target_url
 from aios.retirements.registry import tolerated_rename_map
 from aios.retirements.telemetry import record_tolerance_hit
 
@@ -100,6 +101,7 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 PreemptPolicy = Literal["preempt", "wait"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
+log = get_logger(__name__)
 
 # Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
 # Agent/workflow/run/session rows persisted before a rename carry the pre-rename builtin tool
@@ -175,6 +177,9 @@ _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 # ── MCP server declaration ────────────────────────────────────────────────────
 
 
+_PERSISTED_READ_CONTEXT = {"persisted_read": True}
+
+
 class McpServerSpec(BaseModel):
     """One entry in an agent's ``mcp_servers`` list.
 
@@ -208,8 +213,23 @@ class McpServerSpec(BaseModel):
     url: str = Field(min_length=1)
     include_instructions: bool = True
 
-    _validate_url = field_validator("url")(validate_outbound_target_url)
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v: str, info: ValidationInfo) -> str:
+        try:
+            return validate_outbound_target_url(v)
+        except OutboundTargetBlockedError:
+            if not (isinstance(info.context, dict) and info.context.get("persisted_read")):
+                raise
+            log.warning("mcp_server.persisted_url_tolerated")
+            return v
+
     headers: dict[str, str] | None = Field(default=None)
+
+    @classmethod
+    def model_validate_persisted(cls, value: Any) -> McpServerSpec:
+        """Hydrate a stored spec while tolerating URL rules added after it was written."""
+        return cls.model_validate(value, context=_PERSISTED_READ_CONTEXT)
 
     @field_validator("name")
     @classmethod
