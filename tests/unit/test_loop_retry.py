@@ -504,6 +504,35 @@ class TestRunSessionStepOnTerminalModelError:
             ANY, "sess_x", account_id=ANY, error={"kind": "model_terminal_error"}
         )
 
+    async def test_terminal_error_surfaces_provider_detail_in_stop_reason(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(400, request=request)
+        error = litellm_exceptions.BadRequestError(
+            message='AnthropicException - {"error":{"type":"request_too_large"}}',
+            model="x",
+            llm_provider="anthropic",
+            response=response,
+        )
+        mock_step_dependencies.stream_litellm.side_effect = error
+
+        await run_session_step("sess_x")
+
+        recorded_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        reason = next(reason for reason in recorded_reasons if reason.get("type") == "error")
+        assert reason["provider_error"] == {
+            "exception_class": "BadRequestError",
+            "http_status": 400,
+            "message": str(error),
+        }
+        # The console's failed-turn panel renders stop_reason.message, so keep
+        # the diagnostic visible there as well as available in structured form.
+        assert "BadRequestError (HTTP 400)" in reason["message"]
+        assert "request_too_large" in reason["message"]
+
     @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
     async def test_transient_class_keeps_backoff_ladder(
         self, mock_step_dependencies: Any, cls: type[Exception]
