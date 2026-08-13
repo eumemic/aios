@@ -200,6 +200,26 @@ class Settings(BaseSettings):
         "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
         "denial-of-service; ``None`` leaves the host's default in place.",
     )
+    sandbox_snapshot_store_root: Path | None = Field(
+        default=None,
+        description="Persistent host path for canonical immutable sandbox tarballs. "
+        "When set, durable publication is synchronous before the DB pointer write.",
+    )
+    sandbox_canonical_store_budget_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Canonical tarball-store budget; pressure backpressures admissions.",
+    )
+    sandbox_canonical_store_headroom_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=0,
+        description="Free bytes reserved on the persistent snapshot filesystem.",
+    )
+    sandbox_docker_cache_high_watermark_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Independent disposable Docker snapshot-cache watermark.",
+    )
     sandbox_snapshot_budget_bytes: int | None = Field(
         default=4 * 1024 * 1024 * 1024,
         ge=10 * 1024 * 1024,
@@ -267,6 +287,19 @@ class Settings(BaseSettings):
         default=15 * 1024 * 1024 * 1024,
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
+    )
+    sandbox_snapshot_ttl_seconds: int = Field(
+        default=2_592_000,  # 30 days
+        ge=60,
+        description="Dormancy threshold for non-destructive maintenance and pressure reporting. "
+        "keyed on the session's ``(session_id, last_event_seq)`` event row. "
+        "It never authorizes deletion of canonical non-archived state.",
+    )
+    sandbox_archive_gc_grace_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        description="Minimum age before unreferenced or archived canonical snapshot archives "
+        "are eligible for deletion.",
     )
     sandbox_snapshot_pool_bytes: int | None = Field(
         default=None,
