@@ -1,13 +1,13 @@
 """Runtime inbound approval grants ledger.
 
 Revision ID: 0164
-Revises: 0158
+Revises: 0159
 """
 
 from alembic import op
 
 revision = "0164"
-down_revision = "0158"
+down_revision = "0159"
 branch_labels = None
 depends_on = None
 
