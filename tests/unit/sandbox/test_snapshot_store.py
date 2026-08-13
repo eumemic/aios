@@ -100,7 +100,7 @@ class TestTarballStore:
         backend = FakeBackend()
 
         async def save(_tag: str, path: Path) -> None:
-            path.write_bytes(b"docker image archive")  # noqa: ASYNC240 -- tiny fixture
+            path.write_bytes(b"docker image archive")
 
         backend.save_image = AsyncMock(side_effect=save)  # type: ignore[method-assign]
         store = TarballStore(backend, tmp_path)
@@ -109,7 +109,7 @@ class TestTarballStore:
         assert await store.put("aios-sbx-local", ref) == ref
         assert await store.exists(ref) is True
         assert await store.size(ref) == len(b"docker image archive")
-        assert not list(tmp_path.rglob("*.tmp"))  # noqa: ASYNC240 -- test assertion
+        assert not list(tmp_path.rglob("*.tmp"))
 
     @pytest.mark.asyncio
     async def test_get_loads_verified_archive_on_cache_miss(self, tmp_path: Path) -> None:

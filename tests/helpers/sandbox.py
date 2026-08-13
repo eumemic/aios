@@ -229,7 +229,7 @@ class FakeBackend:
 
     async def save_image(self, image: str, path: Path) -> None:
         self.calls.append(("save_image", {"image": image, "path": path}))
-        path.write_bytes(b"fake docker archive")  # noqa: ASYNC240 -- in-memory test fake
+        path.write_bytes(b"fake docker archive")
 
     async def load_image(self, path: Path) -> None:
         self.calls.append(("load_image", {"path": path}))
