@@ -102,6 +102,43 @@ async def unscoped_set_session_snapshot(
     )
 
 
+async def unscoped_compare_and_set_session_snapshot(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    observed_ref: str | None,
+    observed_updated_at: object | None,
+    ref: str,
+    host: str,
+    snapshot_bytes: int,
+) -> bool:
+    """Publish iff the pointer identity observed under the session lock is unchanged."""
+    status: str = await conn.execute(
+        """
+        UPDATE sessions SET snapshot_ref=$4, snapshot_host=$5, snapshot_bytes=$6,
+                            snapshot_updated_at=now()
+         WHERE id=$1 AND snapshot_ref IS NOT DISTINCT FROM $2
+           AND snapshot_updated_at IS NOT DISTINCT FROM $3
+        """,
+        session_id,
+        observed_ref,
+        observed_updated_at,
+        ref,
+        host,
+        snapshot_bytes,
+    )
+    return bool(status != "UPDATE 0")
+
+
+async def unscoped_get_session_snapshot_pointer(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str | None, object | None] | None:
+    row = await conn.fetchrow(
+        "SELECT snapshot_ref, snapshot_updated_at FROM sessions WHERE id=$1", session_id
+    )
+    return None if row is None else (row["snapshot_ref"], row["snapshot_updated_at"])
+
+
 async def unscoped_get_session_snapshot_bytes(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> int | None:
@@ -118,18 +155,11 @@ async def unscoped_get_session_snapshot_bytes(
 
 
 async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session_id: str) -> None:
-    """Clear a session's snapshot pointer (all four columns NULL).
-
-    Used on a detected reset (snapshot-missing / base-image drift). Destructive
-    GC uses :func:`unscoped_clear_session_snapshot_if_matches` instead so a
-    concurrently published replacement cannot be erased by a stale clear.
-    """
+    """Unconditionally clear a pointer (legacy callers only)."""
     await conn.execute(
         """
         UPDATE sessions
-           SET snapshot_ref = NULL,
-               snapshot_host = NULL,
-               snapshot_bytes = NULL,
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
                snapshot_updated_at = now()
          WHERE id = $1
         """,
@@ -137,30 +167,45 @@ async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session
     )
 
 
-async def unscoped_clear_session_snapshot_if_matches(
-    conn: asyncpg.Connection[Any], session_id: str, *, ref: str, host: str
+async def unscoped_compare_and_clear_session_snapshot(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_ref: str
 ) -> bool:
-    """Atomically clear exactly the snapshot pointer GC just removed.
-
-    A concurrent publication changes ``snapshot_ref`` and/or ``snapshot_host``;
-    the predicate then matches zero rows and preserves the replacement pointer.
-    """
-    result = await conn.execute(
+    """Clear only the exact artifact pointer the caller removed/proved missing."""
+    status: str = await conn.execute(
         """
         UPDATE sessions
-           SET snapshot_ref = NULL,
-               snapshot_host = NULL,
-               snapshot_bytes = NULL,
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
                snapshot_updated_at = now()
-         WHERE id = $1
-           AND snapshot_ref = $2
-           AND snapshot_host = $3
+         WHERE id = $1 AND snapshot_ref = $2
         """,
         session_id,
-        ref,
-        host,
+        expected_ref,
     )
-    return bool(result == "UPDATE 1")
+    return status != "UPDATE 0"
+
+
+async def unscoped_lock_session_snapshot_state(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> asyncpg.Record | None:
+    """Serialize artifact ownership/lifecycle decisions with all session updates.
+
+    The row lock is held by the caller's transaction while it performs the
+    external store operation and pointer CAS.  Publishers and archive/unarchive
+    updates cannot pass the corresponding UPDATE until that decision settles.
+    """
+    return await conn.fetchrow(
+        """
+        SELECT id, account_id, archived_at, snapshot_ref, snapshot_host,
+               snapshot_bytes,
+               (SELECT e.created_at FROM events e
+                 WHERE e.session_id = sessions.id AND e.seq = sessions.last_event_seq)
+                   AS last_event_at
+          FROM sessions
+         WHERE id = $1
+         FOR UPDATE
+        """,
+        session_id,
+    )
 
 
 async def unscoped_live_session_ids(
