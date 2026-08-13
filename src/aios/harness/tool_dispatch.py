@@ -1137,11 +1137,20 @@ async def _execute_mcp_tool_admitted(
         )
         result = suppression_service.mcp_synthesized_result()
     else:
-        from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
+        from aios.mcp.client import (
+            call_mcp_tool,
+            resolve_auth_for_target_url,
+            validate_mcp_arguments,
+        )
         from aios.services.outbound_tool_quota import (
             mark_outbound_dispatch_completed,
             reserve_outbound_tool_quota,
         )
+
+        input_schema = _mcp_input_schema(tc.name, mcp_tools)
+        schema_error = validate_mcp_arguments(tool_name, arguments, input_schema)
+        if schema_error is not None:
+            raise ToolBail(schema_error)
 
         crypto_box = runtime.require_crypto_box()
         vault_id, headers = await resolve_auth_for_target_url(
@@ -1161,7 +1170,7 @@ async def _execute_mcp_tool_admitted(
             headers,
             tool_name,
             arguments,
-            input_schema=_mcp_input_schema(tc.name, mcp_tools),
+            input_schema=input_schema,
             meta=meta,
             spec_headers=spec.headers,
         )

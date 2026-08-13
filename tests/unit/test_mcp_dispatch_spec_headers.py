@@ -10,11 +10,19 @@ append, and the crypto box) mocked, so the assertion is purely about the
 from __future__ import annotations
 
 import contextlib
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aios.harness.tool_dispatch import _execute_mcp_tool_async, _ToolCall
+import pytest
+
+from aios.harness.tool_dispatch import (
+    _execute_mcp_tool_admitted,
+    _execute_mcp_tool_async,
+    _ToolCall,
+)
 from aios.models.agents import McpServerSpec
+from aios.tools.invoke import ToolBail
 
 
 @contextlib.asynccontextmanager
@@ -40,7 +48,6 @@ class TestMcpDispatchSpecHeaders:
         input_schema = {
             "type": "object",
             "properties": {"title": {"type": "string"}},
-            "required": ["title"],
         }
         mcp_tools = [
             {
@@ -48,7 +55,7 @@ class TestMcpDispatchSpecHeaders:
                 "function": {
                     "name": "mcp__gh__create_issue",
                     "parameters": input_schema,
-                    "strict": True,
+                    "strict": False,
                 },
             }
         ]
@@ -88,6 +95,62 @@ class TestMcpDispatchSpecHeaders:
         assert call_mock.await_args.kwargs.get("input_schema") is input_schema
         # The resolved URL comes from the spec, not a bare string map value.
         assert call_mock.await_args.args[0] == "https://mcp.github/"
+
+    async def test_schema_refusal_precedes_quota_reservation(self) -> None:
+        spec = McpServerSpec(name="planner", url="https://mcp.planner/")
+        schema = {
+            "type": "object",
+            "properties": {
+                "draft": {
+                    "type": "object",
+                    "properties": {"pieces": {"type": "array", "minItems": 1}},
+                    "required": ["pieces"],
+                }
+            },
+            "required": ["draft"],
+        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__planner__propose",
+                    "parameters": schema,
+                    "strict": False,
+                },
+            }
+        ]
+        tc = _ToolCall(
+            call_id="call_1",
+            name="mcp__planner__propose",
+            raw_args=json.dumps({"draft": {}}),
+            bound_log=MagicMock(),
+        )
+        reserve = AsyncMock()
+        call = AsyncMock()
+
+        with (
+            patch(
+                "aios.harness.tool_dispatch._mcp_call_suppressed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("aios.services.outbound_tool_quota.reserve_outbound_tool_quota", reserve),
+            patch("aios.mcp.client.call_mcp_tool", call),
+            pytest.raises(ToolBail, match=r"draft\.pieces"),
+        ):
+            await _execute_mcp_tool_admitted(
+                MagicMock(),
+                "sess_x",
+                tc,
+                {"planner": spec},
+                mcp_tools=tools,
+                account_id="acc_test_stub",
+                focal_channel=None,
+                parent_focal_at_arrival=None,
+            )
+
+        reserve.assert_not_awaited()
+        call.assert_not_awaited()
 
     async def test_unknown_server_bails(self) -> None:
         """A tool naming a server absent from the map raises ``ToolBail`` —

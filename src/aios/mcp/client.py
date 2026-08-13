@@ -28,6 +28,9 @@ import jsonschema
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox, EncryptedBlob
@@ -49,6 +52,22 @@ from aios.services.vaults import is_expiring, refresh_credential
 # the same precedent as ``pinned_transport``/``secret_egress_proxy``.
 
 log = get_logger("aios.mcp.client")
+
+# A fresh referencing registry has no retriever: any non-local URI raises
+# NoSuchResource instead of performing jsonschema's legacy remote retrieval.
+_NO_REMOTE_SCHEMA_REGISTRY: Registry[Any] = Registry()
+
+
+def _check_local_schema_references(resource: Resource[Any], resolver: Any) -> None:
+    """Reject references that the schema's self-contained resource tree cannot resolve."""
+    contents = resource.contents
+    if isinstance(contents, dict):
+        for keyword in ("$ref", "$dynamicRef", "$recursiveRef"):
+            reference = contents.get(keyword)
+            if isinstance(reference, str):
+                resolver.lookup(reference)
+    for subresource in resource.subresources():
+        _check_local_schema_references(subresource, resolver.in_subresource(subresource))
 
 
 def _format_argument_validation_error(
@@ -80,7 +99,7 @@ def _format_argument_validation_error(
     return "\n".join(lines)
 
 
-def _validate_mcp_arguments(
+def validate_mcp_arguments(
     tool_name: str,
     arguments: dict[str, Any],
     input_schema: dict[str, Any] | None,
@@ -96,7 +115,12 @@ def _validate_mcp_arguments(
         return None
     try:
         jsonschema.Draft202012Validator.check_schema(input_schema)
-    except jsonschema.SchemaError as exc:
+        root = DRAFT202012.create_resource(input_schema)
+        _check_local_schema_references(
+            root,
+            _NO_REMOTE_SCHEMA_REGISTRY.resolver_with_root(root),
+        )
+    except (jsonschema.SchemaError, Unresolvable) as exc:
         log.warning(
             "mcp.schema_validation_skipped",
             tool_name=tool_name,
@@ -104,8 +128,25 @@ def _validate_mcp_arguments(
             reason=str(exc),
         )
         return None
-    validator = jsonschema.Draft202012Validator(input_schema)
-    errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.absolute_path))
+    validator = jsonschema.Draft202012Validator(
+        input_schema,
+        registry=_NO_REMOTE_SCHEMA_REGISTRY,
+    )
+    try:
+        errors = sorted(
+            validator.iter_errors(arguments), key=lambda error: list(error.absolute_path)
+        )
+    except Unresolvable as exc:
+        # Dynamic references may only become reachable while walking the
+        # instance. The registry still refuses retrieval; keep the additive
+        # advertised-only fallback for this unusable schema.
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason=str(exc),
+        )
+        return None
     if not errors:
         return None
     return _format_argument_validation_error(tool_name, arguments, errors)
@@ -605,7 +646,7 @@ async def call_mcp_tool(
     contribute to the pool key.  Returns a result dict with either
     ``content`` (success) or ``error`` (failure).
     """
-    schema_error = _validate_mcp_arguments(tool_name, arguments, input_schema)
+    schema_error = validate_mcp_arguments(tool_name, arguments, input_schema)
     if schema_error is not None:
         return {"error": schema_error, "code": "tool_error"}
 

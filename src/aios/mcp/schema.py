@@ -43,7 +43,10 @@ def make_function_tool(qualified_name: str, tool: Tool) -> dict[str, Any]:
         "name": qualified_name,
         "description": tool.description or "",
         "parameters": sanitize_mcp_schema(tool.inputSchema),
-        "strict": True,
+        # Arbitrary MCP schemas are not guaranteed to fit providers' narrower
+        # strict-function subset. Explicit false also prevents provider-side
+        # auto-promotion from turning optional MCP properties into required ones.
+        "strict": False,
     }
     output_schema = getattr(tool, "outputSchema", None)
     if output_schema is not None:

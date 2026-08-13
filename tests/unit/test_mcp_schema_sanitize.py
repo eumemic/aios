@@ -146,7 +146,7 @@ class TestMakeFunctionToolIntegration:
         assert envelope["type"] == "function"
         assert envelope["function"]["name"] == "mcp__aios__update_agent"
         assert envelope["function"]["description"] == "Update an agent"
-        assert envelope["function"]["strict"] is True
+        assert envelope["function"]["strict"] is False
         assert "type" not in envelope["function"]["parameters"]["properties"]["tools"]
 
         count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
@@ -183,7 +183,7 @@ class TestMakeFunctionToolIntegration:
         function = make_function_tool("mcp__planner__propose", tool)["function"]
         draft = function["parameters"]["properties"]["draft"]
 
-        assert function["strict"] is True
+        assert function["strict"] is False
         assert function["parameters"]["required"] == ["draft"]
         assert draft["required"] == ["name", "pieces"]
         assert draft["properties"]["pieces"]["type"] == "array"
@@ -217,3 +217,19 @@ class TestMakeFunctionToolIntegration:
         ]
         assert "type" not in parameters["properties"]["summary"]
         assert parameters["properties"]["draft"]["required"] == ["name"]
+
+    def test_make_function_tool_never_promotes_optional_schema_to_strict(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "required_name": {"type": "string"},
+                "optional_note": {"type": "string"},
+            },
+            "required": ["required_name"],
+        }
+        tool = Tool(name="annotate", description="Annotate", inputSchema=schema)
+
+        function = make_function_tool("mcp__notes__annotate", tool)["function"]
+
+        assert function["strict"] is False
+        assert function["parameters"] == schema

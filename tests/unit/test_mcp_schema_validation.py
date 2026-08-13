@@ -94,3 +94,66 @@ async def test_invalid_third_party_schema_keeps_advertised_only_dispatch() -> No
 
     session.call_tool.assert_awaited_once_with("legacy_tool", {}, meta=None)
     assert result == {"content": "ok"}
+
+
+async def test_remote_ref_is_never_retrieved_and_keeps_advertised_only_dispatch() -> None:
+    session = AsyncMock()
+    session.call_tool = AsyncMock(return_value=_successful_result())
+    remote_schema = {
+        "type": "object",
+        "properties": {"draft": {"$ref": "http://127.0.0.1:9/internal-schema"}},
+    }
+
+    with (
+        patch("urllib.request.urlopen") as urlopen,
+        patch(
+            "aios.mcp.client._open_session",
+            new_callable=AsyncMock,
+            return_value=(session, MagicMock()),
+        ),
+        patch("aios.mcp.client.log.warning") as warning,
+    ):
+        result = await call_mcp_tool(
+            "https://mcp.example/",
+            None,
+            {},
+            "remote_ref_tool",
+            {},
+            input_schema=remote_schema,
+        )
+
+    urlopen.assert_not_called()
+    session.call_tool.assert_awaited_once_with("remote_ref_tool", {}, meta=None)
+    assert result == {"content": "ok"}
+    warning.assert_called_once()
+    assert warning.call_args.kwargs["schema_validate"] is False
+    assert "127.0.0.1" in warning.call_args.kwargs["reason"]
+
+
+async def test_local_ref_is_resolved_and_enforced() -> None:
+    schema = {
+        "$defs": {
+            "draft": {
+                "type": "object",
+                "properties": {"pieces": {"type": "array", "minItems": 1}},
+                "required": ["pieces"],
+            }
+        },
+        "type": "object",
+        "properties": {"draft": {"$ref": "#/$defs/draft"}},
+        "required": ["draft"],
+    }
+
+    with patch("aios.mcp.client._open_session", new_callable=AsyncMock) as open_session:
+        result = await call_mcp_tool(
+            "https://mcp.example/",
+            None,
+            {},
+            "local_ref_tool",
+            {"draft": {}},
+            input_schema=schema,
+        )
+
+    open_session.assert_not_awaited()
+    assert result["code"] == "tool_error"
+    assert "draft.pieces" in result["error"]
