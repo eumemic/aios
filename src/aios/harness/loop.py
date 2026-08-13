@@ -1071,6 +1071,7 @@ async def _run_session_step_body(
             pending,
             agent,
             mcp_server_map,
+            mcp_tools=prelude.tools,
             focal_channel=session.focal_channel,
             account_id=account_id,
         )
@@ -1751,6 +1752,7 @@ async def _run_session_step_body(
                 session_id,
                 blocked_mcp,
                 {},
+                mcp_tools=tools,
                 focal_channel=session.focal_channel,
                 account_id=account_id,
                 parent_focal_at_arrival=parent_focal,
@@ -1762,6 +1764,7 @@ async def _run_session_step_body(
                 session_id,
                 immediate_mcp,
                 mcp_server_map,
+                mcp_tools=tools,
                 focal_channel=session.focal_channel,
                 account_id=account_id,
                 parent_focal_at_arrival=parent_focal,
@@ -2132,6 +2135,7 @@ def _launch_confirmed_calls(
     agent: Any,
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]],
     focal_channel: str | None,
     account_id: str,
 ) -> None:
@@ -2174,6 +2178,7 @@ def _launch_confirmed_calls(
             session_id,
             pending_blocked_mcp,
             {},
+            mcp_tools=mcp_tools,
             focal_channel=focal_channel,
             account_id=account_id,
         )
@@ -2183,6 +2188,7 @@ def _launch_confirmed_calls(
             session_id,
             pending_mcp,
             mcp_server_map,
+            mcp_tools=mcp_tools,
             focal_channel=focal_channel,
             account_id=account_id,
         )

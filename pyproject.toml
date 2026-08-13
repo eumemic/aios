@@ -15,6 +15,11 @@ dependencies = [
     # Validation + settings
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    # Direct runtime dependency: MCP dispatch validates untrusted third-party
+    # tool arguments with Draft 2020-12 before any connector side effect.
+    "jsonschema==4.23.0",
+    # jsonschema's immutable registry disables remote $ref retrieval.
+    "referencing==0.37.0",
     # Postgres + migrations + job queue
     "asyncpg>=0.30",
     "alembic>=1.13",
