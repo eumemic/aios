@@ -34,7 +34,7 @@ from typing import Any, TypedDict
 import asyncpg
 
 import aios.harness.tasks
-import aios.tools
+import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries

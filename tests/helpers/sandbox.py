@@ -12,6 +12,7 @@ need to expose a ``get_or_provision`` and an ``exec`` method.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -229,7 +230,7 @@ class FakeBackend:
 
     async def save_image(self, image: str, path: Path) -> None:
         self.calls.append(("save_image", {"image": image, "path": path}))
-        path.write_bytes(b"fake docker archive")
+        await asyncio.to_thread(path.write_bytes, b"fake docker archive")
 
     async def load_image(self, path: Path) -> None:
         self.calls.append(("load_image", {"path": path}))

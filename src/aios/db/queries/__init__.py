@@ -376,7 +376,7 @@ def outcome_from_jsonb(data: dict[str, Any]) -> Outcome:
 # ``queries.foo`` resolve to the SAME object the submodule defines, which keeps
 # ``patch.object(queries, "foo")`` reaching the real callee.
 
-from .accounts import (
+from .accounts import (  # noqa: E402
     archive_account,
     bootstrap_root_account,
     count_account_resources,
@@ -407,7 +407,7 @@ from .accounts import (
     unscoped_live_session_account_id,
     update_account,
 )
-from .agents import (
+from .agents import (  # noqa: E402
     archive_agent,
     get_agent,
     get_agent_version,
@@ -416,14 +416,14 @@ from .agents import (
     list_agents,
     update_agent,
 )
-from .cancel import (
+from .cancel import (  # noqa: E402
     get_session_cancel_marker,
     insert_session_cancel_marker,
     list_session_ids_with_unharvested_cancel_marker,
     list_unharvested_session_cancel_markers,
     mark_session_cancel_marker_harvested,
 )
-from .connections import (
+from .connections import (  # noqa: E402
     ActiveBinding,
     _row_to_connection,
     _session_bound_to_connection_predicate,
@@ -455,7 +455,7 @@ from .connections import (
     update_connector_capabilities,
     update_connector_tools_schema,
 )
-from .environments import (
+from .environments import (  # noqa: E402
     archive_environment,
     get_environment,
     get_environment_config_for_id,
@@ -464,7 +464,7 @@ from .environments import (
     list_environments,
     update_environment,
 )
-from .events import (
+from .events import (  # noqa: E402
     _clear_model_token_ratio_cache,
     _derive_is_error,
     _derive_sender_name,
@@ -503,10 +503,10 @@ from .events import (
     recompute_session_channels,
     replace_event_data,
 )
-from .files import (
+from .files import (  # noqa: E402
     insert_file,
 )
-from .management_calls import (
+from .management_calls import (  # noqa: E402
     get_management_call,
     insert_management_call,
     list_pending_management_calls_for_connector,
@@ -514,7 +514,7 @@ from .management_calls import (
     notify_management_call_dispatch,
     notify_management_call_result,
 )
-from .memory_stores import (
+from .memory_stores import (  # noqa: E402
     _allocate_version_seq,
     acquire_session_resources_lock,
     archive_memory_store,
@@ -550,7 +550,7 @@ from .memory_stores import (
     update_memory_with_version,
     update_session_github_repo_blob,
 )
-from .model_providers import (
+from .model_providers import (  # noqa: E402
     ResolvedModelProvider,
     archive_model_provider,
     audit_credentialless_root,
@@ -560,13 +560,13 @@ from .model_providers import (
     resolve_model_provider,
     update_model_provider,
 )
-from .prune import (
+from .prune import (  # noqa: E402
     prune_archived_runs,
     prune_unpinned_archived_agents,
     prune_unpinned_archived_skills,
     prune_unpinned_archived_workflows,
 )
-from .sandboxes import (
+from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
     gc_snapshot_session_states,
     normalized_workspace_path,
@@ -583,14 +583,14 @@ from .sandboxes import (
     unscoped_workspace_path_is_live,
     workspace_advisory_lock_key,
 )
-from .session_templates import (
+from .session_templates import (  # noqa: E402
     archive_session_template,
     get_session_template,
     insert_session_template,
     list_session_templates,
     update_session_template,
 )
-from .sessions import (
+from .sessions import (  # noqa: E402
     _SESSION_ACTIVE_EXPR,
     _SESSION_ERRORED_EXPR,
     _SESSION_STATUS_EXPR,
@@ -641,7 +641,7 @@ from .sessions import (
     update_session,
     write_response_if_absent,
 )
-from .skills import (
+from .skills import (  # noqa: E402
     archive_skill,
     get_latest_skill_version,
     get_skill,
@@ -652,7 +652,7 @@ from .skills import (
     list_skills,
     resolve_skill_refs,
 )
-from .trace import (
+from .trace import (  # noqa: E402
     CallerTask,
     ChildNode,
     children_of,
@@ -663,7 +663,7 @@ from .trace import (
     read_session_journal_batched,
     read_session_meta_batched,
 )
-from .triggers import (
+from .triggers import (  # noqa: E402
     ClaimedTriggerRun,
     ResolvedExternalEventTrigger,
     TriggerFireRef,
@@ -696,7 +696,7 @@ from .triggers import (
     unscoped_get_trigger_row,
     update_trigger,
 )
-from .vaults import (
+from .vaults import (  # noqa: E402
     EnvVarCredentialEcho,
     EnvVarCredentialRow,
     archive_vault,

@@ -10,6 +10,7 @@ idle's lineage gate discard its post-hiccup work).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -100,7 +101,7 @@ class TestTarballStore:
         backend = FakeBackend()
 
         async def save(_tag: str, path: Path) -> None:
-            path.write_bytes(b"docker image archive")
+            await asyncio.to_thread(path.write_bytes, b"docker image archive")
 
         backend.save_image = AsyncMock(side_effect=save)  # type: ignore[method-assign]
         store = TarballStore(backend, tmp_path)
@@ -109,7 +110,7 @@ class TestTarballStore:
         assert await store.put("aios-sbx-local", ref) == ref
         assert await store.exists(ref) is True
         assert await store.size(ref) == len(b"docker image archive")
-        assert not list(tmp_path.rglob("*.tmp"))
+        assert not await asyncio.to_thread(lambda: list(tmp_path.rglob("*.tmp")))
 
     @pytest.mark.asyncio
     async def test_get_loads_verified_archive_on_cache_miss(self, tmp_path: Path) -> None:
