@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
 import pytest
@@ -1500,7 +1500,7 @@ class TestServeSupervisor:
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
                 seen.append(dict(secrets))
-                if secrets["token"] == "revoked":
+                if secrets["token"] != "corrected":
                     raise RuntimeError("credential rejected")
 
         c = _CredentialConnector(base_url="http://x", token="aios_runtime_x")
@@ -1510,13 +1510,19 @@ class TestServeSupervisor:
             secrets={"token": "revoked"},
         )
         c._connections["conn_1"] = state
-        c._fetch_runtime_secrets = AsyncMock(return_value={"token": "corrected"})  # type: ignore[method-assign]
+        c._fetch_runtime_secrets = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[{"token": "still-revoked"}, {"token": "corrected"}]
+        )
         c.emit_lifecycle = AsyncMock()  # type: ignore[method-assign]
 
         await c._isolated_serve_connection("conn_1", state.secrets)
 
-        assert seen == [{"token": "revoked"}, {"token": "corrected"}]
-        c._fetch_runtime_secrets.assert_awaited_once_with("conn_1")  # type: ignore[attr-defined]
+        assert seen == [
+            {"token": "revoked"},
+            {"token": "still-revoked"},
+            {"token": "corrected"},
+        ]
+        assert c._fetch_runtime_secrets.await_args_list == [call("conn_1"), call("conn_1")]  # type: ignore[attr-defined]
         assert state.secrets == {"token": "corrected"}
 
     async def test_lifecycle_failure_does_not_escape_supervisor(self) -> None:
