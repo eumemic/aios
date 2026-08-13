@@ -119,6 +119,10 @@ class _CallAgentArgs(BaseModel):
     )
     title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace: Literal["shared", "fresh"] = Field(
+        default="shared",
+        description="Share this session workspace live, or use a fresh empty child workspace.",
+    )
     vault_ids: list[str] | None = Field(
         default=None,
         description="Parent-held vault ids; omitted inherits every vault bound to the parent.",
@@ -363,6 +367,7 @@ async def call_agent_handler(
         resources=cast(list[SessionResource], args.resources),
         env=args.env,
         outbound_suppression=args.outbound_suppression,
+        workspace=args.workspace,
         launcher_session_id=session_id,
         crypto_box=runtime.require_crypto_box(),
         caller=_caller(session_id),

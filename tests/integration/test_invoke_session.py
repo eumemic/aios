@@ -268,6 +268,48 @@ async def _invoke_agent_child(
     )
 
 
+@pytest.mark.parametrize("workspace", [None, "shared"])
+async def test_call_agent_inherits_live_workspace_by_default_or_explicitly(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str], workspace: str | None
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    async with pool.acquire() as conn:
+        parent_path = await queries.get_session_workspace_path(
+            conn, parent_id, account_id=account_id
+        )
+
+    kwargs = {} if workspace is None else {"workspace": workspace}
+    handle = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, **kwargs)
+    child = await service.get_session_basic(pool, handle.servicer_id, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        child_path = await queries.get_session_workspace_path(conn, child.id, account_id=account_id)
+    assert child_path == parent_path
+
+
+async def test_call_agent_fresh_workspace_is_isolated_and_persisted(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    async with pool.acquire() as conn:
+        parent_path = await queries.get_session_workspace_path(
+            conn, parent_id, account_id=account_id
+        )
+
+    handle = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, workspace="fresh"
+    )
+    child = await service.get_session_basic(pool, handle.servicer_id, account_id=account_id)
+    async with pool.acquire() as conn:
+        child_path = await queries.get_session_workspace_path(conn, child.id, account_id=account_id)
+        reloaded_path = await queries.get_session_workspace_path(
+            conn, child.id, account_id=account_id
+        )
+
+    assert child_path != parent_path
+    assert reloaded_path == child_path
+
+
 async def test_call_agent_vault_attenuation_and_suppression(
     pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:

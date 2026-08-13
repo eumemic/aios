@@ -163,11 +163,26 @@ async def test_call_agent_forwards_spawn_parameters_and_inherits_by_default(
     assert inv_mock.await_args is not None
     kwargs = inv_mock.await_args.kwargs
     assert kwargs["launcher_session_id"] == _CALLER
+    assert kwargs["workspace"] == "shared"
     assert kwargs["vault_ids"] == ["vlt_1"]
     assert kwargs["env"] == {"MODE": "build"}
     assert kwargs["resources"] == []
     assert kwargs["title"] == "builder"
     assert kwargs["metadata"] == {"job": 1}
+
+
+async def test_call_agent_explicit_fresh_workspace_is_forwarded(monkeypatch: Any) -> None:
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "workspace": "fresh"})
+
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["workspace"] == "fresh"
 
 
 @pytest.mark.parametrize("tool_args, expected", [({}, None), ({"vault_ids": []}, [])])
