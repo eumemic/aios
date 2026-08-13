@@ -1490,6 +1490,34 @@ class TestServeSupervisor:
         assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0, 2.0]
         assert lifecycle.await_count == 3
 
+    async def test_retry_refetches_corrected_runtime_secrets(self) -> None:
+        seen: list[dict[str, str]] = []
+
+        class _CredentialConnector(HttpConnector):
+            connector = "credential"
+            RECONNECT_BACKOFF_INITIAL = 0.0
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                seen.append(dict(secrets))
+                if secrets["token"] == "revoked":
+                    raise RuntimeError("credential rejected")
+
+        c = _CredentialConnector(base_url="http://x", token="aios_runtime_x")
+        state = _ConnectionState(
+            connection_id="conn_1",
+            external_account_id="acct_1",
+            secrets={"token": "revoked"},
+        )
+        c._connections["conn_1"] = state
+        c._fetch_runtime_secrets = AsyncMock(return_value={"token": "corrected"})  # type: ignore[method-assign]
+        c.emit_lifecycle = AsyncMock()  # type: ignore[method-assign]
+
+        await c._isolated_serve_connection("conn_1", state.secrets)
+
+        assert seen == [{"token": "revoked"}, {"token": "corrected"}]
+        c._fetch_runtime_secrets.assert_awaited_once_with("conn_1")  # type: ignore[attr-defined]
+        assert state.secrets == {"token": "corrected"}
+
     async def test_lifecycle_failure_does_not_escape_supervisor(self) -> None:
         attempts = 0
 

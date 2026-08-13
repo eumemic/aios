@@ -1053,31 +1053,7 @@ class HttpConnector:
         if connection_id in self._connections:
             # Replay from backfill after reconnect — already running.
             return
-        client = self._require_client()
-        if not self.uses_connection_secrets:
-            secrets_map: dict[str, str] = {}
-        else:
-            response = await _get_runtime_secrets(client=client, connection_id=connection_id)
-            if response.status_code >= 500:
-                raise httpx.HTTPStatusError(
-                    f"secrets fetch 5xx for connection {connection_id!r}: "
-                    f"{response.status_code} {response.content!r}",
-                    request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
-                    response=httpx.Response(response.status_code, content=response.content),
-                )
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"secrets fetch 4xx for connection {connection_id!r}: "
-                    f"{response.status_code} {response.content!r}"
-                )
-            body = response.parsed
-            if body is None or isinstance(body, HTTPValidationError):
-                raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
-            raw_secrets = body.secrets
-            if isinstance(raw_secrets, Unset):
-                secrets_map = {}
-            else:
-                secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+        secrets_map = await self._fetch_runtime_secrets(connection_id)
         state = _ConnectionState(
             connection_id=connection_id,
             external_account_id=external_account_id,
@@ -1096,6 +1072,33 @@ class HttpConnector:
             external_account_id=external_account_id,
         )
 
+    async def _fetch_runtime_secrets(self, connection_id: str) -> dict[str, str]:
+        """Fetch and validate the latest runtime secrets for a connection."""
+        client = self._require_client()
+        if not self.uses_connection_secrets:
+            return {}
+        response = await _get_runtime_secrets(client=client, connection_id=connection_id)
+        if response.status_code >= 500:
+            raise httpx.HTTPStatusError(
+                f"secrets fetch 5xx for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}",
+                request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
+                response=httpx.Response(response.status_code, content=response.content),
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"secrets fetch 4xx for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}"
+            )
+        body = response.parsed
+        if body is None or isinstance(body, HTTPValidationError):
+            raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
+        raw_secrets = body.secrets
+        if isinstance(raw_secrets, Unset):
+            return {}
+        return {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+
+
     async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
         """Supervise one connection, restarting failed serves with capped backoff.
 
@@ -1104,10 +1107,16 @@ class HttpConnector:
         so recovery does not depend on discovery replaying an ``added`` event.
         """
         backoff = self.RECONNECT_BACKOFF_INITIAL
+        retrying = False
         try:
             while True:
                 try:
                     state = self._connections.get(connection_id)
+                    if retrying and state is not None:
+                        # Credentials can be corrected while this worker is backing
+                        # off. Never pin a failed worker to its original snapshot.
+                        secrets = await self._fetch_runtime_secrets(connection_id)
+                        state.secrets = secrets
                     if state is not None:
                         state.serve_status = "serving"
                     await self.serve_connection(connection_id, secrets)
@@ -1141,6 +1150,7 @@ class HttpConnector:
                         )
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, self.RECONNECT_BACKOFF_MAX)
+                    retrying = True
         finally:
             # Subclass state belongs to the whole serve lifetime; do not pop it
             # between attempts while concurrent outbound calls may still read it.
