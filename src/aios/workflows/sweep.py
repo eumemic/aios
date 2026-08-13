@@ -72,6 +72,10 @@ async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
             # re-wake and re-dispatch (#1706).
             call_llm_stale_seconds=settings.workflow_call_llm_stale_seconds,
         )
+        reaped_ids = await wf_queries.signal_stale_suspended_runs(
+            conn, older_than_seconds=settings.workflow_suspended_reap_seconds
+        )
+    run_ids = list(dict.fromkeys([*run_ids, *reaped_ids]))
     for run_id in run_ids:
         try:
             await defer_run_wake(run_id)

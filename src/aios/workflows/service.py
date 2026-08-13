@@ -472,8 +472,8 @@ async def create_run(
         if outstanding >= account_cap:
             raise RateLimitedError(
                 f"account at outstanding-run cap ({outstanding}/{account_cap}); "
-                "wait for outstanding runs to complete, or have stuck runs cancelled, "
-                "to free a slot",
+                "wait for outstanding runs to complete, or cancel a stuck run with "
+                "POST /v1/tasks/{run_id}/cancel?request_id={request_id} to free a slot",
                 detail={"outstanding": outstanding, "max": account_cap},
             )
         # Minimal mutex scope: take this only at the shared pointer's persist

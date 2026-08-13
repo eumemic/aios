@@ -774,6 +774,14 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    workflow_suspended_reap_seconds: float = Field(
+        default=24 * 60 * 60,
+        gt=0,
+        description="Age after which the worker sweep cancel-signals a suspended "
+        "workflow run when every unresolved awaited session/run child is terminal, "
+        "archived, or missing. The signal-and-wake path keeps the workflow step as "
+        "the journal's single writer. Defaults to 24 hours.",
+    )
     workflow_call_llm_stale_seconds: float = Field(
         default=1200.0,  # 20 minutes
         gt=0,

@@ -318,12 +318,59 @@ async def test_archived_run_is_never_swept(sweep_pool: asyncpg.Pool[Any]) -> Non
 
 
 async def test_wake_runs_needing_step_defers_for_matches(sweep_pool: asyncpg.Pool[Any]) -> None:
-    """The sweep entrypoint (settings-bound) defers exactly the filter's matches."""
+    """The sweep entrypoint wakes work and cancel-signals stale orphaned parks."""
     pool = sweep_pool
     pending = await _make_run(pool, status="pending")
-    parked = await _make_run(pool)  # suspended, nothing new — must stay quiet
-    with mock.patch("aios.workflows.sweep.defer_run_wake", new=AsyncMock()) as deferred:
+    parked = await _make_run(pool)  # fresh suspension — must stay quiet
+    stale = await _make_run(pool)
+    await _call_started(pool, stale, "sha:gone#0", "agent", age_seconds=172_800)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET payload = payload || "
+            '\'{"child_session_id": "ses_missing"}\'::jsonb WHERE run_id = $1',
+            stale,
+        )
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '2 days' WHERE id = $1", stale
+        )
+    settings = mock.Mock(
+        workflow_agent_deadline_seconds=AGENT_DEADLINE,
+        bash_default_timeout_seconds=120,
+        workflow_call_llm_stale_seconds=CALL_LLM_STALE,
+        workflow_suspended_reap_seconds=86_400,
+    )
+    with (
+        mock.patch("aios.workflows.sweep.get_settings", return_value=settings),
+        mock.patch("aios.workflows.sweep.defer_run_wake", new=AsyncMock()) as deferred,
+    ):
         swept = await wake_runs_needing_step(pool)
     woken = {call.args[0] for call in deferred.call_args_list}
-    assert swept == 1 and woken == {pending}
+    assert swept == 2 and woken == {pending, stale}
     assert parked not in woken
+    async with pool.acquire() as conn:
+        signal = await wf_queries.read_run_signal(conn, stale, wf_queries.CANCEL_SIGNAL_CALL_KEY)
+    assert signal is not None
+    assert signal.kind == "cancel"
+    assert signal.result == {"kind": "stale_suspended_run"}
+
+
+async def test_reaper_keeps_stale_run_with_live_awaited_child(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    run_id = await _make_run(sweep_pool)
+    await _call_started(sweep_pool, run_id, "sha:a#0", "agent", age_seconds=172_800)
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, account_id) "
+            "VALUES ('ses_live_child', NULL, 'env_sw', 'acc_sw')"
+        )
+        await conn.execute(
+            "UPDATE wf_run_events SET payload = payload || "
+            '\'{"child_session_id": "ses_live_child"}\'::jsonb WHERE run_id = $1',
+            run_id,
+        )
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '2 days' WHERE id = $1", run_id
+        )
+        reaped = await wf_queries.signal_stale_suspended_runs(conn, older_than_seconds=86_400)
+    assert reaped == []
