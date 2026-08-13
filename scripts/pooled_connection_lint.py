@@ -227,6 +227,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_session_memory_store_echoes",
         "queries.list_session_memory_store_ranks",
         "queries.list_session_templates",
+        "queries.list_session_vault_credentials",
         "queries.list_sessions",
         "queries.list_skill_versions",
         "queries.list_skills",
