@@ -224,6 +224,8 @@ from .session_create import SessionCreate
 from .session_create_env import SessionCreateEnv
 from .session_create_metadata import SessionCreateMetadata
 from .session_create_outbound_suppression import SessionCreateOutboundSuppression
+from .session_egress_host import SessionEgressHost
+from .session_egress_response import SessionEgressResponse
 from .session_interrupt_request import SessionInterruptRequest
 from .session_metadata import SessionMetadata
 from .session_origin import SessionOrigin
@@ -568,6 +570,8 @@ __all__ = (
     "SessionCreateEnv",
     "SessionCreateMetadata",
     "SessionCreateOutboundSuppression",
+    "SessionEgressHost",
+    "SessionEgressResponse",
     "SessionInterruptRequest",
     "SessionMetadata",
     "SessionOrigin",

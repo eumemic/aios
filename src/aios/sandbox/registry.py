@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     # ``spec.build_spec_from_session`` and receives it on the plan), so a
     # TYPE_CHECKING import is sufficient.
     from aios.sandbox.secret_egress_proxy import SecretEgressProxy
+    from aios.services.vaults import ResolvedEnvVarCredential
 
 log = get_logger("aios.sandbox.registry")
 
@@ -953,6 +954,7 @@ class SandboxRegistry:
                 limited_hosts=frozenset(limited_hosts),
                 fallback_proxy_port=dnat_target[1],
                 runtime=plan.spec.runtime,
+                credentials=plan.env_var_credentials,
             )
         return outcome
 
@@ -964,6 +966,7 @@ class SandboxRegistry:
         limited_hosts: frozenset[str],
         fallback_proxy_port: int,
         runtime: str | None,
+        credentials: tuple[ResolvedEnvVarCredential, ...] = (),
     ) -> None:
         """Seed the refresh state from the egress rules ACTUALLY installed.
 
@@ -1031,6 +1034,26 @@ class SandboxRegistry:
                 return
             proxy_ip = sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0]
             proxy_port = fallback_proxy_port
+        if handle.owner_id.startswith("sess_") and credentials:
+            from aios.harness import runtime as harness_runtime
+            from aios.models.vaults import parse_allowed_host_entry
+
+            hosts = []
+            for credential in credentials:
+                for entry in credential.allowed_hosts:
+                    host, _prefix = parse_allowed_host_entry(entry)
+                    if host in credential_hosts:
+                        hosts.append(
+                            {
+                                "host": host,
+                                "intercepted": True,
+                                "source_credential_id": credential.credential_id,
+                                "secret_name": credential.secret_name,
+                            }
+                        )
+            async with harness_runtime.require_pool().acquire() as conn:
+                await queries.stamp_session_egress(conn, handle.owner_id, hosts)
+
         self._egress_states[handle.owner_id] = EgressRefreshState(
             credential_hosts=credential_hosts,
             limited_hosts=limited_hosts,
