@@ -321,6 +321,47 @@ class TestImageBranch:
         assert isinstance(result.content, list)
         assert result.content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
+    async def test_grok_4_6_inlines_when_litellm_catalog_is_stale(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_get_session_model.value = "xai/grok-4.6"
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        _stage_workspace_image("sess_01TEST", "grok.png", valid_png_bytes())
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/grok.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1]["type"] == "image_url"
+
+    async def test_catalog_miss_reports_unknown_vision_support(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        stub_get_session_model.value = "future/model"
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        _stage_workspace_image("sess_01TEST", "future.png", valid_png_bytes())
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/future.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, str)
+        assert "Mind vision support: unknown (LiteLLM catalog lookup failed)" in result.content
+        assert "Mind vision support: no" not in result.content
+
     async def test_blocked_for_non_vision_mind_is_not_an_error(
         self,
         temp_workspace_root: Path,

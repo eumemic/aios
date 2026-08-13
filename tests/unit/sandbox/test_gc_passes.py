@@ -10,16 +10,19 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from aios.config import get_settings
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.ids import make_id
 from aios.sandbox.backends.base import ManagedImage, ManagedSandboxRef
 from aios.sandbox.registry import GcImageVerdict, SandboxRegistry, SessionSnapshotState
+from aios.sandbox.snapshot_store import TarballStore
 from aios.sandbox.spec import snapshot_tag
 from tests.helpers.sandbox import FakeBackend, FakePool
 
@@ -243,7 +246,7 @@ def _stub_event_and_pointer(registry: SandboxRegistry) -> None:
     """Stub DB-touching methods so observational-pass tests can assert that
     neither lifecycle events nor pointer changes occur on the transaction-less FakePool."""
     registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
-    registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
+    registry._remove_canonical_image_and_clear_pointer = AsyncMock()  # type: ignore[method-assign]
 
 
 @pytest.mark.asyncio
@@ -423,7 +426,13 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
     )
     registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
     registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
-    registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
+
+    async def remove_canonical(verdict: GcImageVerdict, *_args: Any) -> bool:
+        return await backend.remove_image(verdict.removal_ref)
+
+    registry._remove_canonical_image_and_clear_pointer = AsyncMock(  # type: ignore[method-assign]
+        side_effect=remove_canonical
+    )
 
     retained = await registry._gc_image_pass(
         [verdict], {"sess_x": state}, get_settings().instance_id
@@ -431,6 +440,48 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
 
     assert retained == []
     assert tag in backend.removed_image_refs
+
+
+@pytest.mark.asyncio
+async def test_archived_event_refusal_does_not_abort_image_pass() -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    host = get_settings().instance_id
+    states: dict[str, SessionSnapshotState] = {}
+    verdicts: list[GcImageVerdict] = []
+    for sid in ("sess_x", "sess_y"):
+        tag = snapshot_tag(host, sid)
+        state = SessionSnapshotState(sid, "acct", _NOW, _NOW, tag, host, 1)
+        states[sid] = state
+        verdicts.append(
+            GcImageVerdict(
+                ManagedImage(f"img_{sid}", (tag,), None, 1, {}),
+                sid,
+                True,
+                tag,
+                "remove",
+                "archived",
+            )
+        )
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[states["sess_x"], states["sess_y"]]
+    )
+    registry._append_fs_event = AsyncMock(  # type: ignore[method-assign]
+        side_effect=NotFoundError("session not found")
+    )
+
+    async def remove_canonical(verdict: GcImageVerdict, *_args: Any) -> bool:
+        return await backend.remove_image(verdict.removal_ref)
+
+    registry._remove_canonical_image_and_clear_pointer = AsyncMock(  # type: ignore[method-assign]
+        side_effect=remove_canonical
+    )
+
+    retained = await registry._gc_image_pass(verdicts, states, host)
+
+    assert retained == []
+    assert backend.removed_image_refs == [v.removal_ref for v in verdicts]
+    assert registry._append_fs_event.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -500,49 +551,39 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
 
 
 @pytest.mark.asyncio
-async def test_image_pass_caps_removals_and_retains_live_canonical_under_pressure() -> None:
-    """A tick bounds rmi churn, while pool pressure never widens lifecycle eligibility."""
+async def test_tarball_pointer_survives_docker_gc_reconciliation_and_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Docker cache enumeration must never rewrite canonical durable refs."""
     backend = FakeBackend()
     registry = SandboxRegistry(backend=backend)
-    removals = [
-        GcImageVerdict(
-            ManagedImage(f"img-{i}", (), None, 1, {}), None, False, f"img-{i}", "remove", "residue"
-        )
-        for i in range(250)
-    ]
-    live = _canonical_verdict("live", size_bytes=10_000_000)
-
-    retained = await registry._gc_image_pass([*removals, live], {}, get_settings().instance_id)
-    pressure = await registry._gc_pool_budget_pass(
-        [live],
-        {"live": _acct_state("live", account_id="acct", days_dormant=999)},
-        1,
-        get_settings().instance_id,
+    registry._store = TarballStore(backend, tmp_path)
+    sid = "sess_durable"
+    durable_ref = f"{sid}/generation.tar"
+    state = SessionSnapshotState(
+        sid, "acct", None, _NOW, durable_ref, get_settings().instance_id, 7
     )
+    set_pointer = AsyncMock()
+    monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
+    verdict = _canonical_verdict(sid, size_bytes=7)
 
-    assert len(backend.removed_image_refs) == 200
-    assert len([v for v in retained if v.verdict == "remove"]) == 50
-    assert pressure.pressured
-    assert live.removal_ref not in backend.removed_image_refs
+    await registry._gc_reconcile_pointers([verdict], {sid: state}, get_settings().instance_id)
+    set_pointer.assert_not_awaited()
+    # Simulate label-blind `docker image prune -af`: only the local cache vanishes.
+    await backend.remove_image(verdict.removal_ref)
+    assert state.snapshot_ref == durable_ref
 
 
 @pytest.mark.asyncio
-async def test_gc_compare_and_clear_preserves_concurrently_published_pointer(
-    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+async def test_docker_gc_row_locks_remove_and_exact_ref_clear(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A replacement published after rmi but before pointer clear survives."""
-    backend = FakeBackend()
-    registry = SandboxRegistry(backend=backend)
+    """A replacement published at the remove/clear boundary is never cleared."""
     host = get_settings().instance_id
     old_ref = snapshot_tag(host, "sess_x")
-    replacement = {
-        "ref": old_ref + "-replacement",
-        "host": host,
-        "bytes": 42,
-        "updated_at": _NOW + timedelta(seconds=1),
-    }
-    pointer = {"ref": old_ref, "host": host, "bytes": 1, "updated_at": _NOW}
-    state = SessionSnapshotState("sess_x", "acct", _NOW - timedelta(days=2), _NOW, old_ref, host, 1)
+    replacement_ref = f"{old_ref}-replacement"
+    archived_at = _NOW
+    state = SessionSnapshotState("sess_x", "acct", archived_at, _NOW, old_ref, host, 1)
     verdict = GcImageVerdict(
         ManagedImage("img", (old_ref,), None, 1, {}),
         "sess_x",
@@ -551,28 +592,82 @@ async def test_gc_compare_and_clear_preserves_concurrently_published_pointer(
         "remove",
         "archived",
     )
-    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
-    registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
+    pointer = old_ref
+    calls: list[str] = []
 
-    async def remove_then_publish(ref: str) -> bool:
-        backend.removed_image_refs.append(ref)
-        pointer.update(replacement)
+    class Transaction:
+        async def __aenter__(self) -> None:
+            calls.append("transaction-enter")
+
+        async def __aexit__(self, *args: Any) -> None:
+            calls.append("transaction-exit")
+
+    class Conn:
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+    class Acquire:
+        async def __aenter__(self) -> Conn:
+            return Conn()
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+    class Pool:
+        def acquire(self) -> Acquire:
+            return Acquire()
+
+    previous_pool = runtime.pool
+    runtime.pool = cast(Any, Pool())
+    backend = FakeBackend()
+
+    async def lock_row(_conn: Any, _sid: str) -> dict[str, Any]:
+        calls.append("row-lock")
+        return {
+            "archived_at": archived_at,
+            "snapshot_ref": pointer,
+            "snapshot_host": host,
+        }
+
+    async def remove_image(ref: str) -> bool:
+        nonlocal pointer
+        calls.append("remove")
+        assert ref == old_ref
+        # Model a replacement publisher at the historical race boundary. In
+        # production it blocks on the row lock; CAS remains the final defense.
+        pointer = replacement_ref
         return True
 
-    async def compare_and_clear(_conn: Any, session_id: str, *, ref: str, host: str) -> bool:
-        assert session_id == "sess_x"
-        if pointer["ref"] != ref or pointer["host"] != host:
+    async def compare_clear(_conn: Any, _sid: str, *, expected_ref: str) -> bool:
+        nonlocal pointer
+        calls.append(f"cas:{expected_ref}")
+        if pointer != expected_ref:
             return False
-        pointer.update(ref=None, host=None, bytes=None, updated_at=_NOW)
+        pointer = None  # type: ignore[assignment]
         return True
 
-    monkeypatch.setattr(backend, "remove_image", remove_then_publish)
+    monkeypatch.setattr(backend, "remove_image", remove_image)
     monkeypatch.setattr(
-        "aios.sandbox.registry.queries.unscoped_clear_session_snapshot_if_matches",
-        compare_and_clear,
+        "aios.sandbox.registry.queries.unscoped_lock_session_snapshot_state", lock_row
     )
+    monkeypatch.setattr(
+        "aios.sandbox.registry.queries.unscoped_compare_and_clear_session_snapshot",
+        compare_clear,
+    )
+    try:
+        registry = SandboxRegistry(backend=backend)
+        removed = await registry._remove_canonical_image_and_clear_pointer(
+            verdict, host, {"sess_x": state}
+        )
+    finally:
+        runtime.pool = previous_pool
 
-    retained = await registry._gc_image_pass([verdict], {"sess_x": state}, host)
-
-    assert retained == []
-    assert pointer == replacement
+    assert removed
+    assert pointer == replacement_ref
+    assert calls == [
+        "transaction-enter",
+        "row-lock",
+        "remove",
+        f"cas:{old_ref}",
+        "transaction-exit",
+    ]

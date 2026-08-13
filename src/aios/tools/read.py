@@ -25,7 +25,6 @@ from aios.harness.image_resize import ImageDownsampleError, maybe_downsample
 from aios.harness.vision import (
     INLINE_SIZE_CAP_BYTES,
     PROVIDER_INLINE_IMAGE_FORMATS,
-    can_inline_image,
     human_size,
     inline_image_format,
     make_image_url_part,
@@ -258,8 +257,13 @@ async def _read_image(
                     is_error=True,
                 )
 
-    if not can_inline_image(model=model, content_type=mime, size_bytes=size):
-        vision = "yes" if supports_vision(model) else "no"
+    vision_support = supports_vision(model)
+    if not mime.startswith("image/") or size > INLINE_SIZE_CAP_BYTES or vision_support is not True:
+        vision = {
+            True: "yes",
+            False: "no",
+            None: "unknown (LiteLLM catalog lookup failed)",
+        }[vision_support]
         # Render the cap with higher precision than ``human_size`` to
         # avoid the model getting "Image is 3.8MB, cap is 3.8MB" when
         # the truth is 3.93 MB > 3.75 MiB — ``human_size`` rounds both

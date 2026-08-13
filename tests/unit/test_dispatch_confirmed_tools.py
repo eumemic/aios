@@ -275,6 +275,7 @@ class TestLaunchConfirmedCallsReclassification:
                 pending,
                 agent,
                 server_map,
+                mcp_tools=[],
                 focal_channel=None,
                 account_id="acc_test_stub",
             )
