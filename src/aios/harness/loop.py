@@ -1554,6 +1554,11 @@ async def _run_session_step_body(
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
             "model": agent.model,
+            **(
+                llm_response.admission_report.as_event_fields()
+                if llm_response.admission_report is not None
+                else {}
+            ),
         },
         account_id=account_id,
     )
