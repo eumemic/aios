@@ -24,6 +24,7 @@ from typing import Any, assert_never
 
 import asyncpg
 import httpx
+import jsonschema
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
@@ -48,6 +49,66 @@ from aios.services.vaults import is_expiring, refresh_credential
 # the same precedent as ``pinned_transport``/``secret_egress_proxy``.
 
 log = get_logger("aios.mcp.client")
+
+
+def _format_argument_validation_error(
+    tool_name: str,
+    arguments: dict[str, Any],
+    errors: list[jsonschema.ValidationError],
+) -> str:
+    """Render JSON Schema failures with model-actionable property paths."""
+    lines = [
+        f"Arguments for MCP tool {tool_name!r} failed schema validation. "
+        f"You sent: {json.dumps(arguments)}",
+        "Errors:",
+    ]
+    for error in errors:
+        base_path = [str(part) for part in error.absolute_path]
+        if (
+            error.validator == "required"
+            and isinstance(error.instance, dict)
+            and isinstance(error.validator_value, list)
+        ):
+            missing = [str(name) for name in error.validator_value if name not in error.instance]
+            for name in missing:
+                path = ".".join([*base_path, name])
+                lines.append(f"  - at {path}: {name!r} is required")
+            continue
+        path = ".".join(base_path) or "<root>"
+        lines.append(f"  - at {path}: {error.message}")
+    lines.append("Review the tool's parameters schema and retry with valid arguments.")
+    return "\n".join(lines)
+
+
+def _validate_mcp_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+    input_schema: dict[str, Any] | None,
+) -> str | None:
+    """Validate one MCP call, falling back only for an unusable third-party schema."""
+    if input_schema is None:
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason="input schema unavailable",
+        )
+        return None
+    try:
+        jsonschema.Draft202012Validator.check_schema(input_schema)
+    except jsonschema.SchemaError as exc:
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason=str(exc),
+        )
+        return None
+    validator = jsonschema.Draft202012Validator(input_schema)
+    errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.absolute_path))
+    if not errors:
+        return None
+    return _format_argument_validation_error(tool_name, arguments, errors)
 
 
 class _McpHttpError(Exception):
@@ -527,6 +588,7 @@ async def call_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
     *,
+    input_schema: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
     spec_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -543,6 +605,10 @@ async def call_mcp_tool(
     contribute to the pool key.  Returns a result dict with either
     ``content`` (success) or ``error`` (failure).
     """
+    schema_error = _validate_mcp_arguments(tool_name, arguments, input_schema)
+    if schema_error is not None:
+        return {"error": schema_error, "code": "tool_error"}
+
     try:
         from aios.harness import runtime
         from aios.tools.url_safety import is_cleartext_credential_target  # lazy — see module note

@@ -37,6 +37,21 @@ class TestMcpDispatchSpecHeaders:
             headers={"X-MCP-Toolsets": "issues"},
         )
         mcp_server_map = {"gh": spec}
+        input_schema = {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+        }
+        mcp_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__gh__create_issue",
+                    "parameters": input_schema,
+                    "strict": True,
+                },
+            }
+        ]
 
         call_mock = AsyncMock(return_value={"content": "ok"})
         with (
@@ -63,12 +78,14 @@ class TestMcpDispatchSpecHeaders:
                 "sess_x",
                 {"id": "call_1", "function": {"name": "mcp__gh__create_issue", "arguments": "{}"}},
                 mcp_server_map,
+                mcp_tools=mcp_tools,
                 account_id="acc_test_stub",
             )
 
         call_mock.assert_awaited_once()
         assert call_mock.await_args is not None
         assert call_mock.await_args.kwargs.get("spec_headers") == {"X-MCP-Toolsets": "issues"}
+        assert call_mock.await_args.kwargs.get("input_schema") is input_schema
         # The resolved URL comes from the spec, not a bare string map value.
         assert call_mock.await_args.args[0] == "https://mcp.github/"
 

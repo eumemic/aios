@@ -146,6 +146,7 @@ class TestMakeFunctionToolIntegration:
         assert envelope["type"] == "function"
         assert envelope["function"]["name"] == "mcp__aios__update_agent"
         assert envelope["function"]["description"] == "Update an agent"
+        assert envelope["function"]["strict"] is True
         assert "type" not in envelope["function"]["parameters"]["properties"]["tools"]
 
         count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
@@ -155,3 +156,64 @@ class TestMakeFunctionToolIntegration:
         tool = Tool(name="t", description=None, inputSchema={"type": "object"})
         envelope = make_function_tool("mcp__aios__t", tool)
         assert envelope["function"]["description"] == ""
+
+    def test_make_function_tool_preserves_nested_required_constraints(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "draft": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1},
+                        "pieces": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "minItems": 1,
+                            "maxItems": 20,
+                        },
+                    },
+                    "required": ["name", "pieces"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["draft"],
+        }
+        tool = Tool(name="propose", description="Propose", inputSchema=schema)
+
+        function = make_function_tool("mcp__planner__propose", tool)["function"]
+        draft = function["parameters"]["properties"]["draft"]
+
+        assert function["strict"] is True
+        assert function["parameters"]["required"] == ["draft"]
+        assert draft["required"] == ["name", "pieces"]
+        assert draft["properties"]["pieces"]["type"] == "array"
+        assert draft["properties"]["pieces"]["minItems"] == 1
+        assert draft["properties"]["pieces"]["maxItems"] == 20
+        assert draft["additionalProperties"] is False
+
+    def test_make_function_tool_preserves_object_and_nullable_union_properties(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "anyOf": [{"type": "string", "maxLength": 200}, {"type": "null"}],
+                    "type": "string",
+                },
+                "draft": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "format": "hostname"}},
+                    "required": ["name"],
+                },
+            },
+        }
+        tool = Tool(name="propose", description="Propose", inputSchema=schema)
+
+        parameters = make_function_tool("mcp__planner__propose", tool)["function"]["parameters"]
+
+        assert set(parameters["properties"]) == {"summary", "draft"}
+        assert parameters["properties"]["summary"]["anyOf"] == [
+            {"type": "string", "maxLength": 200},
+            {"type": "null"},
+        ]
+        assert "type" not in parameters["properties"]["summary"]
+        assert parameters["properties"]["draft"]["required"] == ["name"]
