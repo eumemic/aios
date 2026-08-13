@@ -272,17 +272,6 @@ class HttpConnector:
         # the caller proceeds.  Reset to 0 on teardown so re-runs work.
         self._loops_backfilled: int = 0
         self._all_loops_live: asyncio.Event = asyncio.Event()
-        # Per-connection reconnect backoff, in seconds.  Keyed by
-        # connection_id.  ``_isolated_serve_connection`` pops
-        # ``_connections[connection_id]`` on a terminal (non-cancel)
-        # ``serve_connection`` failure so a later discovery ``added`` (or
-        # manual re-add) re-spawns the worker; this dict bounds how fast
-        # that re-spawn actually starts platform work, so a hard-failing
-        # connection (revoked token, unregistered phone) backs off
-        # exponentially instead of hot-looping on every backfill replay.
-        # An entry is cleared on a clean serve (one that ran past the
-        # backoff sleep without immediately failing) and on ``removed``.
-        self._reconnect_backoff: dict[str, float] = {}
         # In-memory discovery resume cursor: the highest ledger
         # ``change_seq`` this process has observed.  ``None`` means "no
         # complete view yet" → the next (re)subscribe uses the ``fresh``

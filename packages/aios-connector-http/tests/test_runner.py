@@ -1015,6 +1015,7 @@ class TestIsolatedServeConnection:
         c._connections["conn_1"] = _ConnectionState(
             connection_id="conn_1", external_account_id="acct_1"
         )
+        c._fetch_runtime_secrets = AsyncMock(return_value={})  # type: ignore[method-assign]
 
         await c._isolated_serve_connection("conn_1", {})
 
