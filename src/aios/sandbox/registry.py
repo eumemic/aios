@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.errors import NotFoundError
 from aios.ids import is_run_owner_id
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
@@ -2482,9 +2483,15 @@ class SandboxRegistry:
                     retained.append(v)
                     continue
                 if v.reason == "archived":
-                    await self._append_fs_event(
-                        sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
-                    )
+                    try:
+                        await self._append_fs_event(
+                            sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
+                        )
+                    except NotFoundError:
+                        # Archived sessions deliberately reject event writes. The
+                        # image is already gone, so this courtesy notice must not
+                        # abort the remaining bounded GC pass.
+                        log.info("sandbox.gc_archived_fs_event_skipped", session_id=sid)
                 if v.is_canonical:
                     await self._clear_pointer_if_owned(sid, v.removal_ref, instance_id, states)
         if removal_count:

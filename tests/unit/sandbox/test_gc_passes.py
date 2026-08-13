@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from aios.config import get_settings
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.ids import make_id
 from aios.sandbox.backends.base import ManagedImage, ManagedSandboxRef
@@ -431,6 +432,42 @@ async def test_archived_current_positive_ownership_is_removed() -> None:
 
     assert retained == []
     assert tag in backend.removed_image_refs
+
+
+@pytest.mark.asyncio
+async def test_archived_event_refusal_does_not_abort_image_pass() -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    host = get_settings().instance_id
+    states: dict[str, SessionSnapshotState] = {}
+    verdicts: list[GcImageVerdict] = []
+    for sid in ("sess_x", "sess_y"):
+        tag = snapshot_tag(host, sid)
+        state = SessionSnapshotState(sid, "acct", _NOW, _NOW, tag, host, 1)
+        states[sid] = state
+        verdicts.append(
+            GcImageVerdict(
+                ManagedImage(f"img_{sid}", (tag,), None, 1, {}),
+                sid,
+                True,
+                tag,
+                "remove",
+                "archived",
+            )
+        )
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[states["sess_x"], states["sess_y"]]
+    )
+    registry._append_fs_event = AsyncMock(  # type: ignore[method-assign]
+        side_effect=NotFoundError("session not found")
+    )
+    registry._clear_pointer_if_owned = AsyncMock()  # type: ignore[method-assign]
+
+    retained = await registry._gc_image_pass(verdicts, states, host)
+
+    assert retained == []
+    assert backend.removed_image_refs == [v.removal_ref for v in verdicts]
+    assert registry._append_fs_event.await_count == 2
 
 
 @pytest.mark.asyncio
