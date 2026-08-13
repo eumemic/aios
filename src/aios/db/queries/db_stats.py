@@ -12,6 +12,7 @@ from aios.models.db_stats import MonthlyStorageBucket, TableStorageStats
 
 TOP_BUCKET_TABLES = 5
 BUCKET_MONTHS = 12
+MAX_BUCKET_QUERIES = 24
 STATEMENT_TIMEOUT_MS = 5_000
 
 
@@ -65,6 +66,8 @@ async def monthly_buckets(
         # Identifier originates in pg_class, then is quoted by Postgres itself.
         identifier = await conn.fetchval("SELECT format('%I.%I', 'public', $1)", table.name)
         for offset in range(BUCKET_MONTHS - 1, -1, -1):
+            if len(buckets) >= MAX_BUCKET_QUERIES:
+                return buckets
             year = current_month.year
             month = current_month.month - offset
             while month <= 0:

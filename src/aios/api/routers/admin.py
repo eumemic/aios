@@ -15,11 +15,11 @@ router = APIRouter(
 )
 
 
-@router.get("/db-stats", operation_id="get_database_stats", include_in_schema=False)
+@router.get(
+    "/db-stats",
+    operation_id="get_database_stats",
+    include_in_schema=False,
+)
 async def get_database_stats(pool: PoolDep) -> DatabaseStats:
-    """Return cached catalog and planner estimates of database storage use.
-
-    Root-account keys only. Non-root callers receive 404 so the global
-    introspection surface is not disclosed to tenants.
-    """
+    """Return cached catalog and planner estimates of database storage use."""
     return await db_stats.collect_database_stats(pool)
