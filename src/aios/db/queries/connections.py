@@ -1262,6 +1262,29 @@ async def insert_connection_change(
     )
 
 
+async def get_connection_change_watermarks(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> tuple[int, int]:
+    """Read the durable pruning horizon and retained high-water atomically.
+
+    A single statement is important under READ COMMITTED: separate statements
+    could observe a pre-prune horizon and a post-prune ledger, creating a
+    cursor for rows that have already disappeared.
+    """
+    row = await conn.fetchrow(
+        """SELECT
+            COALESCE((SELECT pruned_through_seq
+                        FROM connection_change_horizons
+                       WHERE account_id = $1 AND connector = $2), 0) AS pruned_through,
+            COALESCE((SELECT MAX(seq) FROM connection_changes
+                       WHERE account_id = $1 AND connector = $2), 0) AS high_water""",
+        account_id,
+        connector,
+    )
+    assert row is not None
+    return int(row["pruned_through"]), int(row["high_water"])
+
+
 async def get_connection_change_high_water(
     conn: asyncpg.Connection[Any], *, account_id: str, connector: str
 ) -> int:
@@ -1335,6 +1358,49 @@ async def set_connection_change_pruned_through(
         connector,
         pruned_through_seq,
     )
+
+
+async def list_connection_changes_with_horizon(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    after_seq: int,
+    limit: int = 500,
+) -> tuple[int, list[asyncpg.Record]]:
+    """Atomically read the pruning horizon and one replay page.
+
+    The shared statement snapshot means the result is always either before a
+    pruning transaction (when the rows are still present) or after it (when
+    its advanced horizon is visible). It can never pair deleted rows with the
+    old horizon under READ COMMITTED.
+    """
+    rows = list(
+        await conn.fetch(
+            """WITH horizon AS (
+            SELECT COALESCE((SELECT pruned_through_seq
+                               FROM connection_change_horizons
+                              WHERE account_id = $1 AND connector = $2), 0)
+                       AS pruned_through
+        ), changes AS (
+            SELECT seq, kind, connection_id, external_account_id
+              FROM connection_changes
+             WHERE account_id = $1 AND connector = $2 AND seq > $3
+             ORDER BY seq LIMIT $4
+        )
+        SELECT horizon.pruned_through, changes.seq, changes.kind,
+               changes.connection_id, changes.external_account_id
+          FROM horizon LEFT JOIN changes ON true
+         ORDER BY changes.seq NULLS LAST""",
+            account_id,
+            connector,
+            after_seq,
+            limit,
+        )
+    )
+    # ``horizon`` always contributes exactly one row, even when replay is empty.
+    pruned_through = int(rows[0]["pruned_through"])
+    return pruned_through, [row for row in rows if row["seq"] is not None]
 
 
 async def list_connection_changes(

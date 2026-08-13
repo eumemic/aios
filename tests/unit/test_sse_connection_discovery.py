@@ -55,26 +55,27 @@ async def test_fresh_orders_cursor_snapshot_sentinel_then_ledger(
         yield _connection("con_1")
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=7)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(0, 7)),
     )
     monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", snapshot)
     changes = AsyncMock(
         side_effect=[
-            [
-                {
-                    "seq": 8,
-                    "kind": "removed",
-                    "connection_id": "con_1",
-                    "external_account_id": "ghost_con_1",
-                }
-            ],
-            [],
+            (
+                0,
+                [
+                    {
+                        "seq": 8,
+                        "kind": "removed",
+                        "connection_id": "con_1",
+                        "external_account_id": "ghost_con_1",
+                    }
+                ],
+            ),
+            (0, []),
         ]
     )
-    monkeypatch.setattr("aios.api.sse.queries.list_connection_changes", changes)
+    monkeypatch.setattr("aios.api.sse.queries.list_connection_changes_with_horizon", changes)
     gen = connection_discovery_stream(_sub(), _pool(), "matrix", account_id="acct", arm="fresh")
     events = [_data(await gen.__anext__()) for _ in range(4)]
     await gen.aclose()  # type: ignore[attr-defined]
@@ -94,28 +95,29 @@ async def test_tail_replays_delta_without_snapshot_and_honours_allowlist(
     snapshot = MagicMock()
     monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", snapshot)
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(0, 1000)),
     )
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=1000)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.list_connection_changes",
+        "aios.api.sse.queries.list_connection_changes_with_horizon",
         AsyncMock(
-            return_value=[
-                {
-                    "seq": 1001,
-                    "kind": "added",
-                    "connection_id": "hidden",
-                    "external_account_id": "x",
-                },
-                {
-                    "seq": 1002,
-                    "kind": "added",
-                    "connection_id": "allowed",
-                    "external_account_id": "y",
-                },
-            ]
+            return_value=(
+                0,
+                [
+                    {
+                        "seq": 1001,
+                        "kind": "added",
+                        "connection_id": "hidden",
+                        "external_account_id": "x",
+                    },
+                    {
+                        "seq": 1002,
+                        "kind": "added",
+                        "connection_id": "allowed",
+                        "external_account_id": "y",
+                    },
+                ],
+            ),
         ),
     )
     gen = connection_discovery_stream(
@@ -139,10 +141,8 @@ async def test_tail_replays_delta_without_snapshot_and_honours_allowlist(
 
 async def test_tail_below_pruning_watermark_resets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=50)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=60)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(50, 60)),
     )
     gen = connection_discovery_stream(
         _sub(), _pool(), "matrix", account_id="acct", arm="tail", after_change_seq=10
@@ -161,11 +161,8 @@ async def test_tail_resets_even_when_ledger_is_empty(monkeypatch: pytest.MonkeyP
     ``None`` and waved every cursor through.
     """
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=100)
-    )
-    # MAX(seq) over an empty stream is 0 — no rows retained at all.
-    monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(100, 0)),
     )
     gen = connection_discovery_stream(
         _sub(), _pool(), "matrix", account_id="acct", arm="tail", after_change_seq=10
@@ -190,10 +187,8 @@ async def test_fresh_cursor_survives_empty_ledger_horizon_then_tails(
         yield
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=100)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(100, 0)),
     )
     monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", empty)
 
@@ -204,16 +199,19 @@ async def test_fresh_cursor_survives_empty_ledger_horizon_then_tails(
     await fresh.aclose()  # type: ignore[attr-defined]
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.list_connection_changes",
+        "aios.api.sse.queries.list_connection_changes_with_horizon",
         AsyncMock(
-            return_value=[
-                {
-                    "seq": 101,
-                    "kind": "added",
-                    "connection_id": "con_a",
-                    "external_account_id": "x",
-                }
-            ]
+            return_value=(
+                0,
+                [
+                    {
+                        "seq": 101,
+                        "kind": "added",
+                        "connection_id": "con_a",
+                        "external_account_id": "x",
+                    }
+                ],
+            ),
         ),
     )
     tail = connection_discovery_stream(
@@ -233,27 +231,87 @@ async def test_fresh_cursor_survives_empty_ledger_horizon_then_tails(
     await tail.aclose()  # type: ignore[attr-defined]
 
 
+async def test_active_tail_resets_when_pruning_advances_after_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never consume later rows after retention overtakes an accepted cursor."""
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(10, 20)),
+    )
+    replay = AsyncMock(
+        return_value=(
+            15,
+            [
+                {
+                    "seq": 21,
+                    "kind": "added",
+                    "connection_id": "con_later",
+                    "external_account_id": "later",
+                }
+            ],
+        )
+    )
+    monkeypatch.setattr("aios.api.sse.queries.list_connection_changes_with_horizon", replay)
+
+    gen = connection_discovery_stream(
+        _sub(), _pool(), "matrix", account_id="acct", arm="tail", after_change_seq=10
+    )
+    assert _data(await gen.__anext__()) == {"event": "reset"}
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+    replay.assert_awaited_once()
+
+
+async def test_fresh_revalidates_horizon_after_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retention during a fresh snapshot resets at the replay handoff."""
+
+    async def snapshot(*args: object, **kwargs: object) -> AsyncGenerator[Connection]:
+        yield _connection("con_snapshot")
+
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(0, 10)),
+    )
+    monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", snapshot)
+    monkeypatch.setattr(
+        "aios.api.sse.queries.list_connection_changes_with_horizon",
+        AsyncMock(return_value=(11, [])),
+    )
+
+    gen = connection_discovery_stream(_sub(), _pool(), "matrix", account_id="acct", arm="fresh")
+    assert _data(await gen.__anext__()) == {"event": "cursor", "change_seq": 10}
+    assert _data(await gen.__anext__())["event"] == "added"
+    assert _data(await gen.__anext__()) == {"event": "snapshot_complete"}
+    assert _data(await gen.__anext__()) == {"event": "reset"}
+    with pytest.raises(StopAsyncIteration):
+        await gen.__anext__()
+
+
 async def test_tail_at_watermark_boundary_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     """``after_change_seq == pruned_through`` is sound: rows ``<= cursor``
     were already consumed, so pruning through exactly the cursor loses
     nothing.  Strictly below it must reset (covered above)."""
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=10)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(10, 10)),
     )
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=10)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.list_connection_changes",
+        "aios.api.sse.queries.list_connection_changes_with_horizon",
         AsyncMock(
-            return_value=[
-                {
-                    "seq": 11,
-                    "kind": "added",
-                    "connection_id": "con_a",
-                    "external_account_id": "x",
-                }
-            ]
+            return_value=(
+                0,
+                [
+                    {
+                        "seq": 11,
+                        "kind": "added",
+                        "connection_id": "con_a",
+                        "external_account_id": "x",
+                    }
+                ],
+            ),
         ),
     )
     gen = connection_discovery_stream(
@@ -271,10 +329,8 @@ async def test_v1_emits_snapshot_complete(monkeypatch: pytest.MonkeyPatch) -> No
         yield
 
     monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_pruned_through", AsyncMock(return_value=0)
-    )
-    monkeypatch.setattr(
-        "aios.api.sse.queries.get_connection_change_high_water", AsyncMock(return_value=0)
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(0, 0)),
     )
     monkeypatch.setattr("aios.api.sse.connections_service.iter_all_connections", empty)
     gen = connection_discovery_stream(_sub(), _pool(), "matrix", account_id="acct")

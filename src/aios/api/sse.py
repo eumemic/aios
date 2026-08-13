@@ -576,10 +576,7 @@ async def connection_discovery_stream(
             # below fails CLOSED even after retention has emptied the
             # ledger (a derived MIN(seq) floor returns NULL then, and
             # would wave every stale cursor through).
-            pruned_through = await queries.get_connection_change_pruned_through(
-                conn, account_id=account_id, connector=connector
-            )
-            high_water = await queries.get_connection_change_high_water(
+            pruned_through, high_water = await queries.get_connection_change_watermarks(
                 conn, account_id=account_id, connector=connector
             )
 
@@ -616,9 +613,19 @@ async def connection_discovery_stream(
 
         while True:
             async with pool.acquire() as conn:
-                changes = await queries.list_connection_changes(
-                    conn, account_id=account_id, connector=connector, after_seq=cursor
+                pruned_through, changes = await queries.list_connection_changes_with_horizon(
+                    conn,
+                    account_id=account_id,
+                    connector=connector,
+                    after_seq=cursor,
                 )
+            if cursor < pruned_through:
+                # Retention advanced after this stream was accepted (including
+                # while a fresh snapshot was being produced). The atomic replay
+                # read proves rows needed after cursor may now be gone; reset
+                # before consuming any later rows from that same snapshot.
+                yield event({"event": "reset"})
+                return
             for change in changes:
                 cursor = int(change["seq"])
                 if allowlist is not None and change["connection_id"] not in allowlist:
