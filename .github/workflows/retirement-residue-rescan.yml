@@ -41,7 +41,8 @@ permissions:
 
 jobs:
   residue-rescan:
-    runs-on: ubuntu-latest
+    # runs-on: self-hosted per eumemic-ops#414 (GitHub Actions is for CI only)
+    runs-on: [self-hosted, watchdog]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
