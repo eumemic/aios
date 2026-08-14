@@ -660,7 +660,10 @@ def _proxy_networking_mode(
       been taught) → ``limited``: the strict side, so a future config shape
       fails closed instead of silently unlocking blind relay.
     """
-    networking = env_config.networking if env_config is not None else None
+    # Widen deliberately: this selector is the defense-in-depth boundary for a
+    # future NetworkingConfig member that the current discriminated union cannot
+    # yet express.
+    networking: object = env_config.networking if env_config is not None else None
     if isinstance(networking, LimitedNetworking):
         return "limited"
     if networking is None or isinstance(networking, UnrestrictedNetworking):
