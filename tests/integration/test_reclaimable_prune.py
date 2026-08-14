@@ -29,6 +29,7 @@ from aios.db.queries.prune import (
     prune_unpinned_archived_agents,
     prune_unpinned_archived_skills,
     prune_unpinned_archived_workflows,
+    reconcile_terminal_archival_batch,
 )
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -91,7 +92,12 @@ async def _make_archived_run(
             run.id,
         )
     await wf_queries.set_run_terminal(
-        conn, run.id, status="completed", output=None, account_id="acc_root"
+        conn,
+        run.id,
+        status="completed",
+        output=None,
+        account_id="acc_root",
+        terminal_summary={"is_error": False},
     )
     await wf_queries.archive_run(conn, run.id, account_id="acc_root")
     # Back-date archived_at so it is past the retention window.
@@ -246,6 +252,27 @@ async def test_run_prune_is_idempotent(conn: asyncpg.Connection[Any]) -> None:
     second = await prune_archived_runs(conn, retention_days=30)
     assert first == 2
     assert second == 0
+
+
+async def test_archived_legacy_run_is_backfilled_before_detail_prune(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """An already-archived pre-migration run cannot lose its terminal event."""
+    run_id = await _make_archived_run(conn, archived_age_days=60)
+    archived_at = await conn.fetchval("SELECT archived_at FROM wf_runs WHERE id=$1", run_id)
+    await conn.execute("UPDATE wf_runs SET terminal_summary=NULL WHERE id=$1", run_id)
+
+    assert await prune_archived_runs(conn, retention_days=30) == 0
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 2
+
+    assert await reconcile_terminal_archival_batch(conn) == 1
+    row = await conn.fetchrow(
+        "SELECT archived_at, terminal_summary FROM wf_runs WHERE id=$1", run_id
+    )
+    assert row["archived_at"] == archived_at
+    assert row["terminal_summary"] is not None
+    assert await prune_archived_runs(conn, retention_days=30) == 2
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
 
 
 # ─── archived definitions: agents ───────────────────────────────────────────

@@ -4521,6 +4521,28 @@ async def test_derive_run_response_reads_the_terminal_record(
     assert pending is None
 
 
+async def test_legacy_errored_run_falls_back_to_completed_event(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A pre-migration terminal row still resolves from its durable journal."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "def main(input):\n    return 1", name="legacy_err")
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        expected_error = await conn.fetchval(
+            "SELECT payload->'error' FROM wf_run_events WHERE run_id=$1 AND type='run_completed'",
+            run_id,
+        )
+        await conn.execute("UPDATE wf_runs SET terminal_summary=NULL WHERE id=$1", run_id)
+        outcome = await wf_queries.derive_run_response(conn, run_id, account_id="acc_wf")
+        resolved_error = await wf_queries.resolve_run_error(conn, run_id)
+
+    assert outcome == Err(error=expected_error)
+    assert resolved_error == expected_error
+    assert expected_error["kind"] == "author_exception"
+
+
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───
 
 _WEB_SCRIPT = (

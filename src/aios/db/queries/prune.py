@@ -62,6 +62,7 @@ async def prune_archived_runs(
         """SELECT id FROM wf_runs
              WHERE archived_at IS NOT NULL
                AND archived_at < now() - make_interval(days => $1)
+               AND terminal_summary IS NOT NULL
                AND journal_pruned_at IS NULL
                AND status IN ('completed','errored','cancelled')
              ORDER BY archived_at, id LIMIT $2""",
@@ -75,6 +76,7 @@ async def prune_archived_runs(
                 f"""DELETE FROM {table} WHERE ctid IN (
                     SELECT child.ctid FROM {table} child JOIN wf_runs run ON run.id=child.run_id
                     WHERE child.run_id=$1 AND run.status IN ('completed','errored','cancelled')
+                      AND run.terminal_summary IS NOT NULL
                       AND run.archived_at < now() - make_interval(days => $2)
                     ORDER BY child.{order} LIMIT $3)""",
                 run_id,
@@ -109,13 +111,13 @@ async def reconcile_terminal_archival_batch(
                       WHERE run_id = r.id AND type = 'run_completed'
                       ORDER BY seq DESC LIMIT 1
                  ) e ON true
-                WHERE r.archived_at IS NULL
+                WHERE (r.archived_at IS NULL OR r.terminal_summary IS NULL)
                   AND r.status IN ('completed','errored','cancelled')
                 ORDER BY r.updated_at, r.id
                 LIMIT $1
            )
            UPDATE wf_runs r
-              SET archived_at = c.updated_at,
+              SET archived_at = COALESCE(r.archived_at, c.updated_at),
                   terminal_summary = jsonb_strip_nulls(jsonb_build_object(
                       'is_error', c.payload->'is_error',
                       'error', c.payload->'error',
@@ -124,7 +126,7 @@ async def reconcile_terminal_archival_batch(
                       'cancelled', (r.status = 'cancelled')
                   ))
              FROM candidates c WHERE r.id = c.id
-               AND r.archived_at IS NULL
+               AND (r.archived_at IS NULL OR r.terminal_summary IS NULL)
                AND r.status IN ('completed','errored','cancelled')""",
         row_limit,
     )
