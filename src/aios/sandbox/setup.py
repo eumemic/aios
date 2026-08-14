@@ -436,6 +436,16 @@ def build_egress_refresh_script(
     def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
         return set().union(*(host_ips.get(host, set()) for host in hosts))
 
+    # FAIL CLOSED on an incomplete inventory. An in-scope host ABSENT from
+    # ``new_ips`` is a host whose IPs could not be READ; a host present with an
+    # empty set is a host that genuinely owns NONE. Those are different facts,
+    # and conflating them (``.get(host, set())``) drops the unread host's live
+    # IPs into the ``old - new`` difference — so one transient/partial resolve
+    # would DELETE firewall rules that are still in force. Deletions are
+    # therefore refused entirely while any in-scope host is unread; adds are
+    # unaffected because an add only ever widens what is already permitted.
+    unread_hosts = sorted((credential_hosts | limited_hosts) - set(new_ips))
+
     old_credential_ips = _category_ips(old_ips, credential_hosts)
     new_credential_ips = _category_ips(new_ips, credential_hosts)
     old_limited_ips = _category_ips(old_ips, limited_hosts)
@@ -447,6 +457,15 @@ def build_egress_refresh_script(
         lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     for ip in sorted(new_credential_ips - old_credential_ips):
         lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
+    if unread_hosts:
+        # Surfaced, not silent: the emitted script itself records why no
+        # delete pass ran, so an operator reading the sidecar script sees the
+        # refusal rather than an unexplained absence of deletions.
+        lines.append(
+            "# egress refresh: deletions REFUSED — incomplete host inventory "
+            f"(unread: {' '.join(unread_hosts)})"
+        )
+        return "\n".join(lines)
     for ip in sorted(old_credential_ips - new_credential_ips):
         lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
     for ip in sorted(old_limited_ips - new_limited_ips):

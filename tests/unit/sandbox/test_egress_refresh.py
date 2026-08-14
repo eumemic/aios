@@ -80,6 +80,55 @@ def test_refresh_script_keeps_rules_pinned_by_another_host() -> None:
     assert "-D OUTPUT -d 1.1.1.1" not in script
 
 
+def test_refresh_script_refuses_deletes_on_incomplete_host_read() -> None:
+    """An UNREAD host must not produce deletions (fail closed).
+
+    ``b.example`` is in scope but absent from the inventory — its IPs could
+    not be read. That is NOT the same fact as "owns no IPs": treating it as
+    the latter drops ``9.9.9.9`` into ``old - new`` and DELETES a live
+    firewall rule on a transient/partial read. The whole deletion pass must
+    be refused while any in-scope host is unread.
+    """
+    script = build_egress_refresh_script(
+        old_ips={"a.example": {"1.1.1.1"}, "b.example": {"9.9.9.9"}},
+        new_ips={"a.example": {"1.1.1.1", "2.2.2.2"}},  # b.example: read FAILED
+        credential_hosts={"a.example", "b.example"},
+        limited_hosts={"a.example", "b.example"},
+        dnat_target=_PROXY,
+    )
+
+    # No deletion may be derived from a partial inventory.
+    assert "-D OUTPUT" not in script
+    assert "9.9.9.9" not in script
+    # The refusal is surfaced, not silent.
+    assert "b.example" in script
+    # Adds are unaffected — a read host's new IP is still installed.
+    assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 80 -j ACCEPT' in script
+
+
+def test_refresh_script_still_deletes_when_complete_read_shows_host_owns_nothing() -> None:
+    """Over-correction guard: a COMPLETE read in which a host legitimately
+    owns nothing must still delete that host's stale rules. Fail-closed on
+    an unread host must not degrade into never deleting."""
+    script = build_egress_refresh_script(
+        old_ips={"a.example": {"1.1.1.1"}, "b.example": {"9.9.9.9"}},
+        # b.example WAS read and genuinely resolves to nothing.
+        new_ips={"a.example": {"1.1.1.1"}, "b.example": set()},
+        credential_hosts={"a.example", "b.example"},
+        limited_hosts={"a.example", "b.example"},
+        dnat_target=_PROXY,
+    )
+
+    assert (
+        '"$IPT" -t nat -D OUTPUT -d 9.9.9.9 -p tcp --dport 443 '
+        f"-j DNAT --to-destination {_PROXY[0]}:{_PROXY[1]} 2>/dev/null || true" in script
+    )
+    assert '"$IPT" -D OUTPUT -d 9.9.9.9 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true' in script
+    assert '"$IPT" -D OUTPUT -d 9.9.9.9 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true' in script
+    # Still-pinned IP is untouched.
+    assert "-D OUTPUT -d 1.1.1.1" not in script
+
+
 def test_refresh_script_ops_are_idempotent() -> None:
     """Every add is -C-guarded and every delete tolerates absence, so a
     retried old→new delta neither aborts under ``set -e`` nor accumulates
