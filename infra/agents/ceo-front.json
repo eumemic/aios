@@ -946,7 +946,7 @@
   "description": "Full-capability CEO seat of the zero-human company (chairman-directed 2026-07-13). Acts: bash/write/edit, GitHub write + merge within policy, workflows, subagents, triggers, skills, read-write brain. Chairman reaches it on Telegram (@EumemicBot). The prior 'Phase-1 conversational / read-only' self-model is RETIRED.",
   "metadata": {},
   "litellm_extra": {},
-  "window_min": 500000,
-  "window_max": 600000,
+  "window_min": 600000,
+  "window_max": 700000,
   "preempt_policy": "preempt"
 }
