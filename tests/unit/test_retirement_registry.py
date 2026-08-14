@@ -29,9 +29,10 @@ EXPECTED_TOOL_SURFACES = {
 
 
 def test_registry_seeds_two_descriptors() -> None:
-    assert len(reg.REGISTRY) == 2
+    assert len(reg.REGISTRY) == 3
     assert reg.LEGACY_BUILTIN_RENAMES in reg.REGISTRY
     assert reg.RETIRED_GOAL_OUTCOME_BUILTINS in reg.REGISTRY
+    assert reg.TASK_TO_CALL_BUILTIN_RENAMES in reg.REGISTRY
 
 
 def test_every_descriptor_registers_all_seven_surfaces() -> None:
@@ -157,3 +158,10 @@ def test_registry_is_importable_as_single_source() -> None:
     # Sanity: the module-level REGISTRY tuple is the consulted artifact.
     assert isinstance(reg.REGISTRY, tuple)
     assert all(isinstance(r, Retirement) for r in reg.REGISTRY)
+
+
+def test_task_to_call_retirement_descriptor() -> None:
+    r = reg.TASK_TO_CALL_BUILTIN_RENAMES
+    assert r.action == "rename"
+    assert r.token_map() == {"stop_task": "cancel_call", "list_tasks": "list_calls"}
+    assert r.contract_rev is None

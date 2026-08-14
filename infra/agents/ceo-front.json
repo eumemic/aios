@@ -244,7 +244,7 @@
       "configs": null
     },
     {
-      "type": "list_tasks",
+      "type": "list_calls",
       "name": null,
       "description": null,
       "input_schema": null,
@@ -508,7 +508,7 @@
       "configs": null
     },
     {
-      "type": "stop_task",
+      "type": "cancel_call",
       "name": null,
       "description": null,
       "input_schema": null,
