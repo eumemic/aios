@@ -1570,7 +1570,22 @@ async def append_event(
             cum_mass["tool_result"],
             cum_mass["thinking"],
             cum_mass["tool_use"],
-            cum_mass["image"],
+            # ``cumulative_image_mass`` is the ONE counter migration 0161
+            # declared NOT NULL DEFAULT 0; its five siblings (migration 0127)
+            # are nullable.  A column DEFAULT applies only when the column is
+            # OMITTED from the INSERT -- this statement ENUMERATES it, so an
+            # explicit ``None`` reaches the DB and violates the constraint.
+            # Non-message kinds (span/lifecycle/interrupt) skip the mass
+            # computation above, leaving ``cum_mass["image"]`` None, so EVERY
+            # sweep-telemetry span insert failed.  Substituting the column's
+            # own declared default keeps the stored value byte-identical to
+            # what the omission arm would have written, without making the
+            # column list kind-conditional on the append hot path.
+            # Unobservable to readers: both reads of this column filter
+            # ``kind = 'message' AND cumulative_tokens IS NOT NULL``, so no
+            # non-message row is ever inspected.  NOT NULL is preserved -- the
+            # column always carries a value, which is the point.
+            cum_mass["image"] if cum_mass["image"] is not None else 0,
             token_baseline_v,
             orig_channel,
             focal_at_arrival,

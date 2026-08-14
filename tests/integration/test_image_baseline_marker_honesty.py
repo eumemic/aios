@@ -232,3 +232,66 @@ async def test_calibration_fit_admits_only_v2_lineage_spans(
 
     _, n_samples_v2 = await model_token_class_ratio_fit(live_conn, model, account_id=account_id)
     assert n_samples_v2 == 40, f"expected 40 v2 spans admitted, got {n_samples_v2}"
+
+
+@pytest.mark.integration
+async def test_non_message_append_satisfies_image_mass_not_null(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """RED: a ``span`` append must not violate the NOT NULL on image mass.
+
+    Migration 0161 declares ``events.cumulative_image_mass`` NOT NULL DEFAULT 0
+    (its five 0127 siblings are nullable). A column DEFAULT applies only when
+    the column is OMITTED from an INSERT -- ``append_event`` ENUMERATES it, so
+    the ``None`` it computes for every non-message kind reaches the DB and
+    raises NotNullViolationError. Spans are ordinary sweep telemetry appended
+    through the SAME ``append_event`` as messages, so pre-fix this fires on
+    every span, lifecycle, and interrupt append.
+
+    Payload is the exact one from the failing CI run.
+    """
+    account_id, session_id = await _seed(live_conn, baseline_v=1)
+
+    event = await queries.append_event(
+        live_conn,
+        account_id=account_id,
+        session_id=session_id,
+        kind="span",
+        data={"event": "sweep.batch_filter_start", "candidate_count": 1},
+    )
+
+    row = await live_conn.fetchrow(
+        "SELECT kind, cumulative_image_mass, cumulative_tokens, cumulative_text_mass "
+        "FROM events WHERE id = $1",
+        event.id,
+    )
+    assert row is not None
+    assert row["kind"] == "span"
+    # The constraint is satisfied by the column's own declared default...
+    assert row["cumulative_image_mass"] == 0
+    # ...and the substitution stays confined to that one NOT NULL column: the
+    # nullable siblings still record "no cumulative data" for a non-message row,
+    # which is what every reader's ``cumulative_tokens IS NOT NULL`` filter uses.
+    assert row["cumulative_tokens"] is None
+    assert row["cumulative_text_mass"] is None
+
+
+@pytest.mark.integration
+async def test_every_non_message_kind_appends(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """The same NOT NULL exposure applies to all non-message kinds, not just span."""
+    account_id, session_id = await _seed(live_conn, baseline_v=1)
+
+    for kind in ("span", "lifecycle", "interrupt"):
+        event = await queries.append_event(
+            live_conn,
+            account_id=account_id,
+            session_id=session_id,
+            kind=kind,  # type: ignore[arg-type]
+            data={"event": f"{kind}.probe"},
+        )
+        mass = await live_conn.fetchval(
+            "SELECT cumulative_image_mass FROM events WHERE id = $1", event.id
+        )
+        assert mass == 0, f"{kind} append stored {mass!r} for cumulative_image_mass"
