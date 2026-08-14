@@ -40,12 +40,14 @@ if TYPE_CHECKING:
 # complementary per-session open-goal admission cap.
 MAX_RENDERED_OBLIGATIONS = 10
 
-# Summary truncation length; matches the 60-char preview the channels tail uses
-# and the store-side ``_obligation_summary`` budget.
-_SUMMARY_MAX = 60
+# Requests up to this size remain verbatim in the always-on reminder. Beyond it,
+# render a loud refusal instruction rather than a plausible-looking prefix. This
+# bounds the reserved tail while making instruction loss impossible to miss.
+_TASK_MAX = 8192
+_TASK_TRUNCATED = "[TASK TRUNCATED — return an error; do not act on or infer the missing task]"
 
-# Max chars of a rendered ``output_schema`` contract (#1522). Analogous to the
-# 60-char summary cap, but wider because a schema is a structural contract (it
+# Max chars of a rendered ``output_schema`` contract (#1522). Kept narrower
+# than the task budget because a schema is a structural contract and usually
 # legitimately needs a few keys/types to be useful) — still a HARD cap so a large
 # persisted schema can't blow the reserved tail budget. A schema longer than this
 # is JSON-serialised then elided to this width + an ellipsis. The bound is what
@@ -89,13 +91,13 @@ def _format_age(opened_at: datetime, now: datetime) -> str:
     return f"{hours // 24}d"
 
 
-def _truncate_summary(summary: str | None) -> str:
-    if not summary:
-        return ""
-    s = summary.replace("\n", " ").strip()
-    if len(s) > _SUMMARY_MAX:
-        s = s[:_SUMMARY_MAX] + "…"
-    return s
+def _request_content(summary: str | None) -> str:
+    """Render a verbatim task, or a loud marker when that is impossible."""
+    if summary is None:
+        return "[TASK CONTENT UNAVAILABLE — return an error; do not infer the task]"
+    if len(summary) > _TASK_MAX:
+        return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {_TASK_MAX})"
+    return summary
 
 
 def _render_schema(output_schema: dict[str, Any] | None) -> str | None:
@@ -103,8 +105,8 @@ def _render_schema(output_schema: dict[str, Any] | None) -> str | None:
     (#1522), or ``None`` when the request demands no schema.
 
     JSON-serialises the schema (compact separators, sorted keys for stability) and
-    **elides** it to :data:`_SCHEMA_MAX` chars + an ellipsis — the schema-side
-    analogue of the 60-char summary cap. A large persisted schema can therefore
+    **elides** it to :data:`_SCHEMA_MAX` chars + an ellipsis. A large persisted
+    schema can therefore
     NEVER inflate the rendered tail past a fixed per-entry bound, which is what
     keeps :func:`max_obligations_block_local` a correct upper bound (no
     ``read_windowed_events`` budget overflow). Newlines are flattened so the
@@ -122,15 +124,15 @@ def _render_schema(output_schema: dict[str, Any] | None) -> str | None:
 def _obligation_line(obligation: Obligation, *, session_id: str, now: datetime) -> str:
     """One render line for an obligation, oldest-first ordering applied by caller.
 
-    Shape: ``• <request_id> [origin] "<summary>" (open <age>)`` — the literal
-    ``request_id`` first (copy-pasteable; the id the model echoes to
-    ``return``/``error``), then origin, an optional quoted summary, and age.
+    The literal ``request_id`` comes first (copy-pasteable; the id the model
+    echoes to ``return``/``error``), followed by origin, age, and the verbatim
+    task. Tasks beyond the render budget are replaced wholesale by a loud marker;
+    no plausible-looking prefix is ever shown.
     """
     origin = _origin_label(obligation, session_id=session_id)
-    summary = _truncate_summary(obligation.summary)
-    summary_clause = f' "{summary}"' if summary else ""
+    request_content = _request_content(obligation.summary)
     age = _format_age(obligation.opened_at, now)
-    return f"• {obligation.request_id} [{origin}]{summary_clause} (open {age})"
+    return f"• {obligation.request_id} [{origin}] (open {age}) verbatim task: {request_content}"
 
 
 def build_obligations_tail_block(
@@ -149,7 +151,8 @@ def build_obligations_tail_block(
     Header line, then one line per obligation **oldest-first** (the caller already
     fetches them ``ORDER BY req.seq ASC``): the literal ``request_id``, an
     ``[origin]`` label (``api``|``session``|``run``, plus ``self`` for a #1414
-    self-goal), a ``<=60``-char quoted summary, and ``(open <age>)``. The block is
+    self-goal), ``(open <age>)``, and the verbatim task (or a loud truncation
+    marker when it exceeds the render budget). The block is
     capped at :data:`MAX_RENDERED_OBLIGATIONS` lines + a ``+K more`` marker so the
     reserved tail budget stays bounded regardless of obligation count.
 
@@ -183,7 +186,8 @@ def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime)
 
     Each entry carries ``request_id``, ``caller_kind`` (the trusted frame kind),
     ``origin`` (``api``/``session``/``run`` plus ``self`` for a #1414 self-goal),
-    a ``<=60``-char ``summary``, a terse ``age``, and the **bounded**
+    the verbatim task in ``summary`` (or a loud truncation marker), a terse
+    ``age``, and the **bounded**
     ``output_schema`` contract (elided to :data:`_SCHEMA_MAX`; ``None`` when the
     request demands no schema). The schema bound is what lets the surfacing render
     stay within :func:`max_obligations_block_local`'s upper bound.
@@ -192,7 +196,7 @@ def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime)
         "request_id": obligation.request_id,
         "caller_kind": obligation.caller_kind or "",
         "origin": _origin_label(obligation, session_id=session_id),
-        "summary": _truncate_summary(obligation.summary),
+        "summary": _request_content(obligation.summary),
         "age": _format_age(obligation.opened_at, now),
         "output_schema": _render_schema(obligation.output_schema),
     }
@@ -223,7 +227,7 @@ def render_owed_listing(
 
     A header line, then one entry per open obligation **oldest-first** (the caller
     fetches them ``ORDER BY req.seq ASC``) drawn from :func:`render_owed_entry`:
-    each line shows ``request_id``, ``[origin]`` (incl. ``self``), quoted summary,
+    each line shows ``request_id``, ``[origin]`` (incl. ``self``), task content,
     age, **and the bounded ``output_schema`` contract** — the format the session
     must produce to answer. Capped at :data:`MAX_RENDERED_OBLIGATIONS` entries +
     a ``+K more`` marker so the rendered size stays bounded regardless of count;
@@ -249,8 +253,9 @@ def max_obligations_block_local(obligations: list[Obligation]) -> int:
     unknown pre-windowing, so it synthesizes a fattest-line bound), the obligation
     set is **already fetched** by ``compute_step_prelude``, so this bounds from the
     REAL obligations — the real count (capped at :data:`MAX_RENDERED_OBLIGATIONS`
-    + the ``+K more`` marker line) and each real summary (re-truncated to the
-    render width). Strictly tighter than a synthetic max; the produced tail at
+    + the ``+K more`` marker line) and each rendered task (verbatim through
+    :data:`_TASK_MAX`, then replaced by a fixed loud marker). Strictly tighter than
+    a synthetic max; the produced tail at
     send time is guaranteed ≤ this bound, so reserving it never overshoots
     ``window_max``.
 

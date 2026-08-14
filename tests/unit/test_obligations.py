@@ -88,24 +88,32 @@ class TestBuildObligationsTailBlock:
         assert block is not None
         assert "[self]" in block["content"]
 
-    def test_summary_quoted_and_truncated_to_60(self) -> None:
-        ob = _ob("req_long", summary="x" * 200)
+    def test_task_payload_over_4kb_is_rendered_verbatim(self) -> None:
+        task = "first line\n" + "x" * 4096 + "\nlast line"
+        ob = _ob("req_long", summary=task)
         block = build_obligations_tail_block([ob], session_id="sess_x", now=_NOW)
         assert block is not None
-        line = block["content"].splitlines()[1]
-        # The quoted preview body is <= 60 chars (+ ellipsis), never the full 200.
-        assert '"' in line
-        body = line.split('"')[1]
-        assert len(body.rstrip("…")) <= 60
+        content = block["content"]
+        assert "verbatim task: " + task in content
+        assert "TRUNCATED" not in content
 
-    def test_missing_summary_renders_id_only_no_crash(self) -> None:
+    def test_oversized_task_fails_loud_instead_of_showing_a_silent_prefix(self) -> None:
+        ob = _ob("req_too_long", summary="dangerous instruction " * 1000)
+        block = build_obligations_tail_block([ob], session_id="sess_x", now=_NOW)
+        assert block is not None
+        content = block["content"]
+        assert "TASK TRUNCATED" in content
+        assert "return an error; do not act on or infer" in content
+        assert "dangerous instruction" not in content
+
+    def test_missing_task_fails_loud(self) -> None:
         ob = _ob("req_nosum", summary=None)
         block = build_obligations_tail_block([ob], session_id="sess_x", now=_NOW)
         assert block is not None
         line = block["content"].splitlines()[1]
         assert "req_nosum" in line
-        # No empty quoted clause for an absent summary.
-        assert '""' not in line
+        assert "TASK CONTENT UNAVAILABLE" in line
+        assert "do not infer" in line
 
     def test_age_clause_present(self) -> None:
         ob = _ob("req_age", age=timedelta(minutes=5))

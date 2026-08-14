@@ -177,6 +177,7 @@ def mock_step_dependencies() -> Any:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -355,6 +356,29 @@ class TestRunSessionStepOnModelError:
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "child_errored"}
         )
+
+    async def test_exhausted_budget_reclaims_self_archiving_child(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.session.origin = "background"
+        mock_step_dependencies.session.parent_run_id = "run_x"
+        mock_step_dependencies.session.archive_when_idle = True
+
+        reclaim = AsyncMock(return_value=True)
+        with (
+            patch(
+                "aios.harness.loop._count_consecutive_rescheduling",
+                AsyncMock(return_value=4),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.reclaim_session_if_idle",
+                reclaim,
+            ),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_not_awaited()
+        reclaim.assert_awaited_once_with(ANY, "sess_x", account_id=ANY)
 
     async def test_streaming_deadline_records_usage_and_parks_without_retry(
         self, mock_step_dependencies: Any
