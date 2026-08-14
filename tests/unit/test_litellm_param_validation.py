@@ -133,7 +133,7 @@ def test_module_import_pins_the_litellm_drop_params_global() -> None:
         ],
         capture_output=True,
         text=True,
-        env={*os.environ, "PYTHONPATH": str(_SRC)},
+        env={**os.environ, "PYTHONPATH": str(_SRC)},
     )
 
     assert probe.returncode == 0, probe.stderr
