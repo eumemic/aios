@@ -66,8 +66,8 @@ BuiltinToolType = Literal[
     "create_goal",
     "list_obligations",
     "defer_obligations",
-    "stop_task",
-    "list_tasks",
+    "cancel_call",
+    "list_calls",
     "skill_upsert",
     "skill_archive",
 ]

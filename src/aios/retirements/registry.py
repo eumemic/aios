@@ -122,12 +122,27 @@ RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
 )
 
 
+#: Obligation/call-surface vocabulary unification (#1516). The task-named
+#: outgoing view and cancel verb are renamed to the source-agnostic call-edge
+#: terminology. Persisted surfaces are migrated through the retirement lifecycle.
+TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
+    domain=TOOL_SURFACE_DOMAIN,
+    action="rename",
+    mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
+    surfaces=TOOL_SURFACES,
+    introduced_rev="0160",
+    contract_rev=None,
+    sla_days=30,
+)
+
+
 #: The registry: the single list of declared retirements. Append new descriptors
 #: here; downstream tooling (validator / boot-gate / migration generator)
 #: consults this and nothing else.
 REGISTRY: tuple[Retirement, ...] = (
     LEGACY_BUILTIN_RENAMES,
     RETIRED_GOAL_OUTCOME_BUILTINS,
+    TASK_TO_CALL_BUILTIN_RENAMES,
 )
 
 

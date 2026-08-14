@@ -118,10 +118,10 @@ class AwaitResponse(BaseModel):
 
 
 class OpenTask(BaseModel):
-    """One still-open outbound ``call_*`` a session is awaiting — a ``list_tasks`` row (#1428).
+    """One still-open outbound ``call_*`` a session is awaiting — a ``list_calls`` row (#1428).
 
     The model-plane roster entry: a parked ``call_session``/``call_agent``/``call_workflow``
-    keyed by the launching ``tool_call_id`` (the same handle ``stop_task`` takes). ``kind`` is
+    keyed by the launching ``tool_call_id`` (the same handle ``cancel_call`` takes). ``kind`` is
     the servicer kind (``session`` for ``call_session``/``call_agent``, ``run`` for
     ``call_workflow``); ``target`` is the servicer id. Only **open** tasks are listed —
     an answered/cancelled edge is resolved out by the service under one snapshot.

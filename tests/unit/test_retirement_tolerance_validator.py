@@ -127,7 +127,7 @@ def test_telemetry_is_keyed_per_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         agents_mod,
         "tolerated_rename_map",
-        lambda: {"invoke": "call_session", "cancel_run": "stop_task"},
+        lambda: {"invoke": "call_session", "cancel_run": "cancel_call"},
     )
     ToolSpec.model_validate({"type": "invoke"})
     ToolSpec.model_validate({"type": "cancel_run"})

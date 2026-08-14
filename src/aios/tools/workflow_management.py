@@ -12,7 +12,7 @@ already enforce, keyed on the **executing session id** the harness supplies
 * ``resume_gate`` — gate-resume attenuation: a session may resume only gates in
   runs *it launched*; operator-launched runs stay on the operator HTTP plane.
 
-Cancelling a run is **not** here: it is the model-facing ``stop_task`` builtin (``tools/tasks.py``),
+Cancelling a run is **not** here: it is the model-facing ``cancel_call`` builtin (``tools/tasks.py``),
 which cancels any awaited ``call_*`` task by its ``tool_call_id`` — a session servicer or a run —
 and threads the launcher guard (``wf_service.cancel_run``'s "only runs you launched") through
 ``cancel_task``. The retired ``cancel_run`` model tool is fully covered by it.
