@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from typing import Any
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, cast
 
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 
@@ -93,10 +94,10 @@ class FakeWorld:
         self.sessions: dict[str, Any] = {}
         self.triggers: dict[str, Any] = {}
 
-    def tool(self):  # noqa: C901 - a dispatch table, flat by nature
+    def tool(self) -> Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]:
         async def _tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             method, path = args["method"], args["path"]
-            payload = json.loads(args["body"]) if args.get("body") else None
+            payload: dict[str, Any] = json.loads(args["body"]) if args.get("body") else {}
 
             if args["server_ref"] == "github":
                 if "/contents/app/infra/lanes/" in path:
@@ -193,9 +194,10 @@ class FakeWorld:
         namespace["tool"] = self.tool()
         namespace["log"] = lambda *a, **k: None
         namespace["phase"] = lambda *a, **k: None
-        return asyncio.run(
-            namespace["main"]({"input": {"lane": "test", "merge_sha": merge_sha}})
+        main = cast(
+            Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]], namespace["main"]
         )
+        return asyncio.run(main({"input": {"lane": "test", "merge_sha": merge_sha}}))
 
     async def activate_async(self, merge_sha: str = "sha1") -> dict[str, Any]:
         namespace: dict[str, Any] = {}
@@ -203,7 +205,8 @@ class FakeWorld:
         namespace["tool"] = self.tool()
         namespace["log"] = lambda *a, **k: None
         namespace["phase"] = lambda *a, **k: None
-        return await namespace["main"]({"input": {"lane": "test", "merge_sha": merge_sha}})
+        main = cast(Callable[[dict[str, Any]], Awaitable[dict[str, Any]]], namespace["main"])
+        return await main({"input": {"lane": "test", "merge_sha": merge_sha}})
 
 
 def _actions(result: dict[str, Any]) -> dict[str, str]:
@@ -245,9 +248,7 @@ class TestIdempotency:
         world = FakeWorld()
 
         async def race() -> tuple[dict[str, Any], dict[str, Any]]:
-            return await asyncio.gather(  # type: ignore[return-value]
-                world.activate_async(), world.activate_async()
-            )
+            return await asyncio.gather(world.activate_async(), world.activate_async())
 
         first, second = asyncio.run(race())
 
@@ -396,10 +397,10 @@ class TestFailedChecksHelper:
     """Direct unit tests of the failed_checks predicate inside the script."""
 
     @staticmethod
-    def _failed_checks():
+    def _failed_checks() -> Callable[[dict[str, Any]], list[str]]:
         namespace: dict[str, Any] = {}
         exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
-        return namespace["failed_checks"]
+        return cast(Callable[[dict[str, Any]], list[str]], namespace["failed_checks"])
 
     def test_all_true_is_empty(self) -> None:
         assert self._failed_checks()({"a": True, "b": True}) == []
