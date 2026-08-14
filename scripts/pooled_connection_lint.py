@@ -167,6 +167,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.get_vault_credential_with_blob",
         "queries.get_wake_priority_context",
         "queries.hard_delete_account",
+        "queries.has_active_inbound_grant",
         "queries.has_active_root_account",
         "queries.increment_session_usage",
         "queries.insert_account_key",
