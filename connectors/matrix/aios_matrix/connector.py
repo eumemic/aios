@@ -45,7 +45,7 @@ class ReceiverHalted(RuntimeError):
 
 
 class RoutingNotReady(RuntimeError):
-    """A namespaced ghost is addressable but has no live connection yet.
+    """At least one intended recipient has no live connection *yet*.
 
     Raised instead of returning normally so the transaction is NOT ACKed.
     Matrix appservice delivery is at-least-once: the homeserver retries a
@@ -54,6 +54,38 @@ class RoutingNotReady(RuntimeError):
     not-ready condition (``setup()`` starts the listener before discovery
     has populated ``_ghost_connections``) into silent, permanent loss of a
     human's message.  Failing closed makes the homeserver redeliver.
+
+    Raised for PARTIAL routability too, not just total.  "Some ghosts
+    present" is not "all ghosts routable": a group room holding one live
+    ghost and one not-yet-connected ghost used to emit to the live subset,
+    return normally, and ACK 200 — losing the second recipient's copy
+    while reporting success.  Any unroutable recipient fails the whole
+    transaction.
+    """
+
+
+class RoutingPermanentlyUnroutable(RuntimeError):
+    """A recipient has stayed unroutable across so many redeliveries that
+    retrying is no longer plausibly productive.
+
+    NOTE — this is an escalation, NOT an ACK.  It still answers non-2xx, so
+    the homeserver keeps the message; what changes is that the failure
+    becomes LOUD (HALT → container exit → health/dead-man) instead of an
+    invisible 503 loop that head-of-line blocks every Matrix transaction
+    forever.  Nothing is dropped on this path.
+
+    Why a count and not a classification: from inside the container a
+    permanently-deleted connection and a transiently-absent one are not
+    reliably distinguishable.  ``_ghost_connections`` is populated by
+    ``serve_connection`` and popped in its ``finally``, and the runner
+    ALSO pops ``_connections[connection_id]`` on a terminal worker failure
+    before re-spawning it with backoff — so "absent" covers both "deleted"
+    and "crashed, restarting shortly".  The discovery protocol makes the
+    same point normatively: after a ``reset`` the runner treats absence
+    from a snapshot as *unknown*, never as *removed*.  Guessing
+    "permanent" wrongly would convert a recoverable delay into
+    unrecoverable message loss, so permanence is never inferred — only
+    persistent failure to make progress is measured.
     """
 
 
@@ -81,6 +113,18 @@ class MatrixConnector(HttpConnector):
     connector = "matrix"
     uses_connection_secrets = False
     RECONCILE_SECONDS = 300.0
+    # How many times one event may be redelivered while a recipient stays
+    # unroutable before the condition is escalated from "retry quietly" to
+    # "halt loudly".  Synapse's recoverer backs off 2**n seconds capped at
+    # ~512 s, so ~12 attempts is on the order of an hour of retrying — long
+    # enough to cover container restarts and discovery re-subscribes, short
+    # enough that a genuinely dead recipient does not head-of-line block
+    # every Matrix transaction indefinitely and unseen.
+    MAX_UNROUTABLE_REDELIVERIES = 12
+    # Bounds the redelivery-attempt ledger.  Entries are keyed per event and
+    # dropped once the event is fully delivered; this cap only matters if a
+    # large number of distinct events are simultaneously stuck.
+    _MAX_TRACKED_UNROUTABLE_EVENTS = 4096
 
     def __init__(
         self,
@@ -95,6 +139,10 @@ class MatrixConnector(HttpConnector):
         self._halt = asyncio.Event()
         self._halt_error: BaseException | None = None
         self._ghost_connections: dict[str, str] = {}
+        # event_id → how many times we have refused it for unroutability.
+        # Drives the transient → permanent escalation; see
+        # ``RoutingPermanentlyUnroutable``.
+        self._unroutable_attempts: dict[str, int] = {}
         self._spool = SqliteAnsweredSpool(
             spool_path or Path("/var/lib/aios-matrix/answered.sqlite")
         )
@@ -129,6 +177,16 @@ class MatrixConnector(HttpConnector):
         raise ReceiverHalted("Matrix receiver halted") from self._halt_error
 
     def _classify_receiver_failure(self, exc: BaseException) -> ReceiverAction:
+        if isinstance(exc, RoutingPermanentlyUnroutable):
+            # Retrying has stopped being productive: this event has been
+            # refused ``MAX_UNROUTABLE_REDELIVERIES`` times and a recipient
+            # is still unroutable.  HALT does NOT ack and does NOT drop —
+            # the homeserver still holds the transaction.  What it does is
+            # make an otherwise-invisible infinite 503 loop loud: the
+            # container exits, health/dead-man fires, and an operator gets
+            # to decide, instead of ordered Matrix traffic silently
+            # head-of-line blocking forever behind a stale room member.
+            return ReceiverAction.HALT
         if isinstance(exc, RoutingNotReady):
             # Transient by construction: the connection worker that
             # populates ``_ghost_connections`` is still starting.  Must NOT
@@ -216,21 +274,55 @@ class MatrixConnector(HttpConnector):
         ]
         if not receivers:
             return
-        ghosts = [
-            member for member in receivers if self._localpart(member) in self._ghost_connections
+        # PARTIAL routability is the same failure as total unroutability.
+        # The pre-fix code asked "are there ANY live ghosts?" and, if so,
+        # emitted to that subset and returned normally — ACKing 200 while a
+        # co-recipient's copy was never delivered.  Synapse drops a
+        # transaction permanently once it sees a 2xx, so that ACK is silent,
+        # unrecoverable loss of a human's message.  The question must be
+        # "are ALL intended recipients routable?".
+        unroutable = [
+            member for member in receivers if self._localpart(member) not in self._ghost_connections
         ]
-        if not ghosts:
+        if unroutable:
+            # Deliver NOTHING on a partial-routability failure.  Emitting to
+            # the live subset first and then refusing would double-deliver
+            # to that subset on every redelivery *if* the emit were not
+            # idempotent; it is idempotent (see below), but emitting before
+            # a refusal still buys nothing and costs an extra aios round
+            # trip per retry, so the whole event is failed atomically.
+            attempts = self._record_unroutable_attempt(event)
             log.warning(
                 "matrix.inbound.routing_not_ready",
                 room_id=str(event.room_id),
+                event_id=str(event.event_id),
                 namespaced_members=[str(member) for member in receivers],
+                unroutable_members=[str(member) for member in unroutable],
+                live_members=[str(member) for member in receivers if member not in set(unroutable)],
+                attempts=attempts,
             )
-            raise RoutingNotReady(
-                f"no live connection for {[str(member) for member in receivers]} "
-                f"in room {event.room_id}"
+            detail = (
+                f"no live connection for {[str(member) for member in unroutable]} "
+                f"in room {event.room_id} "
+                f"(recipients={[str(member) for member in receivers]}, attempt {attempts})"
             )
+            if attempts >= self.MAX_UNROUTABLE_REDELIVERIES:
+                # Escalate LOUD, do not ACK.  See RoutingPermanentlyUnroutable.
+                raise RoutingPermanentlyUnroutable(
+                    f"{detail}; still unroutable after "
+                    f"{self.MAX_UNROUTABLE_REDELIVERIES} redeliveries"
+                )
+            raise RoutingNotReady(detail)
         room_kind = "dm" if len(members) == 2 else "group"
-        for ghost in ghosts:
+        # Every recipient is routable.  The emits below are individually
+        # idempotent — ``event_id`` is the deterministic
+        # ``matrix-{localpart}-{matrix event id}``, and the aios inbound
+        # endpoint dedups on (account, connector, external_account_id,
+        # event_id) with an ON CONFLICT DO NOTHING ledger row written in the
+        # same transaction as the append.  So if a LATER event in the same
+        # Synapse transaction fails, redelivery of this whole transaction
+        # re-emits these copies harmlessly rather than duplicating them.
+        for ghost in receivers:
             localpart = self._localpart(ghost)
             await self.emit_inbound(
                 connection_id=self._ghost_connections[localpart],
@@ -240,6 +332,32 @@ class MatrixConnector(HttpConnector):
                 event_id=f"matrix-{localpart}-{event.event_id}",
                 metadata={"room_kind": room_kind},
             )
+        # Fully delivered: stop tracking redelivery attempts for this event.
+        self._unroutable_attempts.pop(str(event.event_id), None)
+
+    def _record_unroutable_attempt(self, event: Event) -> int:
+        """Count how many times this event has been refused as unroutable.
+
+        Keyed on the Matrix event id, which is stable across redeliveries of
+        the same transaction, so the count measures "how long has this
+        specific message been stuck", not "how busy is the server".
+
+        The counter is per-process: a container restart resets it.  That is
+        deliberate and is the safe direction — a restart is exactly the
+        event most likely to FIX routability, so it earns a fresh budget
+        rather than inheriting a stale one and halting immediately.
+        """
+        key = str(event.event_id)
+        if key not in self._unroutable_attempts and (
+            len(self._unroutable_attempts) >= self._MAX_TRACKED_UNROUTABLE_EVENTS
+        ):
+            # Bounded ledger: drop the oldest tracked event (dicts preserve
+            # insertion order).  Losing a count only costs that event a
+            # fresh retry budget — it never causes an ACK or a drop.
+            self._unroutable_attempts.pop(next(iter(self._unroutable_attempts)), None)
+        attempts = self._unroutable_attempts.get(key, 0) + 1
+        self._unroutable_attempts[key] = attempts
+        return attempts
 
     @tool(name="matrix_send", delivery=True)
     async def matrix_send(

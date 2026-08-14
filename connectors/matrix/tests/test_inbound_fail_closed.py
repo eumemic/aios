@@ -290,3 +290,114 @@ async def test_supervised_handler_is_actually_bound_to_the_route(config) -> None
             f"transaction route is bound to {handler.__qualname__}, not the "
             "supervised override; the ACK/RETRY/HALT logic is unreachable"
         )
+
+
+# ─── mixed-routability: "some ghosts present" ≠ "all ghosts routable" ─────────
+
+GHOST2 = UserID("@_aios_agent_two:your.server")
+
+
+async def _join_second_ghost(appservice) -> None:
+    await appservice.state_store.set_membership(ROOM, GHOST2, Membership.JOIN)
+
+
+async def test_mixed_live_and_unroutable_room_is_not_acked(receiver) -> None:
+    """RED: a group room with one LIVE ghost and one not-yet-routable ghost.
+
+    ``ghosts`` is non-empty, so the pre-fix code emits to the live subset,
+    returns normally, and the HTTP layer ACKs 200 -- permanently losing the
+    second recipient's copy.  "Some ghosts present" is not "all ghosts
+    routable".
+    """
+    connector, appservice = receiver
+    await _join_second_ghost(appservice)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+
+    response = await _put(appservice, "txn-mixed", _txn([_message()]))
+
+    assert response.status >= 400, (
+        f"receiver ACKed {response.status} for a room where only SOME "
+        "recipients were routable; the unroutable recipient's copy is lost"
+    )
+    assert "txn-mixed" not in appservice.transactions
+
+
+async def test_all_live_group_room_delivers_to_every_ghost_and_acks(receiver) -> None:
+    """POSITIVE CONTROL: an all-live group room still delivers AND ACKs.
+
+    Without this, "we never ACK a partial delivery" would pass trivially on
+    a build that never delivers anything at all.
+    """
+    connector, appservice = receiver
+    await _join_second_ghost(appservice)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    connector._ghost_connections["_aios_agent_two"] = "con_2"
+
+    response = await _put(appservice, "txn-all-live", _txn([_message()]))
+
+    assert response.status == 200, f"all-live room was refused ({response.status})"
+    delivered = {call.kwargs["connection_id"] for call in connector.emit_inbound.await_args_list}
+    assert delivered == {"con_1", "con_2"}, f"delivered to {delivered}, expected both ghosts"
+
+
+async def test_partial_delivery_emits_nothing_at_all(receiver) -> None:
+    """A partial-routability refusal must not half-deliver.
+
+    Pins the atomicity choice: the live subset is NOT emitted to before the
+    refusal, so the retry does not depend on emit idempotency to be correct.
+    """
+    connector, appservice = receiver
+    await _join_second_ghost(appservice)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+
+    await _put(appservice, "txn-mixed-noemit", _txn([_message()]))
+
+    connector.emit_inbound.assert_not_awaited()
+
+
+async def test_repeated_unroutable_redelivery_escalates_to_halt(receiver) -> None:
+    """SECOND FINDING: a permanently-absent recipient must stop retrying forever.
+
+    Synapse marks the whole appservice DOWN on a non-2xx and retries the
+    OLDEST unsent transaction with 2**n backoff before delivering anything
+    newer -- so an eternally-503ing event head-of-line blocks every Matrix
+    transaction.  After a bounded number of redeliveries the condition must
+    escalate to a loud HALT rather than looping invisibly.
+
+    HALT still answers non-2xx: the message is not dropped, it is escalated.
+    """
+    connector, appservice = receiver
+    connector.MAX_UNROUTABLE_REDELIVERIES = 3
+
+    for attempt in range(2):
+        response = await _put(appservice, f"txn-stuck-{attempt}", _txn([_message()]))
+        assert response.status == 503, f"attempt {attempt} gave {response.status}, want 503"
+        assert not connector._halt.is_set(), "halted before the retry budget was spent"
+
+    final = await _put(appservice, "txn-stuck-final", _txn([_message()]))
+
+    assert final.status >= 400, "escalation must NOT ack; the message is not deliverable"
+    assert final.status == 500, f"expected non-retryable 500 on escalation, got {final.status}"
+    assert connector._halt.is_set(), "exhausted retry budget did not escalate loudly"
+    connector.emit_inbound.assert_not_awaited()
+
+
+async def test_recovered_routing_clears_the_escalation_counter(receiver) -> None:
+    """A stuck event that becomes routable must not stay near the halt edge.
+
+    Without the reset, a room that flaps unroutable/routable would eventually
+    halt the container on a fully-delivered message.
+    """
+    connector, appservice = receiver
+    connector.MAX_UNROUTABLE_REDELIVERIES = 3
+
+    stuck = await _put(appservice, "txn-flap-1", _txn([_message()]))
+    assert stuck.status == 503
+    assert connector._unroutable_attempts
+
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    recovered = await _put(appservice, "txn-flap-2", _txn([_message()]))
+
+    assert recovered.status == 200
+    connector.emit_inbound.assert_awaited_once()
+    assert connector._unroutable_attempts == {}, "attempt ledger not cleared after delivery"
