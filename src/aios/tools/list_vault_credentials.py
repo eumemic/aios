@@ -63,5 +63,6 @@ registry.register(
         "and lifecycle timestamps; never returns secret values."
     ),
     handler=list_vault_credentials_handler,
-    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    parameters_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    transport="agent_tool",
 )
