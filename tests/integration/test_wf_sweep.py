@@ -379,3 +379,87 @@ async def test_reaper_keeps_stale_run_with_live_awaited_child(
         )
         reaped = await wf_queries.signal_stale_suspended_runs(conn, older_than_seconds=86_400)
     assert reaped == []
+
+
+async def test_reaper_keeps_stale_run_with_live_tool_call(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """An orphaned agent child does NOT license reaping while a `tool` call is unresolved.
+
+    The reap predicate's eligibility trigger (one dead-looking agent/workflow child) and
+    its live-child veto must cover the SAME roster. A fan-out that lost its agent child but
+    still has a live 30-hour sandbox exec is not dead — cancel-signalling it kills live work.
+    """
+    run_id = await _make_run(sweep_pool)
+    # Orphaned agent child: session row never existed -> looks dead, arms eligibility.
+    await _call_started(sweep_pool, run_id, "sha:gone#0", "agent", age_seconds=172_800)
+    # A long-running but ALIVE tool call: unresolved, no terminal signal, no servicer row.
+    await _call_started(sweep_pool, run_id, "sha:tool#1", "tool", age_seconds=108_000)
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET payload = payload || "
+            '\'{"child_session_id": "ses_missing"}\'::jsonb '
+            "WHERE run_id = $1 AND call_key = 'sha:gone#0'",
+            run_id,
+        )
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '2 days' WHERE id = $1", run_id
+        )
+        reaped = await wf_queries.signal_stale_suspended_runs(conn, older_than_seconds=86_400)
+    assert reaped == [], "reaped a run with a live unresolved tool call"
+
+
+async def test_reaper_still_reaps_genuinely_dead_run(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """POSITIVE CONTROL: every child resolved-or-orphaned, past threshold -> still reaped.
+
+    Without this, 'live work is never cancelled' passes trivially on a build that reaps nothing.
+    """
+    run_id = await _make_run(sweep_pool)
+    # An orphaned agent child (servicer row absent) — dead.
+    await _call_started(sweep_pool, run_id, "sha:gone#0", "agent", age_seconds=172_800)
+    # A tool call that DID resolve — carries its authoritative terminal signal.
+    await _call_started(sweep_pool, run_id, "sha:tool#1", "tool", age_seconds=172_800)
+    await _call_result(sweep_pool, run_id, "sha:tool#1")
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET payload = payload || "
+            '\'{"child_session_id": "ses_missing"}\'::jsonb '
+            "WHERE run_id = $1 AND call_key = 'sha:gone#0'",
+            run_id,
+        )
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '2 days' WHERE id = $1", run_id
+        )
+        reaped = await wf_queries.signal_stale_suspended_runs(conn, older_than_seconds=86_400)
+    assert reaped == [run_id], "genuinely dead run was NOT reaped"
+    async with sweep_pool.acquire() as conn:
+        signal = await wf_queries.read_run_signal(conn, run_id, wf_queries.CANCEL_SIGNAL_CALL_KEY)
+    assert signal is not None and signal.kind == "cancel"
+
+
+async def test_reaper_vetoes_on_unrecognised_future_capability(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """FUTURE-CAPABILITY: an unresolved call whose capability the predicate does not know
+    must VETO the reap.
+
+    This is the durability property: a capability added next month, by an author who never
+    reads this predicate, makes the reaper MORE conservative, never less. Fail-closed.
+    """
+    run_id = await _make_run(sweep_pool)
+    await _call_started(sweep_pool, run_id, "sha:gone#0", "agent", age_seconds=172_800)
+    await _call_started(sweep_pool, run_id, "sha:future#1", "teleport_to_mars", age_seconds=172_800)
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET payload = payload || "
+            '\'{"child_session_id": "ses_missing"}\'::jsonb '
+            "WHERE run_id = $1 AND call_key = 'sha:gone#0'",
+            run_id,
+        )
+        await conn.execute(
+            "UPDATE wf_runs SET updated_at = now() - interval '2 days' WHERE id = $1", run_id
+        )
+        reaped = await wf_queries.signal_stale_suspended_runs(conn, older_than_seconds=86_400)
+    assert reaped == [], "reaped despite an unresolved call of an unrecognised capability"
