@@ -41,6 +41,10 @@ permissions:
 
 jobs:
   residue-rescan:
+    # HOSTED PENDING A RUNNER: eumemic-ops#414 flipped this to [self-hosted, watchdog]
+# on 2026-08-13 and it QUEUED FOREVER — watchdog-hil-01 is registered to the
+# eumemic-ops repo only, so no runner in THIS repo matches that label. Reverted
+# the same day. Re-flip only after the runner is registered org-wide (or to aios).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

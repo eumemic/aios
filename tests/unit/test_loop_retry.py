@@ -177,6 +177,7 @@ def mock_step_dependencies() -> Any:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -356,6 +357,29 @@ class TestRunSessionStepOnModelError:
             ANY, "sess_x", account_id=ANY, error={"kind": "child_errored"}
         )
 
+    async def test_exhausted_budget_reclaims_self_archiving_child(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        mock_step_dependencies.session.origin = "background"
+        mock_step_dependencies.session.parent_run_id = "run_x"
+        mock_step_dependencies.session.archive_when_idle = True
+
+        reclaim = AsyncMock(return_value=True)
+        with (
+            patch(
+                "aios.harness.loop._count_consecutive_rescheduling",
+                AsyncMock(return_value=4),
+            ),
+            patch(
+                "aios.harness.loop.sessions_service.reclaim_session_if_idle",
+                reclaim,
+            ),
+        ):
+            await run_session_step("sess_x")
+
+        mock_step_dependencies.defer_wake.assert_not_awaited()
+        reclaim.assert_awaited_once_with(ANY, "sess_x", account_id=ANY)
+
     async def test_streaming_deadline_records_usage_and_parks_without_retry(
         self, mock_step_dependencies: Any
     ) -> None:
@@ -503,6 +527,35 @@ class TestRunSessionStepOnTerminalModelError:
         mock_step_dependencies.fail_all_open_requests.assert_awaited_once_with(
             ANY, "sess_x", account_id=ANY, error={"kind": "model_terminal_error"}
         )
+
+    async def test_terminal_error_surfaces_provider_detail_in_stop_reason(
+        self, mock_step_dependencies: Any
+    ) -> None:
+        request = httpx.Request("POST", "https://example.test/v1")
+        response = httpx.Response(400, request=request)
+        error = litellm_exceptions.BadRequestError(
+            message='AnthropicException - {"error":{"type":"request_too_large"}}',
+            model="x",
+            llm_provider="anthropic",
+            response=response,
+        )
+        mock_step_dependencies.stream_litellm.side_effect = error
+
+        await run_session_step("sess_x")
+
+        recorded_reasons = [
+            call.args[2] for call in mock_step_dependencies.set_stop_reason.call_args_list
+        ]
+        reason = next(reason for reason in recorded_reasons if reason.get("type") == "error")
+        assert reason["provider_error"] == {
+            "exception_class": "BadRequestError",
+            "http_status": 400,
+            "message": str(error),
+        }
+        # The console's failed-turn panel renders stop_reason.message, so keep
+        # the diagnostic visible there as well as available in structured form.
+        assert "BadRequestError (HTTP 400)" in reason["message"]
+        assert "request_too_large" in reason["message"]
 
     @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
     async def test_transient_class_keeps_backoff_ladder(

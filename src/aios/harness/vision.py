@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from typing import Any
 
 from aios.logging import get_logger
@@ -60,17 +61,26 @@ _VISION_OVERRIDES: dict[str, bool] = {}
 _VISION_GATEWAY_PREFIX = "openai/responses/"
 _VISION_GATEWAY_FAMILIES = frozenset({"gpt-5", "gpt-4o", "o4"})
 
+# Maintained family assertions cover provider models whose capability is newer
+# than the pinned LiteLLM catalog. Keep these beside the gateway assertions and
+# completion parameter maps: the catalog is useful metadata, not final
+# authority. xAI's numbered Grok 4 line accepts image input; constrain the
+# match to numbered releases so text-specialized siblings such as grok-code do
+# not inherit vision accidentally.
+_XAI_GROK_4_VISION_RE = re.compile(r"^xai/grok-4(?:\.\d+)*$")
 
-def supports_vision(model: str) -> bool:
+
+def supports_vision(model: str) -> bool | None:
     """True when ``model`` accepts ``image_url`` content parts.
 
     Resolution order:
 
     1. :data:`_VISION_OVERRIDES` — explicit per-model escape hatch (force
        ``True`` or ``False``).
-    2. Known vision families on custom gateway routes, plus any Claude family,
-       are assumed vision-capable. A long-running worker fetches litellm's
-       catalog once at startup, so a Claude model released afterwards makes
+    2. Maintained family assertions for provider and custom gateway routes,
+       plus any Claude family, are assumed vision-capable. A long-running worker
+       fetches litellm's catalog once at startup, so a Claude model released
+       afterwards makes
        ``litellm.get_model_info``
        raise "isn't mapped yet" and we would otherwise collapse to "no vision"
        — silently degrading image reads to a text marker.  Asserting the family
@@ -81,12 +91,13 @@ def supports_vision(model: str) -> bool:
        :attr:`~aios.harness.completion.CacheChannel.ANTHROPIC` — via the
        ``_ANTHROPIC_PROXY_PROVIDERS`` frozenset it reads — in
        :mod:`aios.harness.completion`).
-    3. ``litellm.get_model_info`` for every other provider/model.
+    3. ``litellm.get_model_info`` for every other provider/model. A lookup
+       failure returns ``None`` (unknown), never a confident ``False``.
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
     normalized = model.lower()
-    if "claude" in normalized:
+    if "claude" in normalized or _XAI_GROK_4_VISION_RE.fullmatch(normalized):
         return True
     if normalized.startswith(_VISION_GATEWAY_PREFIX):
         gateway_model = normalized.removeprefix(_VISION_GATEWAY_PREFIX)
@@ -102,13 +113,10 @@ def supports_vision(model: str) -> bool:
     except Exception as err:
         # ``get_model_info`` raises a mix of ``BadRequestError`` (unknown
         # model), KeyError, and import/network errors depending on the
-        # failure mode.  Collapsing to "no vision" is the safe fallback
-        # (we degrade to a text marker the model can still ``read``), but
-        # the silence makes a transient outage look identical to "unknown
-        # model" — log warn-level so operators have a grep target when
-        # vision unexpectedly degrades across a deploy or provider blip.
+        # failure mode. Preserve that uncertainty rather than claiming the
+        # model has no vision; callers surface it in their visible marker.
         log.warning("vision.litellm_lookup_failed", model=model, error=str(err))
-        return False
+        return None
     return bool(info.get("supports_vision"))
 
 
@@ -174,7 +182,7 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
         return False
     if size_bytes > INLINE_SIZE_CAP_BYTES:
         return False
-    return supports_vision(model)
+    return supports_vision(model) is True
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:

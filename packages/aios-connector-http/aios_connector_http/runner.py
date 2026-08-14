@@ -60,7 +60,7 @@ import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 import httpx
 import structlog
@@ -125,17 +125,12 @@ class ManagementHandlerError(Exception):
 
 
 def _is_fatal_inbound_status(status_code: int) -> bool:
-    """``emit_inbound`` raises for these; everything else (routine 4xx)
-    drops the envelope and returns ``None``.
+    """Raise only when runtime authentication is broken.
 
-    ``401`` / ``403`` mean the runtime token is busted (revoked or
-    misconfigured) — fatal for every connection the container serves.
-    ``5xx`` is a server-side outage / bug — also fatal so the
-    container crash-and-restarts.  Routine 4xx (``400``, ``422``)
-    indicates one specific envelope is malformed; dropping it lets
-    sibling connections keep serving.
+    A server error is logged and dropped per-message: allowing a transient
+    API outage to escape would terminate the connector's inbound feed.
     """
-    return status_code in (401, 403) or status_code >= 500
+    return status_code in (401, 403)
 
 
 def tool(
@@ -225,6 +220,9 @@ class _ConnectionState:
     external_account_id: str
     secrets: dict[str, str] = field(default_factory=dict)
     worker: asyncio.Task[None] | None = None
+    serve_status: Literal["serving", "restarting"] = "serving"
+    last_serve_error: str | None = None
+    serve_restart_count: int = 0
 
 
 class HttpConnector:
@@ -274,26 +272,30 @@ class HttpConnector:
         # the caller proceeds.  Reset to 0 on teardown so re-runs work.
         self._loops_backfilled: int = 0
         self._all_loops_live: asyncio.Event = asyncio.Event()
-        # Per-connection reconnect backoff, in seconds.  Keyed by
-        # connection_id.  ``_isolated_serve_connection`` pops
-        # ``_connections[connection_id]`` on a terminal (non-cancel)
-        # ``serve_connection`` failure so a later discovery ``added`` (or
-        # manual re-add) re-spawns the worker; this dict bounds how fast
-        # that re-spawn actually starts platform work, so a hard-failing
-        # connection (revoked token, unregistered phone) backs off
-        # exponentially instead of hot-looping on every backfill replay.
-        # An entry is cleared on a clean serve (one that ran past the
-        # backoff sleep without immediately failing) and on ``removed``.
-        self._reconnect_backoff: dict[str, float] = {}
+        # In-memory discovery resume cursor: the highest ledger
+        # ``change_seq`` this process has observed.  ``None`` means "no
+        # complete view yet" → the next (re)subscribe uses the ``fresh``
+        # arm (cursor event + full snapshot + sentinel).  Non-``None`` →
+        # reconnects use ``tail(after_change_seq=cursor)`` so a restart
+        # of the *stream* (not the container) replays O(Δ) ledger rows
+        # instead of an O(N) snapshot.  A server ``reset`` (cursor below
+        # the pruning horizon) clears it, forcing a fresh re-run — and
+        # per §12.4 nothing may be retired on that pass, which holds
+        # trivially here because the runner never acts on absence at all.
+        # Durable (cross-restart) cursor persistence is the #1906
+        # consumer's job; container restarts simply re-run ``fresh``.
+        self._discovery_cursor: int | None = None
 
-    # ── reconnect-backoff tunables (overridable on subclasses) ────────
+    # ── serve-restart tunables (overridable on subclasses) ────────────
+
     #
-    # Bounds the re-spawn rate of a connection whose ``serve_connection``
-    # keeps failing terminally.  The first (re)spawn after a failure
-    # sleeps ``RECONNECT_BACKOFF_INITIAL``; each subsequent consecutive
-    # failure doubles it up to ``RECONNECT_BACKOFF_MAX``.
+    # Bounds retries after ``serve_connection`` fails. The supervisor sleeps
+    # ``RECONNECT_BACKOFF_INITIAL`` after the first failure and doubles each
+    # subsequent delay up to ``RECONNECT_BACKOFF_MAX``.
     RECONNECT_BACKOFF_INITIAL: float = 1.0
     RECONNECT_BACKOFF_MAX: float = 60.0
+    # Appservice-style connectors receive credentials via container env.
+    uses_connection_secrets: bool = True
 
     # ─── helpers (subclasses use these) ──────────────────────────────
 
@@ -480,14 +482,11 @@ class HttpConnector:
         ``(filename, bytes, content_type)`` tuples that ride as
         multipart parts.
 
-        Routine 4xx responses (a 422 from one malformed envelope, a 400
-        from a stale connection_id mid-removal) drop the envelope and
-        return ``None`` so one bad inbound can't tear down the whole
-        container via the parent TaskGroup.  ``401`` / ``403`` (auth
-        broken — runtime token revoked or misconfigured) and ``5xx``
-        (server outage / bug) still raise: those are container-level
-        problems that warrant the crash-and-restart loop.  Callers that
-        need the bad-envelope to surface (e.g. integration-test tools
+        HTTP errors other than ``401`` / ``403`` drop the envelope and
+        return ``None`` so one bad inbound or transient API outage cannot
+        tear down the connection feed. Authentication failures still raise
+        because the runtime token is globally revoked or misconfigured.
+        Callers that need the bad-envelope to surface (e.g. integration-test tools
         that want loud validation failures) check for ``None`` and
         raise themselves.
         """
@@ -921,9 +920,26 @@ class HttpConnector:
         backoff = 1.0
         _signalled_ready = False
         while True:
+            if self._discovery_cursor is None:
+                arm: str | None = "fresh"
+                after_change_seq: int | None = None
+            else:
+                arm = "tail"
+                after_change_seq = self._discovery_cursor
+            got_reset = False
+            # ``fresh`` watermark S₀, buffered until ``snapshot_complete``.
+            # Committing it to ``_discovery_cursor`` early would be a loss
+            # bug: a mid-snapshot disconnect would resume as
+            # ``tail(S₀)`` and permanently skip the snapshot rows that
+            # were never streamed.  Only a *complete* view is a valid
+            # resume point.
+            pending_watermark: int | None = None
             try:
                 async for msg in stream_connection_discovery(
-                    client.get_async_httpx_client(), self.connector
+                    client.get_async_httpx_client(),
+                    self.connector,
+                    arm=arm,
+                    after_change_seq=after_change_seq,
                 ):
                     if msg.event == "_open":
                         # SDK-synthetic marker: the SSE handshake succeeded
@@ -939,21 +955,56 @@ class HttpConnector:
                         # immediate-disconnect loop should still back off
                         # exponentially.  Resetting only on real messages
                         # ensures CI-side flapping doesn't pin us at 1 s.
-                        if not _signalled_ready:
-                            _signalled_ready = True
-                            self._mark_loop_backfilled()
                         continue
                     backoff = 1.0
                     if msg.event != "connection":
                         continue
                     payload = json.loads(msg.data)
                     event = payload.get("event")
+                    if event == "reset":
+                        # Our tail cursor fell below the server's durable
+                        # pruning horizon: rows we never saw may already be
+                        # deleted, so replay cannot be proven complete.  Drop
+                        # the cursor and immediately re-subscribe ``fresh``
+                        # (cursor → snapshot → sentinel); the per-connection
+                        # idempotence check in ``_on_connection_added`` makes
+                        # the replayed snapshot ``added``s no-ops for workers
+                        # that are already running.  Nothing is torn down on
+                        # this pass — absence in a post-reset view means
+                        # "unknown", never "removed" (§12.4).
+                        log.warning(
+                            "connector.discovery.reset",
+                            connector=self.connector,
+                            stale_cursor=self._discovery_cursor,
+                        )
+                        self._discovery_cursor = None
+                        got_reset = True
+                        break
+                    if event == "cursor":
+                        pending_watermark = int(payload["change_seq"])
+                        continue
+                    if event == "snapshot_complete":
+                        if pending_watermark is not None:
+                            # The fresh view is now complete: S₀ becomes the
+                            # resume cursor (everything after the sentinel
+                            # has seq > S₀ and advances it further).
+                            self._discovery_cursor = pending_watermark
+                            pending_watermark = None
+                        if not _signalled_ready:
+                            _signalled_ready = True
+                            self._mark_loop_backfilled()
+                        continue
                     connection_id = payload.get("connection_id", "")
                     external_account_id = payload.get("external_account_id", "")
                     if event == "added":
                         await self._on_connection_added(tg, connection_id, external_account_id)
                     elif event == "removed":
                         await self._on_connection_removed(connection_id)
+                    if (seq := payload.get("change_seq")) is not None:
+                        # Advance the resume cursor only AFTER the event is
+                        # fully handled, so a crash between receive and
+                        # handle replays (at-least-once) rather than skips.
+                        self._discovery_cursor = int(seq)
             # Only retry on transport-level errors (timeouts, dropped
             # connections, server restarts). Application-level exceptions
             # — including secrets-fetch failures from
@@ -967,6 +1018,12 @@ class HttpConnector:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
+                continue
+            if got_reset:
+                # Reset is a server-directed recovery, not a failure: the
+                # stream ended cleanly and the very next subscribe (fresh)
+                # is what restores a complete view.  Skip the backoff so
+                # the incomplete-view window stays as small as possible.
                 continue
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
@@ -985,28 +1042,7 @@ class HttpConnector:
         if connection_id in self._connections:
             # Replay from backfill after reconnect — already running.
             return
-        client = self._require_client()
-        response = await _get_runtime_secrets(client=client, connection_id=connection_id)
-        if response.status_code >= 500:
-            raise httpx.HTTPStatusError(
-                f"secrets fetch 5xx for connection {connection_id!r}: "
-                f"{response.status_code} {response.content!r}",
-                request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
-                response=httpx.Response(response.status_code, content=response.content),
-            )
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"secrets fetch 4xx for connection {connection_id!r}: "
-                f"{response.status_code} {response.content!r}"
-            )
-        body = response.parsed
-        if body is None or isinstance(body, HTTPValidationError):
-            raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
-        raw_secrets = body.secrets
-        if isinstance(raw_secrets, Unset):
-            secrets_map: dict[str, str] = {}
-        else:
-            secrets_map = {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+        secrets_map = await self._fetch_runtime_secrets(connection_id)
         state = _ConnectionState(
             connection_id=connection_id,
             external_account_id=external_account_id,
@@ -1025,108 +1061,94 @@ class HttpConnector:
             external_account_id=external_account_id,
         )
 
+    async def _fetch_runtime_secrets(self, connection_id: str) -> dict[str, str]:
+        """Fetch and validate the latest runtime secrets for a connection."""
+        client = self._require_client()
+        if not self.uses_connection_secrets:
+            return {}
+        response = await _get_runtime_secrets(client=client, connection_id=connection_id)
+        if response.status_code >= 500:
+            raise httpx.HTTPStatusError(
+                f"secrets fetch 5xx for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}",
+                request=httpx.Request("GET", "/v1/connectors/runtime/secrets"),
+                response=httpx.Response(response.status_code, content=response.content),
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"secrets fetch 4xx for connection {connection_id!r}: "
+                f"{response.status_code} {response.content!r}"
+            )
+        body = response.parsed
+        if body is None or isinstance(body, HTTPValidationError):
+            raise RuntimeError(f"unparseable secrets response for connection {connection_id!r}")
+        raw_secrets = body.secrets
+        if isinstance(raw_secrets, Unset):
+            return {}
+        return {str(k): str(v) for k, v in raw_secrets.additional_properties.items()}
+
     async def _isolated_serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-        """Run :meth:`serve_connection` with failure-isolated cleanup.
+        """Supervise one connection, restarting failed serves with capped backoff.
 
-        Catches any non-``CancelledError`` exception so a single bad
-        connection (typo'd secret, unregistered phone, revoked bot
-        token) can't tear down sibling connections via the parent
-        TaskGroup.  Always pops the user-state slot on exit so
-        connections cycling in/out don't leak stale state.
-
-        On a terminal (non-cancel) failure this ALSO pops
-        ``self._connections[connection_id]`` and clears the
-        ``_connection_served`` event, so the connection is no longer
-        treated as "already running": a subsequent discovery-backfill
-        ``added`` (or a manual re-add) re-spawns the worker with freshly
-        re-fetched secrets, rather than the connection becoming a
-        permanent zombie that ignores every ``added`` while process-level
-        health shows green (issue #1233).  A bounded exponential backoff
-        (:meth:`_arm_reconnect_backoff`) gates how fast that re-spawn
-        starts platform work, so a hard-failing connection backs off
-        instead of hot-looping on every backfill replay.
-
-        Cancellation (a ``removed`` event, or container shutdown) is NOT
-        a failure: it re-raises so the TaskGroup sees a clean cancel,
-        leaves ``_connections`` untouched here (``_on_connection_removed``
-        already owns that pop), and does not arm the backoff.
+        A clean return ends serving. Cancellation propagates immediately. Other
+        exceptions are isolated from sibling connections and retried in-task,
+        so recovery does not depend on discovery replaying an ``added`` event.
         """
-        # Re-spawn backoff: if this connection failed terminally on a
-        # previous spawn, sleep before doing platform work so a
-        # hard-failing connection doesn't hot-loop on every backfill
-        # ``added``.  Sleeping inside the worker task (not the discovery
-        # loop) keeps sibling connections' bring-up unblocked.  A
-        # CancelledError mid-sleep (connection ``removed`` while backing
-        # off) aborts the sleep and skips serve_connection cleanly.
-        delay = self._reconnect_backoff.get(connection_id, 0.0)
-        if delay:
-            log.info(
-                "connector.connection.reconnect_backoff",
-                connector=self.connector,
-                connection_id=connection_id,
-                delay=delay,
-            )
-            await asyncio.sleep(delay)
-        terminal_failure = False
+        backoff = self.RECONNECT_BACKOFF_INITIAL
+        retrying = False
         try:
-            await self.serve_connection(connection_id, secrets)
-        except asyncio.CancelledError:
-            # Cooperative cancellation (removed / shutdown): re-raise for
-            # a clean TaskGroup cancel and do NOT arm backoff or pop
-            # ``_connections`` — that's _on_connection_removed's job.
-            raise
-        except Exception as exc:
-            terminal_failure = True
-            log.exception(
-                "connector.connection.serve_failed",
-                connector=self.connector,
-                connection_id=connection_id,
-                error=type(exc).__name__,
-            )
+            while True:
+                try:
+                    state = self._connections.get(connection_id)
+                    if retrying and state is not None:
+                        # Credentials can be corrected while this worker is backing
+                        # off. Never pin a failed worker to its original snapshot.
+                        secrets = await self._fetch_runtime_secrets(connection_id)
+                        state.secrets = secrets
+                    if state is not None:
+                        state.serve_status = "serving"
+                    await self.serve_connection(connection_id, secrets)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.exception(
+                        "connector.connection.serve_failed",
+                        connector=self.connector,
+                        connection_id=connection_id,
+                        error=type(exc).__name__,
+                    )
+                    state = self._connections.get(connection_id)
+                    if state is not None:
+                        state.serve_status = "restarting"
+                        state.last_serve_error = f"{type(exc).__name__}: {exc}"
+                        state.serve_restart_count += 1
+                    try:
+                        await self.emit_lifecycle(
+                            connection_id=connection_id,
+                            event="connector.connection.serve_interrupted",
+                            reason=type(exc).__name__,
+                            data={"error": str(exc)},
+                        )
+                    except Exception:
+                        log.exception(
+                            "connector.connection.serve_interrupted_emit_failed",
+                            connector=self.connector,
+                            connection_id=connection_id,
+                        )
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, self.RECONNECT_BACKOFF_MAX)
+                    retrying = True
         finally:
+            # Subclass state belongs to the whole serve lifetime; do not pop it
+            # between attempts while concurrent outbound calls may still read it.
             self.state.pop(connection_id, None)
-            if terminal_failure:
-                self._arm_reconnect_backoff(connection_id)
-                # Drop the live-connection slot so a later ``added``
-                # re-spawns the worker instead of short-circuiting on
-                # "already running".
-                self._connections.pop(connection_id, None)
-                if event := self._connection_served.get(connection_id):
-                    event.clear()
-                log.warning(
-                    "connector.connection.worker_terminated",
-                    connector=self.connector,
-                    connection_id=connection_id,
-                    reconnect_backoff=self._reconnect_backoff.get(connection_id),
-                )
-            else:
-                # Clean exit (serve_connection returned, or was cancelled):
-                # reset the failure backoff so the next bring-up is prompt.
-                self._reconnect_backoff.pop(connection_id, None)
-
-    def _arm_reconnect_backoff(self, connection_id: str) -> None:
-        """Bump the per-connection re-spawn backoff after a terminal failure.
-
-        Starts at :attr:`RECONNECT_BACKOFF_INITIAL` and doubles on each
-        consecutive terminal failure up to :attr:`RECONNECT_BACKOFF_MAX`.
-        Reset to absent by a clean serve / ``removed`` so an intermittent
-        connection doesn't accumulate stale backoff.
-        """
-        current = self._reconnect_backoff.get(connection_id)
-        if current is None:
-            self._reconnect_backoff[connection_id] = self.RECONNECT_BACKOFF_INITIAL
-        else:
-            self._reconnect_backoff[connection_id] = min(current * 2, self.RECONNECT_BACKOFF_MAX)
 
     async def _on_connection_removed(self, connection_id: str) -> None:
         """Cancel the worker task for a vanished connection."""
         state = self._connections.pop(connection_id, None)
         if event := self._connection_served.get(connection_id):
             event.clear()
-        # A genuine ``removed`` (operator deleted the connection) clears
-        # any armed re-spawn backoff so a later re-add of the same id
-        # starts fresh rather than inheriting a stale failure backoff.
-        self._reconnect_backoff.pop(connection_id, None)
         if state is None or state.worker is None:
             return
         state.worker.cancel()

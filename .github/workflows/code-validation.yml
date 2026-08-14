@@ -296,11 +296,11 @@ jobs:
         # transient testcontainer startup cannot fail the entire suite; a real
         # regression fails both attempts and remains blocking.
         run: |
-          if ! uv run pytest tests/integration -q; then
+          if ! uv run pytest tests/integration -q --durations=25 -o faulthandler_timeout=120; then
             echo "::warning::FLAKE_RETRY integration"
             echo "FLAKE_RETRY integration" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY integration" >> flake-retry-integration.txt
-            uv run pytest tests/integration -q --lf
+            uv run pytest tests/integration -q --durations=25 -o faulthandler_timeout=120 --lf
           fi
 
       - name: Upload integration flake-retry marker
@@ -452,11 +452,11 @@ jobs:
         # preserving a second failure as a blocking signal.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
         run: |
-          if ! uv run pytest tests/e2e -q -m "not docker" -n 4; then
+          if ! uv run pytest tests/e2e -q -m "not docker" -n 4 --durations=25; then
             echo "::warning::FLAKE_RETRY e2e-non-docker"
             echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
-            uv run pytest tests/e2e -q -m "not docker" -n 4 --lf
+            uv run pytest tests/e2e -q -m "not docker" -n 4 --durations=25 --lf
           fi
 
       - name: Upload non-docker E2E flake-retry marker
@@ -492,11 +492,11 @@ jobs:
         # failures on shared runners. Retry only the recorded failures once; a
         # deterministic regression still fails the required check.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile; then
+          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile --durations=25; then
             echo "::warning::FLAKE_RETRY e2e-docker"
             echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            uv run pytest tests/e2e -q -m "docker and not perf" --lf
+            uv run pytest tests/e2e -q -m "docker and not perf" --durations=25 --lf
           fi
 
       - name: Upload docker E2E flake-retry marker

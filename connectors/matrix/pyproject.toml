@@ -3,7 +3,15 @@ name = "aios-matrix"
 version = "0.1.0"
 description = "Bare Matrix appservice receiver for aios"
 requires-python = ">=3.13"
-dependencies = ["mautrix==0.21.1", "asyncpg>=0.30", "pydantic-settings>=2.6"]
+dependencies = [
+    "aios-connector-http",
+    "mautrix==0.21.1",
+    "asyncpg>=0.30",
+    "pydantic-settings>=2.6",
+]
+
+[tool.uv.sources]
+aios-connector-http = { workspace = true }
 
 [dependency-groups]
 dev = [

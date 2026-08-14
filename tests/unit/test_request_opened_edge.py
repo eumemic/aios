@@ -348,9 +348,14 @@ def test_both_writers_pass_summary_to_append_request_opened() -> None:
     assert _writer_passes_summary(sessions_svc._stimulate_existing_ask)
 
 
+def test_obligation_edge_preserves_task_payload_over_4kb_verbatim() -> None:
+    task = "first line\n" + "x" * 4096 + "\nlast line"
+    assert sessions_svc._obligation_summary(task) == task
+
+
 def test_append_request_opened_summary_is_additive() -> None:
-    """The summary is written only when present (absent ⇒ no key ⇒ id-only render,
-    no migration). The frame data dict is built conditionally, not unconditionally."""
+    """The request copy is written only when present (absent ⇒ no key ⇒ loud
+    unavailable marker, no migration). The frame data dict is conditional."""
     func_src = _src(sessions_q.append_request_opened)
     assert 'data["summary"] = summary' in func_src
     assert "if summary is not None" in func_src

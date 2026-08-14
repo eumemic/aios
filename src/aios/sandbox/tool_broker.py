@@ -685,7 +685,7 @@ class ToolBroker:
         resolved = await self._resolve_mcp(request, require_tool=True)
         if isinstance(resolved, Response):
             return resolved
-        session_id, server, _toolset, tool_name, _agent = resolved
+        session_id, server, _toolset, tool_name, agent = resolved
         assert tool_name is not None
 
         # Outbound suppression (#710): MCP is default-deny under suppression.
@@ -711,6 +711,33 @@ class ToolBroker:
             return JSONResponse(outbound_suppression_service.mcp_synthesized_result())
 
         vault_id, headers = await self._load_auth_for(session_id, server.url)
+        try:
+            tool_dicts, _ = await discover_mcp_tools(
+                server.url,
+                vault_id,
+                headers,
+                server.name,
+                spec_headers=server.headers,
+                binding_id=agents_service.tool_cache_binding_id(agent),
+            )
+        except Exception as exc:
+            log.warning(
+                "tool_broker.mcp_discovery_failed",
+                server_name=server.name,
+                url=server.url,
+                exc_info=True,
+            )
+            return _transport_err(server.name, exc)
+        qualified = f"mcp__{server.name}__{tool_name}"
+        input_schema: dict[str, Any] | None = None
+        for tool_dict in tool_dicts:
+            function = tool_dict.get("function") or {}
+            if function.get("name") == qualified:
+                parameters = function.get("parameters")
+                input_schema = parameters if isinstance(parameters, dict) else None
+                break
+        else:
+            return _err(404, f"tool {tool_name!r} not found on MCP server {server.name!r}")
         log.info(
             "tool_broker.invoke_mcp",
             session_id=session_id,
@@ -718,7 +745,13 @@ class ToolBroker:
             tool=tool_name,
         )
         envelope = await call_mcp_tool(
-            server.url, vault_id, headers, tool_name, arguments, spec_headers=server.headers
+            server.url,
+            vault_id,
+            headers,
+            tool_name,
+            arguments,
+            input_schema=input_schema,
+            spec_headers=server.headers,
         )
         return JSONResponse(envelope)
 

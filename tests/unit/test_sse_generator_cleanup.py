@@ -78,6 +78,14 @@ def _install_discovery_backfill(
     """
     mock = AsyncMock(return_value=[]) if exc is None else AsyncMock(side_effect=exc)
     monkeypatch.setattr("aios.services.connections.queries.list_connections", mock)
+    monkeypatch.setattr(
+        "aios.api.sse.queries.get_connection_change_watermarks",
+        AsyncMock(return_value=(0, 0)),
+    )
+    monkeypatch.setattr(
+        "aios.api.sse.queries.list_connection_changes_with_horizon",
+        AsyncMock(return_value=(0, [])),
+    )
     return mock
 
 

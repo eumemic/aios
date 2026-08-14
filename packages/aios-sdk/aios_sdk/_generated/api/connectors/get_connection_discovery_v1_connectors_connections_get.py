@@ -5,21 +5,49 @@ import httpx
 
 from ... import errors
 from ...client import AuthenticatedClient, Client
+from ...models.get_connection_discovery_v1_connectors_connections_get_arm_type_0 import (
+    GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0,
+)
 from ...models.http_validation_error import HTTPValidationError
 from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     *,
+    arm: GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0
+    | None
+    | Unset = UNSET,
+    after_change_seq: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
     if not isinstance(authorization, Unset):
         headers["Authorization"] = authorization
 
+    params: dict[str, Any] = {}
+
+    json_arm: None | str | Unset
+    if isinstance(arm, Unset):
+        json_arm = UNSET
+    elif isinstance(arm, GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0):
+        json_arm = arm.value
+    else:
+        json_arm = arm
+    params["arm"] = json_arm
+
+    json_after_change_seq: int | None | Unset
+    if isinstance(after_change_seq, Unset):
+        json_after_change_seq = UNSET
+    else:
+        json_after_change_seq = after_change_seq
+    params["after_change_seq"] = json_after_change_seq
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
+
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/v1/connectors/connections",
+        "params": params,
     }
 
     _kwargs["headers"] = headers
@@ -58,6 +86,10 @@ def _build_response(
 def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
+    arm: GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0
+    | None
+    | Unset = UNSET,
+    after_change_seq: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
     r"""Get Connection Discovery
@@ -84,6 +116,8 @@ def sync_detailed(
     loop just doesn't see them.
 
     Args:
+        arm (GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0 | None | Unset):
+        after_change_seq (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -95,6 +129,8 @@ def sync_detailed(
     """
 
     kwargs = _get_kwargs(
+        arm=arm,
+        after_change_seq=after_change_seq,
         authorization=authorization,
     )
 
@@ -108,6 +144,10 @@ def sync_detailed(
 def sync(
     *,
     client: AuthenticatedClient | Client,
+    arm: GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0
+    | None
+    | Unset = UNSET,
+    after_change_seq: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
     r"""Get Connection Discovery
@@ -134,6 +174,8 @@ def sync(
     loop just doesn't see them.
 
     Args:
+        arm (GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0 | None | Unset):
+        after_change_seq (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -146,6 +188,8 @@ def sync(
 
     return sync_detailed(
         client=client,
+        arm=arm,
+        after_change_seq=after_change_seq,
         authorization=authorization,
     ).parsed
 
@@ -153,6 +197,10 @@ def sync(
 async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
+    arm: GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0
+    | None
+    | Unset = UNSET,
+    after_change_seq: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[Any | HTTPValidationError]:
     r"""Get Connection Discovery
@@ -179,6 +227,8 @@ async def asyncio_detailed(
     loop just doesn't see them.
 
     Args:
+        arm (GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0 | None | Unset):
+        after_change_seq (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -190,6 +240,8 @@ async def asyncio_detailed(
     """
 
     kwargs = _get_kwargs(
+        arm=arm,
+        after_change_seq=after_change_seq,
         authorization=authorization,
     )
 
@@ -201,6 +253,10 @@ async def asyncio_detailed(
 async def asyncio(
     *,
     client: AuthenticatedClient | Client,
+    arm: GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0
+    | None
+    | Unset = UNSET,
+    after_change_seq: int | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Any | HTTPValidationError | None:
     r"""Get Connection Discovery
@@ -227,6 +283,8 @@ async def asyncio(
     loop just doesn't see them.
 
     Args:
+        arm (GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0 | None | Unset):
+        after_change_seq (int | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -240,6 +298,8 @@ async def asyncio(
     return (
         await asyncio_detailed(
             client=client,
+            arm=arm,
+            after_change_seq=after_change_seq,
             authorization=authorization,
         )
     ).parsed

@@ -44,9 +44,23 @@ class TestSupportsVision:
         _patch_get_model_info(monkeypatch, {"foo/text": {"supports_vision": False}})
         assert vision.supports_vision("foo/text") is False
 
-    def test_false_when_litellm_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unknown_when_litellm_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_get_model_info(monkeypatch, {})  # any model raises
-        assert vision.supports_vision("totally/unknown") is False
+        assert vision.supports_vision("totally/unknown") is None
+
+    @pytest.mark.parametrize("model", ["xai/grok-4", "xai/grok-4.5", "xai/grok-4.6"])
+    def test_grok_4_family_assumed_vision_capable_despite_stale_litellm(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        _patch_get_model_info(monkeypatch, {})
+        assert vision.supports_vision(model) is True
+
+    @pytest.mark.parametrize("model", ["xai/grok-3", "xai/grok-code-fast-1"])
+    def test_other_grok_families_are_not_asserted_as_vision_capable(
+        self, monkeypatch: pytest.MonkeyPatch, model: str
+    ) -> None:
+        _patch_get_model_info(monkeypatch, {})
+        assert vision.supports_vision(model) is None
 
     def test_litellm_exception_emits_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bare exception path must surface at warn-level so operators can
@@ -60,7 +74,7 @@ class TestSupportsVision:
                 warned.append((event, kwargs))
 
         monkeypatch.setattr("aios.harness.vision.log", _Recorder())
-        assert vision.supports_vision("totally/unknown") is False
+        assert vision.supports_vision("totally/unknown") is None
         assert len(warned) == 1
         event, kwargs = warned[0]
         assert event == "vision.litellm_lookup_failed"
@@ -120,7 +134,7 @@ class TestSupportsVision:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_get_model_info(monkeypatch, {})
-        assert vision.supports_vision("openai/responses/future-text-model") is False
+        assert vision.supports_vision("openai/responses/future-text-model") is None
 
     def test_explicit_override_can_force_claude_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The override dict is consulted before the Claude-family rule, so an

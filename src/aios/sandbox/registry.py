@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -41,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.errors import NotFoundError
 from aios.ids import is_run_owner_id
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
@@ -72,7 +74,7 @@ from aios.sandbox.setup import (
     install_egress_ca,
     install_packages,
 )
-from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore
+from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore, TarballStore
 from aios.sandbox.spec import (
     ProvisioningPlan,
     build_spec_from_run,
@@ -113,8 +115,6 @@ _STOP_ALL_TIMEOUT_S = 8.0
 # GC reconciler tick interval (durable session sandboxes, §5.5): hourly, with
 # an immediate first tick at boot (replacing the old boot-time orphan reap).
 _GC_INTERVAL_SECONDS = 3600.0
-# Bound daemon churn when a recovered GC encounters a large lifecycle backlog.
-_GC_IMAGE_REMOVAL_LIMIT = 200
 _EGRESS_REFRESH_INTERVAL_SECONDS = 30.0
 _EGRESS_EVICT_AFTER_SUCCESSES = 3
 
@@ -195,6 +195,14 @@ class GcPressureResult:
 
 
 PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
+
+
+def _archive_eligible(state: SessionSnapshotState, now: datetime, grace_seconds: int) -> bool:
+    """Return whether an archived session has passed its retention grace."""
+    archived_at = state.archived_at
+    if archived_at is None:
+        return False
+    return (now - archived_at).total_seconds() >= grace_seconds
 
 
 def _classify_images(
@@ -299,7 +307,12 @@ class SandboxRegistry:
         # Snapshot transport seam (durable session sandboxes). v1 is the
         # identity store over the local daemon; multi-host is a drop-in
         # replacement here with no lifecycle changes.
-        self._store: SnapshotStore = LocalDaemonStore(backend)
+        store_root = get_settings().sandbox_snapshot_store_root
+        self._store: SnapshotStore = (
+            TarballStore(backend, store_root)
+            if store_root is not None
+            else LocalDaemonStore(backend)
+        )
         self._handles: dict[str, SandboxHandle] = {}
         self._git_proxies: dict[str, GitProxy] = {}
         self._secret_proxies: dict[str, SecretEgressProxy] = {}
@@ -1290,6 +1303,14 @@ class SandboxRegistry:
         preamble or the GC tick converges. Best-effort by contract: a snapshot
         failure here must not propagate (release/recycle callers continue).
         """
+        # Lightweight registries used outside ``worker_main`` have no DB
+        # pointer surface. Preserve their historical release semantics rather
+        # than trying to publish an unusable snapshot.
+        from aios.harness import runtime
+
+        if runtime.pool is None:
+            await self._backend.destroy(handle)
+            return
         if await self._snapshot_and_record(
             session_id, handle.sandbox_id, disk_limit_bytes=handle.disk_limit_bytes
         ):
@@ -1307,6 +1328,7 @@ class SandboxRegistry:
         """
         settings = get_settings()
         tag = snapshot_tag(settings.instance_id, session_id)
+        ref = self._store.make_ref(session_id, tag)
         try:
             outcome = await self._backend.snapshot(
                 sandbox_id,
@@ -1350,8 +1372,14 @@ class SandboxRegistry:
             return False
 
         # ``image_id is None`` ⇒ skipped_empty with no prior tag (a session
-        # that never wrote): nothing to point at, leave the pointer NULL.
+        # that never wrote): nothing to point at, leave the pointer NULL. Avoid
+        # touching the DB in that case; release is also used by lightweight
+        # registries that deliberately run without a worker runtime.
         if outcome.image_id is not None:
+            # Observe after commit but before durable publication. The session
+            # lock serializes local producers; the CAS also protects against DB
+            # writers.
+            observed = await self._read_snapshot_pointer(session_id)
             # Edge-trigger the over-limit notice only on the crossing — read
             # the prior bytes only when we're actually over budget (rare).
             # The notice (this read + the append below) is BEST-EFFORT: the
@@ -1376,12 +1404,21 @@ class SandboxRegistry:
                     )
                     over_now = False
             try:
-                await self._write_snapshot_pointer(session_id, tag, outcome.unique_bytes)
+                # Canonical publication is synchronous and precedes the pointer:
+                # no crash can expose a ref whose durable artifact is incomplete.
+                await self._store.put(tag, ref)
+                published = await self._write_snapshot_pointer(
+                    session_id, ref, outcome.unique_bytes, observed=observed
+                )
+                if not published:
+                    await self._store.remove(ref)
+                    log.warning("sandbox.snapshot_publication_cas_lost", session_id=session_id)
+                    return False
             except Exception as err:
                 cause = f"snapshot pointer write failed: {err}"
                 self._last_snapshot_failure[sandbox_id] = cause
                 log.warning(
-                    "sandbox.snapshot_pointer_write_failed_corpse_retained",
+                    "sandbox.snapshot_publication_failed_corpse_retained",
                     session_id=session_id,
                     container_id=sandbox_id[:12],
                     error=str(err),
@@ -1559,6 +1596,8 @@ class SandboxRegistry:
         the full image size here (reporting-only; the next real commit writes
         the accurate unique figure).
         """
+        if not isinstance(self._store, LocalDaemonStore):
+            return
         tag = snapshot_tag(get_settings().instance_id, session_id)
         try:
             if not await self._store.exists(tag):
@@ -1570,6 +1609,35 @@ class SandboxRegistry:
             )
             return
         await self._write_snapshot_pointer(session_id, tag, size)
+
+    async def _migrate_legacy_snapshot(self, session_id: str, legacy_ref: str) -> str:
+        """Backfill a Docker-only pointer without ever making Docker disposable early."""
+        observed = await self._read_snapshot_pointer(session_id)
+        if observed is None or observed[0] != legacy_ref:
+            # Another worker already converged; use its exact current identity.
+            current = await self._read_snapshot_pointer(session_id)
+            if current is None or current[0] is None:
+                raise SandboxBackendError("legacy snapshot migration lost pointer ownership")
+            return current[0]
+        durable_ref = self._store.make_ref(session_id, legacy_ref)
+        try:
+            await self._store.put(legacy_ref, durable_ref)
+            # get() verifies digest and test-loads the archive before publication.
+            await self._store.get(durable_ref)
+            size = await self._store.size(durable_ref)
+            converted = await self._write_snapshot_pointer(
+                session_id, durable_ref, size, observed=observed
+            )
+            if converted:
+                return durable_ref
+            await self._store.remove(durable_ref)
+            current = await self._read_snapshot_pointer(session_id)
+            if current is None or current[0] is None:
+                raise SandboxBackendError("legacy snapshot migration did not converge")
+            return current[0]
+        except BaseException:
+            await self._store.remove(durable_ref)
+            raise
 
     async def _resolve_snapshot(self, session_id: str, spec: SandboxSpec) -> SandboxSpec:
         """Resolve the DB snapshot pointer to a runnable spec (§5.3).
@@ -1585,23 +1653,35 @@ class SandboxRegistry:
         if ref is None:
             return spec  # cold start — no pointer
 
+        # Lossless rolling migration from the old Docker-tag pointer. Publish a
+        # verified archive, test-load it, then CAS the pointer. The Docker image
+        # remains until the durable pointer is observed, so prune cannot open a
+        # gap between the two representations.
+        if isinstance(self._store, TarballStore) and self._store.is_legacy_ref(ref):
+            ref = await self._migrate_legacy_snapshot(session_id, ref)
+            spec = dataclasses.replace(spec, snapshot_image=ref)
+
         # Verified-negative existence through the store (raises on indeterminate).
         if not await self._store.exists(ref):
             # Pointer set + store verified-not-found ⇒ external mutation
             # (operator rmi, image-store loss, host replacement w/o transport).
-            await self._reset_snapshot(session_id, reason="snapshot_missing")
+            await self._reset_snapshot(session_id, reason="snapshot_missing", expected_ref=ref)
             return dataclasses.replace(spec, snapshot_image=None)
+
+        # Materialize remote/durable refs before inspection. The backend only
+        # understands runnable local tags; LocalDaemonStore remains identity.
+        local_tag = await self._store.get(ref)
 
         # Base-image drift: the snapshot's recorded base vs the currently
         # resolved env image. A mismatch means the operator deliberately
         # redefined the environment image.
-        snap_labels = await self._backend.image_labels(ref)
+        snap_labels = await self._backend.image_labels(local_tag)
         if snap_labels is None:
             # The image was removed between the existence probe and here (an
             # operator rmi racing resume). That's the snapshot-missing case, not
             # base drift — record the right reason and cold-start; nothing to
             # remove (it's already gone).
-            await self._reset_snapshot(session_id, reason="snapshot_missing")
+            await self._reset_snapshot(session_id, reason="snapshot_missing", expected_ref=ref)
             return dataclasses.replace(spec, snapshot_image=None)
         snap_base = snap_labels.get(BASE_IMAGE_LABEL_KEY)
         if snap_base != spec.image:
@@ -1611,11 +1691,12 @@ class SandboxRegistry:
             # tag and discard live post-drift work as skipped_stale. remove +
             # clear + event, in the same step.
             await self._store.remove(ref)
-            await self._reset_snapshot(session_id, reason="environment_image_changed")
+            await self._reset_snapshot(
+                session_id, reason="environment_image_changed", expected_ref=ref
+            )
             return dataclasses.replace(spec, snapshot_image=None)
 
-        # Valid resume: make the ref locally runnable (identity for v1).
-        local_tag = await self._store.get(ref)
+        # Valid resume: use the locally materialized durable snapshot.
         resumed = self._neutralize_stale_placeholder_env(
             dataclasses.replace(spec, snapshot_image=local_tag), snap_labels
         )
@@ -1623,7 +1704,9 @@ class SandboxRegistry:
             # Unlabeled snapshot whose stale placeholder keys cannot be
             # determined: cold-start rather than resume an image that may bake
             # an unexchangeable placeholder (see the method docstring).
-            await self._reset_snapshot(session_id, reason="unverifiable_placeholder_env")
+            await self._reset_snapshot(
+                session_id, reason="unverifiable_placeholder_env", expected_ref=ref
+            )
             return dataclasses.replace(spec, snapshot_image=None)
         return resumed
 
@@ -1788,34 +1871,66 @@ class SandboxRegistry:
             spec, environment={**spec.environment, **dict.fromkeys(stale, "")}
         )
 
-    async def _reset_snapshot(self, session_id: str, *, reason: str) -> None:
-        """Clear the snapshot pointer and append a model-visible reset notice."""
+    async def _reset_snapshot(
+        self, session_id: str, *, reason: str, expected_ref: str | None = None
+    ) -> None:
+        """Clear the exact pointer proved invalid and append a reset notice."""
         from aios.harness import runtime
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_clear_session_snapshot(conn, session_id)
+            cleared = True
+            if expected_ref is None:
+                await queries.unscoped_clear_session_snapshot(conn, session_id)
+            else:
+                cleared = await queries.unscoped_compare_and_clear_session_snapshot(
+                    conn, session_id, expected_ref=expected_ref
+                )
+        if not cleared:
+            return
         await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
         log.info("sandbox.fs_reset", session_id=session_id, reason=reason)
 
-    async def _write_snapshot_pointer(self, session_id: str, ref: str, unique_bytes: int) -> None:
-        """Write the DB snapshot pointer under the deployment's host id.
-
-        ``snapshot_host`` is ``settings.instance_id`` in v1 (one worker), kept
-        distinct from the deployment namespace that derives ``ref`` so a future
-        multi-host deployment never changes a session's ref on handoff (§5.11).
-        """
+    async def _write_snapshot_pointer(
+        self,
+        session_id: str,
+        ref: str,
+        unique_bytes: int,
+        *,
+        observed: tuple[str | None, object | None] | None = None,
+    ) -> bool:
+        """CAS-publish a pointer; direct mode is retained only for local GC healing."""
         from aios.harness import runtime
 
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_set_session_snapshot(
+            if observed is None:
+                await queries.unscoped_set_session_snapshot(
+                    conn,
+                    session_id,
+                    ref=ref,
+                    host=get_settings().instance_id,
+                    snapshot_bytes=unique_bytes,
+                )
+                return True
+            return await queries.unscoped_compare_and_set_session_snapshot(
                 conn,
                 session_id,
+                observed_ref=observed[0],
+                observed_updated_at=observed[1],
                 ref=ref,
                 host=get_settings().instance_id,
                 snapshot_bytes=unique_bytes,
             )
+
+    async def _read_snapshot_pointer(
+        self, session_id: str
+    ) -> tuple[str | None, object | None] | None:
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            return await queries.unscoped_get_session_snapshot_pointer(conn, session_id)
 
     async def _read_snapshot_bytes(self, session_id: str) -> int | None:
         from aios.harness import runtime
@@ -2295,10 +2410,23 @@ class SandboxRegistry:
         )
         retained = await self._gc_image_pass(verdicts, image_states, instance_id)
 
-        # Pass 3 — per-host pool budget.
+        # Separate canonical filesystem pass; it never derives truth from Docker.
+        await self._gc_canonical_store_pass(now)
+
+        # Docker cache and canonical store have independent budgets/verdicts.
+        docker_budget = settings.sandbox_docker_cache_high_watermark_bytes
         pool_pressure = await self._gc_pool_budget_pass(
-            retained, image_states, settings.sandbox_snapshot_pool_bytes, instance_id
+            retained, image_states, docker_budget, instance_id
         )
+        if isinstance(self._store, TarballStore):
+            used = self._store.used_bytes()
+            budget = settings.sandbox_canonical_store_budget_bytes
+            stat = os.statvfs(self._store._root)
+            free = stat.f_bavail * stat.f_frsize
+            effective_used = used
+            if free < settings.sandbox_canonical_store_headroom_bytes:
+                effective_used += settings.sandbox_canonical_store_headroom_bytes - free
+            pool_pressure = GcPressureResult(effective_used, budget)
 
         # Pass 3b — per-account snapshot cap (quota tiers / plan limits, §5.7).
         account_pressure = await self._gc_account_cap_pass(retained, image_states, instance_id)
@@ -2426,20 +2554,45 @@ class SandboxRegistry:
     ) -> list[GcImageVerdict]:
         """Remove every non-retained image (under per-session locks); return the retained."""
         retained: list[GcImageVerdict] = []
-        removal_count = 0
         for v in verdicts:
             if v.verdict == "retain":
-                retained.append(v)
-                continue
-            if removal_count >= _GC_IMAGE_REMOVAL_LIMIT:
-                retained.append(v)
+                # In tarball mode this image is only a runnable Docker cache.
+                # Reclaim it once DB truth names a verified durable generation;
+                # never clear/convert that durable pointer as a side effect.
+                sid = v.session_id
+                state = states.get(sid) if sid is not None else None
+                durable_cache = (
+                    isinstance(self._store, TarballStore)
+                    and v.is_canonical
+                    and state is not None
+                    and state.snapshot_ref is not None
+                    and not self._store.is_legacy_ref(state.snapshot_ref)
+                )
+                if not durable_cache or sid is None:
+                    retained.append(v)
+                    continue
+                async with self._lock_for(sid):
+                    if self._handles.get(sid) is not None:
+                        retained.append(v)
+                        continue
+                    fresh = await self._fresh_session_state(sid)
+                    durable_exists = False
+                    if (
+                        fresh is not None
+                        and fresh.snapshot_ref is not None
+                        and state is not None
+                        and fresh.snapshot_ref == state.snapshot_ref
+                    ):
+                        is_legacy = getattr(self._store, "is_legacy_ref", None)
+                        if not (is_legacy and is_legacy(fresh.snapshot_ref)):
+                            durable_exists = await self._store.exists(fresh.snapshot_ref)
+                    if not durable_exists or not await self._backend.remove_image(v.removal_ref):
+                        retained.append(v)
                 continue
             sid = v.session_id
             if sid is None:
                 # Residue with no session label — remove directly.
-                removal_count += 1
-                if not await self._backend.remove_image(v.removal_ref):
-                    retained.append(v)
+                await self._backend.remove_image(v.removal_ref)
                 continue
             async with self._lock_for(sid):
                 # Re-check under the lock: a waking session may now hold a
@@ -2475,26 +2628,77 @@ class SandboxRegistry:
                     # Publication raced the scan: it is current now, not residue.
                     retained.append(v)
                     continue
-                removal_count += 1
-                removed = await self._backend.remove_image(v.removal_ref)
+                if v.is_canonical:
+                    removed = await self._remove_canonical_image_and_clear_pointer(
+                        v, instance_id, states
+                    )
+                else:
+                    removed = await self._backend.remove_image(v.removal_ref)
                 if not removed:
-                    # Refused (a child still references it) — retain this tick.
+                    # Refused, or the DB-locked lifecycle recheck no longer
+                    # permits removal — retain this tick.
                     retained.append(v)
                     continue
                 if v.reason == "archived":
+                    try:
+                        await self._append_fs_event(
+                            sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
+                        )
+                    except NotFoundError:
+                        # Archived sessions deliberately reject event writes. The
+                        # image is already gone, so this courtesy notice must not
+                        # abort the remaining bounded GC pass.
+                        log.info("sandbox.gc_archived_fs_event_skipped", session_id=sid)
+        return retained
+
+    async def _gc_canonical_store_pass(self, now: datetime) -> int:
+        """Filesystem-store GC, deliberately independent from Docker cache GC."""
+        if not isinstance(self._store, TarballStore):
+            return 0
+        grace = get_settings().sandbox_archive_gc_grace_seconds
+        removed = 0
+        for ref, mtime in self._store.artifacts():
+            if now.timestamp() - mtime < grace:
+                continue
+            sid = ref.split("/", 1)[0]
+            async with self._lock_for(sid):
+                # A process lock is insufficient with multiple workers. Hold the
+                # session row lock across lifecycle recheck, artifact deletion,
+                # and pointer CAS so publish/unarchive cannot interleave.
+                from aios.harness import runtime
+
+                pool = runtime.require_pool()
+                expired_current = False
+                async with pool.acquire() as conn, conn.transaction():
+                    row = await queries.unscoped_lock_session_snapshot_state(conn, sid)
+                    current = row is not None and row["snapshot_ref"] == ref
+                    if row is not None and current:
+                        fresh = SessionSnapshotState(
+                            row["id"],
+                            row["account_id"],
+                            row["archived_at"],
+                            row["last_event_at"],
+                            row["snapshot_ref"],
+                            row["snapshot_host"],
+                            row["snapshot_bytes"],
+                        )
+                        if not _archive_eligible(fresh, now, grace):
+                            continue
+                    if await self._store.remove(  # pooled-connection-await: allow eumemic/aios#2100
+                        ref
+                    ):
+                        removed += 1
+                        if current:
+                            expired_current = (
+                                await queries.unscoped_compare_and_clear_session_snapshot(
+                                    conn, sid, expected_ref=ref
+                                )
+                            )
+                if expired_current:
                     await self._append_fs_event(
                         sid, SANDBOX_FS_EXPIRED_EVENT, {"reason": "archived"}
                     )
-                if v.is_canonical:
-                    await self._clear_pointer_if_owned(sid, v.removal_ref, instance_id, states)
-        if removal_count:
-            log.info(
-                "sandbox.gc_image_removal_progress",
-                attempted=removal_count,
-                limit=_GC_IMAGE_REMOVAL_LIMIT,
-                remaining=sum(v.verdict == "remove" for v in retained),
-            )
-        return retained
+        return removed
 
     async def _gc_pool_budget_pass(
         self,
@@ -2571,6 +2775,12 @@ class SandboxRegistry:
         don't mutate it) with a tick-start NULL/stale pointer, so without this
         skip the heal would write a pointer to an image that no longer exists.
         """
+        # This pass enumerates Docker images and therefore has authority only
+        # when Docker itself is the canonical store.  In TarballStore mode an
+        # image is disposable cache: rewriting a durable ref to its local tag
+        # would make an external ``docker image prune -af`` destructive.
+        if not isinstance(self._store, LocalDaemonStore):
+            return
         skip = already_evicted or set()
         base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
         for v in retained:
@@ -2609,27 +2819,49 @@ class SandboxRegistry:
                 base_sizes[base_ref] = 0  # over-count is safe; never under-report
         return max(0, image.size_bytes - base_sizes[base_ref])
 
-    async def _clear_pointer_if_owned(
+    async def _remove_canonical_image_and_clear_pointer(
         self,
-        session_id: str,
-        removed_ref: str,
+        verdict: GcImageVerdict,
         instance_id: str,
         states: dict[str, SessionSnapshotState],
-    ) -> None:
-        """Clear a session's pointer when removing its canonical artifact.
+    ) -> bool:
+        """Remove a Docker-native canonical image and clear only its pointer.
 
-        Ownership-gated: skip when the pointer is owned by another host (a
-        local cache of a peer's artifact, never the canonical copy). A deleted
-        session (absent from ``states``) is cleared unconditionally — the
-        ``UPDATE`` is a harmless no-op against the vanished row.
+        The database row lock spans the final lifecycle check, Docker removal,
+        and exact-ref CAS.  It is intentionally held across the daemon call:
+        this is the conservative ordering that prevents another worker from
+        publishing a replacement between removal and pointer clearing.
         """
-        st = states.get(session_id)
-        if st is not None and st.snapshot_host not in (None, instance_id):
-            return
+        session_id = verdict.session_id
+        assert session_id is not None
         from aios.harness import runtime
 
         pool = runtime.require_pool()
-        async with pool.acquire() as conn:
-            await queries.unscoped_clear_session_snapshot_if_matches(
-                conn, session_id, ref=removed_ref, host=instance_id
+        async with pool.acquire() as conn, conn.transaction():
+            row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
+            if verdict.reason == "archived":
+                candidate = states.get(session_id)
+                if (
+                    row is None
+                    or candidate is None
+                    or row["archived_at"] != candidate.archived_at
+                    or row["archived_at"] is None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                ):
+                    return False
+            elif (
+                verdict.reason == "residue"
+                and row is not None
+                and row["snapshot_ref"] in (verdict.removal_ref, *verdict.image.repo_tags)
+            ):
+                return False
+
+            if not await self._backend.remove_image(  # pooled-connection-await: allow — eumemic/aios#919
+                verdict.removal_ref
+            ):
+                return False
+            await queries.unscoped_compare_and_clear_session_snapshot(
+                conn, session_id, expected_ref=verdict.removal_ref
             )
+            return True

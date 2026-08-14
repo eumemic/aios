@@ -37,6 +37,7 @@ BuiltinToolType = Literal[
     "wake_session",
     "wake_self",
     "list_related_sessions",
+    "list_vault_credentials",
     "http_request",
     "trigger_create",
     "trigger_remove",

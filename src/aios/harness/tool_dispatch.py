@@ -480,7 +480,7 @@ def launch_tool_calls(
     tool_calls: list[dict[str, Any]],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch each tool call as an asyncio task. Returns immediately.
 
@@ -543,7 +543,7 @@ async def _execute_tool_async(
     call: dict[str, Any],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one built-in tool call via the shared invoke core, then
     append the tool-role result event.
@@ -717,7 +717,7 @@ async def _append_tool_result_event(
     event_data: dict[str, Any],
     *,
     account_id: str,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
 ) -> None:
     """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
 
@@ -951,9 +951,10 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
 
@@ -977,6 +978,7 @@ def launch_mcp_tool_calls(
             session_id,
             call,
             mcp_server_map,
+            mcp_tools=mcp_tools,
             focal_channel=focal_channel,
             account_id=account_id,
             parent_focal_at_arrival=parent_focal_at_arrival,
@@ -1016,15 +1018,29 @@ def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
     return parts[1], parts[2]
 
 
+def _mcp_input_schema(
+    qualified_name: str, tools: list[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    """Return the exact MCP parameters schema advertised for this inference."""
+    for tool in tools or []:
+        function = tool.get("function") or {}
+        if function.get("name") != qualified_name:
+            continue
+        parameters = function.get("parameters")
+        return parameters if isinstance(parameters, dict) else None
+    return None
+
+
 async def _execute_mcp_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,
     call: dict[str, Any],
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result.
 
@@ -1047,6 +1063,7 @@ async def _execute_mcp_tool_async(
             session_id,
             tc,
             mcp_server_map,
+            mcp_tools=mcp_tools,
             account_id=account_id,
             focal_channel=focal_channel,
             parent_focal_at_arrival=parent_focal_at_arrival,
@@ -1059,9 +1076,10 @@ async def _execute_mcp_tool_admitted(
     tc: _ToolCall,
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]] | None,
     account_id: str,
     focal_channel: str | None,
-    parent_focal_at_arrival: str | None | EllipsisType,
+    parent_focal_at_arrival: str | EllipsisType | None,
 ) -> None:
     """The body of one MCP dispatch, inside ``_tool_lifecycle``.
 
@@ -1119,11 +1137,20 @@ async def _execute_mcp_tool_admitted(
         )
         result = suppression_service.mcp_synthesized_result()
     else:
-        from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
+        from aios.mcp.client import (
+            call_mcp_tool,
+            resolve_auth_for_target_url,
+            validate_mcp_arguments,
+        )
         from aios.services.outbound_tool_quota import (
             mark_outbound_dispatch_completed,
             reserve_outbound_tool_quota,
         )
+
+        input_schema = _mcp_input_schema(tc.name, mcp_tools)
+        schema_error = validate_mcp_arguments(tool_name, arguments, input_schema)
+        if schema_error is not None:
+            raise ToolBail(schema_error)
 
         crypto_box = runtime.require_crypto_box()
         vault_id, headers = await resolve_auth_for_target_url(
@@ -1138,7 +1165,14 @@ async def _execute_mcp_tool_admitted(
         if admission.refusal is not None:
             raise ToolBail(admission.refusal)
         result = await call_mcp_tool(
-            url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
+            url,
+            vault_id,
+            headers,
+            tool_name,
+            arguments,
+            input_schema=input_schema,
+            meta=meta,
+            spec_headers=spec.headers,
         )
         if admission.reservation_id is not None:
             await mark_outbound_dispatch_completed(pool, admission.reservation_id)

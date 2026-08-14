@@ -100,6 +100,51 @@ class TestDiscoverSessionMcpTools:
         names = {t["name"] for t in tools}
         assert names == {"mcp__gh__t"}
 
+    async def test_disabled_and_undiscovered_server_tools_stay_absent(self) -> None:
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="ready", url="https://mcp.ready"),
+                McpServerSpec(name="disabled", url="https://mcp.disabled"),
+                McpServerSpec(name="unavailable", url="https://mcp.unavailable"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="ready"),
+                ToolSpec(type="mcp_toolset", enabled=False, mcp_server_name="disabled"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="unavailable"),
+            ],
+        )
+        attempted: list[str] = []
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            attempted.append(name)
+            if name == "unavailable":
+                raise ConnectionError("discovery failed")
+            return [{"name": f"mcp__{name}__tool"}], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = (None, {})
+            tools, instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+
+        assert attempted == ["ready", "unavailable"]
+        assert tools == [{"name": "mcp__ready__tool"}]
+        assert instructions == {}
+
     async def test_auth_resolved_per_url(self) -> None:
         """Each URL resolves auth independently — goes through
         resolve_auth_for_target_url once per server, not once per batch.
