@@ -34,6 +34,18 @@ async def work(pool):
     )
 
 
+def test_allows_database_stats_helpers_receiving_the_held_connection() -> None:
+    assert not _messages(
+        """
+async def work(pool, tables):
+    async with pool.acquire() as conn, conn.transaction(readonly=True):
+        await db_stats_queries.database_size(conn)
+        await db_stats_queries.table_storage_stats(conn)
+        await db_stats_queries.monthly_buckets(conn, tables)
+"""
+    )
+
+
 def test_passing_conn_to_arbitrary_call_is_not_db_io() -> None:
     # Reviewer's bypass: classification must be by called object, not arguments.
     assert _messages(
