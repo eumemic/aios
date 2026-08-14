@@ -212,9 +212,22 @@ async def _enforce_output_schema(
 ) -> tuple[Any, str | None]:
     """Validate and, when safe, coerce ``value`` against the requested schema.
 
-    A top-level JSON string is accepted as its parsed value only when that value
-    validates against the schema. The returned pair is the value to persist and
-    an optional model-facing validation error.
+    A top-level JSON string is accepted as its parsed value only when the string
+    does NOT already conform AND the parsed value does. The returned pair is the
+    value to persist and an optional model-facing validation error — acceptance
+    and transformation stay together, so whatever this gate validated is exactly
+    what ``return_handler`` hands to :func:`_finish` (and thus to the awaiting
+    caller); a coercion that were accepted here but not propagated would report a
+    satisfied contract while the consumer got the wrong type.
+
+    The already-conforming check is load-bearing, not an optimization. Coercion
+    is a REPAIR of a value the schema would otherwise reject, never an
+    unconditional ``json.loads`` of every string: under a ``{"type": "string"}``
+    request the conforming value ``'"hello"'`` parses to ``'hello'`` — also
+    conforming — so parsing first would silently rewrite the caller's answer. The
+    same holds for any permissive schema (``{}`` accepts every string, so every
+    JSON-looking string would be mangled). Validate first; only a failing value is
+    a candidate for repair.
     """
     if not isinstance(request_id, str):
         return value, None
@@ -222,13 +235,14 @@ async def _enforce_output_schema(
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
     if schema is None:
         return value, None
-    if isinstance(value, str):
+    validator = jsonschema.Draft202012Validator(schema)
+    if isinstance(value, str) and not validator.is_valid(value):
         try:
             parsed = json.loads(value)
         except (json.JSONDecodeError, ValueError):
             pass
         else:
-            if jsonschema.Draft202012Validator(schema).is_valid(parsed):
+            if validator.is_valid(parsed):
                 log.info("return_value_stringified_json_coerced", site="workflow_completion.return")
                 value = parsed
     return value, _validate_value(value, schema)
