@@ -567,8 +567,7 @@ def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
     # onerror, which we escalate rather than swallow.
     def _fail(exc: OSError) -> None:
         raise RuntimeError(
-            f"cannot enumerate {getattr(exc, 'filename', '?')} while discovering "
-            f"exemptions: {exc}"
+            f"cannot enumerate {getattr(exc, 'filename', '?')} while discovering exemptions: {exc}"
         ) from exc
 
     discovered: list[Path] = []

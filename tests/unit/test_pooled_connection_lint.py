@@ -4,7 +4,6 @@ import ast
 from pathlib import Path
 
 import pytest
-
 from scripts.pooled_connection_lint import check_source
 
 
@@ -232,9 +231,8 @@ def test_enumeration_refuses_to_report_clean_when_it_cannot_look(
         "        return await conn.fetch('x')  # pooled-connection-await: allow eumemic/aios#1\n",
         encoding="utf-8",
     )
-    real_walk = os.walk
 
-    def exploding_walk(top, **kwargs):  # type: ignore[no-untyped-def]
+    def exploding_walk(top, **kwargs):
         onerror = kwargs.get("onerror")
         if onerror is not None:
             onerror(OSError(13, "Permission denied", str(src / "locked")))
@@ -266,7 +264,7 @@ def test_unreadable_file_raises_rather_than_reporting_no_markers(
 
     real_read_text = _Path.read_text
 
-    def boom(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    def boom(self, *args, **kwargs):
         if self.name == "unreadable.py":
             raise OSError(13, "Permission denied")
         return real_read_text(self, *args, **kwargs)
