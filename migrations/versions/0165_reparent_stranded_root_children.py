@@ -28,7 +28,7 @@ Safety properties:
   could previously resolve; the migration asserts this from the live tree
   rather than trusting the argument.
 
-Revision ID: 0160
+Revision ID: 0165
 Revises: 0159
 """
 
@@ -40,12 +40,12 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0160"
+revision: str = "0165"
 down_revision: str = "0159"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-logger = logging.getLogger("alembic.migration.0160")
+logger = logging.getLogger("alembic.migration.0165")
 
 _CHILD_NAME = "Eumemic"
 # 0154 tags the account it creates with this revoked bootstrap key.  Matching
@@ -127,7 +127,7 @@ def _assert_no_name_collisions(root: str, child: str) -> None:
     )
     if conflicts:
         raise RuntimeError(
-            "migration 0160 cannot reparent: display-name collision under "
+            "migration 0165 cannot reparent: display-name collision under "
             f"{child} for: " + ", ".join(conflicts) + " -- rename the conflicting "
             "account(s) and re-run"
         )
@@ -135,7 +135,7 @@ def _assert_no_name_collisions(root: str, child: str) -> None:
 
 def _snapshot_resolution() -> None:
     op.get_bind().execute(
-        sa.text("CREATE TEMP TABLE migration_0160_resolved ON COMMIT DROP AS " + _RESOLVED_ACCOUNTS)
+        sa.text("CREATE TEMP TABLE migration_0165_resolved ON COMMIT DROP AS " + _RESOLVED_ACCOUNTS)
     )
 
 
@@ -147,7 +147,7 @@ def _assert_resolution_not_regressed() -> None:
             sa.text(
                 "WITH resolved AS (" + _RESOLVED_ACCOUNTS + ") "
                 "SELECT snapshot.account_id "
-                "FROM migration_0160_resolved snapshot "
+                "FROM migration_0165_resolved snapshot "
                 "LEFT JOIN resolved USING (account_id) "
                 "WHERE resolved.account_id IS NULL "
                 "ORDER BY snapshot.account_id"
@@ -158,7 +158,7 @@ def _assert_resolution_not_regressed() -> None:
     )
     if stranded:
         raise RuntimeError(
-            "migration 0160 would strand provider resolution for accounts: " + ", ".join(stranded)
+            "migration 0165 would strand provider resolution for accounts: " + ", ".join(stranded)
         )
 
 
@@ -186,20 +186,20 @@ def upgrade() -> None:
     _assert_resolution_not_regressed()
     if moved:
         logger.warning(
-            "migration 0160 reparented %d account(s) stranded under the platform root "
+            "migration 0165 reparented %d account(s) stranded under the platform root "
             "by migration 0154 beneath %s: %s",
             len(moved),
             child,
             ", ".join(sorted(moved)),
         )
     else:
-        logger.info("migration 0160: no accounts stranded under the platform root; no-op")
+        logger.info("migration 0165: no accounts stranded under the platform root; no-op")
 
 
 def downgrade() -> None:
     """Intentionally a no-op.
 
-    0160 corrects data that 0154 should have written; it does not own a
+    0165 corrects data that 0154 should have written; it does not own a
     schema change to reverse.  The set of accounts it moved is not recoverable
     after the fact (accounts legitimately minted under Eumemic since the
     cutover are indistinguishable from reparented ones), so blindly moving

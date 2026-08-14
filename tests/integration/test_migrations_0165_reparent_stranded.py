@@ -1,20 +1,20 @@
-"""Migration 0160 repairs databases that 0154 already stranded.
+"""Migration 0165 repairs databases that 0154 already stranded.
 
 0154 ran in production on 2026-07-31 and alembic will never re-run it, so
 correcting 0154 in place only helps *fresh* databases.  These checks exercise
 the case that matters: a database migrated by the **original** 0154 (the
-pre-fix text, reconstructed here) still carries the defect, and 0160 corrects
+pre-fix text, reconstructed here) still carries the defect, and 0165 corrects
 it.
 
 The four properties, each derived from the live account tree rather than from
 a fixture list:
 
 * **red/green** -- pre-existing root children are stranded after the original
-  0154, and resolve again after 0160;
-* **idempotence** -- a second 0160 run moves nothing and changes nothing;
+  0154, and resolve again after 0165;
+* **idempotence** -- a second 0165 run moves nothing and changes nothing;
 * **positive control** -- a database that never had the defect (fresh DB
-  migrated by the corrected 0154) is left byte-identical by 0160;
-* **guard** -- 0160 declines to touch an account tree with no
+  migrated by the corrected 0154) is left byte-identical by 0165;
+* **guard** -- 0165 declines to touch an account tree with no
   migration-owned Eumemic child.
 """
 
@@ -189,7 +189,7 @@ async def _account_tree(db_url: str) -> list[tuple[str, str | None, str]]:
 
 
 @needs_docker
-def test_0160_repairs_a_database_the_original_0154_stranded(postgres: Any) -> None:
+def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> None:
     """RED then GREEN on the state production is actually in."""
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)
@@ -199,7 +199,7 @@ def test_0160_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
     before = asyncio.run(_resolving_accounts(db_url))
     assert {"acc_tenantA", "acc_tenantB", "acc_grandchild"} <= before
 
-    # Apply the migration production actually ran, then stop short of 0160.
+    # Apply the migration production actually ran, then stop short of 0165.
     with _PreFix0154():
         result = _run_alembic(["upgrade", "0159"], db_url, key)
         assert result.returncode == 0, result.stderr
@@ -212,11 +212,11 @@ def test_0160_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
     )
 
     # GREEN: the forward migration restores them.
-    result = _run_alembic(["upgrade", "0160"], db_url, key)
+    result = _run_alembic(["upgrade", "0165"], db_url, key)
     assert result.returncode == 0, result.stderr
     repaired = asyncio.run(_resolving_accounts(db_url))
     assert before - {"acc_root"} <= repaired, (
-        f"0160 failed to restore resolution; missing: {sorted(before - repaired - {'acc_root'})}"
+        f"0165 failed to restore resolution; missing: {sorted(before - repaired - {'acc_root'})}"
     )
 
     async def _check_topology() -> None:
@@ -249,7 +249,7 @@ def test_0160_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
 
 
 @needs_docker
-def test_0160_is_idempotent(postgres: Any) -> None:
+def test_0165_is_idempotent(postgres: Any) -> None:
     """Re-running the forward migration changes nothing."""
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)
@@ -258,14 +258,14 @@ def test_0160_is_idempotent(postgres: Any) -> None:
     asyncio.run(_seed(db_url, key))
     with _PreFix0154():
         assert _run_alembic(["upgrade", "0159"], db_url, key).returncode == 0
-    assert _run_alembic(["upgrade", "0160"], db_url, key).returncode == 0
+    assert _run_alembic(["upgrade", "0165"], db_url, key).returncode == 0
 
     tree_once = asyncio.run(_account_tree(db_url))
     resolved_once = asyncio.run(_resolving_accounts(db_url))
 
     # Re-run the same forward migration against the already-repaired database.
     assert _run_alembic(["downgrade", "0159"], db_url, key).returncode == 0
-    result = _run_alembic(["upgrade", "0160"], db_url, key)
+    result = _run_alembic(["upgrade", "0165"], db_url, key)
     assert result.returncode == 0, result.stderr
 
     assert asyncio.run(_account_tree(db_url)) == tree_once
@@ -273,20 +273,20 @@ def test_0160_is_idempotent(postgres: Any) -> None:
 
 
 @needs_docker
-def test_0160_leaves_a_never_defective_database_untouched(postgres: Any) -> None:
+def test_0165_leaves_a_never_defective_database_untouched(postgres: Any) -> None:
     """Positive control: a fresh DB migrated by the corrected 0154."""
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)
 
     assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
     asyncio.run(_seed(db_url, key))
-    # The corrected 0154 (working tree) already reparents; stop before 0160.
+    # The corrected 0154 (working tree) already reparents; stop before 0165.
     assert _run_alembic(["upgrade", "0159"], db_url, key).returncode == 0
 
     tree_before = asyncio.run(_account_tree(db_url))
     resolved_before = asyncio.run(_resolving_accounts(db_url))
 
-    result = _run_alembic(["upgrade", "0160"], db_url, key)
+    result = _run_alembic(["upgrade", "0165"], db_url, key)
     assert result.returncode == 0, result.stderr
 
     assert asyncio.run(_account_tree(db_url)) == tree_before
@@ -294,7 +294,7 @@ def test_0160_leaves_a_never_defective_database_untouched(postgres: Any) -> None
 
 
 @needs_docker
-def test_0160_noops_without_a_migration_owned_eumemic_child(postgres: Any) -> None:
+def test_0165_noops_without_a_migration_owned_eumemic_child(postgres: Any) -> None:
     """An operator-created account merely named Eumemic is not the marker."""
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)
@@ -319,7 +319,7 @@ def test_0160_noops_without_a_migration_owned_eumemic_child(postgres: Any) -> No
     asyncio.run(_seed_lookalike())
     tree_before = asyncio.run(_account_tree(db_url))
 
-    result = _run_alembic(["upgrade", "0160"], db_url, key)
+    result = _run_alembic(["upgrade", "0165"], db_url, key)
     assert result.returncode == 0, result.stderr
     assert asyncio.run(_account_tree(db_url)) == tree_before
 
