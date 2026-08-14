@@ -40,6 +40,9 @@ def _expression_name(node: ast.AST) -> str | None:
 _DB_HELPER_SYMBOLS = frozenset(
     {
         "_queries.list_session_memory_store_echoes",
+        "db_stats_queries.database_size",
+        "db_stats_queries.monthly_buckets",
+        "db_stats_queries.table_storage_stats",
         "queries.acquire_account_triggers_lock",
         "queries.acquire_session_resources_lock",
         "queries.acquire_workspace_advisory_xact_lock",
