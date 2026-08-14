@@ -35,7 +35,7 @@ async def test_monthly_buckets_casts_identifier_parameter_for_postgres() -> None
         dead_tuple_estimate=0,
     )
 
-    await db_stats.monthly_buckets(conn, [table])  # type: ignore[arg-type]
+    await db_stats.monthly_buckets(conn, [table])
 
     format_calls = [call for call in conn.calls if call[0].startswith("SELECT format")]
     assert format_calls == [("SELECT format('%I.%I', 'public', $1::text)", ("accounts",))]
