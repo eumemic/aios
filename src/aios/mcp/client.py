@@ -24,9 +24,13 @@ from typing import Any, assert_never
 
 import asyncpg
 import httpx
+import jsonschema
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import InitializeResult
+from referencing import Registry, Resource
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox, EncryptedBlob
@@ -48,6 +52,104 @@ from aios.services.vaults import is_expiring, refresh_credential
 # the same precedent as ``pinned_transport``/``secret_egress_proxy``.
 
 log = get_logger("aios.mcp.client")
+
+# A fresh referencing registry has no retriever: any non-local URI raises
+# NoSuchResource instead of performing jsonschema's legacy remote retrieval.
+_NO_REMOTE_SCHEMA_REGISTRY: Registry[Any] = Registry()
+
+
+def _check_local_schema_references(resource: Resource[Any], resolver: Any) -> None:
+    """Reject references that the schema's self-contained resource tree cannot resolve."""
+    contents = resource.contents
+    if isinstance(contents, dict):
+        for keyword in ("$ref", "$dynamicRef", "$recursiveRef"):
+            reference = contents.get(keyword)
+            if isinstance(reference, str):
+                resolver.lookup(reference)
+    for subresource in resource.subresources():
+        _check_local_schema_references(subresource, resolver.in_subresource(subresource))
+
+
+def _format_argument_validation_error(
+    tool_name: str,
+    arguments: dict[str, Any],
+    errors: list[jsonschema.ValidationError],
+) -> str:
+    """Render JSON Schema failures with model-actionable property paths."""
+    lines = [
+        f"Arguments for MCP tool {tool_name!r} failed schema validation. "
+        f"You sent: {json.dumps(arguments)}",
+        "Errors:",
+    ]
+    for error in errors:
+        base_path = [str(part) for part in error.absolute_path]
+        if (
+            error.validator == "required"
+            and isinstance(error.instance, dict)
+            and isinstance(error.validator_value, list)
+        ):
+            missing = [str(name) for name in error.validator_value if name not in error.instance]
+            for name in missing:
+                path = ".".join([*base_path, name])
+                lines.append(f"  - at {path}: {name!r} is required")
+            continue
+        path = ".".join(base_path) or "<root>"
+        lines.append(f"  - at {path}: {error.message}")
+    lines.append("Review the tool's parameters schema and retry with valid arguments.")
+    return "\n".join(lines)
+
+
+def validate_mcp_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+    input_schema: dict[str, Any] | None,
+) -> str | None:
+    """Validate one MCP call, falling back only for an unusable third-party schema."""
+    if input_schema is None:
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason="input schema unavailable",
+        )
+        return None
+    try:
+        jsonschema.Draft202012Validator.check_schema(input_schema)
+        root = DRAFT202012.create_resource(input_schema)
+        _check_local_schema_references(
+            root,
+            _NO_REMOTE_SCHEMA_REGISTRY.resolver_with_root(root),
+        )
+    except (jsonschema.SchemaError, Unresolvable) as exc:
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason=str(exc),
+        )
+        return None
+    validator = jsonschema.Draft202012Validator(
+        input_schema,
+        registry=_NO_REMOTE_SCHEMA_REGISTRY,
+    )
+    try:
+        errors = sorted(
+            validator.iter_errors(arguments), key=lambda error: list(error.absolute_path)
+        )
+    except Unresolvable as exc:
+        # Dynamic references may only become reachable while walking the
+        # instance. The registry still refuses retrieval; keep the additive
+        # advertised-only fallback for this unusable schema.
+        log.warning(
+            "mcp.schema_validation_skipped",
+            tool_name=tool_name,
+            schema_validate=False,
+            reason=str(exc),
+        )
+        return None
+    if not errors:
+        return None
+    return _format_argument_validation_error(tool_name, arguments, errors)
 
 
 class _McpHttpError(Exception):
@@ -527,6 +629,7 @@ async def call_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
     *,
+    input_schema: dict[str, Any] | None = None,
     meta: dict[str, Any] | None = None,
     spec_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -543,6 +646,10 @@ async def call_mcp_tool(
     contribute to the pool key.  Returns a result dict with either
     ``content`` (success) or ``error`` (failure).
     """
+    schema_error = validate_mcp_arguments(tool_name, arguments, input_schema)
+    if schema_error is not None:
+        return {"error": schema_error, "code": "tool_error"}
+
     try:
         from aios.harness import runtime
         from aios.tools.url_safety import is_cleartext_credential_target  # lazy — see module note
