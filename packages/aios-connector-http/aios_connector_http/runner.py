@@ -643,7 +643,7 @@ class HttpConnector:
         HUMAN SENDER is deliberately NOT done here — an auto-reply to an
         unapproved stranger is an outbound side effect with its own
         abuse/spam-amplification and per-platform-consent questions, and is
-        tracked separately (see eumemic/aios#2145).
+        tracked separately (see eumemic/aios#2147).
         """
         return None
 
