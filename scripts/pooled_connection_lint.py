@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -552,7 +553,31 @@ def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
     again.
     """
     out: list[tuple[str, int, int]] = []
-    for path in sorted(Path(root).rglob("*.py")):
+    root_path = Path(root)
+    if not root_path.is_dir():
+        # A root that is not a directory yields zero markers from rglob -- silently,
+        # and indistinguishably from "this tree has no exemptions".
+        raise RuntimeError(f"exemption root {root!r} is not a directory")
+
+    # Walk EXPLICITLY rather than with Path.rglob: rglob SUPPRESSES OSErrors raised
+    # while scanning directories, so an unreadable subtree simply does not appear in
+    # its results. That makes partial discovery failure indistinguishable from "that
+    # subtree has no exemptions" -- the exact class this function exists to kill
+    # (aios#2138), one level below the per-file read. os.walk surfaces the error via
+    # onerror, which we escalate rather than swallow.
+    def _fail(exc: OSError) -> None:
+        raise RuntimeError(
+            f"cannot enumerate {getattr(exc, 'filename', '?')} while discovering "
+            f"exemptions: {exc}"
+        ) from exc
+
+    discovered: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(root_path, onerror=_fail):
+        for name in filenames:
+            if name.endswith(".py"):
+                discovered.append(Path(dirpath) / name)
+
+    for path in sorted(discovered):
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError as exc:
