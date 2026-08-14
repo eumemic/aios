@@ -238,7 +238,7 @@ async def insert_vault_credential(
     allowed_hosts: list[str] | None,
     auth_type: AuthType,
     blob: EncryptedBlob,
-    metadata: dict[str, Any],
+    metadata: dict[str, Any] | None,
 ) -> VaultCredential:
     new_id = make_id(VAULT_CREDENTIAL)
     metadata_json = json.dumps(metadata)
