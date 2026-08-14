@@ -619,9 +619,28 @@ def render_user_event(
     ``orig_channel``, ``focal_channel_at_arrival``, ``created_at``, and
     the optional vision policy inputs ``model`` / ``session_id``.
     ``build_messages`` threads vision policy through; the append-time
-    token counter in ``queries.append_event`` does not (and pays a small
-    under-count per inlined image, absorbed by ``model_token_class_ratios``
-    calibration).
+    token counter in ``queries.append_event`` does not.
+
+    .. warning::
+
+       This docstring previously claimed the per-image under-count was
+       "small" and "absorbed by ``model_token_class_ratios`` calibration".
+       **Both halves were false**, and the claim predates the bug that
+       falsified it (written 2026-07-12; aios#2050 filed 2026-07-27).
+
+       Measured 2026-08-14: ``litellm.token_counter`` returns a CONSTANT
+       ~90 tokens for an ``image_url`` data-URI part **regardless of size**
+       -- 90 against a true 1,919,159 for a 2 MB image, a 21,324x
+       under-count that grows without bound. And calibration cannot reach
+       it, for the reason ``tokens.py`` already states: the scaling layer
+       corrects a RATIO, so **no coefficient multiplied by zero reaches a
+       positive number**. An uncounted term is invisible to calibration
+       forever.
+
+       The fix is explicit image-mass tracking (aios#2073), not a better
+       ratio. This note stays until that lands, because the original
+       sentence read as a considered design decision and misled a reader
+       into concluding the bug was already handled.
 
     Every user message carries a ``received`` envelope field (the absolute
     receipt timestamp, from the immutable ``created_at``; see
