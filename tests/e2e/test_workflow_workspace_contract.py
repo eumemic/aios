@@ -44,9 +44,14 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
 ) -> None:
     """Exercise run creation -> agent() -> session provision, not hand-built mounts."""
     launcher = await docker_harness.start("workspace contract launcher")
+    # `first`/`second` pass workspace="shared" EXPLICITLY: this test asserts sharing
+    # BEHAVIOUR, not what the default happens to be. The default's value is pinned by
+    # its own test (tests/integration/test_wf_host.py::
+    # test_generic_agent_spec_includes_default_workspace), so a deliberate change to
+    # the default fails that one obvious test instead of silently reddening this one.
     script = f"""async def main(input):
-    first = await agent("first", agent_id={launcher.agent_id!r})
-    second = await agent("second", agent_id={launcher.agent_id!r})
+    first = await agent("first", agent_id={launcher.agent_id!r}, workspace="shared")
+    second = await agent("second", agent_id={launcher.agent_id!r}, workspace="shared")
     isolated = await agent("fresh", agent_id={launcher.agent_id!r}, workspace="fresh")
     return [first, second, isolated]
 """
