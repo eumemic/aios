@@ -773,6 +773,8 @@ def _event_token_delta(
     data: dict[str, Any],
     orig_channel: str | None,
     focal_at_arrival: str | None,
+    *,
+    image_aware: bool = True,
 ) -> int:
     """Approximate per-event token contribution, computed pre-transaction.
 
@@ -801,8 +803,8 @@ def _event_token_delta(
         # bounded drift the in-lock code accepted (see ``append_event``).
         rendered = render_user_event(data, orig_channel, focal_at_arrival, datetime.now(UTC))
         separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
-        return approx_tokens([rendered, separator])
-    return approx_tokens([data])
+        return approx_tokens([rendered, separator], image_aware=image_aware)
+    return approx_tokens([data], image_aware=image_aware)
 
 
 async def find_tool_result_event(
@@ -1168,6 +1170,26 @@ class _PrecomputedAppend(NamedTuple):
 
     token_delta: int
     resolved_tool_channel: str | None
+    # The SAME event priced under the v1 (image-blind) baseline.  The two
+    # baselines differ only for messages carrying an ``image_url`` part, so
+    # this is the identical object for every other event and costs nothing
+    # extra to carry.  ``append_event`` selects between them using the
+    # session's ``token_baseline_v`` read under the row lock — the delta and
+    # the recorded marker therefore ALWAYS describe the same arithmetic, even
+    # if the backfill flips the marker between this pre-lock compute and the
+    # lock (issue #2050 review).
+    token_delta_v1: int = 0
+
+
+def message_has_image(data: dict[str, Any]) -> bool:
+    """Lazy re-export of :func:`aios.harness.tokens.message_has_image`.
+
+    Imported inside the function body to preserve the litellm-bootstrap
+    deferral the surrounding module relies on.
+    """
+    from aios.harness.tokens import message_has_image as _has
+
+    return _has(data)
 
 
 async def precompute_event_append(
@@ -1202,6 +1224,7 @@ async def precompute_event_append(
     from aios.db.queries import sessions as _sessions_q
 
     delta = 0
+    delta_v1 = 0
     if kind == "message":
         if data.get("role") == "user":
             # USER token count needs the focal channel to render the as-sent
@@ -1213,8 +1236,18 @@ async def precompute_event_append(
                 conn, session_id, account_id=account_id
             )
             delta = _event_token_delta(kind, data, orig_channel, pre_focal)
+            delta_v1 = (
+                _event_token_delta(kind, data, orig_channel, pre_focal, image_aware=False)
+                if message_has_image(data)
+                else delta
+            )
         else:
             delta = _event_token_delta(kind, data, orig_channel, None)
+            delta_v1 = (
+                _event_token_delta(kind, data, orig_channel, None, image_aware=False)
+                if message_has_image(data)
+                else delta
+            )
 
     # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
     # dispatch path supplies it directly (default ``...`` → look it up).
@@ -1228,7 +1261,11 @@ async def precompute_event_append(
             else tool_parent_channel
         )
 
-    return _PrecomputedAppend(token_delta=delta, resolved_tool_channel=resolved_tool_channel)
+    return _PrecomputedAppend(
+        token_delta=delta,
+        resolved_tool_channel=resolved_tool_channel,
+        token_delta_v1=delta_v1,
+    )
 
 
 async def append_event(
@@ -1460,17 +1497,48 @@ async def append_event(
         cum_messages: int | None = None
         cum_mass: dict[str, int | None] = {c: None for c in _MESSAGE_CONTENT_CLASSES}
         if kind == "message":
+            # BASELINE SELECTION (issue #2050 review).  ``token_baseline_v`` is
+            # read from the session row under the SAME lock that allocates the
+            # seq, and it selects the arithmetic applied to THIS append.  A v1
+            # session therefore keeps v1 (image-blind) arithmetic and a v1
+            # marker; only the backfill's atomic replay-then-flip promotes a
+            # session to v2.  This is what keeps the marker LOAD-BEARING: the
+            # value stored in ``token_baseline_v`` always describes the
+            # arithmetic that produced the row's cumulative counters.
+            #
+            # Why honour the marker rather than merely birthing new sessions at
+            # v2: ``cumulative_tokens`` is a RUNNING SUM.  Switching arithmetic
+            # part-way leaves a v1-priced prefix and a v2-priced suffix inside
+            # ONE monotonic series, and the windower's drop boundary compares a
+            # v2-scale total against a v1-scale prefix — an incoherent
+            # comparison no marker can repair after the fact.  Per-append
+            # honouring keeps every session internally homogeneous.
+            image_aware = token_baseline_v >= 2
+            effective_delta = delta if image_aware else precomputed.token_delta_v1
             prev = await _latest_cumulative_state(conn, session_id)
-            cum_tokens = (prev.tokens or 0) + delta
+            cum_tokens = (prev.tokens or 0) + effective_delta
             counts_as_message = role in ("user", "assistant")
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
-            from aios.harness.tokens import approx_tokens_by_class
-
-            event_mass = approx_tokens_by_class([data])
-            # Reconcile rendering/envelope drift to the event's dominant class;
-            # image itself remains the exact mixed-part residual.
             cls = _message_content_class(role, data)
-            event_mass[cls] += delta - sum(event_mass[c] for c in _MESSAGE_CONTENT_CLASSES)
+            if image_aware:
+                from aios.harness.tokens import approx_tokens_by_class
+
+                event_mass = approx_tokens_by_class([data], image_aware=True)
+                # Reconcile rendering/envelope drift to the event's dominant
+                # class; image itself remains the exact mixed-part residual.
+                event_mass[cls] += effective_delta - sum(
+                    event_mass[c] for c in _MESSAGE_CONTENT_CLASSES
+                )
+            else:
+                # v1 lineage → EXACTLY master's pre-#2050 arithmetic: the whole
+                # (image-blind) delta is attributed to the event's dominant
+                # class, and no mass is ever credited to the ``image`` class.
+                # Reproducing master byte-for-byte here is what makes the
+                # marker safe: a v1 session's stored numbers are indistinguish-
+                # able from what the current production code would have written,
+                # so merging this PR changes NO v1 session's drop boundary.
+                event_mass = {c: 0 for c in _MESSAGE_CONTENT_CLASSES}
+                event_mass[cls] = effective_delta
             for c in _MESSAGE_CONTENT_CLASSES:
                 cum_mass[c] = max(0, (prev.mass.get(c) or 0) + event_mass[c])
 
@@ -1502,7 +1570,7 @@ async def append_event(
             cum_mass["tool_result"],
             cum_mass["thinking"],
             cum_mass["tool_use"],
-            cum_mass["image"] if token_baseline_v == 2 else 0,
+            cum_mass["image"],
             token_baseline_v,
             orig_channel,
             focal_at_arrival,

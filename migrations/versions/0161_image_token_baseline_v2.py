@@ -19,6 +19,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # lock_timeout on the ``events`` ALTER (review finding, #2050).  PG11+
+    # fast-default means adding a DEFAULTed column does NOT rewrite the table,
+    # so this is a catalog-only change -- but it still needs ACCESS EXCLUSIVE,
+    # and ``events`` is one of the two tables holding ~87% of the DB with
+    # appends landing on it continuously.  Without a timeout the ALTER queues
+    # behind any live transaction AND every subsequent append queues behind the
+    # ALTER: a single long-running reader turns a catalog tweak into a
+    # fleet-wide append stall.  Failing fast and retrying is strictly better
+    # than an unbounded convoy.  Scoped to this transaction via SET LOCAL.
+    op.execute("SET LOCAL lock_timeout = '3s'")
     op.execute(
         "ALTER TABLE events "
         "ADD COLUMN cumulative_image_mass bigint NOT NULL DEFAULT 0, "

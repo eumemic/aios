@@ -1,5 +1,25 @@
 #!/usr/bin/env python
-"""Race-free, idempotent activation of image-aware token baseline v2."""
+"""Race-free, idempotent activation of image-aware token baseline v2.
+
+Promotes sessions from token baseline v1 (image-blind) to v2 (image-aware) by
+REPLAYING every message event's arithmetic and flipping the session marker in
+the SAME transaction.  Atomicity is the point: ``append_event`` selects its
+arithmetic from ``sessions.token_baseline_v``, so a session is either fully v1
+or fully v2 and never a mix of the two inside one running sum.
+
+KNOWN LIMITATION (follow-up, not addressed here): this holds the session's
+``FOR UPDATE`` row lock -- the same lock ``append_event`` takes to allocate a
+seq -- for the whole replay, issuing one UPDATE per message.  A very large
+session therefore blocks its own appends for the duration of its replay.  That
+is *correct* (an append interleaved with the replay would be priced under a
+marker the replay is mid-way through changing) but it is not *bounded*: the
+stall scales with session length.  Bounding it requires chunked replay with a
+resumable cursor, which needs its own design + review pass; filed as a
+follow-up rather than smuggled into this fix round.  Operationally: run this
+per-session against large sessions during a quiet window, and note that
+UNPROMOTED sessions are fully functional -- they keep honest v1 arithmetic
+under a v1 marker indefinitely, so the backfill is not time-critical.
+"""
 
 from __future__ import annotations
 
