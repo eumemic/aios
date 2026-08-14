@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Any, NamedTuple
 
 import asyncpg
+from pydantic import ValidationError as PydanticValidationError
 
 from aios.config import get_settings
 from aios.db import queries
@@ -127,8 +128,14 @@ async def handle_inbound(
     if len(content) > MAX_USER_MESSAGE_CHARS:
         return InboundResult(None, None, InboundDrop.PAYLOAD_TOO_LARGE, False)
 
-    async with pool.acquire() as conn:
-        connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+    try:
+        async with pool.acquire() as conn:
+            connection = await queries.get_connection(conn, connection_id, account_id=account_id)
+    except PydanticValidationError:
+        # The JSONB column predates a database shape constraint. Treat a row
+        # that cannot be decoded as an unevaluable admission predicate: deny
+        # before resolution rather than turning malformed policy into a 500.
+        return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
     # Refuse to route inbounds for archived connections. ``get_connection``
     # doesn't filter ``archived_at IS NULL`` (other callers — listing,

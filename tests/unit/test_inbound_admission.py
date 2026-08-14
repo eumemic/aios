@@ -187,6 +187,38 @@ def _fake_pool() -> MagicMock:
     return pool
 
 
+async def test_unreadable_policy_denies_sender_without_side_effects() -> None:
+    """A malformed stored policy fails closed instead of becoming a fatal 500."""
+    malformed = {"kind": "allow_list", "chat_ids": []}
+    with pytest.raises(PydanticValidationError) as exc_info:
+        AllowList.model_validate(malformed)
+
+    patches, spies = _patch_gate_side_effects(stored_policy=None)
+    with (
+        patch(
+            "aios.services.inbound.queries.get_connection",
+            AsyncMock(side_effect=exc_info.value),
+        ),
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+    ):
+        result = await handle_inbound(
+            _fake_pool(),
+            account_id="acc_1",
+            connection_id="conn_1",
+            event_id="evt_invalid_policy",
+            chat_id="stranger",
+            sender={"id": "stranger"},
+            content="hello",
+        )
+
+    assert result == InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
+    for spy in spies.values():
+        spy.assert_not_called()
+
+
 async def test_fresh_connection_null_policy_denies_unknown_sender() -> None:
     """A NULL-policy (fresh) connection denies an unknown chat_id with
     DENIED_BY_POLICY, and runs zero downstream side effects."""
