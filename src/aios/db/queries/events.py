@@ -1178,7 +1178,7 @@ async def precompute_event_append(
     kind: EventKind,
     data: dict[str, Any],
     orig_channel: str | None = None,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
 ) -> _PrecomputedAppend:
     """Run :func:`append_event`'s pre-transaction compute and return it.
 
@@ -1239,7 +1239,7 @@ async def append_event(
     kind: EventKind,
     data: dict[str, Any],
     orig_channel: str | None = None,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
     precomputed: _PrecomputedAppend | None = None,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.

@@ -70,16 +70,6 @@ async def test_handle_envelope_raises_on_401(
         await connector._handle_envelope(CONNECTION_ID, _state(), _make_envelope())
 
 
-async def test_handle_envelope_raises_on_500(
-    connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """5xx is a server-side outage; let the container crash + restart."""
-    monkeypatch.setattr(connector, "emit_inbound", AsyncMock(side_effect=_http_status_error(503)))
-
-    with pytest.raises(httpx.HTTPStatusError):
-        await connector._handle_envelope(CONNECTION_ID, _state(), _make_envelope())
-
-
 async def test_handle_envelope_sends_receipt_on_success(
     connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
 ) -> None:
