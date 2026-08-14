@@ -674,9 +674,13 @@ async def update_vault_credential(
                 auth_type=cred.auth_type,
                 blob=new_blob,
                 metadata=(
-                    body.metadata
-                    if "metadata" in body.model_fields_set and body.metadata is not None
-                    else cred.metadata
+                    # Presence in ``model_fields_set`` — not nullity — decides:
+                    # an explicit ``metadata: null`` must CLEAR, exactly as it
+                    # does on the ordinary update path below. Only a genuinely
+                    # OMITTED field falls back to the existing value (the
+                    # replacement row is new, so "leave alone" has to be
+                    # materialized as ``cred.metadata``).
+                    body.metadata if "metadata" in body.model_fields_set else cred.metadata
                 ),
                 account_id=account_id,
             )
