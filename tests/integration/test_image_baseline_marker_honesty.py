@@ -288,7 +288,7 @@ async def test_every_non_message_kind_appends(
             live_conn,
             account_id=account_id,
             session_id=session_id,
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             data={"event": f"{kind}.probe"},
         )
         mass = await live_conn.fetchval(
