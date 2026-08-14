@@ -14,6 +14,7 @@ from types import EllipsisType
 from typing import Any
 
 import asyncpg
+from pydantic import ValidationError as PydanticValidationError
 
 from aios.actors import actor_columns, actor_from_row
 from aios.db import queries
@@ -44,6 +45,7 @@ from aios.ids import (
     TRIGGER,
     make_id,
 )
+from aios.logging import get_logger
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.attenuation import Surface
 from aios.models.sessions import (
@@ -57,6 +59,8 @@ from aios.models.sessions import (
     SessionUsage,
 )
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
+
+log = get_logger("aios.db.queries.sessions")
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -1438,8 +1442,35 @@ async def get_session_egress(
         raise NotFoundError(
             f"live egress state for session {session_id} not found", detail={"id": session_id}
         )
+    # Fail CLOSED on unreadable persisted state.
+    #
+    # ``hosts`` is ``JSONB NOT NULL``, but ``NOT NULL`` does not exclude the
+    # JSON scalar ``null``, a non-array container, or an array whose entries
+    # do not satisfy ``SessionEgressHost`` — this read cannot assume its own
+    # writer produced the row (older writer, manual repair, future schema).
+    # Unvalidated, those escape as an unhandled ``TypeError`` /
+    # pydantic ``ValidationError`` and surface as a 500, which is the absence
+    # of a contract rather than one. The stated contract: state that cannot be
+    # read as the declared shape is reported as ABSENT, exactly like a missing
+    # row, and is never partially rendered. The raw payload is deliberately
+    # kept out of the error (it is the untrusted thing) and logged instead, so
+    # corruption stays diagnosable without becoming a response-side channel.
+    raw_hosts = row["hosts"]
+    try:
+        if not isinstance(raw_hosts, list):
+            raise TypeError(f"hosts is {type(raw_hosts).__name__}, expected list")
+        hosts = [SessionEgressHost.model_validate(host) for host in raw_hosts]
+    except (TypeError, PydanticValidationError) as exc:
+        log.error(
+            "session_egress_state_unreadable",
+            session_id=session_id,
+            error=str(exc),
+        )
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        ) from exc
     return SessionEgressResponse(
-        hosts=[SessionEgressHost.model_validate(host) for host in row["hosts"]],
+        hosts=hosts,
         provisioned_at=row["provisioned_at"],
         sandbox_generation=row["sandbox_generation"],
     )
