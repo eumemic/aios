@@ -17,7 +17,7 @@ from structlog.contextvars import bind_contextvars
 from aios.actors import set_api_actor
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
-from aios.errors import UnauthorizedError
+from aios.errors import NotFoundError, UnauthorizedError
 from aios.services import accounts as accounts_service
 from aios.services import runtime_tokens as runtime_tokens_service
 
@@ -96,6 +96,18 @@ async def get_account_id(
     ``accounts`` router) keep ``AuthDep``.
     """
     account_id, _, _ = auth
+    return account_id
+
+
+async def require_root_account(
+    pool: Annotated[asyncpg.Pool, Depends(get_pool)],
+    account_id: Annotated[str, Depends(get_account_id)],
+) -> str:
+    """Require an account-key-authenticated root, hiding the route from tenants."""
+    async with pool.acquire() as conn:
+        account = await queries.get_account(conn, account_id)
+    if account is None or account.parent_account_id is not None:
+        raise NotFoundError("not found")
     return account_id
 
 
