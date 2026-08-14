@@ -2422,7 +2422,15 @@ class SandboxRegistry:
         await self._gc_corpse_pass(containers, corpse_states, now, settings, instance_id)
 
         # Pass 2 — images (enumerated AFTER the corpse pass settled).
+        # Bound the observation before enumeration so a concurrent commit is
+        # not cleared based on a host view taken before that commit completed.
+        images_observed_after = datetime.now(UTC)
         images = await self._backend.list_managed_images(instance_id=instance_id)
+        if isinstance(self._store, LocalDaemonStore):
+            present_refs = {tag for image in images for tag in image.repo_tags}
+            await self._gc_reconcile_absent_pointers(
+                present_refs, instance_id, observed_before=images_observed_after
+            )
         image_states = await self._load_gc_states(
             pool,
             {sid for img in images if (sid := img.labels.get(SESSION_LABEL_KEY)) is not None},
@@ -2778,6 +2786,27 @@ class SandboxRegistry:
                     budget_bytes=cap,
                 )
         return GcPressureResult(pressured_accounts=frozenset(pressured))
+
+    async def _gc_reconcile_absent_pointers(
+        self,
+        present_refs: set[str],
+        instance_id: str,
+        *,
+        observed_before: datetime,
+    ) -> None:
+        """Clear this host's DB pointers missing from a complete daemon view."""
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            cleared = await queries.unscoped_reconcile_absent_host_snapshots(
+                conn,
+                instance_id,
+                sorted(present_refs),
+                observed_before=observed_before,
+            )
+        if cleared:
+            log.info("sandbox.gc_absent_pointers_reconciled", cleared=cleared)
 
     async def _gc_reconcile_pointers(
         self,

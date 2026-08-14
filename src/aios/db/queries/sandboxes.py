@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -369,6 +370,36 @@ async def unscoped_live_workspace_volume_paths(
         """,
     )
     return [row["workspace_volume_path"] for row in rows]
+
+
+async def unscoped_reconcile_absent_host_snapshots(
+    conn: asyncpg.Connection[Any],
+    instance_id: str,
+    present_refs: Sequence[str],
+    *,
+    observed_before: datetime,
+) -> int:
+    """Clear host-owned pointers absent from one complete image enumeration.
+
+    ``snapshot_updated_at`` makes the update a compare-and-swap against the
+    enumeration start: a concurrent commit cannot have its new pointer erased
+    using stale host observations.
+    """
+    status: str = await conn.execute(
+        """
+        UPDATE sessions
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
+               snapshot_updated_at = now()
+         WHERE snapshot_host = $1
+           AND snapshot_ref IS NOT NULL
+           AND snapshot_ref <> ALL($2::text[])
+           AND snapshot_updated_at <= $3
+        """,
+        instance_id,
+        list(present_refs),
+        observed_before,
+    )
+    return int(status.rsplit(" ", 1)[-1])
 
 
 async def gc_snapshot_session_states(
