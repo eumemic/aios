@@ -21,6 +21,7 @@ from aios.api.deps import require_bearer_auth
 from aios.api.middleware import RequestLoggingMiddleware
 from aios.api.routers import (
     accounts,
+    admin,
     agents,
     connections,
     connectors,
@@ -192,6 +193,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestLoggingMiddleware)
     app.include_router(health.router)
     app.include_router(accounts.router)
+    app.include_router(admin.router)
     app.include_router(environments.router)
     app.include_router(agents.router)
     app.include_router(sessions.router)
