@@ -44,6 +44,19 @@ class ReceiverHalted(RuntimeError):
     pass
 
 
+class RoutingNotReady(RuntimeError):
+    """A namespaced ghost is addressable but has no live connection yet.
+
+    Raised instead of returning normally so the transaction is NOT ACKed.
+    Matrix appservice delivery is at-least-once: the homeserver retries a
+    transaction until it sees a 2xx and drops it permanently once it does.
+    Answering 200 for an event we could not route turns a transient
+    not-ready condition (``setup()`` starts the listener before discovery
+    has populated ``_ghost_connections``) into silent, permanent loss of a
+    human's message.  Failing closed makes the homeserver redeliver.
+    """
+
+
 class SupervisedAppService(AppService):
     """mautrix receiver that does not turn every handler failure into a 200."""
 
@@ -62,11 +75,6 @@ class SupervisedAppService(AppService):
             return web.json_response({"error": action.value}, status=status)
         self.transactions.add(transaction_id)
         return web.json_response({})
-
-
-def _copy_appservice(base: AppService) -> SupervisedAppService:
-    base.__class__ = SupervisedAppService
-    return cast(SupervisedAppService, base)
 
 
 class MatrixConnector(HttpConnector):
@@ -99,7 +107,10 @@ class MatrixConnector(HttpConnector):
 
     async def setup(self, tg: asyncio.TaskGroup) -> None:
         self.config = MatrixConfig()
-        self.az = _copy_appservice(create_appservice(self.config))
+        self.az = cast(
+            SupervisedAppService,
+            create_appservice(self.config, appservice_class=SupervisedAppService),
+        )
         self.az.connector = self
         self.az.synchronous_handlers = True
         self.az.matrix_event_handler(self._handle_event)
@@ -118,6 +129,12 @@ class MatrixConnector(HttpConnector):
         raise ReceiverHalted("Matrix receiver halted") from self._halt_error
 
     def _classify_receiver_failure(self, exc: BaseException) -> ReceiverAction:
+        if isinstance(exc, RoutingNotReady):
+            # Transient by construction: the connection worker that
+            # populates ``_ghost_connections`` is still starting.  Must NOT
+            # fall through to the HALT default — a routine startup race
+            # would otherwise tear the whole container down.
+            return ReceiverAction.RETRY
         if isinstance(exc, httpx.TransportError):
             return ReceiverAction.RETRY
         if isinstance(exc, httpx.HTTPStatusError):
@@ -175,17 +192,42 @@ class MatrixConnector(HttpConnector):
         if event.type != EventType.ROOM_MESSAGE or not getattr(event.content, "body", None):
             return
         members = await self.az.state_store.get_members(event.room_id, (Membership.JOIN,))
-        namespaced = [member for member in members if self._is_ghost(member)]
-        ghosts = [
-            member
-            for member in namespaced
-            if member != event.sender and self._localpart(member) in self._ghost_connections
+        # Three distinct facts, which must NOT be collapsed into one
+        # "nothing to do" branch — the conflation is what loses messages:
+        #
+        #   1. no membership state    → we cannot classify → retry
+        #   2. no namespaced receiver → genuinely not ours → ACK + ignore
+        #   3. receiver but no route  → not ready yet      → retry
+        #
+        # A room always contains at least the event's own sender, so an
+        # empty member list never means "an empty room"; it means the state
+        # store has nothing for this room (cold store, un-reconciled ghost).
+        # Treating that as "not ours" would silently drop a real DM.
+        if not members:
+            raise RoutingNotReady(
+                f"no membership state for room {event.room_id}; cannot classify event"
+            )
+        # Namespaced members other than the sender are the candidate
+        # receivers.  Excluding the sender here (rather than after the
+        # routing check) keeps our own ghost's echo in the ACK-and-ignore
+        # case: it is not undeliverable, it is simply not inbound traffic.
+        receivers = [
+            member for member in members if self._is_ghost(member) and member != event.sender
         ]
-        if not ghosts and namespaced:
+        if not receivers:
+            return
+        ghosts = [
+            member for member in receivers if self._localpart(member) in self._ghost_connections
+        ]
+        if not ghosts:
             log.warning(
-                "matrix.inbound.zero_ghosts",
+                "matrix.inbound.routing_not_ready",
                 room_id=str(event.room_id),
-                namespaced_members=[str(member) for member in namespaced],
+                namespaced_members=[str(member) for member in receivers],
+            )
+            raise RoutingNotReady(
+                f"no live connection for {[str(member) for member in receivers]} "
+                f"in room {event.room_id}"
             )
         room_kind = "dm" if len(members) == 2 else "group"
         for ghost in ghosts:
