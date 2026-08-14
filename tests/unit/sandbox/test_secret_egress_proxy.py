@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import socket
 import ssl
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 import h11
 import httpx
@@ -516,6 +517,103 @@ class TestFailClosed:
             await proxy.stop()
             upstream.close()
             await upstream.wait_closed()
+
+    async def _relay_probe(self, monkeypatch: pytest.MonkeyPatch, mode: str) -> tuple[bool, int]:
+        """Drive one unrecognized-SNI connection at ``mode``.
+
+        Returns ``(relayed, upstream_connections)``. ``relayed`` is True when
+        the ClientHello was blind-relayed to the collateral upstream (the
+        permissive path); False when the proxy refused (the strict path).
+        """
+        upstream_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert, key = mint_server_leaf(get_egress_ca(), "collateral.test")
+        pem = cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        with tempfile.NamedTemporaryFile() as fh:
+            fh.write(pem)
+            fh.flush()
+            upstream_ctx.load_cert_chain(fh.name)
+        hits = 0
+
+        async def _count(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            nonlocal hits
+            hits += 1
+            await _echo_once(r, w)
+
+        upstream = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(_count(r, w)), "127.0.0.1", 0, ssl=upstream_ctx
+        )
+        port = upstream.sockets[0].getsockname()[1]
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", port)
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode=cast(Any, mode),
+            owner_id="sess_probe",
+        )
+        await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", proxy.port, ssl=_client_ctx(), server_hostname="collateral.test"
+            )
+        except (ssl.SSLError, ConnectionResetError, EOFError, OSError):
+            return False, hits
+        try:
+            writer.write(b"same-ip-different-sni")
+            await writer.drain()
+            echoed = await asyncio.wait_for(reader.readexactly(21), 5)
+            return echoed == b"same-ip-different-sni", hits
+        except (
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ssl.SSLError,
+            ConnectionResetError,
+            OSError,
+        ):
+            return False, hits
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
+    async def test_unknown_networking_mode_is_strict(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mode that is neither ``limited`` nor ``unrestricted`` must get the
+        STRICT path.
+
+        ``Literal`` is an annotation, not a runtime check: a typo, a
+        mis-deserialized field, or a future mode reaches the constructor as an
+        arbitrary string. At a credential-exfiltration boundary the unknown
+        case must fail closed, not blind-relay.
+        """
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "frobnicated-egress")
+        assert not relayed, "unknown networking mode was blind-relayed (permissive)"
+        assert upstream_hits == 0, "unknown mode reached the collateral upstream"
+
+    async def test_explicit_unrestricted_still_relays_positive_control(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POSITIVE CONTROL: a legitimately Unrestricted environment must still
+        blind-relay a colliding SNI (the whole point of #2034). Without this,
+        "unknown is strict" would pass on a build that blocks everything."""
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "unrestricted")
+        assert relayed, "explicitly unrestricted mode failed to relay"
+        assert upstream_hits == 1
+
+    async def test_limited_mode_is_strict_regression(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Limited stays fail-closed (unchanged behavior)."""
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "limited")
+        assert not relayed
+        assert upstream_hits == 0
 
     async def test_unauthorized_sni_resets_handshake_under_limited(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]

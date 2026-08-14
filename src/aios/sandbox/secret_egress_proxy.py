@@ -422,6 +422,15 @@ def _decode_basic_credential(value: str) -> str | None:
 # path below and the tests' ``sep._resolve_pinned_ip`` monkeypatch resolve it here.
 _resolve_pinned_ip = resolve_pinned_ip
 
+# The ONLY networking modes that permit blind-relaying an unrecognized SNI.
+# Membership, not inequality: ``Literal`` is an annotation, NOT runtime
+# validation, so a typo, a future mode, or a mis-deserialized field arrives
+# here as an arbitrary string. Gating on "is provably in this set" makes every
+# unknown value land on the STRICT (fail-closed) side; gating on
+# ``!= "limited"`` made every unknown value land on the PERMISSIVE side, which
+# at a credential-exfiltration boundary is the wrong default (aios#2138).
+_RELAY_PERMITTED_MODES: frozenset[str] = frozenset({"unrestricted"})
+
 
 def _h11_send(conn: h11.Connection, event: h11.Event) -> bytes:
     """``conn.send`` returns ``None`` for events that frame no bytes."""
@@ -461,6 +470,10 @@ class SecretEgressProxy:
         # distinct SNIs to balloon the leaf cache.
         self._allowed_hosts: frozenset[str] = frozenset(h for h, _, _, _ in self._rules)
         self._networking_mode = networking_mode
+        # Resolve the string mode to a capability ONCE, at construction, so the
+        # dispatch hot path can never re-derive it with a different (inverted)
+        # test. Unknown/unrecognized ⇒ False ⇒ fail closed.
+        self._relay_unrecognized_sni: bool = networking_mode in _RELAY_PERMITTED_MODES
         self._owner_id = owner_id
         # Hard cap on the whole-buffered request body (the placeholder→secret
         # swap needs the body buffered, but the sandbox is untrusted, so an
@@ -539,7 +552,9 @@ class SecretEgressProxy:
                 upstream_reader, upstream_writer = await asyncio.open_connection(
                     "127.0.0.1", self._tls_port
                 )
-            elif self._networking_mode == "limited":
+            elif not self._relay_unrecognized_sni:
+                # STRICT path: Limited, and every mode we do not positively
+                # recognize as relay-permitting. Fail closed on the unknown.
                 log.warning(
                     "secret_egress_proxy.sni_refused",
                     server_name=host,
