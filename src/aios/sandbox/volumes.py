@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from aios.config import get_settings
@@ -473,3 +474,29 @@ def _bind_mount_base(
     if sandbox_path.startswith("/mnt/uploads/"):
         return session_uploads_dir(session_id), sandbox_path[len("/mnt/uploads/") :]
     return None, None
+
+
+def purge_session_directories(session_id: str, workspace_path: Path) -> None:
+    """Remove every host directory exclusively owned by ``session_id``.
+
+    Every candidate is resolved and checked against ``workspace_root`` before
+    deletion.  This is intentionally stricter than trusting the persisted
+    workspace path: a stale row or symlink must never turn session deletion
+    into an out-of-jail ``rmtree``.
+    """
+    root = get_settings().workspace_root.resolve()
+    candidates = (
+        workspace_path,
+        session_uploads_dir(session_id),
+        session_attachments_dir(session_id),
+        session_repos_root(session_id),
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved == root or not resolved.is_relative_to(root):
+            raise ForbiddenError(
+                "refusing to purge session directory outside workspace_root",
+                detail={"path": str(candidate), "session_id": session_id},
+            )
+        if resolved.exists():
+            shutil.rmtree(resolved)

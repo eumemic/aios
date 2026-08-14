@@ -517,6 +517,7 @@ from .events import (  # noqa: E402
 )
 from .files import (  # noqa: E402
     insert_file,
+    list_upload_paths_for_sessions,
 )
 from .management_calls import (  # noqa: E402
     get_management_call,
@@ -984,6 +985,7 @@ __all__ = [
     "list_triggers",
     "list_unharvested_session_cancel_markers",
     "list_unresolved_tool_calls_batch",
+    "list_upload_paths_for_sessions",
     "list_vault_credentials",
     "list_vaults",
     "lock_active_session_for_update",
