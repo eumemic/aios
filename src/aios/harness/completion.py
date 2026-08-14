@@ -49,8 +49,11 @@ from aios.models.model_providers import ProviderAuth
 from aios.services.litellm_params import openai_params_in
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
-# tool-call-only turns; modify_params tells LiteLLM to sanitize them.
+# tool-call-only turns; modify_params tells LiteLLM to sanitize them. Keep
+# unsupported request parameters fail-loud: ``drop_params`` makes provider
+# adapters silently discard treatments the caller believes reached the wire.
 litellm.modify_params = True
+litellm.drop_params = False
 
 # LiteLLM's Anthropic adapter silently DROPS a requested ``thinking`` param
 # whenever the last tool-calling assistant message in the replayed history
@@ -681,6 +684,9 @@ def _build_litellm_kwargs(
     if tools:
         kwargs["tools"] = tools
     effective_extra = dict(extra or {})
+    # Never permit LiteLLM's silent unsupported-parameter path, even when an
+    # agent explicitly requests it through ``litellm_extra``.
+    effective_extra["drop_params"] = False
     if auth is not None and get_settings().inference_credential_policy != "legacy_env":
         # Account rows are authoritative under non-legacy policies. Inline auth
         # fields are agent metadata, not account configuration.
