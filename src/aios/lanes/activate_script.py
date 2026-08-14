@@ -444,6 +444,21 @@ async def verify_post_apply(lock, workflow_id, session_id):
     return checks
 
 
+def failed_checks(checks):
+    """Names of verification checks that did not pass.
+
+    A check passes ONLY if it is exactly True. False means the check ran and
+    the post-apply state is wrong; None means the check could not be performed
+    (the API call errored) — unverifiable is NOT healthy, so both fail.
+    Keys ending in ``_error`` carry diagnostic strings, not check results.
+    """
+    return sorted(
+        name
+        for name, value in checks.items()
+        if not name.endswith("_error") and value is not True
+    )
+
+
 # ── main ──────────────────────────────────────────────────────────────────
 
 async def main(input):
@@ -535,6 +550,18 @@ async def main(input):
     # Phase 6: Post-apply verification
     phase("verify")
     verification = await verify_post_apply(lock, workflow_id, session_id)
+
+    # A failed (or unperformable) post-apply check FAILS the activation.
+    # Collecting a false and returning success would report a broken lane as live.
+    bad = failed_checks(verification)
+    if bad:
+        error = "post-apply verification failed: " + ", ".join(bad)
+        log(f"lane_activate FAILED verification: {error}")
+        return {
+            "outcome": "failed", "lane": lane, "merge_sha": merge_sha,
+            "spec_hash": spec_hash, "deltas": deltas, "verification": verification,
+            "error": error,
+        }
 
     # Determine outcome
     any_changed = any(d.get("action") in ("created", "updated") for d in deltas)
