@@ -72,7 +72,7 @@ async def test_agent_supplied_drop_params_cannot_silence_a_rejected_param(
     """
     request = completion.LlmRequest(
         messages=[{"role": "user", "content": "hi"}],
-        params={*_REJECTED_PARAM, "drop_params": True, "mock_response": "ok"},
+        params={**_REJECTED_PARAM, "drop_params": True, "mock_response": "ok"},
     )
 
     with pytest.raises(UnsupportedParamsError, match="does not support temperature"):
@@ -83,7 +83,7 @@ async def test_rejected_sampling_param_fails_loud_by_default(_settings: None) ->
     """The ordinary path (agent supplies no ``drop_params``) also fails loud."""
     request = completion.LlmRequest(
         messages=[{"role": "user", "content": "hi"}],
-        params={*_REJECTED_PARAM, "mock_response": "ok"},
+        params={**_REJECTED_PARAM, "mock_response": "ok"},
     )
 
     with pytest.raises(UnsupportedParamsError, match="does not support temperature"):
@@ -151,7 +151,7 @@ def test_build_kwargs_overrides_agent_supplied_drop_params() -> None:
         messages=[{"role": "user", "content": "hi"}],
         tools=None,
         auth=None,
-        extra={*_REJECTED_PARAM, "drop_params": True},
+        extra={**_REJECTED_PARAM, "drop_params": True},
         session_id=None,
         stream=False,
     )
