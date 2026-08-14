@@ -2484,18 +2484,20 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
     # events), so it survives the cascade and makes the run sweep-visible within a tick
     # rather than waiting out the 1h agent deadline; derive_response resolves child_gone
     # via its liveness fallback once the session row is gone.
-    async with pool.acquire() as conn, conn.transaction():
+    async with pool.acquire() as conn:
         artifact = await conn.fetchrow(
             "SELECT workspace_volume_path, snapshot_ref FROM sessions "
-            "WHERE id=$1 AND account_id=$2 FOR UPDATE",
+            "WHERE id=$1 AND account_id=$2",
             session_id,
             account_id,
         )
-        if artifact is None:
-            raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
-        snapshot_ref = artifact["snapshot_ref"]
-        if snapshot_ref is not None and not await get_snapshot_store().remove(snapshot_ref):
-            raise RuntimeError(f"snapshot store refused removal of {snapshot_ref}")
+    if artifact is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    snapshot_ref = artifact["snapshot_ref"]
+    if snapshot_ref is not None and not await get_snapshot_store().remove(snapshot_ref):
+        raise RuntimeError(f"snapshot store refused removal of {snapshot_ref}")
+
+    async with pool.acquire() as conn, conn.transaction():
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )

@@ -238,6 +238,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_triggers",
         "queries.list_unharvested_session_cancel_markers",
         "queries.list_unresolved_tool_calls_batch",
+        "queries.list_upload_paths_for_sessions",
         "queries.list_vault_credentials",
         "queries.list_vaults",
         "queries.lock_active_session_for_update",
