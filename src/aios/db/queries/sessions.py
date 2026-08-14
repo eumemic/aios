@@ -37,6 +37,7 @@ from aios.errors import (
     NotFoundError,
     RateLimitedError,
 )
+from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 from aios.ids import (
     EVENT,
     GITHUB_REPOSITORY,
@@ -54,7 +55,6 @@ from aios.models.sessions import (
     SessionStatus,
     SessionUsage,
 )
-from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
