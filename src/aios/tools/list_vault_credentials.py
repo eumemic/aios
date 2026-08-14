@@ -32,9 +32,7 @@ async def list_vault_credentials_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     async with pool.acquire() as conn:
-        rows = await queries.list_session_vault_credentials(  # pooled-connection-await: allow eumemic/aios#1945
-            conn, session_id, account_id=account_id
-        )
+        rows = await queries.list_session_vault_credentials(conn, session_id, account_id=account_id)
     return {
         "credentials": [
             {
@@ -57,24 +55,13 @@ async def list_vault_credentials_handler(
     }
 
 
-_DESCRIPTION = (
-    "List metadata for every active or archived credential in vaults attached to "
-    "your current session. Returns credential_id, vault_id, display_name, auth_type, "
-    "secret_name, allowed_hosts, target_url, created_at, and archived_at. This is "
-    "read-only and never returns secret material, ciphertext, nonce, or credential "
-    "metadata payloads. Use it to diagnose credential identity, host scope, and stale "
-    "archived references."
+registry.register(
+    name="list_vault_credentials",
+    description=(
+        "List non-secret metadata for vault credentials available to this session. "
+        "Returns credential identity, auth type, secret field name, host scope, target URL, "
+        "and lifecycle timestamps; never returns secret values."
+    ),
+    handler=list_vault_credentials_handler,
+    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
 )
-
-
-def _register() -> None:
-    registry.register(
-        name="list_vault_credentials",
-        description=_DESCRIPTION,
-        parameters_schema=_ListVaultCredentialsArgs.model_json_schema(),
-        handler=list_vault_credentials_handler,
-        transport="agent_tool",
-    )
-
-
-_register()
