@@ -1,14 +1,13 @@
 """Regression test pinning the inbound-admission denial to a NON-fatal 422.
 
 Part of #1500. The server maps a ``denied_by_policy`` inbound drop to HTTP 422
-(``ValidationError``), NOT 403 and NOT 5xx. This is load-bearing for
-deploy-safety: ``_is_fatal_inbound_status`` treats 401/403/5xx as fatal —
-those crash-restart the connector container, killing every connection it
-serves. A denied *stranger* must drop one envelope and leave the container
-serving every other connection, so the denial status must be a routine 4xx.
+(``ValidationError``), NOT 403. This is load-bearing for deploy-safety:
+``_is_fatal_inbound_status`` treats authentication failures as fatal. A denied
+*stranger* must drop one envelope and leave the container serving every other
+connection, so the denial status must not be an authentication failure.
 
-This test asserts the contract from the connector runner's side: 422 is
-non-fatal, while 403/5xx (which the denial must never be) are fatal.
+This test asserts the contract from the connector runner's side: 422 and 5xx
+are per-message drops, while 403 (which the denial must never be) is fatal.
 """
 
 from __future__ import annotations
@@ -29,11 +28,10 @@ def test_denied_by_policy_maps_to_non_fatal_422() -> None:
     # 422 is a routine per-envelope drop — the container keeps serving.
     assert _is_fatal_inbound_status(denied_status) is False
 
-    # Defensive: the statuses the denial must NEVER be are fatal, so if a future
-    # refactor regresses the mapping to 403 or 5xx the connector would crash on
-    # the first denied stranger.
+    # Authentication failures remain fatal, while transient API failures drop
+    # the affected message without killing the connection feed.
     assert _is_fatal_inbound_status(403) is True
-    assert _is_fatal_inbound_status(500) is True
+    assert _is_fatal_inbound_status(500) is False
 
 
 def test_denied_by_policy_reason_constant_is_stable() -> None:
