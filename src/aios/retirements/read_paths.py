@@ -55,14 +55,10 @@ from aios.retirements.registry import REGISTRY
 #: Root of the importable ``aios`` package (``.../src/aios``).
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
-#: The canonical loader + per-``ToolSpec`` consumer names. A persisted tools
-#: array element is "parsed into a ToolSpec" when it flows through one of these.
-#: ``load_tool_specs`` is the list-level loader (drops retired-builtin entries,
-#: then ``ToolSpec.model_validate`` each remaining); ``ToolSpec.model_validate`` /
-#: ``ToolSpec.model_validate_json`` are the per-site form the tolerance validator
-#: rides on.
+#: The canonical per-``ToolSpec`` consumer name. A persisted tools array element
+#: is parsed directly through ``ToolSpec.model_validate[_json]`` so invalid current
+#: vocabulary fails closed at every hydration site.
 TOOLSPEC_MODEL = "ToolSpec"
-TOOLSPEC_LOADER = "load_tool_specs"
 _TOOLSPEC_VALIDATE_METHODS = frozenset({"model_validate", "model_validate_json"})
 
 
@@ -237,8 +233,6 @@ def _is_toolspec_consume_call(call: ast.Call) -> bool:
     """True if ``call`` materialises a persisted tools array into ``ToolSpec``."""
 
     func = call.func
-    if isinstance(func, ast.Name) and func.id == TOOLSPEC_LOADER:
-        return True
     return (
         isinstance(func, ast.Attribute)
         and func.attr in _TOOLSPEC_VALIDATE_METHODS
@@ -361,7 +355,7 @@ def iter_toolspec_consumed_columns(
     Keyed on *consumption shape*, not column type or a hand-list: a tools-array
     column counts when the function that ``SELECT``\\ s it is reachable, through
     the call graph, from a function that materialises a persisted tools array
-    into ``ToolSpec`` (``load_tool_specs`` / ``ToolSpec.model_validate[_json]``).
+    into ``ToolSpec`` (``ToolSpec.model_validate[_json]``).
 
     This flags ``connectors.tools_schema`` as the seventh surface — it is
     selected ``cat.tools_schema AS tools`` in ``list_connection_tools_for_session``
@@ -467,7 +461,7 @@ def iter_foreign_toolspec_parses(root: Path = PACKAGE_ROOT) -> Iterator[ForeignP
 
     This deliberately does NOT flag:
 
-    * ``ToolSpec.model_validate(...)`` / ``load_tool_specs(...)`` — the sanctioned
+    * ``ToolSpec.model_validate(...)`` — the sanctioned
       per-site tolerance path (banning *those* is the explicitly-rejected
       "ban model_validate outside a loader").
     * bare-dict field reads over a tools array (``t["name"]`` for connector

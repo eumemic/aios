@@ -60,9 +60,8 @@ def test_no_read_path_parses_persisted_tools_into_a_foreign_model() -> None:
     (a bare-dict / foreign-model bypass of the quarantine validator) FAILS CI.
 
     The current tree has none — every read site materialising a persisted tools
-    array goes through ``ToolSpec`` (``load_tool_specs`` or
-    ``ToolSpec.model_validate``). A regression that introduces a foreign model
-    over a tools array would surface here.
+    array goes through ``ToolSpec.model_validate``. A regression that introduces a
+    foreign model over a tools array would surface here.
     """
 
     offenders = list(iter_foreign_toolspec_parses())
@@ -94,7 +93,6 @@ def test_lint_flags_a_synthetic_bypassing_read_path() -> None:
     sanctioned_src = (
         "def read(row):\n    return [ToolSpec.model_validate(d) for d in row['tools']]\n"
     )
-    loader_src = "def read(row):\n    return load_tool_specs(row['tools'])\n"
 
     def _foreign_models(src: str) -> list[str]:
         tree = ast.parse(src)
@@ -121,7 +119,6 @@ def test_lint_flags_a_synthetic_bypassing_read_path() -> None:
 
     assert _foreign_models(bypass_src) == ["BareTool"]
     assert _foreign_models(sanctioned_src) == []  # ToolSpec is the sanctioned form
-    assert _foreign_models(loader_src) == []  # load_tool_specs is the loader form
 
 
 def test_lint_does_not_ban_per_site_toolspec_model_validate() -> None:

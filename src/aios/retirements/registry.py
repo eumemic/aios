@@ -104,9 +104,9 @@ LEGACY_BUILTIN_RENAMES = Retirement(
 #: Post-#1563 builtin-shim retirement (teardown-tracked as #1569). #1525
 #: removed ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry
 #: but shipped neither shim nor migration, wedging the live kedalion-ultron agent
-#: into an infinite reschedule; #1563 closed the gap with the
-#: ``_RETIRED_BUILTINS`` + ``load_tool_specs`` read shim and the 0122 data
-#: migration. These builtins have NO canonical successor (``return``/``error``
+#: into an infinite reschedule; #1563 closed the gap with migration 0122 and a
+#: temporary read shim, removed by #1569 after the live residue proof. These
+#: builtins have NO canonical successor (``return``/``error``
 #: are general step verbs, not model-listed builtins) → ``action=drop``.
 RETIRED_GOAL_OUTCOME_BUILTINS = Retirement(
     domain=TOOL_SURFACE_DOMAIN,
@@ -170,8 +170,8 @@ def tolerated_rename_map(
     in the live-exercise issue).
 
     Only ``action="rename"`` descriptors contribute — a ``drop`` has no successor
-    to map to and is handled at the list level (``load_tool_specs``), not by the
-    per-``ToolSpec`` before-validator. ``registry`` is injectable so callers and
+    to map to and fails normal ``ToolSpec`` validation after its contract. ``registry``
+    is injectable so callers and
     tests can scope the lookup to a synthetic set of descriptors.
 
     The ``contract_rev IS NULL`` predicate here is the single tolerance gate;
@@ -205,8 +205,8 @@ def dropped_tokens(
     ``return``/``error`` step verbs, not any model-listed builtin), so a
     persisted occurrence is *removed* rather than remapped. This is the single
     list the re-upcast hook (:mod:`aios.retirements.upcast`) consults to scrub
-    drops, mirroring the list-level drop the read shim
-    (``load_tool_specs``) applies. ``registry`` is injectable for tests.
+    drops from imported snapshots before normal fail-closed hydration. ``registry``
+    is injectable for tests.
     """
 
     out: set[str] = set()

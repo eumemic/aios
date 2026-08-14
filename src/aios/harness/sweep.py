@@ -586,14 +586,14 @@ def _build_surfaces(agent_rows: list[Any]) -> dict[str, _SweepAgentSurface]:
     """Materialize ``AGENT_SURFACE_SQL`` rows into ``_SweepAgentSurface`` per
     session — the thin duck-typed ``Agent`` the disposition classifier reads.
     """
-    from aios.models.agents import HttpServerSpec, load_tool_specs
+    from aios.models.agents import HttpServerSpec, ToolSpec
 
     surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
         tools_list = r["tools"]
         http_list = r["http_servers"]
         surface_by_session[r["session_id"]] = _SweepAgentSurface(
-            tools=load_tool_specs(tools_list or []),
+            tools=[ToolSpec.model_validate(tool) for tool in tools_list or []],
             http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
         )
     return surface_by_session

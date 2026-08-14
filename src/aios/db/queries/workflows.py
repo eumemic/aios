@@ -31,7 +31,7 @@ from aios.db.queries import (
 )
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
+from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
@@ -64,7 +64,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         output_schema=row["output_schema"],
         output_model=row["output_model"],
         description=row["description"],
-        tools=load_tool_specs(row["tools"]),
+        tools=[ToolSpec.model_validate(tool) for tool in row["tools"]],
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_by=actor_from_row(row),
@@ -84,7 +84,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         output_schema=row["output_schema"],
         output_model=row["output_model"],
         description=row["description"],
-        tools=load_tool_specs(row["tools"]),
+        tools=[ToolSpec.model_validate(tool) for tool in row["tools"]],
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_at=row["created_at"],
@@ -109,7 +109,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         script_sha=row["script_sha"],
         source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
-        tools=load_tool_specs(row["tools"]),
+        tools=[ToolSpec.model_validate(tool) for tool in row["tools"]],
         mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         status=row["status"],

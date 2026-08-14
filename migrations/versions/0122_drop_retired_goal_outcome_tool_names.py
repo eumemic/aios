@@ -12,10 +12,9 @@ This migration removes every ``{"type": "complete_goal"}`` / ``{"type": "fail_go
 from every agent/workflow ``ToolSpec`` surface — ``agents``, ``agent_versions``, ``workflows``,
 ``workflow_versions``, ``wf_runs`` (the launch-pinned surface), and ``sessions`` (the frozen
 child surface, nullable). Order-preserving; a list that was only ``[complete_goal, fail_goal]``
-collapses to ``[]``; clean rows are untouched. The model code carries a matching read-tolerance
-shim (``_RETIRED_BUILTINS`` + ``load_tool_specs`` in ``models/agents.py``) for the
-post-deploy/pre-migrate window and for any future respawn from an unmigrated row; both can be
-removed once this has run everywhere.
+collapses to ``[]``; clean rows are untouched. The model code initially carried a matching read-tolerance shim for the
+post-deploy/pre-migrate window. #1569 removed it after the contract migration and live residue
+scan proved every surface clean.
 
 This is the same "remove a builtin from BuiltinToolType + registry → ship the shim-and-migration
 pair" discipline that #1419 (migration 0116) / #1428 (migration 0117) / #1458 (migration 0120)

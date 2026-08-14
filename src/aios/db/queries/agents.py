@@ -35,7 +35,6 @@ from aios.models.agents import (
     McpServerSpec,
     PreemptPolicy,
     ToolSpec,
-    load_tool_specs,
 )
 from aios.models.skills import AgentSkillRef
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
@@ -56,7 +55,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         name=row["name"],
         model=row["model"],
         system=row["system"],
-        tools=load_tool_specs(tools_data),
+        tools=[ToolSpec.model_validate(tool) for tool in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],
@@ -84,7 +83,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         version=row["version"],
         model=row["model"],
         system=row["system"],
-        tools=load_tool_specs(tools_data),
+        tools=[ToolSpec.model_validate(tool) for tool in tools_data],
         skills=[AgentSkillRef.model_validate(s) for s in skills_data],
         mcp_servers=[McpServerSpec.model_validate(s) for s in (mcp_data or [])],
         http_servers=[HttpServerSpec.model_validate(s) for s in (http_data or [])],

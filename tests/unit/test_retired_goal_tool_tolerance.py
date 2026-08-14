@@ -1,84 +1,26 @@
-"""Read-tolerance for the RETIRED ``complete_goal``/``fail_goal`` builtins (#1562).
-
-#1525 removed ``complete_goal``/``fail_goal`` from ``BuiltinToolType`` + the registry but shipped
-neither a read shim nor a data migration. A long-lived agent whose persisted ``tools`` JSONB still
-listed those builtins then failed ``ToolSpec`` validation on every wake — a pre-context-build throw
-that wedged the agent into an infinite reschedule (the kedalion-ultron incident). They have NO
-canonical successor (``return``/``error`` are general step verbs, not model-listed builtins), so
-the entries are DROPPED, not remapped.
-
-``load_tool_specs`` is the list-level read-tolerance choke point used by every DB read path
-(agents / agent_versions / workflows / workflow_versions / wf_runs / sessions); these tests pin
-the drop + order/preservation semantics, and ``test_agent_row_with_retired_builtin_hydrates_clean``
-is the CI-gap test the incident calls for: test agents are born from the *current* catalog so none
-carry retired builtins, which is exactly why the wedge was invisible to CI.
-"""
+"""Fail-closed hydration for goal-outcome builtins retired by migration 0122."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from aios.models.agents import load_tool_specs
-
-
-def test_retired_builtin_entry_is_dropped() -> None:
-    specs = load_tool_specs([{"type": "bash"}, {"type": "complete_goal"}, {"type": "read"}])
-    assert [s.type for s in specs] == ["bash", "read"]
+from aios.db.queries.agents import _row_to_agent
 
 
 @pytest.mark.parametrize("retired", ["complete_goal", "fail_goal"])
-def test_each_retired_builtin_is_dropped(retired: str) -> None:
-    specs = load_tool_specs([{"type": retired}, {"type": "bash"}])
-    assert [s.type for s in specs] == ["bash"]
-
-
-def test_retired_only_list_hydrates_to_empty() -> None:
-    assert load_tool_specs([{"type": "complete_goal"}, {"type": "fail_goal"}]) == []
-
-
-def test_clean_list_is_untouched_and_validates() -> None:
-    specs = load_tool_specs([{"type": "bash"}, {"type": "create_goal"}])
-    assert [s.type for s in specs] == ["bash", "create_goal"]
-
-
-def test_order_preserved_with_custom_and_mcp_entries() -> None:
-    specs = load_tool_specs(
-        [
-            {"type": "bash"},
-            {"type": "fail_goal"},
-            {"type": "custom", "name": "foo", "description": "d", "input_schema": {}},
-            {"type": "complete_goal"},
-            {"type": "mcp_toolset", "mcp_server_name": "srv"},
-        ]
-    )
-    assert [s.type for s in specs] == ["bash", "custom", "mcp_toolset"]
-
-
-def test_retired_drop_does_not_tolerate_contracted_rename() -> None:
-    """The drop shim does not mask an independently contracted rename token."""
-    with pytest.raises(ValidationError):
-        load_tool_specs([{"type": "complete_goal"}, {"type": "invoke_workflow"}])
-
-
-def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
-    """CI-gap regression: an agent whose persisted ``tools`` JSONB carries a retired builtin
-    hydrates without raising — the exact wedge #1525 introduced and CI missed (test agents are
-    born from the current catalog, so none carry retired builtins)."""
+def test_agent_row_with_retired_builtin_fails_hydration(retired: str) -> None:
+    """Migration 0122 closed the compatibility window; stale persisted tools fail closed."""
     from datetime import UTC, datetime
-
-    from aios.db.queries.agents import _row_to_agent
 
     now = datetime.now(UTC)
     row = {
-        "id": "agt_wedged",
+        "id": "agt_stale",
         "version": 3,
-        "name": "ultron",
+        "name": "stale",
         "model": "anthropic/claude-opus-4-6",
         "system": "",
-        # Pool reads arrive already parsed (the jsonb codec decodes), so pass
-        # parsed Python here, exactly what ``_row_to_agent`` receives in prod.
-        "tools": [{"type": "bash"}, {"type": "complete_goal"}, {"type": "fail_goal"}],
+        "tools": [{"type": "bash"}, {"type": retired}],
         "skills": [],
         "mcp_servers": [],
         "http_servers": [],
@@ -95,7 +37,5 @@ def test_agent_row_with_retired_builtin_hydrates_clean() -> None:
         "archived_at": None,
     }
 
-    agent = _row_to_agent(row)
-
-    # The retired builtins are gone; the legitimate one survives. No exception = no wedge.
-    assert [t.type for t in agent.tools] == ["bash"]
+    with pytest.raises(ValidationError):
+        _row_to_agent(row)
