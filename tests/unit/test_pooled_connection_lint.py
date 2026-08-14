@@ -141,3 +141,56 @@ async def work(pool):
     async with pool.acquire() as conn:
         await {call}
 """)
+
+
+def test_iter_exemption_refs_sees_markers_the_old_ci_grep_missed(tmp_path) -> None:
+    """The em-dash blind spot: aios#2143.
+
+    CI used to enumerate exemptions with an inline grep requiring the issue ref to
+    follow ``allow`` IMMEDIATELY::
+
+        grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src
+
+    A real marker read ``allow — eumemic/aios#919``. The grep never matched it, so
+    that exemption cited a CLOSED issue for two months while the check reported
+    success. This pins the parser against every punctuation variant, so the check
+    can never again be blind to the formatting it did not anticipate.
+    """
+    import re
+
+    from scripts.pooled_connection_lint import iter_exemption_refs
+
+    variants = [
+        ("plain", "allow eumemic/aios#111"),
+        ("em_dash", "allow — eumemic/aios#222"),
+        ("hyphen", "allow - eumemic/aios#333"),
+        ("colon", "allow: eumemic/aios#444"),
+        ("parens", "allow (eumemic/aios#555)"),
+        ("trailing_prose", "allow eumemic/aios#666 — load-bearing, see thread"),
+    ]
+    src = tmp_path / "src"
+    src.mkdir()
+    for name, marker in variants:
+        (src / f"{name}.py").write_text(
+            "async def f(pool):\n"
+            "    async with pool.acquire() as conn:\n"
+            f"        return await conn.fetch('x')  # pooled-connection-await: {marker}\n",
+            encoding="utf-8",
+        )
+
+    found = {issue for _path, _line, issue in iter_exemption_refs(str(src))}
+    assert found == {111, 222, 333, 444, 555, 666}, (
+        f"parser missed a marker variant: got {sorted(found)}"
+    )
+
+    # And prove the OLD grep semantics really were blind, so this test documents the
+    # bug rather than merely asserting current behaviour.
+    old_grep = re.compile(r"pooled-connection-await: allow eumemic/aios#(\d+)")
+    old_found = {
+        int(m.group(1))
+        for _n, marker in variants
+        for m in [old_grep.search(f"# pooled-connection-await: {marker}")]
+        if m
+    }
+    assert 222 not in old_found, "the em-dash case must be what the old grep missed"
+    assert old_found < found, "the new parser must strictly dominate the old grep"

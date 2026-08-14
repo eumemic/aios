@@ -144,14 +144,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          refs=$(grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src \
-            | grep -oE 'eumemic/aios#[0-9]+' | sort -u || true)
-          while read -r ref; do
+          # Ask the LINTER what an exemption marker is -- never re-implement the parse
+          # here (aios#2143). An inline grep requiring the ref to follow `allow`
+          # IMMEDIATELY silently skipped `allow -- eumemic/aios#919`, so that exemption
+          # pointed at a CLOSED issue for two months while this step reported success.
+          # Two mechanisms parsing one syntax with different rules is how a blind spot
+          # appears; the linter is now the single source of truth.
+          uv run python scripts/pooled_connection_lint.py --list-exemptions src \
+            | sort -u > /tmp/exemptions.tsv
+          fail=0
+          while IFS=$'\t' read -r site ref; do
             [[ -z "$ref" ]] && continue
             issue=${ref##*#}
-            state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state)
-            [[ "$state" == "open" ]] || { echo "$ref does not exist or is not open"; exit 1; }
-          done <<< "$refs"
+            state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state 2>/dev/null || echo missing)
+            if [[ "$state" != "open" ]]; then
+              # Name the EXEMPTION and its file:line, not just the issue number: the
+              # reader's next action is to edit that marker, and a bare issue number
+              # makes every occurrence a fresh investigation.
+              echo "::error file=${site%%:*},line=${site##*:}::pooled-await exemption at ${site} cites ${ref}, which is ${state} (must be open). Re-anchor it to a live tracking issue, or remove the exemption."
+              fail=1
+            fi
+          done < /tmp/exemptions.tsv
+          exit $fail
 
       - name: Lint (ruff)
         # ``packages/aios-sdk/aios_sdk`` carries hand-written modules

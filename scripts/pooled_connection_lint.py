@@ -528,10 +528,61 @@ def check_paths(paths: list[Path]) -> list[Violation]:
     return violations
 
 
+def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
+    """Every pooled-await exemption marker under ``root``, as (path, lineno, issue).
+
+    THE SINGLE SOURCE OF TRUTH for "what is an exemption marker", so CI cannot
+    disagree with the linter about it.
+
+    WHY THIS EXISTS (aios#2143, 2026-08-14): the CI workflow re-implemented this
+    parse as an inline grep requiring the reference to follow ``allow``
+    IMMEDIATELY::
+
+        grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src
+
+    One real marker read ``allow — eumemic/aios#919`` (em-dash). The grep never
+    matched it, so that exemption pointed at a CLOSED issue for two months while
+    the check reported success -- a governance check blind to the formatting it
+    did not anticipate, whose silence was indistinguishable from a clean bill of
+    health. Meanwhile a legitimately-closed issue (#1945) turned lint red on
+    every PR that rebased onto master.
+
+    Two mechanisms parsing one syntax with different rules is how the blind spot
+    appeared. This function is the fix: the workflow calls it instead of guessing
+    again.
+    """
+    out: list[tuple[str, int, int]] = []
+    for path in sorted(Path(root).rglob("*.py")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            if _PRAGMA not in line:
+                continue
+            match = _ISSUE_REF.search(line)
+            if match is not None:
+                out.append((str(path), lineno, int(match.group(1))))
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
+    parser.add_argument(
+        "--list-exemptions",
+        action="store_true",
+        help=(
+            "print every pooled-await exemption marker as 'path:line\\teumemic/aios#N'. "
+            "CI uses this instead of re-implementing the parse (aios#2143)."
+        ),
+    )
     args = parser.parse_args()
+    if args.list_exemptions:
+        for path in args.paths:
+            for _p, _ln, _issue in iter_exemption_refs(str(path)):
+                print(f"{_p}:{_ln}\teumemic/aios#{_issue}")
+        return 0
     violations = check_paths(args.paths)
     for violation in violations:
         print(violation)
