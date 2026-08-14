@@ -1361,7 +1361,8 @@ async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[
     """
     summary = await conn.fetchval("SELECT terminal_summary FROM wf_runs WHERE id = $1", run_id)
     if summary is not None:
-        return summary.get("error")
+        summary_error: dict[str, Any] | None = summary.get("error")
+        return summary_error
     completed = await get_run_completed_event(conn, run_id)
     if completed is None:
         return None
