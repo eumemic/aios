@@ -586,6 +586,147 @@ class TestUpdateVaultCredentialCallSite:
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
 
 
+class TestUpdateVaultCredentialMetadataClearParity:
+    """``metadata: null`` must CLEAR metadata identically whether or not the
+    update also rescopes the credential.
+
+    The rescope branch inserts a *replacement* row, so it has to reconstruct
+    every field rather than pass a "leave alone" sentinel. Deciding that
+    reconstruction with ``body.metadata is not None`` conflates *omitted* with
+    *explicitly null*: the same PUT then clears metadata on the ordinary path
+    but silently preserves it on the rescope path. Presence in
+    ``model_fields_set`` — not the value's truthiness/nullity — is what
+    distinguishes the two.
+    """
+
+    @staticmethod
+    def _env_var_credential() -> VaultCredential:
+        return VaultCredential(
+            id="vc_1",
+            vault_id="vlt_1",
+            display_name="mailgun",
+            target_url=None,
+            auth_type="environment_variable",
+            secret_name="MAILGUN_API_KEY",
+            allowed_hosts=["mailgun.com"],
+            metadata={"owner": "ops"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    async def _metadata_sent_for(
+        self, crypto_box: CryptoBox, body: VaultCredentialUpdate, *, rescope: bool
+    ) -> Any:
+        """Drive the service once and return the metadata it handed the DB layer.
+
+        Normalizes across the two branches so the assertions can compare them:
+        the rescope branch reports the replacement row's ``metadata`` kwarg,
+        the ordinary branch reports its ``metadata`` kwarg (``...`` meaning
+        "leave the stored value alone").
+        """
+        account_id = "acc_test_stub"
+        existing = self._env_var_credential()
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt_dict(
+            {"secret_value": "carried-secret"}
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
+            ),
+            patch.object(queries, "archive_vault_credential", AsyncMock(return_value=existing)),
+            patch.object(
+                queries, "insert_vault_credential", AsyncMock(return_value=existing)
+            ) as insert,
+            patch.object(
+                queries, "update_vault_credential", AsyncMock(return_value=existing)
+            ) as upd,
+        ):
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=body,
+                account_id=account_id,
+            )
+
+        if rescope:
+            assert insert.await_args is not None, "expected the replacement-row path"
+            assert upd.await_args is None
+            return insert.await_args.kwargs["metadata"]
+        assert upd.await_args is not None, "expected the ordinary update path"
+        assert insert.await_args is None
+        return upd.await_args.kwargs["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_metadata_clears_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # A rescope (allowed_hosts change) combined with an explicit
+        # ``metadata: null`` must CLEAR metadata — not silently carry the
+        # existing {"owner": "ops"} over onto the replacement row.
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata=None),
+            rescope=True,
+        )
+        assert sent is None, f"rescope path failed to clear metadata: sent {sent!r}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_metadata_clears_identically_with_and_without_rescope(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # The equivalence IS the property: the same explicitly-null metadata
+        # request must have the same observable effect on the stored metadata
+        # regardless of whether a rescope happened to occur.
+        with_rescope = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata=None),
+            rescope=True,
+        )
+        without_rescope = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(metadata=None),
+            rescope=False,
+        )
+        assert without_rescope is None  # the ordinary path already clears
+        assert with_rescope == without_rescope, (
+            "same request, different outcome depending on rescope: "
+            f"rescope sent {with_rescope!r}, non-rescope sent {without_rescope!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_metadata_preserves_existing_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # The other direction: omitted is NOT the same as explicitly null. A
+        # rescope that never mentions metadata must carry the existing value
+        # onto the replacement row (the row is new, so "leave alone" has to be
+        # materialized as the old value).
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"]),
+            rescope=True,
+        )
+        assert sent == {"owner": "ops"}, f"omitted metadata was not preserved: sent {sent!r}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_metadata_value_is_written_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata={"owner": "sec"}),
+            rescope=True,
+        )
+        assert sent == {"owner": "sec"}
+
+
 # ── OAuth refresh ────────────────────────────────────────────────────────────
 
 
