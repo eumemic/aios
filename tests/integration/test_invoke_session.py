@@ -268,23 +268,51 @@ async def _invoke_agent_child(
     )
 
 
-@pytest.mark.parametrize("workspace", [None, "shared"])
-async def test_call_agent_inherits_live_workspace_by_default_or_explicitly(
-    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str], workspace: str | None
+async def test_call_agent_shares_live_workspace_only_when_explicitly_asked(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
 ) -> None:
+    """POSITIVE CONTROL: opting in by name still hands the child the parent's
+    live workspace. Paired with the default test below, so "omitting gives fresh"
+    cannot pass on a build where sharing is broken outright.
+
+    This case used to be parametrized over ``[None, "shared"]`` — asserting that
+    OMITTING also shared. That ``None`` arm pinned the old default and is now the
+    inverted assertion in
+    :func:`test_call_agent_omitting_workspace_does_not_touch_parent_workspace`.
+    """
     pool, account_id, agent_id, env_id, parent_id = pool_env
     async with pool.acquire() as conn:
         parent_path = await queries.get_session_workspace_path(
             conn, parent_id, account_id=account_id
         )
 
-    kwargs = {} if workspace is None else {"workspace": workspace}
-    handle = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id, **kwargs)
+    handle = await _invoke_agent_child(
+        pool, account_id, parent_id, agent_id, env_id, workspace="shared"
+    )
     child = await service.get_session_basic(pool, handle.servicer_id, account_id=account_id)
 
     async with pool.acquire() as conn:
         child_path = await queries.get_session_workspace_path(conn, child.id, account_id=account_id)
     assert child_path == parent_path
+
+
+async def test_call_agent_omitting_workspace_does_not_touch_parent_workspace(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str, str],
+) -> None:
+    """A caller that never heard of ``workspace`` must NOT get live write access to
+    the parent's workspace. Sharing is opt-in; silence means isolation."""
+    pool, account_id, agent_id, env_id, parent_id = pool_env
+    async with pool.acquire() as conn:
+        parent_path = await queries.get_session_workspace_path(
+            conn, parent_id, account_id=account_id
+        )
+
+    handle = await _invoke_agent_child(pool, account_id, parent_id, agent_id, env_id)
+    child = await service.get_session_basic(pool, handle.servicer_id, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        child_path = await queries.get_session_workspace_path(conn, child.id, account_id=account_id)
+    assert child_path != parent_path
 
 
 async def test_call_agent_fresh_workspace_is_isolated_and_persisted(

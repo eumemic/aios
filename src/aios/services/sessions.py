@@ -852,7 +852,7 @@ async def invoke(
     resources: list[SessionResource] | None = None,
     env: dict[str, str] | None = None,
     outbound_suppression: str | None = None,
-    workspace: Literal["shared", "fresh"] = "shared",
+    workspace: Literal["shared", "fresh"] = "fresh",
     launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
