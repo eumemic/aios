@@ -152,9 +152,28 @@ jobs:
           # appears; the linter is now the single source of truth.
           uv run python scripts/pooled_connection_lint.py --list-exemptions src \
             | sort -u > /tmp/exemptions.tsv
+
+          # FAIL CLOSED ON AN EMPTY ENUMERATION. If the linter crashes, the path is
+          # wrong, or every file is unreadable, zero rows come back -- and treating
+          # that as "all clear" would make total enumeration failure indistinguishable
+          # from a clean result. That is precisely the defect this step exists to fix
+          # (aios#2138: a predicate that reads "I could not check" as "it is fine"),
+          # so the fix must not reintroduce it one layer up. The repo is known to
+          # carry exemptions; zero means the enumerator broke, not that they vanished.
+          if [[ ! -s /tmp/exemptions.tsv ]]; then
+            echo "::error::pooled-await exemption enumeration returned NOTHING. The repo carries known exemptions, so an empty result means the enumerator failed -- it does NOT mean there are none. Refusing to report all-clear."
+            exit 1
+          fi
+
           fail=0
           while IFS=$'\t' read -r site ref; do
-            [[ -z "$ref" ]] && continue
+            [[ -z "$site$ref" ]] && continue
+            # A row we cannot parse is an exemption we cannot check. Never skip it.
+            if [[ -z "$ref" || "$site" != *:* ]]; then
+              echo "::error::unparseable exemption row from the enumerator: '${site}\t${ref}' -- refusing to skip it, because a skipped row is an unchecked exemption."
+              fail=1
+              continue
+            fi
             issue=${ref##*#}
             state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state 2>/dev/null || echo missing)
             if [[ "$state" != "open" ]]; then

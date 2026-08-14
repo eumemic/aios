@@ -555,8 +555,12 @@ def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
     for path in sorted(Path(root).rglob("*.py")):
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
+        except OSError as exc:
+            # NEVER swallow this. A file we cannot read is a file whose exemptions we
+            # do not know about -- reporting "no markers here" would make partial
+            # enumeration failure indistinguishable from a clean result, which is the
+            # exact class this whole change exists to kill (aios#2138).
+            raise RuntimeError(f"cannot read {path} while enumerating exemptions: {exc}") from exc
         for lineno, line in enumerate(lines, start=1):
             if _PRAGMA not in line:
                 continue

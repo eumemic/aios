@@ -143,7 +143,7 @@ async def work(pool):
 """)
 
 
-def test_iter_exemption_refs_sees_markers_the_old_ci_grep_missed(tmp_path) -> None:
+def test_iter_exemption_refs_sees_markers_the_old_ci_grep_missed(tmp_path: Path) -> None:
     """The em-dash blind spot: aios#2143.
 
     CI used to enumerate exemptions with an inline grep requiring the issue ref to
