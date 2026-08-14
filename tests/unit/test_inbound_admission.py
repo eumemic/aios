@@ -357,7 +357,7 @@ def test_malformed_stored_inbound_policy_raises_422_not_500() -> None:
     }
 
     with pytest.raises(ValidationError) as excinfo:
-        _row_to_connection(row)  # type: ignore[arg-type]
+        _row_to_connection(row)
 
     assert excinfo.value.status_code == 422
     assert excinfo.value.detail["reason"] == "malformed_inbound_policy"
