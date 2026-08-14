@@ -13,6 +13,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import asyncpg
 from pydantic import TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
 
 from aios.actors import actor_from_row
 from aios.crypto.vault import EncryptedBlob
@@ -22,6 +23,7 @@ from aios.db.queries import (
 from aios.errors import (
     ConflictError,
     NotFoundError,
+    ValidationError,
 )
 from aios.ids import (
     BINDING,
@@ -299,9 +301,27 @@ _CONNECTION_UPDATE_CTE_TAIL = """
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
     raw_policy = row["inbound_policy"]
-    inbound_policy = (
-        _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
-    )
+    try:
+        inbound_policy = (
+            _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
+        )
+    except PydanticValidationError as exc:
+        # A stored policy that no longer parses (hand-edited jsonb, a
+        # rolled-back deploy that wrote a ``kind`` this build doesn't know)
+        # must FAIL CLOSED — and it does, because this raises before any
+        # admission decision, so nothing is delivered.
+        #
+        # But it has to fail closed as a **422**, not a 500. A raw pydantic
+        # ``ValidationError`` escapes as an unhandled exception → 500, and the
+        # connector runner treats 5xx as a routine *per-message* drop: every
+        # inbound on that connection would be silently discarded one at a
+        # time, indistinguishable from a transient API blip, forever. 422
+        # (aios ``ValidationError``) is the terminal "operator must fix the
+        # config" signal the rest of the inbound drop-reason surface uses.
+        raise ValidationError(
+            f"connection {row['id']} has a malformed inbound_policy",
+            detail={"id": row["id"], "reason": "malformed_inbound_policy"},
+        ) from exc
     return Connection(
         id=row["id"],
         connector=row["connector"],

@@ -29,6 +29,33 @@ async def upsert_pending_inbound_grant(
     )
 
 
+async def has_active_inbound_grant(
+    conn: asyncpg.Connection[Any], *, account_id: str, connection_id: str, chat_id: str
+) -> bool:
+    """Is there an **active** (operator-approved, server-stamped) grant?
+
+    This is the authority read behind ``RequireApproval`` admission. The
+    ``connections.inbound_policy->approved`` list is an operator-writable
+    *mirror*; this ledger row is the audited fact (#1503 requires approval to
+    be server-stamped and audited). A ``pending`` row is NOT an approval, and a
+    ``revoked`` row is not one either — only ``status = 'active'`` admits, so a
+    dangling ``approved`` entry left behind by a crashed / racing / hand-rolled
+    policy write cannot keep a chat admitted.
+    """
+    return bool(
+        await conn.fetchval(
+            """SELECT EXISTS (
+                   SELECT 1 FROM inbound_grants
+                    WHERE account_id = $1 AND connection_id = $2 AND chat_id = $3
+                      AND status = 'active'
+               )""",
+            account_id,
+            connection_id,
+            chat_id,
+        )
+    )
+
+
 async def list_pending_inbound_grants(
     conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
 ) -> list[InboundGrant]:

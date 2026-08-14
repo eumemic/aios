@@ -118,9 +118,14 @@ def _inbound_drop_error(drop_reason: inbound_service.InboundDrop) -> AiosError:
             inbound_service.InboundDrop.DETACHED
             | inbound_service.InboundDrop.ARCHIVED_TEMPLATE
             | inbound_service.InboundDrop.DENIED_BY_POLICY
+            | inbound_service.InboundDrop.PENDING_APPROVAL
         ):
             # DENIED_BY_POLICY maps to a non-fatal 422 (#1504): a denied stranger
             # must not be able to crash-restart the connector container.
+            # PENDING_APPROVAL shares the 422 status for the same reason, but
+            # carries its own ``drop_reason`` so a caller can tell "held for
+            # operator approval" apart from a flat denial — and both apart from
+            # a delivery (which is a 200 carrying ``appended_event_id``).
             return ValidationError(msg, detail=detail)
         case inbound_service.InboundDrop.SESSION_MISSING:
             return NotFoundError(msg, detail=detail)

@@ -323,3 +323,51 @@ async def test_allow_senders_member_is_appended_and_woken() -> None:
     assert result.drop_reason is None
     append.assert_awaited_once()
     wake.assert_awaited_once()
+
+
+# ─── malformed stored policy → 422, never 500 ────────────────────────────────
+
+
+def test_malformed_stored_inbound_policy_raises_422_not_500() -> None:
+    """A stored ``inbound_policy`` this build can't parse must surface as an
+    aios ``ValidationError`` (422), not a raw pydantic error escaping as a 500.
+
+    It already failed CLOSED for delivery, but a 500 is a *non-fatal
+    per-message* drop in the connector runner: every inbound on the connection
+    would be discarded one at a time, indistinguishable from a transient API
+    blip. 422 is the terminal "operator must fix the config" signal.
+    """
+    from aios.db.queries.connections import _row_to_connection
+
+    row = {
+        "id": "conn_malformed",
+        "connector": "signal",
+        "external_account_id": "+15551234567",
+        "metadata": {},
+        "secrets_ciphertext": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+        "archived_at": None,
+        "binding_session_id": None,
+        "binding_session_template_id": None,
+        "binding_created_at": None,
+        "inbound_policy": {"kind": "not_a_real_kind"},
+        "created_by_actor_kind": None,
+        "created_by_actor_id": None,
+    }
+
+    with pytest.raises(ValidationError) as excinfo:
+        _row_to_connection(row)  # type: ignore[arg-type]
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail["reason"] == "malformed_inbound_policy"
+
+
+def test_pending_approval_is_a_distinct_non_fatal_422() -> None:
+    """PENDING_APPROVAL is distinguishable from a flat denial AND from a
+    delivery, while sharing the non-fatal 422 status."""
+    err = _inbound_drop_error(InboundDrop.PENDING_APPROVAL)
+    assert isinstance(err, ValidationError)
+    assert err.status_code == 422
+    assert err.detail == {"drop_reason": "pending_approval"}
+    assert err.detail != _inbound_drop_error(InboundDrop.DENIED_BY_POLICY).detail

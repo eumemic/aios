@@ -522,6 +522,7 @@ from .files import (  # noqa: E402
 )
 from .inbound_grants import (  # noqa: E402
     approve_inbound_grant,
+    has_active_inbound_grant,
     list_pending_inbound_grants,
     reap_pending_inbound_grants,
     revoke_inbound_grant,
@@ -920,6 +921,7 @@ __all__ = [
     "get_vault_credential_with_blob",
     "get_wake_priority_context",
     "hard_delete_account",
+    "has_active_inbound_grant",
     "has_active_root_account",
     "increment_session_usage",
     "insert_account_key",
