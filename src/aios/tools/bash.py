@@ -51,6 +51,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import structlog
+
 from aios.config import get_settings
 from aios.errors import AiosError
 from aios.harness import runtime
@@ -61,6 +63,8 @@ from aios.tools.bash_memory_reconcile import (
     snapshot_memory_mounts,
 )
 from aios.tools.registry import registry
+
+log = structlog.get_logger(__name__)
 
 
 class BashArgumentError(AiosError):
@@ -178,6 +182,10 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
         except Exception:
             if not exec_raised:
                 raise  # fail hard when exec succeeded
+            log.exception(
+                "memory_reconcile_failed_after_exec_error",
+                session_id=session_id,
+            )
 
     stderr = result.stderr
     if reconcile_warnings:

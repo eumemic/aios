@@ -870,6 +870,17 @@ The throughline: the primitives are largely in place; the work ahead is composin
 
 ---
 
+### Pre-commit checks
+
+Install the repository hook once per clone:
+
+```bash
+ln -sf ../../scripts/git-hooks/pre-commit .git/hooks/pre-commit
+```
+
+The hook runs the local lint, type, and unit-test checks when Python files are
+staged. Ruff fixes are left in the working tree for review and explicit staging.
+
 ## License
 
 MIT.

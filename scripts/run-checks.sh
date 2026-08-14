@@ -7,6 +7,7 @@
 #   scripts/run-checks.sh --skip mypy      # skip mypy
 #   scripts/run-checks.sh --fail-on-autofix # fail if ruff auto-formats (for pre-commit)
 #   scripts/run-checks.sh --fail-fast      # stop at first failure
+#   scripts/run-checks.sh --integration    # also run Docker-backed integration tests
 #
 # Checks: ruff, mypy, tests (unit + connector suites — e2e needs Docker)
 
@@ -20,12 +21,14 @@ cd "$GIT_ROOT"
 SKIP=""
 FAIL_ON_AUTOFIX=0
 FAIL_FAST=0
+INTEGRATION=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --skip)       SKIP="$2"; shift 2 ;;
         --fail-on-autofix) FAIL_ON_AUTOFIX=1; shift ;;
         --fail-fast)  FAIL_FAST=1; shift ;;
+        --integration) INTEGRATION=1; shift ;;
         *)            echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -57,11 +60,17 @@ if ! should_skip ruff; then
         # exit means it reported lint errors it could NOT auto-fix; those
         # leave no diff, so we must surface the exit status explicitly or the
         # pre-commit gate would pass an unfixable error.
+        before=$(mktemp)
+        after=$(mktemp)
+        git diff --name-only | sort -u > "$before"
         uv run ruff check --fix "${LINT_TARGETS[@]}" 2>&1 || fail
         uv run ruff format "${LINT_TARGETS[@]}" 2>&1 || fail
-        if [[ -n "$(git diff --name-only)" ]]; then
+        git diff --name-only | sort -u > "$after"
+        newly_changed=$(comm -13 "$before" "$after")
+        rm -f "$before" "$after"
+        if [[ -n "$newly_changed" ]]; then
             echo "ruff auto-fixed files — please re-stage:" >&2
-            git diff --name-only >&2
+            echo "$newly_changed" >&2
             fail
         fi
     else
@@ -81,7 +90,7 @@ fi
 
 if ! should_skip tests; then
     echo "── pytest (unit) ──"
-    uv run pytest tests/unit -q || fail
+    uv run pytest tests/unit -q -n 4 || fail
 
     # Each connector suite runs as its own run: every connector
     # ``tests/`` dir has an ``__init__.py`` and no parent package, so pytest
@@ -98,6 +107,11 @@ if ! should_skip tests; then
     uv run pytest connectors/whatsapp/tests -q || fail
     uv run pytest packages/aios-connector-http/tests -q || fail
     uv run pytest packages/aios-sdk/tests -q || fail
+
+    if [[ $INTEGRATION -eq 1 ]]; then
+        echo "── pytest (integration) ──"
+        uv run pytest tests/integration -q || fail
+    fi
 fi
 
 echo ""

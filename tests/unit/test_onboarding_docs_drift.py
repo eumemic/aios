@@ -65,3 +65,27 @@ def test_run_checks_matches_ci_lint_and_test_targets() -> None:
     assert "packages/aios-sdk/tests" in checks, (
         "run-checks.sh omits the packages/aios-sdk/tests suite that CI runs."
     )
+
+
+def test_env_example_aios_keys_map_to_settings_fields() -> None:
+    """Every documented AIOS_* variable must be accepted by Settings."""
+    import re
+
+    from aios.config import Settings
+
+    keys = set(re.findall(r"^#?\s*(AIOS_[A-Z0-9_]+)=", _read(".env.example"), re.MULTILINE))
+    unknown = sorted(
+        key for key in keys if key.removeprefix("AIOS_").lower() not in Settings.model_fields
+    )
+    assert not unknown, f".env.example contains AIOS_* keys without Settings fields: {unknown}"
+
+
+def test_env_example_documents_instance_id_and_omits_dead_network_mode() -> None:
+    env_example = _read(".env.example")
+    assert "AIOS_INSTANCE_ID=" in env_example
+    assert "AIOS_SANDBOX_NETWORK_MODE" not in env_example
+
+
+def test_pre_commit_hook_does_not_restage_worktree_changes() -> None:
+    hook = _read("scripts/git-hooks/pre-commit")
+    assert "git add" not in hook

@@ -324,3 +324,24 @@ class TestExecRaisedReconcileSuppression:
 
         # reconcile was still attempted despite exec raising
         mock_reconcile.assert_awaited_once()
+
+
+async def test_reconcile_failure_is_logged_when_exec_already_raised(
+    stub_registry: _StubRegistry,
+) -> None:
+    stub_registry.exec.side_effect = RuntimeError("container died")
+    with (
+        patch(
+            "aios.tools.bash.reconcile_memory_mounts",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("reconcile failed too"),
+        ),
+        patch("aios.tools.bash.log.exception") as log_exception,
+        pytest.raises(RuntimeError, match="container died"),
+    ):
+        await bash_handler("sess_01TEST", {"command": "true"})
+
+    log_exception.assert_called_once_with(
+        "memory_reconcile_failed_after_exec_error",
+        session_id="sess_01TEST",
+    )

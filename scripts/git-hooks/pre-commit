@@ -22,12 +22,4 @@ fi
 "$GIT_ROOT/scripts/run-checks.sh" --fail-on-autofix
 RESULT=$?
 
-# Re-add any files that ruff auto-formatted
-if [[ $RESULT -eq 0 ]]; then
-    modified=$(git diff --name-only | grep -E '\.py$' || true)
-    if [[ -n "$modified" ]]; then
-        git add $modified 2>/dev/null
-    fi
-fi
-
 exit $RESULT

@@ -49,6 +49,12 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # Client/dev-tool settings documented in the shared .env.example. Server
+    # code does not use these values directly, but declaring them keeps the
+    # AIOS_* environment contract centralized and type-checked.
+    api_key: SecretStr | None = Field(default=None, repr=False)
+    postgres_admin_url: SecretStr | None = Field(default=None, repr=False)
+
     # ── instance identity ──────────────────────────────────────────────────
     instance_id: str = Field(
         default="default",
