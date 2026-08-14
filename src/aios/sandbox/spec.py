@@ -28,7 +28,7 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from aios.config import get_settings
 from aios.db import queries
@@ -38,6 +38,7 @@ from aios.models.environments import (
     RESERVED_SANDBOX_IMAGE_PREFIX,
     EnvironmentConfig,
     LimitedNetworking,
+    UnrestrictedNetworking,
 )
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import MemoryStoreResourceEcho
@@ -633,6 +634,40 @@ def _warn_if_creds_under_open_egress(
     )
 
 
+def _proxy_networking_mode(
+    env_config: EnvironmentConfig | None,
+) -> Literal["limited", "unrestricted"]:
+    """Select the egress proxy's networking mode from the environment config.
+
+    TOTAL and explicit, rather than an ``else``-falls-to-permissive ternary
+    (aios#2138). The proxy uses this mode to decide whether an unrecognized SNI
+    may be blind-relayed, so an unknown configuration shape must NOT silently
+    select the permissive value.
+
+    * :class:`LimitedNetworking`      → ``limited``      (strict; there is a
+      filter DROP, so the allowlist is the containment boundary).
+    * :class:`UnrestrictedNetworking` → ``unrestricted`` (explicitly open).
+    * ``None`` env config / ``None`` networking → ``unrestricted``. This is
+      NOT an "unknown" — absent networking config is the DOCUMENTED default
+      for open egress and is treated as unrestricted by every other consumer
+      (``registry._apply_egress_rules`` installs no DROP,
+      ``env_var_credential_containment_error`` skips the subset gate,
+      ``_warn_if_creds_under_open_egress`` warns). Selecting ``limited`` here
+      would make the proxy reset colliding SNIs for the DEFAULT configuration
+      — reintroducing the exact outage this PR fixes (#2034) on sessions whose
+      egress the firewall leaves wide open.
+    * Anything else (a networking class added later that this function has not
+      been taught) → ``limited``: the strict side, so a future config shape
+      fails closed instead of silently unlocking blind relay.
+    """
+    networking = env_config.networking if env_config is not None else None
+    if isinstance(networking, LimitedNetworking):
+        return "limited"
+    if networking is None or isinstance(networking, UnrestrictedNetworking):
+        return "unrestricted"
+    return "limited"
+
+
 def _resolve_image(env_config: EnvironmentConfig | None, default_image: str) -> str:
     """Resolve the sandbox image from the environment config (#724) and enforce the
     cross-tenant snapshot gate (durable session sandboxes, §5.8).
@@ -752,12 +787,7 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         if env_var_credentials:
             proxy = SecretEgressProxy(
                 env_var_credentials,
-                networking_mode=(
-                    "limited"
-                    if env_config is not None
-                    and isinstance(env_config.networking, LimitedNetworking)
-                    else "unrestricted"
-                ),
+                networking_mode=_proxy_networking_mode(env_config),
                 owner_id=session_id,
             )
             await proxy.start()
@@ -901,12 +931,7 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
         if env_var_credentials:
             proxy = SecretEgressProxy(
                 env_var_credentials,
-                networking_mode=(
-                    "limited"
-                    if env_config is not None
-                    and isinstance(env_config.networking, LimitedNetworking)
-                    else "unrestricted"
-                ),
+                networking_mode=_proxy_networking_mode(env_config),
                 owner_id=run_id,
             )
             await proxy.start()
