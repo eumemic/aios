@@ -64,7 +64,11 @@ async def monthly_buckets(
         if table.name not in with_created_at:
             continue
         # Identifier originates in pg_class, then is quoted by Postgres itself.
-        identifier = await conn.fetchval("SELECT format('%I.%I', 'public', $1)", table.name)
+        # $1 MUST be cast: format() is variadic "any", so Postgres cannot infer the
+        # parameter's type and asyncpg's PREPARE fails with IndeterminateDatatypeError
+        # ("could not determine data type of parameter $1") on EVERY call. Caught by the
+        # integration test, not by unit tests that mock the connection.
+        identifier = await conn.fetchval("SELECT format('%I.%I', 'public', $1::text)", table.name)
         for offset in range(BUCKET_MONTHS - 1, -1, -1):
             if len(buckets) >= MAX_BUCKET_QUERIES:
                 return buckets
