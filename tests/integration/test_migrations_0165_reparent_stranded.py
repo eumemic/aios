@@ -211,7 +211,20 @@ def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
         f"still resolving: {sorted(stranded)}"
     )
 
-    # GREEN: the forward migration restores them.
+    # A direct-root account created after 0154 is legitimate, not stranded.
+    async def _add_legitimate_post_cutover_account() -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            await conn.execute(
+                "INSERT INTO accounts (id,parent_account_id,display_name) "
+                "VALUES ('acc_legitimate_root','acc_root','Legitimate root child')"
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_add_legitimate_post_cutover_account())
+
+    # GREEN: the forward migration restores only accounts present at cutover.
     result = _run_alembic(["upgrade", "0165"], db_url, key)
     assert result.returncode == 0, result.stderr
     repaired = asyncio.run(_resolving_accounts(db_url))
@@ -234,6 +247,12 @@ def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
                     )
                     == child
                 )
+            assert (
+                await conn.fetchval(
+                    "SELECT parent_account_id FROM accounts WHERE id='acc_legitimate_root'"
+                )
+                == "acc_root"
+            )
             # Deeper descendants keep their own parent -- only root's direct
             # children move.
             assert (
@@ -245,6 +264,12 @@ def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
         finally:
             await conn.close()
 
+    asyncio.run(_check_topology())
+
+    # The repair's downgrade is deliberately non-destructive; a full round
+    # trip must preserve both the repaired and legitimate placements.
+    result = _run_alembic(["downgrade", "0159"], db_url, key)
+    assert result.returncode == 0, result.stderr
     asyncio.run(_check_topology())
 
 

@@ -439,6 +439,13 @@ def downgrade() -> None:
     _rekey(child, root)
     _plain_move(child, root)
     _move_keys(child, root, retain_one=False)
+    # A post-upgrade child may legitimately also be named Eumemic.  Free the
+    # root-level sibling name before moving children back; deleting first is
+    # impossible because the self-FK is ON DELETE RESTRICT.
+    op.get_bind().execute(
+        sa.text("UPDATE accounts SET display_name=:name WHERE id=:child"),
+        {"child": child, "name": f"0154 downgrade ({child})"},
+    )
     _reparent_children(child, root)
     op.get_bind().execute(
         sa.text(

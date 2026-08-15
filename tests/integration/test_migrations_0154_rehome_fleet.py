@@ -411,6 +411,76 @@ async def _assert_restored(
 
 
 @needs_docker
+def test_downgrade_handles_nested_eumemic_name(postgres: Any) -> None:
+    """A post-cutover Eumemic child must survive downgrade beneath root."""
+    db_url = _alembic_url(postgres)
+    key = os.urandom(SecretBox.KEY_SIZE)
+    assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
+
+    async def _seed_and_check() -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            await conn.execute(
+                "INSERT INTO accounts (id,display_name,can_mint_children) "
+                "VALUES ('acc_root','root',true)"
+            )
+            await conn.execute(
+                "INSERT INTO account_keys (key_id,account_id,hash,label) "
+                "VALUES ('key_keep','acc_root',$1,'admin')",
+                os.urandom(32),
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_seed_and_check())
+    result = _run_alembic(["upgrade", "0154"], db_url, key)
+    assert result.returncode == 0, result.stderr
+
+    async def _add_nested() -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            child = await conn.fetchval(
+                "SELECT id FROM accounts WHERE parent_account_id='acc_root' "
+                "AND display_name='Eumemic'"
+            )
+            await conn.execute(
+                "INSERT INTO accounts (id,parent_account_id,display_name) "
+                "VALUES ('acc_nested_eumemic',$1,'Eumemic')",
+                child,
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_add_nested())
+    result = _run_alembic(["downgrade", "0152"], db_url, key)
+    assert result.returncode == 0, result.stderr
+
+    async def _assert_tree() -> None:
+        conn = await asyncpg.connect(db_url)
+        try:
+            assert (
+                await conn.fetchval(
+                    "SELECT parent_account_id FROM accounts WHERE id='acc_nested_eumemic'"
+                )
+                == "acc_root"
+            )
+            assert (
+                await conn.fetchval("SELECT count(*) FROM accounts WHERE display_name='Eumemic'")
+                == 1
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT count(*) FROM account_keys WHERE label='0154 bootstrap (revoked)'"
+                )
+                == 0
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_assert_tree())
+
+
+@needs_docker
 def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
     db_url = _alembic_url(postgres)
     key = os.urandom(SecretBox.KEY_SIZE)

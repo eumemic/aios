@@ -16,9 +16,10 @@ already-migrated database.**
 
 Safety properties:
 
-* **Idempotent.**  The reparenting ``UPDATE`` is defined by the predicate it
-  eliminates (``parent_account_id = root AND id <> child``), so a second run
-  matches zero rows.
+* **Targeted and idempotent.**  0154 created its marker-owned child at the
+  cutover.  Only direct root children created before that boundary can have
+  been present for the shipped 0154 to strand; later root children are left
+  alone.  Once moved, the same predicate no longer matches them.
 * **Harmless where the defect never existed.**  A database migrated by the
   corrected 0154 -- or any database with no root, or no migration-owned
   Eumemic child -- finds nothing to move and returns without writing.
@@ -69,8 +70,8 @@ _RESOLVED_ACCOUNTS = """
 """
 
 
-def _root_and_marked_child() -> tuple[str | None, str | None]:
-    """Locate the live root and the 0154-created Eumemic child, if both exist."""
+def _root_and_marked_child() -> tuple[str | None, str | None, object | None]:
+    """Locate root, 0154-owned child, and its creation-time cutover boundary."""
     bind = op.get_bind()
     root = bind.execute(
         sa.text(
@@ -80,10 +81,10 @@ def _root_and_marked_child() -> tuple[str | None, str | None]:
     ).scalar_one_or_none()
     if root is None:
         # Fresh database (tests, new installs): 0154 was a structural no-op.
-        return None, None
-    child = bind.execute(
+        return None, None, None
+    child_row = bind.execute(
         sa.text(
-            "SELECT accounts.id FROM accounts "
+            "SELECT accounts.id, accounts.created_at FROM accounts "
             "JOIN account_keys ON account_keys.account_id = accounts.id "
             "WHERE accounts.parent_account_id = :root "
             "  AND accounts.display_name = :name "
@@ -93,11 +94,13 @@ def _root_and_marked_child() -> tuple[str | None, str | None]:
             "FOR UPDATE OF accounts"
         ),
         {"root": root, "name": _CHILD_NAME, "label": _MARKER_LABEL},
-    ).scalar_one_or_none()
-    return root, child
+    ).one_or_none()
+    if child_row is None:
+        return root, None, None
+    return root, child_row.id, child_row.created_at
 
 
-def _assert_no_name_collisions(root: str, child: str) -> None:
+def _assert_no_name_collisions(root: str, child: str, cutover: object) -> None:
     """Refuse rather than trip ``accounts_sibling_name_uniq`` mid-move.
 
     Accounts minted under Eumemic since the cutover could share a display name
@@ -117,10 +120,11 @@ def _assert_no_name_collisions(root: str, child: str) -> None:
                 " AND existing.display_name = stranded.display_name "
                 "WHERE stranded.parent_account_id = :root "
                 "  AND stranded.id <> :child "
+                "  AND stranded.created_at < :cutover "
                 "  AND stranded.archived_at IS NULL "
                 "ORDER BY 1"
             ),
-            {"root": root, "child": child},
+            {"root": root, "child": child, "cutover": cutover},
         )
         .scalars()
         .all()
@@ -163,12 +167,12 @@ def _assert_resolution_not_regressed() -> None:
 
 
 def upgrade() -> None:
-    root, child = _root_and_marked_child()
-    if root is None or child is None:
+    root, child, cutover = _root_and_marked_child()
+    if root is None or child is None or cutover is None:
         # No root, or no migration-owned Eumemic child: nothing 0154 could
         # have stranded on this database.
         return
-    _assert_no_name_collisions(root, child)
+    _assert_no_name_collisions(root, child, cutover)
     _snapshot_resolution()
     moved = (
         op.get_bind()
@@ -176,9 +180,10 @@ def upgrade() -> None:
             sa.text(
                 "UPDATE accounts SET parent_account_id = :child "
                 "WHERE parent_account_id = :root AND id <> :child "
+                "  AND created_at < :cutover "
                 "RETURNING id"
             ),
-            {"root": root, "child": child},
+            {"root": root, "child": child, "cutover": cutover},
         )
         .scalars()
         .all()
