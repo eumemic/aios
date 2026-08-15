@@ -839,7 +839,13 @@ class TestParentChannelThreading:
         # The hot path passes ``precomputed=`` (not ``tool_parent_channel=``);
         # its resolved channel echoes the supplied stamp with no DB round-trip.
         assert "tool_parent_channel" not in captured
-        assert captured["precomputed"].resolved_tool_channel == "tg:42"
+        precomputed = captured["precomputed"]
+        assert precomputed.resolved_tool_channel == "tg:42"
+        # Ordinary tool results have identical v1/master and v2 prices.  Both
+        # must be explicit and non-zero: a missing v1 value must never silently
+        # masquerade as a zero-token append.
+        assert precomputed.token_delta_v1 == precomputed.token_delta
+        assert precomputed.token_delta_v1 > 0
 
 
 def _mock_pool_conn() -> tuple[Any, Any]:
@@ -889,7 +895,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
@@ -920,7 +926,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)

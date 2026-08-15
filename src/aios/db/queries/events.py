@@ -1178,7 +1178,7 @@ class _PrecomputedAppend(NamedTuple):
     # the recorded marker therefore ALWAYS describe the same arithmetic, even
     # if the backfill flips the marker between this pre-lock compute and the
     # lock (issue #2050 review).
-    token_delta_v1: int = 0
+    token_delta_v1: int
 
 
 def message_has_image(data: dict[str, Any]) -> bool:
