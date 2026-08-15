@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 from unittest import mock
 from unittest.mock import AsyncMock
@@ -12,8 +13,10 @@ import pytest
 from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
+from aios.models.agents import ToolSpec
 from aios.services import workflows as workflows_service
 from aios.tools import workflow_completion
+from aios.workflows import run_tools
 from aios.workflows.step import run_workflow_step
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
@@ -44,20 +47,23 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
 ) -> None:
     """Exercise run creation -> agent() -> session provision, not hand-built mounts."""
     launcher = await docker_harness.start("workspace contract launcher")
-    # `first`/`second` pass workspace="shared" EXPLICITLY: this test asserts sharing
-    # BEHAVIOUR, not what the default happens to be. The default's value is pinned by
-    # its own test (tests/integration/test_wf_host.py::
-    # test_generic_agent_spec_includes_default_workspace), so a deliberate change to
-    # the default fails that one obvious test instead of silently reddening this one.
+    marker = secrets.token_hex(48)
     script = f"""async def main(input):
-    first = await agent("first", agent_id={launcher.agent_id!r}, workspace="shared")
-    second = await agent("second", agent_id={launcher.agent_id!r}, workspace="shared")
+    wrote = await tool("bash", {{"command": "printf %s {marker} > marker.bin"}})
+    if wrote["exit_code"] != 0:
+        raise RuntimeError(wrote["stderr"])
+    first = await agent("first", agent_id={launcher.agent_id!r})
+    second = await agent("second", agent_id={launcher.agent_id!r})
     isolated = await agent("fresh", agent_id={launcher.agent_id!r}, workspace="fresh")
     return [first, second, isolated]
 """
     async with docker_harness._pool.acquire() as conn:
         workflow = await wf_queries.insert_workflow(
-            conn, account_id="acc_test_stub", name="workspace-contract", script=script
+            conn,
+            account_id="acc_test_stub",
+            name="workspace-contract",
+            script=script,
+            tools=[ToolSpec(type="bash")],
         )
     run = await workflows_service.create_run(
         docker_harness._pool,
@@ -69,21 +75,18 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
 
     registry = runtime.require_sandbox_registry()
     backend = registry._backend
-    run_handle = await registry.get_or_provision_run(run.id)
-    marker = secrets.token_hex(48)
-    write = await backend.exec(
-        run_handle,
-        f"printf %s {marker} > marker.bin",
-        timeout_seconds=30,
-        max_output_bytes=10_000,
-    )
-    assert write.exit_code == 0
 
     with (
         mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()),
         mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()),
+        mock.patch("aios.workflows.run_sandbox.defer_run_wake", new=AsyncMock()),
     ):
+        # The first step dispatches main()'s bash write into the workflow execution
+        # sandbox. Harvest it before replay reaches the first agent() call.
         await run_workflow_step(run.id)
+        await asyncio.gather(*list(run_tools._INFLIGHT.values()))
+        await run_workflow_step(run.id)
+        run_handle = await registry.get_or_provision_run(run.id)
         first_id = await _child_id(docker_harness._pool, run.id, 0)
         first = await registry.get_or_provision(first_id, pool=docker_harness._pool)
         read = await backend.exec(
