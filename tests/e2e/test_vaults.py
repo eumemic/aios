@@ -334,6 +334,49 @@ class TestVaultCredentialCRUD:
         )
         assert cred2.id != cred1.id
 
+    async def test_environment_variable_rescope_and_metadata_clear_are_atomic(
+        self, pool: Any, crypto_box: Any
+    ) -> None:
+        """Rescoping must not discard an explicit metadata update."""
+        account_id = "acc_test_stub"
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="env-rescope-metadata", metadata={}, account_id=account_id
+        )
+        cred = await svc.create_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            body=VaultCredentialCreate(
+                auth_type="environment_variable",
+                secret_name="RESCOPED_KEY",
+                allowed_hosts=["old.example.com"],
+                secret_value=SecretStr("secret"),
+                metadata={"owner": "ops"},
+            ),
+            account_id=account_id,
+        )
+
+        replacement = await svc.update_vault_credential(
+            pool,
+            crypto_box,
+            vault_id=vault.id,
+            credential_id=cred.id,
+            body=VaultCredentialUpdate(
+                allowed_hosts=["new.example.com"],
+                metadata=None,
+            ),
+            account_id=account_id,
+        )
+        fetched = await svc.get_vault_credential(
+            pool, vault.id, replacement.id, account_id=account_id
+        )
+
+        assert replacement.id != cred.id
+        assert fetched.allowed_hosts == ["new.example.com"]
+        assert fetched.metadata is None
+
     async def test_environment_variable_rotates_secret(self, pool: Any, crypto_box: Any) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         from aios.db import queries
