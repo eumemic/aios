@@ -660,7 +660,11 @@ def _proxy_networking_mode(
       been taught) → ``limited``: the strict side, so a future config shape
       fails closed instead of silently unlocking blind relay.
     """
-    networking = env_config.networking if env_config is not None else None
+    # Deliberately widen at this runtime trust boundary.  EnvironmentConfig's
+    # current static union is exhaustive, but persisted/deserialized data (and a
+    # future networking model not yet handled here) must still land on the
+    # fail-closed branch below rather than make that branch type-level dead code.
+    networking: object | None = env_config.networking if env_config is not None else None
     if isinstance(networking, LimitedNetworking):
         return "limited"
     if networking is None or isinstance(networking, UnrestrictedNetworking):
