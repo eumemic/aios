@@ -8,6 +8,9 @@ non-idempotent rule op is only visible there.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from structlog.testing import capture_logs
 
 from aios.sandbox.backends.base import CommandResult
@@ -19,6 +22,7 @@ from aios.sandbox.registry import (
     SandboxRegistry,
 )
 from aios.sandbox.setup import build_egress_refresh_script, egress_unread_hosts
+from aios.services.vaults import ResolvedEnvVarCredential
 from tests.helpers.sandbox import FakeBackend, make_handle
 
 _PROXY = ("172.18.0.2", 49152)
@@ -48,6 +52,25 @@ def _sidecar_result(exit_code: int = 0, stdout: str = "") -> CommandResult:
     return CommandResult(
         exit_code=exit_code, stdout=stdout, stderr="", timed_out=False, truncated=False
     )
+
+
+def _credential(credential_id: str, secret_name: str, host: str) -> ResolvedEnvVarCredential:
+    return ResolvedEnvVarCredential(
+        credential_id=credential_id,
+        secret_name=secret_name,
+        secret_value="not-observable",
+        allowed_hosts=(host,),
+        placeholder="placeholder",
+        updated_at=MagicMock(),
+    )
+
+
+class _Acquire:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
 
 
 def test_refresh_script_adds_before_deleting_and_never_flushes() -> None:
@@ -445,3 +468,79 @@ async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_hos
     assert state.pinned == before
     assert any(entry.get("event") == "sandbox.egress_refresh_deletes_refused" for entry in logs)
     assert any(entry.get("unread_hosts") == ["b.example"] for entry in logs)
+
+
+async def test_persisted_intercepts_are_attributed_to_live_dnat_rules_only() -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    handle = make_handle(session_id="sess_X")
+    credentials = (
+        _credential("vcred_live", "LIVE_TOKEN", "live.example.com"),
+        _credential("vcred_missing", "MISSING_TOKEN", "missing.example.com"),
+    )
+    dump = "\n".join(
+        [
+            "=filter=",
+            "-P OUTPUT ACCEPT",
+            "=nat=",
+            "-P OUTPUT ACCEPT",
+            "-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 "
+            "-j DNAT --to-destination 172.18.0.2:49152",
+        ]
+    )
+    backend.sidecar_results = [
+        _sidecar_result(stdout="live.example.com 1.1.1.1\nmissing.example.com 2.2.2.2\n"),
+        _sidecar_result(stdout=dump),
+    ]
+    stamp = AsyncMock()
+
+    with (
+        patch(
+            "aios.harness.runtime.require_pool",
+            return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+        ),
+        patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+    ):
+        await registry._stamp_egress_state(
+            handle,
+            credential_hosts=frozenset({"live.example.com", "missing.example.com"}),
+            limited_hosts=frozenset(),
+            fallback_proxy_port=0,
+            runtime=None,
+            credentials=credentials,
+        )
+
+    persisted = stamp.await_args.args[2]
+    assert persisted == [
+        {
+            "host": "live.example.com",
+            "intercepted": True,
+            "source_credential_id": "vcred_live",
+            "secret_name": "LIVE_TOKEN",
+        }
+    ]
+
+
+async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None:
+    registry = SandboxRegistry(FakeBackend())
+    handle = make_handle(session_id="sess_X")
+    plan = SimpleNamespace(
+        env_config=None,
+        env_var_credentials=(),
+        secret_proxy=None,
+        spec=SimpleNamespace(runtime=None),
+        git_proxy=None,
+    )
+    stamp = AsyncMock()
+
+    with (
+        patch(
+            "aios.harness.runtime.require_pool",
+            return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+        ),
+        patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+    ):
+        await registry._apply_egress_rules(handle, plan)
+
+    stamp.assert_awaited_once()
+    assert stamp.await_args.args[1:] == ("sess_X", [])

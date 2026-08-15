@@ -941,8 +941,12 @@ class SandboxRegistry:
             )
         else:
             outcome = EgressProvisionResult()
-        # else: Unrestricted, no credentials → nothing (today's early return).
-        if dnat_target is not None:
+        # else: Unrestricted, no credentials → no network-rule work.
+        if dnat_target is None:
+            # A successful credential-free reprovision supersedes any persisted
+            # intercept set from the previous sandbox generation.
+            await self._publish_session_egress(handle, [])
+        else:
             limited_hosts: set[str] = set()
             if isinstance(networking, LimitedNetworking):
                 limited_hosts.update(networking.allowed_hosts)
@@ -1034,15 +1038,16 @@ class SandboxRegistry:
                 return
             proxy_ip = sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0]
             proxy_port = fallback_proxy_port
-        if handle.owner_id.startswith("sess_") and credentials:
-            from aios.harness import runtime as harness_runtime
+        if credentials:
             from aios.models.vaults import parse_allowed_host_entry
 
             hosts = []
             for credential in credentials:
                 for entry in credential.allowed_hosts:
                     host, _prefix = parse_allowed_host_entry(entry)
-                    if host in credential_hosts:
+                    # A configured host is observed as intercepted only when at
+                    # least one of its currently resolved IPs has a live DNAT.
+                    if resolved.get(host, set()) & dnat_ips:
                         hosts.append(
                             {
                                 "host": host,
@@ -1051,8 +1056,7 @@ class SandboxRegistry:
                                 "secret_name": credential.secret_name,
                             }
                         )
-            async with harness_runtime.require_pool().acquire() as conn:
-                await queries.stamp_session_egress(conn, handle.owner_id, hosts)
+            await self._publish_session_egress(handle, hosts)
 
         self._egress_states[handle.owner_id] = EgressRefreshState(
             credential_hosts=credential_hosts,
@@ -1068,6 +1072,18 @@ class SandboxRegistry:
                 accept_ips=accept_ips,
             ),
         )
+
+    @staticmethod
+    async def _publish_session_egress(
+        handle: SandboxHandle, hosts: list[dict[str, object]]
+    ) -> None:
+        """Publish the observed intercept set for a successful session provision."""
+        if not handle.owner_id.startswith("sess_"):
+            return
+        from aios.harness import runtime as harness_runtime
+
+        async with harness_runtime.require_pool().acquire() as conn:
+            await queries.stamp_session_egress(conn, handle.owner_id, hosts)
 
     async def _read_installed_egress_rules(
         self, handle: SandboxHandle, runtime: str | None
