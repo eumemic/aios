@@ -32,7 +32,9 @@ async def list_vault_credentials_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     async with pool.acquire() as conn:
-        rows = await queries.list_session_vault_credentials(conn, session_id, account_id=account_id)
+        rows = await queries.list_session_vault_credentials(  # pooled-connection-await: allow eumemic/aios#2144
+            conn, session_id, account_id=account_id
+        )
     return {
         "credentials": [
             {
