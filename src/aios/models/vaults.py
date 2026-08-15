@@ -367,6 +367,9 @@ class VaultCredential(BaseModel):
     auth_type: AuthType
     secret_name: str | None = None
     allowed_hosts: list[str] | None = None
+    # Explicit ``metadata: null`` on update means "clear" and is persisted as
+    # JSON null.  The read contract must therefore represent both populated
+    # metadata objects and the cleared state produced by that write path.
     metadata: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime

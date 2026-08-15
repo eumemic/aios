@@ -586,6 +586,31 @@ class TestUpdateVaultCredentialCallSite:
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
 
 
+class TestVaultCredentialMetadataReadContract:
+    def test_cleared_metadata_row_parses_as_vault_credential(self) -> None:
+        """The JSON-null value produced by a clear remains readable."""
+        from aios.db.queries.vaults import _row_to_vault_credential
+
+        now = datetime.now(UTC)
+        credential = _row_to_vault_credential(
+            {
+                "id": "vc_cleared",
+                "vault_id": "vlt_1",
+                "display_name": "mailgun",
+                "target_url": None,
+                "auth_type": "environment_variable",
+                "secret_name": "MAILGUN_API_KEY",
+                "allowed_hosts": ["mailgun.com"],
+                "metadata": None,
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+            }
+        )
+
+        assert credential.metadata is None
+
+
 class TestUpdateVaultCredentialMetadataClearParity:
     """``metadata: null`` must CLEAR metadata identically whether or not the
     update also rescopes the credential.
