@@ -117,6 +117,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.get_account_spent_microusd",
         "queries.get_account_subtree_spent_microusd",
         "queries.get_active_binding",
+        "queries.get_active_connection",
         "queries.get_active_credential_by_target_url",
         "queries.get_agent",
         "queries.get_agent_version",
