@@ -2857,7 +2857,7 @@ class SandboxRegistry:
             ):
                 return False
 
-            if not await self._backend.remove_image(  # pooled-connection-await: allow — eumemic/aios#919
+            if not await self._backend.remove_image(  # pooled-connection-await: allow eumemic/aios#2145
                 verdict.removal_ref
             ):
                 return False
