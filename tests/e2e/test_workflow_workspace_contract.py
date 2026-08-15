@@ -27,7 +27,13 @@ pytestmark = [needs_docker, pytest.mark.docker]
 async def _child_id(pool: asyncpg.Pool[object], run_id: str, ordinal: int) -> str:
     async with pool.acquire() as conn:
         events = await wf_queries.list_run_events(conn, run_id)
-    starts = [event for event in events if event.type == "call_started"]
+    # A workflow-level tool() call also emits call_started, but only agent calls
+    # carry child_session_id. Keep ordinals scoped to the children under test.
+    starts = [
+        event
+        for event in events
+        if event.type == "call_started" and event.payload.get("capability") == "agent"
+    ]
     return str(starts[ordinal].payload["child_session_id"])
 
 
