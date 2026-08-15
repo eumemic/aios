@@ -57,6 +57,7 @@ class TestSandboxProvisionSpan:
             patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+            patch.object(registry, "_publish_session_egress", AsyncMock()),
             patch("aios.services.sessions.append_event", append_event),
         ):
             await registry.get_or_provision("sess_01TEST", pool=pool)
@@ -166,6 +167,7 @@ class TestSandboxProvisionSpan:
             patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", AsyncMock()),
+            patch.object(registry, "_publish_session_egress", AsyncMock()),
             patch("aios.services.sessions.append_event", append_event),
         ):
             await registry.get_or_provision("sess_01TEST")

@@ -231,6 +231,7 @@ class TestColdStartSkipGate:
             patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
             patch("aios.sandbox.registry.install_packages", AsyncMock()),
             patch("aios.sandbox.registry.apply_network_lockdown", lockdown),
+            patch.object(registry, "_publish_session_egress", AsyncMock()),
             patch("aios.harness.runtime.require_tool_broker", runtime.require_tool_broker),
             patch("aios.sandbox.registry.log", MagicMock()),
         )

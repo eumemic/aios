@@ -8,12 +8,13 @@ non-idempotent rule op is only visible there.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from structlog.testing import capture_logs
 
-from aios.sandbox.backends.base import CommandResult
+from aios.sandbox.backends.base import CommandResult, Mount, SandboxSpec
 from aios.sandbox.registry import (
     _EGRESS_EVICT_AFTER_SUCCESSES as _EVICT_AFTER,
 )
@@ -22,6 +23,7 @@ from aios.sandbox.registry import (
     SandboxRegistry,
 )
 from aios.sandbox.setup import build_egress_refresh_script, egress_unread_hosts
+from aios.sandbox.spec import ProvisioningPlan
 from aios.services.vaults import ResolvedEnvVarCredential
 from tests.helpers.sandbox import FakeBackend, make_handle
 
@@ -71,6 +73,27 @@ class _Acquire:
 
     async def __aexit__(self, *_args: object) -> None:
         return None
+
+
+def _credential_free_plan() -> ProvisioningPlan:
+    return ProvisioningPlan(
+        spec=SandboxSpec(
+            session_id="sess_X",
+            instance_id="inst_TEST",
+            workspace=Mount(host_path=Path("/tmp/w"), sandbox_path="/workspace"),
+            extra_mounts=(),
+            environment={},
+            labels={},
+            network_policy=None,
+            host_gateway_alias=None,
+            image="aios-sandbox:test",
+        ),
+        env_config=None,
+        memory_echoes=[],
+        github_echoes=[],
+        git_proxy=None,
+        env_var_credentials=(),
+    )
 
 
 def test_refresh_script_adds_before_deleting_and_never_flushes() -> None:
@@ -510,7 +533,9 @@ async def test_persisted_intercepts_are_attributed_to_live_dnat_rules_only() -> 
             credentials=credentials,
         )
 
-    persisted = stamp.await_args.args[2]
+    persisted_call = stamp.await_args
+    assert persisted_call is not None
+    persisted = persisted_call.args[2]
     assert persisted == [
         {
             "host": "live.example.com",
@@ -524,13 +549,7 @@ async def test_persisted_intercepts_are_attributed_to_live_dnat_rules_only() -> 
 async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None:
     registry = SandboxRegistry(FakeBackend())
     handle = make_handle(session_id="sess_X")
-    plan = SimpleNamespace(
-        env_config=None,
-        env_var_credentials=(),
-        secret_proxy=None,
-        spec=SimpleNamespace(runtime=None),
-        git_proxy=None,
-    )
+    plan = _credential_free_plan()
     stamp = AsyncMock()
 
     with (
@@ -543,4 +562,6 @@ async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None
         await registry._apply_egress_rules(handle, plan)
 
     stamp.assert_awaited_once()
-    assert stamp.await_args.args[1:] == ("sess_X", [])
+    persisted_call = stamp.await_args
+    assert persisted_call is not None
+    assert persisted_call.args[1:] == ("sess_X", [])
