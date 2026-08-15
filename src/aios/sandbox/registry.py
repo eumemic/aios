@@ -939,6 +939,17 @@ class SandboxRegistry:
         Fail-closed: if the rules can't be read back (or the DNAT target is
         ambiguous), the session is left UNSWEPT and a warning names it —
         never a state stamped from unverified data.
+
+        Every one of those unswept returns ALSO invalidates the persisted
+        intercept set (``_invalidate_session_egress``). The published state
+        must never outlive the provisioning it describes: this provision
+        succeeded, so the previous generation's row now describes a sandbox
+        that is gone. Leaving it would make GET answer "is this host
+        intercepted?" from a dead sandbox's configuration. Invalidation is a
+        DELETE, not an empty stamp — an empty host list is an affirmative
+        "nothing is intercepted", which is the false all-clear this endpoint
+        exists to prevent, whereas an absent row reports "I could not observe
+        it" via the same ``NotFoundError`` contract as unreadable state.
         """
         resolved = await self._resolve_egress_hosts(
             handle, set(credential_hosts) | set(limited_hosts), runtime
@@ -950,6 +961,7 @@ class SandboxRegistry:
                 owner_id=handle.owner_id,
                 reason="rule_readback_failed",
             )
+            await self._invalidate_session_egress(handle, reason="rule_readback_failed")
             return
         dnat_ips, accept_ips, proxy_targets = installed
         if len(proxy_targets) == 1:
@@ -964,6 +976,7 @@ class SandboxRegistry:
                 reason="ambiguous_dnat_target",
                 targets=sorted(f"{ip}:{port}" for ip, port in proxy_targets),
             )
+            await self._invalidate_session_egress(handle, reason="ambiguous_dnat_target")
             return
         elif credential_hosts:
             # Credential hosts but no installed DNAT rule: the provision
@@ -974,6 +987,7 @@ class SandboxRegistry:
                 owner_id=handle.owner_id,
                 reason="no_installed_dnat",
             )
+            await self._invalidate_session_egress(handle, reason="no_installed_dnat")
             return
         else:
             # No credential hosts → no DNAT rules to read the proxy from (and
@@ -986,28 +1000,33 @@ class SandboxRegistry:
                     owner_id=handle.owner_id,
                     reason="proxy_alias_resolve_miss",
                 )
+                await self._invalidate_session_egress(handle, reason="proxy_alias_resolve_miss")
                 return
             proxy_ip = sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0]
             proxy_port = fallback_proxy_port
-        if credentials:
-            from aios.models.vaults import parse_allowed_host_entry
+        from aios.models.vaults import parse_allowed_host_entry
 
-            hosts = []
-            for credential in credentials:
-                for entry in credential.allowed_hosts:
-                    host, _prefix = parse_allowed_host_entry(entry)
-                    # A configured host is observed as intercepted only when at
-                    # least one of its currently resolved IPs has a live DNAT.
-                    if resolved.get(host, set()) & dnat_ips:
-                        hosts.append(
-                            {
-                                "host": host,
-                                "intercepted": True,
-                                "source_credential_id": credential.credential_id,
-                                "secret_name": credential.secret_name,
-                            }
-                        )
-            await self._publish_session_egress(handle, hosts)
+        # The observed intercept set, derived from the LIVE read-back. A
+        # configured host is reported intercepted only when at least one of its
+        # currently resolved IPs carries an installed DNAT rule. This publishes
+        # unconditionally — including the empty list when `credentials` is
+        # empty — because the row must describe THIS provisioning, and a
+        # credential-free (or fully un-intercepted) provisioning is a real
+        # observation, not a reason to leave the previous one standing.
+        hosts = []
+        for credential in credentials:
+            for entry in credential.allowed_hosts:
+                host, _prefix = parse_allowed_host_entry(entry)
+                if resolved.get(host, set()) & dnat_ips:
+                    hosts.append(
+                        {
+                            "host": host,
+                            "intercepted": True,
+                            "source_credential_id": credential.credential_id,
+                            "secret_name": credential.secret_name,
+                        }
+                    )
+        await self._publish_session_egress(handle, hosts)
 
         self._egress_states[handle.owner_id] = EgressRefreshState(
             credential_hosts=credential_hosts,
@@ -1035,6 +1054,30 @@ class SandboxRegistry:
 
         async with harness_runtime.require_pool().acquire() as conn:
             await queries.stamp_session_egress(conn, handle.owner_id, hosts)
+
+    @staticmethod
+    async def _invalidate_session_egress(handle: SandboxHandle, *, reason: str) -> None:
+        """Drop the persisted intercept set when it could not be observed.
+
+        The provisioning succeeded but its live rules could not be read, so
+        there is no observation to publish. The prior row describes a sandbox
+        generation that no longer exists; keeping it would let GET present a
+        dead configuration as the current live intercept set. Deleting makes
+        the endpoint say "unknown" (``NotFoundError``) instead of asserting a
+        stale truth — and an unavailable answer is recoverable, whereas a
+        confidently wrong one is what misroutes an incident.
+        """
+        if not handle.owner_id.startswith("sess_"):
+            return
+        from aios.harness import runtime as harness_runtime
+
+        log.warning(
+            "sandbox.session_egress_state_invalidated",
+            owner_id=handle.owner_id,
+            reason=reason,
+        )
+        async with harness_runtime.require_pool().acquire() as conn:
+            await queries.clear_session_egress(conn, handle.owner_id)
 
     async def _read_installed_egress_rules(
         self, handle: SandboxHandle, runtime: str | None

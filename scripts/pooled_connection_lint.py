@@ -73,6 +73,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.bootstrap_root_account",
         "queries.children_of",
         "queries.claim_trigger_run",
+        "queries.clear_session_egress",
         "queries.clone_session",
         "queries.copy_session_github_resources",
         "queries.copy_session_resources",
