@@ -18595,8 +18595,15 @@
             "title": "Allowed Hosts"
           },
           "metadata": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Metadata"
           },
           "created_at": {
