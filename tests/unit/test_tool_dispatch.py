@@ -239,6 +239,16 @@ class TestUnofferedToolMessage:
         assert "none offered right now" in msg
 
 
+class TestAgentToolExposureEnforcement:
+    def test_non_exposed_registered_builtin_is_refused(self) -> None:
+        """The model-path authority check must deny registry membership without exposure."""
+        with pytest.raises(tool_dispatch.ToolBail, match="not exposed on this agent_tool surface"):
+            tool_dispatch.enforce_agent_tool_exposure("trigger_list", frozenset())
+
+    def test_exposed_builtin_is_admitted(self) -> None:
+        tool_dispatch.enforce_agent_tool_exposure("trigger_list", frozenset({"trigger_list"}))
+
+
 class TestRejectUnofferedToolCalls:
     """``reject_unoffered_tool_calls`` — the #1773 defect-2 harness invariant: a call
     naming a tool absent from the step's frozen offered set is rejected through the
@@ -648,7 +658,13 @@ class TestParentChannelThreading:
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
-        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
+        )
 
         invoke.assert_not_awaited()
         assert append_error.await_args is not None
@@ -678,7 +694,13 @@ class TestParentChannelThreading:
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "not json"}}
-        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
+        )
 
         reserve.assert_not_awaited()
         invoke.assert_not_awaited()
@@ -705,7 +727,13 @@ class TestParentChannelThreading:
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
-        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
+        )
 
         invoke.assert_not_awaited()
         append_call = append_error.await_args
@@ -732,7 +760,13 @@ class TestParentChannelThreading:
         )
 
         call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
-        await tool_dispatch._execute_tool_async(MagicMock(), "ses_1", call, account_id="acc_1")
+        await tool_dispatch._execute_tool_async(
+            MagicMock(),
+            "ses_1",
+            call,
+            account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
+        )
 
         mark.assert_awaited_once()
         mark_call = mark.await_args
@@ -757,6 +791,7 @@ class TestParentChannelThreading:
             "ses_1",
             call,
             account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
             parent_focal_at_arrival="tg:42",
         )
         assert append_event_ev.await_count == 1
@@ -782,6 +817,7 @@ class TestParentChannelThreading:
             "ses_1",
             call,
             account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
             parent_focal_at_arrival=None,
         )
         assert append_event_ev.await_args.kwargs["tool_parent_channel"] is None
@@ -807,6 +843,7 @@ class TestParentChannelThreading:
             "ses_1",
             call,
             account_id="acc_1",
+            exposed_names=frozenset({call["function"]["name"]}),
             parent_focal_at_arrival="tg:42",
         )
         assert append_event_ev.await_count == 1

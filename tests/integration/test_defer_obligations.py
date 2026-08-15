@@ -219,7 +219,9 @@ async def test_duration_elapse_returns_single_result(env: tuple[asyncpg.Pool[Any
     call = _defer_call("tc_elapse", 1)
     await _append_defer_turn(pool, sid, call)
 
-    launch_tool_calls(pool, sid, [call], account_id=account_id)
+    launch_tool_calls(
+        pool, sid, [call], account_id=account_id, exposed_names=frozenset({"defer_obligations"})
+    )
     results = await _wait_for_result(pool, sid, "tc_elapse", deadline_seconds=20)
 
     assert len(results) == 1
@@ -258,7 +260,9 @@ async def test_inbound_stimulus_resolves_early(
 
     call = _defer_call("tc_stim", 600)
     await _append_defer_turn(pool, sid, call)
-    launch_tool_calls(pool, sid, [call], account_id=account_id)
+    launch_tool_calls(
+        pool, sid, [call], account_id=account_id, exposed_names=frozenset({"defer_obligations"})
+    )
     await asyncio.wait_for(parked.wait(), timeout=10)
 
     # While parked the session is ACTIVE (this is what suppresses nudging).
@@ -305,7 +309,9 @@ async def test_stimulus_between_baseline_and_listen_is_not_lost(
 
     call = _defer_call("tc_setup_gap", 600)
     await _append_defer_turn(pool, sid, call)
-    launch_tool_calls(pool, sid, [call], account_id=account_id)
+    launch_tool_calls(
+        pool, sid, [call], account_id=account_id, exposed_names=frozenset({"defer_obligations"})
+    )
 
     results = await _wait_for_result(pool, sid, "tc_setup_gap", deadline_seconds=15)
     assert len(results) == 1

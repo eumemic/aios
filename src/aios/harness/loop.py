@@ -1748,6 +1748,7 @@ async def _run_session_step_body(
                 session_id,
                 immediate,
                 account_id=account_id,
+                exposed_names=frozenset(n for n in offered_names if n),
                 parent_focal_at_arrival=parent_focal,
             )
             log.info(
@@ -2191,7 +2192,17 @@ def _launch_confirmed_calls(
             # same terminal the pre-classification path produced).
             pending_builtin.append(tc)
     if pending_builtin:
-        launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
+        launch_tool_calls(
+            pool,
+            session_id,
+            pending_builtin,
+            account_id=account_id,
+            exposed_names=frozenset(
+                (tool.get("function") or {}).get("name")
+                for tool in mcp_tools
+                if (tool.get("function") or {}).get("name")
+            ),
+        )
     if pending_blocked_mcp:
         launch_mcp_tool_calls(
             pool,
