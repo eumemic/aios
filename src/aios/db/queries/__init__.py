@@ -462,6 +462,11 @@ from .connections import (  # noqa: E402
     update_connector_capabilities,
     update_connector_tools_schema,
 )
+from .db_stats import (  # noqa: E402
+    database_size,
+    monthly_buckets,
+    table_storage_stats,
+)
 from .environments import (  # noqa: E402
     archive_environment,
     get_environment,
@@ -726,6 +731,7 @@ from .vaults import (  # noqa: E402
     list_run_env_var_credentials,
     list_session_env_var_credential_echoes,
     list_session_env_var_credentials,
+    list_session_vault_credentials,
     list_vault_credentials,
     list_vaults,
     lock_oauth_credential_for_refresh,
@@ -813,6 +819,7 @@ __all__ = [
     "count_request_nudges",
     "count_session_triggers",
     "count_stuck_running_trigger_runs",
+    "database_size",
     "decrement_open_tool_call_count",
     "default_inbound_policy_if_unset",
     "delete_chat_session",
@@ -969,6 +976,7 @@ __all__ = [
     "list_session_memory_store_echoes",
     "list_session_memory_store_ranks",
     "list_session_templates",
+    "list_session_vault_credentials",
     "list_sessions",
     "list_skill_versions",
     "list_skills",
@@ -986,6 +994,7 @@ __all__ = [
     "mark_management_call_resolved",
     "mark_session_cancel_marker_harvested",
     "model_token_class_ratios",
+    "monthly_buckets",
     "normalized_workspace_path",
     "notify_connection_change",
     "notify_management_call_dispatch",
@@ -1041,6 +1050,7 @@ __all__ = [
     "set_session_stop_reason",
     "set_session_vaults",
     "sum_account_session_tokens",
+    "table_storage_stats",
     "try_record_inbound_ack",
     "unscoped_clear_session_snapshot",
     "unscoped_compare_and_clear_session_snapshot",

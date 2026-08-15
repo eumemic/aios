@@ -325,9 +325,9 @@ async def update_trigger(
     action: dict[str, Any] | None = None,
     enabled: bool | None = None,
     metadata: dict[str, Any] | None = None,
-    next_fire: datetime | None | EllipsisType = ...,
-    environment_id: str | None | EllipsisType = ...,
-    ingest_token_hash: str | None | EllipsisType = ...,
+    next_fire: datetime | EllipsisType | None = ...,
+    environment_id: str | EllipsisType | None = ...,
+    ingest_token_hash: str | EllipsisType | None = ...,
     reset_consecutive_failures: bool = False,
     account_id: str,
 ) -> TriggerEcho:

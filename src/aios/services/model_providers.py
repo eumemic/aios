@@ -102,7 +102,7 @@ async def update_model_provider(
     *,
     account_id: str,
     api_key: str | None,
-    api_base: str | None | EllipsisType = ...,
+    api_base: str | EllipsisType | None = ...,
 ) -> ModelProvider:
     """Rotate the key and/or edit ``api_base``.
 
