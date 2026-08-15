@@ -144,14 +144,47 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          refs=$(grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src \
-            | grep -oE 'eumemic/aios#[0-9]+' | sort -u || true)
-          while read -r ref; do
-            [[ -z "$ref" ]] && continue
+          # Ask the LINTER what an exemption marker is -- never re-implement the parse
+          # here (aios#2143). An inline grep requiring the ref to follow `allow`
+          # IMMEDIATELY silently skipped `allow -- eumemic/aios#919`, so that exemption
+          # pointed at a CLOSED issue for two months while this step reported success.
+          # Two mechanisms parsing one syntax with different rules is how a blind spot
+          # appears; the linter is now the single source of truth.
+          uv run python scripts/pooled_connection_lint.py --list-exemptions src \
+            | sort -u > /tmp/exemptions.tsv
+
+          # FAIL CLOSED ON AN EMPTY ENUMERATION. If the linter crashes, the path is
+          # wrong, or every file is unreadable, zero rows come back -- and treating
+          # that as "all clear" would make total enumeration failure indistinguishable
+          # from a clean result. That is precisely the defect this step exists to fix
+          # (aios#2138: a predicate that reads "I could not check" as "it is fine"),
+          # so the fix must not reintroduce it one layer up. The repo is known to
+          # carry exemptions; zero means the enumerator broke, not that they vanished.
+          if [[ ! -s /tmp/exemptions.tsv ]]; then
+            echo "::error::pooled-await exemption enumeration returned NOTHING. The repo carries known exemptions, so an empty result means the enumerator failed -- it does NOT mean there are none. Refusing to report all-clear."
+            exit 1
+          fi
+
+          fail=0
+          while IFS=$'\t' read -r site ref; do
+            [[ -z "$site$ref" ]] && continue
+            # A row we cannot parse is an exemption we cannot check. Never skip it.
+            if [[ -z "$ref" || "$site" != *:* ]]; then
+              echo "::error::unparseable exemption row from the enumerator: '${site}\t${ref}' -- refusing to skip it, because a skipped row is an unchecked exemption."
+              fail=1
+              continue
+            fi
             issue=${ref##*#}
-            state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state)
-            [[ "$state" == "open" ]] || { echo "$ref does not exist or is not open"; exit 1; }
-          done <<< "$refs"
+            state=$(gh api "repos/eumemic/aios/issues/$issue" --jq .state 2>/dev/null || echo missing)
+            if [[ "$state" != "open" ]]; then
+              # Name the EXEMPTION and its file:line, not just the issue number: the
+              # reader's next action is to edit that marker, and a bare issue number
+              # makes every occurrence a fresh investigation.
+              echo "::error file=${site%%:*},line=${site##*:}::pooled-await exemption at ${site} cites ${ref}, which is ${state} (must be open). Re-anchor it to a live tracking issue, or remove the exemption."
+              fail=1
+            fi
+          done < /tmp/exemptions.tsv
+          exit $fail
 
       - name: Lint (ruff)
         # ``packages/aios-sdk/aios_sdk`` carries hand-written modules
