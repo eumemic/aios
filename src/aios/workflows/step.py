@@ -60,7 +60,7 @@ from aios.services.sessions import (
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
-from aios.tools.schema_errors import format_schema_violation
+from aios.tools.schema_errors import format_schema_violation, normalize_schema_value
 from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
@@ -1406,6 +1406,10 @@ async def _complete_run(
     # No bounce-and-retry — the script already ran (unlike an agent, which the
     # return-tool bounces). Only a *successful* output is schema-checked; an already-
     # errored completion passes through (the error already explains the outcome).
+    if not is_error and run.request_id is not None and run.request_output_schema is not None:
+        output = normalize_schema_value(
+            output, run.request_output_schema, site="workflows.step.run_output"
+        )
     if (
         not is_error
         and run.request_id is not None

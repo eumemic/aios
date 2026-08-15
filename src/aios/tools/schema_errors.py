@@ -33,10 +33,10 @@ Rules (ratified spec v2, issue #1769 comment 4918753010):
    the subschema at the failing path (``err.schema``) — still no instance data.
 4. A targeted hint fires when the failing top-level value is itself a JSON
    string that would parse+validate cleanly against the schema: the caller
-   double-encoded its answer. This is detection + a short imperative hint
-   only — NOT silent coercion (the coercion shim was evaluated and dropped;
-   see #1769's final verdict comment — re-offering the tool schema fixed the
-   incident, not the message).
+   double-encoded its answer. The formatter only detects this condition. Output
+   boundaries apply :func:`normalize_schema_value` before formatting so the
+   same narrowly defined repair policy is used for session returns, workflow
+   terminal outputs, and caller-side validation.
 """
 
 from __future__ import annotations
@@ -108,9 +108,19 @@ def _format_error_line(err: jsonschema.exceptions.ValidationError, *, root: str)
         expected = err.validator_value
         expected_str = " or ".join(expected) if isinstance(expected, list) else str(expected)
         return f"  - at {at}: expected {expected_str}, got {json_type_name(err.instance)}"
-    if err.validator in ("enum", "const", "required", "additionalProperties"):
-        # These jsonschema stock messages are already instance-free (they name
-        # the offending keys/allowed values, not a repr of the whole instance).
+    if err.validator in ("enum", "const"):
+        instance = _describe_instance(err.instance)
+        if not instance.startswith("<"):
+            # Preserve jsonschema's useful wording only when its instance echo is
+            # independently known to satisfy the documented short-scalar rule.
+            return f"  - at {at}: {err.message}"
+        return (
+            f"  - at {at}: expected `{err.validator}: {err.validator_value}` "
+            f"(got {instance})"
+        )
+    if err.validator in ("required", "additionalProperties"):
+        # These stock messages name missing/unexpected keys without rendering
+        # the containing instance.
         return f"  - at {at}: {err.message}"
     # Generic fallback (minLength/maxLength/pattern/minimum/maximum/etc.):
     # describe the failing instance safely rather than trust jsonschema's stock
@@ -124,6 +134,28 @@ def _schema_snippet(err: jsonschema.exceptions.ValidationError, schema: dict[str
     if len(full) <= _SCHEMA_ECHO_MAX:
         return full
     return json.dumps(err.schema)
+
+
+def normalize_schema_value(value: Any, schema: dict[str, Any], *, site: str) -> Any:
+    """Apply the one permitted output-schema repair consistently.
+
+    An already-valid value is never rewritten. A failing top-level string is
+    parsed exactly once and substituted only when the parsed value validates
+    against the same schema. Invalid JSON, invalid parsed values, and
+    double-encoded strings remain unchanged and are rejected by normal
+    validation.
+    """
+    validator = jsonschema.Draft202012Validator(schema)
+    if not isinstance(value, str) or validator.is_valid(value):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+    if not validator.is_valid(parsed):
+        return value
+    log.info("output_value_stringified_json_coerced", site=site)
+    return parsed
 
 
 def _stringified_json_hint(instance: Any, schema: dict[str, Any], *, site: str) -> str | None:

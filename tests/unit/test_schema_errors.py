@@ -109,6 +109,27 @@ class TestFormatSchemaViolation:
         assert err is not None
         assert "'z' is not one of ['x', 'y']" in err  # short scalar: verbatim is fine
 
+    def test_long_enum_and_const_instances_are_not_echoed(self) -> None:
+        long_str = "rejected-secret-" * 40
+        for schema in ({"enum": ["allowed"]}, {"const": "allowed"}):
+            err = format_schema_violation(
+                long_str, schema, root="value", intro="bad", retry_hint="retry", site="test"
+            )
+            assert err is not None
+            assert long_str not in err
+            assert "<string>" in err
+
+    def test_container_enum_and_const_instances_are_not_echoed(self) -> None:
+        rejected = {"secret": ["do-not-echo", {"nested": True}]}
+        for schema in ({"enum": [{"allowed": True}]}, {"const": {"allowed": True}}):
+            err = format_schema_violation(
+                rejected, schema, root="value", intro="bad", retry_hint="retry", site="test"
+            )
+            assert err is not None
+            assert repr(rejected) not in err
+            assert "do-not-echo" not in err
+            assert "<object>" in err
+
     def test_long_string_pattern_mismatch_not_echoed(self) -> None:
         schema = {"type": "string", "pattern": "^a"}
         long_str = "b" * 500

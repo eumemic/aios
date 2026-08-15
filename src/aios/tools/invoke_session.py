@@ -65,7 +65,7 @@ from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
-from aios.tools.schema_errors import format_schema_violation
+from aios.tools.schema_errors import format_schema_violation, normalize_schema_value
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
 # long park never blocks the caller's other turns; we re-poll in a loop so a
@@ -303,8 +303,11 @@ async def _park_and_resolve(
     )
     if resp.outcome != "ok":
         return _error_result(resp.error)
-    violation = _validate_output(resp.result, output_schema)
-    return violation if violation is not None else _ok_result(resp.result)
+    result = resp.result
+    if output_schema is not None:
+        result = normalize_schema_value(result, output_schema, site="invoke_session.call_output")
+    violation = _validate_output(result, output_schema)
+    return violation if violation is not None else _ok_result(result)
 
 
 def _caller(session_id: str) -> dict[str, Any]:

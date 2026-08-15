@@ -31,10 +31,7 @@ caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop
 
 from __future__ import annotations
 
-import json
 from typing import Any
-
-import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
@@ -43,7 +40,7 @@ from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
-from aios.tools.schema_errors import format_schema_violation
+from aios.tools.schema_errors import format_schema_violation, normalize_schema_value
 
 log = get_logger(__name__)
 
@@ -235,16 +232,7 @@ async def _enforce_output_schema(
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
     if schema is None:
         return value, None
-    validator = jsonschema.Draft202012Validator(schema)
-    if isinstance(value, str) and not validator.is_valid(value):
-        try:
-            parsed = json.loads(value)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        else:
-            if validator.is_valid(parsed):
-                log.info("return_value_stringified_json_coerced", site="workflow_completion.return")
-                value = parsed
+    value = normalize_schema_value(value, schema, site="workflow_completion.return")
     return value, _validate_value(value, schema)
 
 

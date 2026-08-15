@@ -32,8 +32,11 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.models.sessions import Ok
 from aios.tools import workflow_completion
+from aios.tools.invoke_session import _validate_output
 from aios.tools.registry import ToolResult
+from aios.tools.schema_errors import normalize_schema_value
 from aios.tools.workflow_completion import _enforce_output_schema, return_handler
+from aios.workflows.step import _validate_output_against_schema
 
 _OBJ_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -166,6 +169,40 @@ class TestRegressionGuardStillRejects:
         assert isinstance(result, ToolResult)
         assert result.is_error is True
         finish.assert_not_called()
+
+
+class TestCrossPathConsistency:
+    """The same terminal payload receives the same verdict at every boundary."""
+
+    async def test_encoded_object_is_accepted_and_normalized_everywhere(
+        self, monkeypatch: Any
+    ) -> None:
+        encoded = '{"n": 1}'
+        _mock_schema(monkeypatch, _OBJ_SCHEMA)
+
+        session_value, session_error = await _enforce_output_schema("ses_1", "req_1", encoded)
+        run_value = normalize_schema_value(encoded, _OBJ_SCHEMA, site="test.run")
+        caller_value = normalize_schema_value(encoded, _OBJ_SCHEMA, site="test.caller")
+
+        assert session_error is None
+        assert _validate_output_against_schema(run_value, _OBJ_SCHEMA) is None
+        assert _validate_output(caller_value, _OBJ_SCHEMA) is None
+        assert session_value == run_value == caller_value == {"n": 1}
+
+    async def test_double_encoded_object_is_rejected_everywhere(self, monkeypatch: Any) -> None:
+        encoded_twice = '"{\\"n\\": 1}"'
+        _mock_schema(monkeypatch, _OBJ_SCHEMA)
+
+        session_value, session_error = await _enforce_output_schema(
+            "ses_1", "req_1", encoded_twice
+        )
+        run_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.run")
+        caller_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.caller")
+
+        assert session_error is not None
+        assert _validate_output_against_schema(run_value, _OBJ_SCHEMA) is not None
+        assert _validate_output(caller_value, _OBJ_SCHEMA) is not None
+        assert session_value == run_value == caller_value == encoded_twice
 
 
 class TestNoSchemaPassesThrough:
