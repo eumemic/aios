@@ -2684,7 +2684,7 @@ class SandboxRegistry:
                         )
                         if not _archive_eligible(fresh, now, grace):
                             continue
-                    if await self._store.remove(  # pooled-connection-await: allow eumemic/aios#2097
+                    if await self._store.remove(  # pooled-connection-await: allow eumemic/aios#2100
                         ref
                     ):
                         removed += 1
@@ -2857,7 +2857,7 @@ class SandboxRegistry:
             ):
                 return False
 
-            if not await self._backend.remove_image(  # pooled-connection-await: allow — eumemic/aios#919
+            if not await self._backend.remove_image(  # pooled-connection-await: allow eumemic/aios#2145
                 verdict.removal_ref
             ):
                 return False

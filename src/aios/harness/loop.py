@@ -351,6 +351,14 @@ class _StepResult(NamedTuple):
     cancel_harvest: sessions_service.CancelMarkerHarvest | None = None
 
 
+def _model_error_step_result(retry_delay: float | None, *, archive_when_idle: bool) -> _StepResult:
+    """Preserve retries, but reclaim self-owned sessions once the error latches."""
+    return _StepResult(
+        retry_delay=retry_delay,
+        archive_when_idle=archive_when_idle and retry_delay is None,
+    )
+
+
 async def _list_session_github_repo_echoes(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> list[GithubRepositoryResourceEcho]:
@@ -778,8 +786,8 @@ async def run_session_step(
         # rejects writes (``archived_at IS NULL`` fence). ``reclaim_session_if_idle`` is
         # conditional on still-idle, so a nudge or a user message that re-activated the
         # session (its ``defer_wake`` span already appended just above) wins and the archive
-        # no-ops. Only the clean end-of-turn return sets the flag (error/reschedule paths
-        # leave it False), so a rescheduling session is never reclaimed out from under a retry.
+        # no-ops. Clean end-of-turn and terminal-error returns set the flag; rescheduling
+        # paths leave it false so a session is never reclaimed out from under a retry.
         if result.archive_when_idle and await sessions_service.reclaim_session_if_idle(
             pool, session_id, account_id=account_id
         ):
@@ -1104,7 +1112,7 @@ async def _run_session_step_body(
             spend_limit_usd=spend_limit_usd,
             account_id=account_id,
         )
-        return _StepResult()
+        return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
@@ -1250,7 +1258,7 @@ async def _run_session_step_body(
         # user message tries to recover the session.
         if harvested.outcome != "ok":
             # The bound run errored / was cancelled — no assistant turn to dispatch.
-            # Latch errored so the session parks for recovery (a user message lifts it).
+            # Latch errored; human sessions park for recovery while self-owned sessions reclaim.
             log.warning(
                 "step.model_workflow_errored",
                 session_id=session_id,
@@ -1276,7 +1284,7 @@ async def _run_session_step_body(
                 is_error=True,
                 account_id=account_id,
             )
-            return _StepResult()
+            return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
         try:
             llm_response = map_run_output_to_response(harvested.output)
         except BindingBoundaryError as exc:
@@ -1304,7 +1312,7 @@ async def _run_session_step_body(
                 is_error=True,
                 account_id=account_id,
             )
-            return _StepResult()
+            return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
         # Record the harvest as the step's model span (NO re-charge); seal the
         # park-time watermark; fall through to the shared append/dispatch tail. This
         # span is ALSO the park-consumed marker for the ok path (see the block note
@@ -1444,7 +1452,7 @@ async def _run_session_step_body(
                     account_id=account_id,
                     provider_error=_provider_error_detail(exc),
                 )
-                return _StepResult()
+                return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
             await _append_model_request_error_span(
                 pool,
                 session_id,
@@ -1452,8 +1460,9 @@ async def _run_session_step_body(
                 account_id=account_id,
                 provider_error=_provider_error_detail(exc),
             )
-            return _StepResult(
-                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            return _model_error_step_result(
+                await _apply_retry_or_failure(pool, session_id, account_id=account_id),
+                archive_when_idle=session.archive_when_idle,
             )
         except Exception as exc:
             if _is_context_overflow(exc):
@@ -1465,10 +1474,9 @@ async def _run_session_step_body(
                     account_id=account_id,
                     provider_error=_provider_error_detail(exc),
                 )
-                return _StepResult(
-                    retry_delay=await _apply_context_overflow_retry(
-                        pool, session_id, account_id=account_id
-                    )
+                return _model_error_step_result(
+                    await _apply_context_overflow_retry(pool, session_id, account_id=account_id),
+                    archive_when_idle=session.archive_when_idle,
                 )
             if _is_terminal_model_error(exc):
                 log.warning(
@@ -1492,7 +1500,7 @@ async def _run_session_step_body(
                     provider_error=provider_error,
                     account_id=account_id,
                 )
-                return _StepResult()  # no retry_delay → no defer_wake → session parks errored
+                return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
             log.exception("step.litellm_failed", session_id=session_id)
             await _append_model_request_error_span(
                 pool,
@@ -1501,8 +1509,9 @@ async def _run_session_step_body(
                 account_id=account_id,
                 provider_error=_provider_error_detail(exc),
             )
-            return _StepResult(
-                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            return _model_error_step_result(
+                await _apply_retry_or_failure(pool, session_id, account_id=account_id),
+                archive_when_idle=session.archive_when_idle,
             )
 
     # Project the named ``LlmResponse`` back to the locals the rest of the step
@@ -1554,6 +1563,11 @@ async def _run_session_step_body(
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
             "model": agent.model,
+            **(
+                llm_response.admission_report.as_event_fields()
+                if llm_response.admission_report is not None
+                else {}
+            ),
         },
         account_id=account_id,
     )
@@ -1593,8 +1607,8 @@ async def _run_session_step_body(
     # (it would poison subsequent context) and do NOT dispatch its tool calls
     # (a cut argument can hit a wrong-but-valid target). Record the refusal as a
     # span (excluded from build_messages replay) and latch the session into the
-    # errored state, where it parks until a user message recovers it. End the
-    # step cleanly — no tool dispatch, normal step_end/turn_ended bracketing.
+    # errored state. Human sessions park until a user message recovers them;
+    # self-owned sessions reclaim. End cleanly without dispatching tools.
     if finish_reason == REFUSAL_FINISH_REASON:
         await _handle_refusal(
             pool,
@@ -1610,10 +1624,9 @@ async def _run_session_step_body(
             finish_reason=finish_reason,
             had_tool_calls=bool(assistant_msg.get("tool_calls")),
         )
-        # No ``archive_when_idle``: an errored session parks for recovery, exactly
-        # like the litellm-error / retry-budget-exhausted paths, which never
-        # self-archive. A user message lifts it back to pending.
-        return _StepResult()
+        # Human-facing sessions remain parked for recovery. Self-owned workflow /
+        # background sessions have no caller left to recover them, so reclaim them.
+        return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
     if channels:
         from aios.harness.channels import apply_monologue_prefix

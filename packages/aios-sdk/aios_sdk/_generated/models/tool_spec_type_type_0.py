@@ -27,6 +27,7 @@ class ToolSpecTypeType0(str, Enum):
     LIST_RUNS = "list_runs"
     LIST_RUN_EVENTS = "list_run_events"
     LIST_TASKS = "list_tasks"
+    LIST_VAULT_CREDENTIALS = "list_vault_credentials"
     LIST_WORKFLOWS = "list_workflows"
     MEMORY_SEARCH = "memory_search"
     READ = "read"

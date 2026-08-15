@@ -603,20 +603,14 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
-# Max length of the ``summary`` preview carried on the ``request_opened`` frame
-# (#1413). Matches the 60-char truncation the obligations tail block renders; a
-# slightly larger store budget is pointless since the renderer re-truncates.
-_OBLIGATION_SUMMARY_MAX = 60
-
-
 def _obligation_summary(content: str) -> str:
-    """A short single-line preview of a request input, for the #1413 obligations
-    block. Collapses newlines and truncates to ``_OBLIGATION_SUMMARY_MAX`` chars
-    (ellipsis when clipped) -- mirrors the channels-tail preview clause."""
-    preview = content.replace("\n", " ").strip()
-    if len(preview) > _OBLIGATION_SUMMARY_MAX:
-        preview = preview[:_OBLIGATION_SUMMARY_MAX] + "…"
-    return preview
+    """The verbatim request input carried by the durable obligation edge.
+
+    The original user event can leave the context window while its request remains
+    open. Persisting only a preview here would make the always-on obligation plane
+    silently lose the task at exactly that point, so this copy must remain exact.
+    """
+    return content
 
 
 async def create_child_session(
@@ -2501,8 +2495,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
-    title: str | None | EllipsisType = ...,
+    agent_version: int | EllipsisType | None = ...,
+    title: str | EllipsisType | None = ...,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,
