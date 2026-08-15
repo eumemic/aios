@@ -6,11 +6,19 @@ from typing import Any, TypeVar
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
+<<<<<<<< HEAD:packages/aios-sdk/aios_sdk/_generated/models/wf_run_terminal_summary_type_0.py
 T = TypeVar("T", bound="WfRunTerminalSummaryType0")
 
 
 @_attrs_define
 class WfRunTerminalSummaryType0:
+========
+T = TypeVar("T", bound="VaultCredentialMetadataType0")
+
+
+@_attrs_define
+class VaultCredentialMetadataType0:
+>>>>>>>> fd5ad37a (Regenerate OpenAPI and SDK for nullable vault metadata):packages/aios-sdk/aios_sdk/_generated/models/vault_credential_metadata_type_0.py
     """ """
 
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -25,10 +33,17 @@ class WfRunTerminalSummaryType0:
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
+<<<<<<<< HEAD:packages/aios-sdk/aios_sdk/_generated/models/wf_run_terminal_summary_type_0.py
         wf_run_terminal_summary_type_0 = cls()
 
         wf_run_terminal_summary_type_0.additional_properties = d
         return wf_run_terminal_summary_type_0
+========
+        vault_credential_metadata_type_0 = cls()
+
+        vault_credential_metadata_type_0.additional_properties = d
+        return vault_credential_metadata_type_0
+>>>>>>>> fd5ad37a (Regenerate OpenAPI and SDK for nullable vault metadata):packages/aios-sdk/aios_sdk/_generated/models/vault_credential_metadata_type_0.py
 
     @property
     def additional_keys(self) -> list[str]:
