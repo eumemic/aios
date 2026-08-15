@@ -891,21 +891,27 @@ class DockerBackend:
                 )
             except SandboxBackendError as err:
                 log.warning(
-                    "sandbox.image_inspect_batch_failed",
+                    "sandbox.image_enumeration_incomplete",
                     offset=offset,
                     size=len(batch),
                     error=str(err),
                 )
-                continue
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: inspect batch at offset {offset} failed"
+                ) from err
             if rc != 0:
+                stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
                 log.warning(
-                    "sandbox.image_inspect_batch_failed",
+                    "sandbox.image_enumeration_incomplete",
                     offset=offset,
                     size=len(batch),
                     exit_code=rc,
-                    stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+                    stderr=stderr,
                 )
-                continue
+                raise SandboxBackendError(
+                    "incomplete managed image enumeration: "
+                    f"inspect batch at offset {offset} failed (exit {rc}): {stderr}"
+                )
             for line in stdout_bytes.decode("utf-8").splitlines():
                 if not line.strip():
                     continue
