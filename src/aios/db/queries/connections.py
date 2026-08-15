@@ -446,6 +446,37 @@ async def get_connection(
     return _row_to_connection(row)
 
 
+async def get_active_connection(
+    conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
+) -> Connection:
+    """:func:`get_connection` restricted to LIVE rows — archived is a 404.
+
+    ``get_connection`` deliberately returns archived rows: listing, the
+    archive call itself, and audit views all need them. That makes it the
+    wrong validator for a connection-scoped *operator read*, because an
+    archived connection passes it and the scoped query behind it then
+    filters the archived row out — so "this connection is gone" and "this
+    connection has nothing" become the same answer.
+
+    The property this restores is **distinguishability**: every input that
+    cannot be served — missing id, another tenant's id, archived id —
+    raises :class:`NotFoundError`, and an empty list means only "live
+    connection, nothing to show".
+    """
+    row = await conn.fetchrow(
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} "
+        "WHERE c.id = $1 AND c.account_id = $2 AND c.archived_at IS NULL",
+        connection_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
 async def set_connection_secrets(
     conn: asyncpg.Connection[Any],
     connection_id: str,

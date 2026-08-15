@@ -175,6 +175,51 @@ async def test_pending_list_validates_connection_and_gc_only_reaps_pending(
     assert [grant.chat_id for grant in pending] == ["old-pending"]
 
 
+async def test_pending_list_404s_for_an_archived_connection(
+    grants_pool: asyncpg.Pool[Any],
+) -> None:
+    """An ARCHIVED connection must 404, not return an empty list.
+
+    Regression for the review finding that the validation used
+    ``get_connection``, which filters on id + account_id only and
+    deliberately returns archived rows, while
+    ``queries.list_pending_inbound_grants`` joins
+    ``connections ... AND c.archived_at IS NULL``. An archived connection
+    therefore PASSED validation and then produced ``[]`` — "this
+    connection is gone" and "this connection has nothing pending" became
+    the same answer.
+
+    The property under test is distinguishability, not the one archived
+    example: every input the underlying query cannot serve (missing,
+    cross-tenant, archived) raises NotFoundError, so an empty list has
+    exactly one meaning. The pending row seeded here would be returned by
+    the pre-fix code path as ``[]`` only because of the join filter, so
+    the assertion cannot pass by accident on an empty table.
+    """
+    connection_id = await _connection(grants_pool)
+    async with grants_pool.acquire() as conn:
+        await queries.upsert_pending_inbound_grant(
+            conn,
+            account_id="grant-a",
+            connection_id=connection_id,
+            chat_id="alice",
+        )
+        # Sanity: while the connection is LIVE the pending row is visible,
+        # so a later empty result is attributable to the archive alone.
+        assert [
+            grant.chat_id
+            for grant in await queries.list_pending_inbound_grants(
+                conn, connection_id, account_id="grant-a"
+            )
+        ] == ["alice"]
+        await queries.archive_connection(conn, connection_id, account_id="grant-a")
+
+    with pytest.raises(NotFoundError):
+        await connections_service.list_pending_inbound_grants(
+            grants_pool, connection_id, account_id="grant-a"
+        )
+
+
 async def test_reparent_moves_every_grant_status(grants_pool: asyncpg.Pool[Any]) -> None:
     connection_id = await _connection(grants_pool)
     async with grants_pool.acquire() as conn:

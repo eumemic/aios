@@ -127,7 +127,18 @@ async def list_pending_inbound_grants(
         # Keep this connection-scoped list symmetric with list_bound_chats:
         # an absent, archived, or foreign connection is a 404, not an
         # indistinguishable empty list.
-        await queries.get_connection(conn, connection_id, account_id=account_id)
+        #
+        # This MUST be ``get_active_connection``, not ``get_connection``:
+        # ``get_connection`` filters on ``c.id``/``c.account_id`` only and
+        # deliberately returns archived rows, while the grant query below
+        # joins ``connections ... AND c.archived_at IS NULL``. Validating
+        # with the archived-permissive lookup therefore lets an archived
+        # connection pass and then yields ``[]`` from the query — exactly
+        # the "gone" / "nothing pending" ambiguity this validation exists
+        # to remove. The invariant is that EVERY input the query cannot
+        # serve (missing, foreign tenant, archived) raises 404, so an empty
+        # list has one meaning only.
+        await queries.get_active_connection(conn, connection_id, account_id=account_id)
         return await queries.list_pending_inbound_grants(conn, connection_id, account_id=account_id)
 
 
