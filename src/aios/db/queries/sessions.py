@@ -1524,6 +1524,24 @@ async def stamp_session_egress(
     )
 
 
+async def clear_session_egress(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Invalidate a session's persisted intercept set.
+
+    Used when a provisioning completes but the live intercept set could NOT be
+    observed (rule read-back failed, the DNAT target was ambiguous, no DNAT was
+    installed, or the proxy alias would not resolve). The previous generation's
+    row describes a sandbox that no longer exists, so leaving it in place makes
+    GET report obsolete hosts as the CURRENT live intercept set.
+
+    Deletion — not an empty stamp — is the fail-closed action: an empty ``hosts``
+    array is an affirmative "nothing is intercepted", which is exactly the false
+    all-clear this endpoint exists to prevent. An absent row renders as
+    ``NotFoundError``, the same contract :func:`get_session_egress` already
+    states for unreadable state ("I could not read it", not "there is nothing").
+    """
+    await conn.execute("DELETE FROM session_egress_states WHERE session_id = $1", session_id)
+
+
 async def get_session_provisioning(
     conn: asyncpg.Connection[Any],
     session_id: str,

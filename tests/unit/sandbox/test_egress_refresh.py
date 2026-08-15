@@ -425,13 +425,23 @@ async def test_stamp_seeds_pinned_and_proxy_target_from_live_rules() -> None:
         _sidecar_result(stdout=dump),  # live-rule read-back
     ]
 
-    await registry._stamp_egress_state(
-        handle,
-        credential_hosts=frozenset({"api.github.com"}),
-        limited_hosts=frozenset({"api.github.com"}),
-        fallback_proxy_port=0,
-        runtime=None,
-    )
+    # The stamp now publishes the observed set on EVERY observed path (an
+    # observation of "nothing intercepted" is still an observation), so even
+    # this credential-free stamp writes -- hence the pool patch.
+    with (
+        patch(
+            "aios.harness.runtime.require_pool",
+            return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+        ),
+        patch("aios.sandbox.registry.queries.stamp_session_egress", AsyncMock()),
+    ):
+        await registry._stamp_egress_state(
+            handle,
+            credential_hosts=frozenset({"api.github.com"}),
+            limited_hosts=frozenset({"api.github.com"}),
+            fallback_proxy_port=0,
+            runtime=None,
+        )
 
     state = registry._egress_states["sess_X"]
     assert state.pinned == {"api.github.com": {"1.1.1.1": 0}}
@@ -565,3 +575,177 @@ async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None
     persisted_call = stamp.await_args
     assert persisted_call is not None
     assert persisted_call.args[1:] == ("sess_X", [])
+
+
+# --- The persisted state must never outlive the provisioning it describes ---
+#
+# The re-verification finding named a PROPERTY, and used ONE input to show it:
+# a credential-free reprovision left the previous generation's row standing.
+# That instance is fixed. But the same wrong outcome is reachable from every
+# OTHER exit of `_stamp_egress_state`: the provision succeeds, the live rules
+# cannot be observed, the function returns early -- and the stale row survives,
+# so GET keeps serving a dead sandbox's hosts as the live intercept set.
+#
+# These pin the property over the whole input space rather than the one shown
+# example: for each unobservable-readback shape, the row must be INVALIDATED.
+
+
+def _unreadable_cases() -> list[tuple[str, list[CommandResult]]]:
+    """Each entry drives one early return out of ``_stamp_egress_state``."""
+    ambiguous = "\n".join(
+        [
+            "=nat=",
+            "-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 "
+            "-j DNAT --to-destination 172.18.0.2:49152",
+            "-A OUTPUT -d 3.3.3.3/32 -p tcp -m tcp --dport 443 "
+            "-j DNAT --to-destination 172.18.0.9:49152",
+        ]
+    )
+    return [
+        # Read-back sidecar itself failed.
+        (
+            "rule_readback_failed",
+            [_sidecar_result(stdout="live.example.com 1.1.1.1\n"), _sidecar_result(exit_code=1)],
+        ),
+        # Two distinct --to-destination targets.
+        (
+            "ambiguous_dnat_target",
+            [
+                _sidecar_result(stdout="live.example.com 1.1.1.1\n"),
+                _sidecar_result(stdout=ambiguous),
+            ],
+        ),
+        # Credential hosts configured but NO DNAT rule installed -- the exact
+        # "config says intercepted, live rules disagree" drift this endpoint exists
+        # to expose.
+        (
+            "no_installed_dnat",
+            [
+                _sidecar_result(stdout="live.example.com 1.1.1.1\n"),
+                _sidecar_result(stdout="=nat=\n-P OUTPUT ACCEPT"),
+            ],
+        ),
+    ]
+
+
+async def test_unobservable_readback_invalidates_stale_persisted_state() -> None:
+    """A successful provision whose live rules cannot be read must DELETE the
+    persisted intercept set, not leave the previous generation's row serving.
+
+    Same property as the credential-free case, different input. Deleting (not
+    stamping empty) is deliberate: an empty host list asserts "nothing is
+    intercepted", while an absent row reports "could not observe", which is the
+    contract ``get_session_egress`` already states for unreadable state.
+    """
+    for reason, sidecars in _unreadable_cases():
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend)
+        handle = make_handle(session_id="sess_X")
+        backend.sidecar_results = list(sidecars)
+        stamp = AsyncMock()
+        clear = AsyncMock()
+
+        with (
+            patch(
+                "aios.harness.runtime.require_pool",
+                return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+            ),
+            patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+            patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+        ):
+            await registry._stamp_egress_state(
+                handle,
+                credential_hosts=frozenset({"live.example.com"}),
+                limited_hosts=frozenset(),
+                fallback_proxy_port=0,
+                runtime=None,
+                credentials=(_credential("vcred_live", "LIVE_TOKEN", "live.example.com"),),
+            )
+
+        # The stale row is invalidated ...
+        clear.assert_awaited_once()
+        assert clear.await_args is not None
+        assert clear.await_args.args[1] == "sess_X", reason
+        # ... and nothing is published as an observation, because none was made.
+        stamp.assert_not_awaited()
+
+
+async def test_all_hosts_uninterceped_publishes_empty_not_stale_hosts() -> None:
+    """Rules ARE readable, but NO configured host has a live DNAT.
+
+    The read-back succeeds (a DNAT exists for an IP no configured host resolves
+    to), so this is a real observation: the answer is "no host is intercepted".
+    That must be PUBLISHED as an empty set -- overwriting any previous
+    generation's hosts -- rather than skipped, which is what the old
+    ``if credentials:``/``if hosts:`` shaped write path would do.
+    """
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    handle = make_handle(session_id="sess_X")
+    dump = "\n".join(
+        [
+            "=nat=",
+            "-P OUTPUT ACCEPT",
+            # A DNAT exists, so read-back succeeds and the proxy target is
+            # unambiguous -- but 9.9.9.9 is not what our host resolves to.
+            "-A OUTPUT -d 9.9.9.9/32 -p tcp -m tcp --dport 443 "
+            "-j DNAT --to-destination 172.18.0.2:49152",
+        ]
+    )
+    backend.sidecar_results = [
+        _sidecar_result(stdout="drifted.example.com 1.1.1.1\n"),
+        _sidecar_result(stdout=dump),
+    ]
+    stamp = AsyncMock()
+    clear = AsyncMock()
+
+    with (
+        patch(
+            "aios.harness.runtime.require_pool",
+            return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+        ),
+        patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+    ):
+        await registry._stamp_egress_state(
+            handle,
+            credential_hosts=frozenset({"drifted.example.com"}),
+            limited_hosts=frozenset(),
+            fallback_proxy_port=0,
+            runtime=None,
+            credentials=(_credential("vcred_x", "X_TOKEN", "drifted.example.com"),),
+        )
+
+    stamp.assert_awaited_once()
+    assert stamp.await_args is not None
+    assert stamp.await_args.args[1:] == ("sess_X", [])
+    clear.assert_not_awaited()
+
+
+async def test_non_session_owner_never_touches_session_egress_table() -> None:
+    """A run sandbox (``wfr_``) has no session row; neither write may fire."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    handle = make_handle(session_id="wfr_01TEST")
+    backend.sidecar_results = [
+        _sidecar_result(stdout="live.example.com 1.1.1.1\n"),
+        _sidecar_result(exit_code=1),
+    ]
+    stamp = AsyncMock()
+    clear = AsyncMock()
+
+    with (
+        patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+    ):
+        await registry._stamp_egress_state(
+            handle,
+            credential_hosts=frozenset({"live.example.com"}),
+            limited_hosts=frozenset(),
+            fallback_proxy_port=0,
+            runtime=None,
+            credentials=(_credential("vcred_live", "LIVE_TOKEN", "live.example.com"),),
+        )
+
+    stamp.assert_not_awaited()
+    clear.assert_not_awaited()
