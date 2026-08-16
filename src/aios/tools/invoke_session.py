@@ -119,6 +119,14 @@ class _CallAgentArgs(BaseModel):
     )
     title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace: Literal["shared", "fresh"] = Field(
+        default="fresh",
+        description=(
+            "Workspace for the child. Defaults to `fresh` (an empty child workspace): "
+            "sharing hands the child LIVE WRITE ACCESS to this session's workspace, so it "
+            "is opt-in. Pass `shared` explicitly to hand the child this session's workspace."
+        ),
+    )
     vault_ids: list[str] | None = Field(
         default=None,
         description="Parent-held vault ids; omitted inherits every vault bound to the parent.",
@@ -159,8 +167,12 @@ class _CallWorkflowArgs(BaseModel):
     )
     input: Any = Field(default=None, description="The run input (JSON or a string).")
     workspace: Literal["shared", "fresh"] = Field(
-        default="shared",
-        description="Share this session workspace live, or use a fresh empty run workspace.",
+        default="fresh",
+        description=(
+            "Workspace for the run. Defaults to `fresh` (an empty run workspace): sharing "
+            "hands the run LIVE WRITE ACCESS to this session's workspace, so it is opt-in. "
+            "Pass `shared` explicitly to hand the run this session's workspace."
+        ),
     )
     output_schema: dict[str, Any] | None = Field(
         default=None,
@@ -363,6 +375,7 @@ async def call_agent_handler(
         resources=cast(list[SessionResource], args.resources),
         env=args.env,
         outbound_suppression=args.outbound_suppression,
+        workspace=args.workspace,
         launcher_session_id=session_id,
         crypto_box=runtime.require_crypto_box(),
         caller=_caller(session_id),

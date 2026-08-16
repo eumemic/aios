@@ -1,9 +1,24 @@
 """Vision-policy helper: single source of truth for image-into-vision decisions.
 
-LiteLLM's :func:`token_counter` returns a flat ~85 tokens per
-``image_url`` part regardless of provider; under-counting only
-matters near the window boundary and provider rejection there is
-recoverable.
+LiteLLM's :func:`token_counter` returns a flat ~89 tokens per
+``image_url`` part regardless of provider AND regardless of payload
+size (measured 2026-08-15 on litellm 1.97.0: 89 against 9,600 /
+191,447 / 1,912,670 as text for 10 KB / 200 KB / 2 MB of image
+bytes).  An earlier version of this note said the under-counting
+"only matters near the window boundary" and that "provider rejection
+there is recoverable".  BOTH claims are false:
+
+* it is not boundary-local -- a constant against a linear truth is an
+  unbounded error, so a single inlined image can put the built request
+  arbitrarily far over the ceiling; and
+* it is not recoverable -- aios#2050 records the consequence as a
+  4.5h HARD-DOWN, because every wake rebuilds the same oversized
+  context, so the rejection repeats forever rather than clearing.
+
+Calibration cannot correct it either: the scaling layer corrects a
+RATIO, and no coefficient multiplied by zero reaches a positive number
+(see the ``tokens.py`` invariant).  Fix is explicit image-mass
+tracking, issue #2050 / aios#2073.
 """
 
 from __future__ import annotations

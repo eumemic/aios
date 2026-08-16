@@ -8,6 +8,7 @@ dependencies = [
     "mautrix==0.21.1",
     "asyncpg>=0.30",
     "pydantic-settings>=2.6",
+    "markdown-it-py>=3.0",
 ]
 
 [tool.uv.sources]

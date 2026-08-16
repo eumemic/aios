@@ -1289,7 +1289,9 @@ class HttpConnector:
         except json.JSONDecodeError:
             args = {}
         focal_channel = call.get("focal_channel") or ""
-        args = _inject_focal_kwargs(meta, args, focal_channel, connection_id)
+        args = _inject_focal_kwargs(
+            meta, args, focal_channel, connection_id, tool_call_id=tool_call_id
+        )
         # #1722: a send (or any focal-required tool) whose channel can't be
         # resolved must fail loud, not silently no-op. ``_inject_focal_kwargs``
         # fills a required param only when it has a source (``connection_id``
@@ -1657,7 +1659,9 @@ class HttpConnector:
         return out
 
 
-_FOCAL_INJECTABLE: frozenset[str] = frozenset({"connection_id", "external_account_id", "chat_id"})
+_FOCAL_INJECTABLE: frozenset[str] = frozenset(
+    {"connection_id", "external_account_id", "chat_id", "tool_call_id"}
+)
 
 
 def _build_tool_meta(fn: ToolFn) -> _ToolMeta:
@@ -1789,8 +1793,10 @@ def _inject_focal_kwargs(
     args: dict[str, Any],
     focal_channel: str,
     connection_id: str,
+    *,
+    tool_call_id: str = "",
 ) -> dict[str, Any]:
-    """Inject ``connection_id`` / ``external_account_id`` / ``chat_id`` kwargs.
+    """Inject dispatch- and focal-derived kwargs.
 
     The runtime SSE payload includes ``connection_id`` directly;
     ``external_account_id`` and ``chat_id`` are parsed out of
@@ -1799,6 +1805,8 @@ def _inject_focal_kwargs(
     caller didn't already pass it explicitly.
     """
     out = dict(args)
+    if tool_call_id and "tool_call_id" in meta.focal_params and "tool_call_id" not in out:
+        out["tool_call_id"] = tool_call_id
     if connection_id and "connection_id" in meta.focal_params and "connection_id" not in out:
         out["connection_id"] = connection_id
     if focal_channel and meta.focal_params & {"external_account_id", "chat_id"}:
