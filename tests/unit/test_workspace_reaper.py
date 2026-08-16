@@ -50,9 +50,16 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     settings.workspace_reaper_dry_run = False
     settings.workspace_reaper_min_archived_age_seconds = 86_400
     settings.workspace_reaper_min_mtime_age_seconds = 0
+    settings.db_url = "postgresql://reaper-test"
     monkeypatch.setattr(workspace_reaper, "get_settings", lambda: settings)
 
-    return {"root": root, "settings": settings}
+    lock_conn = MagicMock()
+    lock_conn.execute = AsyncMock()
+    lock_conn.fetchval = AsyncMock(return_value=False)
+    lock_conn.close = AsyncMock()
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=lock_conn))
+
+    return {"root": root, "settings": settings, "lock_conn": lock_conn}
 
 
 def _mk_workspace(root: Path, account_id: str, session_id: str, *, age_s: float = 10_000.0) -> Path:
@@ -150,6 +157,12 @@ async def test_archived_aged_inactive_session_dir_is_reaped(env: dict[str, Any])
     assert result.reaped == 1
     assert not d.exists(), "an archived/aged/not-active session's workspace must be reaped"
     assert result.bytes_freed > 0
+    lock_conn = env["lock_conn"]
+    assert [call.args[0] for call in lock_conn.execute.await_args_list] == [
+        "SELECT pg_advisory_lock($1::bigint)",
+        "SELECT pg_advisory_unlock($1::bigint)",
+    ]
+    lock_conn.close.assert_awaited_once()
 
 
 async def test_running_session_never_in_candidate_set(env: dict[str, Any]) -> None:
@@ -494,7 +507,7 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
     conn.fetch = AsyncMock(side_effect=_route_fetch)
     conn.execute = AsyncMock()
-    conn.fetchval = AsyncMock(return_value=True)
+    env["lock_conn"].fetchval.return_value = True
 
     class _Tx:
         async def __aenter__(self) -> None:
@@ -521,7 +534,7 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
     assert result.reaped == 0
     assert launcher_dir.exists()
     assert keep_reads == 1
-    conn.fetchval.assert_awaited_once()
+    env["lock_conn"].fetchval.assert_awaited_once()
 
 
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:

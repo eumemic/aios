@@ -96,6 +96,7 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db import queries
+from aios.db.pool import normalize_dsn
 from aios.logging import get_logger
 
 log = get_logger("aios.harness.workspace_reaper")
@@ -373,10 +374,15 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
     live_workspace_realpaths = _live_workspace_realpath_keepset(live_paths)
 
     reaped = bytes_freed = skip_conf = skip_missing = skip_fresh = skip_error = 0
-    # Hold one dedicated pooled backend for the entire destructive phase. Session
-    # advisory locks remain owned across each to_thread delete without opening a
-    # new database connection per candidate.
-    async with pool.acquire() as lock_conn:
+    # One non-pooled backend is dedicated to this sweep's lock lifecycle.  The
+    # session advisory lock must remain owned across slow filesystem deletion;
+    # borrowing that backend from the shared pool would starve unrelated work,
+    # while opening one backend per candidate would create a connection storm.
+    lock_conn = await asyncpg.connect(
+        normalize_dsn(settings.db_url),
+        server_settings={"application_name": "aios-workspace-reaper"},
+    )
+    try:
         for row in candidates:
             target, reason = _resolve_reap_target(
                 account_id=row["account_id"],
@@ -429,6 +435,8 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
                 continue
             reaped += 1
             bytes_freed += size
+    finally:
+        await lock_conn.close()
     result = ReapResult(
         reaped=reaped,
         bytes_freed=bytes_freed,
