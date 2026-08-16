@@ -43,6 +43,7 @@ class Workflow:
         http_servers (list[HttpServerSpec] | Unset):
         created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
+        auto_archive_on_completion (bool | Unset):  Default: False.
     """
 
     id: str
@@ -61,6 +62,7 @@ class Workflow:
     http_servers: list[HttpServerSpec] | Unset = UNSET
     created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
+    auto_archive_on_completion: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,6 +149,8 @@ class Workflow:
         else:
             archived_at = self.archived_at
 
+        auto_archive_on_completion = self.auto_archive_on_completion
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -178,6 +182,8 @@ class Workflow:
             field_dict["created_by"] = created_by
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
+        if auto_archive_on_completion is not UNSET:
+            field_dict["auto_archive_on_completion"] = auto_archive_on_completion
 
         return field_dict
 
@@ -322,6 +328,8 @@ class Workflow:
 
         archived_at = _parse_archived_at(d.pop("archived_at", UNSET))
 
+        auto_archive_on_completion = d.pop("auto_archive_on_completion", UNSET)
+
         workflow = cls(
             id=id,
             account_id=account_id,
@@ -339,6 +347,7 @@ class Workflow:
             http_servers=http_servers,
             created_by=created_by,
             archived_at=archived_at,
+            auto_archive_on_completion=auto_archive_on_completion,
         )
 
         workflow.additional_properties = d
