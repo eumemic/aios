@@ -367,6 +367,7 @@ class MatrixConnector(HttpConnector):
                 httpx.TransportError,
                 ClientError,
                 OSError,
+                EOFError,
                 TimeoutError,
             ),
         ):
