@@ -464,8 +464,10 @@ async def test_call_agent_auto_archive_is_forwarded_in_both_directions(monkeypat
     await invoke_builtin(
         _CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": False}
     )
+    assert inv_mock.await_args is not None
     assert inv_mock.await_args.kwargs["auto_archive_on_completion"] is False
     await invoke_builtin(
         _CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": True}
     )
+    assert inv_mock.await_args is not None
     assert inv_mock.await_args.kwargs["auto_archive_on_completion"] is True
