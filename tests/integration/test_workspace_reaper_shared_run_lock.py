@@ -12,6 +12,8 @@ import pytest
 from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.harness import workspace_reaper
+from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.sandbox.volumes import purge_session_directories
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
@@ -244,6 +246,44 @@ async def test_nested_workspace_activation_serializes_with_parent_delete(
     finally:
         await owner.close()
         await contender.close()
+
+
+async def test_sweep_uses_real_pool_locking_path(
+    migrated_db_url: str,
+    _reset_db_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real asyncpg.Pool path locks, rechecks, and performs a real rmtree."""
+    pool = await create_pool(migrated_db_url, min_size=1, max_size=2)
+    target = tmp_path / "acc_reaper" / "sess_archived"
+    target.mkdir(parents=True)
+    (target / "payload").write_text("orphan")
+    settings = get_settings().model_copy(deep=True)
+    settings.workspace_root = tmp_path
+    settings.workspace_reaper_enabled = True
+    settings.workspace_reaper_dry_run = False
+    settings.workspace_reaper_min_archived_age_seconds = 0
+    settings.workspace_reaper_min_mtime_age_seconds = 0
+    monkeypatch.setattr(workspace_reaper, "get_settings", lambda: settings)
+    try:
+        async with pool.acquire() as conn:
+            await _seed(conn)
+            await conn.execute(
+                """
+                INSERT INTO sessions
+                  (id, agent_id, environment_id, agent_version, metadata,
+                   workspace_volume_path, env, account_id, archived_at)
+                VALUES ('sess_archived', 'agent_reaper', 'env_reaper', 1, '{}'::jsonb,
+                        $1, '{}'::jsonb, 'acc_reaper', now() - interval '1 day')
+                """,
+                str(target),
+            )
+        result = await sweep_archived_workspaces(pool)
+        assert result.reaped == 1
+        assert not target.exists()
+    finally:
+        await pool.close()
 
 
 async def test_reaper_lock_survives_real_to_thread_delete(

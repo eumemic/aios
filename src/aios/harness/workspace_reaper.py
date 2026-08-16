@@ -37,11 +37,13 @@ archived-and-aged session it derives the canonical default path
 reaps **only** that, and **only** when the stored ``workspace_volume_path``
 ``resolve()``s equal to it. Consequences, all in the safe direction:
 
-* A user-overridden / clone-shared / aliased / nested path never equals the
-  canonical path ⇒ it is skipped (a space leak, never a wrong delete).
+* A user-overridden / clone-shared / nested path that resolves elsewhere never
+  equals the canonical path ⇒ it is skipped (a space leak, never a wrong delete).
+  A symlink alias of the canonical path is equivalent and may pass this check;
+  the canonical delete target itself must still contain no symlink component.
 * The canonical path is always two levels under ``workspace_root`` ⇒ it can
   never be ``workspace_root`` itself or a reserved sibling root (``_runs`` …).
-* A relative / empty / out-of-tree stored value never resolves-equal ⇒ skipped.
+* Empty, relative, or out-of-tree stored values are rejected explicitly.
 
 Confinement is proven on the FULLY-RESOLVED canonical path — no symlink anywhere
 in its chain (leaf, parent ACCOUNT component, OR root) and its realpath still
@@ -94,7 +96,6 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db import queries
-from aios.db.pool import normalize_dsn
 from aios.logging import get_logger
 
 log = get_logger("aios.harness.workspace_reaper")
@@ -171,6 +172,26 @@ def _canonical_workspace_path(account_id: str, session_id: str, workspace_root: 
     discipline ``host_dir_reaper._scan_children`` uses.
     """
     return workspace_root / account_id / session_id
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    """Whether either normalized absolute path contains the other."""
+    left_path = Path(left)
+    right_path = Path(right)
+    return (
+        left_path == right_path
+        or left_path.is_relative_to(right_path)
+        or right_path.is_relative_to(left_path)
+    )
+
+
+def _max_tree_mtime(path: Path) -> float:
+    """Newest lstat mtime in a workspace tree, without following symlinks."""
+    newest = path.lstat().st_mtime
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for name in (*dirs, *files):
+            newest = max(newest, (Path(root) / name).lstat().st_mtime)
+    return newest
 
 
 def _live_workspace_realpath_keepset(live_paths: list[str]) -> frozenset[str]:
@@ -274,10 +295,9 @@ def _resolve_reap_target(
         return None, "confinement"
 
     # Confinement: reap ONLY the canonical default path, and ONLY when the
-    # session's stored path points at the SAME real location. We compare on
-    # ``realpath`` (symlink-collapsed) so an override / shared / aliased /
-    # relative / out-of-tree stored value never matches ⇒ skipped, never reaped.
-    if not stored_path:
+    # session's stored path points at the SAME real location. Relative paths are
+    # rejected before realpath so the decision never depends on process CWD.
+    if not stored_path or not os.path.isabs(stored_path):
         return None, "confinement"
     try:
         if os.path.realpath(stored_path) != canonical_real:
@@ -293,7 +313,7 @@ def _resolve_reap_target(
     # fail-closed-empty only when its query erred — and on that error the caller
     # skips the WHOLE sweep, so an empty set here always means "no live collision
     # among the sessions we could enumerate".)
-    if canonical_real in live_workspace_realpaths:
+    if any(_paths_overlap(canonical_real, live) for live in live_workspace_realpaths):
         return None, "confinement"
 
     # Structural belt: a real dir that is exactly two levels under the root.
@@ -303,9 +323,9 @@ def _resolve_reap_target(
         return None, "confinement"
 
     try:
-        # lstat (not stat): mtime of the dir itself, never a dereferenced target
-        # (the leaf is already proven non-symlink above; belt-and-suspenders).
-        mtime = canonical.lstat().st_mtime
+        # Descendant writes do not update the candidate directory's mtime, so
+        # inspect the full tree. os.walk never follows symlinked directories.
+        mtime = _max_tree_mtime(canonical)
     except OSError:
         return None, "missing"
     if mtime > mtime_cutoff:
@@ -353,70 +373,62 @@ async def sweep_archived_workspaces(pool: asyncpg.Pool[Any]) -> ReapResult:
     live_workspace_realpaths = _live_workspace_realpath_keepset(live_paths)
 
     reaped = bytes_freed = skip_conf = skip_missing = skip_fresh = skip_error = 0
-    for row in candidates:
-        target, reason = _resolve_reap_target(
-            account_id=row["account_id"],
-            session_id=row["id"],
-            stored_path=row["workspace_volume_path"],
-            workspace_root=workspace_root,
-            mtime_cutoff=mtime_cutoff,
-            live_workspace_realpaths=live_workspace_realpaths,
-        )
-        if reason == "confinement":
-            skip_conf += 1
-            continue
-        if reason == "missing":
-            skip_missing += 1
-            continue
-        if reason == "too_fresh":
-            skip_fresh += 1
-            continue
-        assert target is not None  # reason == "reap"
+    # Hold one dedicated pooled backend for the entire destructive phase. Session
+    # advisory locks remain owned across each to_thread delete without opening a
+    # new database connection per candidate.
+    async with pool.acquire() as lock_conn:
+        for row in candidates:
+            target, reason = _resolve_reap_target(
+                account_id=row["account_id"],
+                session_id=row["id"],
+                stored_path=row["workspace_volume_path"],
+                workspace_root=workspace_root,
+                mtime_cutoff=mtime_cutoff,
+                live_workspace_realpaths=live_workspace_realpaths,
+            )
+            if reason == "confinement":
+                skip_conf += 1
+                continue
+            if reason == "missing":
+                skip_missing += 1
+                continue
+            if reason == "too_fresh":
+                skip_fresh += 1
+                continue
+            assert target is not None  # reason == "reap"
 
-        size = _dir_size_bytes(target)
-        if dry_run:
+            size = _dir_size_bytes(target)
+            if dry_run:
+                reaped += 1
+                bytes_freed += size
+                log.info(
+                    "workspace_reaper.would_reap",
+                    session_id=row["id"],
+                    path=str(target),
+                    bytes=size,
+                )
+                continue
+            try:
+                # The dedicated sweep backend owns the session lock across slow
+                # filesystem I/O; explicit unlock makes it reusable for the next item.
+                normalized_target = queries.normalized_workspace_path(str(target))
+                lock_key = queries.workspace_advisory_lock_key(normalized_target)
+                await lock_conn.execute("SELECT pg_advisory_lock($1::bigint)", lock_key)
+                try:
+                    if await queries.unscoped_workspace_path_is_live(lock_conn, normalized_target):
+                        skip_conf += 1
+                        continue
+                    await asyncio.to_thread(shutil.rmtree, target)
+                finally:
+                    await lock_conn.execute("SELECT pg_advisory_unlock($1::bigint)", lock_key)
+            except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError):
+                # One un-removable dir (perm drift, read-only FS) must not abort the
+                # rest of the sweep; the next sweep retries it.
+                log.exception("workspace_reaper.rmtree_failed", path=str(target))
+                skip_error += 1
+                continue
             reaped += 1
             bytes_freed += size
-            log.info(
-                "workspace_reaper.would_reap",
-                session_id=row["id"],
-                path=str(target),
-                bytes=size,
-            )
-            continue
-        try:
-            # A session advisory lock survives transaction/borrow release, so the
-            # pool connection is returned before slow filesystem I/O.  The same
-            # backend is borrowed again only to unlock after rmtree; pool reset must
-            # not run between these two points, hence the explicit acquire/release.
-            normalized_target = queries.normalized_workspace_path(str(target))
-            lock_key = queries.workspace_advisory_lock_key(normalized_target)
-            # A dedicated backend, not a pooled borrow, owns the session lock.
-            # Thus every pool connection is released before the thread await while
-            # activation remains excluded until this backend closes.
-            lock_conn = (
-                pool._conn
-                if hasattr(pool, "_conn")  # unit-test fake; production pools never expose this
-                else await asyncpg.connect(normalize_dsn(settings.db_url))
-            )
-            try:
-                await lock_conn.execute("SELECT pg_advisory_lock($1::bigint)", lock_key)
-                if await queries.unscoped_workspace_path_is_live(lock_conn, normalized_target):
-                    skip_conf += 1
-                    continue
-                await asyncio.to_thread(shutil.rmtree, target)
-            finally:
-                if not hasattr(pool, "_conn"):
-                    await lock_conn.close()
-        except (asyncpg.PostgresError, OSError):
-            # One un-removable dir (perm drift, read-only FS) must not abort the
-            # rest of the sweep; the next sweep retries it.
-            log.exception("workspace_reaper.rmtree_failed", path=str(target))
-            skip_error += 1
-            continue
-        reaped += 1
-        bytes_freed += size
-
     result = ReapResult(
         reaped=reaped,
         bytes_freed=bytes_freed,
