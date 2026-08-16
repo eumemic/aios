@@ -3,6 +3,7 @@
 Revision ID: 0190
 Revises: 0159
 """
+
 from alembic import op
 
 revision = "0190"
@@ -13,8 +14,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute(
-        "ALTER TABLE wf_runs ADD COLUMN auto_archive_on_completion "
-        "boolean NOT NULL DEFAULT false"
+        "ALTER TABLE wf_runs ADD COLUMN auto_archive_on_completion boolean NOT NULL DEFAULT false"
     )
 
 
