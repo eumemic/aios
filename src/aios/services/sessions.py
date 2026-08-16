@@ -2525,11 +2525,17 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
         # Serialize the keep-set decision with every shared-workspace activation.
         # The transaction sees its own DELETE, so the owner's pointer is absent
         # while live clones and shared runs borrowing the path remain represented.
-        await queries.acquire_workspace_hierarchy_advisory_xact_locks(
-            conn,
-            queries.normalized_workspace_path(str(workspace_path)),
-            boundary=str(get_settings().workspace_root),
-        )
+        normalized_workspace_path = queries.normalized_workspace_path(str(workspace_path))
+        try:
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn,
+                normalized_workspace_path,
+                boundary=str(get_settings().workspace_root),
+            )
+        except ValueError:
+            # Persisted paths can predate a workspace_root reconfiguration. The
+            # purge jail below must skip them without making the row undeletable.
+            pass
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
