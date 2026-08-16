@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
+import litellm
 from fastapi import Response
 
 from aios.api.routers import agents as router
@@ -36,6 +37,13 @@ def _agent(**over: Any) -> Agent:
 
 
 async def test_update_warns_when_local_map_would_reject_param(monkeypatch: Any) -> None:
+    # Model metadata may refresh independently of the locked LiteLLM package. Pin the
+    # stale-map condition this warning is specifically intended to report.
+    monkeypatch.setattr(
+        litellm,
+        "get_supported_openai_params",
+        lambda _model: ["temperature"],
+    )
     current = _agent()
     updated = _agent(version=2, litellm_extra={"reasoning_effort": "high"})
     monkeypatch.setattr(agents_service, "get_agent", AsyncMock(return_value=current))
