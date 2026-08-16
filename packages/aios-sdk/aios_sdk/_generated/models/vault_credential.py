@@ -44,7 +44,7 @@ class VaultCredential:
     display_name: None | str
     target_url: None | str
     auth_type: VaultCredentialAuthType
-    metadata: VaultCredentialMetadata
+    metadata: None | VaultCredentialMetadata
     created_at: datetime.datetime
     updated_at: datetime.datetime
     secret_name: None | str | Unset = UNSET
