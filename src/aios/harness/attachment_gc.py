@@ -156,6 +156,8 @@ async def sweep_orphan_uploads(pool: asyncpg.Pool[Any]) -> int:
                 failures.append((session_dir, err))
             continue
         retained = referenced[session_dir.name]
+        if retained is None:
+            continue
         for file_path in session_dir.rglob("*"):
             if not file_path.is_file() or str(file_path) in retained:
                 continue
