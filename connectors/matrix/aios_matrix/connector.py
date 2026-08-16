@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from enum import Enum
 from pathlib import Path
@@ -365,11 +366,17 @@ class MatrixConnector(HttpConnector):
                 MatrixConnectionError,
                 httpx.TransportError,
                 ClientError,
-                ConnectionError,
+                OSError,
                 TimeoutError,
             ),
         ):
             return False
+        if isinstance(exc, json.JSONDecodeError):
+            # A truncated 200 can cause this transiently, but malformed JSON is
+            # also a stable homeserver/proxy protocol violation. Bound it so a
+            # persistently invalid success response cannot stall every room
+            # forever; unlike OS/transport errors it has no transient contract.
+            return True
         if isinstance(exc, MatrixRequestError):
             status = getattr(exc, "http_status", None)
             # Request timeout and rate limiting are explicitly transient, as

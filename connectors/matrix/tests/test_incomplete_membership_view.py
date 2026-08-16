@@ -40,6 +40,7 @@ the status code the HTTP layer returns.
 
 from __future__ import annotations
 
+import socket
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -395,6 +396,43 @@ async def test_failed_ghost_repair_does_not_probe_every_connected_ghost(receiver
     assert response.status == 503
     assert ghost_intent.get_joined_members.await_count == connector.MAX_MEMBERSHIP_REPAIR_CANDIDATES
     assert ghost_intent.get_joined_members.await_count < len(connector._ghost_connections)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("network is unreachable"),
+        socket.gaierror(-3, "Temporary failure in name resolution"),
+    ],
+    ids=["oserror", "dns-gaierror"],
+)
+@pytest.mark.parametrize("through_ghost", [False, True], ids=["direct", "ghost"])
+async def test_os_network_failures_remain_transient_past_bound(
+    receiver, failure: OSError, through_ghost: bool
+) -> None:
+    """Raw OS/DNS failures are network blips, not reasons to halt the connector."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    failing_intent = appservice._intent
+    if through_ghost:
+        connector._ghost_connections["_aios_agent_one"] = "con_1"
+        appservice._intent.get_joined_members = AsyncMock(side_effect=MForbidden(403, "not joined"))
+        failing_intent = MagicMock()
+        appservice._intent.user.return_value = failing_intent
+    failing_intent.get_joined_members = AsyncMock(side_effect=failure)
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES + 1):
+        response = await _put(
+            appservice,
+            f"txn-os-transient-{through_ghost}-{attempt}",
+            [_message(event_id="$evt-os-transient")],
+        )
+        statuses.append(response.status)
+
+    assert statuses == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES + 1)
+    assert not connector._halt.is_set()
+    assert connector._unroutable_attempts == {}
 
 
 async def test_repeated_transient_repair_failure_never_halts(receiver) -> None:
