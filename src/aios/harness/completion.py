@@ -44,9 +44,10 @@ from aios.harness.request_body_budget import (
     enforce_request_body_budget,
     is_request_too_large_error,
 )
+from aios.logging import get_logger
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
-from aios.services.litellm_params import openai_params_in
+from aios.services.litellm_params import openai_params_in, silent_drop_controls_in
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them. Keep
@@ -54,6 +55,8 @@ from aios.services.litellm_params import openai_params_in
 # adapters silently discard treatments the caller believes reached the wire.
 litellm.modify_params = True
 litellm.drop_params = False
+
+log = get_logger("aios.harness.completion")
 
 # LiteLLM's Anthropic adapter silently DROPS a requested ``thinking`` param
 # whenever the last tool-calling assistant message in the replayed history
@@ -686,7 +689,33 @@ def _build_litellm_kwargs(
     effective_extra = dict(extra or {})
     # Never permit LiteLLM's silent unsupported-parameter path, even when an
     # agent explicitly requests it through ``litellm_extra``.
+    #
+    # TWO switches reach this behaviour and both must be neutralized:
+    #   * ``drop_params`` discards whatever the provider map rejects.
+    #   * ``additional_drop_params`` removes NAMED params in LiteLLM's
+    #     ``_get_non_default_params`` BEFORE provider validation runs, so no
+    #     error is ever raised. It also drops params the provider SUPPORTS,
+    #     which ``drop_params`` does not (verified against litellm 1.96.2).
+    #
+    # Neutralizing ``additional_drop_params`` by quietly popping it would
+    # reproduce this very defect one level up: the caller's input would vanish
+    # while the call reported success. So the override is LOGGED, naming the
+    # params that would have been discarded.
+    silenced = silent_drop_controls_in(effective_extra)
     effective_extra["drop_params"] = False
+    dropped_names = effective_extra.pop("additional_drop_params", None)
+    if silenced:
+        log.warning(
+            "litellm_silent_drop_control_overridden",
+            model=model,
+            session_id=session_id,
+            controls=silenced,
+            additional_drop_params=list(dropped_names or []),
+            detail=(
+                "agent litellm_extra asked LiteLLM to discard request params and "
+                "report success; overridden so an unsupported param fails loud"
+            ),
+        )
     if auth is not None and get_settings().inference_credential_policy != "legacy_env":
         # Account rows are authoritative under non-legacy policies. Inline auth
         # fields are agent metadata, not account configuration.

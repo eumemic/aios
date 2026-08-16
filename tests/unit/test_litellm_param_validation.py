@@ -4,18 +4,31 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import litellm
 import pytest
 from litellm.exceptions import UnsupportedParamsError
+from structlog.testing import capture_logs
 
 from aios.harness import completion
-from aios.services.litellm_params import unsupported_openai_params
+from aios.services.litellm_params import (
+    silent_drop_controls_in,
+    unsupported_openai_params,
+)
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
 
-def test_stale_capability_map_is_reported_at_config_save() -> None:
+def test_stale_capability_map_is_reported_at_config_save(monkeypatch: Any) -> None:
+    # Model metadata may refresh independently of the locked LiteLLM package. Exercise a
+    # deliberately stale snapshot instead of depending on today's remote capability map.
+    monkeypatch.setattr(
+        litellm,
+        "get_supported_openai_params",
+        lambda _model: ["temperature"],
+    )
+
     assert unsupported_openai_params("xai/grok-4.6", {"reasoning_effort": "high"}) == [
         "reasoning_effort"
     ]
@@ -157,3 +170,148 @@ def test_build_kwargs_overrides_agent_supplied_drop_params() -> None:
     )
 
     assert kwargs["drop_params"] is False
+
+
+# ─ The SECOND silent-drop switch: additional_drop_params ───────────────────
+#
+# Reviewer finding (2026-08-15), reproduced by execution against litellm
+# 1.96.2 before changing anything::
+#
+#   temperature=0.8, additional_drop_params=['temperature'] -> NO RAISE,
+#   content='ok', optional_params == {}    <- the #1674 outcome
+#
+# ``additional_drop_params`` removes named params in LiteLLM's
+# ``_get_non_default_params`` BEFORE provider validation runs, so the clamp on
+# ``drop_params`` never gets a chance to raise. It is strictly worse than
+# ``drop_params``: it also discards params the provider SUPPORTS (measured on
+# gpt-4o, where temperature is supported and still vanished).
+
+
+async def test_additional_drop_params_cannot_silence_a_rejected_param(
+    _settings: None,
+) -> None:
+    """The second switch must not buy a silent drop either.
+
+    Mutation-sensitive: remove the ``additional_drop_params`` pop from
+    ``_build_litellm_kwargs`` and this call SUCCEEDS with temperature discarded.
+    """
+    request = completion.LlmRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        params={
+            **_REJECTED_PARAM,
+            "additional_drop_params": ["temperature"],
+            "mock_response": "ok",
+        },
+    )
+
+    with pytest.raises(UnsupportedParamsError, match="claude-opus-4-8"):
+        await completion.call_litellm(request, model=_REJECTING_MODEL)
+
+
+async def test_additional_drop_params_cannot_silently_discard_a_supported_param(
+    _settings: None,
+) -> None:
+    """The wider half of the same defect: it drops SUPPORTED params too.
+
+    ``temperature`` IS supported on gpt-4o, so no provider error is available
+    to save us — under the unfixed harness the param simply disappears and the
+    call reports success. Pin that the param survives to the outbound kwargs.
+    """
+    seen: dict[str, object] = {}
+
+    async def _capture(**kwargs: object) -> object:
+        seen.update(kwargs)
+        raise _StopBeforeWire
+
+    request = completion.LlmRequest(
+        messages=[{"role": "user", "content": "hi"}],
+        params={"temperature": 0.8, "additional_drop_params": ["temperature"]},
+    )
+    kwargs = completion._build_litellm_kwargs(
+        model="gpt-4o",
+        messages=request.messages,
+        tools=None,
+        auth=None,
+        extra=request.params,
+        session_id=None,
+        stream=False,
+    )
+
+    assert "additional_drop_params" not in kwargs
+    assert kwargs["temperature"] == 0.8
+
+
+class _StopBeforeWire(Exception):
+    pass
+
+
+def test_neutralizing_the_control_is_itself_not_silent() -> None:
+    """The fix's OWN input must carry the guarantee the fix adds.
+
+    Popping ``additional_drop_params`` quietly would reproduce #1674 one level
+    up: the caller's instruction would vanish while the call reported success.
+    The override must be observable.
+    """
+    with capture_logs() as logs:
+        completion._build_litellm_kwargs(
+            model=_REJECTING_MODEL,
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            auth=None,
+            extra={**_REJECTED_PARAM, "additional_drop_params": ["temperature"]},
+            session_id=None,
+            stream=False,
+        )
+
+    overrides = [e for e in logs if e["event"] == "litellm_silent_drop_control_overridden"]
+    assert overrides, f"override was silent; logs={logs}"
+    assert overrides[0]["controls"] == ["additional_drop_params"]
+    assert overrides[0]["additional_drop_params"] == ["temperature"]
+
+
+def test_no_warning_when_the_agent_asked_for_nothing_harmful() -> None:
+    """Not a hair-trigger: controls that cannot cause a drop are not reported.
+
+    ``drop_params: False`` agrees with the harness and an empty
+    ``additional_drop_params`` discards nothing. Warning on those would train
+    operators to ignore the warning that matters.
+    """
+    with capture_logs() as logs:
+        completion._build_litellm_kwargs(
+            model=_REJECTING_MODEL,
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            auth=None,
+            extra={"drop_params": False, "additional_drop_params": []},
+            session_id=None,
+            stream=False,
+        )
+
+    assert not [e for e in logs if e["event"] == "litellm_silent_drop_control_overridden"]
+
+
+def test_silent_drop_controls_enumerated_against_the_repo_s_own_control_list() -> None:
+    """Close the "clamps one of five" gap by naming why each control is safe.
+
+    ``litellm_params.py`` already enumerates five LiteLLM control params. Two
+    have drop semantics and are neutralized; the other three were checked by
+    execution and do not bypass validation (``allowed_openai_params``,
+    ``max_retries``, ``custom_llm_provider`` all still raised on a rejected
+    temperature). This test fails if a future LiteLLM adds a control param to
+    that list without a decision being recorded here.
+    """
+    from aios.services import litellm_params
+
+    expected_controls = {
+        "allowed_openai_params",
+        "additional_drop_params",
+        "custom_llm_provider",
+        "drop_params",
+        "max_retries",
+    }
+    assert expected_controls == litellm_params._LITELLM_CONTROL_PARAMS
+    assert silent_drop_controls_in({"drop_params": True}) == ["drop_params"]
+    assert silent_drop_controls_in({"additional_drop_params": ["x"]}) == ["additional_drop_params"]
+    assert silent_drop_controls_in({"allowed_openai_params": ["temperature"]}) == []
+    assert silent_drop_controls_in({"max_retries": 0}) == []
+    assert silent_drop_controls_in({"custom_llm_provider": "anthropic"}) == []
