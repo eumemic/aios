@@ -1153,14 +1153,16 @@ async def reclaim_session_if_idle(
     row matches → no-op, so a late user/tool message always wins over reclaim. Idempotent via
     ``archived_at IS NULL``. Returns ``True`` iff this call archived the row.
 
-    The caller gates on the session's immutable ``archive_when_idle`` launch flag; this query
-    enforces the idle condition atomically and must be the **last** session write of the step
-    (no write may follow — ``append_event`` fences on ``archived_at IS NULL``).
+    The immutable ``archive_when_idle`` launch flag is enforced in this same conditional
+    UPDATE rather than relying only on the harness caller's pre-check. This keeps every service
+    caller from reclaiming a persistent session and preserves the flag-to-archive decision under
+    one atomic predicate. The update must be the **last** session write of the step (no write may
+    follow — ``append_event`` fences on ``archived_at IS NULL``).
     """
     row = await conn.fetchrow(
         "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND NOT {_SESSION_ACTIVE_EXPR} "
-        "RETURNING id",
+        f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND archive_when_idle "
+        f"AND NOT {_SESSION_ACTIVE_EXPR} RETURNING id",
         session_id,
         account_id,
     )
