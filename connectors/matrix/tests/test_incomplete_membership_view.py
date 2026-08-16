@@ -46,7 +46,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from mautrix.appservice.state_store.memory import ASStateStore
 from mautrix.client.state_store.memory import MemoryStateStore
-from mautrix.errors import MForbidden
+from mautrix.errors import MForbidden, MNotFound, MUnknown
 from mautrix.types import Member, Membership, RoomID, UserID
 
 from aios_matrix.appservice import create_appservice
@@ -270,6 +270,85 @@ async def test_permanently_forbidden_repair_escalates_and_halts(receiver) -> Non
     assert connector._halt.is_set(), "permanent refusal did not escalate to HALT"
     assert connector._unroutable_attempts["$evt8"] == connector.MAX_UNROUTABLE_REDELIVERIES
     connector.emit_inbound.assert_not_awaited()
+
+
+async def test_permanent_non_forbidden_repair_failure_escalates_at_bound(receiver) -> None:
+    """A terminal 404 must not silently retry forever merely because it is not 403."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    appservice._intent.get_joined_members = AsyncMock(side_effect=MNotFound(404, "room gone"))
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES):
+        response = await _put(
+            appservice, f"txn-not-found-{attempt}", [_message(event_id="$evt404")]
+        )
+        statuses.append(response.status)
+
+    assert statuses[:-1] == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES - 1)
+    assert statuses[-1] == 500
+    assert connector._halt.is_set()
+    assert connector._unroutable_attempts["$evt404"] == connector.MAX_UNROUTABLE_REDELIVERIES
+
+
+async def test_matrix_server_error_remains_transient_without_consuming_budget(receiver) -> None:
+    """A Matrix 5xx is no more permanent than a transport failure."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    appservice._intent.get_joined_members = AsyncMock(side_effect=MUnknown(503, "overloaded"))
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES * 3):
+        response = await _put(
+            appservice, f"txn-server-error-{attempt}", [_message(event_id="$evt503")]
+        )
+        statuses.append(response.status)
+
+    assert statuses == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES * 3)
+    assert not connector._halt.is_set()
+    assert connector._unroutable_attempts == {}
+
+
+async def test_ghost_repair_is_bounded_and_skips_a_flaky_candidate(receiver) -> None:
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    connector._ghost_connections.update({f"_aios_agent_{i}": f"con_{i}" for i in range(100)})
+    appservice._intent.get_joined_members = AsyncMock(side_effect=MForbidden(403, "not joined"))
+    ghost_intent = MagicMock()
+    ghost_intent.get_joined_members = AsyncMock(
+        side_effect=[
+            ConnectionError("first ghost is flapping"),
+            {HUMAN: Member(membership=Membership.JOIN), GHOST: Member(membership=Membership.JOIN)},
+        ]
+    )
+    appservice._intent.user.return_value = ghost_intent
+
+    response = await _put(appservice, "txn-bounded-repair", [_message(event_id="$evt-bound")])
+
+    assert response.status == 200
+    assert ghost_intent.get_joined_members.await_count == 2
+    assert ghost_intent.get_joined_members.await_count <= connector.MAX_MEMBERSHIP_REPAIR_CANDIDATES
+    assert connector._unroutable_attempts == {}
+    for call in ghost_intent.get_joined_members.await_args_list:
+        assert call.kwargs["ensure_joined"] is False
+
+
+async def test_failed_ghost_repair_does_not_probe_every_connected_ghost(receiver) -> None:
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections.update({f"_aios_agent_{i}": f"con_{i}" for i in range(500)})
+    forbidden = MForbidden(403, "not joined")
+    appservice._intent.get_joined_members = AsyncMock(side_effect=forbidden)
+    ghost_intent = MagicMock()
+    ghost_intent.get_joined_members = AsyncMock(side_effect=forbidden)
+    appservice._intent.user.return_value = ghost_intent
+
+    response = await _put(appservice, "txn-bounded-failure", [_message(event_id="$evt-cap")])
+
+    assert response.status == 503
+    assert ghost_intent.get_joined_members.await_count == connector.MAX_MEMBERSHIP_REPAIR_CANDIDATES
+    assert ghost_intent.get_joined_members.await_count < len(connector._ghost_connections)
 
 
 async def test_repeated_transient_repair_failure_never_halts(receiver) -> None:

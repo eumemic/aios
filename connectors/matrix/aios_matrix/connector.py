@@ -15,7 +15,7 @@ from aios_connector_http import HttpConnector, SandboxPath, tool
 from aios_connector_http.spool import SqliteAnsweredSpool
 from markdown_it import MarkdownIt
 from mautrix.appservice import AppService
-from mautrix.errors import MForbidden
+from mautrix.errors import MForbidden, MatrixRequestError
 from mautrix.types import (
     Event,
     EventID,
@@ -122,6 +122,10 @@ class MatrixConnector(HttpConnector):
     # enough that a genuinely dead recipient does not head-of-line block
     # every Matrix transaction indefinitely and unseen.
     MAX_UNROUTABLE_REDELIVERIES = 12
+    # Membership repair is on Synapse's ordered transaction path.  Connected
+    # ghosts are only candidates (liveness does not prove room membership), so
+    # never serially probe the appservice's whole connection population.
+    MAX_MEMBERSHIP_REPAIR_CANDIDATES = 8
     # Bounds the redelivery-attempt ledger.  Entries are keyed per event and
     # dropped once the event is fully delivered; this cap only matters if a
     # large number of distinct events are simultaneously stuck.
@@ -297,39 +301,40 @@ class MatrixConnector(HttpConnector):
             )
         except MForbidden as bot_forbidden:
             joined = None
-            last_forbidden: MForbidden = bot_forbidden
-            for localpart in tuple(self._ghost_connections):
+            last_permanent: Exception = bot_forbidden
+            last_transient: Exception | None = None
+            candidates = tuple(self._ghost_connections)[: self.MAX_MEMBERSHIP_REPAIR_CANDIDATES]
+            for localpart in candidates:
                 intent = self.az.intent.user(self._mxid(localpart))
                 try:
                     joined = await intent.get_joined_members(
                         room_id, ensure_joined=False  # type: ignore[call-arg]
                     )
                     break
-                except MForbidden as exc:
-                    last_forbidden = exc
                 except Exception as exc:
-                    # A transport/server failure may recover. It must neither
-                    # consume the permanent-refusal budget nor halt.
-                    raise RoutingNotReady(
-                        f"membership view for room {room_id} is incomplete and ghost repair "
-                        f"failed transiently ({type(exc).__name__}: {exc})"
-                    ) from exc
+                    # A failed candidate says nothing about later candidates.
+                    # Keep trying within the strict fan-out bound.
+                    if self._is_permanent_membership_failure(exc):
+                        last_permanent = exc
+                    else:
+                        last_transient = exc
             if joined is None:
-                attempts = self._record_unroutable_attempt(event)
-                detail = (
-                    f"membership view for room {room_id} is incomplete and no connected "
-                    f"intent may read it (M_FORBIDDEN, attempt {attempts})"
-                )
-                if attempts >= self.MAX_UNROUTABLE_REDELIVERIES:
-                    raise RoutingPermanentlyUnroutable(
-                        f"{detail}; still unverifiable after "
-                        f"{self.MAX_UNROUTABLE_REDELIVERIES} redeliveries"
-                    ) from last_forbidden
-                raise RoutingNotReady(detail) from last_forbidden
+                if last_transient is not None:
+                    # At least one candidate may recover.  Do not spend the
+                    # permanent budget merely because the other candidates
+                    # cannot read this room.
+                    raise RoutingNotReady(
+                        f"membership view for room {room_id} is incomplete and bounded ghost "
+                        f"repair failed transiently ({type(last_transient).__name__}: "
+                        f"{last_transient})"
+                    ) from last_transient
+                self._raise_unrepairable_membership(event, room_id, last_permanent)
         except Exception as exc:
-            # Could not verify — refuse, do NOT ACK.  RoutingNotReady is
-            # classified RETRY, so a transient homeserver failure costs a
-            # redelivery rather than a message or a container.
+            if self._is_permanent_membership_failure(exc):
+                self._raise_unrepairable_membership(event, room_id, exc)
+            # Could not verify — refuse, do NOT ACK.  A transport failure or
+            # server-side response may recover and must not consume the
+            # permanent budget.
             raise RoutingNotReady(
                 f"membership view for room {room_id} is incomplete and could not be "
                 f"refreshed ({type(exc).__name__}: {exc}); refusing rather than "
@@ -342,6 +347,32 @@ class MatrixConnector(HttpConnector):
                 f"homeserver returned no joined members for room {room_id}; cannot classify event"
             )
         return list(joined.keys())
+
+    @staticmethod
+    def _is_permanent_membership_failure(exc: Exception) -> bool:
+        """Whether retrying this Matrix membership read cannot repair it."""
+        if not isinstance(exc, MatrixRequestError):
+            return False
+        status = getattr(exc, "http_status", None)
+        # Request timeout and rate limiting are explicitly transient, as are
+        # all server failures.  Other 4xx answers (notably 404/410) are stable
+        # verdicts for this read and must receive the finite escalation budget.
+        return isinstance(status, int) and 400 <= status < 500 and status not in (408, 429)
+
+    def _raise_unrepairable_membership(
+        self, event: Event, room_id: RoomID, cause: Exception
+    ) -> None:
+        attempts = self._record_unroutable_attempt(event)
+        detail = (
+            f"membership view for room {room_id} is permanently unrepairable "
+            f"({type(cause).__name__}: {cause}, attempt {attempts})"
+        )
+        if attempts >= self.MAX_UNROUTABLE_REDELIVERIES:
+            raise RoutingPermanentlyUnroutable(
+                f"{detail}; still unverifiable after "
+                f"{self.MAX_UNROUTABLE_REDELIVERIES} redeliveries"
+            ) from cause
+        raise RoutingNotReady(detail) from cause
 
     async def _handle_event(self, event: Event) -> None:
         if event.type != EventType.ROOM_MESSAGE or not getattr(event.content, "body", None):
