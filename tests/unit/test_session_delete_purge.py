@@ -104,7 +104,9 @@ async def test_delete_session_out_of_jail_workspace_skips_purge_and_deletes_row(
 
     delete_row.assert_awaited_once_with(conn, session_id, account_id=account_id)
     assert marker.read_text() == "must survive"
-    assert "outside workspace_root" in caplog.text
+    assert "skipping workspace hierarchy lock outside workspace_root" in caplog.text
+    assert str(stale_workspace) in caplog.text
+    assert session_id in caplog.text
 
 
 async def test_delete_session_in_jail_still_takes_full_hierarchy_lock(tmp_path: Path) -> None:

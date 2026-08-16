@@ -34,6 +34,7 @@ from aios.harness.chat_type import ChatType
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
+from aios.logging import get_logger
 from aios.models.agents import (
     StepSurface,
     is_mcp_tool_name,
@@ -72,6 +73,8 @@ from aios.services import memory_stores as memory_service
 from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
 from aios.services.vaults import env_var_credential_containment_error
+
+log = get_logger(__name__)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -2535,7 +2538,11 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
         except ValueError:
             # Persisted paths can predate a workspace_root reconfiguration. The
             # purge jail below must skip them without making the row undeletable.
-            pass
+            log.warning(
+                "skipping workspace hierarchy lock outside workspace_root",
+                path=str(workspace_path),
+                session_id=session_id,
+            )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
