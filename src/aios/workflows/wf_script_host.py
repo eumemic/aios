@@ -157,6 +157,7 @@ def agent(
     model: str | None = None,
     label: str | None = None,
     workspace: str = "shared",
+    auto_archive_on_completion: bool = True,
 ) -> _Capability:
     """Invoke an agent child and await its ``return``/``error`` result.
 
@@ -187,6 +188,7 @@ def agent(
             else canonical_schema_json(output_schema),
             "model": model,
             "workspace": workspace,
+            "auto_archive_on_completion": auto_archive_on_completion,
         },
         annotations,
     )
@@ -198,6 +200,7 @@ def invoke_workflow(
     *,
     output_schema: Any = None,
     label: str | None = None,
+    auto_archive_on_completion: bool = False,
 ) -> _Capability:
     """Invoke another workflow as a sub-run and await its result — the dual of
     :func:`agent` (which invokes a child *session*), keyed by id like
@@ -227,6 +230,7 @@ def invoke_workflow(
             "output_schema": None
             if output_schema is None
             else canonical_schema_json(output_schema),
+            "auto_archive_on_completion": auto_archive_on_completion,
         },
         annotations,
     )

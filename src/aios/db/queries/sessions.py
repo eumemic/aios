@@ -37,7 +37,6 @@ from aios.errors import (
     NotFoundError,
     RateLimitedError,
 )
-from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 from aios.ids import (
     EVENT,
     GITHUB_REPOSITORY,
@@ -193,11 +192,6 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
-        # Soft read: present in every ``SELECT *`` / ``RETURNING *`` feeder
-        # (the worker step's ``get_session_bare`` is one). Explicit-column
-        # reads that omit it fall back to the conservative v1 — an unknown
-        # lineage must never be reported as v2 (#2050).
-        token_baseline_v=int(row.get("token_baseline_v") or 1),
     )
 
 
@@ -256,11 +250,10 @@ async def insert_session(
                 workspace_volume_path, env,
                 focal_channel, focal_locked, account_id, archive_when_idle,
                 outbound_suppression, created_by_type, created_by_ref,
-                tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
-                token_baseline_v
+                tools, mcp_servers, http_servers, surface_frozen, litellm_extra
             )
             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
-                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb, $21)
+                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb)
             RETURNING *
             """,
             new_id,
@@ -288,11 +281,6 @@ async def insert_session(
             else None,
             frozen_surface is not None,
             json.dumps(frozen_litellm_extra or {}) if frozen_surface else None,
-            # A session with NO events has no v1 history to be inconsistent
-            # with, so it is born at the current baseline (#2050).  The DB
-            # DEFAULT stays 1 so every PRE-EXISTING row keeps its honest v1
-            # lineage until the backfill promotes it.
-            TOKEN_BASELINE_CURRENT,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -321,6 +309,7 @@ async def insert_child_session(
     http_servers: list[HttpServerSpec],
     litellm_extra: dict[str, Any] | None = None,
     workspace_path: str | None = None,
+    archive_when_idle: bool = True,
 ) -> Session | None:
     """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
 
@@ -350,11 +339,11 @@ async def insert_child_session(
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
                 tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
-                tools_vocab_epoch, token_baseline_v
+                tools_vocab_epoch
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
-                    NULL, FALSE, $7, $8, 'background', TRUE,
-                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE, $12::jsonb, $13, $14)
+                    NULL, FALSE, $7, $8, 'background', $9,
+                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -366,12 +355,12 @@ async def insert_child_session(
             workspace_path,
             account_id,
             parent_run_id,
+            archive_when_idle,
             json.dumps([t.model_dump() for t in tools]),
             json.dumps([s.model_dump() for s in mcp_servers]),
             json.dumps([s.model_dump() for s in http_servers]),
             json.dumps(litellm_extra or {}),
             TOOLS_VOCAB_EPOCH,
-            TOKEN_BASELINE_CURRENT,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

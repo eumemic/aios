@@ -142,6 +142,10 @@ class _CallAgentArgs(BaseModel):
             "url and mount_path. Omitted inherits all parent resource mounts."
         ),
     )
+    auto_archive_on_completion: bool = Field(
+        default=True,
+        description="Archive the spawned session when it becomes idle after completion.",
+    )
     outbound_suppression: OutboundSuppression | None = Field(
         default=None, description="Outbound suppression; omitted inherits the parent's setting."
     )
@@ -177,6 +181,10 @@ class _CallWorkflowArgs(BaseModel):
     output_schema: dict[str, Any] | None = Field(
         default=None,
         description="Optional JSON Schema the run output must satisfy (validated fail-loud).",
+    )
+    auto_archive_on_completion: bool = Field(
+        default=False,
+        description="Archive the run after terminal completion.",
     )
     vault_ids: list[str] = Field(
         default_factory=list,
@@ -376,6 +384,7 @@ async def call_agent_handler(
         env=args.env,
         outbound_suppression=args.outbound_suppression,
         workspace=args.workspace,
+        auto_archive_on_completion=args.auto_archive_on_completion,
         launcher_session_id=session_id,
         crypto_box=runtime.require_crypto_box(),
         caller=_caller(session_id),
@@ -425,6 +434,7 @@ async def call_workflow_handler(
         vault_ids=args.vault_ids,
         budget_usd=args.budget_usd,
         workspace=args.workspace,
+        auto_archive_on_completion=args.auto_archive_on_completion,
     )
     return await _park_and_resolve(
         pool,

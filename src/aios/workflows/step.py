@@ -1086,6 +1086,11 @@ async def _open_agent_capability(
     workspace = spec.get("workspace", "shared")
     if workspace not in {"shared", "fresh"}:
         return await _reject("bad_agent_call", "agent() workspace must be shared or fresh")
+    auto_archive = spec.get("auto_archive_on_completion", True)
+    if not isinstance(auto_archive, bool):
+        return await _reject(
+            "bad_agent_call", "agent() auto_archive_on_completion must be a boolean"
+        )
     model = spec.get("model")
     if model is not None and not isinstance(model, str):
         return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
@@ -1194,6 +1199,7 @@ async def _open_agent_capability(
             depth=run.depth - 1,
             litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
             workspace_path=run.workspace_path if workspace == "shared" else None,
+            auto_archive_on_completion=auto_archive,
         ),
         account_id=account_id,
     )
@@ -1281,6 +1287,12 @@ async def _open_invoke_workflow_capability(
 
     spec = cap.spec if isinstance(cap.spec, dict) else {}
     workflow_id = spec.get("workflow_id")
+    auto_archive = spec.get("auto_archive_on_completion", False)
+    if not isinstance(auto_archive, bool):
+        return await _reject(
+            "bad_invoke_workflow",
+            "invoke_workflow() auto_archive_on_completion must be a boolean",
+        )
     if not isinstance(workflow_id, str):
         return await _reject(
             "bad_invoke_workflow",
@@ -1337,6 +1349,7 @@ async def _open_invoke_workflow_capability(
             request_id=cap.call_key,  # the invoke_workflow() call IS the request
             caller={"kind": "run", "id": run.id, "awaited": True},
             request_output_schema=output_schema,
+            auto_archive_on_completion=auto_archive,
         )
     except NotFoundError:
         return await _reject("workflow_not_found", f"workflow {workflow_id!r} not found")

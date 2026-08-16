@@ -88,6 +88,7 @@ async def launch_awaited_run(
     budget_usd: float | None = None,
     workspace: str = "fresh",
     version: int | None = None,
+    auto_archive_on_completion: bool = True,
 ) -> tuple[WfRun, str]:
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
 
@@ -119,6 +120,7 @@ async def launch_awaited_run(
         budget_usd=budget_usd,
         workspace=workspace,
         version=version,
+        auto_archive_on_completion=auto_archive_on_completion,
     )
     return run, request_id
 
