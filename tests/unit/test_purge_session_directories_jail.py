@@ -2,8 +2,16 @@
 
 The destructive property under test: session deletion ``rmtree``s host
 directories, so the guard authorising that ``rmtree`` must REFUSE any
-target that is not exclusively owned by the session being deleted, and
-must delete NOTHING when it refuses.
+target that is not exclusively owned by the session being deleted -- it
+must leave that directory INTACT.
+
+The assertion is on the filesystem, not on an exception type.  Refusing
+the ``rmtree`` is the safety property; aborting the delete is not.
+``purge_session_directories`` runs after ``delete_session`` has already
+committed the row removal, so raising would report a failed DELETE for a
+session that is in fact gone.  An earlier revision of this guard did
+raise, and it broke a legitimate reachable case -- see
+``TestPermitsLegitimatePurge.test_workflow_shared_run_workspace_is_skipped_not_fatal``.
 
 The pre-existing suite only asserted that a legitimate purge removes four
 directories — nothing asserted anything was ever refused, so replacing the
@@ -29,7 +37,6 @@ from pathlib import Path
 import pytest
 
 from aios.config import get_settings
-from aios.errors import ForbiddenError
 from aios.sandbox.volumes import purge_session_directories
 
 ACCOUNT = "acc_purge"
@@ -75,10 +82,9 @@ class TestRefusesUnownedTargets:
         victim = _populate(account_root / "sess_other_live_session")
         mine = _populate(account_root / SESSION)
 
-        with pytest.raises(ForbiddenError):
-            purge_session_directories(SESSION, account_root, account_id=ACCOUNT)
+        purge_session_directories(SESSION, account_root, account_id=ACCOUNT)
 
-        # "Refuses" is only half the property — it must also not have deleted.
+        # "Refuses" means exactly one thing here: the directory is still there.
         assert victim.exists(), "another session's workspace was destroyed"
         assert (victim / "marker.txt").read_text() == "payload"
         assert account_root.exists()
@@ -86,36 +92,31 @@ class TestRefusesUnownedTargets:
 
     def test_refuses_workspace_root_itself(self, workspace_root: Path) -> None:
         _populate(workspace_root / ACCOUNT / "sess_other")
-        with pytest.raises(ForbiddenError):
-            purge_session_directories(SESSION, workspace_root, account_id=ACCOUNT)
+        purge_session_directories(SESSION, workspace_root, account_id=ACCOUNT)
         assert (workspace_root / ACCOUNT / "sess_other" / "marker.txt").exists()
 
     def test_refuses_sibling_sessions_directory(self, workspace_root: Path) -> None:
         """A stale/duplicated row pointing at ANOTHER session's dir."""
         sibling = _populate(workspace_root / ACCOUNT / "sess_sibling")
-        with pytest.raises(ForbiddenError):
-            purge_session_directories(SESSION, sibling, account_id=ACCOUNT)
+        purge_session_directories(SESSION, sibling, account_id=ACCOUNT)
         assert (sibling / "marker.txt").exists()
 
     def test_refuses_other_accounts_directory(self, workspace_root: Path) -> None:
         cross = _populate(workspace_root / "acc_other" / "sess_theirs")
-        with pytest.raises(ForbiddenError):
-            purge_session_directories(SESSION, cross, account_id=ACCOUNT)
+        purge_session_directories(SESSION, cross, account_id=ACCOUNT)
         assert (cross / "marker.txt").exists()
 
     def test_refuses_shared_reserved_roots(self, workspace_root: Path) -> None:
         """``_uploads`` / ``_attachments`` hold EVERY session's subdir."""
         for reserved in ("_uploads", "_attachments", "_session_repos", "_memory_stores"):
             shared = _populate(workspace_root / reserved / "sess_someone_else")
-            with pytest.raises(ForbiddenError):
-                purge_session_directories(SESSION, workspace_root / reserved, account_id=ACCOUNT)
+            purge_session_directories(SESSION, workspace_root / reserved, account_id=ACCOUNT)
             assert (shared / "marker.txt").exists()
 
     def test_refuses_out_of_jail_path(self, workspace_root: Path, tmp_path: Path) -> None:
         outside = _populate(tmp_path.parent / f"outside_{tmp_path.name}")
         try:
-            with pytest.raises(ForbiddenError):
-                purge_session_directories(SESSION, outside, account_id=ACCOUNT)
+            purge_session_directories(SESSION, outside, account_id=ACCOUNT)
             assert (outside / "marker.txt").exists()
         finally:
             (outside / "marker.txt").unlink()
@@ -133,31 +134,60 @@ class TestRefusesUnownedTargets:
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(outside, target_is_directory=True)
         try:
-            with pytest.raises(ForbiddenError):
-                purge_session_directories(SESSION, link, account_id=ACCOUNT)
+            purge_session_directories(SESSION, link, account_id=ACCOUNT)
             assert (outside / "marker.txt").exists(), "symlink escaped the jail"
         finally:
             (outside / "marker.txt").unlink()
             outside.rmdir()
 
-    def test_refusal_precedes_every_deletion(self, workspace_root: Path) -> None:
-        """The refused candidate is the FIRST argument, but the session's own
-        uploads/attachments dirs are legitimate. A guard that validated
-        lazily would rmtree those before reaching the refusal."""
+    def test_refusing_one_candidate_still_reclaims_the_session_s_own_dirs(
+        self, workspace_root: Path
+    ) -> None:
+        """An unowned ``workspace_path`` must not suppress the OTHER purges.
+
+        The uploads/attachments/repos dirs are derived from ``session_id``
+        and are unambiguously this session's, whatever the workspace row
+        says. Skipping is per-candidate: refusing the account root reclaims
+        nothing less. An all-or-nothing refusal leaked these forever for
+        precisely the sessions with an anomalous workspace row.
+        """
         _, uploads, attachments, repos = _session_owned_dirs(workspace_root)
         for owned in (uploads, attachments, repos):
             _populate(owned)
-        account_root = workspace_root / ACCOUNT
+        account_root = _populate(workspace_root / ACCOUNT)
+        sibling = _populate(account_root / "sess_other_live_session")
 
-        with pytest.raises(ForbiddenError):
-            purge_session_directories(SESSION, account_root, account_id=ACCOUNT)
+        purge_session_directories(SESSION, account_root, account_id=ACCOUNT)
 
+        assert sibling.exists(), "another session's workspace was destroyed"
+        assert account_root.exists(), "the shared account root was rmtree'd"
         for owned in (uploads, attachments, repos):
-            assert owned.exists(), f"{owned} deleted despite the purge being refused"
+            assert not owned.exists(), f"{owned} is this session's own and must be reclaimed"
 
 
 class TestPermitsLegitimatePurge:
     """A guard only ever observed refusing could be refusing everything."""
+
+    def test_workflow_shared_run_workspace_is_skipped_not_fatal(self, workspace_root: Path) -> None:
+        """The regression that a raising guard caused (integration:
+        ``test_operator_deleted_child_resolves_run_as_child_gone``).
+
+        A workflow ``agent()`` child spawned with the default
+        ``workspace='shared'`` stores the RUN's workspace
+        (``<root>/<account_id>/_runs/<run_id>``) as its own
+        ``workspace_volume_path``. That dir belongs to the run and is shared
+        with the parent and every sibling child, so refusing to delete it is
+        CORRECT -- but the refusal must not be fatal: ``delete_session`` has
+        already committed the row removal by the time this runs, so raising
+        reports a failed DELETE for a session that is in fact gone.
+        """
+        run_workspace = _populate(workspace_root / ACCOUNT / "_runs" / "run_abc")
+        uploads = _populate(workspace_root / "_uploads" / SESSION)
+
+        purge_session_directories(SESSION, run_workspace, account_id=ACCOUNT)
+
+        assert (run_workspace / "marker.txt").exists(), "the run's shared workspace was destroyed"
+        assert not uploads.exists(), "the child's own uploads dir must still be reclaimed"
 
     def test_purges_canonical_session_directories(self, workspace_root: Path) -> None:
         owned = _session_owned_dirs(workspace_root)

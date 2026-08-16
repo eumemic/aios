@@ -476,21 +476,21 @@ def _bind_mount_base(
     return None, None
 
 
-def _assert_purge_target_owned(
+def _purge_target_if_owned(
     candidate: Path,
     *,
     session_id: str,
     owned_bases: tuple[Path, ...],
     root: Path,
-) -> Path:
-    """Return ``candidate``'s resolved path, or raise if it isn't provably
-    a directory owned by ``session_id`` alone.
+) -> Path | None:
+    """Return ``candidate``'s resolved path if it is provably a directory
+    owned by ``session_id`` alone, else ``None`` — meaning *do not delete it*.
 
     Two independent conditions, both on the RESOLVED (symlink-dereferenced,
     ``..``-collapsed) real path — never on the raw string:
 
     1. **In jail.** The target must live strictly under ``workspace_root``.
-       ``workspace_root`` itself is refused.
+       ``workspace_root`` itself is not owned.
     2. **Owned by this session.** The target must be one of the session's own
        canonical directories (or something strictly inside one).  Containment
        is checked against a base that is itself derived from ``session_id``
@@ -504,13 +504,30 @@ def _assert_purge_target_owned(
     shared with every other live session of that tenant.  ``rmtree``-ing it
     on one session's delete destroys every sibling session's workspace.  An
     ancestor is not ownership; only a proven per-session location is.
+
+    **Skip, don't raise.**  Refusing the ``rmtree`` is the safety property;
+    aborting the *delete* is not.  ``delete_session`` calls this AFTER the
+    session row is already committed as deleted, so raising would leave the
+    caller with a deleted row and a 403 — and would break a legitimate,
+    reachable shape: a workflow ``agent()`` child spawned with the default
+    ``workspace='shared'`` stores the RUN's shared workspace
+    (``<root>/<account_id>/_runs/<run_id>``, or the launcher session's dir)
+    as its own ``workspace_volume_path``.  That directory is genuinely not
+    the child's to delete — it belongs to the run and is shared with the
+    parent and every sibling child — so skipping it is exactly right, while
+    raising turned a correct refusal into a failed deletion.  Shared/run
+    directories are reclaimed on their own lifecycle by the host scratch-dir
+    reaper (``_runs``) and the archived-workspace reaper, both of which
+    consult a live keep-set; skipping here leaks nothing permanently.
     """
     resolved = candidate.resolve()
     if resolved == root or not resolved.is_relative_to(root):
-        raise ForbiddenError(
+        log.warning(
             "refusing to purge session directory outside workspace_root",
-            detail={"path": str(candidate), "session_id": session_id},
+            path=str(candidate),
+            session_id=session_id,
         )
+        return None
     for base in owned_bases:
         base_resolved = base.resolve()
         # The base must itself be in-jail: otherwise a symlink AT the
@@ -519,10 +536,12 @@ def _assert_purge_target_owned(
             continue
         if resolved == base_resolved or resolved.is_relative_to(base_resolved):
             return resolved
-    raise ForbiddenError(
+    log.warning(
         "refusing to purge a directory that is not exclusively owned by this session",
-        detail={"path": str(candidate), "session_id": session_id},
+        path=str(candidate),
+        session_id=session_id,
     )
+    return None
 
 
 def purge_session_directories(session_id: str, workspace_path: Path, *, account_id: str) -> None:
@@ -546,11 +565,22 @@ def purge_session_directories(session_id: str, workspace_path: Path, *, account_
     ``<workspace_root>/<session_id>`` (the same carve-out
     :func:`validate_workspace_path` makes, and still exclusively this
     session's).  Anything else — the account root, a sibling session's dir,
-    a shared custom dir — raises ``ForbiddenError`` and deletes NOTHING:
-    every candidate is validated up front, so a refusal on the last one
-    cannot follow an ``rmtree`` of the first.  Failing the delete is the
-    safe direction; an unreferenced directory is recoverable, another
-    session's live workspace is not.
+    a shared run/clone dir — is **skipped and logged**, never ``rmtree``d.
+
+    Skipping is per-candidate, not all-or-nothing.  An unowned
+    ``workspace_path`` does not suppress reclaiming this session's own
+    uploads/attachments/repos dirs, which are derived from ``session_id``
+    and are unambiguously its own; the earlier all-or-nothing shape leaked
+    those forever for exactly the sessions with an anomalous workspace row.
+
+    Refusing the ``rmtree`` is the safety property; aborting the *delete* is
+    not.  This runs after ``delete_session`` has already committed the row
+    removal, so raising here would report a failed DELETE for a session that
+    is in fact gone — and would break the legitimate workflow-child case
+    (``workspace='shared'`` children store the run's shared workspace).  Not
+    deleting another session's live data is what matters; an unreferenced
+    directory is recoverable by the reapers, another session's live
+    workspace is not.
     """
     settings = get_settings()
     root = settings.workspace_root.resolve()
@@ -564,12 +594,19 @@ def purge_session_directories(session_id: str, workspace_path: Path, *, account_
         (session_attachments_dir(session_id), (session_attachments_dir(session_id),)),
         (session_repos_root(session_id), (session_repos_root(session_id),)),
     )
-    # Two passes: prove EVERY target first, delete only once all are proven.
-    # A single-pass loop would leave the earlier directories already gone when
-    # a later candidate is refused — "delete nothing" must mean nothing.
+    # Prove EVERY target before deleting ANY of them. A prove-as-you-go loop
+    # would already have rmtree'd the earlier directories by the time a later
+    # candidate turns out to be unowned; proving first keeps the destructive
+    # phase free of any decision-making.
     targets = [
-        _assert_purge_target_owned(candidate, session_id=session_id, owned_bases=bases, root=root)
+        proven
         for candidate, bases in candidates
+        if (
+            proven := _purge_target_if_owned(
+                candidate, session_id=session_id, owned_bases=bases, root=root
+            )
+        )
+        is not None
     ]
     for target in targets:
         if target.exists():
