@@ -15,6 +15,7 @@ from aios_connector_http import HttpConnector, SandboxPath, tool
 from aios_connector_http.spool import SqliteAnsweredSpool
 from markdown_it import MarkdownIt
 from mautrix.appservice import AppService
+from mautrix.errors import MForbidden
 from mautrix.types import (
     Event,
     EventID,
@@ -246,7 +247,7 @@ class MatrixConnector(HttpConnector):
     def _localpart(user_id: UserID) -> str:
         return str(user_id).removeprefix("@").split(":", 1)[0]
 
-    async def _verified_joined_members(self, room_id: RoomID) -> list[UserID]:
+    async def _verified_joined_members(self, event: Event) -> list[UserID]:
         """The room's join list, or ``RoutingNotReady`` if it cannot be trusted.
 
         ``state_store.get_members()`` is a CACHE, not an authority.  mautrix
@@ -281,15 +282,50 @@ class MatrixConnector(HttpConnector):
         as much authority.  Refusing is safe (Synapse redelivers); ACKing is
         not (Synapse drops the message forever).
         """
+        room_id = event.room_id
         store = self.az.state_store
         if await store.has_full_member_list(room_id):
             return list(await store.get_members(room_id, (Membership.JOIN,)))
         # Incomplete: bulk-fill from the homeserver, which is authoritative
-        # and also write-throughs into the store for subsequent events.
-        # ``ensure_joined=False`` because this is a read: the bot must not
-        # join a room as a side effect of classifying traffic in it.
+        # and also write-throughs into the store for subsequent events. The
+        # bot is normally not joined to human↔ghost DMs, so on M_FORBIDDEN try
+        # the connected ghost intents: a ghost in the room can perform this
+        # read without changing room membership.
         try:
-            joined = await self.az.intent.get_joined_members(room_id, ensure_joined=False)
+            joined = await self.az.intent.get_joined_members(
+                room_id, ensure_joined=False  # type: ignore[call-arg]
+            )
+        except MForbidden as bot_forbidden:
+            joined = None
+            last_forbidden: MForbidden = bot_forbidden
+            for localpart in tuple(self._ghost_connections):
+                intent = self.az.intent.user(self._mxid(localpart))
+                try:
+                    joined = await intent.get_joined_members(
+                        room_id, ensure_joined=False  # type: ignore[call-arg]
+                    )
+                    break
+                except MForbidden as exc:
+                    last_forbidden = exc
+                except Exception as exc:
+                    # A transport/server failure may recover. It must neither
+                    # consume the permanent-refusal budget nor halt.
+                    raise RoutingNotReady(
+                        f"membership view for room {room_id} is incomplete and ghost repair "
+                        f"failed transiently ({type(exc).__name__}: {exc})"
+                    ) from exc
+            if joined is None:
+                attempts = self._record_unroutable_attempt(event)
+                detail = (
+                    f"membership view for room {room_id} is incomplete and no connected "
+                    f"intent may read it (M_FORBIDDEN, attempt {attempts})"
+                )
+                if attempts >= self.MAX_UNROUTABLE_REDELIVERIES:
+                    raise RoutingPermanentlyUnroutable(
+                        f"{detail}; still unverifiable after "
+                        f"{self.MAX_UNROUTABLE_REDELIVERIES} redeliveries"
+                    ) from last_forbidden
+                raise RoutingNotReady(detail) from last_forbidden
         except Exception as exc:
             # Could not verify — refuse, do NOT ACK.  RoutingNotReady is
             # classified RETRY, so a transient homeserver failure costs a
@@ -313,7 +349,7 @@ class MatrixConnector(HttpConnector):
         # VERIFIED membership, not merely cached membership.  Everything
         # below — who the receivers are, whether they are all routable, and
         # whether the room is a dm — is only as sound as this list.
-        members = await self._verified_joined_members(event.room_id)
+        members = await self._verified_joined_members(event)
         # Three distinct facts, which must NOT be collapsed into one
         # "nothing to do" branch — the conflation is what loses messages:
         #

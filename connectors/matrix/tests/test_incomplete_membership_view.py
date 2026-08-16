@@ -46,6 +46,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from mautrix.appservice.state_store.memory import ASStateStore
 from mautrix.client.state_store.memory import MemoryStateStore
+from mautrix.errors import MForbidden
 from mautrix.types import Member, Membership, RoomID, UserID
 
 from aios_matrix.appservice import create_appservice
@@ -222,6 +223,74 @@ async def test_unverifiable_view_refuses_rather_than_acking(receiver) -> None:
     connector.emit_inbound.assert_not_awaited()
     assert "txn-unverifiable" not in appservice.transactions
     assert not connector._halt.is_set(), "a transient homeserver failure halted the connector"
+
+
+async def test_bot_forbidden_repair_uses_a_connected_ghost_intent(receiver) -> None:
+    """The bot need not belong to a human↔ghost DM; the ghost does."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    appservice._intent.get_joined_members = AsyncMock(side_effect=MForbidden(403, "not joined"))
+    ghost_intent = MagicMock()
+    ghost_intent.get_joined_members = AsyncMock(
+        return_value={
+            HUMAN: Member(membership=Membership.JOIN),
+            GHOST: Member(membership=Membership.JOIN),
+        }
+    )
+    appservice._intent.user.return_value = ghost_intent
+
+    response = await _put(appservice, "txn-bot-forbidden-repair", [_message(event_id="$evt7")])
+
+    assert response.status == 200
+    connector.emit_inbound.assert_awaited_once()
+    appservice._intent.user.assert_called_once_with(GHOST)
+
+
+async def test_permanently_forbidden_repair_escalates_and_halts(receiver) -> None:
+    """A permanent membership refusal gets a finite retry budget, then HALTs loudly."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    forbidden = MForbidden(403, "not joined")
+    appservice._intent.get_joined_members = AsyncMock(side_effect=forbidden)
+    ghost_intent = MagicMock()
+    ghost_intent.get_joined_members = AsyncMock(side_effect=forbidden)
+    appservice._intent.user.return_value = ghost_intent
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES):
+        response = await _put(
+            appservice, f"txn-forbidden-{attempt}", [_message(event_id="$evt8")]
+        )
+        statuses.append(response.status)
+
+    assert statuses[:-1] == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES - 1)
+    assert statuses[-1] == 500
+    assert connector._halt.is_set(), "permanent refusal did not escalate to HALT"
+    assert connector._unroutable_attempts["$evt8"] == connector.MAX_UNROUTABLE_REDELIVERIES
+    connector.emit_inbound.assert_not_awaited()
+
+
+async def test_repeated_transient_repair_failure_never_halts(receiver) -> None:
+    """Transport failure remains retryable and must not consume the permanent budget."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    appservice._intent.get_joined_members = AsyncMock(
+        side_effect=ConnectionError("synapse unreachable")
+    )
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES + 1):
+        response = await _put(
+            appservice, f"txn-transient-{attempt}", [_message(event_id="$evt9")]
+        )
+        statuses.append(response.status)
+
+    assert statuses == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES + 1)
+    assert not connector._halt.is_set()
+    assert connector._unroutable_attempts == {}
 
 
 async def test_partial_view_does_not_mislabel_a_group_as_a_dm(receiver) -> None:
