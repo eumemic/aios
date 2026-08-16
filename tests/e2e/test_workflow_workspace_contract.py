@@ -58,8 +58,9 @@ async def test_real_workflow_agent_spawn_shares_workspace_and_fresh_isolates(
     wrote = await tool("bash", {{"command": "printf %s {marker} > marker.bin"}})
     if wrote["exit_code"] != 0:
         raise RuntimeError(wrote["stderr"])
-    first = await agent("first", agent_id={launcher.agent_id!r})
-    second = await agent("second", agent_id={launcher.agent_id!r})
+    # Pin sharing as an explicit opt-in: omission must not define this contract.
+    first = await agent("first", agent_id={launcher.agent_id!r}, workspace="shared")
+    second = await agent("second", agent_id={launcher.agent_id!r}, workspace="shared")
     isolated = await agent("fresh", agent_id={launcher.agent_id!r}, workspace="fresh")
     return [first, second, isolated]
 """
