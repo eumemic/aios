@@ -7,7 +7,7 @@ module.
 Module-boundary discipline: ``aios.*`` keeps its top-level imports
 free of ``aios_connectors.*``; the dependency arrow goes
 core → interface ← subsystem, with the interfaces in core (e.g.
-``aios.tools.providers.ToolProvider``). Two narrow function-local
+``aios.tools.providers.ToolProvider``). Three narrow function-local
 imports cross the line during process startup or per-request work:
 
 * ``aios.harness.worker.worker_main`` registers

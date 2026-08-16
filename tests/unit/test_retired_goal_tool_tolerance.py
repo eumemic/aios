@@ -17,6 +17,7 @@ carry retired builtins, which is exactly why the wedge was invisible to CI.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from aios.models.agents import load_tool_specs
 
@@ -54,11 +55,10 @@ def test_order_preserved_with_custom_and_mcp_entries() -> None:
     assert [s.type for s in specs] == ["bash", "custom", "mcp_toolset"]
 
 
-def test_retired_drop_composes_with_legacy_rename() -> None:
-    """A row mixing a retired builtin and a legacy-renamed builtin: the retired one is dropped,
-    the legacy one is still remapped to its canonical name (the two shims compose)."""
-    specs = load_tool_specs([{"type": "complete_goal"}, {"type": "invoke_workflow"}])
-    assert [s.type for s in specs] == ["call_workflow"]
+def test_retired_drop_does_not_tolerate_contracted_rename() -> None:
+    """The drop shim does not mask an independently contracted rename token."""
+    with pytest.raises(ValidationError):
+        load_tool_specs([{"type": "complete_goal"}, {"type": "invoke_workflow"}])
 
 
 def test_agent_row_with_retired_builtin_hydrates_clean() -> None:

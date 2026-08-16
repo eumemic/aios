@@ -217,7 +217,15 @@ def _function_name(retirement: Retirement, revision: str) -> str:
 # ── Per-migration source builders ─────────────────────────────────────────────
 
 
-def _module_header(message: str, revision: str, down_revision: str, docstring: str) -> str:
+def _module_header(
+    message: str,
+    revision: str,
+    down_revision: str,
+    docstring: str,
+    *,
+    uses_op: bool = True,
+) -> str:
+    op_import = "\nfrom alembic import op\n" if uses_op else ""
     return f'''"""{message}
 
 {docstring}
@@ -232,9 +240,7 @@ regenerate from the descriptor instead (#1578, epic #1572).
 from __future__ import annotations
 
 from collections.abc import Sequence
-
-from alembic import op
-
+{op_import}
 revision: str = "{revision}"
 down_revision: str | None = "{down_revision}"
 branch_labels: str | Sequence[str] | None = None
@@ -250,6 +256,7 @@ def build_expand(retirement: Retirement, revision: str, down_revision: str) -> s
         revision,
         down_revision,
         "No-op on persisted data. The registry-driven read-tolerance shim does the live work.",
+        uses_op=False,
     )
     return f"""{header}
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 # matches the agent-tools declaration order for readability.
 from aios.tools import agent_management as _agent_management  # noqa: F401
 from aios.tools import bash as _bash  # noqa: F401
+from aios.tools import defer_obligations as _defer_obligations  # noqa: F401
 from aios.tools import edit as _edit  # noqa: F401
 from aios.tools import glob as _glob  # noqa: F401
 from aios.tools import goal_management as _goal_management  # noqa: F401
@@ -29,6 +30,7 @@ from aios.tools import http_request as _http_request  # noqa: F401
 from aios.tools import invoke_session as _invoke_session  # noqa: F401
 from aios.tools import list_obligations as _list_obligations  # noqa: F401
 from aios.tools import list_related_sessions as _list_related_sessions  # noqa: F401
+from aios.tools import list_vault_credentials as _list_vault_credentials  # noqa: F401
 from aios.tools import memory_search as _memory_search  # noqa: F401
 from aios.tools import read as _read  # noqa: F401
 from aios.tools import schedule_wake as _schedule_wake  # noqa: F401

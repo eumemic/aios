@@ -62,6 +62,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from aios.errors import AiosError
+from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
 from aios.logging import get_logger
 from aios.mcp.client import call_mcp_tool, discover_mcp_tools
 from aios.models.agents import (
@@ -450,7 +451,9 @@ class ToolBroker:
 
     # ── built-in routes ───────────────────────────────────────────────────
 
-    async def _resolve_builtin(self, request: Request) -> tuple[str, str, ToolSpec] | Response:
+    async def _resolve_builtin(
+        self, request: Request, arguments: dict[str, Any] | None = None
+    ) -> tuple[str, str, ToolSpec] | Response:
         """Resolve (session_id, name, spec) for a built-in route.
 
         Returns an error ``Response`` with a diagnostic message if the
@@ -467,14 +470,15 @@ class ToolBroker:
         spec = _find_builtin_spec(agent.tools, name)
         if spec is None or not spec.enabled:
             return _err(404, f"tool {name!r} is not declared on this agent")
-        if not _builtin_cli_eligible(spec):
-            transport = spec.transport or registry.get(spec.type).transport
-            if transport not in ("cli", "both"):
-                return _err(
-                    403,
-                    f"tool {name!r} is not CLI-reachable on this agent "
-                    f"(transport={transport!r}). The model can still call it.",
-                )
+        transport = effective_transport(name, agent.tools)
+        if transport not in ("cli", "both"):
+            return _err(
+                403,
+                f"tool {name!r} is not CLI-reachable on this agent "
+                f"(transport={transport!r}). The model can still call it.",
+            )
+        disposition = classify_tool_call(name, arguments, agent, confirmation_resolved=False)
+        if disposition is ToolDisposition.NEEDS_CONFIRM:
             return _err(
                 403,
                 f"tool {name!r} requires confirmation (always_ask) and is "
@@ -506,7 +510,7 @@ class ToolBroker:
         if not isinstance(arguments, dict):
             return _err(400, 'request body must contain {"arguments": <object>}')
 
-        resolved = await self._resolve_builtin(request)
+        resolved = await self._resolve_builtin(request, arguments)
         if isinstance(resolved, Response):
             return resolved
         session_id, name, _spec = resolved
@@ -681,7 +685,7 @@ class ToolBroker:
         resolved = await self._resolve_mcp(request, require_tool=True)
         if isinstance(resolved, Response):
             return resolved
-        session_id, server, _toolset, tool_name, _agent = resolved
+        session_id, server, _toolset, tool_name, agent = resolved
         assert tool_name is not None
 
         # Outbound suppression (#710): MCP is default-deny under suppression.
@@ -707,6 +711,33 @@ class ToolBroker:
             return JSONResponse(outbound_suppression_service.mcp_synthesized_result())
 
         vault_id, headers = await self._load_auth_for(session_id, server.url)
+        try:
+            tool_dicts, _ = await discover_mcp_tools(
+                server.url,
+                vault_id,
+                headers,
+                server.name,
+                spec_headers=server.headers,
+                binding_id=agents_service.tool_cache_binding_id(agent),
+            )
+        except Exception as exc:
+            log.warning(
+                "tool_broker.mcp_discovery_failed",
+                server_name=server.name,
+                url=server.url,
+                exc_info=True,
+            )
+            return _transport_err(server.name, exc)
+        qualified = f"mcp__{server.name}__{tool_name}"
+        input_schema: dict[str, Any] | None = None
+        for tool_dict in tool_dicts:
+            function = tool_dict.get("function") or {}
+            if function.get("name") == qualified:
+                parameters = function.get("parameters")
+                input_schema = parameters if isinstance(parameters, dict) else None
+                break
+        else:
+            return _err(404, f"tool {tool_name!r} not found on MCP server {server.name!r}")
         log.info(
             "tool_broker.invoke_mcp",
             session_id=session_id,
@@ -714,7 +745,13 @@ class ToolBroker:
             tool=tool_name,
         )
         envelope = await call_mcp_tool(
-            server.url, vault_id, headers, tool_name, arguments, spec_headers=server.headers
+            server.url,
+            vault_id,
+            headers,
+            tool_name,
+            arguments,
+            input_schema=input_schema,
+            spec_headers=server.headers,
         )
         return JSONResponse(envelope)
 

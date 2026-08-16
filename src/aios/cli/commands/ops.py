@@ -188,6 +188,27 @@ def _run_migrate() -> int:
     return 0
 
 
+async def _run_validate_workspace_roots_async() -> int:
+    from aios.config import get_settings
+    from aios.db.pool import create_pool
+    from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+
+    settings = get_settings()
+    pool = await create_pool(settings.db_url, min_size=1, max_size=1)
+    try:
+        result = await validate_workspace_root_against_sessions(
+            pool, service="preflight", mode="warn"
+        )
+    finally:
+        await pool.close()
+    typer.echo(f"workspace-root validation found {result.violation_count} violation(s)")
+    return 1 if result.violation_count else 0
+
+
+def _run_validate_workspace_roots() -> int:
+    return asyncio.run(_run_validate_workspace_roots_async())
+
+
 def register(app: typer.Typer) -> None:
     """Attach the operator commands to the root app."""
 
@@ -209,3 +230,16 @@ def register(app: typer.Typer) -> None:
     @app.command("rekey", help="Re-encrypt encrypted rows after AIOS_VAULT_KEY rotation.")
     def rekey() -> None:
         raise typer.Exit(_run_rekey())
+
+    ops = typer.Typer(
+        name="ops", help="Read-only operator pre-flight checks.", no_args_is_help=True
+    )
+
+    @ops.command(
+        "validate-workspace-roots",
+        help="Validate all live session workspace paths against AIOS_WORKSPACE_ROOT.",
+    )
+    def validate_workspace_roots() -> None:
+        raise typer.Exit(_run_validate_workspace_roots())
+
+    app.add_typer(ops, name="ops")

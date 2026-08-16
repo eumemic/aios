@@ -41,6 +41,11 @@ ConnectionMode = Literal["detached", "single_session", "per_chat"]
 BindingMode = Literal["single_session", "per_chat"]
 
 
+def inbound_orig_channel(connector: str, external_account_id: str, chat_id: str) -> str:
+    """Build the channel address for an inbound connector chat."""
+    return f"{connector}/{external_account_id}/{chat_id}"
+
+
 class ConnectionCreate(BaseModel):
     """Request body for ``POST /v1/connections``.
 

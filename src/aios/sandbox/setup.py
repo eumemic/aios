@@ -47,7 +47,7 @@ from collections.abc import Sequence
 
 from aios.config import get_settings
 from aios.logging import get_logger
-from aios.models.environments import EnvironmentConfig, LimitedNetworking
+from aios.models.environments import EnvironmentConfig, LimitedNetworking, PackageManager
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError, SandboxHandle
 from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 from aios.sandbox.env_keys import PATH_ENV_KEY
@@ -151,7 +151,7 @@ async def install_packages(
 
     packages = env_config.packages
 
-    install_cmds = {
+    install_cmds: dict[PackageManager, str] = {
         "apt": "apt-get update -qq && apt-get install -y -qq {}",
         "pip": "pip install -q {}",
         "npm": "npm install -g --silent {}",
@@ -289,6 +289,56 @@ _RESOLVE_IPV4_FN = (
 )
 
 
+# KNOWN RESIDUAL — credential-host egress fails OPEN under Unrestricted
+# networking (eumemic/aios#2042). Documented here, deliberately NOT
+# half-mitigated here.
+#
+# The credential-host rules below are the nat-OUTPUT DNAT redirect, and they are
+# generated ONLY for RESOLVED (learned) addresses: the ``for ip in $(resolve_ipv4
+# <host>)`` loop installs one rule per address the sidecar's DNS query happened
+# to return. A rotating pool — api.github.com serves a ~60s-TTL set and returns
+# only a SUBSET per query — means that set is a SAMPLE, not the pool.
+#
+# Consequence, stated as the failure it is:
+#
+#   * LIMITED networking is closed. An unsampled address matches no DNAT and no
+#     per-host ACCEPT, so it falls through to the terminal ``-P OUTPUT DROP``.
+#     Nothing leaves.
+#   * UNRESTRICTED networking is OPEN. The filter policy stays ``ACCEPT``, so an
+#     unsampled address matches no DNAT and egresses DIRECTLY to the real
+#     upstream carrying the literal ``AIOS_SECRET_PLACEHOLDER_*`` — never
+#     reaching the secret-egress proxy, so neither the swap nor the #331
+#     fail-loud fence in ``secret_egress_proxy.py`` ever runs on it.
+#
+# Why nothing is done about it HERE. An earlier round of this PR added a
+# per-credential-host filter REJECT for the learned addresses and called it a
+# fence. It was withdrawn on review, and the reasoning is worth keeping because
+# it is the reason this block is a comment and not code: that rule is IP-keyed
+# exactly like the DNAT, so its coverage is exactly the same sample, and the
+# unsampled address — the ordinary case against a rotating pool, not an exotic
+# one — walks past it. It reads as a fence to the next person who greps for one
+# while leaving the hole open. A DOCUMENTED hole is safer than a DISGUISED one:
+# a reader who finds this comment knows the exposure is live, whereas a reader
+# who finds a REJECT rule reasonably concludes it is closed. More DNS probing
+# has the same defect one level down — it narrows the window and cannot close
+# it, so it would be mitigation theatre with a security-shaped name.
+#
+# The correct shape INVERTS the default for credential hosts: deny-by-default
+# with the learned set as an ALLOW-list, rather than allow-by-default with the
+# learned set as a fence. That cannot be decided at the IP layer for an address
+# we have never seen; it needs name-based interception (a worker-controlled
+# resolver answering credential hosts with the proxy address, or an in-netns
+# SNI-aware TPROXY on :443). eumemic/aios#2042 carries the four options
+# considered and why each is a larger change than this PR.
+#
+# The residual is pinned BEHAVIOURALLY, not only in prose:
+# ``TestCredentialHostEgressVerdict`` (tests/unit/test_networking.py) runs the
+# real generated script against recording ``iptables``/``getent`` shims and
+# replays the ruleset against a packet — asserting Limited BLOCKS an unsampled
+# address and that Unrestricted still routes it DIRECT. That assertion failing
+# is the acceptance signal for #2042, not a regression.
+
+
 def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> list[str]:
     """The nat-OUTPUT DNAT block: credential-host :443 → secret-egress proxy.
 
@@ -336,6 +386,153 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
         lines.append("  done")
     lines.append("fi")
     return lines
+
+
+def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
+    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP."""
+    lines = ["set -e", _RESOLVE_IPV4_FN]
+    for host in sorted(set(hosts)):
+        lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
+    return _RESOLV_PREAMBLE + "\n".join(lines)
+
+
+def egress_unread_hosts(
+    *,
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+) -> list[str]:
+    """In-scope hosts ABSENT from ``new_ips`` — i.e. hosts whose IPs were not read.
+
+    Absence and presence-with-an-empty-set are DIFFERENT facts: the first is
+    "could not be read", the second is "read, and this host genuinely owns
+    nothing". Only the second may drive a deletion.
+
+    Exposed (rather than inlined into :func:`build_egress_refresh_script`) so
+    the CALLER can act on the same signal the builder acts on. The builder can
+    only decline to emit deletes; it cannot stop the caller from advancing its
+    ``pinned`` bookkeeping past IPs whose rules were deliberately left
+    installed. Both layers must read the identical predicate or the two
+    disagree — which is how a refusal to delete silently becomes "the rule is
+    installed and nothing remembers it exists".
+
+    NOTE ON REACHABILITY (measured, not assumed): with today's sole in-tree
+    caller this returns ``[]`` unconditionally — ``_seed_pinned_from_installed``
+    writes a key for EVERY in-scope host and ``_merge_egress_resolutions`` only
+    ever copies/``setdefault``s that dict, never deletes a key, and carries an
+    unread host forward at its last-good pins (``if not fresh: continue``). A
+    20k-tick randomized simulation of the merge (resolve failures, empty
+    resolves, rotations, whole-sidecar failure) produced zero non-empty
+    results. **Keep-last-good upstream is the actual live protection**; this
+    predicate is defence-in-depth on a public helper whose contract would
+    otherwise turn a missing key into a delete.
+    """
+    return sorted((credential_hosts | limited_hosts) - set(new_ips))
+
+
+def build_egress_refresh_script(
+    *,
+    old_ips: dict[str, set[str]],
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+    dnat_target: tuple[str, int],
+) -> str:
+    """Atomically refresh generated egress rules without flushing Docker's tables.
+
+    New rules are appended before superseded rules are deleted.  Every delete is
+    the exact inverse of a rule this subsystem owns; no table restore/flush can
+    disturb Docker's embedded-DNS chains or unrelated policy.
+
+    Every operation is **idempotent** so a retried old→new delta never wedges
+    under ``set -e`` and never accumulates duplicate rules: adds are guarded by
+    an ``iptables -C`` existence check (append only when absent), and deletes
+    tolerate an already-absent rule (``-D … || true``). A genuine ``-A``
+    failure still aborts the script loudly (nonzero exit) so the caller keeps
+    its last-good ``pinned`` state and retries the same delta next tick.
+    """
+
+    def _add(table_flag: str, rule: str) -> str:
+        # Append-if-absent: -C exits 0 when the rule exists (skip the -A),
+        # nonzero otherwise (2>/dev/null silences its "Bad rule" noise).
+        return f'"$IPT"{table_flag} -C OUTPUT {rule} 2>/dev/null || "$IPT"{table_flag} -A OUTPUT {rule}'
+
+    def _delete(table_flag: str, rule: str) -> str:
+        # Delete-if-present: an already-absent rule must never abort the
+        # script (set -e) — the delta may be a retry of a partial apply.
+        return f'"$IPT"{table_flag} -D OUTPUT {rule} 2>/dev/null || true'
+
+    proxy_ip, proxy_port = dnat_target
+    # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
+    # DNAT shape so -C/-D match the installed rules exactly.
+    dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
+
+    def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
+        return set().union(*(host_ips.get(host, set()) for host in hosts))
+
+    # FAIL CLOSED on an incomplete inventory. An in-scope host ABSENT from
+    # ``new_ips`` is a host whose IPs could not be READ; a host present with an
+    # empty set is a host that genuinely owns NONE. Those are different facts,
+    # and conflating them (``.get(host, set())``) drops the unread host's live
+    # IPs into the ``old - new`` difference — so one transient/partial resolve
+    # would DELETE firewall rules that are still in force. Deletions are
+    # therefore refused entirely while any in-scope host is unread; adds are
+    # unaffected because an add only ever widens what is already permitted.
+    #
+    # The SAME predicate is read by the caller (``_merge_egress_resolutions``),
+    # which must also hold its ``pinned`` bookkeeping when it fires — see
+    # :func:`egress_unread_hosts`.
+    unread_hosts = egress_unread_hosts(
+        new_ips=new_ips, credential_hosts=credential_hosts, limited_hosts=limited_hosts
+    )
+
+    old_credential_ips = _category_ips(old_ips, credential_hosts)
+    new_credential_ips = _category_ips(new_ips, credential_hosts)
+    old_limited_ips = _category_ips(old_ips, limited_hosts)
+    new_limited_ips = _category_ips(new_ips, limited_hosts)
+
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
+    for ip in sorted(new_limited_ips - old_limited_ips):
+        lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_credential_ips - old_credential_ips):
+        lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
+    if unread_hosts:
+        # Surfaced, not silent: the emitted script itself records why no
+        # delete pass ran, so an operator reading the sidecar script sees the
+        # refusal rather than an unexplained absence of deletions.
+        lines.append(
+            "# egress refresh: deletions REFUSED — incomplete host inventory "
+            f"(unread: {' '.join(unread_hosts)})"
+        )
+        return "\n".join(lines)
+    for ip in sorted(old_credential_ips - new_credential_ips):
+        lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
+    for ip in sorted(old_limited_ips - new_limited_ips):
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    return "\n".join(lines)
+
+
+def build_egress_dump_script() -> str:
+    """Dump the netns's live OUTPUT rules (filter + nat) with section markers.
+
+    Run at provision time, AFTER the apply sidecar, so the refresh state's
+    ``pinned`` set can be seeded from the rules **actually installed** rather
+    than from a second DNS resolve that may diverge from the apply script's
+    own in-script ``resolve_ipv4`` (short-TTL/round-robin DNS). Read-only —
+    never mutates the tables.
+    """
+    return "\n".join(
+        [
+            "set -e",
+            _IPTABLES_BACKEND_SELECT,
+            "echo '=filter='",
+            '"$IPT" -S OUTPUT',
+            "echo '=nat='",
+            '"$IPT" -t nat -S OUTPUT',
+        ]
+    )
 
 
 def build_iptables_script(

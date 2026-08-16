@@ -258,6 +258,7 @@ async def test_workflow_target_creates_run(
     # The run row exists and is account-scoped.
     run = await wf_service.get_run(pool, handle.servicer_id, account_id=account_id)
     assert run.workflow_id == wf_id
+    assert run.workspace == "fresh"
 
 
 # ─── auth + ownership + validation ───────────────────────────────────────────

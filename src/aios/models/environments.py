@@ -86,6 +86,8 @@ NetworkingConfig = Annotated[
     Discriminator(_networking_discriminator),
 ]
 
+PackageManager = Literal["apt", "pip", "npm", "cargo", "gem", "go"]
+
 
 # ── environment config ────────────────────────────────────────────────────────
 
@@ -123,7 +125,7 @@ class EnvironmentConfig(BaseModel):
             "tag for development."
         ),
     )
-    packages: dict[str, list[str]] | None = Field(
+    packages: dict[PackageManager, list[str]] | None = Field(
         default=None,
         description='Package manager → package list, e.g. {"pip": ["pandas"], "npm": ["express"]}.',
     )

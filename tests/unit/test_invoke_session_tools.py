@@ -24,6 +24,7 @@ import pytest
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.models.tasks import AwaitResponse, TaskHandle
 from aios.tools.invoke import ToolBail, invoke_builtin
+from aios.tools.invoke_session import _CallAgentArgs
 from aios.tools.registry import ToolResult
 
 _CALLER = "ses_caller"
@@ -136,6 +137,76 @@ async def test_invoke_repolls_until_done(monkeypatch: Any) -> None:
     out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
     assert out == {"ok": "ok"}
     assert await_mock.await_count == 2
+
+
+async def test_call_agent_forwards_spawn_parameters_and_inherits_by_default(
+    monkeypatch: Any,
+) -> None:
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    await invoke_builtin(
+        _CALLER,
+        "call_agent",
+        {
+            "agent_id": "agt_1",
+            "input": "go",
+            "vault_ids": ["vlt_1"],
+            "env": {"MODE": "build"},
+            "resources": [],
+            "title": "builder",
+            "metadata": {"job": 1},
+            # EXPLICIT: this case asserts that spawn parameters are FORWARDED, so it
+            # opts into sharing by name. It previously asserted "shared" while passing
+            # nothing — i.e. it pinned the old default. Vault/env/resource inheritance
+            # (what "inherits_by_default" names) is unrelated to the workspace knob.
+            "workspace": "shared",
+        },
+    )
+    assert inv_mock.await_args is not None
+    kwargs = inv_mock.await_args.kwargs
+    assert kwargs["launcher_session_id"] == _CALLER
+    assert kwargs["workspace"] == "shared"
+    assert kwargs["vault_ids"] == ["vlt_1"]
+    assert kwargs["env"] == {"MODE": "build"}
+    assert kwargs["resources"] == []
+    assert kwargs["title"] == "builder"
+    assert kwargs["metadata"] == {"job": 1}
+
+
+async def test_call_agent_explicit_fresh_workspace_is_forwarded(monkeypatch: Any) -> None:
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "workspace": "fresh"})
+
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["workspace"] == "fresh"
+
+
+@pytest.mark.parametrize("tool_args, expected", [({}, None), ({"vault_ids": []}, [])])
+async def test_call_agent_preserves_omitted_vs_empty_vault_selection(
+    monkeypatch: Any, tool_args: dict[str, Any], expected: list[str] | None
+) -> None:
+    """Omitted means inherit all; an explicit empty list means inherit none."""
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", **tool_args})
+
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["vault_ids"] == expected
 
 
 async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
@@ -298,13 +369,75 @@ def test_resumable_tools_are_exactly_the_parking_call_builtins() -> None:
     is a tripwire that fails if the derived set changes, forcing a deliberate confirmation
     the change was intended (#1431). A parking tool left ``resumable=False`` would be
     silently error-repaired = re-orphaned on restart; a side-effectful tool wrongly marked
-    ``resumable`` would be re-parked-and-re-read as if pure — a double-execution risk."""
+    ``resumable`` would be re-parked-and-re-read as if pure — a double-execution risk.
+
+    ``defer_obligations`` (#1533) is a deliberate addition: a pure await on the
+    session's own event channel with NO servicer edge, so the resumable branch's
+    ``find_parked_servicer`` lookup returns ``None`` and it lands in the retryable
+    ``launch_lost`` result — the design's crash semantic (a wait is not a side
+    effect; the model just re-defers)."""
     from aios.tools.registry import registry  # ``aios.tools`` imported at module top
 
     assert registry.resumable_tool_names() == frozenset(
-        {"call_session", "call_agent", "call_workflow"}
+        {"call_session", "call_agent", "call_workflow", "defer_obligations"}
     )
     for name in registry.resumable_tool_names():
         assert registry.get(name).transport == "agent_tool"
     # The default is non-resumable: a side-effectful tool must never be re-parked.
     assert registry.get("bash").resumable is False
+
+
+# ─── workspace default: sharing must be OPT-IN (fix round on #2114) ──────────
+# The parent's live workspace is a blast-radius increase; a caller that never
+# heard of `workspace` must NOT silently get write access to it. These pin the
+# DEFAULT (omission) and the POSITIVE CONTROL (explicit "shared" still shares)
+# so "omitting gives fresh" can't pass on a build where sharing is broken.
+
+
+def test_call_agent_workspace_defaults_to_fresh_when_omitted() -> None:
+    assert _CallAgentArgs(agent_id="agt_1").workspace == "fresh"
+
+
+def test_call_agent_explicit_shared_is_preserved() -> None:
+    assert _CallAgentArgs(agent_id="agt_1", workspace="shared").workspace == "shared"
+
+
+async def test_call_agent_omitting_workspace_forwards_fresh(monkeypatch: Any) -> None:
+    """An omitting caller must not be handed the parent's live workspace."""
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1"})
+
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["workspace"] == "fresh"
+
+
+async def test_call_agent_explicit_shared_workspace_is_forwarded(monkeypatch: Any) -> None:
+    """POSITIVE CONTROL: opting in still shares, so the default test can't pass
+    on a build where sharing is simply broken."""
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+
+    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "workspace": "shared"})
+
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["workspace"] == "shared"
+
+
+def test_sessions_invoke_workspace_default_is_fresh() -> None:
+    """The service-layer default is the backstop: an internal caller that omits
+    `workspace` must not inherit the launcher's workspace either."""
+    import inspect
+
+    from aios.services.sessions import invoke as sessions_invoke
+
+    assert inspect.signature(sessions_invoke).parameters["workspace"].default == "fresh"

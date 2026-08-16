@@ -15,6 +15,11 @@ from aios.harness.loop import (
 from aios.harness.window import WindowedEvents
 
 
+@pytest.fixture(autouse=True)
+def _legacy_inference_policy(legacy_env: None) -> None:
+    """This suite intentionally reaches model behavior beyond credential admission."""
+
+
 def test_limit_to_microusd_allows_none_zero_and_rounding() -> None:
     assert _limit_to_microusd(None) is None
     assert _limit_to_microusd(0) == 0
@@ -41,6 +46,7 @@ async def test_spend_gate_trips_before_context_build() -> None:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -119,6 +125,7 @@ async def test_preflight_gate_trips_on_subtree_rollup() -> None:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -199,6 +206,7 @@ async def test_preflight_gate_admits_when_subtree_under_limit() -> None:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",
@@ -267,6 +275,7 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",

@@ -12,6 +12,8 @@ exists for the next provision.
 
 from __future__ import annotations
 
+import contextlib
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from typing import Any
 import asyncpg
 
 from aios.db import queries
-from aios.sandbox.volumes import attachments_root
+from aios.sandbox.volumes import attachments_root, uploads_root
 
 # Files staged within this many seconds of sweep time are considered
 # in-flight: ``stage_inbound_attachments`` writes to disk BEFORE the
@@ -120,4 +122,57 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
             f"failed to unlink {len(failures)} orphan attachment(s): {rendered}"
         )
 
+    return deleted
+
+
+async def sweep_orphan_uploads(pool: asyncpg.Pool[Any]) -> int:
+    """Reconcile ``_uploads`` with live sessions and rows in ``files``.
+
+    Directories for deleted sessions are removed wholesale.  For live sessions,
+    unreferenced files older than the staging grace are removed; recent files
+    may still be between their atomic rename and DB insert.
+    """
+    root = uploads_root()
+    if not root.exists():
+        return 0
+    session_dirs = [path for path in root.iterdir() if path.is_dir()]
+    if not session_dirs:
+        return 0
+    async with pool.acquire() as conn:
+        referenced = await queries.list_upload_paths_for_sessions(
+            conn, [path.name for path in session_dirs]
+        )
+
+    cutoff = time.time() - _IN_FLIGHT_AGE_S
+    deleted = 0
+    failures: list[tuple[Path, OSError]] = []
+    for session_dir in session_dirs:
+        if session_dir.name not in referenced:
+            files = [path for path in session_dir.rglob("*") if path.is_file()]
+            try:
+                shutil.rmtree(session_dir)
+                deleted += len(files)
+            except OSError as err:
+                failures.append((session_dir, err))
+            continue
+        retained = referenced[session_dir.name]
+        for file_path in session_dir.rglob("*"):
+            if not file_path.is_file() or str(file_path) in retained:
+                continue
+            if file_path.stat().st_mtime > cutoff:
+                continue
+            try:
+                file_path.unlink()
+                deleted += 1
+            except OSError as err:
+                failures.append((file_path, err))
+        for directory in sorted(
+            (path for path in session_dir.rglob("*") if path.is_dir()), reverse=True
+        ):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+
+    if failures:
+        rendered = ", ".join(f"{path}: {error}" for path, error in failures)
+        raise AttachmentGcError(f"failed to remove {len(failures)} orphan upload(s): {rendered}")
     return deleted

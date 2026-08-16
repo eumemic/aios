@@ -15,10 +15,11 @@ import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from aios.actors import Actor
 from aios.models.environments import HOSTNAME_RE
+from aios.models.target_urls import validate_outbound_target_url
 from aios.sandbox.env_keys import (
     RESERVED_SANDBOX_ENV_KEYS as _RESERVED_SANDBOX_ENV_KEYS,
 )
@@ -268,6 +269,12 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
     # the xor.
     target_url: str | None = Field(default=None, min_length=1)
     secret_name: str | None = Field(default=None, max_length=128)
+
+    @field_validator("target_url")
+    @classmethod
+    def _validate_target_url(cls, value: str | None) -> str | None:
+        return validate_outbound_target_url(value) if value is not None else None
+
     allowed_hosts: list[str] | None = None
 
     @model_validator(mode="after")

@@ -74,7 +74,6 @@ from aios.logging import get_logger
 from aios.models.agents import (
     McpServerSpec,
     StepSurface,
-    is_mcp_tool_name,
 )
 from aios.models.events import (
     ERRORED_LIFECYCLE_STATUS,
@@ -104,6 +103,12 @@ _RETRY_BACKOFF_SECONDS: list[float] = [2, 8, 30, 120]
 # further factor (0.8, 0.64, ...), so the retry is never the identical oversized
 # request; the reschedule ladder bounds the attempts (terminal once spent).
 _CONTEXT_OVERFLOW_SHRINK_BASE: float = 0.8
+
+# Lifecycle events that are pure diagnostics: they record what a retry path did
+# but carry no turn outcome, so they must not break a consecutive-``turn_ended``
+# streak (see :func:`_count_consecutive_stop_reason`). Anything added here is
+# invisible to the retry-attempt counters, so only add write-only breadcrumbs.
+_STREAK_TRANSPARENT_LIFECYCLE_EVENTS: frozenset[str] = frozenset({"adaptive_context_truncation"})
 
 # ``HARNESS_STEP_TIMEOUT_S`` (imported from ``aios.config`` above) is the
 # wall-clock cap on a single ``run_session_step`` call. The harness's
@@ -197,6 +202,20 @@ def _provider_error_detail(exc: BaseException) -> dict[str, Any]:
     }
 
 
+_CONTEXT_OVERFLOW_SIGNATURES: tuple[str, ...] = (
+    "input exceeds the context window",
+    "input exceeds context window",
+)
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """Recognize native and gateway-wrapped provider token overflows."""
+    if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+        return True
+    message = " ".join(str(exc).casefold().split())
+    return any(signature in message for signature in _CONTEXT_OVERFLOW_SIGNATURES)
+
+
 def _is_terminal_model_error(exc: BaseException) -> bool:
     """True iff ``exc`` is a litellm error that retrying the SAME prompt cannot fix.
 
@@ -215,6 +234,17 @@ _MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
     "To recover, post a message to the session, optionally after switching the "
     "agent's model or trimming the conversation."
 )
+
+
+def _terminal_error_stop_message(provider_error: dict[str, Any]) -> str:
+    """Include the provider diagnosis in the console-visible failure message."""
+    exception_class = provider_error["exception_class"]
+    http_status = provider_error["http_status"]
+    status = f" (HTTP {http_status})" if http_status is not None else ""
+    return (
+        f"{_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE}\n\n"
+        f"Provider error: {exception_class}{status}: {provider_error['message']}"
+    )
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:
@@ -319,6 +349,14 @@ class _StepResult(NamedTuple):
     autoerror_caller_session_ids: tuple[str, ...] = ()
     archive_when_idle: bool = False
     cancel_harvest: sessions_service.CancelMarkerHarvest | None = None
+
+
+def _model_error_step_result(retry_delay: float | None, *, archive_when_idle: bool) -> _StepResult:
+    """Preserve retries, but reclaim self-owned sessions once the error latches."""
+    return _StepResult(
+        retry_delay=retry_delay,
+        archive_when_idle=archive_when_idle and retry_delay is None,
+    )
 
 
 async def _list_session_github_repo_echoes(
@@ -748,8 +786,8 @@ async def run_session_step(
         # rejects writes (``archived_at IS NULL`` fence). ``reclaim_session_if_idle`` is
         # conditional on still-idle, so a nudge or a user message that re-activated the
         # session (its ``defer_wake`` span already appended just above) wins and the archive
-        # no-ops. Only the clean end-of-turn return sets the flag (error/reschedule paths
-        # leave it False), so a rescheduling session is never reclaimed out from under a retry.
+        # no-ops. Clean end-of-turn and terminal-error returns set the flag; rescheduling
+        # paths leave it false so a session is never reclaimed out from under a retry.
         if result.archive_when_idle and await sessions_service.reclaim_session_if_idle(
             pool, session_id, account_id=account_id
         ):
@@ -828,22 +866,13 @@ async def _run_session_step_body(
     try:
         pool_acquire_start = await _span({"event": "sweep.pool_acquire_start"})
         async with pool.acquire() as fast_conn:
-            await _span(
-                {
-                    "event": "sweep.pool_acquire_end",
-                    "start_id": pool_acquire_start.id if pool_acquire_start else None,
-                }
-            )
-            query_exec_start = await _span({"event": "sweep.query_exec_start"})
-            try:
-                has_work = await session_has_pending_work(fast_conn, session_id)
-            finally:
-                await _span(
-                    {
-                        "event": "sweep.query_exec_end",
-                        "start_id": query_exec_start.id if query_exec_start else None,
-                    }
-                )
+            has_work = await session_has_pending_work(fast_conn, session_id)
+        await _span(
+            {
+                "event": "sweep.pool_acquire_end",
+                "start_id": pool_acquire_start.id if pool_acquire_start else None,
+            }
+        )
     finally:
         await _span(
             {
@@ -982,20 +1011,25 @@ async def _run_session_step_body(
         # shrink factor onto the stop_reason; a fresh/non-overflow step reads
         # none and builds at full budget (shrink 1.0).
         _stop_reason = getattr(session, "stop_reason", None) or {}
+        adaptive_context_retry = _stop_reason.get("context_overflow") is True
         request_window_max = effective_window_max(
             model=capability_model,
             window_max=agent.window_max,
             params=agent.litellm_extra,
             shrink_factor=(
                 _stop_reason.get("context_shrink_factor", _CONTEXT_OVERFLOW_SHRINK_BASE)
-                if _stop_reason.get("context_overflow") is True
+                if adaptive_context_retry
                 else 1.0
             ),
         )
         windowed = await sessions_service.read_windowed_events(
             pool,
             session_id,
-            window_min=min(agent.window_min, request_window_max),
+            # Adaptive recovery drops the configured snap band for this
+            # attempt. The provider rejection is the authoritative bound; a
+            # zero minimum lets the windower discard exactly as much history
+            # as the progressively smaller maximum requires.
+            window_min=0 if adaptive_context_retry else min(agent.window_min, request_window_max),
             window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),
@@ -1039,23 +1073,15 @@ async def _run_session_step_body(
         inflight_tool_registry=inflight_tool_registry,
     )
     if pending:
-        pending_builtin = [tc for tc in pending if not is_mcp_tool_name(_tc_name(tc))]
-        pending_mcp = [tc for tc in pending if is_mcp_tool_name(_tc_name(tc))]
-        if pending_builtin:
-            launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
-        if pending_mcp:
-            launch_mcp_tool_calls(
-                pool,
-                session_id,
-                pending_mcp,
-                mcp_server_map,
-                focal_channel=session.focal_channel,
-                account_id=account_id,
-            )
-        log.info(
-            "step.confirmed_tools_dispatched",
-            session_id=session_id,
-            count=len(pending),
+        _launch_confirmed_calls(
+            pool,
+            session_id,
+            pending,
+            agent,
+            mcp_server_map,
+            mcp_tools=prelude.tools,
+            focal_channel=session.focal_channel,
+            account_id=account_id,
         )
         return _StepResult()
 
@@ -1086,7 +1112,7 @@ async def _run_session_step_body(
             spend_limit_usd=spend_limit_usd,
             account_id=account_id,
         )
-        return _StepResult()
+        return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
     # Span the remainder of the prologue so "why is the step slow?"
     # can separate context-build cost from model-call cost (issue #78).
@@ -1232,7 +1258,7 @@ async def _run_session_step_body(
         # user message tries to recover the session.
         if harvested.outcome != "ok":
             # The bound run errored / was cancelled — no assistant turn to dispatch.
-            # Latch errored so the session parks for recovery (a user message lifts it).
+            # Latch errored; human sessions park for recovery while self-owned sessions reclaim.
             log.warning(
                 "step.model_workflow_errored",
                 session_id=session_id,
@@ -1258,7 +1284,7 @@ async def _run_session_step_body(
                 is_error=True,
                 account_id=account_id,
             )
-            return _StepResult()
+            return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
         try:
             llm_response = map_run_output_to_response(harvested.output)
         except BindingBoundaryError as exc:
@@ -1286,7 +1312,7 @@ async def _run_session_step_body(
                 is_error=True,
                 account_id=account_id,
             )
-            return _StepResult()
+            return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
         # Record the harvest as the step's model span (NO re-charge); seal the
         # park-time watermark; fall through to the shared append/dispatch tail. This
         # span is ALSO the park-consumed marker for the ok path (see the block note
@@ -1328,8 +1354,24 @@ async def _run_session_step_body(
             has_subscriber(pool, session_id),
         )
         if conflict is not None:
-            await _handle_provider_auth_conflict(
-                pool, session_id, message=conflict, account_id=account_id
+            await _handle_provider_configuration_error(
+                pool,
+                session_id,
+                error_kind="provider_auth_conflict",
+                message=conflict,
+                account_id=account_id,
+            )
+            return _StepResult()
+        if auth is None and (
+            get_settings().inference_credential_policy == "account_only"
+            or get_settings().tenancy_posture == "external_byok"
+        ):
+            await _handle_provider_configuration_error(
+                pool,
+                session_id,
+                error_kind="model_provider_not_configured",
+                message=model_providers_service.PROVIDER_NOT_CONFIGURED_MESSAGE,
+                account_id=account_id,
             )
             return _StepResult()
 
@@ -1410,7 +1452,7 @@ async def _run_session_step_body(
                     account_id=account_id,
                     provider_error=_provider_error_detail(exc),
                 )
-                return _StepResult()
+                return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
             await _append_model_request_error_span(
                 pool,
                 session_id,
@@ -1418,11 +1460,12 @@ async def _run_session_step_body(
                 account_id=account_id,
                 provider_error=_provider_error_detail(exc),
             )
-            return _StepResult(
-                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            return _model_error_step_result(
+                await _apply_retry_or_failure(pool, session_id, account_id=account_id),
+                archive_when_idle=session.archive_when_idle,
             )
         except Exception as exc:
-            if isinstance(exc, litellm_exceptions.ContextWindowExceededError):
+            if _is_context_overflow(exc):
                 log.warning("step.model_context_overflow", session_id=session_id)
                 await _append_model_request_error_span(
                     pool,
@@ -1431,10 +1474,9 @@ async def _run_session_step_body(
                     account_id=account_id,
                     provider_error=_provider_error_detail(exc),
                 )
-                return _StepResult(
-                    retry_delay=await _apply_context_overflow_retry(
-                        pool, session_id, account_id=account_id
-                    )
+                return _model_error_step_result(
+                    await _apply_context_overflow_retry(pool, session_id, account_id=account_id),
+                    archive_when_idle=session.archive_when_idle,
                 )
             if _is_terminal_model_error(exc):
                 log.warning(
@@ -1442,21 +1484,23 @@ async def _run_session_step_body(
                     session_id=session_id,
                     error_class=type(exc).__name__,
                 )
+                provider_error = _provider_error_detail(exc)
                 await _append_model_request_error_span(
                     pool,
                     session_id,
                     start_event_id=start_event.id,
                     account_id=account_id,
-                    provider_error=_provider_error_detail(exc),
+                    provider_error=provider_error,
                 )
                 await _latch_errored_turn(
                     pool,
                     session_id,
                     error_kind="model_terminal_error",
-                    stop_message=_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE,
+                    stop_message=_terminal_error_stop_message(provider_error),
+                    provider_error=provider_error,
                     account_id=account_id,
                 )
-                return _StepResult()  # no retry_delay → no defer_wake → session parks errored
+                return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
             log.exception("step.litellm_failed", session_id=session_id)
             await _append_model_request_error_span(
                 pool,
@@ -1465,8 +1509,9 @@ async def _run_session_step_body(
                 account_id=account_id,
                 provider_error=_provider_error_detail(exc),
             )
-            return _StepResult(
-                retry_delay=await _apply_retry_or_failure(pool, session_id, account_id=account_id)
+            return _model_error_step_result(
+                await _apply_retry_or_failure(pool, session_id, account_id=account_id),
+                archive_when_idle=session.archive_when_idle,
             )
 
     # Project the named ``LlmResponse`` back to the locals the rest of the step
@@ -1518,6 +1563,11 @@ async def _run_session_step_body(
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
             "model": agent.model,
+            **(
+                llm_response.admission_report.as_event_fields()
+                if llm_response.admission_report is not None
+                else {}
+            ),
         },
         account_id=account_id,
     )
@@ -1557,8 +1607,8 @@ async def _run_session_step_body(
     # (it would poison subsequent context) and do NOT dispatch its tool calls
     # (a cut argument can hit a wrong-but-valid target). Record the refusal as a
     # span (excluded from build_messages replay) and latch the session into the
-    # errored state, where it parks until a user message recovers it. End the
-    # step cleanly — no tool dispatch, normal step_end/turn_ended bracketing.
+    # errored state. Human sessions park until a user message recovers them;
+    # self-owned sessions reclaim. End cleanly without dispatching tools.
     if finish_reason == REFUSAL_FINISH_REASON:
         await _handle_refusal(
             pool,
@@ -1574,10 +1624,9 @@ async def _run_session_step_body(
             finish_reason=finish_reason,
             had_tool_calls=bool(assistant_msg.get("tool_calls")),
         )
-        # No ``archive_when_idle``: an errored session parks for recovery, exactly
-        # like the litellm-error / retry-budget-exhausted paths, which never
-        # self-archive. A user message lifts it back to pending.
-        return _StepResult()
+        # Human-facing sessions remain parked for recovery. Self-owned workflow /
+        # background sessions have no caller left to recover them, so reclaim them.
+        return _model_error_step_result(None, archive_when_idle=session.archive_when_idle)
 
     if channels:
         from aios.harness.channels import apply_monologue_prefix
@@ -1669,6 +1718,7 @@ async def _run_session_step_body(
         needs_confirm: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
         unknown_mcp: list[dict[str, Any]] = []
+        blocked_mcp: list[dict[str, Any]] = []
 
         for tc in offered_calls:
             kind = _classify_tool_call(tc, agent, mcp_server_map)
@@ -1680,8 +1730,10 @@ async def _run_session_step_body(
                 needs_confirm.append(tc)
             elif kind == "custom":
                 custom.append(tc)
-            else:  # "unknown_mcp"
+            elif kind == "unknown_mcp":
                 unknown_mcp.append(tc)
+            else:  # "mcp_blocked"
+                blocked_mcp.append(tc)
 
         if immediate:
             launch_tool_calls(
@@ -1704,12 +1756,28 @@ async def _run_session_step_body(
         # event for them.  Routing them to immediate dispatch lets the
         # model see the error in the next step and self-correct.
         immediate_mcp = mcp_immediate + unknown_mcp
+        if blocked_mcp:
+            # Route disabled / CLI-only model calls to the MCP dispatcher's
+            # existing typed "server not found" error path without contacting
+            # the declared server.
+            launch_mcp_tool_calls(
+                pool,
+                session_id,
+                blocked_mcp,
+                {},
+                mcp_tools=tools,
+                focal_channel=session.focal_channel,
+                account_id=account_id,
+                parent_focal_at_arrival=parent_focal,
+            )
+
         if immediate_mcp:
             launch_mcp_tool_calls(
                 pool,
                 session_id,
                 immediate_mcp,
                 mcp_server_map,
+                mcp_tools=tools,
                 focal_channel=session.focal_channel,
                 account_id=account_id,
                 parent_focal_at_arrival=parent_focal,
@@ -1812,7 +1880,7 @@ def _tc_name(tc: dict[str, Any]) -> str:
 
 
 type ToolDispatchKind = Literal[
-    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp"
+    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp", "mcp_blocked"
 ]
 
 
@@ -1820,6 +1888,8 @@ def _classify_tool_call(
     tool_call: dict[str, Any],
     agent: Any,
     mcp_server_map: dict[str, McpServerSpec],
+    *,
+    confirmation_resolved: bool = False,
 ) -> ToolDispatchKind:
     """Classify a tool call into a dispatch bucket.
 
@@ -1843,8 +1913,11 @@ def _classify_tool_call(
     :class:`~aios.harness.tool_disposition.ToolDisposition` values verbatim.
     """
     # Thin projection of the single-source disposition classifier (#1076).
-    # A fresh dispatch is never pre-confirmed, so confirmation_resolved=False;
-    # the loop carries the mcp_server_map and so distinguishes unknown_mcp.
+    # Fresh dispatch is never pre-confirmed (``confirmation_resolved=False``,
+    # the default); the confirmed cold-dispatch path passes ``True`` so an
+    # already-satisfied ``always_ask`` gate projects to an immediate
+    # disposition while the enabled/transport policy still re-applies.
+    # The loop carries the mcp_server_map and so distinguishes unknown_mcp.
     function = tool_call.get("function") or {}
     name: str = function.get("name") or ""
 
@@ -1852,7 +1925,7 @@ def _classify_tool_call(
         name,
         function.get("arguments"),
         agent,
-        confirmation_resolved=False,
+        confirmation_resolved=confirmation_resolved,
         mcp_server_map=mcp_server_map,
     )
     return disposition.value
@@ -2068,6 +2141,79 @@ async def _dispatch_confirmed_tools(
     return dispatch_now
 
 
+def _launch_confirmed_calls(
+    pool: Any,
+    session_id: str,
+    pending: list[dict[str, Any]],
+    agent: Any,
+    mcp_server_map: dict[str, McpServerSpec],
+    *,
+    mcp_tools: list[dict[str, Any]],
+    focal_channel: str | None,
+    account_id: str,
+) -> None:
+    """Re-classify confirmed calls against the CURRENT agent surface, then launch.
+
+    Confirmation is not a policy bypass (#1931 review): an ``always_ask`` MCP
+    call proposed-and-confirmed while its toolset was enabled can have that
+    toolset disabled, removed, or narrowed to ``transport="cli"`` before this
+    cold dispatch runs.  Each confirmed call therefore re-walks the shared
+    disposition classifier (`#1076`) with ``confirmation_resolved=True`` —
+    the satisfied ``always_ask`` gate projects to an immediate disposition,
+    but the CURRENT enabled/transport policy still applies:
+
+    * ``mcp_blocked`` — routed to the MCP dispatcher's typed error path with
+      an EMPTY server map, so the declared server is never contacted;
+    * ``unknown_mcp`` (server un-declared since proposal) — routed through the
+      regular MCP dispatcher, which detects the unknown server and appends a
+      typed ``tool_error`` without contacting anything (same as fresh dispatch);
+    * everything else launches exactly as before.
+    """
+    pending_builtin: list[dict[str, Any]] = []
+    pending_mcp: list[dict[str, Any]] = []
+    pending_blocked_mcp: list[dict[str, Any]] = []
+    for tc in pending:
+        kind = _classify_tool_call(tc, agent, mcp_server_map, confirmation_resolved=True)
+        if kind == "mcp_blocked":
+            pending_blocked_mcp.append(tc)
+        elif kind in ("mcp_immediate", "unknown_mcp"):
+            pending_mcp.append(tc)
+        else:
+            # "immediate" and the degenerate "custom" (unknown bare name —
+            # invoke_builtin resolves it to a typed unknown-tool error, the
+            # same terminal the pre-classification path produced).
+            pending_builtin.append(tc)
+    if pending_builtin:
+        launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
+    if pending_blocked_mcp:
+        launch_mcp_tool_calls(
+            pool,
+            session_id,
+            pending_blocked_mcp,
+            {},
+            mcp_tools=mcp_tools,
+            focal_channel=focal_channel,
+            account_id=account_id,
+        )
+    if pending_mcp:
+        launch_mcp_tool_calls(
+            pool,
+            session_id,
+            pending_mcp,
+            mcp_server_map,
+            mcp_tools=mcp_tools,
+            focal_channel=focal_channel,
+            account_id=account_id,
+        )
+    log.info(
+        "step.confirmed_tools_dispatched",
+        session_id=session_id,
+        count=len(pending),
+        blocked_count=len(pending_blocked_mcp),
+        tool_names=[_tc_name(tc) for tc in pending],
+    )
+
+
 async def _append_model_request_error_span(
     pool: Any,
     session_id: str,
@@ -2137,6 +2283,7 @@ async def _latch_errored_turn(
     error_kind: str,
     stop_message: str | None = None,
     finish_reason: str | None = None,
+    provider_error: dict[str, Any] | None = None,
     account_id: str,
 ) -> None:
     """Land a session in the terminal ``errored`` state (#353).
@@ -2168,6 +2315,8 @@ async def _latch_errored_turn(
         stop_reason["message"] = stop_message
     if finish_reason is not None:
         stop_reason["finish_reason"] = finish_reason
+    if provider_error is not None:
+        stop_reason["provider_error"] = provider_error
     await sessions_service.set_session_stop_reason(
         pool, session_id, stop_reason, account_id=account_id
     )
@@ -2273,6 +2422,17 @@ async def _apply_context_overflow_retry(
         },
         account_id=account_id,
     )
+    await sessions_service.append_event(
+        pool,
+        session_id,
+        "lifecycle",
+        {
+            "event": "adaptive_context_truncation",
+            "axis": "tokens",
+            "shrink_factor": shrink_factor,
+        },
+        account_id=account_id,
+    )
     await _append_lifecycle(
         pool,
         session_id,
@@ -2345,27 +2505,26 @@ async def _handle_spend_cap(
     )
 
 
-async def _handle_provider_auth_conflict(
-    pool: Any, session_id: str, *, message: str, account_id: str
+async def _handle_provider_configuration_error(
+    pool: Any,
+    session_id: str,
+    *,
+    error_kind: str,
+    message: str,
+    account_id: str,
 ) -> None:
-    """Latch a session whose litellm_extra would send an above-owned api_key to a redirect.
-
-    Mirrors ``_handle_spend_cap``: a deterministic config error, not a transient
-    provider failure, so it lands here — before any inference leaves the worker —
-    rather than through the model-call try/except (which would misclassify it as
-    retryable and burn the backoff ladder).
-    """
+    """Latch a deterministic provider configuration error before inference."""
     await sessions_service.append_event(
         pool,
         session_id,
         "span",
-        {"event": "provider_auth_conflict", "is_error": True},
+        {"event": error_kind, "is_error": True},
         account_id=account_id,
     )
     await _latch_errored_turn(
         pool,
         session_id,
-        error_kind="provider_auth_conflict",
+        error_kind=error_kind,
         stop_message=message,
         account_id=account_id,
     )
@@ -2434,21 +2593,34 @@ async def _count_consecutive_stop_reason(
 ) -> int:
     """Count consecutive ``turn_ended`` lifecycle events with ``stop_reason`` at
     the tail of the log. A ``turn_ended`` with any other stop_reason — or any
-    non-``turn_ended`` event — breaks the streak.
+    non-``turn_ended`` event that is not purely diagnostic — breaks the streak.
+
+    Diagnostic lifecycle events (:data:`_STREAK_TRANSPARENT_LIFECYCLE_EVENTS`)
+    are skipped rather than treated as streak breakers: they are written by the
+    retry paths themselves, interleaved with the very ``turn_ended`` events this
+    counter measures, so counting them as "some other event happened" would peg
+    every streak at 1 and make the shrink/backoff ladder never advance (an
+    unbounded retry loop — the failure mode this ladder exists to prevent).
     """
     # Only the tail matters; reading ASC with the default LIMIT would miss the
-    # recent streak entirely on a session with >limit lifecycle events.
+    # recent streak entirely on a session with >limit lifecycle events. The
+    # window must also cover the diagnostic events interleaved with the streak,
+    # hence the per-attempt multiplier — undersizing it would silently truncate
+    # a live streak and, again, stall the ladder.
     lifecycle_events = await sessions_service.read_events(
         pool,
         session_id,
         kind="lifecycle",
         newest_first=True,
-        limit=len(_RETRY_BACKOFF_SECONDS) + 1,
+        limit=(len(_RETRY_BACKOFF_SECONDS) + 1) * (1 + len(_STREAK_TRANSPARENT_LIFECYCLE_EVENTS)),
         account_id=account_id,
     )
     count = 0
     for e in lifecycle_events:
-        if e.data.get("event") == "turn_ended" and e.data.get("stop_reason") == stop_reason:
+        event = e.data.get("event")
+        if event in _STREAK_TRANSPARENT_LIFECYCLE_EVENTS:
+            continue
+        if event == "turn_ended" and e.data.get("stop_reason") == stop_reason:
             count += 1
         else:
             break

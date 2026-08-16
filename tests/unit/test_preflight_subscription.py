@@ -15,6 +15,7 @@ import asyncpg
 import pytest
 
 from aios.api.sse import preflight_subscription
+from aios.db.listen import SSESubscriberCapacityError
 from aios.errors import SSEPreflightFailedError
 
 
@@ -75,3 +76,18 @@ async def test_preflight_does_not_swallow_unexpected_errors() -> None:
             log=log,
         )
     log.warning.assert_not_called()
+
+
+async def test_preflight_translates_sse_capacity_exhaustion_to_503() -> None:
+    async def _open() -> MagicMock:
+        raise SSESubscriberCapacityError("subscriber cap reached")
+
+    with pytest.raises(SSEPreflightFailedError) as excinfo:
+        await preflight_subscription(
+            _open(),
+            stream_name="session_events",
+            log_key="sse.session.preflight_failed",
+            log_fields={},
+            log=MagicMock(),
+        )
+    assert excinfo.value.status_code == 503

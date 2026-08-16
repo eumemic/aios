@@ -110,18 +110,9 @@ def provider_auth_conflict(
     ``base_url`` alias). If it does, the effective ``api_key`` LiteLLM will
     actually send must be traceable to something the account holds itself:
 
-    * an explicit ``litellm_extra["api_key"]`` that is a **non-empty string
-      after stripping whitespace** — the account supplied its own key
-      alongside the redirect, so nothing "above" it rides along. This is a
-      value check, not a presence check: ``{"api_key": None}`` or
-      ``{"api_key": ""}`` are indistinguishable from omitting the key to
-      every LiteLLM provider branch (each falls back to its provider env var
-      via an ``or``-chain), so treating mere key *presence* as exemption
-      would let an attacker who knows no real credential fully bypass this
-      guard with a null value. A whitespace-only or non-``str`` value is
-      treated the same way (not an exemption) so the guard's correctness
-      doesn't depend on un-contracted LiteLLM/httpx handling of a
-      degenerate key string.
+    * Inline ``litellm_extra["api_key"]`` never exempts this guard: inline
+      credentials are agent metadata, not account configuration, and are not
+      authoritative under non-legacy credential policies.
     * a ``model_providers`` row **owned by this account itself**
       (``resolved.owner_account_id == account_id``) — the account's own key,
       redirected by the account's own agent, is not privilege escalation.
@@ -148,9 +139,6 @@ def provider_auth_conflict(
     """
     redirect = api_base_of(litellm_extra)
     if redirect is None:
-        return False
-    extra_key = litellm_extra.get("api_key") if litellm_extra else None
-    if isinstance(extra_key, str) and extra_key.strip():
         return False
     if resolved is not None:
         return resolved.owner_account_id != account_id

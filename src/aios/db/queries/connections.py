@@ -1,4 +1,4 @@
-"""Connection, binding, chat-session, routing-rule, and connector-RPC queries.
+"""Connection, binding, chat-session, routing-rule, and connector queries.
 
 A subsystem module of the ``aios.db.queries`` package — see ``__init__`` for the
 shared scoping helpers and the package-level re-export contract. Raw SQL against
@@ -19,7 +19,6 @@ from aios.crypto.vault import EncryptedBlob
 from aios.db.queries import (
     _escape_like,
 )
-from aios.db.queries.inbound_policy import effective_inbound_policy
 from aios.errors import (
     ConflictError,
     NotFoundError,
@@ -31,7 +30,7 @@ from aios.ids import (
 )
 from aios.models.connections import BindingMode, Connection, ConnectionMode
 from aios.models.connectors import ConnectorCapabilities
-from aios.models.inbound_policy import InboundPolicy
+from aios.models.inbound_policy import InboundPolicy, effective_inbound_policy
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
 
 # Discriminated-union adapter for the ``connections.inbound_policy`` jsonb
@@ -318,8 +317,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         archived_at=row["archived_at"],
         inbound_policy=inbound_policy,
         # Server-derived echo: NULL column → the fail-closed ``DenyAll``
-        # default (same rule the gate's ``resolve_effective_inbound_policy``
-        # applies), defined once in ``effective_inbound_policy``.
+        # fail-closed default defined beside the policy model.
         inbound_policy_effective=effective_inbound_policy(inbound_policy),
     )
 
@@ -1215,6 +1213,218 @@ async def try_record_inbound_ack(
     return row is not None
 
 
+# ─── durable discovery ledger ────────────────────────────────────────────────
+
+
+async def insert_connection_change(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    kind: str,
+    connection_id: str,
+    external_account_id: str,
+) -> int:
+    """Append a row to the sequenced discovery ledger.
+
+    MUST run inside the caller's transaction (the attach/archive transaction
+    that also flips the connection row) — it takes a transaction-scoped
+    advisory lock on the ``(account_id, connector)`` stream *before* the
+    identity ``seq`` is allocated, and holds it until that transaction
+    commits or rolls back.
+
+    The lock is the ledger's core no-loss guarantee: identity values are
+    allocated at INSERT, not commit, so without serialization transaction X
+    can allocate seq=100, stay in flight while Y commits seq=101, and a
+    reader that advanced its cursor to 101 permanently skips 100 when X
+    finally commits.  Holding the per-stream lock across allocation→commit
+    makes seq order equal commit order within a stream, so ``MAX(seq)``
+    visible to any reader implies every lower seq in that stream is also
+    committed and visible.  Cross-stream ordering is deliberately NOT
+    serialized — readers filter on ``(account_id, connector)``, so global
+    interleaving is invisible to them and unrelated tenants never contend.
+    """
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"aios_connection_changes:{account_id}:{connector}",
+    )
+    return int(
+        await conn.fetchval(
+            """INSERT INTO connection_changes
+        (account_id, connector, kind, connection_id, external_account_id)
+        VALUES ($1, $2, $3, $4, $5) RETURNING seq""",
+            account_id,
+            connector,
+            kind,
+            connection_id,
+            external_account_id,
+        )
+    )
+
+
+async def get_connection_change_watermarks(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> tuple[int, int]:
+    """Read the durable pruning horizon and retained high-water atomically.
+
+    A single statement is important under READ COMMITTED: separate statements
+    could observe a pre-prune horizon and a post-prune ledger, creating a
+    cursor for rows that have already disappeared.
+    """
+    row = await conn.fetchrow(
+        """SELECT
+            COALESCE((SELECT pruned_through_seq
+                        FROM connection_change_horizons
+                       WHERE account_id = $1 AND connector = $2), 0) AS pruned_through,
+            COALESCE((SELECT MAX(seq) FROM connection_changes
+                       WHERE account_id = $1 AND connector = $2), 0) AS high_water""",
+        account_id,
+        connector,
+    )
+    assert row is not None
+    return int(row["pruned_through"]), int(row["high_water"])
+
+
+async def get_connection_change_high_water(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> int:
+    """Highest committed-and-visible ``seq`` for one ``(account, connector)``
+    stream (0 when the stream has no rows).
+
+    Per-stream on purpose: the commit-order guarantee from
+    :func:`insert_connection_change`'s advisory lock is per-stream, so a
+    global ``MAX(seq)`` could stand above an uncommitted lower seq from a
+    *different* writer in this stream and a ``fresh`` watermark based on it
+    would skip that change.  Scoped to the stream, "visible high water"
+    implies "every lower seq in this stream is visible" — which is what the
+    watermark-before-snapshot ordering in ``connection_discovery_stream``
+    relies on.
+    """
+    return int(
+        await conn.fetchval(
+            """SELECT COALESCE(MAX(seq), 0) FROM connection_changes
+        WHERE account_id = $1 AND connector = $2""",
+            account_id,
+            connector,
+        )
+    )
+
+
+async def get_connection_change_pruned_through(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str
+) -> int:
+    """Durable per-stream pruning watermark: every ledger row with
+    ``seq <= pruned_through_seq`` may have been deleted.
+
+    Returns 0 when the stream has never been pruned.  This deliberately
+    replaces a derived ``MIN(seq)`` floor, which fails OPEN: once retention
+    empties the table ``MIN(seq)`` is NULL and every stale tail cursor would
+    be accepted, silently resuming an incomplete view.  The watermark row
+    survives the deletes it describes (the pruner writes it in the same
+    transaction as its DELETE), so the staleness check keeps working after
+    the last retained row is gone.
+    """
+    return int(
+        await conn.fetchval(
+            """SELECT COALESCE(
+            (SELECT pruned_through_seq FROM connection_change_horizons
+              WHERE account_id = $1 AND connector = $2), 0)""",
+            account_id,
+            connector,
+        )
+    )
+
+
+async def set_connection_change_pruned_through(
+    conn: asyncpg.Connection[Any], *, account_id: str, connector: str, pruned_through_seq: int
+) -> None:
+    """Advance the durable pruning watermark for one stream (monotonic —
+    ``GREATEST`` guards against a stale pruner run moving it backwards).
+
+    The pruner (#1909) MUST call this in the same transaction as the
+    ``DELETE FROM connection_changes`` it describes; a watermark that could
+    lag its deletes would re-open the fail-open hole this table closes.
+    """
+    await conn.execute(
+        """INSERT INTO connection_change_horizons
+        (account_id, connector, pruned_through_seq, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (account_id, connector) DO UPDATE
+           SET pruned_through_seq = GREATEST(
+                   connection_change_horizons.pruned_through_seq,
+                   EXCLUDED.pruned_through_seq),
+               updated_at = now()""",
+        account_id,
+        connector,
+        pruned_through_seq,
+    )
+
+
+async def list_connection_changes_with_horizon(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    after_seq: int,
+    limit: int = 500,
+) -> tuple[int, list[asyncpg.Record]]:
+    """Atomically read the pruning horizon and one replay page.
+
+    The shared statement snapshot means the result is always either before a
+    pruning transaction (when the rows are still present) or after it (when
+    its advanced horizon is visible). It can never pair deleted rows with the
+    old horizon under READ COMMITTED.
+    """
+    rows = list(
+        await conn.fetch(
+            """WITH horizon AS (
+            SELECT COALESCE((SELECT pruned_through_seq
+                               FROM connection_change_horizons
+                              WHERE account_id = $1 AND connector = $2), 0)
+                       AS pruned_through
+        ), changes AS (
+            SELECT seq, kind, connection_id, external_account_id
+              FROM connection_changes
+             WHERE account_id = $1 AND connector = $2 AND seq > $3
+             ORDER BY seq LIMIT $4
+        )
+        SELECT horizon.pruned_through, changes.seq, changes.kind,
+               changes.connection_id, changes.external_account_id
+          FROM horizon LEFT JOIN changes ON true
+         ORDER BY changes.seq NULLS LAST""",
+            account_id,
+            connector,
+            after_seq,
+            limit,
+        )
+    )
+    # ``horizon`` always contributes exactly one row, even when replay is empty.
+    pruned_through = int(rows[0]["pruned_through"])
+    return pruned_through, [row for row in rows if row["seq"] is not None]
+
+
+async def list_connection_changes(
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    connector: str,
+    after_seq: int,
+    limit: int = 500,
+) -> list[asyncpg.Record]:
+    return list(
+        await conn.fetch(
+            """SELECT seq, kind, connection_id, external_account_id
+        FROM connection_changes
+        WHERE account_id = $1 AND connector = $2 AND seq > $3
+        ORDER BY seq LIMIT $4""",
+            account_id,
+            connector,
+            after_seq,
+            limit,
+        )
+    )
+
+
 # ─── connectors (type catalog) ───────────────────────────────────────────────
 
 
@@ -1308,182 +1518,4 @@ async def update_connector_capabilities(
         """,
         connector,
         json.dumps(capabilities),
-    )
-
-
-# ─── pending management calls (operator→connector RPC plane) ──────────
-
-
-async def insert_management_call(
-    conn: asyncpg.Connection[Any],
-    *,
-    account_id: str,
-    call_id: str,
-    connector: str,
-    method: str,
-    params: dict[str, Any],
-    expires_at: datetime,
-) -> None:
-    """Insert a fresh ``pending`` row for ``call_id``."""
-    await conn.execute(
-        """
-        INSERT INTO pending_management_calls
-            (id, connector, method, params, expires_at, account_id)
-        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-        """,
-        call_id,
-        connector,
-        method,
-        json.dumps(params),
-        expires_at,
-        account_id,
-    )
-
-
-async def list_pending_management_calls_for_connector(
-    conn: asyncpg.Connection[Any],
-    connector: str,
-    *,
-    account_id: str,
-) -> list[dict[str, Any]]:
-    """Pending, unexpired management calls for ``connector`` scoped to ``account_id``.
-
-    Used by the runtime SSE backfill on connector reconnect.  Output dict
-    shape::
-
-        {"call_id": "mgmt_...", "method": "register", "params": {...}}
-
-    Filtered by ``account_id`` so a runtime container authenticated for
-    one tenant never sees another tenant's pending calls. The partial
-    index ``pending_management_calls_connector_account_pending_idx``
-    (migration 0049) backs this query directly.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id, method, params
-          FROM pending_management_calls
-         WHERE connector = $1
-           AND account_id = $2
-           AND status = 'pending'
-           AND expires_at > now()
-         ORDER BY created_at ASC
-        """,
-        connector,
-        account_id,
-    )
-    return [
-        {
-            "call_id": row["id"],
-            "method": row["method"],
-            "params": row["params"],
-        }
-        for row in rows
-    ]
-
-
-async def get_management_call(
-    conn: asyncpg.Connection[Any], call_id: str, *, account_id: str
-) -> dict[str, Any] | None:
-    """Fetch one management call by id, or ``None`` if missing.
-
-    Used by both the runtime SSE NOTIFY tail (to assemble the emit
-    payload from the freshly-inserted row), the runtime result-intake
-    route (to authorise the caller's bearer scope before the conditional
-    UPDATE), and the operator-side wake to fetch the resolved row.
-    """
-    row = await conn.fetchrow(
-        """
-        SELECT id, connector, method, params, status, result, is_error
-          FROM pending_management_calls
-         WHERE id = $1 AND account_id = $2
-        """,
-        call_id,
-        account_id,
-    )
-    if row is None:
-        return None
-    return {
-        "id": row["id"],
-        "connector": row["connector"],
-        "method": row["method"],
-        "params": row["params"],
-        "status": row["status"],
-        "result": row["result"] if row["result"] is not None else None,
-        "is_error": row["is_error"],
-    }
-
-
-async def mark_management_call_resolved(
-    conn: asyncpg.Connection[Any],
-    *,
-    account_id: str,
-    call_id: str,
-    result: Any,
-    is_error: bool,
-) -> bool:
-    """Conditional UPDATE: only resolves a still-``pending`` row.
-
-    Returns ``True`` iff this call moved the row from ``pending`` to a
-    terminal state.  A second POST from a race / retry gets ``False`` —
-    the caller no-ops the NOTIFY so the operator never sees a double wake.
-    """
-    new_status = "failed" if is_error else "succeeded"
-    row = await conn.fetchrow(
-        """
-        UPDATE pending_management_calls
-           SET status      = $2,
-               result      = $3::jsonb,
-               is_error    = $4,
-               resolved_at = now()
-         WHERE id = $1
-           AND status = 'pending'
-           AND account_id = $5
-         RETURNING id
-        """,
-        call_id,
-        new_status,
-        json.dumps(result),
-        is_error,
-        account_id,
-    )
-    return row is not None
-
-
-async def notify_management_call_dispatch(
-    conn: asyncpg.Connection[Any],
-    *,
-    connector: str,
-    call_id: str,
-) -> None:
-    """NOTIFY the per-connector dispatch channel after inserting a pending row.
-
-    Payload is just ``call_id`` so subscribers re-fetch full details from
-    the row; keeps the NOTIFY well under Postgres' 8000-byte cap and
-    means an in-flight payload can't desync from a later UPDATE.
-
-    Carries no tenancy info — subscribers fetch the row via
-    :func:`get_management_call`, which enforces ``WHERE account_id = $N``.
-    """
-    await conn.execute(
-        "SELECT pg_notify($1, $2)",
-        f"connector_management_calls_{connector}",
-        call_id,
-    )
-
-
-async def notify_management_call_result(
-    conn: asyncpg.Connection[Any],
-    *,
-    call_id: str,
-) -> None:
-    """NOTIFY the per-call result channel after resolving the row.
-
-    Payload is empty — listeners re-fetch the resolved row via
-    :func:`get_management_call`, mirroring the dispatch-side convention
-    (which also lets the fetch enforce tenancy).
-    """
-    await conn.execute(
-        "SELECT pg_notify($1, $2)",
-        f"connector_result_{call_id}",
-        "",
     )

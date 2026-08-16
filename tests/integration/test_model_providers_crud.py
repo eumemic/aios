@@ -33,7 +33,8 @@ async def pool_with_account(
             await conn.execute(
                 """
                 INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
-                VALUES ('acc_mp_test', NULL, TRUE, 'model-providers-test')
+                VALUES ('platform_root', NULL, TRUE, 'platform-root'),
+                       ('acc_mp_test', 'platform_root', TRUE, 'model-providers-test')
                 """
             )
         yield pool, "acc_mp_test"
@@ -66,6 +67,22 @@ async def test_create_get_list(
 
     listed = await service.list_model_providers(pool, account_id=account_id)
     assert [p.id for p in listed] == [created.id]
+
+
+async def test_platform_root_rejects_simultaneous_openai_and_anthropic(
+    pool_with_account: tuple[asyncpg.Pool[Any], str], crypto_box: CryptoBox
+) -> None:
+    pool, _ = pool_with_account
+    for provider in ("openai", "anthropic"):
+        with pytest.raises(ConflictError, match="credentialless"):
+            await service.create_model_provider(
+                pool,
+                crypto_box,
+                account_id="platform_root",
+                provider=provider,
+                api_key=f"sentinel-{provider}",
+                api_base=None,
+            )
 
 
 async def test_duplicate_active_provider_conflicts(

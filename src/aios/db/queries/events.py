@@ -376,12 +376,11 @@ async def model_token_class_ratios(
     guard), so the regression trains only on NEW spans and self-heals as
     they accumulate (same contract as #160).
 
-    Same cache machinery as the scalar: mature fits cached 60 s,
-    below-threshold neutral results cached 10 s (bounding the activation
-    lag).  ``k_bucket`` is accepted for signature/cache-key compatibility
-    with the scalar contract (it keyed the bucket width); the per-class
-    fit's stability comes from the ridge regularizer, not bucket
-    quantization, so ``k_bucket`` only partitions the cache here.
+    Mature fits are cached 60 s; below-threshold neutral results are cached
+    10 s to bound the activation lag.  ``k_bucket`` partitions the cache so
+    callers using different calibration bucket widths do not share fitted
+    results.  The per-class fit's stability comes from the ridge regularizer,
+    not bucket quantization.
 
     ``model`` is the raw model string (``agent.model``) — NO
     NORMALIZATION; the same string must appear at stamp and query time.
@@ -399,8 +398,8 @@ async def model_token_class_ratios(
     per-tenant one.  This is NOT a tenant leak.  Do **not** add an
     ``account_id`` predicate: it would fragment the sample (slowing
     calibration convergence) and require a new index without buying any
-    correctness.  The param is kept for signature/cache-key compatibility
-    with the scalar contract.
+    correctness.  The parameter retains the caller's account-scoped query
+    interface while the cache and fit intentionally remain global per model.
 
     The fetch is bounded to the most recent
     :data:`_MODEL_TOKEN_RATIO_SAMPLE_LIMIT` spans via ``ORDER BY created_at
@@ -1174,7 +1173,7 @@ async def precompute_event_append(
     kind: EventKind,
     data: dict[str, Any],
     orig_channel: str | None = None,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
 ) -> _PrecomputedAppend:
     """Run :func:`append_event`'s pre-transaction compute and return it.
 
@@ -1235,7 +1234,7 @@ async def append_event(
     kind: EventKind,
     data: dict[str, Any],
     orig_channel: str | None = None,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
     precomputed: _PrecomputedAppend | None = None,
 ) -> Event:
     """Append an event to ``session_id`` with gapless seq allocation.
@@ -1277,10 +1276,14 @@ async def append_event(
     Drift note (issue #862): a USER message's ``cumulative_tokens`` is
     counted against the focal read BEFORE the lock, so if a ``switch_channel``
     commits between that pre-read and the lock, the token count MAY reflect
-    the pre-switch focal — an acceptable, bounded drift in the same class as
-    the documented vision/tz drifts below (absorbed by ``model_token_class_ratios``
-    calibration).  The STORED ``focal_channel_at_arrival`` is always the
-    locked RETURNING value, never the pre-read.
+    the pre-switch focal — an acceptable, bounded drift, absorbed by
+    ``model_token_class_ratios`` calibration because the mis-rendered envelope
+    is still COUNTED (a ratio error is exactly what the scaling layer corrects).
+    Do NOT read the image under-count noted below as being in this class: it is
+    a CONSTANT against a linear truth, is not counted at all, and calibration
+    therefore cannot touch it (issue #2050).  The STORED
+    ``focal_channel_at_arrival`` is always the locked RETURNING value, never
+    the pre-read.
     """
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
@@ -1434,13 +1437,24 @@ async def append_event(
         # serialize behind it.  The running sum stays race-free because
         # ``prev`` is read under the session row lock.
         #
-        # NOTE(vision/tz): the USER ``delta`` was rendered without
-        # ``model``/``session_id`` and in the default UTC zone, so inlined
-        # images undercount by ~55 LiteLLM tokens each and a non-UTC account's
-        # envelope is a few tokens narrower than build time.  Both drifts are
-        # bounded and absorbed by ``model_token_class_ratios`` calibration in
+        # NOTE(tz): the USER ``delta`` was rendered in the default UTC zone,
+        # so a non-UTC account's envelope is a few tokens narrower than at
+        # build time.  THAT drift is bounded and absorbed by
+        # ``model_token_class_ratios`` calibration in
         # :func:`read_windowed_events` (see PR #218); exact matching is
-        # impossible anyway, since a later tz/vision change re-renders history.
+        # impossible anyway, since a later tz change re-renders history.
+        #
+        # NOTE(vision): the image term is NOT in that class, and an earlier
+        # version of this comment wrongly grouped it there ("~55 LiteLLM
+        # tokens each ... absorbed by calibration").  ``litellm.token_counter``
+        # prices an ``image_url`` part at a CONSTANT ~89 tokens regardless of
+        # payload size (measured 2026-08-15 on litellm 1.97.0: 89 against
+        # 9,600 / 191,447 / 1,912,670 as text for 10 KB / 200 KB / 2 MB of
+        # image bytes).  A constant against a linear truth is unbounded, and
+        # calibration CANNOT recover it: the scaling layer corrects a RATIO,
+        # and no coefficient multiplied by zero reaches a positive number
+        # (see the ``tokens.py`` invariant).  Fix is explicit image-mass
+        # tracking, issue #2050 / aios#2073 -- not a better ratio.
         # cumulative_messages / cumulative_*_mass extend the SAME append-time
         # running-sum machinery (issue #1657): read the prior running state
         # (one index seek on the latest message row), then increment. The
@@ -2001,10 +2015,11 @@ async def read_events(
     newest_first: bool = False,
     error_only: bool = False,
 ) -> list[Event]:
-    # ``after_seq`` is a lower bound (forward, ASC by default); ``before`` is an
-    # upper bound for tail-anchored backward paging (chat-style reverse scroll),
-    # which is always newest-first. Both compose with ``kind``/``error_only``.
-    order = "DESC" if newest_first or before is not None else "ASC"
+    # Bounds define the requested window; ``newest_first`` alone defines its
+    # traversal direction.  A forward bounded window (``after_seq`` + ``before``)
+    # must remain chronological rather than becoming backward merely because it
+    # has an upper bound.
+    order = "DESC" if newest_first else "ASC"
 
     def _build_query(lower_bound: int, upper_bound: int | None) -> tuple[str, list[Any]]:
         params: list[Any] = [session_id, account_id]

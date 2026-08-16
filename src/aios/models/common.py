@@ -56,17 +56,3 @@ class ListResponse[T](BaseModel):
                 )
             )
         return cls(data=data, has_more=has_more, next_cursor=next_cursor)
-
-
-class ErrorBody(BaseModel):
-    """The body of every aios error response."""
-
-    type: str
-    message: str
-    detail: dict[str, Any] | None = None
-
-
-class ErrorResponse(BaseModel):
-    """Top-level error envelope: `{"error": {...}}`."""
-
-    error: ErrorBody

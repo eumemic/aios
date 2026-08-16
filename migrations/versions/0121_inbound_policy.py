@@ -6,7 +6,7 @@ fail-open→fail-closed flip:
 
 1. ``ALTER TABLE connections ADD COLUMN inbound_policy jsonb`` — nullable, no
    DB default. NULL resolves to the server default ``DenyAll`` at read time
-   (``aios.db.queries.inbound_policy.resolve_effective_inbound_policy``). The
+   (``aios.models.inbound_policy.effective_inbound_policy``). The
    shape is validated on the write path by the pydantic discriminated union,
    not a DB CHECK — same posture as the triggers ``source`` / ``action`` jsonb.
 

@@ -113,6 +113,29 @@ def validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> str
     return "\n".join(lines)
 
 
+def prepare_builtin(tool_name: str, raw_arguments: Any) -> dict[str, Any]:
+    """The pure admission preamble of :func:`invoke_builtin`: parse -> lookup -> validate.
+
+    Raises :class:`ToolBail` for the same expected failures ``invoke_builtin``
+    would (bad JSON, unknown tool, schema mismatch) WITHOUT running the
+    handler. The model dispatch path calls this before consuming an outbound
+    quota reservation (#1903), so a call that would refuse anyway never
+    consumes dispatch capacity. Returns the parsed arguments; pure — no I/O,
+    no side effects, safe to run twice (``invoke_builtin`` re-runs it).
+    """
+    arguments = parse_arguments(raw_arguments)
+    if arguments is None:
+        raise ToolBail("arguments were not valid JSON")
+    try:
+        tool = registry.get(tool_name)
+    except ToolNotFoundError as err:
+        raise ToolBail(err.message) from err
+    schema_error = validate_arguments(arguments, tool.parameters_schema)
+    if schema_error is not None:
+        raise ToolBail(schema_error)
+    return arguments
+
+
 async def invoke_builtin(
     session_id: str,
     tool_name: str,
@@ -136,16 +159,8 @@ async def invoke_builtin(
     duration of the call via :func:`current_tool_call_id` — the parking ``call_*``
     handlers read it to stamp the servicer edge for crash-resume (#1431).
     """
-    arguments = parse_arguments(raw_arguments)
-    if arguments is None:
-        raise ToolBail("arguments were not valid JSON")
-    try:
-        tool = registry.get(tool_name)
-    except ToolNotFoundError as err:
-        raise ToolBail(err.message) from err
-    schema_error = validate_arguments(arguments, tool.parameters_schema)
-    if schema_error is not None:
-        raise ToolBail(schema_error)
+    arguments = prepare_builtin(tool_name, raw_arguments)
+    tool = registry.get(tool_name)
     token = _CURRENT_TOOL_CALL_ID.set(tool_call_id)
     try:
         return await tool.handler(session_id, arguments)

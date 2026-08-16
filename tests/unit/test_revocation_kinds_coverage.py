@@ -43,6 +43,7 @@ FULFILLED_KINDS: frozenset[str] = frozenset(
         "child_errored",
         "spend_cap_exceeded",
         "provider_auth_conflict",
+        "model_provider_not_configured",
         # the session errored its OWN turn: its context didn't fit and it
         # exhausted the shrink-on-retry ladder (#1792) — servicer's own erroring
         "context_overflow",

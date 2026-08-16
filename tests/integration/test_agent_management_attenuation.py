@@ -28,7 +28,7 @@ from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.errors import ForbiddenError
 from aios.harness import runtime
-from aios.models.agents import Agent, ToolSpec
+from aios.models.agents import Agent, HttpServerSpec, McpServerSpec, ToolSpec
 from aios.models.attenuation import surface_of
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
@@ -212,6 +212,62 @@ async def test_update_rejects_widening_past_editor(pool: asyncpg.Pool[Any]) -> N
     # Unchanged (still at its original version, still read-only).
     after = await agents_service.get_agent(pool, target.id, account_id=ACC)
     assert after.version == target.version and {t.type for t in after.tools} == {"read"}
+
+
+async def test_update_preserves_target_surface_the_editor_lacks(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    editor = await _make_agent(pool, "delta-editor", tools=[ToolSpec(type="read")])
+    session_id = await _make_session(pool, editor)
+    target = await agents_service.create_agent(
+        pool,
+        account_id=ACC,
+        name="delta-target",
+        model="test/dummy",
+        system="x",
+        tools=[ToolSpec(type="write")],
+        mcp_servers=[McpServerSpec(name="target-mcp", url="https://mcp.example.test")],
+        http_servers=[HttpServerSpec(name="target-http", base_url="https://api.example.test")],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+
+    updated = await agents_service.update_agent(
+        pool,
+        target.id,
+        account_id=ACC,
+        expected_version=target.version,
+        window_max=120000,
+        editor_session_id=session_id,
+    )
+
+    assert updated.window_max == 120000
+    assert {t.type for t in updated.tools} == {"write"}
+    assert [server.name for server in updated.mcp_servers] == ["target-mcp"]
+    assert [server.name for server in updated.http_servers] == ["target-http"]
+
+
+async def test_update_allows_shrinking_surface_the_editor_lacks(
+    pool: asyncpg.Pool[Any],
+) -> None:
+    editor = await _make_agent(pool, "shrink-editor", tools=[])
+    session_id = await _make_session(pool, editor)
+    target = await _make_agent(
+        pool, "shrink-target", tools=[ToolSpec(type="read"), ToolSpec(type="write")]
+    )
+
+    updated = await agents_service.update_agent(
+        pool,
+        target.id,
+        account_id=ACC,
+        expected_version=target.version,
+        tools=[ToolSpec(type="read")],
+        editor_session_id=session_id,
+    )
+
+    assert {t.type for t in updated.tools} == {"read"}
 
 
 async def test_update_within_editor_surface_persists(pool: asyncpg.Pool[Any]) -> None:

@@ -369,7 +369,21 @@ def crypto_box(aios_env: dict[str, str]) -> Any:
 
 
 @pytest.fixture
-async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
+async def legacy_inference_env(
+    aios_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[None]:
+    """Explicitly opt scripted-model harnesses into legacy credential behavior."""
+    from aios.config import get_settings
+
+    monkeypatch.setenv("AIOS_INFERENCE_CREDENTIAL_POLICY", "legacy_env")
+    aios_env["AIOS_INFERENCE_CREDENTIAL_POLICY"] = "legacy_env"
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+async def harness(aios_env: dict[str, str], legacy_inference_env: None) -> AsyncIterator[Harness]:
     """Function-scoped harness: real Postgres, scripted model, no Docker."""
     import aios.tools  # noqa: F401  — register built-in tools
     from aios.config import get_settings
@@ -448,7 +462,9 @@ async def harness(aios_env: dict[str, str]) -> AsyncIterator[Harness]:
 
 @pytest.fixture
 async def docker_harness(
-    aios_env: dict[str, str], open_procrastinate_app: None
+    aios_env: dict[str, str],
+    open_procrastinate_app: None,
+    legacy_inference_env: None,
 ) -> AsyncIterator[Harness]:
     """Like ``harness`` but with a real SandboxRegistry for Docker tests.
 

@@ -117,10 +117,6 @@ def require_sandbox_registry() -> SandboxRegistry:
     return _require("sandbox_registry", sandbox_registry)
 
 
-def require_github_clone_breaker() -> GithubCloneBreaker:
-    return _require("github_clone_breaker", github_clone_breaker)
-
-
 def require_inflight_tool_registry() -> InflightToolRegistry:
     return _require("inflight_tool_registry", inflight_tool_registry)
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal, assert_never
 
-from fastapi import APIRouter, File, Form, UploadFile, status
+from fastapi import APIRouter, File, Form, Query, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sse_starlette import EventSourceResponse
 
@@ -60,7 +60,7 @@ from aios.errors import (
 )
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
-from aios.models.connections import ConnectorSecrets
+from aios.models.connections import ConnectorSecrets, inbound_orig_channel
 from aios.models.connectors import ConnectorCapabilities
 from aios.services import connections as connections_service
 from aios.services import connectors as connectors_service
@@ -72,7 +72,6 @@ from aios.services.inbound_budget import (
     check_inbound_budget,
     check_inbound_budget_agent,
     check_inbound_budget_session,
-    inbound_orig_channel,
 )
 
 log = get_logger("aios.api.routers.connectors")
@@ -488,6 +487,8 @@ async def get_connection_discovery(
     db_url: DbUrlDep,
     pool: PoolDep,
     auth: RuntimeAuthDep,
+    arm: Annotated[Literal["fresh", "tail"] | None, Query()] = None,
+    after_change_seq: Annotated[int | None, Query(ge=0)] = None,
 ) -> EventSourceResponse:
     """SSE stream of ``added`` / ``removed`` connection events for the
     runtime container's connector type (#328 PR 5).
@@ -511,6 +512,11 @@ async def get_connection_discovery(
     loop just doesn't see them.
     """
     _, connector, account_id, auth_connection_ids = auth
+    if (arm == "tail") != (after_change_seq is not None):
+        raise ValidationError(
+            "tail requires after_change_seq; fresh and v1 forbid it",
+            detail={"arm": arm, "after_change_seq": after_change_seq},
+        )
     subscription = await preflight_subscription(
         open_listen_for_connection_discovery(db_url, connector),
         stream_name="connection_discovery",
@@ -526,6 +532,8 @@ async def get_connection_discovery(
             connector,
             account_id=account_id,
             connection_ids=auth_connection_ids,
+            arm=arm,
+            after_change_seq=after_change_seq,
         ),
     )
 

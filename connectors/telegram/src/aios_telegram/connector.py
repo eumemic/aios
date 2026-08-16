@@ -389,7 +389,7 @@ class TelegramConnector(HttpConnector):
 
     # ── model-facing tools ────────────────────────────────────────────
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def telegram_send(
         self,
         text: str,
@@ -498,10 +498,9 @@ class TelegramConnector(HttpConnector):
             "chat_type": _chat_kind(sent_group[0].chat.type),
         }
 
-    # NOT fire_and_forget: typing is a PRECURSOR — the model calls it *before*
-    # doing slow work, so its result MUST wake the session to take the follow-up
-    # step that does the work and sends the reply. Marking it fire_and_forget
-    # stranded a typing-only turn idle, never sending (#1121 review).
+    # NOT delivery: typing is a PRECURSOR rather than a send/reaction action.
+    # Its result still wakes the session like every other tool result (#1919);
+    # leaving it unmarked preserves generic exception classification.
     @tool()
     async def telegram_typing(
         self,
@@ -593,7 +592,7 @@ class TelegramConnector(HttpConnector):
         await state.application.bot.delete_message(chat_id=chat_id_int, message_id=message_id)
         return {"status": "ok"}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def telegram_react(
         self,
         message_id: int,

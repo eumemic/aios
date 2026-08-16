@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -22,6 +22,9 @@ import pytest
 from aios.errors import CryptoDecryptError, ForbiddenError
 from aios.models.agents import (
     AgentBinding,
+    HttpPermissionPolicy,
+    HttpRouteSpec,
+    HttpServerSpec,
     McpPermissionPolicy,
     McpServerSpec,
     McpToolConfig,
@@ -39,6 +42,7 @@ def _agent(
     *,
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
+    http_servers: list[HttpServerSpec] | None = None,
 ) -> StepSurface:
     return StepSurface(
         model="test/dummy",
@@ -46,7 +50,7 @@ def _agent(
         tools=tools or [],
         skills=[],
         mcp_servers=mcp_servers or [],
-        http_servers=[],
+        http_servers=http_servers or [],
         litellm_extra={},
         window_min=1000,
         window_max=100000,
@@ -280,6 +284,35 @@ class TestBuiltinInvoke:
         assert r.status_code == 200
         assert r.json() == {"content": "hello"}
 
+    async def test_route_refined_always_ask_is_refused(
+        self, broker: ToolBroker, hijack_tool: Any
+    ) -> None:
+        async def handler(_session_id: str, _arguments: dict[str, Any]) -> Any:
+            raise AssertionError("route-gated tool must not execute")
+
+        hijack_tool("web_search", handler)
+        tool_def = registry.get("web_search")
+        registry._tools["web_search"] = ToolDefinition(
+            name=tool_def.name,
+            description=tool_def.description,
+            parameters_schema=tool_def.parameters_schema,
+            handler=tool_def.handler,
+            transport=tool_def.transport,
+            classify_permission=lambda args, _agent: (
+                "always_ask" if args.get("protected") else "always_allow"
+            ),
+        )
+        broker.register_session("sess_X", "s")
+        agent = _agent(tools=[ToolSpec(type="web_search")])
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "web_search"),
+                    json={"arguments": {"protected": True}},
+                )
+        assert r.status_code == 403
+        assert "requires confirmation" in r.json()["error"]
+
     async def test_tool_result_is_error(
         self,
         broker: ToolBroker,
@@ -407,6 +440,34 @@ class TestBuiltinInvoke:
         assert r.status_code == 403
         assert "not CLI-reachable" in r.json()["error"]
 
+    async def test_route_refined_always_ask_403(self, broker: ToolBroker) -> None:
+        broker.register_session("sess_X", "s")
+        agent = _agent(
+            tools=[ToolSpec(type="http_request", permission="always_allow")],
+            http_servers=[
+                HttpServerSpec(
+                    name="api",
+                    base_url="https://api.example.com",
+                    routes=[
+                        HttpRouteSpec(
+                            path_pattern="/sensitive",
+                            permission_policy=HttpPermissionPolicy(type="always_ask"),
+                        )
+                    ],
+                )
+            ],
+        )
+        with _patch_agent(agent):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "builtins", "http_request"),
+                    json={
+                        "arguments": {"server_ref": "api", "path": "/sensitive", "method": "GET"}
+                    },
+                )
+        assert r.status_code == 403
+        assert "always_ask" in r.json()["error"]
+
     async def test_always_ask_403(self, broker: ToolBroker) -> None:
         broker.register_session("sess_X", "s")
         agent = _agent(tools=[ToolSpec(type="web_fetch", permission="always_ask")])
@@ -532,6 +593,83 @@ class TestMcpGate:
                 )
         assert r.status_code == 403
         assert "always_ask" in r.json()["error"]
+
+    async def test_invoke_uses_binding_cache_without_discovery_network(
+        self, broker: ToolBroker
+    ) -> None:
+        from aios.harness import runtime
+        from aios.mcp.client import _headers_key
+        from aios.mcp.pool import McpSessionPool
+        from aios.services import agents as agents_service
+
+        broker.register_session("sess_X", "s")
+        server = _server("tav")
+        agent = _agent(
+            tools=[_toolset("tav")],
+            mcp_servers=[server],
+        )
+        schema = {"type": "object", "properties": {}}
+        discovered_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__tav__echo",
+                    "description": "echo",
+                    "parameters": schema,
+                    "strict": False,
+                },
+            }
+        ]
+        cache_pool = McpSessionPool()
+        cache_pool.set_cached_tools(
+            server.url,
+            None,
+            _headers_key(server.headers),
+            agents_service.tool_cache_binding_id(agent),
+            discovered_tools,
+            None,
+        )
+        call = AsyncMock(return_value={"content": "ok"})
+        prior_pool = runtime.mcp_session_pool
+        runtime.mcp_session_pool = cache_pool
+        try:
+            with (
+                _patch_agent(agent),
+                patch.object(
+                    ToolBroker,
+                    "_load_auth_for",
+                    new_callable=AsyncMock,
+                    return_value=(None, {}),
+                ),
+                patch.object(
+                    ToolBroker,
+                    "_mcp_suppressed",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ),
+                patch("aios.harness.runtime.require_pool", return_value=MagicMock()),
+                patch(
+                    "aios.services.sessions.load_session_account_id",
+                    new_callable=AsyncMock,
+                    return_value="acc_test_stub",
+                ),
+                patch("aios.sandbox.tool_broker.call_mcp_tool", call),
+                patch.object(cache_pool, "acquire", new_callable=AsyncMock) as acquire,
+            ):
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        _url(broker, "s", "mcp", "tav", "echo"),
+                        json={"arguments": {}},
+                    )
+        finally:
+            runtime.mcp_session_pool = prior_pool
+
+        assert response.status_code == 200
+        assert response.json() == {"content": "ok"}
+        acquire.assert_not_awaited()
+        call.assert_awaited_once()
+        assert call.await_args is not None
+        assert call.await_args.kwargs["input_schema"] is schema
 
 
 # ── retired self-wake route (#1164) ──────────────────────────────────────────

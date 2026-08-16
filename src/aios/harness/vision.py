@@ -1,15 +1,31 @@
 """Vision-policy helper: single source of truth for image-into-vision decisions.
 
-LiteLLM's :func:`token_counter` returns a flat ~85 tokens per
-``image_url`` part regardless of provider; under-counting only
-matters near the window boundary and provider rejection there is
-recoverable.
+LiteLLM's :func:`token_counter` returns a flat ~89 tokens per
+``image_url`` part regardless of provider AND regardless of payload
+size (measured 2026-08-15 on litellm 1.97.0: 89 against 9,600 /
+191,447 / 1,912,670 as text for 10 KB / 200 KB / 2 MB of image
+bytes).  An earlier version of this note said the under-counting
+"only matters near the window boundary" and that "provider rejection
+there is recoverable".  BOTH claims are false:
+
+* it is not boundary-local -- a constant against a linear truth is an
+  unbounded error, so a single inlined image can put the built request
+  arbitrarily far over the ceiling; and
+* it is not recoverable -- aios#2050 records the consequence as a
+  4.5h HARD-DOWN, because every wake rebuilds the same oversized
+  context, so the rejection repeats forever rather than clearing.
+
+Calibration cannot correct it either: the scaling layer corrects a
+RATIO, and no coefficient multiplied by zero reaches a positive number
+(see the ``tokens.py`` invariant).  Fix is explicit image-mass
+tracking, issue #2050 / aios#2073.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import re
 from typing import Any
 
 from aios.logging import get_logger
@@ -54,17 +70,33 @@ PRE_RESIZE_CEILING_BYTES = 50 * 1024 * 1024
 # else defers to litellm — but kept as the stub point for tests.
 _VISION_OVERRIDES: dict[str, bool] = {}
 
+# oai-proxy exposes custom Responses API routes that LiteLLM does not catalog.
+# These OpenAI families accept image inputs, so assert their capability rather
+# than silently degrading to text markers when model-info lookup raises.
+_VISION_GATEWAY_PREFIX = "openai/responses/"
+_VISION_GATEWAY_FAMILIES = frozenset({"gpt-5", "gpt-4o", "o4"})
 
-def supports_vision(model: str) -> bool:
+# Maintained family assertions cover provider models whose capability is newer
+# than the pinned LiteLLM catalog. Keep these beside the gateway assertions and
+# completion parameter maps: the catalog is useful metadata, not final
+# authority. xAI's numbered Grok 4 line accepts image input; constrain the
+# match to numbered releases so text-specialized siblings such as grok-code do
+# not inherit vision accidentally.
+_XAI_GROK_4_VISION_RE = re.compile(r"^xai/grok-4(?:\.\d+)*$")
+
+
+def supports_vision(model: str) -> bool | None:
     """True when ``model`` accepts ``image_url`` content parts.
 
     Resolution order:
 
     1. :data:`_VISION_OVERRIDES` — explicit per-model escape hatch (force
        ``True`` or ``False``).
-    2. Any Claude family is assumed vision-capable (3.x onward; aios targets
-       4.x).  A long-running worker fetches litellm's catalog once at startup,
-       so a Claude model released afterwards makes ``litellm.get_model_info``
+    2. Maintained family assertions for provider and custom gateway routes,
+       plus any Claude family, are assumed vision-capable. A long-running worker
+       fetches litellm's catalog once at startup, so a Claude model released
+       afterwards makes
+       ``litellm.get_model_info``
        raise "isn't mapped yet" and we would otherwise collapse to "no vision"
        — silently degrading image reads to a text marker.  Asserting the family
        by name needs no edit when the next Claude lands.  The match is a
@@ -74,12 +106,18 @@ def supports_vision(model: str) -> bool:
        :attr:`~aios.harness.completion.CacheChannel.ANTHROPIC` — via the
        ``_ANTHROPIC_PROXY_PROVIDERS`` frozenset it reads — in
        :mod:`aios.harness.completion`).
-    3. ``litellm.get_model_info`` for every other provider/model.
+    3. ``litellm.get_model_info`` for every other provider/model. A lookup
+       failure returns ``None`` (unknown), never a confident ``False``.
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
-    if "claude" in model.lower():
+    normalized = model.lower()
+    if "claude" in normalized or _XAI_GROK_4_VISION_RE.fullmatch(normalized):
         return True
+    if normalized.startswith(_VISION_GATEWAY_PREFIX):
+        gateway_model = normalized.removeprefix(_VISION_GATEWAY_PREFIX)
+        if any(gateway_model.startswith(family) for family in _VISION_GATEWAY_FAMILIES):
+            return True
     # Defer the heavy ``litellm`` import: every harness consumer of this
     # module pays ~1.18s of bootstrap otherwise, and most call sites never
     # reach this branch (Claude short-circuits above).
@@ -90,13 +128,10 @@ def supports_vision(model: str) -> bool:
     except Exception as err:
         # ``get_model_info`` raises a mix of ``BadRequestError`` (unknown
         # model), KeyError, and import/network errors depending on the
-        # failure mode.  Collapsing to "no vision" is the safe fallback
-        # (we degrade to a text marker the model can still ``read``), but
-        # the silence makes a transient outage look identical to "unknown
-        # model" — log warn-level so operators have a grep target when
-        # vision unexpectedly degrades across a deploy or provider blip.
+        # failure mode. Preserve that uncertainty rather than claiming the
+        # model has no vision; callers surface it in their visible marker.
         log.warning("vision.litellm_lookup_failed", model=model, error=str(err))
-        return False
+        return None
     return bool(info.get("supports_vision"))
 
 
@@ -162,7 +197,7 @@ def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
         return False
     if size_bytes > INLINE_SIZE_CAP_BYTES:
         return False
-    return supports_vision(model)
+    return supports_vision(model) is True
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import asyncpg
 
@@ -24,6 +24,7 @@ from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     ConflictError,
+    ForbiddenError,
     NotFoundError,
     PayloadTooLargeError,
     RateLimitedError,
@@ -33,6 +34,7 @@ from aios.harness.chat_type import ChatType
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
+from aios.logging import get_logger
 from aios.models.agents import (
     StepSurface,
     is_mcp_tool_name,
@@ -61,13 +63,19 @@ from aios.models.triggers import (
     TriggerCreate,
     compute_initial_next_fire,
 )
-from aios.sandbox.volumes import validate_workspace_path
+from aios.sandbox.snapshot_store import get_snapshot_store
+from aios.sandbox.volumes import (
+    purge_session_directories,
+    validate_workspace_path,
+)
 from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
 from aios.services.vaults import env_var_credential_containment_error
+
+log = get_logger(__name__)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -247,7 +255,11 @@ async def create_session(
     focal_channel: str | None = None,
     focal_locked: bool = False,
     archive_when_idle: bool = False,
-    outbound_suppression: str = "off",
+    outbound_suppression: str | None = None,
+    inherit_from_session_id: str | None = None,
+    workspace: Literal["shared", "fresh"] | None = None,
+    frozen_surface: Surface | None = None,
+    frozen_litellm_extra: dict[str, Any] | None = None,
 ) -> Session:
     """Create a session row and return it.
 
@@ -287,6 +299,73 @@ async def create_session(
         await agents_service.validate_pinned_agent_version(
             conn, agent_id=agent_id, agent_version=agent_version, account_id=account_id
         )
+        inherited_vault_ids: list[str] | None = None
+        if inherit_from_session_id is not None:
+            parent = await queries.get_session(conn, inherit_from_session_id, account_id=account_id)
+            if workspace == "shared":
+                workspace_path = await queries.get_session_workspace_path(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+                workspace_path = queries.normalized_workspace_path(workspace_path)
+            elif workspace == "fresh":
+                workspace_path = None
+            parent_vault_ids = await queries.get_session_vault_ids(
+                conn, inherit_from_session_id, account_id=account_id
+            )
+            requested_vault_ids = parent_vault_ids if vault_ids is None else vault_ids
+            ungranted = [
+                vault_id for vault_id in requested_vault_ids if vault_id not in parent_vault_ids
+            ]
+            if ungranted:
+                raise ForbiddenError(
+                    "child session requested vaults the launching session does not hold",
+                    detail={"ungranted_vault_ids": ungranted},
+                )
+            inherited_vault_ids = requested_vault_ids
+            if env is None:
+                env = await queries.get_session_env(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+            if outbound_suppression is None:
+                outbound_suppression = parent.outbound_suppression
+            elif parent.outbound_suppression == "on":
+                # Monotonic meet: a suppressed launcher cannot be widened by an
+                # explicit child override.  "on" is the more restrictive arm.
+                outbound_suppression = "on"
+            if resources is not None:
+                parent_resources = await _list_all_echoes(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+                parent_memory = {
+                    item.memory_store_id: item
+                    for item in parent_resources
+                    if item.type == "memory_store"
+                }
+                parent_repos = {
+                    (item.url, item.mount_path)
+                    for item in parent_resources
+                    if item.type == "github_repository"
+                }
+                ungranted_resources: list[str] = []
+                for resource in resources:
+                    if resource.type == "memory_store":
+                        held = parent_memory.get(resource.memory_store_id)
+                        if held is None or (
+                            held.access == "read_only" and resource.access == "read_write"
+                        ):
+                            ungranted_resources.append(resource.memory_store_id)
+                    elif (resource.url, resource.mount_path) not in parent_repos:
+                        ungranted_resources.append(resource.mount_path)
+                if ungranted_resources:
+                    raise ForbiddenError(
+                        "child session requested resources the launching session does not hold",
+                        detail={"ungranted_resources": ungranted_resources},
+                    )
+        if workspace_path is not None:
+            workspace_path = queries.normalized_workspace_path(workspace_path)
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn, workspace_path, boundary=str(get_settings().workspace_root)
+            )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -299,20 +378,44 @@ async def create_session(
             focal_channel=focal_channel,
             focal_locked=focal_locked,
             archive_when_idle=archive_when_idle,
-            outbound_suppression=outbound_suppression,
+            outbound_suppression=outbound_suppression or "off",
             account_id=account_id,
+            frozen_surface=frozen_surface,
+            frozen_litellm_extra=frozen_litellm_extra,
         )
-        if vault_ids:
-            await queries.set_session_vaults(conn, session.id, vault_ids, account_id=account_id)
+        effective_vault_ids = (
+            inherited_vault_ids if inherit_from_session_id is not None else vault_ids
+        )
+        if effective_vault_ids:
+            await queries.set_session_vaults(
+                conn, session.id, effective_vault_ids, account_id=account_id
+            )
             await _assert_env_var_creds_contained(conn, session.id, account_id=account_id)
-            session = session.model_copy(update={"vault_ids": vault_ids})
+            session = session.model_copy(update={"vault_ids": effective_vault_ids})
+        if inherit_from_session_id is not None and resources is None:
+            await queries.copy_session_resources(
+                conn, inherit_from_session_id, session.id, account_id=account_id
+            )
+            echoes = await _list_all_echoes(conn, session.id, account_id=account_id)
+            session = session.model_copy(update={"resources": echoes})
         if resources:
             memory_resources, github_resources = split_resources_by_type(resources)
             if memory_resources:
                 await memory_service.attach_to_session(
                     conn, session.id, memory_resources, account_id=account_id
                 )
-            if github_resources:
+            if github_resources and inherit_from_session_id is not None:
+                # Spawn requests select an existing parent binding.  Never consume
+                # caller-supplied credential material; copy the encrypted parent
+                # attachment so secrets cannot ride tool args or logs.
+                await queries.copy_session_github_resources(
+                    conn,
+                    inherit_from_session_id,
+                    session.id,
+                    [(item.url, item.mount_path) for item in github_resources],
+                    account_id=account_id,
+                )
+            elif github_resources:
                 assert crypto_box is not None, (
                     "API surface requires CryptoBox when attaching github_repository"
                 )
@@ -431,6 +534,7 @@ class AskNewSession:
     output_schema: dict[str, Any] | None = None
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
+    workspace_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -457,6 +561,7 @@ class TellNewSession:
     input: Any
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
+    workspace_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -519,20 +624,14 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
-# Max length of the ``summary`` preview carried on the ``request_opened`` frame
-# (#1413). Matches the 60-char truncation the obligations tail block renders; a
-# slightly larger store budget is pointless since the renderer re-truncates.
-_OBLIGATION_SUMMARY_MAX = 60
-
-
 def _obligation_summary(content: str) -> str:
-    """A short single-line preview of a request input, for the #1413 obligations
-    block. Collapses newlines and truncates to ``_OBLIGATION_SUMMARY_MAX`` chars
-    (ellipsis when clipped) -- mirrors the channels-tail preview clause."""
-    preview = content.replace("\n", " ").strip()
-    if len(preview) > _OBLIGATION_SUMMARY_MAX:
-        preview = preview[:_OBLIGATION_SUMMARY_MAX] + "…"
-    return preview
+    """The verbatim request input carried by the durable obligation edge.
+
+    The original user event can leave the context window while its request remains
+    open. Persisting only a preview here would make the always-on obligation plane
+    silently lose the task at exactly that point, so this copy must remain exact.
+    """
+    return content
 
 
 async def create_child_session(
@@ -596,6 +695,7 @@ async def create_child_session(
             mcp_servers=stim.surface.mcp_servers,
             http_servers=stim.surface.http_servers,
             litellm_extra=stim.litellm_extra or {},
+            workspace_path=stim.workspace_path,
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request
@@ -757,6 +857,15 @@ async def invoke(
     input: Any,
     output_schema: dict[str, Any] | None = None,
     environment_id: str | None = None,
+    agent_version: int | None = None,
+    title: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    vault_ids: list[str] | None = None,
+    resources: list[SessionResource] | None = None,
+    env: dict[str, str] | None = None,
+    outbound_suppression: str | None = None,
+    workspace: Literal["shared", "fresh"] = "fresh",
+    launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
 ) -> TaskHandle:
@@ -791,17 +900,59 @@ async def invoke(
                 "environment_id is required for target_kind=agent",
                 detail={"target_kind": target_kind},
             )
+        launcher_agent: StepSurface | None = None
+        child_agent: Any = None
+        if launcher_session_id is not None:
+            # Resolve and validate both model identities before creating a row: an
+            # untrusted api_base must not leave an orphaned, runnable child behind.
+            launcher = await get_session_basic(pool, launcher_session_id, account_id=account_id)
+            launcher_agent = await agents_service.load_for_session(
+                pool, launcher, account_id=account_id
+            )
+            if agent_version is None:
+                child_agent = await agents_service.get_agent(pool, target, account_id=account_id)
+            else:
+                child_agent = await agents_service.get_agent_version(
+                    pool, target, agent_version, account_id=account_id
+                )
+            from aios.services import attenuation as attenuation_service
+
+            if not attenuation_service.model_identity_trusted(
+                child_agent.litellm_extra, launcher_agent.litellm_extra
+            ):
+                raise ForbiddenError(
+                    "child agent routes model calls to an untrusted inference endpoint"
+                )
+
         # create_session account-scopes both agent_id and environment_id (404s a
         # foreign id before any row is written) — the ownership half of #1130.
+        effective_surface = None
+        if launcher_session_id is not None:
+            assert launcher_agent is not None and child_agent is not None
+            effective_surface = attenuation_service.clamp(
+                surface_of(child_agent), surface_of(launcher_agent)
+            )
+
         session = await create_session(
             pool,
             account_id=account_id,
             agent_id=target,
             environment_id=environment_id,
-            title=None,
-            metadata={},
+            # Frozen children must pin the version supplying model/system/skills;
+            # otherwise the loader resolves version=None on their first wake.
+            agent_version=child_agent.version if child_agent is not None else agent_version,
+            title=title,
+            metadata=metadata or {},
+            vault_ids=vault_ids,
+            resources=resources,
+            env=env,
+            outbound_suppression=outbound_suppression,
+            inherit_from_session_id=launcher_session_id,
+            workspace=workspace if launcher_session_id is not None else None,
             crypto_box=crypto_box,
             archive_when_idle=True,
+            frozen_surface=effective_surface,
+            frozen_litellm_extra=(child_agent.litellm_extra if child_agent is not None else None),
         )
         request_id = await _inject_api_request(
             pool,
@@ -857,6 +1008,10 @@ async def invoke(
             input=input,
             caller=caller,
             output_schema=output_schema,
+            # The external/API task caller has no launcher session from which a
+            # shared workspace could be inherited. Keep this operator launch on
+            # the valid isolated mode; agent launches retain the shared default.
+            workspace="fresh",
         )
         return TaskHandle(servicer_kind="run", servicer_id=run.id, request_id=request_id)
 
@@ -2332,7 +2487,15 @@ async def clone_session(
     """Clone a session — see :func:`queries.clone_session`."""
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        shared_path = workspace_path or await queries.get_session_workspace_path(
+            conn, parent_session_id, account_id=account_id
+        )
+        await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+            conn,
+            queries.normalized_workspace_path(shared_path),
+            boundary=str(get_settings().workspace_root),
+        )
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
@@ -2350,11 +2513,50 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
     # events), so it survives the cascade and makes the run sweep-visible within a tick
     # rather than waiting out the 1h agent deadline; derive_response resolves child_gone
     # via its liveness fallback once the session row is gone.
+    async with pool.acquire() as conn:
+        artifact = await conn.fetchrow(
+            "SELECT workspace_volume_path, snapshot_ref FROM sessions "
+            "WHERE id=$1 AND account_id=$2",
+            session_id,
+            account_id,
+        )
+    if artifact is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    snapshot_ref = artifact["snapshot_ref"]
+    if snapshot_ref is not None and not await get_snapshot_store().remove(snapshot_ref):
+        raise RuntimeError(f"snapshot store refused removal of {snapshot_ref}")
+
+    workspace_path = Path(artifact["workspace_volume_path"])
     async with pool.acquire() as conn, conn.transaction():
+        # Serialize the keep-set decision with every shared-workspace activation.
+        # The transaction sees its own DELETE, so the owner's pointer is absent
+        # while live clones and shared runs borrowing the path remain represented.
+        normalized_workspace_path = queries.normalized_workspace_path(str(workspace_path))
+        try:
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn,
+                normalized_workspace_path,
+                boundary=str(get_settings().workspace_root),
+            )
+        except ValueError:
+            # Persisted paths can predate a workspace_root reconfiguration. The
+            # purge jail below must skip them without making the row undeletable.
+            log.warning(
+                "skipping workspace hierarchy lock outside workspace_root",
+                path=str(workspace_path),
+                session_id=session_id,
+            )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
         await queries.delete_session(conn, session_id, account_id=account_id)
+        live_workspace_paths = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            session_id,
+            workspace_path,
+            account_id=account_id,
+            live_workspace_paths=live_workspace_paths,
+        )
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
 
@@ -2365,8 +2567,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
-    title: str | None | EllipsisType = ...,
+    agent_version: int | EllipsisType | None = ...,
+    title: str | EllipsisType | None = ...,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,

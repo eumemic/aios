@@ -79,11 +79,6 @@ def reset_inflight_harvests() -> None:
     _INFLIGHT_HARVESTS.clear()
 
 
-def inflight_harvest_keys() -> frozenset[tuple[str, str]]:
-    """The ``(session_id, run_id)`` keys of harvest tasks live in THIS worker (#1635)."""
-    return frozenset(_INFLIGHT_HARVESTS)
-
-
 # Event ``kind`` is ``"span"`` (excluded from the message-replay window like the
 # other harness bookkeeping events); the ``event`` discriminator names the role.
 PARK_EVENT = "model_workflow_park"
@@ -180,6 +175,12 @@ async def launch_model_workflow_park(
         caller={"kind": "session", "id": session_id, "purpose": "model_dispatch"},
         launcher_session_id=session_id,
         parent_run_id=session.parent_run_id,
+        # EXPLICIT: a model-dispatch run IS this session's own turn (its output becomes
+        # the assistant message), so it deliberately deliberates over the session's live
+        # workspace. This used to ride on ``launch_awaited_run``'s ``workspace`` default;
+        # that default is now ``fresh`` (sharing is opt-in), so the intent is stated here
+        # rather than inherited by silence.
+        workspace="shared",
     )
     # Seal ``reacting_to`` at park — the harvest re-applies this exact watermark to
     # the assistant turn (it is NOT recomputed when the run resolves, so a stimulus

@@ -44,7 +44,7 @@ from aios.harness import runtime
 from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
-from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments
+from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
 from aios.tools.registry import ToolResult
 from aios.tools.workflow_completion import (
     ERROR_TOOL_NAME,
@@ -480,7 +480,7 @@ def launch_tool_calls(
     tool_calls: list[dict[str, Any]],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch each tool call as an asyncio task. Returns immediately.
 
@@ -543,7 +543,7 @@ async def _execute_tool_async(
     call: dict[str, Any],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one built-in tool call via the shared invoke core, then
     append the tool-role result event.
@@ -553,6 +553,11 @@ async def _execute_tool_async(
     only the event-append + sweep + sandbox eviction are model-path
     specific (wrapped here by :func:`_tool_lifecycle`).
     """
+    from aios.services.outbound_tool_quota import (
+        mark_outbound_dispatch_completed,
+        reserve_outbound_tool_quota,
+    )
+
     async with _tool_lifecycle(
         pool,
         session_id,
@@ -561,7 +566,24 @@ async def _execute_tool_async(
         log_prefix="tool",
         on_exception=_evict_session_container,
     ) as tc:
+        # Pure admission preamble FIRST (parse → lookup → validate, no handler
+        # run): a call that would refuse anyway — malformed JSON, unknown tool,
+        # schema mismatch — must never consume outbound quota capacity (#1903).
+        prepare_builtin(tc.name, tc.raw_args)
+        # Durable quota admission (#1903): a short DB-only transaction that
+        # atomically counts + inserts a reservation row and releases its pooled
+        # connection BEFORE the handler runs. Runs INSIDE ``_tool_lifecycle``,
+        # so an admission-store failure fails closed as a typed, model-visible
+        # tool error (the generic-exception arm), never an unresolved call. A
+        # refusal raises ``ToolBail`` and consumed no capacity; once admitted,
+        # the reservation counts even if the handler or the result publication
+        # fails — the side effect may have happened (see the service module).
+        admission = await reserve_outbound_tool_quota(pool, session_id, tc.name)
+        if admission.refusal is not None:
+            raise ToolBail(admission.refusal)
         result = await invoke_builtin(session_id, tc.name, tc.raw_args, tool_call_id=tc.call_id)
+        if admission.reservation_id is not None:
+            await mark_outbound_dispatch_completed(pool, admission.reservation_id)
         event_data = _shape_tool_result(tc, result)
         tc.bound_log.info("tool.completed")
         await _append_tool_result_event(
@@ -695,7 +717,7 @@ async def _append_tool_result_event(
     event_data: dict[str, Any],
     *,
     account_id: str,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
 ) -> None:
     """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
 
@@ -929,9 +951,10 @@ def launch_mcp_tool_calls(
     tool_calls: list[dict[str, Any]],
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
 
@@ -955,6 +978,7 @@ def launch_mcp_tool_calls(
             session_id,
             call,
             mcp_server_map,
+            mcp_tools=mcp_tools,
             focal_channel=focal_channel,
             account_id=account_id,
             parent_focal_at_arrival=parent_focal_at_arrival,
@@ -994,15 +1018,29 @@ def _parse_mcp_tool_name(name: str) -> tuple[str, str]:
     return parts[1], parts[2]
 
 
+def _mcp_input_schema(
+    qualified_name: str, tools: list[dict[str, Any]] | None
+) -> dict[str, Any] | None:
+    """Return the exact MCP parameters schema advertised for this inference."""
+    for tool in tools or []:
+        function = tool.get("function") or {}
+        if function.get("name") != qualified_name:
+            continue
+        parameters = function.get("parameters")
+        return parameters if isinstance(parameters, dict) else None
+    return None
+
+
 async def _execute_mcp_tool_async(
     pool: asyncpg.Pool[Any],
     session_id: str,
     call: dict[str, Any],
     mcp_server_map: dict[str, McpServerSpec],
     *,
+    mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result.
 
@@ -1020,76 +1058,142 @@ async def _execute_mcp_tool_async(
         account_id=account_id,
         log_prefix="mcp_tool",
     ) as tc:
-        arguments = parse_arguments(tc.raw_args)
-        if arguments is None:
-            raise ToolBail("arguments were not valid JSON")
-
-        try:
-            server_name, tool_name = _parse_mcp_tool_name(tc.name)
-        except ValueError as err:
-            raise ToolBail(str(err)) from err
-
-        from aios.harness.channels import (
-            FOCAL_CHANNEL_META_KEY,
-            SESSION_ID_META_KEY,
-            focal_channel_path,
-        )
-
-        meta: dict[str, Any] = {SESSION_ID_META_KEY: session_id}
-        suffix = focal_channel_path(focal_channel)
-        if suffix is not None:
-            meta[FOCAL_CHANNEL_META_KEY] = suffix
-
-        spec = mcp_server_map.get(server_name)
-        if spec is None:
-            raise ToolBail(f"MCP server {server_name!r} not found")
-        url = spec.url
-
-        # Outbound suppression (#710): MCP is default-deny. When the session is
-        # in suppression mode, every MCP call is intercepted (synthesized
-        # success + audit event) unless the per-tool ``read_allow`` opt-in
-        # marks it a known-safe read. Same decision the sandbox CLI broker
-        # makes — both consult ``mcp_tool_suppressed``.
-        from aios.services import outbound_suppression as suppression_service
-
-        if await _mcp_call_suppressed(pool, session_id, account_id, tc.name):
-            await suppression_service.record_mcp_suppression(
-                pool,
-                session_id,
-                account_id=account_id,
-                server_name=server_name,
-                tool_name=tool_name,
-                arguments=arguments,
-            )
-            result = suppression_service.mcp_synthesized_result()
-        else:
-            from aios.mcp.client import call_mcp_tool, resolve_auth_for_target_url
-
-            crypto_box = runtime.require_crypto_box()
-            vault_id, headers = await resolve_auth_for_target_url(
-                pool, crypto_box, session_id, url, account_id=account_id
-            )
-            result = await call_mcp_tool(
-                url, vault_id, headers, tool_name, arguments, meta=meta, spec_headers=spec.headers
-            )
-
-        mcp_is_error = "error" in result
-        event_data: dict[str, Any] = {
-            "role": "tool",
-            "tool_call_id": tc.call_id,
-            "name": tc.name,
-            "content": json.dumps(result, ensure_ascii=False),
-        }
-        if mcp_is_error:
-            event_data["is_error"] = True
-            tc.is_error = True
-
-        tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
-        await _append_tool_result_event(
+        await _execute_mcp_tool_admitted(
             pool,
             session_id,
-            tc.call_id,
-            event_data,
+            tc,
+            mcp_server_map,
+            mcp_tools=mcp_tools,
             account_id=account_id,
-            tool_parent_channel=parent_focal_at_arrival,
+            focal_channel=focal_channel,
+            parent_focal_at_arrival=parent_focal_at_arrival,
         )
+
+
+async def _execute_mcp_tool_admitted(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tc: _ToolCall,
+    mcp_server_map: dict[str, McpServerSpec],
+    *,
+    mcp_tools: list[dict[str, Any]] | None,
+    account_id: str,
+    focal_channel: str | None,
+    parent_focal_at_arrival: str | EllipsisType | None,
+) -> None:
+    """The body of one MCP dispatch, inside ``_tool_lifecycle``.
+
+    Ordering is load-bearing for the outbound quota (#1903): every expected
+    pre-publish refusal — malformed arguments, malformed/unknown tool name,
+    missing server, the suppression intercept, auth resolution — happens
+    BEFORE ``reserve_outbound_tool_quota``, so a call that never reaches the
+    connector consumes no dispatch capacity. The reservation is taken at the
+    last moment before ``call_mcp_tool`` (a short DB-only transaction that
+    releases its pooled connection before the external I/O); once it exists
+    it counts even if the connector call or the local result publication
+    fails, because the side effect may have occurred (see the service
+    module's accounting semantics).
+    """
+    arguments = parse_arguments(tc.raw_args)
+    if arguments is None:
+        raise ToolBail("arguments were not valid JSON")
+
+    try:
+        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+    except ValueError as err:
+        raise ToolBail(str(err)) from err
+
+    from aios.harness.channels import (
+        FOCAL_CHANNEL_META_KEY,
+        SESSION_ID_META_KEY,
+        focal_channel_path,
+    )
+
+    meta: dict[str, Any] = {SESSION_ID_META_KEY: session_id}
+    suffix = focal_channel_path(focal_channel)
+    if suffix is not None:
+        meta[FOCAL_CHANNEL_META_KEY] = suffix
+
+    spec = mcp_server_map.get(server_name)
+    if spec is None:
+        raise ToolBail(f"MCP server {server_name!r} not found")
+    url = spec.url
+
+    # Outbound suppression (#710): MCP is default-deny. When the session is
+    # in suppression mode, every MCP call is intercepted (synthesized
+    # success + audit event) unless the per-tool ``read_allow`` opt-in
+    # marks it a known-safe read. Same decision the sandbox CLI broker
+    # makes — both consult ``mcp_tool_suppressed``.
+    from aios.services import outbound_suppression as suppression_service
+
+    if await _mcp_call_suppressed(pool, session_id, account_id, tc.name):
+        await suppression_service.record_mcp_suppression(
+            pool,
+            session_id,
+            account_id=account_id,
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        result = suppression_service.mcp_synthesized_result()
+    else:
+        from aios.mcp.client import (
+            call_mcp_tool,
+            resolve_auth_for_target_url,
+            validate_mcp_arguments,
+        )
+        from aios.services.outbound_tool_quota import (
+            mark_outbound_dispatch_completed,
+            reserve_outbound_tool_quota,
+        )
+
+        input_schema = _mcp_input_schema(tc.name, mcp_tools)
+        schema_error = validate_mcp_arguments(tool_name, arguments, input_schema)
+        if schema_error is not None:
+            raise ToolBail(schema_error)
+
+        crypto_box = runtime.require_crypto_box()
+        vault_id, headers = await resolve_auth_for_target_url(
+            pool, crypto_box, session_id, url, account_id=account_id
+        )
+        # Quota admission LAST before the connector invocation: everything
+        # above is a refusal path or a pure read and must not consume
+        # capacity. A refusal raises ``ToolBail`` (model-visible, nothing
+        # inserted); admission-store failure lands in the lifecycle's
+        # generic-exception arm as a typed tool error (fail closed).
+        admission = await reserve_outbound_tool_quota(pool, session_id, tc.name)
+        if admission.refusal is not None:
+            raise ToolBail(admission.refusal)
+        result = await call_mcp_tool(
+            url,
+            vault_id,
+            headers,
+            tool_name,
+            arguments,
+            input_schema=input_schema,
+            meta=meta,
+            spec_headers=spec.headers,
+        )
+        if admission.reservation_id is not None:
+            await mark_outbound_dispatch_completed(pool, admission.reservation_id)
+
+    mcp_is_error = "error" in result
+    event_data: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": tc.call_id,
+        "name": tc.name,
+        "content": json.dumps(result, ensure_ascii=False),
+    }
+    if mcp_is_error:
+        event_data["is_error"] = True
+        tc.is_error = True
+
+    tc.bound_log.info("mcp_tool.completed", is_error=mcp_is_error)
+    await _append_tool_result_event(
+        pool,
+        session_id,
+        tc.call_id,
+        event_data,
+        account_id=account_id,
+        tool_parent_channel=parent_focal_at_arrival,
+    )

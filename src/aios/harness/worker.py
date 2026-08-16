@@ -37,6 +37,7 @@ import aios.harness.tasks
 import aios.tools  # noqa: F401  — side-effect: register built-in tools
 from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
+from aios.db import queries
 from aios.db.listen import (
     listen_for_github_clone_breaker_clear,
     listen_for_mcp_evict_vault,
@@ -44,10 +45,11 @@ from aios.db.listen import (
 )
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
-from aios.harness.attachment_gc import sweep_orphan_attachments
+from aios.harness.attachment_gc import sweep_orphan_attachments, sweep_orphan_uploads
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inflight_tool_registry import InflightToolRegistry
+from aios.harness.production_watchdogs import run_production_watchdogs
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -67,9 +69,22 @@ from aios.retirements.boot_gate import (
 from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.github_clone_breaker import GithubCloneBreaker
 from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
-from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
 from aios.sandbox.workspace_ownership import repair_workspace_ownership
+
+
+def _consume_snapshot_pressure(registry: SandboxRegistry, pressure: GcPressureResult) -> None:
+    """Apply one GC pressure report to subsequent provisioning admission."""
+    registry.set_provisioning_pressure(pressure)
+    if pressure.pressured:
+        get_logger("aios.worker").error(
+            "worker.sandbox_capacity_pressure_alarm",
+            pool_used_bytes=pressure.pool_used_bytes,
+            pool_budget_bytes=pressure.pool_budget_bytes,
+            pressured_accounts=sorted(pressure.pressured_accounts),
+        )
+
 
 # Hashed (via Postgres ``hashtextextended($1, 0)``) into the 64-bit
 # advisory-lock key enforcing the worker-process singleton. The string
@@ -348,6 +363,7 @@ async def worker_main() -> None:
     github_clone_breaker_clear_task: asyncio.Task[None] | None = None
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
+    watchdog_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
     supervised_failure: _SupervisedTaskFailure = {"exception": None}
     lock_conn.add_termination_listener(
@@ -360,7 +376,20 @@ async def worker_main() -> None:
     try:
         pool = await create_pool(settings.db_url, max_size=settings.db_pool_max_size)
         crypto_box = CryptoBox.from_base64(settings.vault_key.get_secret_value())
+        async with pool.acquire() as conn:
+            await queries.audit_credentialless_root(conn)
+        from aios.sandbox.workspace_root_startup import validate_workspace_root_against_sessions
+
+        await validate_workspace_root_against_sessions(pool, service="worker")
         sandbox_registry = SandboxRegistry(backend=select_sandbox_backend(settings))
+        # A configured canonical store is mandatory, not a best-effort fallback.
+        if settings.sandbox_snapshot_store_root is not None:
+            from aios.sandbox.snapshot_store import TarballStore
+
+            assert isinstance(sandbox_registry._store, TarballStore)
+            sandbox_registry._store.preflight(
+                headroom_bytes=settings.sandbox_canonical_store_headroom_bytes
+            )
         inflight_tool_registry = InflightToolRegistry()
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()
@@ -457,6 +486,9 @@ async def worker_main() -> None:
         deleted_attachments = await sweep_orphan_attachments(pool)
         if deleted_attachments:
             log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
+        deleted_uploads = await sweep_orphan_uploads(pool)
+        if deleted_uploads:
+            log.info("worker.reaped_orphan_uploads", count=deleted_uploads)
 
         log.info(
             "worker.startup",
@@ -484,7 +516,12 @@ async def worker_main() -> None:
         # pointers against store truth, then repeats hourly. Boot is not
         # blocked — a session waking mid-reconcile salvages its own corpse
         # inline under its own lock.
-        sandbox_gc_task = sandbox_registry.start_gc(pool)
+        sandbox_gc_task = sandbox_registry.start_gc(
+            pool,
+            pressure_callback=lambda pressure: _consume_snapshot_pressure(
+                sandbox_registry, pressure
+            ),
+        )
         _supervise(sandbox_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
         # Start container + MCP-pool idle-TTL reapers.
@@ -492,6 +529,8 @@ async def worker_main() -> None:
             idle_timeout=settings.container_idle_timeout_seconds
         )
         _supervise(sandbox_reaper_task, latch=supervised_latch, fatal=supervised_failure)
+        egress_refresh_task = sandbox_registry.start_egress_refresh()
+        _supervise(egress_refresh_task, latch=supervised_latch, fatal=supervised_failure)
         mcp_reaper_task = mcp_session_pool.start_reaper(
             idle_timeout=settings.mcp_pool_idle_timeout_seconds
         )
@@ -594,6 +633,23 @@ async def worker_main() -> None:
         )
         _supervise(scheduler_task, latch=supervised_latch, fatal=supervised_failure)
 
+        watchdog_task = asyncio.create_task(
+            run_production_watchdogs(
+                pool,
+                settings.db_url,
+                held_threshold_seconds=settings.held_connection_watchdog_threshold_seconds,
+                dead_man_threshold_seconds=settings.worker_dead_man_threshold_seconds,
+                interval_seconds=settings.worker_watchdog_interval_seconds,
+                rate_limit_seconds=settings.worker_watchdog_rate_limit_seconds,
+                specimen_dir=settings.worker_watchdog_specimen_dir,
+                journal_limit=settings.worker_watchdog_journal_events,
+                operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
+                activity_limit=settings.worker_watchdog_activity_rows,
+                max_specimens=settings.worker_watchdog_max_specimens,
+            ),
+            name="production_watchdogs",
+        )
+
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully
         # operational. Touch once now for an immediate green signal,
@@ -665,9 +721,12 @@ async def worker_main() -> None:
             await _cancel_and_drain(github_clone_breaker_clear_task)
         if scheduler_task is not None:
             await _cancel_and_drain(scheduler_task)
+        if watchdog_task is not None:
+            await _cancel_and_drain(watchdog_task)
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()
+            sandbox_registry.stop_egress_refresh()
         if inflight_tool_registry is not None:
             await inflight_tool_registry.shutdown()
         if sandbox_registry is not None:
@@ -886,9 +945,6 @@ async def _memory_reconcile_audit_loop(pool: asyncpg.Pool[Any]) -> None:
     """
     log = get_logger("aios.worker.memory_reconcile_audit")
     settings = get_settings()
-    if not settings.memory_reconcile_audit_enabled:
-        log.warning("memory_reconcile_audit.disabled")
-        return
     from aios.harness.memory_reconcile_audit import run_memory_reconcile_audit
 
     interval = settings.memory_reconcile_audit_interval_seconds

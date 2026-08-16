@@ -33,8 +33,20 @@ import litellm
 
 from aios.config import get_settings
 from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
+from aios.harness.context_admission import (
+    AdmissionMode,
+    AdmissionReport,
+    admit_context,
+    route_attestation,
+)
+from aios.harness.request_body_budget import (
+    body_limits_for_model,
+    enforce_request_body_budget,
+    is_request_too_large_error,
+)
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
+from aios.services.litellm_params import openai_params_in
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
 # tool-call-only turns; modify_params tells LiteLLM to sanitize them.
@@ -148,6 +160,7 @@ class LlmResponse:
     usage: dict[str, int]
     cost: float | None
     message: dict[str, Any]
+    admission_report: AdmissionReport | None = None
 
     @classmethod
     def from_message(
@@ -157,6 +170,7 @@ class LlmResponse:
         usage: dict[str, int],
         cost: float | None,
         finish_reason: str | None,
+        admission_report: AdmissionReport | None = None,
     ) -> LlmResponse:
         """Build from a normalized message dict + the unpacked usage/cost/finish.
 
@@ -172,6 +186,7 @@ class LlmResponse:
             usage=usage,
             cost=cost,
             message=message,
+            admission_report=admission_report,
         )
 
 
@@ -665,18 +680,26 @@ def _build_litellm_kwargs(
         kwargs["stream_options"] = {"include_usage": True}
     if tools:
         kwargs["tools"] = tools
+    effective_extra = dict(extra or {})
+    if auth is not None and get_settings().inference_credential_policy != "legacy_env":
+        # Account rows are authoritative under non-legacy policies. Inline auth
+        # fields are agent metadata, not account configuration.
+        for key in ("api_key", "api_base", "base_url"):
+            effective_extra.pop(key, None)
     if auth is not None:
         kwargs["api_key"] = auth.api_key
-        # Only inject auth.api_base when `extra` doesn't already redirect —
-        # otherwise both `api_base` and its `base_url` alias could end up in
-        # kwargs (one from here, one from extra), and litellm's api_base-over-
-        # base_url precedence would silently invert "extra wins". `extra`
-        # itself needs no such guard: kwargs.update(extra) below overwrites
-        # a same-key api_base naturally.
-        if auth.api_base is not None and api_base_of(extra) is None:
+        if auth.api_base is not None and api_base_of(effective_extra) is None:
             kwargs["api_base"] = auth.api_base
-    if extra:
-        kwargs.update(extra)
+    # LiteLLM's bundled model-capability map is advisory, not authoritative.
+    # Centrally allow every standard OpenAI-shaped param the caller supplied so
+    # new provider models are not rejected locally before reaching the wire.
+    # Preserve any operator-provided additions for non-standard adapter params.
+    passthrough = openai_params_in(effective_extra)
+    passthrough.update(effective_extra.get("allowed_openai_params") or [])
+    if passthrough:
+        effective_extra["allowed_openai_params"] = sorted(passthrough)
+    if effective_extra:
+        kwargs.update(effective_extra)
     _apply_provider_cache_hints(kwargs, model, session_id)
     return kwargs
 
@@ -750,9 +773,37 @@ async def call_litellm(
         session_id=request.session_id,
         stream=False,
     )
-    deadline_s = get_settings().model_call_deadline_s
+    # Last gate before the wire: enforce the bound provider's request-body
+    # ceilings only after cache hints, tools and passthrough params have
+    # reached their final outbound shape. This is the same payload LiteLLM
+    # receives. Limits are provider-scoped (``body_limits_for_model``) — a
+    # provider that publishes no such cap is left untouched.
+    enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
+    settings = get_settings()
+    admission_report = admit_context(
+        kwargs,
+        mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+        attestation=route_attestation(model),
+    )
+    deadline_s = settings.model_call_deadline_s
     try:
-        response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
+        try:
+            response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
+        except Exception as exc:
+            if not is_request_too_large_error(exc):
+                raise
+            trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
+            if trimmed.media_removed == 0:
+                raise
+            # Media stripping mutates the final payload. The prior digest and
+            # count no longer authorize it, so bind a fresh decision before
+            # the retry reaches the wire.
+            admission_report = admit_context(
+                kwargs,
+                mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+                attestation=route_attestation(model),
+            )
+            response = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=deadline_s)
     except TimeoutError as exc:
         raise ModelCallDeadlineError(
             f"model call exceeded its {deadline_s:.0f}s total deadline before returning",
@@ -763,7 +814,13 @@ async def call_litellm(
     message, usage, cost, finish_reason = _unpack_litellm_response(
         response, source="litellm.acompletion"
     )
-    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
+    return LlmResponse.from_message(
+        message,
+        usage=usage,
+        cost=cost,
+        finish_reason=finish_reason,
+        admission_report=admission_report,
+    )
 
 
 async def stream_litellm(
@@ -805,10 +862,40 @@ async def stream_litellm(
         session_id=session_id,
         stream=True,
     )
-    deadline_s = get_settings().model_call_deadline_s
+    # Enforce the bound provider's aggregate-media and serialized-body
+    # ceilings only after cache hints, tools and passthrough params have
+    # reached their final outbound shape. This is the same payload LiteLLM
+    # receives. Limits are provider-scoped (``body_limits_for_model``) — a
+    # provider that publishes no such cap is left untouched.
+    enforce_request_body_budget(kwargs, limits=body_limits_for_model(model))
+    settings = get_settings()
+    admission_report = admit_context(
+        kwargs,
+        mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+        attestation=route_attestation(model),
+    )
+    deadline_s = settings.model_call_deadline_s
     loop = asyncio.get_running_loop()
     deadline_at = loop.time() + deadline_s
-    response = await litellm.acompletion(**kwargs)
+    try:
+        response = await litellm.acompletion(**kwargs)
+    except Exception as exc:
+        # One guarded reactive retry protects against provider serialization
+        # overhead or a provider cap stricter than our proactive safety margin.
+        # Strip historical media, but retain text and signed thinking blocks.
+        if not is_request_too_large_error(exc):
+            raise
+        trimmed = enforce_request_body_budget(kwargs, strip_all_media=True)
+        if trimmed.media_removed == 0:
+            raise
+        # The retry is a different immutable payload and therefore requires a
+        # new route-bound decision and digest.
+        admission_report = admit_context(
+            kwargs,
+            mode=AdmissionMode(getattr(settings, "context_admission_mode", "observe")),
+            attestation=route_attestation(model),
+        )
+        response = await litellm.acompletion(**kwargs)
 
     # Per-chunk inactivity guard. The ``stream_timeout`` kwarg above is
     # LiteLLM's own per-chunk bound, but its behavior varies by provider
@@ -877,7 +964,13 @@ async def stream_litellm(
                 saw_content_filter = True
             content = chunk.choices[0].delta.content
             if content:
-                await _notify_delta(pool, session_id, content)
+                payload = json.dumps({"delta": content})
+                async with pool.acquire() as notify_conn:
+                    await notify_conn.execute(
+                        "SELECT pg_notify($1, $2)",
+                        f"events_{session_id}",
+                        payload,
+                    )
     finally:
         # Close the litellm CustomStreamWrapper on every exit path — normal
         # full drain (no-op), TTFT/inter-chunk TimeoutError, or any in-loop
@@ -913,24 +1006,10 @@ async def stream_litellm(
     # path: only fires when the wire actually carried a ``content_filter``.
     if saw_content_filter and finish_reason != "content_filter":
         finish_reason = "content_filter"
-    return LlmResponse.from_message(message, usage=usage, cost=cost, finish_reason=finish_reason)
-
-
-async def _notify_delta(
-    pool: asyncpg.Pool[Any],
-    session_id: str,
-    content: str,
-) -> None:
-    """Send a transient content delta via pg_notify.
-
-    Uses the same ``events_{session_id}`` channel as persisted events.
-    The JSON payload is distinguishable from event-id payloads because
-    it starts with ``{``.
-    """
-    payload = json.dumps({"delta": content})
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "SELECT pg_notify($1, $2)",
-            f"events_{session_id}",
-            payload,
-        )
+    return LlmResponse.from_message(
+        message,
+        usage=usage,
+        cost=cost,
+        finish_reason=finish_reason,
+        admission_report=admission_report,
+    )

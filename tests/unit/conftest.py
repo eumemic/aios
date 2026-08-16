@@ -28,6 +28,7 @@ def _unit_env() -> Iterator[None]:
         "AIOS_VAULT_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
         "AIOS_EGRESS_CA_KEY": base64.b64encode(secrets.token_bytes(32)).decode(),
         "AIOS_DB_URL": "postgresql://test:test@localhost:5432/test",
+        "AIOS_INFERENCE_CREDENTIAL_POLICY": "account_only",
     }
     with mock.patch.dict(os.environ, env):
         from aios.config import get_settings
@@ -35,6 +36,26 @@ def _unit_env() -> Iterator[None]:
         get_settings.cache_clear()
         yield
         get_settings.cache_clear()
+
+
+@pytest.fixture
+def legacy_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Opt one legacy-dependent test into process-environment credentials."""
+    monkeypatch.setenv("AIOS_INFERENCE_CREDENTIAL_POLICY", "legacy_env")
+    from aios.config import get_settings
+
+    get_settings.cache_clear()
+    settings = get_settings()
+    # Patch references imported into credential/harness modules as well as config.
+    for target in (
+        "aios.harness.loop.get_settings",
+        "aios.harness.completion.get_settings",
+        "aios.services.model_providers.get_settings",
+    ):
+        monkeypatch.setattr(target, lambda: settings)
+    yield
+    # Never leak a cached legacy Settings object into the next account-only test.
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

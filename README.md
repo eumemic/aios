@@ -154,7 +154,9 @@ uv sync --dev
 
 # Configure (see Environment variables below) — minimally:
 #   AIOS_DB_URL, AIOS_VAULT_KEY, AIOS_EGRESS_CA_KEY, AIOS_BOOTSTRAP_TOKEN
-#   and a provider key (ANTHROPIC_API_KEY / OPENROUTER_API_KEY / ...)
+# Provider credentials are encrypted model-provider rows on non-root accounts.
+# Use `aios model-providers create`; the platform root is credentialless.
+# Env keys are migration-only: AIOS_INFERENCE_CREDENTIAL_POLICY=legacy_env.
 set -a && source .env && set +a
 
 # Run migrations (also applies the procrastinate schema + lock-release trigger;
@@ -271,6 +273,7 @@ The harness turns the event log into a running agent. There is no controller loo
 | `AIOS_TOOL_RESULT_MAX_CHARS` | Inline tool-result cap (default 200k); larger results spill to a readable attachment file with an inline stub. |
 | `AIOS_DEFAULT_SPEND_LIMIT_USD` | Default effective spend ceiling; the step's pre-flight admission latches errored on a subtree breach. |
 | `AIOS_INBOUND_DEBOUNCE_SECONDS` | Debounce connector-inbound wakes so rapid messages collapse into one step. |
+| `AIOS_OUTBOUND_TOOL_QUOTAS` | JSON map of connector verb to `[window_seconds, max_per_window]`; empty by default (for example `{"matrix_invite":[3600,20],"matrix_create_room":[3600,20],"matrix_join":[3600,20],"matrix_send":[3600,500]}`). Calls at the cap become model-visible `quota_exceeded` tool errors before connector publish. Keep homeserver/appservice rate limiting enabled as an independent backstop; upstream `M_LIMIT_EXCEEDED` errors are surfaced without retries. |
 | `AIOS_DUMP_CONTEXT` / `AIOS_DUMP_CONTEXT_DIR` | Dump the exact chat-completions payload sent to LiteLLM per step. |
 
 </details>
@@ -491,7 +494,7 @@ A connection binds one platform account to a routing target — a single long-li
 - **Bare assistant text is internal monologue** — channels are reachable *only* via outbound tools, so "what the user saw" is exactly the set of outbound tool calls — a clean audit boundary.
 - **Three routing modes from one bindings table** — `detached` / `single_session` / `per_chat`, with a three-tier resolver (chat-sessions ledger → routing-rule prefix demux → bindings.mode fallback). At-most-one-active-binding is a schema invariant.
 - **Idempotent both ways** — inbound dedups on a client `event_id` inside the append transaction; outbound persists each result between the side-effecting send and the result POST (an answered-spool), so a send-succeeded/POST-failed window re-POSTs rather than re-sends.
-- **`fire_and_forget` results** — a send ack appends to the log but does **not** wake the session — the keystone that stops an agent infinitely reacting to its own outbound message (a failed result always wakes).
+- **Delivery results are stimuli** — send acknowledgements and failures both append to the log and wake the session, just like every other tool result. Delivery tools differ only in typing body exceptions as `delivery_failed`.
 - **Encrypted per-connection secrets** — platform credentials are encrypted under a per-account subkey, write-only on the operator surface (`secrets_set: bool`), decryptable only by a connector holding a runtime token for that type.
 
 ### Connector roster

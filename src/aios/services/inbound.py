@@ -23,6 +23,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
+from aios.models.connections import inbound_orig_channel
 from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll, InboundPolicy
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
@@ -151,9 +152,7 @@ async def handle_inbound(
     # (fail-closed). The denial maps to HTTP 422 in the router so a denied
     # stranger drops one envelope rather than crash-restarting the connector
     # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
-    policy = await queries.resolve_effective_inbound_policy(
-        pool, connection=connection, account_id=account_id
-    )
+    policy = connection.inbound_policy_effective
     if not _admits(policy, chat_id, sender.get("id")):
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
@@ -306,7 +305,7 @@ async def _append_with_dedup(
     txn back via :class:`_DedupRollback`.  Returns True on first-append,
     False on dedup hit.
     """
-    channel = f"{connector}/{external_account_id}/{chat_id}"
+    channel = inbound_orig_channel(connector, external_account_id, chat_id)
     sender_name = sender.get("display_name")
     metadata: dict[str, Any] = {}
     if connector_metadata is not None:

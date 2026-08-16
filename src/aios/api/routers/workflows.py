@@ -15,6 +15,7 @@ from sse_starlette import EventSourceResponse
 from aios.api.deps import AccountIdDep, DbUrlDep, PoolDep
 from aios.api.sse import make_sse_response, preflight_subscription, wf_run_event_stream
 from aios.db.listen import open_listen_for_run_events
+from aios.errors import ValidationError
 from aios.logging import get_logger
 from aios.models.common import ListResponse
 from aios.models.pagination import (
@@ -191,6 +192,11 @@ async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep)
     (credentials it resolves at tool-call time), and wakes it. A missing workflow or
     environment 404s. The HTTP path is unattenuated operator authority — no
     ``launcher_session_id``, so the requested vaults are bound as-is (account-scoped)."""
+    if body.workspace == "shared":
+        raise ValidationError(
+            "workspace='shared' requires a launcher session; HTTP runs have no launcher session",
+            detail={"field": "workspace", "value": "shared"},
+        )
     inline = (
         InlineScript(
             script=body.inline.script,
@@ -214,6 +220,7 @@ async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep)
         vault_ids=body.vault_ids,
         budget_usd=body.budget_usd,
         default_child_model=body.default_child_model,
+        workspace=body.workspace,
     )
 
 

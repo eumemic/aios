@@ -41,6 +41,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.config import get_settings
 from aios.db import queries as queries
 from aios.logging import get_logger
 from aios.sandbox.memory_mounts import MATERIALIZED_MARKER
@@ -145,6 +146,9 @@ async def run_memory_reconcile_audit(pool: asyncpg.Pool[Any]) -> AuditResult:
     not a crash), but every divergence is a structured warning log line the
     ops-agent cron / alerting surface can watch.
     """
+    if not get_settings().memory_reconcile_audit_enabled:
+        return AuditResult(stores_checked=0, files_hashed=0)
+
     divergences: list[Divergence] = []
     stores_checked = 0
     files_hashed = 0

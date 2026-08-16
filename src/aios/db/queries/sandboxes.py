@@ -7,12 +7,93 @@ asyncpg, same conventions as the rest of the package.
 
 from __future__ import annotations
 
+import hashlib
+import os
 from collections.abc import Sequence
 from typing import Any
 
 import asyncpg
 
 from aios.db.queries.sessions import session_active_predicate
+
+# Workspace deletion/activation mutex.  Both sides normalize with realpath, then
+# derive one signed int64 advisory-lock key as the first 8 bytes of
+# BLAKE2b("aios.workspace.v1\0" || UTF-8(realpath)).  The domain/version makes
+# this namespace stable and independent of every other advisory-lock user.
+_WORKSPACE_LOCK_DOMAIN = b"aios.workspace.v1\0"
+
+
+def normalized_workspace_path(path: str) -> str:
+    """Return the canonical path used both for keep-set comparison and locking."""
+    return os.path.realpath(path)
+
+
+def workspace_advisory_lock_key(path: str) -> int:
+    """Derive the documented signed PostgreSQL bigint lock key for ``path``."""
+    digest = hashlib.blake2b(
+        _WORKSPACE_LOCK_DOMAIN + normalized_workspace_path(path).encode(), digest_size=8
+    ).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+async def acquire_workspace_advisory_xact_lock(conn: asyncpg.Connection[Any], path: str) -> None:
+    """Lock a normalized workspace until the caller's transaction ends."""
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1::bigint)", workspace_advisory_lock_key(path)
+    )
+
+
+def workspace_hierarchy_lock_paths(path: str, *, boundary: str) -> tuple[str, ...]:
+    """Return ``path`` and its ancestors below ``boundary``, root to leaf."""
+    normalized = os.path.realpath(path)
+    normalized_boundary = os.path.realpath(boundary)
+    relative = os.path.relpath(normalized, normalized_boundary)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f"workspace path {normalized!r} is outside lock boundary")
+    if relative == os.curdir:
+        return (normalized,)
+    current = normalized_boundary
+    paths: list[str] = []
+    for component in relative.split(os.sep):
+        current = os.path.join(current, component)
+        paths.append(current)
+    return tuple(paths)
+
+
+async def acquire_workspace_hierarchy_advisory_xact_locks(
+    conn: asyncpg.Connection[Any], path: str, *, boundary: str
+) -> None:
+    """Lock a workspace hierarchy root-to-leaf until transaction end.
+
+    A nested creator thereby collides with deletion of any containing
+    workspace, while consistent ordering prevents opposite-order deadlocks.
+    """
+    for lock_path in workspace_hierarchy_lock_paths(path, boundary=boundary):
+        await acquire_workspace_advisory_xact_lock(conn, lock_path)
+
+
+async def unscoped_workspace_path_is_live(conn: asyncpg.Connection[Any], path: str) -> bool:
+    """Targeted under-lock recheck for one already-normalized workspace path."""
+    normalized = normalized_workspace_path(path)
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM sessions
+                 WHERE archived_at IS NULL
+                   AND workspace_volume_path = $1
+                UNION ALL
+                SELECT 1 FROM wf_runs
+                 WHERE archived_at IS NULL
+                   AND workspace_mode = 'shared'
+                   AND status IN ('pending', 'running', 'suspended')
+                   AND workspace_path = $1
+            )
+            """,
+            normalized,
+        )
+    )
+
 
 # ─── durable session sandboxes: snapshot pointer (§5.1) ───────────────────────
 #
@@ -50,6 +131,43 @@ async def unscoped_set_session_snapshot(
     )
 
 
+async def unscoped_compare_and_set_session_snapshot(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    observed_ref: str | None,
+    observed_updated_at: object | None,
+    ref: str,
+    host: str,
+    snapshot_bytes: int,
+) -> bool:
+    """Publish iff the pointer identity observed under the session lock is unchanged."""
+    status: str = await conn.execute(
+        """
+        UPDATE sessions SET snapshot_ref=$4, snapshot_host=$5, snapshot_bytes=$6,
+                            snapshot_updated_at=now()
+         WHERE id=$1 AND snapshot_ref IS NOT DISTINCT FROM $2
+           AND snapshot_updated_at IS NOT DISTINCT FROM $3
+        """,
+        session_id,
+        observed_ref,
+        observed_updated_at,
+        ref,
+        host,
+        snapshot_bytes,
+    )
+    return bool(status != "UPDATE 0")
+
+
+async def unscoped_get_session_snapshot_pointer(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> tuple[str | None, object | None] | None:
+    row = await conn.fetchrow(
+        "SELECT snapshot_ref, snapshot_updated_at FROM sessions WHERE id=$1", session_id
+    )
+    return None if row is None else (row["snapshot_ref"], row["snapshot_updated_at"])
+
+
 async def unscoped_get_session_snapshot_bytes(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> int | None:
@@ -66,19 +184,54 @@ async def unscoped_get_session_snapshot_bytes(
 
 
 async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session_id: str) -> None:
-    """Clear a session's snapshot pointer (all four columns NULL).
-
-    Used on a detected reset (snapshot-missing / base-image drift) and by the
-    GC pass-4 reconcile when a canonical artifact is removed.
-    """
+    """Unconditionally clear a pointer (legacy callers only)."""
     await conn.execute(
         """
         UPDATE sessions
-           SET snapshot_ref = NULL,
-               snapshot_host = NULL,
-               snapshot_bytes = NULL,
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
                snapshot_updated_at = now()
          WHERE id = $1
+        """,
+        session_id,
+    )
+
+
+async def unscoped_compare_and_clear_session_snapshot(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_ref: str
+) -> bool:
+    """Clear only the exact artifact pointer the caller removed/proved missing."""
+    status: str = await conn.execute(
+        """
+        UPDATE sessions
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
+               snapshot_updated_at = now()
+         WHERE id = $1 AND snapshot_ref = $2
+        """,
+        session_id,
+        expected_ref,
+    )
+    return status != "UPDATE 0"
+
+
+async def unscoped_lock_session_snapshot_state(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> asyncpg.Record | None:
+    """Serialize artifact ownership/lifecycle decisions with all session updates.
+
+    The row lock is held by the caller's transaction while it performs the
+    external store operation and pointer CAS.  Publishers and archive/unarchive
+    updates cannot pass the corresponding UPDATE until that decision settles.
+    """
+    return await conn.fetchrow(
+        """
+        SELECT id, account_id, archived_at, snapshot_ref, snapshot_host,
+               snapshot_bytes,
+               (SELECT e.created_at FROM events e
+                 WHERE e.session_id = sessions.id AND e.seq = sessions.last_event_seq)
+                   AS last_event_at
+          FROM sessions
+         WHERE id = $1
+         FOR UPDATE
         """,
         session_id,
     )
@@ -166,7 +319,13 @@ async def unscoped_reapable_archived_workspaces(
 async def unscoped_live_workspace_volume_paths(
     conn: asyncpg.Connection[Any],
 ) -> list[str]:
-    """Return every NON-archived (live) session's stored ``workspace_volume_path``.
+    """Return paths currently borrowed by live sessions or shared workflow runs.
+
+    The keep-set includes every non-archived session's ``workspace_volume_path``
+    and every non-terminal shared ``wf_runs.workspace_path``. A shared workflow
+    run keeps executing against its launcher's session workspace even after the
+    launcher is archived, so omitting those run pointers can delete a live run's
+    filesystem.
 
     The keep-set for the archived-workspace reaper's live-clone cross-check
     (aios#40, same never-delete class as the confinement gate). ``clone_session``
@@ -188,6 +347,14 @@ async def unscoped_live_workspace_volume_paths(
          WHERE archived_at IS NULL
            AND workspace_volume_path IS NOT NULL
            AND workspace_volume_path <> ''
+        UNION
+        SELECT workspace_path AS workspace_volume_path
+          FROM wf_runs
+         WHERE archived_at IS NULL
+           AND workspace_mode = 'shared'
+           AND status IN ('pending', 'running', 'suspended')
+           AND workspace_path IS NOT NULL
+           AND workspace_path <> ''
         """,
     )
     return [row["workspace_volume_path"] for row in rows]

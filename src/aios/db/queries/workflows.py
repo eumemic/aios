@@ -65,7 +65,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_by=actor_from_row(row),
         created_at=row["created_at"],
@@ -85,7 +85,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_at=row["created_at"],
     )
@@ -97,6 +97,8 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         workflow_id=row["workflow_id"],
         account_id=row["account_id"],
         environment_id=row["environment_id"],
+        workspace=row.get("workspace_mode", "fresh"),
+        workspace_path=row.get("workspace_path"),
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         depth=row["depth"],
@@ -108,7 +110,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         status=row["status"],
         input=row["input"],
@@ -643,6 +645,8 @@ async def insert_wf_run(
     budget_usd: float | None = None,
     default_child_model: str | None = None,
     depth: int,
+    workspace: str = "fresh",
+    workspace_path: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -671,12 +675,13 @@ async def insert_wf_run(
             INSERT INTO wf_runs
                 (id, workflow_id, account_id, environment_id, parent_run_id,
                  launcher_session_id, request_id, caller, request_output_schema,
+                 workspace_mode, workspace_path,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
                  depth, tools_vocab_epoch)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13,
-                    'pending', $14::jsonb,
-                    $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20, $21)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
+                    'pending', $16::jsonb,
+                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -689,6 +694,8 @@ async def insert_wf_run(
             request_id,
             json.dumps(caller) if caller is not None else None,
             json.dumps(request_output_schema) if request_output_schema is not None else None,
+            workspace,
+            workspace_path,
             script,
             script_sha,
             source_version,
@@ -1137,6 +1144,94 @@ async def list_run_ids_needing_step(
         call_llm_stale_seconds,
     )
     return [r["id"] for r in rows]
+
+
+async def signal_stale_suspended_runs(
+    conn: asyncpg.Connection[Any], *, older_than_seconds: float
+) -> list[str]:
+    """Cancel-signal stale suspended runs whose awaited children can no longer answer.
+
+    The journal's unresolved ``call_started`` events are the authoritative awaited
+    roster, and the veto below **fails closed** over that whole roster: a run is
+    eligible only when EVERY unresolved call is *provably* dead. Only two classes are
+    provable, because only they have an authoritative out-of-journal servicer row to
+    interrogate — an ``agent``'s session (dead when missing or archived) and an
+    ``invoke_workflow``'s run (dead when missing, archived, or terminal). Every other
+    capability — ``tool``, ``call_llm``, ``gate``, and any capability added after this
+    was written — is worker-task-or-resume backed with no such row, so its liveness
+    cannot be established here and it VETOES the reap.
+
+    The ``ELSE FALSE`` in the liveness CASE is the load-bearing character: an
+    unrecognised (or NULL) capability takes it, fails the ``IS NOT TRUE`` test, and
+    parks the run. Adding a capability next month therefore makes this reaper strictly
+    MORE conservative with no edit here — the failure direction is a parked run an
+    operator can cancel by hand, never a cancel-signal fired into live work. A
+    long-running ``tool`` exec is exactly the case that must never be reaped: it can
+    legitimately occupy hours and its own re-dispatch backstop lives in
+    ``list_run_ids_needing_step``, not here.
+
+    An unharvested signal means the run has real work pending and belongs to the normal
+    needs-step sweep, not the reaper. Cancellation is inserted through the same durable
+    side table as the operator actuator, preserving the run step as journal single writer.
+    ``ON CONFLICT`` makes concurrent/startup/periodic passes idempotent.
+    """
+    rows = await conn.fetch(
+        """
+        INSERT INTO wf_run_signals (run_id, call_key, kind, result)
+        SELECT r.id, $2, 'cancel', $3::jsonb
+          FROM wf_runs r
+         WHERE r.status = 'suspended' AND r.archived_at IS NULL
+           AND r.updated_at < now() - make_interval(secs => $1)
+           AND EXISTS (
+             SELECT 1 FROM wf_run_events awaited
+              WHERE awaited.run_id = r.id AND awaited.type = 'call_started'
+                AND awaited.payload->>'capability' IN ('agent', 'invoke_workflow')
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = awaited.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_signals s
+              WHERE s.run_id = r.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = s.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_events started
+              WHERE started.run_id = r.id AND started.type = 'call_started'
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = started.call_key
+                     AND done.type = 'call_result')
+                -- Fail closed: this arm asks "is this unresolved call PROVABLY DEAD?"
+                -- and vetoes unless the answer is a definite TRUE. Only the two
+                -- servicer-row-backed capabilities can answer; everything else --
+                -- tool / call_llm / gate / any capability added later -- falls to
+                -- ELSE FALSE and parks the run. `IS NOT TRUE` also absorbs a NULL
+                -- (missing/!= JSON capability key) into the veto.
+                AND (CASE started.payload->>'capability'
+                  WHEN 'agent' THEN NOT EXISTS (
+                    SELECT 1 FROM sessions child
+                     WHERE child.id = started.payload->>'child_session_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL)
+                  WHEN 'invoke_workflow' THEN NOT EXISTS (
+                    SELECT 1 FROM wf_runs child
+                     WHERE child.id = started.payload->>'child_run_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL
+                       AND child.status NOT IN ('completed','errored','cancelled'))
+                  ELSE FALSE
+                END) IS NOT TRUE)
+        ON CONFLICT (run_id, call_key) DO NOTHING
+        RETURNING run_id
+        """,
+        older_than_seconds,
+        CANCEL_SIGNAL_CALL_KEY,
+        json.dumps({"kind": "stale_suspended_run"}),
+    )
+    return [row["run_id"] for row in rows]
 
 
 # ─── wf_run_events (the journal — single writer, gapless, idempotent) ─────────

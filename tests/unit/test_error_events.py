@@ -218,13 +218,41 @@ class TestReadEventsCursorPlaceholders:
         assert "seq > $3" in query and "kind = $4" in query
         assert "ORDER BY seq ASC" in query and "LIMIT $5" in query
 
+    async def test_forward_before_bound_stays_ascending(self) -> None:
+        from aios.db.queries import read_events
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[])
+
+        await read_events(
+            conn,
+            "sess_x",
+            after_seq=1,
+            before=5,
+            limit=2,
+            account_id="acc",
+        )
+
+        query, *params = conn.fetch.call_args[0]
+        assert params == ["sess_x", "acc", 1, 5, 2]
+        assert "seq > $3" in query and "seq < $4" in query
+        assert "ORDER BY seq ASC" in query and "LIMIT $5" in query
+
     async def test_backward_before_with_kind_aligns_placeholders(self) -> None:
         from aios.db.queries import read_events
 
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
 
-        await read_events(conn, "sess_x", before=20, kind="message", limit=50, account_id="acc")
+        await read_events(
+            conn,
+            "sess_x",
+            before=20,
+            kind="message",
+            limit=50,
+            newest_first=True,
+            account_id="acc",
+        )
 
         query, *params = conn.fetch.call_args[0]
         assert params == ["sess_x", "acc", 20, "message", 50]

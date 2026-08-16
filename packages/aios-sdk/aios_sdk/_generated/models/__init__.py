@@ -73,6 +73,9 @@ from .gate_resume import GateResume
 from .get_calibration_telemetry_response_get_calibration_telemetry import (
     GetCalibrationTelemetryResponseGetCalibrationTelemetry,
 )
+from .get_connection_discovery_v1_connectors_connections_get_arm_type_0 import (
+    GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0,
+)
 from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
@@ -313,12 +316,14 @@ from .wake_session_action import WakeSessionAction
 from .wf_run import WfRun
 from .wf_run_caller_type_0 import WfRunCallerType0
 from .wf_run_create import WfRunCreate
+from .wf_run_create_workspace import WfRunCreateWorkspace
 from .wf_run_event import WfRunEvent
 from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
 from .wf_run_usage import WfRunUsage
+from .wf_run_workspace import WfRunWorkspace
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
 from .whatsapp_confirm_pairing_response import WhatsappConfirmPairingResponse
 from .whatsapp_confirm_pairing_response_status import (
@@ -416,6 +421,7 @@ __all__ = (
     "FileUploadResponse",
     "GateResume",
     "GetCalibrationTelemetryResponseGetCalibrationTelemetry",
+    "GetConnectionDiscoveryV1ConnectorsConnectionsGetArmType0",
     "GetHealthResponseGetHealth",
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
@@ -628,12 +634,14 @@ __all__ = (
     "WfRun",
     "WfRunCallerType0",
     "WfRunCreate",
+    "WfRunCreateWorkspace",
     "WfRunEvent",
     "WfRunEventPayload",
     "WfRunEventType",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
     "WfRunUsage",
+    "WfRunWorkspace",
     "WhatsappConfirmPairingRequest",
     "WhatsappConfirmPairingResponse",
     "WhatsappConfirmPairingResponseStatus",

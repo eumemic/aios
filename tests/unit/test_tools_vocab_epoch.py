@@ -86,9 +86,9 @@ def test_epoch_ignores_other_domains() -> None:
 
 def test_live_epoch_matches_registry_latest_tool_surface_contract() -> None:
     # The shipped constant tracks the live registry — the latest declared
-    # tool_surface backfill (currently rev 0122, the goal-outcome drop).
+    # tool_surface backfill (rev 0155, the legacy invocation-name contract).
     assert epoch_mod.latest_backfill_rev(reg.TOOL_SURFACE_DOMAIN) == epoch_mod.TOOLS_VOCAB_EPOCH
-    assert epoch_mod.TOOLS_VOCAB_EPOCH == 122
+    assert epoch_mod.TOOLS_VOCAB_EPOCH == 155
 
 
 # ── registry: dropped_tokens helper ──────────────────────────────────────────

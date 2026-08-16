@@ -284,6 +284,10 @@ class SandboxBackendError(Exception):
     """
 
 
+class SandboxSnapshotTimeoutError(SandboxBackendError):
+    """Size-dependent snapshot work exceeded its deadline."""
+
+
 @runtime_checkable
 class SandboxBackend(Protocol):
     """The five-verb surface every backend implements."""
@@ -423,6 +427,14 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def save_image(self, image: str, path: Path) -> None:
+        """Stream ``image`` as a Docker archive to ``path``."""
+        ...
+
+    async def load_image(self, path: Path) -> None:
+        """Load a Docker archive, restoring its saved local tag."""
+        ...
+
     async def image_size(self, image: str) -> int:
         """Return ``image``'s ``.Size`` in bytes.
 
@@ -553,6 +565,38 @@ SESSION_LABEL_KEY = "aios.session_id"
 # accounting). ``FLATTENED_LABEL_KEY`` marks standalone export|import images
 # that share no layers with the base, so accounting charges them full size.
 ENV_KEYS_LABEL_KEY = "aios.env_keys"
+# ``VAULT_PLACEHOLDER_KEYS_LABEL_KEY`` carries the comma-separated NAMES (never
+# values, never credential ids) of the vault-credential placeholder env vars
+# injected at the provision that produced this container/image — the
+# ``secret_name`` of every active ``environment_variable`` credential bound at
+# that moment (eumemic/eumemic-ops#331).
+#
+# It exists because vault placeholder env vars are **start-time-derived state,
+# never snapshot-persisted state**. ``docker run --env`` overrides a key the
+# CURRENT provision still injects, so a rotated credential (same secret_name,
+# new credential id ⇒ new placeholder) self-heals on resume. The gap it closes
+# is the key that is no longer injected at all: when a credential is ARCHIVED,
+# its ``secret_name`` drops out of the current placeholder set, so no ``--env``
+# overrides it and the resumed container inherits whatever the snapshot baked —
+# a placeholder bound to a dead credential id, which the egress proxy's swap
+# set (built from ACTIVE creds only) can never exchange. Recording the names
+# lets the resume path explicitly neutralize exactly the stale keys, so a
+# resumed sandbox can never inherit a credential env var from its snapshot.
+VAULT_PLACEHOLDER_KEYS_LABEL_KEY = "aios.vault_placeholder_keys"
+
+
+def split_label_list(value: str | None) -> list[str]:
+    """Parse a comma-separated label value (e.g. ``aios.env_keys``) into names.
+
+    Shared by the Docker backend's commit-time env scrub and the registry's
+    resume-time stale-placeholder neutralization so both read the label
+    grammar the same way.
+    """
+    if not value:
+        return []
+    return [item for item in (part.strip() for part in value.split(",")) if item]
+
+
 BASE_IMAGE_LABEL_KEY = "aios.base_image"
 FLATTENED_LABEL_KEY = "aios.flattened"
 FLATTENED_LABEL_VALUE = "true"

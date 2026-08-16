@@ -63,7 +63,9 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .sandbox import _SANDBOX_PATH_DESCRIPTION, _SandboxPathMarker
 
-_INJECTED_PARAMS: frozenset[str] = frozenset({"connection_id", "external_account_id", "chat_id"})
+_INJECTED_PARAMS: frozenset[str] = frozenset(
+    {"connection_id", "external_account_id", "chat_id", "tool_call_id"}
+)
 
 
 class SchemaError(ValueError):

@@ -12,7 +12,13 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
-from aios.db.queries import get_environment, get_session_bare, get_session_vault_ids
+from aios.db import queries
+from aios.db.queries import (
+    get_environment,
+    get_session_bare,
+    get_session_vault_ids,
+    get_session_workspace_path,
+)
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     AiosError,
@@ -22,6 +28,7 @@ from aios.errors import (
     RateLimitedError,
     ValidationError,
 )
+from aios.ids import WORKFLOW_RUN, make_id
 from aios.jobs.app import defer_run_wake
 from aios.models.agents import (
     HttpServerRef,
@@ -106,7 +113,7 @@ class InlineScript:
         self.http_servers: list[HttpServerRef] = list(http_servers or [])
 
 
-async def _enforce_inline_surface(
+def _enforce_inline_surface(
     *,
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
@@ -187,6 +194,7 @@ async def create_run(
     version: int | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
+    workspace: str = "fresh",
 ) -> WfRun:
     """Create a run that snapshots a script, then wake it.
 
@@ -260,6 +268,13 @@ async def create_run(
     *completing* run flips terminal without the lock, so a count can only be
     stale-high — a conservative early refusal, never a cap breach.)
     """
+    # A shared workspace is inherited from a launcher session. Reject an impossible
+    # pointer before minting an id, acquiring a connection, inserting a row, or waking.
+    if workspace == "shared" and launcher_session_id is None:
+        raise ValidationError(
+            "workspace='shared' requires a launcher session",
+            detail={"field": "workspace", "value": "shared"},
+        )
     # Exactly one source arm: ``workflow_id`` (registered) XOR ``inline`` (T5, #1466).
     if (workflow_id is None) == (inline is None):
         raise ValidationError(
@@ -274,6 +289,7 @@ async def create_run(
             "(an inline run has no workflow version history)",
         )
     requested = list(vault_ids or [])
+    effective_run_id = run_id or make_id(WORKFLOW_RUN)
     # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
     # #835: the launcher's effective surface is read INSIDE the run transaction (below),
     # threading `conn` into load_for_session — the same consistency point as the vault
@@ -311,6 +327,17 @@ async def create_run(
             )
             launcher_surface = surface_of(launcher_agent)
             run_default_child_model = launcher_agent.model
+            workspace_path = (
+                await get_session_workspace_path(conn, launcher_session_id, account_id=account_id)
+                if workspace == "shared"
+                else None
+            )
+        else:
+            workspace_path = None
+        if workspace == "fresh":
+            workspace_path = str(
+                (get_settings().workspace_root / account_id / "_runs" / effective_run_id).resolve()
+            )
         source_version: int | None
         if inline is not None:
             # ── inline-script arm (T5, #1466) ──────────────────────────────────
@@ -327,7 +354,7 @@ async def create_run(
             # exceeding the launcher raises ForbiddenError (vs the registered path's
             # silent clamp — there the author already passed this same gate at
             # create_workflow, so a re-clamp can only narrow, never breach).
-            effective = await _enforce_inline_surface(
+            effective = _enforce_inline_surface(
                 tools=inline.tools,
                 mcp_servers=inline.mcp_servers,
                 http_servers=inline.http_servers,
@@ -445,16 +472,26 @@ async def create_run(
         if outstanding >= account_cap:
             raise RateLimitedError(
                 f"account at outstanding-run cap ({outstanding}/{account_cap}); "
-                "wait for outstanding runs to complete, or have stuck runs cancelled, "
-                "to free a slot",
+                "wait for outstanding runs to complete, or cancel a stuck run with "
+                "POST /v1/tasks/{run_id}/cancel?request_id={request_id} to free a slot",
                 detail={"outstanding": outstanding, "max": account_cap},
+            )
+        # Minimal mutex scope: take this only at the shared pointer's persist
+        # point. The transaction holds it through INSERT/commit; the reaper takes
+        # the identical normalized-path-derived key across recheck+rmtree.
+        if workspace == "shared" and workspace_path is not None:
+            workspace_path = queries.normalized_workspace_path(workspace_path)
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn, workspace_path, boundary=str(settings.workspace_root)
             )
         run = await wf_queries.insert_wf_run(
             conn,
             account_id=account_id,
             workflow_id=workflow_id,
             environment_id=environment_id,
-            run_id=run_id,
+            workspace=workspace,
+            workspace_path=workspace_path,
+            run_id=effective_run_id,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
             request_id=request_id,

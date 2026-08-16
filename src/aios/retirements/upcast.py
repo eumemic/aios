@@ -7,9 +7,9 @@ through :func:`reupcast_tool_surface` BEFORE inserting it, so a stale blob is
 re-upcast to canonical vocabulary at the boundary instead of being persisted
 stale and waiting for the boot gate to notice.
 
-Canonicalization is registry-driven, exactly as the read-path shims are: renames
-come from :func:`aios.retirements.registry.tolerated_rename_map` (the same map
-the ``mode="before"`` ``ToolSpec`` validator consults) and drops come from
+Canonicalization is registry-driven: renames come from
+:func:`aios.retirements.registry.rename_map` (including contracted descriptors,
+so old snapshots remain importable) and drops come from
 :func:`aios.retirements.registry.dropped_tokens` (the same set
 ``load_tool_specs`` drops). There is no parallel rename/drop table here — if a
 token is retired in the registry it is upcast here, by construction.
@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
-from aios.retirements.registry import dropped_tokens, tolerated_rename_map
+from aios.retirements.registry import dropped_tokens, rename_map
 
 
 def is_stale(epoch: int | None, *, current: int = TOOLS_VOCAB_EPOCH) -> bool:
@@ -70,7 +70,7 @@ def canonicalize_tool_blob(
     tests can scope the upcast to a synthetic descriptor set.
     """
 
-    rename_map = tolerated_rename_map() if renames is None else renames
+    rename_tokens = rename_map() if renames is None else renames
     drop_set = dropped_tokens() if drops is None else drops
 
     out: list[Any] = []
@@ -82,8 +82,8 @@ def canonicalize_tool_blob(
         ttype = entry.get("type")
         if ttype in drop_set:
             continue
-        if ttype in rename_map:
-            new_type = rename_map[ttype]
+        if ttype in rename_tokens:
+            new_type = rename_tokens[ttype]
             entry = {**entry, "type": new_type}
             ttype = new_type
         # De-dupe builtins (anything that is not a custom/mcp_toolset identity).

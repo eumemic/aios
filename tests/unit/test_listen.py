@@ -99,3 +99,64 @@ async def test_listen_for_events_acquire_subscriber_lock_failure_terminates_conn
             pytest.fail("context manager should not yield when setup raises")
 
     conn.terminate.assert_called_once()
+
+
+async def test_sse_listener_cap_rejects_without_connecting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(listen, "_SSE_SUBSCRIBER_LIMIT", 1)
+    monkeypatch.setattr(listen, "_sse_subscriber_count", 0)
+    conn = MagicMock()
+    conn.add_listener = AsyncMock()
+    connect = AsyncMock(return_value=conn)
+    with patch("aios.db.listen.asyncpg.connect", connect):
+        first = await listen.open_listen_for_events(
+            "postgresql://stub/aios", "sess_1", on_connected=None
+        )
+        with pytest.raises(listen.SSESubscriberCapacityError):
+            await listen.open_listen_for_run_events("postgresql://stub/aios", "run_1")
+        assert connect.await_count == 1
+        first.terminate()
+        second = await listen.open_listen_for_run_events("postgresql://stub/aios", "run_1")
+        second.terminate()
+
+
+async def test_connector_result_listener_cap_rejects_and_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(listen, "_SSE_SUBSCRIBER_LIMIT", 1)
+    monkeypatch.setattr(listen, "_sse_subscriber_count", 0)
+    first_conn = MagicMock()
+    first_conn.add_listener = AsyncMock()
+    second_conn = MagicMock()
+    second_conn.add_listener = AsyncMock()
+    connect = AsyncMock(side_effect=[first_conn, second_conn])
+
+    with patch("aios.db.listen.asyncpg.connect", connect):
+        async with listen.listen_for_connector_result("postgresql://stub/aios", "call_1"):
+            with pytest.raises(listen.SSESubscriberCapacityError):
+                async with listen.listen_for_connector_result("postgresql://stub/aios", "call_2"):
+                    pytest.fail("capacity rejection must happen before connecting")
+
+        async with listen.listen_for_connector_result("postgresql://stub/aios", "call_2"):
+            pass
+
+    assert connect.await_count == 2
+    first_conn.terminate.assert_called_once()
+    second_conn.terminate.assert_called_once()
+    assert listen._sse_subscriber_count == 0
+
+
+async def test_connector_result_listener_releases_capacity_on_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(listen, "_SSE_SUBSCRIBER_LIMIT", 1)
+    monkeypatch.setattr(listen, "_sse_subscriber_count", 0)
+    connect = AsyncMock(side_effect=RuntimeError("connect failed"))
+
+    with (
+        patch("aios.db.listen.asyncpg.connect", connect),
+        pytest.raises(RuntimeError, match="connect failed"),
+    ):
+        async with listen.listen_for_connector_result("postgresql://stub/aios", "call_1"):
+            pytest.fail("context manager should not yield when connect raises")
+
+    assert listen._sse_subscriber_count == 0

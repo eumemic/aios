@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.sweep import (
     _Candidate,
+    _is_client_result_pending,
     _SweepAgentSurface,
     _was_dispatched,
     find_and_repair_ghosts,
@@ -60,7 +61,12 @@ def _candidate(arguments: Any) -> _Candidate:
     )
 
 
-# ── direct projection: _was_dispatched ───────────────────────────────────────
+# ── direct projections ────────────────────────────────────────────────────────
+
+
+def test_confirmation_pending_call_is_not_client_result_pending() -> None:
+    surface = _http_surface("always_ask")
+    assert _is_client_result_pending("http_request", surface) is False
 
 
 class TestWasDispatchedRouteRefinement:

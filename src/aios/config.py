@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +20,11 @@ from aios.models.vaults import OAuthProviderApp
 # budget). Imported by ``aios.harness.loop`` as the job-level asyncio.wait_for
 # timeout; the validators below reject per-phase budgets that meet or exceed it.
 HARNESS_STEP_TIMEOUT_S: float = 960.0
+
+OutboundToolQuota = tuple[
+    Annotated[int, Field(gt=0)],
+    Annotated[int, Field(gt=0)],
+]
 
 
 class Settings(BaseSettings):
@@ -75,6 +80,18 @@ class Settings(BaseSettings):
         description="Unlocks ``POST /v1/accounts/bootstrap`` while the ``accounts`` table "
         "has no root row; the endpoint is 404 once a root exists. Generate with "
         "``openssl rand -base64 32``.",
+    )
+
+    inference_credential_policy: Literal["account_only", "observe_legacy_env", "legacy_env"] = (
+        Field(
+            default="account_only",
+            description="Admission policy for paid inference credentials. account_only fails closed; "
+            "legacy modes explicitly permit LiteLLM process-environment fallback during migration.",
+        )
+    )
+    tenancy_posture: Literal["single_operator", "external_byok"] = Field(
+        default="single_operator",
+        description="Deployment tenancy posture. external_byok forbids every process-env inference fallback.",
     )
 
     default_spend_limit_usd: float | None = Field(
@@ -183,6 +200,26 @@ class Settings(BaseSettings):
         "Translates to ``docker run --pids-limit``. Mitigates fork-bomb "
         "denial-of-service; ``None`` leaves the host's default in place.",
     )
+    sandbox_snapshot_store_root: Path | None = Field(
+        default=None,
+        description="Persistent host path for canonical immutable sandbox tarballs. "
+        "When set, durable publication is synchronous before the DB pointer write.",
+    )
+    sandbox_canonical_store_budget_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Canonical tarball-store budget; pressure backpressures admissions.",
+    )
+    sandbox_canonical_store_headroom_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        ge=0,
+        description="Free bytes reserved on the persistent snapshot filesystem.",
+    )
+    sandbox_docker_cache_high_watermark_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Independent disposable Docker snapshot-cache watermark.",
+    )
     sandbox_snapshot_budget_bytes: int | None = Field(
         default=4 * 1024 * 1024 * 1024,
         ge=10 * 1024 * 1024,
@@ -203,12 +240,43 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum interval without bytes moving through a Docker flatten pipeline.",
     )
+    sandbox_docker_cli_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Timeout for individual Docker CLI management calls.",
+    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,
         description="Timeout for the ``docker inspect --size`` writable-layer "
         "walk during salvage; it scales with the corpse, so it gets this "
         "generous bound rather than the blanket ``DOCKER_CLI_TIMEOUT_S``.",
+    )
+    sandbox_snapshot_timeout_floor_seconds: float = Field(
+        default=60.0, gt=0, description="Minimum Docker snapshot operation timeout."
+    )
+    sandbox_snapshot_timeout_ns_per_byte: float = Field(
+        default=20e-9,
+        gt=0,
+        description="Fallback snapshot time per byte until measured throughput is available.",
+    )
+    sandbox_snapshot_timeout_safety_margin: float = Field(
+        default=2.0,
+        ge=1.0,
+        description="Multiplier applied to throughput-derived snapshot budgets.",
+    )
+    sandbox_snapshot_timeout_retry_multiplier: float = Field(
+        default=2.0, ge=1.0, description="Budget multiplier for each prior timeout of a corpse."
+    )
+    sandbox_snapshot_timeout_retry_cap: float = Field(
+        default=16.0, ge=1.0, description="Maximum cumulative timeout retry multiplier."
+    )
+    sandbox_snapshot_throughput_ewma_alpha: float = Field(
+        default=0.25, gt=0, le=1, description="Weight of the latest successful snapshot throughput."
+    )
+    sandbox_snapshot_throughput_state_path: Path = Field(
+        default=Path("/var/lib/aios/snapshot-throughput.json"),
+        description="Host-local persisted snapshot throughput calibration.",
     )
     sandbox_salvage_breaker_threshold: int = Field(
         default=3,
@@ -223,20 +291,22 @@ class Settings(BaseSettings):
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
-        description="Dormancy TTL for a persisted session snapshot. The GC "
-        "reconciler removes a snapshot whose session's last activity is older "
-        "than this (appending a model-visible ``sandbox_fs_expired`` notice), "
+        description="Dormancy threshold for non-destructive maintenance and pressure reporting. "
         "keyed on the session's ``(session_id, last_event_seq)`` event row. "
-        "Bounds supply-chain accumulation (agent-installed software re-executes "
-        "at every resume) and unbounded snapshot retention.",
+        "It never authorizes deletion of canonical non-archived state.",
+    )
+    sandbox_archive_gc_grace_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        description="Minimum age before unreferenced or archived canonical snapshot archives "
+        "are eligible for deletion.",
     )
     sandbox_snapshot_pool_bytes: int | None = Field(
         default=None,
         ge=0,
-        description="Per-host snapshot disk budget in bytes (durable session "
-        "sandboxes, §5.7) — the load-bearing pool bound. When this host's "
-        "total snapshot bytes exceed it, the GC evicts the MOST-DORMANT "
-        "sessions first (``sandbox_fs_expired {disk_pressure}``). Required in "
+        description="Per-host snapshot pressure threshold in bytes (durable session "
+        "sandboxes, §5.7). Crossing it emits an operator diagnostic but never "
+        "authorizes deletion of canonical session state. Required in "
         "production once the eumemic-ops prune-cron exemption lands (that "
         "exemption removes the only existing disk control). ``None`` ⇒ "
         "unbounded retention (dev default); operators MUST set real host "
@@ -306,6 +376,12 @@ class Settings(BaseSettings):
         "after the multipart body is drained so the client sees a clean "
         "response rather than a transport reset.",
     )
+    context_admission_mode: Literal["observe", "enforce"] = Field(
+        default="observe",
+        description="Final-payload deterministic context admission mode. Observe records the "
+        "decision without changing provider-call behavior; enforce fails closed unless the "
+        "route has an independently reviewed exact-counter attestation.",
+    )
     model_call_deadline_s: float = Field(
         default=900.0,
         ge=1.0,
@@ -339,6 +415,41 @@ class Settings(BaseSettings):
         default=4,
         ge=1,
         description="Concurrent session steps per worker process.",
+    )
+    held_connection_watchdog_threshold_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Seconds a worker asyncpg checkout may remain held before specimen capture.",
+    )
+    worker_dead_man_threshold_seconds: float = Field(
+        default=600.0,
+        gt=0,
+        description="Seconds claimed jobs may produce zero completed steps before an alarm.",
+    )
+    worker_watchdog_interval_seconds: float = Field(default=10.0, gt=0)
+    worker_watchdog_rate_limit_seconds: float = Field(default=300.0, gt=0)
+    worker_watchdog_journal_events: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_operation_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
+    worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
+    worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
+    workspace_root_validation: Literal["enforce", "warn", "off"] = Field(
+        default="warn",
+        description="Live-session workspace-root startup validation mode. warn reports every "
+        "violation without blocking startup; enforce reports all violations then fails; off "
+        "skips the scan. Keep warn during rollout until a clean full-fleet report exists.",
+    )
+    workspace_scan_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=120,
+        description="Overall wall-clock budget for live-session workspace-root validation.",
+    )
+    workspace_scan_query_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        le=60,
+        description="Per-page database query timeout for workspace-root validation.",
     )
 
     # ── container lifecycle ────────────────────────────────────────────────
@@ -535,6 +646,12 @@ class Settings(BaseSettings):
         "Includes one-shot ``schedule_wake`` rows; bump if your workload "
         "legitimately needs more standing timers per tenant.",
     )
+    connection_changes_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description="Named retention horizon for the durable connection_changes ledger. "
+        "Pruning is implemented separately; connections-row retention must never undercut it.",
+    )
     trigger_runs_retention_days: int = Field(
         default=30,
         ge=1,
@@ -663,6 +780,14 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    workflow_suspended_reap_seconds: float = Field(
+        default=24 * 60 * 60,
+        gt=0,
+        description="Age after which the worker sweep cancel-signals a suspended "
+        "workflow run when every unresolved awaited session/run child is terminal, "
+        "archived, or missing. The signal-and-wake path keeps the workflow step as "
+        "the journal's single writer. Defaults to 24 hours.",
+    )
     workflow_call_llm_stale_seconds: float = Field(
         default=1200.0,  # 20 minutes
         gt=0,
@@ -761,6 +886,13 @@ class Settings(BaseSettings):
         "harness retry-backoff path (cause='reschedule') and the async "
         "tool-completion path (cause='connector_tool_result') are "
         "untouched.",
+    )
+    outbound_tool_quotas: dict[str, OutboundToolQuota] = Field(
+        default_factory=dict,
+        description="Per-tool rolling outbound dispatch quotas as "
+        "tool_name -> (window_seconds, max_per_window). Empty (default) disables "
+        "quota checks and performs no dispatch-path query. Connector verbs are "
+        "matched without their MCP server namespace.",
     )
     inbound_rate_window_seconds: int = Field(
         default=0,
@@ -877,6 +1009,15 @@ class Settings(BaseSettings):
     def oauth_allow_insecure_host_set(self) -> frozenset[str]:
         """Parsed ``oauth_allow_insecure_hosts`` as a set of host[:port] entries."""
         return frozenset(h.strip() for h in self.oauth_allow_insecure_hosts.split(",") if h.strip())
+
+    @model_validator(mode="after")
+    def _external_byok_requires_account_only(self) -> Settings:
+        if (
+            self.tenancy_posture == "external_byok"
+            and self.inference_credential_policy != "account_only"
+        ):
+            raise ValueError("external_byok requires account_only inference credentials")
+        return self
 
     @model_validator(mode="after")
     def _require_absolute_workspace_root(self) -> Settings:

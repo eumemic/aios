@@ -437,7 +437,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
 
     # ── model-facing tools ────────────────────────────────────────────
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def signal_send(
         self,
         text: str,
@@ -609,7 +609,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         )
         return {"status": "ok"}
 
-    @tool(fire_and_forget=True)
+    @tool(delivery=True)
     async def signal_react(
         self,
         target_author_uuid: str,

@@ -34,7 +34,7 @@ from typing import Any, NamedTuple
 import asyncpg
 
 from aios.db import queries
-from aios.models.connections import Connection
+from aios.models.connections import Connection, inbound_orig_channel
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import SessionResource
 from aios.services import sessions as sessions_service
@@ -221,7 +221,9 @@ async def _spawn_per_chat_session(
     if template.archived_at is not None:
         return ResolveResult(session_id=None, drop=ResolveDrop.ARCHIVED_TEMPLATE)
 
-    focal_channel = f"{connection.connector}/{connection.external_account_id}/{chat_id}"
+    focal_channel = inbound_orig_channel(
+        connection.connector, connection.external_account_id, chat_id
+    )
     # The template's attached memory stores must propagate to the spawned
     # session — create_session only attaches them via its ``resources`` param
     # (there is no memory_store_ids kwarg), so map them here. Forwarding

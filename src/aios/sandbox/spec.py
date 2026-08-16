@@ -28,7 +28,7 @@ import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from aios.config import get_settings
 from aios.db import queries
@@ -38,6 +38,7 @@ from aios.models.environments import (
     RESERVED_SANDBOX_IMAGE_PREFIX,
     EnvironmentConfig,
     LimitedNetworking,
+    UnrestrictedNetworking,
 )
 from aios.models.github_repositories import GithubRepositoryResourceEcho
 from aios.models.memory_stores import MemoryStoreResourceEcho
@@ -48,6 +49,7 @@ from aios.sandbox.backends.base import (
     MANAGED_LABEL_KEY,
     MANAGED_LABEL_VALUE,
     SESSION_LABEL_KEY,
+    VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     Mount,
     SandboxSpec,
 )
@@ -632,6 +634,44 @@ def _warn_if_creds_under_open_egress(
     )
 
 
+def _proxy_networking_mode(
+    env_config: EnvironmentConfig | None,
+) -> Literal["limited", "unrestricted"]:
+    """Select the egress proxy's networking mode from the environment config.
+
+    TOTAL and explicit, rather than an ``else``-falls-to-permissive ternary
+    (aios#2138). The proxy uses this mode to decide whether an unrecognized SNI
+    may be blind-relayed, so an unknown configuration shape must NOT silently
+    select the permissive value.
+
+    * :class:`LimitedNetworking`      → ``limited``      (strict; there is a
+      filter DROP, so the allowlist is the containment boundary).
+    * :class:`UnrestrictedNetworking` → ``unrestricted`` (explicitly open).
+    * ``None`` env config / ``None`` networking → ``unrestricted``. This is
+      NOT an "unknown" — absent networking config is the DOCUMENTED default
+      for open egress and is treated as unrestricted by every other consumer
+      (``registry._apply_egress_rules`` installs no DROP,
+      ``env_var_credential_containment_error`` skips the subset gate,
+      ``_warn_if_creds_under_open_egress`` warns). Selecting ``limited`` here
+      would make the proxy reset colliding SNIs for the DEFAULT configuration
+      — reintroducing the exact outage this PR fixes (#2034) on sessions whose
+      egress the firewall leaves wide open.
+    * Anything else (a networking class added later that this function has not
+      been taught) → ``limited``: the strict side, so a future config shape
+      fails closed instead of silently unlocking blind relay.
+    """
+    # Deliberately widen at this runtime trust boundary.  EnvironmentConfig's
+    # current static union is exhaustive, but persisted/deserialized data (and a
+    # future networking model not yet handled here) must still land on the
+    # fail-closed branch below rather than make that branch type-level dead code.
+    networking: object | None = env_config.networking if env_config is not None else None
+    if isinstance(networking, LimitedNetworking):
+        return "limited"
+    if networking is None or isinstance(networking, UnrestrictedNetworking):
+        return "unrestricted"
+    return "limited"
+
+
 def _resolve_image(env_config: EnvironmentConfig | None, default_image: str) -> str:
     """Resolve the sandbox image from the environment config (#724) and enforce the
     cross-tenant snapshot gate (durable session sandboxes, §5.8).
@@ -749,7 +789,11 @@ async def build_spec_from_session(session_id: str) -> ProvisioningPlan:
         # ``_materialize_github_clones``'s return value (only set on a clean
         # start).
         if env_var_credentials:
-            proxy = SecretEgressProxy(env_var_credentials)
+            proxy = SecretEgressProxy(
+                env_var_credentials,
+                networking_mode=_proxy_networking_mode(env_config),
+                owner_id=session_id,
+            )
             await proxy.start()
             secret_proxy = proxy
 
@@ -841,7 +885,11 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     session-OR-run ULID); the backend stamps it onto the handle's ``owner_id``.
     """
     from aios.db.queries import workflows as wf_queries
-    from aios.sandbox.volumes import ensure_run_workspace_dir
+    from aios.sandbox.volumes import (
+        ensure_run_workspace_dir,
+        ensure_workspace_path,
+        validate_workspace_path,
+    )
 
     settings = get_settings()
     pool = runtime.require_pool()
@@ -867,7 +915,17 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     # path when a credentialed run provisions under non-Limited egress.
     _warn_if_creds_under_open_egress(run_id, env_config, env_var_credentials)
 
-    workspace_path = ensure_run_workspace_dir(run_id)
+    run_workspace_path = getattr(run, "workspace_path", None)
+    if run_workspace_path is not None:
+        validate_workspace_path(
+            run_workspace_path, run.account_id, session_id=run.launcher_session_id
+        )
+        workspace_path = ensure_workspace_path(run_workspace_path)
+    elif getattr(run, "workspace", "fresh") == "shared":
+        raise ValueError(f"shared workflow run {run_id!r} has no workspace pointer")
+    else:
+        # Legacy pre-M2 run rows/tests have no persisted pointer.
+        workspace_path = ensure_run_workspace_dir(run_id)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path
@@ -875,7 +933,11 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
     broker_registered = False
     try:
         if env_var_credentials:
-            proxy = SecretEgressProxy(env_var_credentials)
+            proxy = SecretEgressProxy(
+                env_var_credentials,
+                networking_mode=_proxy_networking_mode(env_config),
+                owner_id=run_id,
+            )
             await proxy.start()
             secret_proxy = proxy
 
@@ -1100,6 +1162,13 @@ def _assemble_plan(
         # unique-bytes accounting.
         ENV_KEYS_LABEL_KEY: ",".join(sorted(merged_env)),
         BASE_IMAGE_LABEL_KEY: image,
+        # The vault-placeholder env keys injected by THIS provision
+        # (eumemic/eumemic-ops#331). Names only — never a placeholder value,
+        # never a credential id. The resume path diffs the snapshot's recorded
+        # set against the current one and explicitly empties any key that is no
+        # longer backed by an active credential, so a resumed container can
+        # never inherit a stale, unexchangeable placeholder from its snapshot.
+        VAULT_PLACEHOLDER_KEYS_LABEL_KEY: ",".join(sorted(placeholder_env)),
     }
 
     # Drift key is stamped from the ATTEMPTED github set (issue #1725):
