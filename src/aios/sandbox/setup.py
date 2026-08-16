@@ -396,6 +396,40 @@ def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
     return _RESOLV_PREAMBLE + "\n".join(lines)
 
 
+def egress_unread_hosts(
+    *,
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+) -> list[str]:
+    """In-scope hosts ABSENT from ``new_ips`` — i.e. hosts whose IPs were not read.
+
+    Absence and presence-with-an-empty-set are DIFFERENT facts: the first is
+    "could not be read", the second is "read, and this host genuinely owns
+    nothing". Only the second may drive a deletion.
+
+    Exposed (rather than inlined into :func:`build_egress_refresh_script`) so
+    the CALLER can act on the same signal the builder acts on. The builder can
+    only decline to emit deletes; it cannot stop the caller from advancing its
+    ``pinned`` bookkeeping past IPs whose rules were deliberately left
+    installed. Both layers must read the identical predicate or the two
+    disagree — which is how a refusal to delete silently becomes "the rule is
+    installed and nothing remembers it exists".
+
+    NOTE ON REACHABILITY (measured, not assumed): with today's sole in-tree
+    caller this returns ``[]`` unconditionally — ``_seed_pinned_from_installed``
+    writes a key for EVERY in-scope host and ``_merge_egress_resolutions`` only
+    ever copies/``setdefault``s that dict, never deletes a key, and carries an
+    unread host forward at its last-good pins (``if not fresh: continue``). A
+    20k-tick randomized simulation of the merge (resolve failures, empty
+    resolves, rotations, whole-sidecar failure) produced zero non-empty
+    results. **Keep-last-good upstream is the actual live protection**; this
+    predicate is defence-in-depth on a public helper whose contract would
+    otherwise turn a missing key into a delete.
+    """
+    return sorted((credential_hosts | limited_hosts) - set(new_ips))
+
+
 def build_egress_refresh_script(
     *,
     old_ips: dict[str, set[str]],
@@ -444,7 +478,13 @@ def build_egress_refresh_script(
     # would DELETE firewall rules that are still in force. Deletions are
     # therefore refused entirely while any in-scope host is unread; adds are
     # unaffected because an add only ever widens what is already permitted.
-    unread_hosts = sorted((credential_hosts | limited_hosts) - set(new_ips))
+    #
+    # The SAME predicate is read by the caller (``_merge_egress_resolutions``),
+    # which must also hold its ``pinned`` bookkeeping when it fires — see
+    # :func:`egress_unread_hosts`.
+    unread_hosts = egress_unread_hosts(
+        new_ips=new_ips, credential_hosts=credential_hosts, limited_hosts=limited_hosts
+    )
 
     old_credential_ips = _category_ips(old_ips, credential_hosts)
     new_credential_ips = _category_ips(new_ips, credential_hosts)

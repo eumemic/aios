@@ -8,6 +8,8 @@ non-idempotent rule op is only visible there.
 
 from __future__ import annotations
 
+from structlog.testing import capture_logs
+
 from aios.sandbox.backends.base import CommandResult
 from aios.sandbox.registry import (
     _EGRESS_EVICT_AFTER_SUCCESSES as _EVICT_AFTER,
@@ -16,7 +18,7 @@ from aios.sandbox.registry import (
     EgressRefreshState,
     SandboxRegistry,
 )
-from aios.sandbox.setup import build_egress_refresh_script
+from aios.sandbox.setup import build_egress_refresh_script, egress_unread_hosts
 from tests.helpers.sandbox import FakeBackend, make_handle
 
 _PROXY = ("172.18.0.2", 49152)
@@ -80,14 +82,16 @@ def test_refresh_script_keeps_rules_pinned_by_another_host() -> None:
     assert "-D OUTPUT -d 1.1.1.1" not in script
 
 
-def test_refresh_script_refuses_deletes_on_incomplete_host_read() -> None:
-    """An UNREAD host must not produce deletions (fail closed).
+def test_builder_refuses_deletes_when_inventory_omits_an_in_scope_host() -> None:
+    """BUILDER CONTRACT ONLY — not a live-system property.
 
-    ``b.example`` is in scope but absent from the inventory — its IPs could
-    not be read. That is NOT the same fact as "owns no IPs": treating it as
-    the latter drops ``9.9.9.9`` into ``old - new`` and DELETES a live
-    firewall rule on a transient/partial read. The whole deletion pass must
-    be refused while any in-scope host is unread.
+    Titled for what it actually verifies. It hand-builds an inventory that
+    OMITS an in-scope host and asserts the builder emits no deletes. Today's
+    sole in-tree caller **cannot produce this input**: keep-last-good in
+    ``_merge_egress_resolutions`` carries an unread host forward at its old
+    pins, so the host arrives PRESENT (measured — see ``egress_unread_hosts``).
+    The live protection is upstream; this pins the public helper's contract,
+    which otherwise turns a missing key into a delete of a live rule.
     """
     script = build_egress_refresh_script(
         old_ips={"a.example": {"1.1.1.1"}, "b.example": {"9.9.9.9"}},
@@ -106,10 +110,12 @@ def test_refresh_script_refuses_deletes_on_incomplete_host_read() -> None:
     assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 80 -j ACCEPT' in script
 
 
-def test_refresh_script_still_deletes_when_complete_read_shows_host_owns_nothing() -> None:
-    """Over-correction guard: a COMPLETE read in which a host legitimately
-    owns nothing must still delete that host's stale rules. Fail-closed on
-    an unread host must not degrade into never deleting."""
+def test_builder_still_deletes_when_inventory_shows_host_owns_nothing() -> None:
+    """BUILDER CONTRACT ONLY — the over-correction guard.
+
+    Present-with-an-empty-set is AUTHORITATIVE ("read, owns nothing") and must
+    still delete, or the refusal degrades into never deleting — a refusal with
+    no escalation path is a different outage, not a fixed one."""
     script = build_egress_refresh_script(
         old_ips={"a.example": {"1.1.1.1"}, "b.example": {"9.9.9.9"}},
         # b.example WAS read and genuinely resolves to nothing.
@@ -384,3 +390,58 @@ async def test_stamp_seeds_pinned_and_proxy_target_from_live_rules() -> None:
     state = registry._egress_states["sess_X"]
     assert state.pinned == {"api.github.com": {"1.1.1.1": 0}}
     assert (state.proxy_ip, state.proxy_port) == _PROXY
+
+
+def test_unread_predicate_distinguishes_absent_from_authoritatively_empty() -> None:
+    """The two layers must agree on ONE predicate, so it is pinned directly.
+
+    Absent ⇒ unread (deletes refused, ``pinned`` held). Present-but-empty ⇒
+    authoritative (deletes proceed, ``pinned`` advances). Conflating them is
+    the whole bug class.
+    """
+    scope = {"credential_hosts": {"a.example"}, "limited_hosts": {"b.example"}}
+
+    assert egress_unread_hosts(new_ips={"a.example": {"1.1.1.1"}}, **scope) == ["b.example"]
+    assert egress_unread_hosts(new_ips={}, **scope) == ["a.example", "b.example"]
+    # Present-with-empty-set is READ, not unread.
+    assert egress_unread_hosts(new_ips={"a.example": set(), "b.example": set()}, **scope) == []
+
+
+async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_host() -> None:
+    """CALLER LAYER: a refusal must not be mistaken for a successful apply.
+
+    The refusal script exits 0. If the caller advanced ``pinned`` on that
+    success it would FORGET the IPs whose deletes were withheld — their rules
+    stay installed, untracked and un-evictable forever. That inverts the
+    discipline the nonzero-exit path already uses. So ``pinned`` is held and a
+    warning is emitted, and the next tick retries the same delta: the refusal
+    has an escalation path rather than being a terminal state.
+
+    Reachability is stated honestly: this drives the real registry method but
+    hand-seeds a ``pinned`` map missing an in-scope host, which today's stamp
+    (``_seed_pinned_from_installed`` writes a key per host) does not produce.
+    """
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    registry._handles["sess_X"] = make_handle(session_id="sess_X")
+    # ``b.example`` is in scope but has NO key — the unread shape.
+    state = _state(
+        credential_hosts=frozenset({"a.example", "b.example"}),
+        limited_hosts=frozenset(),
+        pinned={"a.example": {"1.1.1.1": 0}},
+    )
+    registry._egress_states["sess_X"] = state
+    before = {host: dict(ips) for host, ips in state.pinned.items()}
+
+    with capture_logs() as logs:
+        await registry._merge_egress_resolutions("sess_X", {"a.example": {"2.2.2.2"}})
+
+    script = _sidecar_scripts(backend)[-1]
+    # Adds still apply (an add only widens what is already permitted)...
+    assert "-A OUTPUT -d 2.2.2.2" in script
+    # ...but nothing is deleted, and the script exits 0 all the same.
+    assert "-D OUTPUT" not in script
+    # The caller must NOT bank that exit-0 as a completed delta.
+    assert state.pinned == before
+    assert any(entry.get("event") == "sandbox.egress_refresh_deletes_refused" for entry in logs)
+    assert any(entry.get("unread_hosts") == ["b.example"] for entry in logs)
