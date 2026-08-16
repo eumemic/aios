@@ -615,6 +615,59 @@ class TestFailClosed:
         assert not relayed
         assert upstream_hits == 0
 
+    @pytest.mark.parametrize("mode", ["limited", "unrestricted"])
+    async def test_absent_and_malformed_sni_fail_closed_in_both_modes(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """Absent/unparseable SNI must fail closed under UNRESTRICTED too.
+
+        The existing coverage exercised this only under ``limited``. Under
+        ``unrestricted`` — the mode this PR exists to enable, and the one
+        selected for the DEFAULT config — a ClientHello with no SNI has no
+        hostname to resolve or pin, so relaying it is relaying to an
+        unauthenticated destination. The ``host is None`` check sits ABOVE the
+        mode branch; move it below and the suite must go red rather than
+        blind-relaying unparseable ClientHellos.
+
+        Proven by the upstream never being contacted, not by an exception.
+        """
+        hits = 0
+
+        async def _count(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            nonlocal hits
+            hits += 1
+            await _echo_once(r, w)
+
+        upstream = await asyncio.start_server(_count, "127.0.0.1", 0)
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", upstream.sockets[0].getsockname()[1])
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode=cast(Any, mode),
+            owner_id="sess_absent_sni",
+        )
+        await proxy.start()
+        try:
+            # An IP-literal server_hostname omits the SNI extension entirely
+            # (verified: no 0x0000 extension in the emitted ClientHello).
+            for payload in (_raw_client_hello("203.0.113.9"), b"\x16\x03\x01\x00\x05hello"):
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+                try:
+                    writer.write(payload)
+                    await writer.drain()
+                    assert await asyncio.wait_for(reader.read(4096), 5) == b"", (
+                        f"{mode}: a ClientHello with no usable SNI was answered instead of refused"
+                    )
+                finally:
+                    writer.close()
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
+            assert hits == 0, f"{mode}: unparseable/absent SNI reached the upstream"
+        finally:
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
     async def test_unauthorized_sni_resets_handshake_under_limited(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
     ) -> None:
