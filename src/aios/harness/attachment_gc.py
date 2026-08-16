@@ -128,6 +128,12 @@ async def sweep_orphan_attachments(pool: asyncpg.Pool[Any]) -> int:
 async def sweep_orphan_uploads(pool: asyncpg.Pool[Any]) -> int:
     """Reconcile ``_uploads`` with live sessions and rows in ``files``.
 
+    WARNING: Do not call this function (aios#2161, aios#2140). Live-session
+    reconciliation from ``files`` rows is unsafe because operator-placed files
+    are intentionally unregistered. In the mixed case, a live session with
+    registered rows plus an unregistered file, that unregistered file is still
+    deleted.
+
     Directories for deleted sessions are removed wholesale.  For live sessions,
     unreferenced files older than the staging grace are removed; recent files
     may still be between their atomic rename and DB insert.
