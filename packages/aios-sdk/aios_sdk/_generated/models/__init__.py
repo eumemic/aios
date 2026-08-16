@@ -298,7 +298,7 @@ from .vault_credential_auth_type import VaultCredentialAuthType
 from .vault_credential_create import VaultCredentialCreate
 from .vault_credential_create_auth_type import VaultCredentialCreateAuthType
 from .vault_credential_create_metadata import VaultCredentialCreateMetadata
-from .vault_credential_metadata import VaultCredentialMetadata
+from .vault_credential_metadata_type_0 import VaultCredentialMetadataType0
 from .vault_credential_update import VaultCredentialUpdate
 from .vault_credential_update_metadata_type_0 import VaultCredentialUpdateMetadataType0
 from .vault_metadata import VaultMetadata
@@ -617,7 +617,7 @@ __all__ = (
     "VaultCredentialCreate",
     "VaultCredentialCreateAuthType",
     "VaultCredentialCreateMetadata",
-    "VaultCredentialMetadata",
+    "VaultCredentialMetadataType0",
     "VaultCredentialUpdate",
     "VaultCredentialUpdateMetadataType0",
     "VaultMetadata",
