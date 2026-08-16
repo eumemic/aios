@@ -476,27 +476,101 @@ def _bind_mount_base(
     return None, None
 
 
-def purge_session_directories(session_id: str, workspace_path: Path) -> None:
+def _assert_purge_target_owned(
+    candidate: Path,
+    *,
+    session_id: str,
+    owned_bases: tuple[Path, ...],
+    root: Path,
+) -> Path:
+    """Return ``candidate``'s resolved path, or raise if it isn't provably
+    a directory owned by ``session_id`` alone.
+
+    Two independent conditions, both on the RESOLVED (symlink-dereferenced,
+    ``..``-collapsed) real path — never on the raw string:
+
+    1. **In jail.** The target must live strictly under ``workspace_root``.
+       ``workspace_root`` itself is refused.
+    2. **Owned by this session.** The target must be one of the session's own
+       canonical directories (or something strictly inside one).  Containment
+       is checked against a base that is itself derived from ``session_id``
+       and re-checked for jail residency, so a symlinked canonical dir can't
+       launder an out-of-jail target through condition 2.
+
+    Condition 2 is the one that matters and the one that was missing: a path
+    that is in-jail but too HIGH in the tree — most importantly the account
+    root ``<workspace_root>/<account_id>``, which ``validate_workspace_path``
+    accepts at create time because ``is_relative_to`` is REFLEXIVE — is
+    shared with every other live session of that tenant.  ``rmtree``-ing it
+    on one session's delete destroys every sibling session's workspace.  An
+    ancestor is not ownership; only a proven per-session location is.
+    """
+    resolved = candidate.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ForbiddenError(
+            "refusing to purge session directory outside workspace_root",
+            detail={"path": str(candidate), "session_id": session_id},
+        )
+    for base in owned_bases:
+        base_resolved = base.resolve()
+        # The base must itself be in-jail: otherwise a symlink AT the
+        # canonical location would make an out-of-jail target "contained".
+        if base_resolved == root or not base_resolved.is_relative_to(root):
+            continue
+        if resolved == base_resolved or resolved.is_relative_to(base_resolved):
+            return resolved
+    raise ForbiddenError(
+        "refusing to purge a directory that is not exclusively owned by this session",
+        detail={"path": str(candidate), "session_id": session_id},
+    )
+
+
+def purge_session_directories(session_id: str, workspace_path: Path, *, account_id: str) -> None:
     """Remove every host directory exclusively owned by ``session_id``.
 
-    Every candidate is resolved and checked against ``workspace_root`` before
-    deletion.  This is intentionally stricter than trusting the persisted
-    workspace path: a stale row or symlink must never turn session deletion
-    into an out-of-jail ``rmtree``.
+    Every candidate is resolved and proven to be *the session's own*
+    directory before anything is deleted.  This is intentionally stricter
+    than trusting the persisted workspace path on two axes:
+
+    * **Out of jail** — a stale row or symlink must never turn session
+      deletion into an out-of-jail ``rmtree``.
+    * **In jail but too high** — ``workspace_volume_path`` is user-supplied
+      via ``POST /v1/sessions`` and is NOT unique per session.  The account
+      root ``<workspace_root>/<account_id>`` passes create-time validation
+      (``is_relative_to`` is reflexive), so without a per-session ownership
+      proof deleting one session would ``rmtree`` every OTHER live session's
+      workspace for that tenant.  Refused here.
+
+    Permitted workspace locations are the post-#409 canonical
+    ``<workspace_root>/<account_id>/<session_id>`` and the pre-#409 legacy
+    ``<workspace_root>/<session_id>`` (the same carve-out
+    :func:`validate_workspace_path` makes, and still exclusively this
+    session's).  Anything else — the account root, a sibling session's dir,
+    a shared custom dir — raises ``ForbiddenError`` and deletes NOTHING:
+    every candidate is validated up front, so a refusal on the last one
+    cannot follow an ``rmtree`` of the first.  Failing the delete is the
+    safe direction; an unreferenced directory is recoverable, another
+    session's live workspace is not.
     """
-    root = get_settings().workspace_root.resolve()
-    candidates = (
-        workspace_path,
-        session_uploads_dir(session_id),
-        session_attachments_dir(session_id),
-        session_repos_root(session_id),
+    settings = get_settings()
+    root = settings.workspace_root.resolve()
+    workspace_bases = (
+        settings.workspace_root / account_id / session_id,
+        settings.workspace_root / session_id,
     )
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved == root or not resolved.is_relative_to(root):
-            raise ForbiddenError(
-                "refusing to purge session directory outside workspace_root",
-                detail={"path": str(candidate), "session_id": session_id},
-            )
-        if resolved.exists():
-            shutil.rmtree(resolved)
+    candidates = (
+        (workspace_path, workspace_bases),
+        (session_uploads_dir(session_id), (session_uploads_dir(session_id),)),
+        (session_attachments_dir(session_id), (session_attachments_dir(session_id),)),
+        (session_repos_root(session_id), (session_repos_root(session_id),)),
+    )
+    # Two passes: prove EVERY target first, delete only once all are proven.
+    # A single-pass loop would leave the earlier directories already gone when
+    # a later candidate is refused — "delete nothing" must mean nothing.
+    targets = [
+        _assert_purge_target_owned(candidate, session_id=session_id, owned_bases=bases, root=root)
+        for candidate, bases in candidates
+    ]
+    for target in targets:
+        if target.exists():
+            shutil.rmtree(target)

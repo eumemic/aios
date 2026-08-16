@@ -2502,7 +2502,9 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
         await queries.delete_session(conn, session_id, account_id=account_id)
-    purge_session_directories(session_id, Path(artifact["workspace_volume_path"]))
+    purge_session_directories(
+        session_id, Path(artifact["workspace_volume_path"]), account_id=account_id
+    )
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
 
