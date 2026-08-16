@@ -46,7 +46,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from mautrix.appservice.state_store.memory import ASStateStore
 from mautrix.client.state_store.memory import MemoryStateStore
-from mautrix.errors import MForbidden, MNotFound, MUnknown
+from mautrix.errors import MatrixResponseError, MForbidden, MNotFound, MUnknown
 from mautrix.types import Member, Membership, RoomID, UserID
 
 from aios_matrix.appservice import create_appservice
@@ -260,9 +260,7 @@ async def test_permanently_forbidden_repair_escalates_and_halts(receiver) -> Non
 
     statuses = []
     for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES):
-        response = await _put(
-            appservice, f"txn-forbidden-{attempt}", [_message(event_id="$evt8")]
-        )
+        response = await _put(appservice, f"txn-forbidden-{attempt}", [_message(event_id="$evt8")])
         statuses.append(response.status)
 
     assert statuses[:-1] == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES - 1)
@@ -289,6 +287,54 @@ async def test_permanent_non_forbidden_repair_failure_escalates_at_bound(receive
     assert statuses[-1] == 500
     assert connector._halt.is_set()
     assert connector._unroutable_attempts["$evt404"] == connector.MAX_UNROUTABLE_REDELIVERIES
+
+
+async def test_unknown_repair_failure_escalates_at_bound(receiver) -> None:
+    """An unclassified repair failure gets a finite budget rather than retrying forever."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    appservice._intent.get_joined_members = AsyncMock(
+        side_effect=MatrixResponseError("unexpected homeserver response")
+    )
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES):
+        response = await _put(
+            appservice, f"txn-unknown-{attempt}", [_message(event_id="$evt-unknown")]
+        )
+        statuses.append(response.status)
+
+    assert statuses[:-1] == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES - 1)
+    assert statuses[-1] == 500
+    assert connector._halt.is_set()
+    assert connector._unroutable_attempts["$evt-unknown"] == (connector.MAX_UNROUTABLE_REDELIVERIES)
+
+
+async def test_unknown_ghost_repair_failure_escalates_at_bound(receiver) -> None:
+    """The bounded default also applies after entering the ghost-candidate path."""
+    connector, appservice, store = receiver
+    await store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    connector._ghost_connections["_aios_agent_one"] = "con_1"
+    appservice._intent.get_joined_members = AsyncMock(side_effect=MForbidden(403, "not joined"))
+    ghost_intent = MagicMock()
+    ghost_intent.get_joined_members = AsyncMock(
+        side_effect=MatrixResponseError("unexpected homeserver response")
+    )
+    appservice._intent.user.return_value = ghost_intent
+
+    statuses = []
+    for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES):
+        response = await _put(
+            appservice, f"txn-ghost-unknown-{attempt}", [_message(event_id="$evt-ghost-unknown")]
+        )
+        statuses.append(response.status)
+
+    assert statuses[:-1] == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES - 1)
+    assert statuses[-1] == 500
+    assert connector._halt.is_set()
+    assert connector._unroutable_attempts["$evt-ghost-unknown"] == (
+        connector.MAX_UNROUTABLE_REDELIVERIES
+    )
 
 
 async def test_matrix_server_error_remains_transient_without_consuming_budget(receiver) -> None:
@@ -362,9 +408,7 @@ async def test_repeated_transient_repair_failure_never_halts(receiver) -> None:
 
     statuses = []
     for attempt in range(connector.MAX_UNROUTABLE_REDELIVERIES + 1):
-        response = await _put(
-            appservice, f"txn-transient-{attempt}", [_message(event_id="$evt9")]
-        )
+        response = await _put(appservice, f"txn-transient-{attempt}", [_message(event_id="$evt9")])
         statuses.append(response.status)
 
     assert statuses == [503] * (connector.MAX_UNROUTABLE_REDELIVERIES + 1)

@@ -10,12 +10,12 @@ from typing import Any, Literal, cast
 
 import httpx
 import structlog
-from aiohttp import web
+from aiohttp import ClientError, web
 from aios_connector_http import HttpConnector, SandboxPath, tool
 from aios_connector_http.spool import SqliteAnsweredSpool
 from markdown_it import MarkdownIt
 from mautrix.appservice import AppService
-from mautrix.errors import MForbidden, MatrixRequestError
+from mautrix.errors import MatrixConnectionError, MatrixRequestError, MForbidden
 from mautrix.types import (
     Event,
     EventID,
@@ -297,7 +297,8 @@ class MatrixConnector(HttpConnector):
         # read without changing room membership.
         try:
             joined = await self.az.intent.get_joined_members(
-                room_id, ensure_joined=False  # type: ignore[call-arg]
+                room_id,
+                ensure_joined=False,  # type: ignore[call-arg]
             )
         except MForbidden as bot_forbidden:
             joined = None
@@ -308,7 +309,8 @@ class MatrixConnector(HttpConnector):
                 intent = self.az.intent.user(self._mxid(localpart))
                 try:
                     joined = await intent.get_joined_members(
-                        room_id, ensure_joined=False  # type: ignore[call-arg]
+                        room_id,
+                        ensure_joined=False,  # type: ignore[call-arg]
                     )
                     break
                 except Exception as exc:
@@ -350,14 +352,31 @@ class MatrixConnector(HttpConnector):
 
     @staticmethod
     def _is_permanent_membership_failure(exc: Exception) -> bool:
-        """Whether retrying this Matrix membership read cannot repair it."""
-        if not isinstance(exc, MatrixRequestError):
+        """Whether a membership read should consume the finite failure budget.
+
+        Retry only failures with an explicit transient contract. Unknown
+        exceptions are bounded: treating them as transient would let a code,
+        decoding, or unexpected-response failure stall all Matrix traffic
+        forever without an operator signal.
+        """
+        if isinstance(
+            exc,
+            (
+                MatrixConnectionError,
+                httpx.TransportError,
+                ClientError,
+                ConnectionError,
+                TimeoutError,
+            ),
+        ):
             return False
-        status = getattr(exc, "http_status", None)
-        # Request timeout and rate limiting are explicitly transient, as are
-        # all server failures.  Other 4xx answers (notably 404/410) are stable
-        # verdicts for this read and must receive the finite escalation budget.
-        return isinstance(status, int) and 400 <= status < 500 and status not in (408, 429)
+        if isinstance(exc, MatrixRequestError):
+            status = getattr(exc, "http_status", None)
+            # Request timeout and rate limiting are explicitly transient, as
+            # are all server failures. Other 4xx answers (notably 404/410) are
+            # stable verdicts for this read.
+            return not (isinstance(status, int) and (status in (408, 429) or status >= 500))
+        return True
 
     def _raise_unrepairable_membership(
         self, event: Event, room_id: RoomID, cause: Exception
