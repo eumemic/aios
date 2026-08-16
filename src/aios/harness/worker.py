@@ -45,7 +45,7 @@ from aios.db.listen import (
 )
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
-from aios.harness.attachment_gc import sweep_orphan_attachments, sweep_orphan_uploads
+from aios.harness.attachment_gc import sweep_orphan_attachments
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inflight_tool_registry import InflightToolRegistry
@@ -486,9 +486,6 @@ async def worker_main() -> None:
         deleted_attachments = await sweep_orphan_attachments(pool)
         if deleted_attachments:
             log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
-        deleted_uploads = await sweep_orphan_uploads(pool)
-        if deleted_uploads:
-            log.info("worker.reaped_orphan_uploads", count=deleted_uploads)
 
         log.info(
             "worker.startup",

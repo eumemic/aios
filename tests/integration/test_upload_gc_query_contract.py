@@ -12,10 +12,10 @@ from aios.db import queries
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
-async def test_live_session_without_files_is_present_in_upload_keep_map(
+async def test_live_session_without_files_is_indeterminate_in_upload_keep_map(
     migrated_db_url: str, _reset_db_state: None
 ) -> None:
-    """A missing key authorizes wholesale rmtree, so zero-file live rows must emit one."""
+    """Live zero-row sessions must differ from deleted and authoritative sessions."""
     conn: asyncpg.Connection[Any] = await asyncpg.connect(migrated_db_url)
     try:
         await conn.execute(
@@ -41,6 +41,6 @@ async def test_live_session_without_files_is_present_in_upload_keep_map(
 
         assert await queries.list_upload_paths_for_sessions(
             conn, ["sess_upload_contract", "sess_deleted"]
-        ) == {"sess_upload_contract": set()}
+        ) == {"sess_upload_contract": None}
     finally:
         await conn.close()

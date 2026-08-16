@@ -16,7 +16,7 @@ from aios.errors import (
 )
 from aios.models.files import File
 
-# ─── files ───────────────────────────────────────────────────────────────────
+# ─── files ───────────────────────────────────────────────────────────────
 
 
 def _row_to_file(row: asyncpg.Record) -> File:
@@ -83,12 +83,13 @@ async def insert_file(
 
 async def list_upload_paths_for_sessions(
     conn: asyncpg.Connection[Any], session_ids: list[str]
-) -> dict[str, set[str]]:
-    """Return referenced upload host paths, including empty sets for live sessions.
+) -> dict[str, set[str] | None]:
+    """Return referenced upload host paths for requested live sessions.
 
-    Missing keys identify session directories whose owning row is gone.  The
-    startup filesystem reconciler uses that distinction to remove the whole
-    directory rather than applying the per-file in-flight grace period.
+    A missing key identifies a deleted session. ``None`` identifies a live
+    session with no file rows, where the database cannot determine whether
+    on-disk files are orphaned. A non-empty set authoritatively identifies the
+    known files and permits per-file reconciliation.
     """
     if not session_ids:
         return {}
@@ -101,9 +102,16 @@ async def list_upload_paths_for_sessions(
         """,
         session_ids,
     )
-    result: dict[str, set[str]] = {}
+    result: dict[str, set[str] | None] = {}
     for row in rows:
-        paths = result.setdefault(row["session_id"], set())
-        if row["host_path"] is not None:
-            paths.add(row["host_path"])
+        session_id = row["session_id"]
+        host_path = row["host_path"]
+        if host_path is None:
+            result.setdefault(session_id, None)
+            continue
+        paths = result.get(session_id)
+        if paths is None:
+            paths = set()
+            result[session_id] = paths
+        paths.add(host_path)
     return result
