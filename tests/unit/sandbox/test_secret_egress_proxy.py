@@ -14,15 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import socket
 import ssl
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 import h11
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
 from aios import pinned_transport
@@ -30,7 +33,7 @@ from aios.crypto.vault import CryptoBox
 from aios.harness import runtime
 from aios.pinned_transport import resolve_pinned_ip
 from aios.sandbox import secret_egress_proxy as sep
-from aios.sandbox.egress_ca import get_egress_ca
+from aios.sandbox.egress_ca import get_egress_ca, mint_server_leaf
 from aios.sandbox.secret_egress_proxy import (
     PLACEHOLDER_SUBSTITUTION_FAILED_CODE,
     PLACEHOLDER_SUBSTITUTION_FAILED_HEADER,
@@ -104,6 +107,15 @@ async def _boot(
 def _client_ctx() -> ssl.SSLContext:
     """A client trust store containing only the aios egress CA."""
     return ssl.create_default_context(cadata=get_egress_ca().cert_pem)
+
+
+async def _echo_once(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        writer.write(await reader.read(4096))
+        await writer.drain()
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def _request(
@@ -466,7 +478,197 @@ class TestPathGating:
 
 
 class TestFailClosed:
-    async def test_unauthorized_sni_resets_handshake(
+    async def test_unrecognized_sni_blind_relays_under_unrestricted(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        upstream_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert, key = mint_server_leaf(get_egress_ca(), "collateral.test")
+        pem = cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        with tempfile.NamedTemporaryFile() as fh:
+            fh.write(pem)
+            fh.flush()
+            upstream_ctx.load_cert_chain(fh.name)
+        upstream = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(_echo_once(r, w)), "127.0.0.1", 0, ssl=upstream_ctx
+        )
+        port = upstream.sockets[0].getsockname()[1]
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", port)
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode="unrestricted",
+            owner_id="sess_collision",
+        )
+        await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", proxy.port, ssl=_client_ctx(), server_hostname="collateral.test"
+            )
+            writer.write(b"same-ip-different-sni")
+            await writer.drain()
+            assert await reader.readexactly(21) == b"same-ip-different-sni"
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
+    async def _relay_probe(self, monkeypatch: pytest.MonkeyPatch, mode: str) -> tuple[bool, int]:
+        """Drive one unrecognized-SNI connection at ``mode``.
+
+        Returns ``(relayed, upstream_connections)``. ``relayed`` is True when
+        the ClientHello was blind-relayed to the collateral upstream (the
+        permissive path); False when the proxy refused (the strict path).
+        """
+        upstream_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cert, key = mint_server_leaf(get_egress_ca(), "collateral.test")
+        pem = cert.public_bytes(serialization.Encoding.PEM) + key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        with tempfile.NamedTemporaryFile() as fh:
+            fh.write(pem)
+            fh.flush()
+            upstream_ctx.load_cert_chain(fh.name)
+        hits = 0
+
+        async def _count(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            nonlocal hits
+            hits += 1
+            await _echo_once(r, w)
+
+        upstream = await asyncio.start_server(
+            lambda r, w: asyncio.create_task(_count(r, w)), "127.0.0.1", 0, ssl=upstream_ctx
+        )
+        port = upstream.sockets[0].getsockname()[1]
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", port)
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode=cast(Any, mode),
+            owner_id="sess_probe",
+        )
+        await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", proxy.port, ssl=_client_ctx(), server_hostname="collateral.test"
+            )
+        except (ssl.SSLError, ConnectionResetError, EOFError, OSError):
+            return False, hits
+        try:
+            writer.write(b"same-ip-different-sni")
+            await writer.drain()
+            echoed = await asyncio.wait_for(reader.readexactly(21), 5)
+            return echoed == b"same-ip-different-sni", hits
+        except (
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ssl.SSLError,
+            ConnectionResetError,
+            OSError,
+        ):
+            return False, hits
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
+    async def test_unknown_networking_mode_is_strict(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mode that is neither ``limited`` nor ``unrestricted`` must get the
+        STRICT path.
+
+        ``Literal`` is an annotation, not a runtime check: a typo, a
+        mis-deserialized field, or a future mode reaches the constructor as an
+        arbitrary string. At a credential-exfiltration boundary the unknown
+        case must fail closed, not blind-relay.
+        """
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "frobnicated-egress")
+        assert not relayed, "unknown networking mode was blind-relayed (permissive)"
+        assert upstream_hits == 0, "unknown mode reached the collateral upstream"
+
+    async def test_explicit_unrestricted_still_relays_positive_control(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POSITIVE CONTROL: a legitimately Unrestricted environment must still
+        blind-relay a colliding SNI (the whole point of #2034). Without this,
+        "unknown is strict" would pass on a build that blocks everything."""
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "unrestricted")
+        assert relayed, "explicitly unrestricted mode failed to relay"
+        assert upstream_hits == 1
+
+    async def test_limited_mode_is_strict_regression(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Limited stays fail-closed (unchanged behavior)."""
+        relayed, upstream_hits = await self._relay_probe(monkeypatch, "limited")
+        assert not relayed
+        assert upstream_hits == 0
+
+    @pytest.mark.parametrize("mode", ["limited", "unrestricted"])
+    async def test_absent_and_malformed_sni_fail_closed_in_both_modes(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        """Absent/unparseable SNI must fail closed under UNRESTRICTED too.
+
+        The existing coverage exercised this only under ``limited``. Under
+        ``unrestricted`` — the mode this PR exists to enable, and the one
+        selected for the DEFAULT config — a ClientHello with no SNI has no
+        hostname to resolve or pin, so relaying it is relaying to an
+        unauthenticated destination. The ``host is None`` check sits ABOVE the
+        mode branch; move it below and the suite must go red rather than
+        blind-relaying unparseable ClientHellos.
+
+        Proven by the upstream never being contacted, not by an exception.
+        """
+        hits = 0
+
+        async def _count(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            nonlocal hits
+            hits += 1
+            await _echo_once(r, w)
+
+        upstream = await asyncio.start_server(_count, "127.0.0.1", 0)
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", upstream.sockets[0].getsockname()[1])
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode=cast(Any, mode),
+            owner_id="sess_absent_sni",
+        )
+        await proxy.start()
+        try:
+            # An IP-literal server_hostname omits the SNI extension entirely
+            # (verified: no 0x0000 extension in the emitted ClientHello).
+            for payload in (_raw_client_hello("203.0.113.9"), b"\x16\x03\x01\x00\x05hello"):
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+                try:
+                    writer.write(payload)
+                    await writer.drain()
+                    assert await asyncio.wait_for(reader.read(4096), 5) == b"", (
+                        f"{mode}: a ClientHello with no usable SNI was answered instead of refused"
+                    )
+                finally:
+                    writer.close()
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
+            assert hits == 0, f"{mode}: unparseable/absent SNI reached the upstream"
+        finally:
+            await proxy.stop()
+            upstream.close()
+            await upstream.wait_closed()
+
+    async def test_unauthorized_sni_resets_handshake_under_limited(
         self, gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]]
     ) -> None:
         proxy, captured = gh_proxy
@@ -598,6 +800,240 @@ class TestLifecycle:
         proxy, _ = gh_proxy
         await proxy.stop()
         await proxy.stop()  # idempotent
+
+
+def _raw_client_hello(server_name: str) -> bytes:
+    """A real ClientHello for ``server_name``, produced by OpenSSL via MemoryBIO.
+
+    Hand-rolling the bytes would test the parser against a fixture of our own
+    invention; this is what an actual TLS client puts on the wire.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    sslobj = ctx.wrap_bio(incoming, outgoing, server_hostname=server_name)
+    with contextlib.suppress(ssl.SSLWantReadError):
+        sslobj.do_handshake()
+    return outgoing.read()
+
+
+class TestRelayLifetime:
+    """The relay stage must bound a connection whose peer has gone away.
+
+    The TLS-terminating path bounds every inbound read with
+    ``_INBOUND_IDLE_TIMEOUT_S``; the blind-relay stage is the one place that
+    dropped the bound, so a dispatch task and its TWO sockets survived every
+    connection (credential path included) with ``_conns`` uncapped.
+
+    These drive REAL asyncio servers end to end and assert on the proxy's own
+    ``_conns`` task set and on socket closure — not on an internal predicate.
+    """
+
+    @staticmethod
+    async def _relay_conn(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        upstream_behavior: Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+        idle_s: float,
+    ) -> tuple[SecretEgressProxy, asyncio.Server, asyncio.StreamReader, asyncio.StreamWriter]:
+        """Open ONE relayed connection and hand back the live objects.
+
+        The client goes idle after the ClientHello and never closes — a quiet
+        but still-open sandbox connection, which is exactly the state in which
+        the leak was measured.
+        """
+        upstream = await asyncio.start_server(upstream_behavior, "127.0.0.1", 0)
+        monkeypatch.setattr(sep, "_UPSTREAM_PORT", upstream.sockets[0].getsockname()[1])
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _fixed_resolver("127.0.0.1"))
+        # ``raising=False``: on a build WITHOUT the bound the constant does not
+        # exist, and these tests must then fail on the leak itself rather than
+        # on an AttributeError in setup. That keeps the mutation step honest —
+        # reverting the fix produces the real red, not a collection error.
+        monkeypatch.setattr(sep, "_RELAY_HALF_CLOSE_IDLE_S", idle_s, raising=False)
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "s", ("credential.test",), PH_GH)],
+            networking_mode="unrestricted",
+            owner_id="sess_relay_lifetime",
+        )
+        await proxy.start()
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        writer.write(_raw_client_hello("collateral.test"))
+        await writer.drain()
+        return proxy, upstream, reader, writer
+
+    @staticmethod
+    async def _teardown(
+        proxy: SecretEgressProxy, upstream: asyncio.Server, writer: asyncio.StreamWriter
+    ) -> None:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        await proxy.stop()
+        upstream.close()
+        await upstream.wait_closed()
+
+    @staticmethod
+    async def _await_drained(proxy: SecretEgressProxy, budget_s: float) -> int:
+        """Live dispatch tasks after polling up to ``budget_s``."""
+        deadline = asyncio.get_running_loop().time() + budget_s
+        while asyncio.get_running_loop().time() < deadline:
+            if not [t for t in proxy._conns if not t.done()]:
+                return 0
+            await asyncio.sleep(0.05)
+        return len([t for t in proxy._conns if not t.done()])
+
+    @pytest.mark.parametrize("respond_first", [False, True])
+    async def test_upstream_close_with_idle_client_releases_task_and_sockets(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch, respond_first: bool
+    ) -> None:
+        """(a) upstream closes immediately and (b) upstream answers then closes.
+
+        In both, the client merely goes idle — it never sends again and never
+        closes. Pre-fix the client→upstream copy parked on a read that could
+        never complete, so the dispatch task and both sockets survived
+        indefinitely.
+        """
+
+        async def upstream_cb(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            await r.read(65536)  # the relayed ClientHello
+            if respond_first:
+                w.write(b"upstream-said-something")
+                await w.drain()
+            w.close()  # upstream is fully gone
+            with contextlib.suppress(Exception):
+                await w.wait_closed()
+
+        proxy, upstream, reader, writer = await self._relay_conn(
+            monkeypatch, upstream_behavior=upstream_cb, idle_s=0.5
+        )
+        try:
+            alive = await self._await_drained(proxy, 5.0)
+            assert alive == 0, (
+                "dispatch task still alive after the upstream closed and the "
+                "client went idle — the relay has no idle bound (task + 2 fds leak)"
+            )
+            # EOF PROPAGATION, not merely a timeout: the surviving peer is told
+            # the stream ended instead of being left hanging.
+            assert await asyncio.wait_for(reader.read(65536), 5.0) in (
+                b"",
+                b"upstream-said-something",
+            )
+            assert await asyncio.wait_for(reader.read(65536), 5.0) == b"", (
+                "client was never given the upstream's half-close"
+            )
+        finally:
+            await self._teardown(proxy, upstream, writer)
+
+    async def test_quiet_but_open_relay_is_not_reset(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE OTHER DIRECTION — the bound must not become a hair trigger.
+
+        A relayed connection where BOTH ends are alive and simply quiet (long
+        poll, SSE, an idle interactive session) is legitimate and must survive
+        far past the idle window. The bound is armed only once one direction
+        has ALREADY ended; a blanket idle timeout here would trade a leak for
+        a reset on every slow connection.
+        """
+        gate: asyncio.Event = asyncio.Event()
+
+        async def upstream_cb(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            await r.read(65536)
+            await gate.wait()  # stays open, says nothing
+            w.close()
+            with contextlib.suppress(Exception):
+                await w.wait_closed()
+
+        proxy, upstream, _reader, writer = await self._relay_conn(
+            monkeypatch, upstream_behavior=upstream_cb, idle_s=0.2
+        )
+        try:
+            # Ten idle windows with both ends open.
+            await asyncio.sleep(2.0)
+            assert [t for t in proxy._conns if not t.done()], (
+                "a quiet but fully-open relay was torn down — the idle bound "
+                "must arm only after one direction has ended"
+            )
+            # And it still carries data afterwards: not merely un-cancelled.
+            writer.write(b"late-but-legitimate")
+            await writer.drain()
+            gate.set()
+            assert await self._await_drained(proxy, 5.0) == 0
+        finally:
+            gate.set()
+            await self._teardown(proxy, upstream, writer)
+
+    async def test_credential_path_also_drains(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE FIX'S OWN INPUT: the CREDENTIAL path uses this same ``_pipe``.
+
+        The review measured the leak on the relay path, but ``_dispatch`` pipes
+        BOTH branches through ``_pipe`` — an allowed SNI is relayed to the local
+        terminating listener the same way. Proving the bound only on the relay
+        branch would be a completeness proof one layer below where completeness
+        is needed, so this drives the branch that carries real secrets.
+
+        The client sends a valid ClientHello for the CREDENTIAL host (so
+        ``_dispatch`` takes the ``host in self._allowed_hosts`` branch), then
+        garbage, which makes the terminating listener abandon the handshake and
+        close. The client then goes idle — and the dispatch task must still be
+        released.
+        """
+        monkeypatch.setattr(sep, "_RELAY_HALF_CLOSE_IDLE_S", 0.5, raising=False)
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)],
+            networking_mode="limited",
+            owner_id="sess_credential_path",
+        )
+        await proxy.start()
+        _reader, writer = await asyncio.open_connection("127.0.0.1", proxy.port)
+        try:
+            writer.write(_raw_client_hello("api.allowed.test"))
+            await writer.drain()
+            writer.write(b"\x16\x03\x03\x00\x08not-a-tls-flight")  # kills the handshake
+            await writer.drain()
+            assert await self._await_drained(proxy, 5.0) == 0, (
+                "credential-path dispatch task leaked — the bound was added to "
+                "the relay branch only, but both branches share _pipe"
+            )
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            await proxy.stop()
+
+    async def test_client_close_with_silent_upstream_releases_task(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The mirror case: the CLIENT hangs up while the upstream stays open.
+
+        Symmetric by construction (one shared flag, both directions), so this
+        pins the symmetry rather than trusting it.
+        """
+        hold: asyncio.Event = asyncio.Event()
+
+        async def upstream_cb(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            await r.read(65536)
+            await hold.wait()
+            w.close()
+            with contextlib.suppress(Exception):
+                await w.wait_closed()
+
+        proxy, upstream, _reader, writer = await self._relay_conn(
+            monkeypatch, upstream_behavior=upstream_cb, idle_s=0.5
+        )
+        try:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            assert await self._await_drained(proxy, 5.0) == 0, (
+                "client hung up but the dispatch task stayed parked on a silent upstream"
+            )
+        finally:
+            hold.set()
+            await self._teardown(proxy, upstream, writer)
 
 
 async def _open_tls(
