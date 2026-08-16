@@ -9,8 +9,10 @@ from typing import Any
 import asyncpg
 import pytest
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
+from aios.sandbox.volumes import purge_session_directories
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 pytestmark = [pytest.mark.integration, pytest.mark.docker]
@@ -26,6 +28,10 @@ async def _seed(conn: asyncpg.Connection[Any]) -> None:
     await conn.execute(
         "INSERT INTO environments (id, name, config, account_id) VALUES "
         "('env_reaper', 'reaper', '{}'::jsonb, 'acc_reaper')"
+    )
+    await conn.execute(
+        "INSERT INTO agents (id, account_id, name, model, system, version) VALUES "
+        "('agent_reaper', 'acc_reaper', 'reaper', 'test/model', '', 1)"
     )
     await conn.execute(
         "INSERT INTO workflows (id, account_id, name, script) VALUES "
@@ -82,6 +88,90 @@ async def test_shared_run_keep_set_sql_semantics(
             "/ws/running",
             "/ws/suspended",
         }
+    finally:
+        await conn.close()
+
+
+async def test_delete_guard_keeps_workspace_borrowed_by_live_clone(
+    migrated_db_url: str,
+    _reset_db_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Real keep-set query feeds the rmtree guard for the default clone-sharing shape."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    parent_id = "sess_parent"
+    path = tmp_path / "acc_reaper" / parent_id
+    path.mkdir(parents=True)
+    (path / "live-data").write_text("clone")
+    conn = await asyncpg.connect(migrated_db_url)
+    try:
+        await _seed(conn)
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, "
+            "metadata, workspace_volume_path, env, account_id, last_event_seq) VALUES "
+            "('sess_clone', 'agent_reaper', 'env_reaper', 1, 'clone', '{}'::jsonb, "
+            "$1, '{}'::jsonb, 'acc_reaper', 0)",
+            str(path),
+        )
+        live = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            parent_id, path, account_id="acc_reaper", live_workspace_paths=live
+        )
+        assert (path / "live-data").read_text() == "clone"
+        assert "borrowed by a live session or run" in caplog.text
+    finally:
+        await conn.close()
+
+
+async def test_delete_guard_keeps_launcher_workspace_borrowed_by_live_shared_run(
+    migrated_db_url: str,
+    _reset_db_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running shared run keeps its deleted launcher's canonical workspace alive."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    launcher_id = "sess_launcher"
+    path = tmp_path / "acc_reaper" / launcher_id
+    path.mkdir(parents=True)
+    (path / "live-data").write_text("run")
+    conn = await asyncpg.connect(migrated_db_url)
+    try:
+        await _seed(conn)
+        await _insert_run(conn, "run_live", "running", "shared", str(path))
+        live = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            launcher_id, path, account_id="acc_reaper", live_workspace_paths=live
+        )
+        assert (path / "live-data").read_text() == "run"
+    finally:
+        await conn.close()
+
+
+async def test_delete_guard_reclaims_unshared_workspace_positive_control(
+    migrated_db_url: str,
+    _reset_db_state: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    session_id = "sess_unshared"
+    path = tmp_path / "acc_reaper" / session_id
+    path.mkdir(parents=True)
+    (path / "data").write_text("ordinary")
+    conn = await asyncpg.connect(migrated_db_url)
+    try:
+        await _seed(conn)
+        live = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            session_id, path, account_id="acc_reaper", live_workspace_paths=live
+        )
+        assert not path.exists()
     finally:
         await conn.close()
 

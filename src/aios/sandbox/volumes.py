@@ -511,14 +511,15 @@ def _purge_target_if_owned(
     caller with a deleted row and a 403 — and would break a legitimate,
     reachable shape: a workflow ``agent()`` child spawned with the default
     ``workspace='shared'`` stores the RUN's shared workspace
-    (``<root>/<account_id>/_runs/<run_id>``, or the launcher session's dir)
+    (``<root>/_runs/<run_id>``, or the launcher session's dir)
     as its own ``workspace_volume_path``.  That directory is genuinely not
     the child's to delete — it belongs to the run and is shared with the
     parent and every sibling child — so skipping it is exactly right, while
-    raising turned a correct refusal into a failed deletion.  Shared/run
-    directories are reclaimed on their own lifecycle by the host scratch-dir
-    reaper (``_runs``) and the archived-workspace reaper, both of which
-    consult a live keep-set; skipping here leaks nothing permanently.
+    raising turned a correct refusal into a failed deletion. Shared ``_runs``
+    directories have their own scratch lifecycle. A skipped custom path on a
+    deleted session, however, has no row left for the archived-workspace reaper
+    to discover: that is a deliberate storage leak in preference to
+    irrecoverable cross-session data loss.
     """
     resolved = candidate.resolve()
     if resolved == root or not resolved.is_relative_to(root):
@@ -544,7 +545,13 @@ def _purge_target_if_owned(
     return None
 
 
-def purge_session_directories(session_id: str, workspace_path: Path, *, account_id: str) -> None:
+def purge_session_directories(
+    session_id: str,
+    workspace_path: Path,
+    *,
+    account_id: str,
+    live_workspace_paths: tuple[str, ...] = (),
+) -> None:
     """Remove every host directory exclusively owned by ``session_id``.
 
     Every candidate is resolved and proven to be *the session's own*
@@ -598,16 +605,22 @@ def purge_session_directories(session_id: str, workspace_path: Path, *, account_
     # would already have rmtree'd the earlier directories by the time a later
     # candidate turns out to be unowned; proving first keeps the destructive
     # phase free of any decision-making.
-    targets = [
-        proven
-        for candidate, bases in candidates
-        if (
-            proven := _purge_target_if_owned(
-                candidate, session_id=session_id, owned_bases=bases, root=root
-            )
+    live_paths = {Path(path).resolve() for path in live_workspace_paths}
+    targets: list[Path] = []
+    for candidate, bases in candidates:
+        proven = _purge_target_if_owned(
+            candidate, session_id=session_id, owned_bases=bases, root=root
         )
-        is not None
-    ]
+        if proven is None:
+            continue
+        if candidate == workspace_path and proven in live_paths:
+            log.warning(
+                "refusing to purge session workspace borrowed by a live session or run",
+                path=str(candidate),
+                session_id=session_id,
+            )
+            continue
+        targets.append(proven)
     for target in targets:
         if target.exists():
             shutil.rmtree(target)

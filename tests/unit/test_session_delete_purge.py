@@ -50,6 +50,14 @@ async def test_delete_session_removes_snapshot_and_all_session_directories(tmp_p
         patch("aios.services.sessions.get_snapshot_store", return_value=store),
         patch("aios.sandbox.volumes.get_settings") as settings,
         patch("aios.services.sessions.queries.delete_session", AsyncMock()),
+        patch(
+            "aios.services.sessions.queries.unscoped_live_workspace_volume_paths",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "aios.services.sessions.queries.acquire_workspace_advisory_xact_lock",
+            AsyncMock(),
+        ),
         patch("aios.services.sessions.fail_open_child_requests_conn", AsyncMock(return_value=None)),
     ):
         settings.return_value.workspace_root = tmp_path

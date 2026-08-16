@@ -165,6 +165,26 @@ class TestRefusesUnownedTargets:
             assert not owned.exists(), f"{owned} is this session's own and must be reclaimed"
 
 
+def test_refuses_canonical_workspace_present_in_live_keep_set(
+    workspace_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workspace = _populate(workspace_root / ACCOUNT / SESSION)
+    purge_session_directories(
+        SESSION,
+        workspace,
+        account_id=ACCOUNT,
+        live_workspace_paths=(str(workspace),),
+    )
+    assert (workspace / "marker.txt").exists()
+    assert "borrowed by a live session or run" in caplog.text
+
+
+def test_custom_workspace_skip_is_known_storage_leak(workspace_root: Path) -> None:
+    custom = _populate(workspace_root / ACCOUNT / "custom")
+    purge_session_directories(SESSION, custom, account_id=ACCOUNT)
+    assert custom.exists(), "safety-first refusal deliberately leaves custom path stranded"
+
+
 class TestPermitsLegitimatePurge:
     """A guard only ever observed refusing could be refusing everything."""
 
@@ -174,14 +194,14 @@ class TestPermitsLegitimatePurge:
 
         A workflow ``agent()`` child spawned with the default
         ``workspace='shared'`` stores the RUN's workspace
-        (``<root>/<account_id>/_runs/<run_id>``) as its own
+        (``<root>/_runs/<run_id>``) as its own
         ``workspace_volume_path``. That dir belongs to the run and is shared
         with the parent and every sibling child, so refusing to delete it is
         CORRECT -- but the refusal must not be fatal: ``delete_session`` has
         already committed the row removal by the time this runs, so raising
         reports a failed DELETE for a session that is in fact gone.
         """
-        run_workspace = _populate(workspace_root / ACCOUNT / "_runs" / "run_abc")
+        run_workspace = _populate(workspace_root / "_runs" / "run_abc")
         uploads = _populate(workspace_root / "_uploads" / SESSION)
 
         purge_session_directories(SESSION, run_workspace, account_id=ACCOUNT)

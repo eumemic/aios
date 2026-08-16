@@ -2477,7 +2477,13 @@ async def clone_session(
     """Clone a session — see :func:`queries.clone_session`."""
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        shared_path = workspace_path or await queries.get_session_workspace_path(
+            conn, parent_session_id, account_id=account_id
+        )
+        await queries.acquire_workspace_advisory_xact_lock(
+            conn, queries.normalized_workspace_path(shared_path)
+        )
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
@@ -2508,14 +2514,25 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
     if snapshot_ref is not None and not await get_snapshot_store().remove(snapshot_ref):
         raise RuntimeError(f"snapshot store refused removal of {snapshot_ref}")
 
+    workspace_path = Path(artifact["workspace_volume_path"])
     async with pool.acquire() as conn, conn.transaction():
+        # Serialize the keep-set decision with every shared-workspace activation.
+        # The transaction sees its own DELETE, so the owner's pointer is absent
+        # while live clones and shared runs borrowing the path remain represented.
+        await queries.acquire_workspace_advisory_xact_lock(
+            conn, queries.normalized_workspace_path(str(workspace_path))
+        )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
         await queries.delete_session(conn, session_id, account_id=account_id)
-    purge_session_directories(
-        session_id, Path(artifact["workspace_volume_path"]), account_id=account_id
-    )
+        live_workspace_paths = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            session_id,
+            workspace_path,
+            account_id=account_id,
+            live_workspace_paths=live_workspace_paths,
+        )
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
 
