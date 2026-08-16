@@ -1,11 +1,11 @@
 """Add caller-selected terminal archival to workflow runs.
 
-Revision ID: 0160
+Revision ID: 0161
 Revises: 0159
 """
 from alembic import op
 
-revision = "0160"
+revision = "0161"
 down_revision = "0159"
 branch_labels = None
 depends_on = None
