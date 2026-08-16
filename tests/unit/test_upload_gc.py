@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import os
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aios.harness import worker
 from aios.harness.attachment_gc import sweep_orphan_uploads
+
+
+def test_worker_startup_does_not_call_upload_reconciliation() -> None:
+    """Pin the call graph, not a coincidentally empty filesystem outcome."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(worker.worker_main)))
+    called_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "sweep_orphan_uploads" not in called_names
 
 
 class _AsyncContext:
