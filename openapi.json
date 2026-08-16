@@ -2031,6 +2031,64 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/egress": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Egress",
+        "operationId": "get_session_egress",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEgressResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/resources": {
       "get": {
         "tags": [
@@ -16452,6 +16510,63 @@
         ],
         "title": "SessionCreate",
         "description": "Request body for `POST /v1/sessions`."
+      },
+      "SessionEgressHost": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "intercepted": {
+            "type": "boolean",
+            "title": "Intercepted"
+          },
+          "source_credential_id": {
+            "type": "string",
+            "title": "Source Credential Id"
+          },
+          "secret_name": {
+            "type": "string",
+            "title": "Secret Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "host",
+          "intercepted",
+          "source_credential_id",
+          "secret_name"
+        ],
+        "title": "SessionEgressHost",
+        "description": "Metadata identifying one host in a sandbox's live intercept set."
+      },
+      "SessionEgressResponse": {
+        "properties": {
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/SessionEgressHost"
+            },
+            "type": "array",
+            "title": "Hosts"
+          },
+          "provisioned_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Provisioned At"
+          },
+          "sandbox_generation": {
+            "type": "integer",
+            "title": "Sandbox Generation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hosts",
+          "provisioned_at",
+          "sandbox_generation"
+        ],
+        "title": "SessionEgressResponse",
+        "description": "Worker-observed egress state from the most recent live provisioning."
       },
       "SessionInterruptRequest": {
         "properties": {
