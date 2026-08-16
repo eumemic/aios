@@ -1146,6 +1146,94 @@ async def list_run_ids_needing_step(
     return [r["id"] for r in rows]
 
 
+async def signal_stale_suspended_runs(
+    conn: asyncpg.Connection[Any], *, older_than_seconds: float
+) -> list[str]:
+    """Cancel-signal stale suspended runs whose awaited children can no longer answer.
+
+    The journal's unresolved ``call_started`` events are the authoritative awaited
+    roster, and the veto below **fails closed** over that whole roster: a run is
+    eligible only when EVERY unresolved call is *provably* dead. Only two classes are
+    provable, because only they have an authoritative out-of-journal servicer row to
+    interrogate — an ``agent``'s session (dead when missing or archived) and an
+    ``invoke_workflow``'s run (dead when missing, archived, or terminal). Every other
+    capability — ``tool``, ``call_llm``, ``gate``, and any capability added after this
+    was written — is worker-task-or-resume backed with no such row, so its liveness
+    cannot be established here and it VETOES the reap.
+
+    The ``ELSE FALSE`` in the liveness CASE is the load-bearing character: an
+    unrecognised (or NULL) capability takes it, fails the ``IS NOT TRUE`` test, and
+    parks the run. Adding a capability next month therefore makes this reaper strictly
+    MORE conservative with no edit here — the failure direction is a parked run an
+    operator can cancel by hand, never a cancel-signal fired into live work. A
+    long-running ``tool`` exec is exactly the case that must never be reaped: it can
+    legitimately occupy hours and its own re-dispatch backstop lives in
+    ``list_run_ids_needing_step``, not here.
+
+    An unharvested signal means the run has real work pending and belongs to the normal
+    needs-step sweep, not the reaper. Cancellation is inserted through the same durable
+    side table as the operator actuator, preserving the run step as journal single writer.
+    ``ON CONFLICT`` makes concurrent/startup/periodic passes idempotent.
+    """
+    rows = await conn.fetch(
+        """
+        INSERT INTO wf_run_signals (run_id, call_key, kind, result)
+        SELECT r.id, $2, 'cancel', $3::jsonb
+          FROM wf_runs r
+         WHERE r.status = 'suspended' AND r.archived_at IS NULL
+           AND r.updated_at < now() - make_interval(secs => $1)
+           AND EXISTS (
+             SELECT 1 FROM wf_run_events awaited
+              WHERE awaited.run_id = r.id AND awaited.type = 'call_started'
+                AND awaited.payload->>'capability' IN ('agent', 'invoke_workflow')
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = awaited.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_signals s
+              WHERE s.run_id = r.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = s.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_events started
+              WHERE started.run_id = r.id AND started.type = 'call_started'
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = started.call_key
+                     AND done.type = 'call_result')
+                -- Fail closed: this arm asks "is this unresolved call PROVABLY DEAD?"
+                -- and vetoes unless the answer is a definite TRUE. Only the two
+                -- servicer-row-backed capabilities can answer; everything else --
+                -- tool / call_llm / gate / any capability added later -- falls to
+                -- ELSE FALSE and parks the run. `IS NOT TRUE` also absorbs a NULL
+                -- (missing/!= JSON capability key) into the veto.
+                AND (CASE started.payload->>'capability'
+                  WHEN 'agent' THEN NOT EXISTS (
+                    SELECT 1 FROM sessions child
+                     WHERE child.id = started.payload->>'child_session_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL)
+                  WHEN 'invoke_workflow' THEN NOT EXISTS (
+                    SELECT 1 FROM wf_runs child
+                     WHERE child.id = started.payload->>'child_run_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL
+                       AND child.status NOT IN ('completed','errored','cancelled'))
+                  ELSE FALSE
+                END) IS NOT TRUE)
+        ON CONFLICT (run_id, call_key) DO NOTHING
+        RETURNING run_id
+        """,
+        older_than_seconds,
+        CANCEL_SIGNAL_CALL_KEY,
+        json.dumps({"kind": "stale_suspended_run"}),
+    )
+    return [row["run_id"] for row in rows]
+
+
 # ─── wf_run_events (the journal — single writer, gapless, idempotent) ─────────
 
 
