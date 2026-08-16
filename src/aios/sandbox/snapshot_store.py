@@ -33,7 +33,18 @@ import uuid
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
+from aios.config import get_settings
+from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.backends.base import SandboxBackend, SandboxBackendError
+
+
+def get_snapshot_store() -> SnapshotStore:
+    """Construct the configured snapshot transport for API-side lifecycle work."""
+    settings = get_settings()
+    backend = select_sandbox_backend(settings)
+    if settings.sandbox_snapshot_store_root is not None:
+        return TarballStore(backend, settings.sandbox_snapshot_store_root)
+    return LocalDaemonStore(backend)
 
 
 @runtime_checkable

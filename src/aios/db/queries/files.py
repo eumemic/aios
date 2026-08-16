@@ -79,3 +79,31 @@ async def insert_file(
         ) from exc
     assert row is not None
     return _row_to_file(row)
+
+
+async def list_upload_paths_for_sessions(
+    conn: asyncpg.Connection[Any], session_ids: list[str]
+) -> dict[str, set[str]]:
+    """Return referenced upload host paths, including empty sets for live sessions.
+
+    Missing keys identify session directories whose owning row is gone.  The
+    startup filesystem reconciler uses that distinction to remove the whole
+    directory rather than applying the per-file in-flight grace period.
+    """
+    if not session_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT requested.id AS session_id, f.host_path
+          FROM unnest($1::text[]) AS requested(id)
+          JOIN sessions s ON s.id = requested.id
+          LEFT JOIN files f ON f.session_id = s.id
+        """,
+        session_ids,
+    )
+    result: dict[str, set[str]] = {}
+    for row in rows:
+        paths = result.setdefault(row["session_id"], set())
+        if row["host_path"] is not None:
+            paths.add(row["host_path"])
+    return result

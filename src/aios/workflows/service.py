@@ -481,7 +481,9 @@ async def create_run(
         # the identical normalized-path-derived key across recheck+rmtree.
         if workspace == "shared" and workspace_path is not None:
             workspace_path = queries.normalized_workspace_path(workspace_path)
-            await queries.acquire_workspace_advisory_xact_lock(conn, workspace_path)
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn, workspace_path, boundary=str(settings.workspace_root)
+            )
         run = await wf_queries.insert_wf_run(
             conn,
             account_id=account_id,

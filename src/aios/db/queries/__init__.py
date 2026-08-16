@@ -517,6 +517,7 @@ from .events import (  # noqa: E402
 )
 from .files import (  # noqa: E402
     insert_file,
+    list_upload_paths_for_sessions,
 )
 from .management_calls import (  # noqa: E402
     get_management_call,
@@ -580,6 +581,7 @@ from .prune import (  # noqa: E402
 )
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
+    acquire_workspace_hierarchy_advisory_xact_locks,
     gc_snapshot_session_states,
     normalized_workspace_path,
     unscoped_clear_session_snapshot,
@@ -781,6 +783,7 @@ __all__ = [
     "acquire_account_triggers_lock",
     "acquire_session_resources_lock",
     "acquire_workspace_advisory_xact_lock",
+    "acquire_workspace_hierarchy_advisory_xact_locks",
     "add_trigger",
     "advance_open_request_scan_floor",
     "append_event",
@@ -984,6 +987,7 @@ __all__ = [
     "list_triggers",
     "list_unharvested_session_cancel_markers",
     "list_unresolved_tool_calls_batch",
+    "list_upload_paths_for_sessions",
     "list_vault_credentials",
     "list_vaults",
     "lock_active_session_for_update",
