@@ -446,7 +446,12 @@ def test_sessions_invoke_workspace_default_is_fresh() -> None:
 def test_call_agent_auto_archive_default_and_mutation() -> None:
     """The caller's lifetime bit is explicit and mutable in both directions."""
     assert _CallAgentArgs(agent_id="agt_1").auto_archive_on_completion is True
-    assert _CallAgentArgs(agent_id="agt_1", auto_archive_on_completion=False).auto_archive_on_completion is False
+    assert (
+        _CallAgentArgs(
+            agent_id="agt_1", auto_archive_on_completion=False
+        ).auto_archive_on_completion
+        is False
+    )
 
 
 async def test_call_agent_auto_archive_is_forwarded_in_both_directions(monkeypatch: Any) -> None:
@@ -456,7 +461,11 @@ async def test_call_agent_auto_archive_is_forwarded_in_both_directions(monkeypat
         "aios.services.tasks.await_task",
         AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
     )
-    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": False})
+    await invoke_builtin(
+        _CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": False}
+    )
     assert inv_mock.await_args.kwargs["auto_archive_on_completion"] is False
-    await invoke_builtin(_CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": True})
+    await invoke_builtin(
+        _CALLER, "call_agent", {"agent_id": "agt_1", "auto_archive_on_completion": True}
+    )
     assert inv_mock.await_args.kwargs["auto_archive_on_completion"] is True

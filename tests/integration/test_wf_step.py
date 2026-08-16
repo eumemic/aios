@@ -5803,13 +5803,20 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
 ) -> None:
     """TRUE reaches the existing reclaim mechanism; FALSE remains live and accepts another message."""
     pool = wf_runtime
+
     async def child(flag: bool, suffix: str) -> Session:
         parent_run_id = await _make_run(pool, "async def main(input):\n    return 1")
         stim = AskNewSession(
-            session_id=f"ses_auto_archive_{suffix}", agent_id=wf_agent_id,
-            environment_id="env_wf", agent_version=1, model=None,
-            parent_run_id=parent_run_id, surface=Surface([], [], []), vault_ids=[],
-            request_id=f"req_{suffix}", input="work",
+            session_id=f"ses_auto_archive_{suffix}",
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=parent_run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id=f"req_{suffix}",
+            input="work",
             auto_archive_on_completion=flag,
         )
         await sessions_service.create_child_session(pool, stim, account_id="acc_wf")
@@ -5821,9 +5828,22 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
     assert persistent.archive_when_idle is False
     # Simulate completion's idle point. Only the opted-in lifetime is reclaimed.
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM events WHERE session_id = ANY($1::text[])", [ephemeral.id, persistent.id])
-    assert await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf") is True
-    assert await sessions_service.reclaim_session_if_idle(pool, persistent.id, account_id="acc_wf") is False
-    await sessions_service.append_user_message(pool, persistent.id, "wake again", account_id="acc_wf")
+        await conn.execute(
+            "DELETE FROM events WHERE session_id = ANY($1::text[])", [ephemeral.id, persistent.id]
+        )
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf")
+        is True
+    )
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, persistent.id, account_id="acc_wf")
+        is False
+    )
+    await sessions_service.append_user_message(
+        pool, persistent.id, "wake again", account_id="acc_wf"
+    )
     async with pool.acquire() as conn:
-        assert await db_queries.derive_session_status(conn, persistent.id, account_id="acc_wf") == "active"
+        assert (
+            await db_queries.derive_session_status(conn, persistent.id, account_id="acc_wf")
+            == "active"
+        )
