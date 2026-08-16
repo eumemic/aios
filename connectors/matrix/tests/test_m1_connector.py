@@ -45,6 +45,10 @@ async def test_matrix_send_uses_tool_call_id_as_matrix_txn(connector):
 
 async def test_inbound_nonfatal_drop_continues_to_sibling(connector):
     connector._ghost_connections = {"_aios_agent_one": "c1", "_aios_agent_two": "c2"}
+    # The membership view must be declared COMPLETE, or the connector
+    # (correctly) refuses to classify on it rather than routing off a
+    # possibly-partial member list.
+    connector.az.state_store.has_full_member_list = AsyncMock(return_value=True)
     connector.az.state_store.get_members = AsyncMock(
         return_value=[
             UserID("@_aios_agent_one:example.org"),

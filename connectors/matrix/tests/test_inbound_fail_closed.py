@@ -33,7 +33,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from mautrix.appservice.state_store.memory import ASStateStore
 from mautrix.client.state_store.memory import MemoryStateStore
-from mautrix.types import Membership, RoomID, UserID
+from mautrix.types import Member, Membership, RoomID, UserID
 
 from aios_matrix.appservice import create_appservice
 from aios_matrix.config import MatrixConfig
@@ -51,6 +51,24 @@ class MemoryASStateStore(MemoryStateStore, ASStateStore):
     def __init__(self) -> None:
         MemoryStateStore.__init__(self)
         ASStateStore.__init__(self)
+
+
+async def set_known_room(store, room: RoomID, members: tuple[UserID, ...]) -> None:
+    """Record a room whose join list is KNOWN COMPLETE.
+
+    Deliberately ``set_members`` rather than repeated ``set_membership``:
+    only the bulk write marks ``has_full_member_list``, which is exactly the
+    distinction the connector now checks.  ``set_membership`` models the
+    incremental timeline learning that leaves the view PARTIAL, and tests
+    that want a complete view must not accidentally build a partial one --
+    otherwise every test in this file would exercise the refuse path and the
+    guard would look correct while permitting nothing.
+    """
+    await store.set_members(
+        room,
+        {member: Member(membership=Membership.JOIN) for member in members},
+        only_membership=Membership.JOIN,
+    )
 
 
 @pytest.fixture
@@ -89,8 +107,7 @@ async def receiver(config: MatrixConfig, tmp_path):
     connector.az = appservice
     # The ghost IS in the room and IS in our namespace — we own it.  What we
     # do not have (yet) is the connection_id needed to route its traffic.
-    await state_store.set_membership(ROOM, GHOST, Membership.JOIN)
-    await state_store.set_membership(ROOM, HUMAN, Membership.JOIN)
+    await set_known_room(state_store, ROOM, (GHOST, HUMAN))
     assert connector._ghost_connections == {}
     connector.emit_inbound = AsyncMock(return_value={"deduped": False})
     return connector, appservice
@@ -151,9 +168,8 @@ async def test_foreign_event_is_still_acked(receiver) -> None:
     """
     connector, appservice = receiver
     other_room = RoomID("!foreign:your.server")
-    await appservice.state_store.set_membership(other_room, HUMAN, Membership.JOIN)
-    await appservice.state_store.set_membership(
-        other_room, UserID("@someone_else:your.server"), Membership.JOIN
+    await set_known_room(
+        appservice.state_store, other_room, (HUMAN, UserID("@someone_else:your.server"))
     )
 
     response = await _put(appservice, "txn-foreign", _txn([_message(room=str(other_room))]))
@@ -298,7 +314,7 @@ GHOST2 = UserID("@_aios_agent_two:your.server")
 
 
 async def _join_second_ghost(appservice) -> None:
-    await appservice.state_store.set_membership(ROOM, GHOST2, Membership.JOIN)
+    await set_known_room(appservice.state_store, ROOM, (GHOST, HUMAN, GHOST2))
 
 
 async def test_mixed_live_and_unroutable_room_is_not_acked(receiver) -> None:

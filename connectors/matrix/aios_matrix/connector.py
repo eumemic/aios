@@ -246,10 +246,74 @@ class MatrixConnector(HttpConnector):
     def _localpart(user_id: UserID) -> str:
         return str(user_id).removeprefix("@").split(":", 1)[0]
 
+    async def _verified_joined_members(self, room_id: RoomID) -> list[UserID]:
+        """The room's join list, or ``RoutingNotReady`` if it cannot be trusted.
+
+        ``state_store.get_members()`` is a CACHE, not an authority.  mautrix
+        populates it incrementally: ``AppService`` registers
+        ``state_store.update_state`` as an event handler, so a member's join
+        is learned only when that member's ``m.room.member`` event happens to
+        come down a transaction.  The only bulk fill is
+        ``get_joined_members()``, which write-throughs via
+        ``StoreUpdatingAPI`` and is the one call that sets
+        ``has_full_member_list``; the connector makes it at ghost startup and
+        then every ``RECONCILE_SECONDS`` (300 s).
+
+        Between those points the store answers with a NON-EMPTY but
+        INCOMPLETE list, and nothing in the shape of the answer says so.  A
+        partial view is not a smaller truth, it is a DIFFERENT one:
+
+        * a DM whose ghost join has not been seen yet looks like a room with
+          no namespaced member — i.e. "genuinely foreign", ACK-and-ignore.
+          That is silent, permanent loss of a human's message.
+        * a group whose unroutable co-recipient has not been seen yet looks
+          fully routable, so the partial-routability refusal never fires and
+          that recipient's copy is lost the same way.
+
+        Both defeat the guards above by feeding them an input they never
+        validate: they prove "every member I KNOW ABOUT is routable", not
+        "every recipient is routable".
+
+        So completeness is CHECKED (``has_full_member_list``), and on a miss
+        repaired from the homeserver rather than assumed.  If it can be
+        neither confirmed nor repaired we refuse: an unverifiable membership
+        view is treated exactly like an empty one, because it carries exactly
+        as much authority.  Refusing is safe (Synapse redelivers); ACKing is
+        not (Synapse drops the message forever).
+        """
+        store = self.az.state_store
+        if await store.has_full_member_list(room_id):
+            return list(await store.get_members(room_id, (Membership.JOIN,)))
+        # Incomplete: bulk-fill from the homeserver, which is authoritative
+        # and also write-throughs into the store for subsequent events.
+        # ``ensure_joined=False`` because this is a read: the bot must not
+        # join a room as a side effect of classifying traffic in it.
+        try:
+            joined = await self.az.intent.get_joined_members(room_id, ensure_joined=False)
+        except Exception as exc:
+            # Could not verify — refuse, do NOT ACK.  RoutingNotReady is
+            # classified RETRY, so a transient homeserver failure costs a
+            # redelivery rather than a message or a container.
+            raise RoutingNotReady(
+                f"membership view for room {room_id} is incomplete and could not be "
+                f"refreshed ({type(exc).__name__}: {exc}); refusing rather than "
+                "classifying on a partial member list"
+            ) from exc
+        if not joined:
+            # The sender is necessarily joined, so an empty authoritative
+            # answer is itself untrustworthy.
+            raise RoutingNotReady(
+                f"homeserver returned no joined members for room {room_id}; cannot classify event"
+            )
+        return list(joined.keys())
+
     async def _handle_event(self, event: Event) -> None:
         if event.type != EventType.ROOM_MESSAGE or not getattr(event.content, "body", None):
             return
-        members = await self.az.state_store.get_members(event.room_id, (Membership.JOIN,))
+        # VERIFIED membership, not merely cached membership.  Everything
+        # below — who the receivers are, whether they are all routable, and
+        # whether the room is a dm — is only as sound as this list.
+        members = await self._verified_joined_members(event.room_id)
         # Three distinct facts, which must NOT be collapsed into one
         # "nothing to do" branch — the conflation is what loses messages:
         #
