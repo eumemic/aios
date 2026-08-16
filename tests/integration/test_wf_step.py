@@ -5805,7 +5805,9 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
     pool = wf_runtime
 
     async def child(flag: bool, suffix: str) -> Session:
-        parent_run_id = await _make_run(pool, "async def main(input):\n    return 1")
+        parent_run_id = await _make_run(
+            pool, "async def main(input):\n    return 1", name=f"auto_archive_{suffix}"
+        )
         stim = AskNewSession(
             session_id=f"ses_auto_archive_{suffix}",
             agent_id=wf_agent_id,
