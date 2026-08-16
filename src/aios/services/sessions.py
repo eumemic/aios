@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import asyncpg
 
@@ -249,6 +249,7 @@ async def create_session(
     archive_when_idle: bool = False,
     outbound_suppression: str | None = None,
     inherit_from_session_id: str | None = None,
+    workspace: Literal["shared", "fresh"] | None = None,
     frozen_surface: Surface | None = None,
     frozen_litellm_extra: dict[str, Any] | None = None,
 ) -> Session:
@@ -293,6 +294,14 @@ async def create_session(
         inherited_vault_ids: list[str] | None = None
         if inherit_from_session_id is not None:
             parent = await queries.get_session(conn, inherit_from_session_id, account_id=account_id)
+            if workspace == "shared":
+                workspace_path = await queries.get_session_workspace_path(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+                workspace_path = queries.normalized_workspace_path(workspace_path)
+                await queries.acquire_workspace_advisory_xact_lock(conn, workspace_path)
+            elif workspace == "fresh":
+                workspace_path = None
             parent_vault_ids = await queries.get_session_vault_ids(
                 conn, inherit_from_session_id, account_id=account_id
             )
@@ -843,6 +852,7 @@ async def invoke(
     resources: list[SessionResource] | None = None,
     env: dict[str, str] | None = None,
     outbound_suppression: str | None = None,
+    workspace: Literal["shared", "fresh"] = "fresh",
     launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
@@ -926,6 +936,7 @@ async def invoke(
             env=env,
             outbound_suppression=outbound_suppression,
             inherit_from_session_id=launcher_session_id,
+            workspace=workspace if launcher_session_id is not None else None,
             crypto_box=crypto_box,
             archive_when_idle=True,
             frozen_surface=effective_surface,

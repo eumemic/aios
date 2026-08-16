@@ -86,7 +86,7 @@ async def launch_awaited_run(
     parent_run_id: str | None = None,
     vault_ids: list[str] | None = None,
     budget_usd: float | None = None,
-    workspace: str = "shared",
+    workspace: str = "fresh",
     version: int | None = None,
 ) -> tuple[WfRun, str]:
     """Launch a run as an **awaited** servicer — the one place the run-as-Ask contract lives.
