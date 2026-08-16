@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from aios.config import get_settings
@@ -473,3 +474,155 @@ def _bind_mount_base(
     if sandbox_path.startswith("/mnt/uploads/"):
         return session_uploads_dir(session_id), sandbox_path[len("/mnt/uploads/") :]
     return None, None
+
+
+def _purge_target_if_owned(
+    candidate: Path,
+    *,
+    session_id: str,
+    owned_bases: tuple[Path, ...],
+    root: Path,
+) -> Path | None:
+    """Return ``candidate``'s resolved path if it is provably a directory
+    owned by ``session_id`` alone, else ``None`` — meaning *do not delete it*.
+
+    Two independent conditions, both on the RESOLVED (symlink-dereferenced,
+    ``..``-collapsed) real path — never on the raw string:
+
+    1. **In jail.** The target must live strictly under ``workspace_root``.
+       ``workspace_root`` itself is not owned.
+    2. **Owned by this session.** The target must be one of the session's own
+       canonical directories (or something strictly inside one).  Containment
+       is checked against a base that is itself derived from ``session_id``
+       and re-checked for jail residency, so a symlinked canonical dir can't
+       launder an out-of-jail target through condition 2.
+
+    Condition 2 is the one that matters and the one that was missing: a path
+    that is in-jail but too HIGH in the tree — most importantly the account
+    root ``<workspace_root>/<account_id>``, which ``validate_workspace_path``
+    accepts at create time because ``is_relative_to`` is REFLEXIVE — is
+    shared with every other live session of that tenant.  ``rmtree``-ing it
+    on one session's delete destroys every sibling session's workspace.  An
+    ancestor is not ownership; only a proven per-session location is.
+
+    **Skip, don't raise.**  Refusing the ``rmtree`` is the safety property;
+    aborting the *delete* is not.  ``delete_session`` calls this AFTER the
+    session row is already committed as deleted, so raising would leave the
+    caller with a deleted row and a 403 — and would break a legitimate,
+    reachable shape: a workflow ``agent()`` child spawned with the default
+    ``workspace='shared'`` stores the RUN's shared workspace
+    (``<root>/_runs/<run_id>``, or the launcher session's dir)
+    as its own ``workspace_volume_path``.  That directory is genuinely not
+    the child's to delete — it belongs to the run and is shared with the
+    parent and every sibling child — so skipping it is exactly right, while
+    raising turned a correct refusal into a failed deletion. Shared ``_runs``
+    directories have their own scratch lifecycle. A skipped custom path on a
+    deleted session, however, has no row left for the archived-workspace reaper
+    to discover: that is a deliberate storage leak in preference to
+    irrecoverable cross-session data loss.
+    """
+    resolved = candidate.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        log.warning(
+            "refusing to purge session directory outside workspace_root",
+            path=str(candidate),
+            session_id=session_id,
+        )
+        return None
+    for base in owned_bases:
+        base_resolved = base.resolve()
+        # The base must itself be in-jail: otherwise a symlink AT the
+        # canonical location would make an out-of-jail target "contained".
+        if base_resolved == root or not base_resolved.is_relative_to(root):
+            continue
+        if resolved == base_resolved or resolved.is_relative_to(base_resolved):
+            return resolved
+    log.warning(
+        "refusing to purge a directory that is not exclusively owned by this session",
+        path=str(candidate),
+        session_id=session_id,
+    )
+    return None
+
+
+def purge_session_directories(
+    session_id: str,
+    workspace_path: Path,
+    *,
+    account_id: str,
+    live_workspace_paths: tuple[str, ...] = (),
+) -> None:
+    """Remove every host directory exclusively owned by ``session_id``.
+
+    Every candidate is resolved and proven to be *the session's own*
+    directory before anything is deleted.  This is intentionally stricter
+    than trusting the persisted workspace path on two axes:
+
+    * **Out of jail** — a stale row or symlink must never turn session
+      deletion into an out-of-jail ``rmtree``.
+    * **In jail but too high** — ``workspace_volume_path`` is user-supplied
+      via ``POST /v1/sessions`` and is NOT unique per session.  The account
+      root ``<workspace_root>/<account_id>`` passes create-time validation
+      (``is_relative_to`` is reflexive), so without a per-session ownership
+      proof deleting one session would ``rmtree`` every OTHER live session's
+      workspace for that tenant.  Refused here.
+
+    Permitted workspace locations are the post-#409 canonical
+    ``<workspace_root>/<account_id>/<session_id>`` and the pre-#409 legacy
+    ``<workspace_root>/<session_id>`` (the same carve-out
+    :func:`validate_workspace_path` makes, and still exclusively this
+    session's).  Anything else — the account root, a sibling session's dir,
+    a shared run/clone dir — is **skipped and logged**, never ``rmtree``d.
+
+    Skipping is per-candidate, not all-or-nothing.  An unowned
+    ``workspace_path`` does not suppress reclaiming this session's own
+    uploads/attachments/repos dirs, which are derived from ``session_id``
+    and are unambiguously its own; the earlier all-or-nothing shape leaked
+    those forever for exactly the sessions with an anomalous workspace row.
+
+    Refusing the ``rmtree`` is the safety property; aborting the *delete* is
+    not.  This runs after ``delete_session`` has already committed the row
+    removal, so raising here would report a failed DELETE for a session that
+    is in fact gone — and would break the legitimate workflow-child case
+    (``workspace='shared'`` children store the run's shared workspace).  Not
+    deleting another session's live data is what matters; an unreferenced
+    directory is recoverable by the reapers, another session's live
+    workspace is not.
+    """
+    settings = get_settings()
+    root = settings.workspace_root.resolve()
+    workspace_bases = (
+        settings.workspace_root / account_id / session_id,
+        settings.workspace_root / session_id,
+    )
+    candidates = (
+        (workspace_path, workspace_bases),
+        (session_uploads_dir(session_id), (session_uploads_dir(session_id),)),
+        (session_attachments_dir(session_id), (session_attachments_dir(session_id),)),
+        (session_repos_root(session_id), (session_repos_root(session_id),)),
+    )
+    # Prove EVERY target before deleting ANY of them. A prove-as-you-go loop
+    # would already have rmtree'd the earlier directories by the time a later
+    # candidate turns out to be unowned; proving first keeps the destructive
+    # phase free of any decision-making.
+    live_paths = {Path(path).resolve() for path in live_workspace_paths}
+    targets: list[Path] = []
+    for candidate, bases in candidates:
+        proven = _purge_target_if_owned(
+            candidate, session_id=session_id, owned_bases=bases, root=root
+        )
+        if proven is None:
+            continue
+        if candidate == workspace_path and any(
+            live == proven or live.is_relative_to(proven) for live in live_paths
+        ):
+            log.warning(
+                "refusing to purge session workspace borrowed by a live session or run",
+                path=str(candidate),
+                session_id=session_id,
+            )
+            continue
+        targets.append(proven)
+    for target in targets:
+        if target.exists():
+            shutil.rmtree(target)

@@ -1,5 +1,12 @@
 name: gVisor Validation
 
+# HOSTED BY NECESSITY (not an off-substrate dead-man): this job installs runsc from
+# the gVisor apt repo, edits /etc/docker/daemon.json, restarts the Docker daemon, and
+# runs parallel container E2E. On the shared [self-hosted, watchdog] box that would
+# mutate global host state every other watchdog depends on. Assessed 2026-08-13 under
+# the eumemic-ops#414 GHA exit and deliberately LEFT on ubuntu-latest, where a clean
+# ephemeral VM per run is exactly what it needs.
+
 on:
   workflow_dispatch:
   schedule:

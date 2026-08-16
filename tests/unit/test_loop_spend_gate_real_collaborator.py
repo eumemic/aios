@@ -101,6 +101,7 @@ async def test_real_gate_trips_when_subtree_over_finite_limit() -> None:
         focal_channel=None,
         origin="foreground",
         parent_run_id=None,
+        archive_when_idle=False,
     )
     agent = SimpleNamespace(
         model="openrouter/x",

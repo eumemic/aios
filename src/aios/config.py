@@ -376,6 +376,12 @@ class Settings(BaseSettings):
         "after the multipart body is drained so the client sees a clean "
         "response rather than a transport reset.",
     )
+    context_admission_mode: Literal["observe", "enforce"] = Field(
+        default="observe",
+        description="Final-payload deterministic context admission mode. Observe records the "
+        "decision without changing provider-call behavior; enforce fails closed unless the "
+        "route has an independently reviewed exact-counter attestation.",
+    )
     model_call_deadline_s: float = Field(
         default=900.0,
         ge=1.0,
@@ -773,6 +779,14 @@ class Settings(BaseSettings):
         "catchable ``AgentError`` and keeping the run total. Generous by default "
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
+    )
+    workflow_suspended_reap_seconds: float = Field(
+        default=24 * 60 * 60,
+        gt=0,
+        description="Age after which the worker sweep cancel-signals a suspended "
+        "workflow run when every unresolved awaited session/run child is terminal, "
+        "archived, or missing. The signal-and-wake path keeps the workflow step as "
+        "the journal's single writer. Defaults to 24 hours.",
     )
     workflow_call_llm_stale_seconds: float = Field(
         default=1200.0,  # 20 minutes

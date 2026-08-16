@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import asyncpg
 
@@ -34,6 +34,7 @@ from aios.harness.chat_type import ChatType
 from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
+from aios.logging import get_logger
 from aios.models.agents import (
     StepSurface,
     is_mcp_tool_name,
@@ -61,13 +62,19 @@ from aios.models.triggers import (
     TriggerCreate,
     compute_initial_next_fire,
 )
-from aios.sandbox.volumes import validate_workspace_path
+from aios.sandbox.snapshot_store import get_snapshot_store
+from aios.sandbox.volumes import (
+    purge_session_directories,
+    validate_workspace_path,
+)
 from aios.services import agents as agents_service
 from aios.services import github_repositories as github_repo_service
 from aios.services import memory_stores as memory_service
 from aios.services import triggers as triggers_service
 from aios.services.await_completion import await_completion
 from aios.services.vaults import env_var_credential_containment_error
+
+log = get_logger(__name__)
 
 
 async def load_session_account_id(pool: asyncpg.Pool[Any], session_id: str) -> str:
@@ -249,6 +256,7 @@ async def create_session(
     archive_when_idle: bool = False,
     outbound_suppression: str | None = None,
     inherit_from_session_id: str | None = None,
+    workspace: Literal["shared", "fresh"] | None = None,
     frozen_surface: Surface | None = None,
     frozen_litellm_extra: dict[str, Any] | None = None,
 ) -> Session:
@@ -293,6 +301,13 @@ async def create_session(
         inherited_vault_ids: list[str] | None = None
         if inherit_from_session_id is not None:
             parent = await queries.get_session(conn, inherit_from_session_id, account_id=account_id)
+            if workspace == "shared":
+                workspace_path = await queries.get_session_workspace_path(
+                    conn, inherit_from_session_id, account_id=account_id
+                )
+                workspace_path = queries.normalized_workspace_path(workspace_path)
+            elif workspace == "fresh":
+                workspace_path = None
             parent_vault_ids = await queries.get_session_vault_ids(
                 conn, inherit_from_session_id, account_id=account_id
             )
@@ -345,6 +360,11 @@ async def create_session(
                         "child session requested resources the launching session does not hold",
                         detail={"ungranted_resources": ungranted_resources},
                     )
+        if workspace_path is not None:
+            workspace_path = queries.normalized_workspace_path(workspace_path)
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn, workspace_path, boundary=str(get_settings().workspace_root)
+            )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -603,20 +623,14 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
-# Max length of the ``summary`` preview carried on the ``request_opened`` frame
-# (#1413). Matches the 60-char truncation the obligations tail block renders; a
-# slightly larger store budget is pointless since the renderer re-truncates.
-_OBLIGATION_SUMMARY_MAX = 60
-
-
 def _obligation_summary(content: str) -> str:
-    """A short single-line preview of a request input, for the #1413 obligations
-    block. Collapses newlines and truncates to ``_OBLIGATION_SUMMARY_MAX`` chars
-    (ellipsis when clipped) -- mirrors the channels-tail preview clause."""
-    preview = content.replace("\n", " ").strip()
-    if len(preview) > _OBLIGATION_SUMMARY_MAX:
-        preview = preview[:_OBLIGATION_SUMMARY_MAX] + "…"
-    return preview
+    """The verbatim request input carried by the durable obligation edge.
+
+    The original user event can leave the context window while its request remains
+    open. Persisting only a preview here would make the always-on obligation plane
+    silently lose the task at exactly that point, so this copy must remain exact.
+    """
+    return content
 
 
 async def create_child_session(
@@ -849,6 +863,7 @@ async def invoke(
     resources: list[SessionResource] | None = None,
     env: dict[str, str] | None = None,
     outbound_suppression: str | None = None,
+    workspace: Literal["shared", "fresh"] = "fresh",
     launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
@@ -932,6 +947,7 @@ async def invoke(
             env=env,
             outbound_suppression=outbound_suppression,
             inherit_from_session_id=launcher_session_id,
+            workspace=workspace if launcher_session_id is not None else None,
             crypto_box=crypto_box,
             archive_when_idle=True,
             frozen_surface=effective_surface,
@@ -2468,7 +2484,15 @@ async def clone_session(
     """Clone a session — see :func:`queries.clone_session`."""
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        shared_path = workspace_path or await queries.get_session_workspace_path(
+            conn, parent_session_id, account_id=account_id
+        )
+        await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+            conn,
+            queries.normalized_workspace_path(shared_path),
+            boundary=str(get_settings().workspace_root),
+        )
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
         )
@@ -2486,11 +2510,50 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
     # events), so it survives the cascade and makes the run sweep-visible within a tick
     # rather than waiting out the 1h agent deadline; derive_response resolves child_gone
     # via its liveness fallback once the session row is gone.
+    async with pool.acquire() as conn:
+        artifact = await conn.fetchrow(
+            "SELECT workspace_volume_path, snapshot_ref FROM sessions "
+            "WHERE id=$1 AND account_id=$2",
+            session_id,
+            account_id,
+        )
+    if artifact is None:
+        raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
+    snapshot_ref = artifact["snapshot_ref"]
+    if snapshot_ref is not None and not await get_snapshot_store().remove(snapshot_ref):
+        raise RuntimeError(f"snapshot store refused removal of {snapshot_ref}")
+
+    workspace_path = Path(artifact["workspace_volume_path"])
     async with pool.acquire() as conn, conn.transaction():
+        # Serialize the keep-set decision with every shared-workspace activation.
+        # The transaction sees its own DELETE, so the owner's pointer is absent
+        # while live clones and shared runs borrowing the path remain represented.
+        normalized_workspace_path = queries.normalized_workspace_path(str(workspace_path))
+        try:
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn,
+                normalized_workspace_path,
+                boundary=str(get_settings().workspace_root),
+            )
+        except ValueError:
+            # Persisted paths can predate a workspace_root reconfiguration. The
+            # purge jail below must skip them without making the row undeletable.
+            log.warning(
+                "skipping workspace hierarchy lock outside workspace_root",
+                path=str(workspace_path),
+                session_id=session_id,
+            )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}
         )
         await queries.delete_session(conn, session_id, account_id=account_id)
+        live_workspace_paths = tuple(await queries.unscoped_live_workspace_volume_paths(conn))
+        purge_session_directories(
+            session_id,
+            workspace_path,
+            account_id=account_id,
+            live_workspace_paths=live_workspace_paths,
+        )
     if parent_run_id is not None:
         await defer_run_wake(parent_run_id, batch=True)
 
@@ -2501,8 +2564,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
-    title: str | None | EllipsisType = ...,
+    agent_version: int | EllipsisType | None = ...,
+    title: str | EllipsisType | None = ...,
     metadata: dict[str, Any] | None = None,
     vault_ids: list[str] | None = None,
     resources: list[SessionResource] | None = None,

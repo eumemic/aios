@@ -480,7 +480,7 @@ def launch_tool_calls(
     tool_calls: list[dict[str, Any]],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch each tool call as an asyncio task. Returns immediately.
 
@@ -543,7 +543,7 @@ async def _execute_tool_async(
     call: dict[str, Any],
     *,
     account_id: str,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one built-in tool call via the shared invoke core, then
     append the tool-role result event.
@@ -717,7 +717,7 @@ async def _append_tool_result_event(
     event_data: dict[str, Any],
     *,
     account_id: str,
-    tool_parent_channel: str | None | EllipsisType = ...,
+    tool_parent_channel: str | EllipsisType | None = ...,
 ) -> None:
     """Append a ``role:"tool"`` event, dedup-guarded on ``tool_call_id``.
 
@@ -954,7 +954,7 @@ def launch_mcp_tool_calls(
     mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch MCP tool calls as asyncio tasks. Returns immediately.
 
@@ -1040,7 +1040,7 @@ async def _execute_mcp_tool_async(
     mcp_tools: list[dict[str, Any]] | None = None,
     account_id: str,
     focal_channel: str | None = None,
-    parent_focal_at_arrival: str | None | EllipsisType = ...,
+    parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one MCP tool call: connect, invoke, append result.
 
@@ -1079,7 +1079,7 @@ async def _execute_mcp_tool_admitted(
     mcp_tools: list[dict[str, Any]] | None,
     account_id: str,
     focal_channel: str | None,
-    parent_focal_at_arrival: str | None | EllipsisType,
+    parent_focal_at_arrival: str | EllipsisType | None,
 ) -> None:
     """The body of one MCP dispatch, inside ``_tool_lifecycle``.
 

@@ -462,6 +462,11 @@ from .connections import (  # noqa: E402
     update_connector_capabilities,
     update_connector_tools_schema,
 )
+from .db_stats import (  # noqa: E402
+    database_size,
+    monthly_buckets,
+    table_storage_stats,
+)
 from .environments import (  # noqa: E402
     archive_environment,
     get_environment,
@@ -512,6 +517,7 @@ from .events import (  # noqa: E402
 )
 from .files import (  # noqa: E402
     insert_file,
+    list_upload_paths_for_sessions,
 )
 from .management_calls import (  # noqa: E402
     get_management_call,
@@ -575,6 +581,7 @@ from .prune import (  # noqa: E402
 )
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
+    acquire_workspace_hierarchy_advisory_xact_locks,
     gc_snapshot_session_states,
     normalized_workspace_path,
     unscoped_clear_session_snapshot,
@@ -726,6 +733,7 @@ from .vaults import (  # noqa: E402
     list_run_env_var_credentials,
     list_session_env_var_credential_echoes,
     list_session_env_var_credentials,
+    list_session_vault_credentials,
     list_vault_credentials,
     list_vaults,
     lock_oauth_credential_for_refresh,
@@ -775,6 +783,7 @@ __all__ = [
     "acquire_account_triggers_lock",
     "acquire_session_resources_lock",
     "acquire_workspace_advisory_xact_lock",
+    "acquire_workspace_hierarchy_advisory_xact_locks",
     "add_trigger",
     "advance_open_request_scan_floor",
     "append_event",
@@ -813,6 +822,7 @@ __all__ = [
     "count_request_nudges",
     "count_session_triggers",
     "count_stuck_running_trigger_runs",
+    "database_size",
     "decrement_open_tool_call_count",
     "default_inbound_policy_if_unset",
     "delete_chat_session",
@@ -969,6 +979,7 @@ __all__ = [
     "list_session_memory_store_echoes",
     "list_session_memory_store_ranks",
     "list_session_templates",
+    "list_session_vault_credentials",
     "list_sessions",
     "list_skill_versions",
     "list_skills",
@@ -976,6 +987,7 @@ __all__ = [
     "list_triggers",
     "list_unharvested_session_cancel_markers",
     "list_unresolved_tool_calls_batch",
+    "list_upload_paths_for_sessions",
     "list_vault_credentials",
     "list_vaults",
     "lock_active_session_for_update",
@@ -986,6 +998,7 @@ __all__ = [
     "mark_management_call_resolved",
     "mark_session_cancel_marker_harvested",
     "model_token_class_ratios",
+    "monthly_buckets",
     "normalized_workspace_path",
     "notify_connection_change",
     "notify_management_call_dispatch",
@@ -1041,6 +1054,7 @@ __all__ = [
     "set_session_stop_reason",
     "set_session_vaults",
     "sum_account_session_tokens",
+    "table_storage_stats",
     "try_record_inbound_ack",
     "unscoped_clear_session_snapshot",
     "unscoped_compare_and_clear_session_snapshot",

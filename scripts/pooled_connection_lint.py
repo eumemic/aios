@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -40,9 +41,13 @@ def _expression_name(node: ast.AST) -> str | None:
 _DB_HELPER_SYMBOLS = frozenset(
     {
         "_queries.list_session_memory_store_echoes",
+        "db_stats_queries.database_size",
+        "db_stats_queries.monthly_buckets",
+        "db_stats_queries.table_storage_stats",
         "queries.acquire_account_triggers_lock",
         "queries.acquire_session_resources_lock",
         "queries.acquire_workspace_advisory_xact_lock",
+        "queries.acquire_workspace_hierarchy_advisory_xact_locks",
         "queries.add_trigger",
         "queries.advance_open_request_scan_floor",
         "queries.append_event",
@@ -227,6 +232,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_session_memory_store_echoes",
         "queries.list_session_memory_store_ranks",
         "queries.list_session_templates",
+        "queries.list_session_vault_credentials",
         "queries.list_sessions",
         "queries.list_skill_versions",
         "queries.list_skills",
@@ -234,6 +240,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.list_triggers",
         "queries.list_unharvested_session_cancel_markers",
         "queries.list_unresolved_tool_calls_batch",
+        "queries.list_upload_paths_for_sessions",
         "queries.list_vault_credentials",
         "queries.list_vaults",
         "queries.lock_active_session_for_update",
@@ -352,6 +359,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.runs_children_usage",
         "wf_queries.set_run_status",
         "wf_queries.set_run_terminal",
+        "wf_queries.signal_stale_suspended_runs",
         "wf_queries.set_run_vaults",
         "wf_queries.unarchive_workflow",
         "wf_queries.unscoped_terminal_run_ids",
@@ -524,10 +532,88 @@ def check_paths(paths: list[Path]) -> list[Violation]:
     return violations
 
 
+def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
+    """Every pooled-await exemption marker under ``root``, as (path, lineno, issue).
+
+    THE SINGLE SOURCE OF TRUTH for "what is an exemption marker", so CI cannot
+    disagree with the linter about it.
+
+    WHY THIS EXISTS (aios#2143, 2026-08-14): the CI workflow re-implemented this
+    parse as an inline grep requiring the reference to follow ``allow``
+    IMMEDIATELY::
+
+        grep -RhoE 'pooled-connection-await: allow eumemic/aios#[0-9]+' src
+
+    One real marker read ``allow — eumemic/aios#919`` (em-dash). The grep never
+    matched it, so that exemption pointed at a CLOSED issue for two months while
+    the check reported success -- a governance check blind to the formatting it
+    did not anticipate, whose silence was indistinguishable from a clean bill of
+    health. Meanwhile a legitimately-closed issue (#1945) turned lint red on
+    every PR that rebased onto master.
+
+    Two mechanisms parsing one syntax with different rules is how the blind spot
+    appeared. This function is the fix: the workflow calls it instead of guessing
+    again.
+    """
+    out: list[tuple[str, int, int]] = []
+    root_path = Path(root)
+    if not root_path.is_dir():
+        # A root that is not a directory yields zero markers from rglob -- silently,
+        # and indistinguishably from "this tree has no exemptions".
+        raise RuntimeError(f"exemption root {root!r} is not a directory")
+
+    # Walk EXPLICITLY rather than with Path.rglob: rglob SUPPRESSES OSErrors raised
+    # while scanning directories, so an unreadable subtree simply does not appear in
+    # its results. That makes partial discovery failure indistinguishable from "that
+    # subtree has no exemptions" -- the exact class this function exists to kill
+    # (aios#2138), one level below the per-file read. os.walk surfaces the error via
+    # onerror, which we escalate rather than swallow.
+    def _fail(exc: OSError) -> None:
+        raise RuntimeError(
+            f"cannot enumerate {getattr(exc, 'filename', '?')} while discovering exemptions: {exc}"
+        ) from exc
+
+    discovered: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(root_path, onerror=_fail):
+        for name in filenames:
+            if name.endswith(".py"):
+                discovered.append(Path(dirpath) / name)
+
+    for path in sorted(discovered):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            # NEVER swallow this. A file we cannot read is a file whose exemptions we
+            # do not know about -- reporting "no markers here" would make partial
+            # enumeration failure indistinguishable from a clean result, which is the
+            # exact class this whole change exists to kill (aios#2138).
+            raise RuntimeError(f"cannot read {path} while enumerating exemptions: {exc}") from exc
+        for lineno, line in enumerate(lines, start=1):
+            if _PRAGMA not in line:
+                continue
+            match = _ISSUE_REF.search(line)
+            if match is not None:
+                out.append((str(path), lineno, int(match.group(1))))
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+", type=Path)
+    parser.add_argument(
+        "--list-exemptions",
+        action="store_true",
+        help=(
+            "print every pooled-await exemption marker as 'path:line\\teumemic/aios#N'. "
+            "CI uses this instead of re-implementing the parse (aios#2143)."
+        ),
+    )
     args = parser.parse_args()
+    if args.list_exemptions:
+        for path in args.paths:
+            for _p, _ln, _issue in iter_exemption_refs(str(path)):
+                print(f"{_p}:{_ln}\teumemic/aios#{_issue}")
+        return 0
     violations = check_paths(args.paths)
     for violation in violations:
         print(violation)

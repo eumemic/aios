@@ -145,7 +145,7 @@ async def update_model_provider(
     *,
     account_id: str,
     blob: EncryptedBlob | None = None,
-    api_base: str | None | EllipsisType = ...,
+    api_base: str | EllipsisType | None = ...,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
 

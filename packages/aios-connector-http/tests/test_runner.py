@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
 import pytest
@@ -931,12 +931,27 @@ class TestEmitInbound4xxDrop:
         )
         assert result is None
 
-    @pytest.mark.parametrize("status_code", [401, 500])
-    async def test_raises_on_auth_and_5xx(self, probe: _ProbeConnector, status_code: int) -> None:
+    async def test_drops_5xx_returns_none(self, probe: _ProbeConnector) -> None:
+        mock_response = MagicMock()
+        mock_response.is_error = True
+        mock_response.status_code = 503
+        mock_response.text = "temporary outage"
+        mock_post = AsyncMock(return_value=mock_response)
+        probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]
+
+        result = await probe.emit_inbound(
+            connection_id="conn_1", chat_id="c", sender={"id": 1}, content=""
+        )
+
+        assert result is None
+        mock_response.raise_for_status.assert_not_called()
+
+    @pytest.mark.parametrize("status_code", [401, 403])
+    async def test_raises_on_auth_failure(self, probe: _ProbeConnector, status_code: int) -> None:
         mock_response = MagicMock()
         mock_response.is_error = True
         mock_response.status_code = status_code
-        mock_response.text = "auth or server error"
+        mock_response.text = "auth error"
         mock_response.raise_for_status = MagicMock(
             side_effect=httpx.HTTPStatusError(
                 f"{status_code}", request=MagicMock(), response=mock_response
@@ -962,11 +977,17 @@ class TestIsolatedServeConnection:
     user-state slot on exit."""
 
     async def test_swallows_non_cancel_exception(self) -> None:
+        attempts = 0
+
         class _CrashingConnector(HttpConnector):
             connector = "crashy"
+            RECONNECT_BACKOFF_INITIAL = 0.0
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                raise RuntimeError("daemon refused this phone")
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("daemon refused this phone")
 
         c = _CrashingConnector(base_url="http://x", token="aios_runtime_x")
         with structlog.testing.capture_logs() as records:
@@ -976,6 +997,33 @@ class TestIsolatedServeConnection:
         assert len(failed) == 1
         assert failed[0]["connection_id"] == "conn_1"
         assert failed[0]["error"] == "RuntimeError"
+
+    async def test_retries_failed_serve_until_clean_return(self) -> None:
+        attempts = 0
+
+        class _FlakyConnector(HttpConnector):
+            connector = "flaky"
+            RECONNECT_BACKOFF_INITIAL = 0.0
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise RuntimeError(f"failure {attempts}")
+
+        c = _FlakyConnector(base_url="http://x", token="aios_runtime_x")
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="acct_1"
+        )
+        c._fetch_runtime_secrets = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+        await c._isolated_serve_connection("conn_1", {})
+
+        assert attempts == 3
+        state = c._connections["conn_1"]
+        assert state.serve_status == "serving"
+        assert state.serve_restart_count == 2
+        assert state.last_serve_error == "RuntimeError: failure 2"
 
     async def test_pops_state_on_cancel(self) -> None:
         class _Connector(HttpConnector):
@@ -1418,205 +1466,101 @@ class TestDiscoveryCursorAndResetRecovery:
         removed.assert_not_awaited()
 
 
-class TestDeadWorkerRespawn:
-    """Regression for #1233: ``_isolated_serve_connection``'s ``finally``
-    must pop ``self._connections[connection_id]`` (not just ``self.state``)
-    on a terminal ``serve_connection`` failure, so a later discovery
-    ``added`` re-spawns the worker instead of being short-circuited as
-    "already running."  Paired with a bounded re-spawn backoff so a
-    hard-failing connection doesn't hot-loop.
-    """
+class TestServeSupervisor:
+    async def test_backoff_escalates_and_caps(self) -> None:
+        attempts = 0
 
-    async def test_terminal_failure_pops_connections_slot(self) -> None:
-        """A non-cancel ``serve_connection`` crash must clear the
-        ``_connections`` slot so the id is no longer "already running"."""
-
-        class _Crashing(HttpConnector):
-            connector = "crashy"
+        class _Flaky(HttpConnector):
+            connector = "flaky"
+            RECONNECT_BACKOFF_INITIAL = 1.0
+            RECONNECT_BACKOFF_MAX = 2.0
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                raise RuntimeError("revoked token")
+                nonlocal attempts
+                attempts += 1
+                if attempts < 4:
+                    raise RuntimeError("transient")
 
-        c = _Crashing(base_url="http://x", token="aios_runtime_x")
-        # Simulate the live-connection bookkeeping _on_connection_added sets.
-        c._connections["conn_1"] = _ConnectionState(
-            connection_id="conn_1", external_account_id="acct_1"
+        c = _Flaky(base_url="http://x", token="aios_runtime_x")
+        lifecycle = AsyncMock()
+        c.emit_lifecycle = lifecycle  # type: ignore[method-assign]
+        sleep = AsyncMock()
+        with patch("aios_connector_http.runner.asyncio.sleep", sleep):
+            await c._isolated_serve_connection("conn_1", {})
+
+        assert [call.args[0] for call in sleep.await_args_list] == [1.0, 2.0, 2.0]
+        assert lifecycle.await_count == 3
+
+    async def test_retry_refetches_corrected_runtime_secrets(self) -> None:
+        seen: list[dict[str, str]] = []
+
+        class _CredentialConnector(HttpConnector):
+            connector = "credential"
+            RECONNECT_BACKOFF_INITIAL = 0.0
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                seen.append(dict(secrets))
+                if secrets["token"] != "corrected":
+                    raise RuntimeError("credential rejected")
+
+        c = _CredentialConnector(base_url="http://x", token="aios_runtime_x")
+        state = _ConnectionState(
+            connection_id="conn_1",
+            external_account_id="acct_1",
+            secrets={"token": "revoked"},
         )
-        c._connection_served.setdefault("conn_1", asyncio.Event()).set()
+        c._connections["conn_1"] = state
+        c._fetch_runtime_secrets = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[{"token": "still-revoked"}, {"token": "corrected"}]
+        )
+        c.emit_lifecycle = AsyncMock()  # type: ignore[method-assign]
 
-        # Should NOT raise (failure isolation preserved).
-        await c._isolated_serve_connection("conn_1", {"token": "bad"})
+        await c._isolated_serve_connection("conn_1", state.secrets)
 
-        # The zombie is gone: the connection slot was popped so a later
-        # ``added`` re-spawns rather than short-circuiting.
-        assert "conn_1" not in c._connections
-        # The served event is cleared so wait_connection_served re-arms.
-        assert not c._connection_served["conn_1"].is_set()
+        assert seen == [
+            {"token": "revoked"},
+            {"token": "still-revoked"},
+            {"token": "corrected"},
+        ]
+        assert c._fetch_runtime_secrets.await_args_list == [call("conn_1"), call("conn_1")]  # type: ignore[attr-defined]
+        assert state.secrets == {"token": "corrected"}
 
-    async def test_clean_return_pops_connections_slot(self) -> None:
-        """A ``serve_connection`` that simply returns is also terminal —
-        no zombie and no armed backoff."""
+    async def test_lifecycle_failure_does_not_escape_supervisor(self) -> None:
+        attempts = 0
 
-        class _Returns(HttpConnector):
-            connector = "returns"
+        class _Flaky(HttpConnector):
+            connector = "flaky"
+            RECONNECT_BACKOFF_INITIAL = 0.0
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                return
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("serve failed")
 
-        c = _Returns(base_url="http://x", token="aios_runtime_x")
+        c = _Flaky(base_url="http://x", token="aios_runtime_x")
+        c.emit_lifecycle = AsyncMock(side_effect=RuntimeError("api unavailable"))  # type: ignore[method-assign]
         await c._isolated_serve_connection("conn_1", {})
-        assert "conn_1" not in c._reconnect_backoff
+        assert attempts == 2
 
-    async def test_cancellation_leaves_connections_to_removed_handler(self) -> None:
-        """A ``removed``-driven cancel must NOT pop ``_connections`` here
-        (that's ``_on_connection_removed``'s job) and must NOT arm backoff;
-        the CancelledError re-raises for a clean TaskGroup cancel."""
+    async def test_cancellation_propagates_without_retry(self) -> None:
+        attempts = 0
 
         class _Blocks(HttpConnector):
             connector = "blocks"
 
             async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                nonlocal attempts
+                attempts += 1
                 await asyncio.Event().wait()
 
         c = _Blocks(base_url="http://x", token="aios_runtime_x")
-        c._connections["conn_1"] = _ConnectionState(
-            connection_id="conn_1", external_account_id="acct_1"
-        )
         task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        # Not a failure: this handler leaves the slot for the removed path
-        # and arms no backoff.
-        assert "conn_1" in c._connections
-        assert "conn_1" not in c._reconnect_backoff
-
-    async def test_failed_connection_can_respawn_via_added(self) -> None:
-        """End-to-end of the fix: after a terminal failure the very next
-        discovery ``added`` must re-fetch secrets and re-spawn the
-        worker rather than short-circuiting on "already running"."""
-
-        spawns: list[dict[str, str]] = []
-        healthy = asyncio.Event()
-
-        class _FlakyThenOk(HttpConnector):
-            connector = "flaky"
-            # Collapse backoff so the test doesn't actually wait.
-            RECONNECT_BACKOFF_INITIAL = 0.0
-
-            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                spawns.append(dict(secrets))
-                if len(spawns) == 1:
-                    raise RuntimeError("first spawn: revoked token")
-                # Second spawn (after secret correction): block forever.
-                healthy.set()
-                await asyncio.Event().wait()
-
-        c = _FlakyThenOk(base_url="http://x", token="aios_runtime_x")
-        c._client = MagicMock()
-
-        secrets_seq = [{"token": "bad"}, {"token": "good"}]
-
-        def _secrets_response(token_map: dict[str, str]) -> MagicMock:
-            body = MagicMock()
-            secrets_obj = MagicMock()
-            secrets_obj.additional_properties = token_map
-            body.secrets = secrets_obj
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.parsed = body
-            return resp
-
-        responses = [_secrets_response(s) for s in secrets_seq]
-
-        async def _fake_get_secrets(*, client: Any, connection_id: str) -> Any:
-            del client, connection_id
-            return responses.pop(0)
-
-        async with asyncio.TaskGroup() as tg:
-            with patch(
-                "aios_connector_http.runner._get_runtime_secrets",
-                new=_fake_get_secrets,
-            ):
-                # First ``added`` spawns a worker that fails terminally.
-                await c._on_connection_added(tg, "conn_1", "acct_1")
-                await c.wait_connection_served("conn_1", deadline=5.0)
-                # Let the failing worker run its finally and pop the slot.
-                for _ in range(50):
-                    await asyncio.sleep(0)
-                    if "conn_1" not in c._connections:
-                        break
-                assert "conn_1" not in c._connections, "zombie slot not cleared"
-
-                # The backfill replays ``added`` — must NOT short-circuit.
-                await c._on_connection_added(tg, "conn_1", "acct_1")
-                await asyncio.wait_for(healthy.wait(), timeout=5.0)
-
-            # Cancel the now-healthy blocking worker so the TG can exit.
-            await c._on_connection_removed("conn_1")
-
-        # Two spawns: the failed one, then the corrected re-spawn — and the
-        # second saw the corrected secret (re-fetched at re-spawn).
-        assert spawns == [{"token": "bad"}, {"token": "good"}]
-
-    def test_arm_reconnect_backoff_escalates_and_caps(self) -> None:
-        class _C(HttpConnector):
-            connector = "c"
-            RECONNECT_BACKOFF_INITIAL = 1.0
-            RECONNECT_BACKOFF_MAX = 4.0
-
-        c = _C(base_url="http://x", token="aios_runtime_x")
-        c._arm_reconnect_backoff("conn_1")
-        assert c._reconnect_backoff["conn_1"] == 1.0
-        c._arm_reconnect_backoff("conn_1")
-        assert c._reconnect_backoff["conn_1"] == 2.0
-        c._arm_reconnect_backoff("conn_1")
-        assert c._reconnect_backoff["conn_1"] == 4.0
-        c._arm_reconnect_backoff("conn_1")  # capped
-        assert c._reconnect_backoff["conn_1"] == 4.0
-
-    async def test_respawn_sleeps_backoff_before_serving(self) -> None:
-        """A re-spawn after a terminal failure sleeps the armed backoff
-        before doing platform work, so a hard-failing connection doesn't
-        hot-loop on every backfill replay."""
-
-        class _Crashing(HttpConnector):
-            connector = "crashy"
-            RECONNECT_BACKOFF_INITIAL = 1.0
-
-            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
-                raise RuntimeError("still revoked")
-
-        c = _Crashing(base_url="http://x", token="aios_runtime_x")
-
-        sleeps: list[float] = []
-        _real_sleep = asyncio.sleep
-
-        async def _fake_sleep(delay: float) -> None:
-            sleeps.append(delay)
-            await _real_sleep(0)
-
-        with patch("aios_connector_http.runner.asyncio.sleep", new=_fake_sleep):
-            # First spawn: no backoff armed yet, no sleep.
-            await c._isolated_serve_connection("conn_1", {})
-            assert sleeps == []
-            assert c._reconnect_backoff["conn_1"] == 1.0
-            # Second spawn: armed backoff is slept before serving.
-            await c._isolated_serve_connection("conn_1", {})
-            assert sleeps == [1.0]
-            # Failure escalated the backoff for the next attempt.
-            assert c._reconnect_backoff["conn_1"] == 2.0
-
-    async def test_removed_clears_armed_backoff(self) -> None:
-        class _C(HttpConnector):
-            connector = "c"
-
-        c = _C(base_url="http://x", token="aios_runtime_x")
-        c._arm_reconnect_backoff("conn_1")
-        assert "conn_1" in c._reconnect_backoff
-        await c._on_connection_removed("conn_1")
-        assert "conn_1" not in c._reconnect_backoff
+        assert attempts == 1
 
 
 class TestEmitSessionLifecycle:
@@ -1871,14 +1815,16 @@ class TestDeliveryAcks:
             )
         assert result is None
 
-    async def test_ack_fatal_status_reraises(self, probe: _ProbeConnector) -> None:
-        """A fatal status re-raises, matching ``emit_session_lifecycle``."""
+    async def test_ack_auth_status_reraises(self, probe: _ProbeConnector) -> None:
+        """An authentication failure re-raises, matching ``emit_session_lifecycle``."""
         mock_response = MagicMock()
         mock_response.is_error = True
-        mock_response.status_code = 500
-        mock_response.text = "boom"
+        mock_response.status_code = 401
+        mock_response.text = "unauthorized"
         mock_response.raise_for_status = MagicMock(
-            side_effect=httpx.HTTPStatusError("boom", request=MagicMock(), response=mock_response)
+            side_effect=httpx.HTTPStatusError(
+                "unauthorized", request=MagicMock(), response=mock_response
+            )
         )
         mock_post = AsyncMock(return_value=mock_response)
         probe._client.get_async_httpx_client.return_value = MagicMock(post=mock_post)  # type: ignore[union-attr]

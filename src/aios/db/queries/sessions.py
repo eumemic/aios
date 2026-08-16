@@ -518,7 +518,7 @@ async def get_session_frozen_surface(
         return None
     return Surface(
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
     )
 
@@ -713,9 +713,9 @@ async def get_open_obligations(
     edge so the tail-injected obligations block (and the ``obligations`` read
     model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
     **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
-    (``req.created_at``, for age), and a short ``summary`` (``req.data->>'summary'``,
-    additive — absent on pre-#1413 frames -> ``None`` -> an id-only render line, no
-    migration).
+    (``req.created_at``, for age), and the request content in the legacy-named
+    ``summary`` field (``req.data->>'summary'``, additive — absent on pre-#1413
+    frames -> ``None`` -> a loud unavailable marker, no migration).
 
     #1522 widens the projection to also carry ``output_schema``
     (``req.data->'output_schema'``) — the JSON Schema the request demands of its
@@ -1265,12 +1265,11 @@ async def append_request_opened(
     wake opens the edge exactly once (see :func:`get_open_request_ids` for the
     asked-minus-answered derivation this feeds).
 
-    ``summary`` (#1413) is a short (~60-char) truncated preview of the request
-    input, carried so the always-on tail-injected obligations block can render a
-    human-readable line for an obligation whose original request user message has
-    been windowed out of context. **Purely additive**: omitted (the legacy/None
-    case) it is simply not written to the frame, and the obligations reader treats
-    an absent field as ``None`` -> an id-only render line (no migration, #1131-proof
+    ``summary`` (#1413, retained field name for event compatibility) is the
+    verbatim request input, carried so the always-on tail-injected obligations block
+    can recover the task after its original user message is windowed out. **Purely
+    additive**: omitted (the legacy/None case) it is simply not written to the frame,
+    and the obligations renderer shows a loud unavailable marker (no migration, #1131-proof
     -- frame-extension rather than a LEFT-JOIN on the soon-retired ``metadata`` blob).
     """
     data: dict[str, Any] = {
@@ -1735,8 +1734,8 @@ async def update_session(
     *,
     account_id: str,
     agent_id: str | None = None,
-    agent_version: int | None | EllipsisType = ...,
-    title: str | None | EllipsisType = ...,
+    agent_version: int | EllipsisType | None = ...,
+    title: str | EllipsisType | None = ...,
     metadata: dict[str, Any] | None = None,
     outbound_suppression: str | None = None,
 ) -> Session:
