@@ -303,7 +303,6 @@ async def create_session(
                     conn, inherit_from_session_id, account_id=account_id
                 )
                 workspace_path = queries.normalized_workspace_path(workspace_path)
-                await queries.acquire_workspace_advisory_xact_lock(conn, workspace_path)
             elif workspace == "fresh":
                 workspace_path = None
             parent_vault_ids = await queries.get_session_vault_ids(
@@ -358,6 +357,11 @@ async def create_session(
                         "child session requested resources the launching session does not hold",
                         detail={"ungranted_resources": ungranted_resources},
                     )
+        if workspace_path is not None:
+            workspace_path = queries.normalized_workspace_path(workspace_path)
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                conn, workspace_path, boundary=str(get_settings().workspace_root)
+            )
         session = await queries.insert_session(
             conn,
             agent_id=agent_id,
@@ -2481,8 +2485,10 @@ async def clone_session(
         shared_path = workspace_path or await queries.get_session_workspace_path(
             conn, parent_session_id, account_id=account_id
         )
-        await queries.acquire_workspace_advisory_xact_lock(
-            conn, queries.normalized_workspace_path(shared_path)
+        await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+            conn,
+            queries.normalized_workspace_path(shared_path),
+            boundary=str(get_settings().workspace_root),
         )
         session = await queries.clone_session(
             conn, parent_session_id, workspace_path=workspace_path, account_id=account_id
@@ -2519,8 +2525,10 @@ async def delete_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id
         # Serialize the keep-set decision with every shared-workspace activation.
         # The transaction sees its own DELETE, so the owner's pointer is absent
         # while live clones and shared runs borrowing the path remain represented.
-        await queries.acquire_workspace_advisory_xact_lock(
-            conn, queries.normalized_workspace_path(str(workspace_path))
+        await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+            conn,
+            queries.normalized_workspace_path(str(workspace_path)),
+            boundary=str(get_settings().workspace_root),
         )
         parent_run_id = await fail_open_child_requests_conn(
             conn, session_id, account_id=account_id, error={"kind": "child_gone"}

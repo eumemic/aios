@@ -613,7 +613,9 @@ def purge_session_directories(
         )
         if proven is None:
             continue
-        if candidate == workspace_path and proven in live_paths:
+        if candidate == workspace_path and any(
+            live == proven or live.is_relative_to(proven) for live in live_paths
+        ):
             log.warning(
                 "refusing to purge session workspace borrowed by a live session or run",
                 path=str(candidate),

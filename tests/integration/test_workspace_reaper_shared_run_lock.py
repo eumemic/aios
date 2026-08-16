@@ -214,6 +214,38 @@ async def test_shared_activation_serializes_with_reap(
         await pool.close()
 
 
+async def test_nested_workspace_activation_serializes_with_parent_delete(
+    migrated_db_url: str, tmp_path: Path
+) -> None:
+    """A nested creator and containing delete contend on the parent's key."""
+    parent = str((tmp_path / "parent").resolve())
+    nested = str((tmp_path / "parent" / "child_ws").resolve())
+    owner = await asyncpg.connect(migrated_db_url)
+    contender = await asyncpg.connect(migrated_db_url)
+    try:
+        async with owner.transaction():
+            await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                owner, parent, boundary=str(tmp_path)
+            )
+            entered = asyncio.Event()
+
+            async def activate_nested() -> None:
+                async with contender.transaction():
+                    await queries.acquire_workspace_hierarchy_advisory_xact_locks(
+                        contender, nested, boundary=str(tmp_path)
+                    )
+                    entered.set()
+
+            task = asyncio.create_task(activate_nested())
+            await asyncio.sleep(0.05)
+            assert not entered.is_set(), "nested activation entered during parent deletion"
+        await asyncio.wait_for(task, timeout=1)
+        assert entered.is_set()
+    finally:
+        await owner.close()
+        await contender.close()
+
+
 async def test_reaper_lock_survives_real_to_thread_delete(
     migrated_db_url: str, tmp_path: Path
 ) -> None:

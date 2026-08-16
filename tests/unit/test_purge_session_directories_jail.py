@@ -179,6 +179,39 @@ def test_refuses_canonical_workspace_present_in_live_keep_set(
     assert "borrowed by a live session or run" in caplog.text
 
 
+def test_refuses_parent_workspace_containing_live_nested_workspace(
+    workspace_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workspace = _populate(workspace_root / ACCOUNT / SESSION)
+    nested_live = workspace / "child_ws"
+    _populate(nested_live)
+
+    purge_session_directories(
+        SESSION,
+        workspace,
+        account_id=ACCOUNT,
+        live_workspace_paths=(str(nested_live),),
+    )
+
+    assert (nested_live / "marker.txt").exists(), "parent purge destroyed a nested live workspace"
+    assert "borrowed by a live session or run" in caplog.text
+
+
+def test_reclaims_parent_workspace_when_no_live_workspace_is_nested(workspace_root: Path) -> None:
+    workspace = _populate(workspace_root / ACCOUNT / SESSION)
+    unrelated_live = _populate(workspace_root / ACCOUNT / "sess_unrelated")
+
+    purge_session_directories(
+        SESSION,
+        workspace,
+        account_id=ACCOUNT,
+        live_workspace_paths=(str(unrelated_live),),
+    )
+
+    assert not workspace.exists(), "unrelated live paths must not cause an unbounded storage leak"
+    assert unrelated_live.exists()
+
+
 def test_custom_workspace_skip_is_known_storage_leak(workspace_root: Path) -> None:
     custom = _populate(workspace_root / ACCOUNT / "custom")
     purge_session_directories(SESSION, custom, account_id=ACCOUNT)

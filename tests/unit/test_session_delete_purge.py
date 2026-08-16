@@ -55,7 +55,7 @@ async def test_delete_session_removes_snapshot_and_all_session_directories(tmp_p
             AsyncMock(return_value=[]),
         ),
         patch(
-            "aios.services.sessions.queries.acquire_workspace_advisory_xact_lock",
+            "aios.services.sessions.queries.acquire_workspace_hierarchy_advisory_xact_locks",
             AsyncMock(),
         ),
         patch("aios.services.sessions.fail_open_child_requests_conn", AsyncMock(return_value=None)),

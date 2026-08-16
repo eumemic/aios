@@ -581,6 +581,7 @@ from .prune import (  # noqa: E402
 )
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
+    acquire_workspace_hierarchy_advisory_xact_locks,
     gc_snapshot_session_states,
     normalized_workspace_path,
     unscoped_clear_session_snapshot,
@@ -782,6 +783,7 @@ __all__ = [
     "acquire_account_triggers_lock",
     "acquire_session_resources_lock",
     "acquire_workspace_advisory_xact_lock",
+    "acquire_workspace_hierarchy_advisory_xact_locks",
     "add_trigger",
     "advance_open_request_scan_floor",
     "append_event",
