@@ -1,6 +1,6 @@
-# Matrix appservice receiver (Milestone 0)
+# Matrix appservice connector
 
-This is the bare, private-network HS→AS receiver. It has no aios integration. Copy
+This is the private-network HS→AS receiver and aios `HttpConnector` runtime. Copy
 `registration.yaml`, replace both token placeholders and the example server name in the regex,
 then install it in Synapse together with the settings in `synapse.yaml`. The registration and
 container environment must contain identical tokens and namespace details.

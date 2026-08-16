@@ -619,9 +619,34 @@ def render_user_event(
     ``orig_channel``, ``focal_channel_at_arrival``, ``created_at``, and
     the optional vision policy inputs ``model`` / ``session_id``.
     ``build_messages`` threads vision policy through; the append-time
-    token counter in ``queries.append_event`` does not (and pays a small
-    under-count per inlined image, absorbed by ``model_token_class_ratios``
-    calibration).
+    token counter in ``queries.append_event`` does not.
+
+    .. warning::
+
+       **The per-image error is unbounded, and calibration cannot correct
+       it.** An earlier version of this sentence described it as minor and
+       self-correcting; that was wrong in both halves, and the wording
+       predates the bug that falsified it (the substantive claim dates to
+       ``7c142084``, 2026-05-05 -- ``f576f089`` on 2026-07-12 only renamed
+       the ratio it referred to -- while aios#2050 was filed 2026-07-27).
+
+       Measured 2026-08-15 on litellm 1.97.0: ``litellm.token_counter``
+       prices an ``image_url`` data-URI part at a CONSTANT ~89 tokens
+       **regardless of payload size** -- 89 against 9,600 / 191,447 /
+       1,912,670 as text for 10 KB / 200 KB / 2 MB of image bytes
+       (108x / 2,151x / 21,491x). **A constant against a linear truth.**
+
+       Calibration cannot reach it, for the reason ``tokens.py`` already
+       states: the scaling layer corrects a RATIO, so **no coefficient
+       multiplied by zero reaches a positive number**. An uncounted term
+       is invisible to calibration forever.
+
+       The fix is explicit image-mass tracking (aios#2073), not a better
+       ratio. This note stays until that lands, because the original
+       sentence read as a considered design decision and misled a reader
+       into concluding the bug was already handled.
+       ``tests/unit/test_image_undercount_claim_drift.py`` keeps every
+       copy of the corrected claim in agreement.
 
     Every user message carries a ``received`` envelope field (the absolute
     receipt timestamp, from the immutable ``created_at``; see

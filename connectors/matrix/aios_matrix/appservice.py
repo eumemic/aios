@@ -23,9 +23,19 @@ class PostgresStateStore(PgASStateStore):
 
 
 def create_appservice(
-    config: MatrixConfig, state_store: ASStateStore | None | object = _USE_POSTGRES
+    config: MatrixConfig,
+    state_store: ASStateStore | object | None = _USE_POSTGRES,
+    appservice_class: type[AppService] = AppService,
 ) -> AppService:
-    """Build the receiver, using a durable mautrix state store by default."""
+    """Build the receiver, using a durable mautrix state store by default.
+
+    ``appservice_class`` MUST be supplied by callers that override any HTTP
+    route handler.  ``AppService.__init__`` calls ``register_routes()``, which
+    binds ``self._http_handle_transaction`` into the aiohttp router at
+    construction time; reassigning ``__class__`` afterwards does not rebind
+    the already-bound handler, so a subclass installed post-construction is
+    silently dead code.  The class must therefore be chosen up front.
+    """
     if state_store is _USE_POSTGRES:
         database = Database.create(
             config.database_url,
@@ -33,7 +43,7 @@ def create_appservice(
             owner_name="aios-matrix",
         )
         state_store = PostgresStateStore(database)
-    return AppService(
+    return appservice_class(
         server=config.hs_url,
         domain=config.server_name,
         as_token=config.as_token,

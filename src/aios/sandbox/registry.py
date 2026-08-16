@@ -71,6 +71,7 @@ from aios.sandbox.setup import (
     build_egress_dump_script,
     build_egress_refresh_script,
     build_egress_resolve_script,
+    egress_unread_hosts,
     install_egress_ca,
     install_packages,
 )
@@ -1131,6 +1132,19 @@ class SandboxRegistry:
         handle = self._handles.get(session_id)
         if handle is None:
             return
+        # The SAME predicate the builder refuses deletions on, read here too.
+        # The refusal script exits 0, so advancing ``pinned`` on that success
+        # would FORGET IPs whose rules were deliberately left installed —
+        # permanently untracked and un-evictable, which inverts the discipline
+        # the nonzero-exit path below establishes. Hold ``pinned`` and warn
+        # instead, so the next tick retries the same delta once the inventory
+        # is complete. That is the refusal's escalation path: it is a retry
+        # with an operator signal, never a terminal state.
+        unread = egress_unread_hosts(
+            new_ips=new,
+            credential_hosts=set(state.credential_hosts),
+            limited_hosts=set(state.limited_hosts),
+        )
         settings = get_settings()
         result = await self._backend.run_netns_sidecar(
             handle.sandbox_id,
@@ -1146,8 +1160,18 @@ class SandboxRegistry:
             max_output_bytes=settings.bash_max_output_bytes,
             runtime=state.runtime,
         )
-        if result.exit_code == 0:
+        if result.exit_code == 0 and not unread:
             state.pinned = candidate
+        elif unread:
+            # Deletions were refused (incomplete inventory). The adds DID
+            # apply, but ``pinned`` must not advance past the IPs whose
+            # deletes were withheld, or their rules stay installed with
+            # nothing tracking them.
+            log.warning(
+                "sandbox.egress_refresh_deletes_refused",
+                session_id=session_id,
+                unread_hosts=unread,
+            )
         else:
             # Loud, not silent: `pinned` is deliberately NOT advanced, so the
             # next tick retries the SAME old→new delta (the refresh script's

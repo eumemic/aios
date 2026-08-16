@@ -43,6 +43,35 @@ async def acquire_workspace_advisory_xact_lock(conn: asyncpg.Connection[Any], pa
     )
 
 
+def workspace_hierarchy_lock_paths(path: str, *, boundary: str) -> tuple[str, ...]:
+    """Return ``path`` and its ancestors below ``boundary``, root to leaf."""
+    normalized = os.path.realpath(path)
+    normalized_boundary = os.path.realpath(boundary)
+    relative = os.path.relpath(normalized, normalized_boundary)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f"workspace path {normalized!r} is outside lock boundary")
+    if relative == os.curdir:
+        return (normalized,)
+    current = normalized_boundary
+    paths: list[str] = []
+    for component in relative.split(os.sep):
+        current = os.path.join(current, component)
+        paths.append(current)
+    return tuple(paths)
+
+
+async def acquire_workspace_hierarchy_advisory_xact_locks(
+    conn: asyncpg.Connection[Any], path: str, *, boundary: str
+) -> None:
+    """Lock a workspace hierarchy root-to-leaf until transaction end.
+
+    A nested creator thereby collides with deletion of any containing
+    workspace, while consistent ordering prevents opposite-order deadlocks.
+    """
+    for lock_path in workspace_hierarchy_lock_paths(path, boundary=boundary):
+        await acquire_workspace_advisory_xact_lock(conn, lock_path)
+
+
 async def unscoped_workspace_path_is_live(conn: asyncpg.Connection[Any], path: str) -> bool:
     """Targeted under-lock recheck for one already-normalized workspace path."""
     normalized = normalized_workspace_path(path)

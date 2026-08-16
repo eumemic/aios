@@ -19,9 +19,16 @@ def test_http_run_defaults_to_fresh_workspace() -> None:
     assert run.workspace == "fresh"
 
 
-def test_session_workflow_call_defaults_shared_and_allows_fresh() -> None:
-    assert _CallWorkflowArgs(workflow_id="wf_1").workspace == "shared"
+def test_session_workflow_call_defaults_fresh_and_allows_shared() -> None:
+    """Sharing the caller's live workspace is OPT-IN, not inherited by silence.
+
+    This test previously pinned ``"shared"`` as the default — a caller that had
+    never heard of ``workspace`` was handed live write access to the launching
+    session's workspace. The default is now ``fresh``; sharing is stated by name.
+    """
+    assert _CallWorkflowArgs(workflow_id="wf_1").workspace == "fresh"
     assert _CallWorkflowArgs(workflow_id="wf_1", workspace="fresh").workspace == "fresh"
+    assert _CallWorkflowArgs(workflow_id="wf_1", workspace="shared").workspace == "shared"
 
 
 def test_agent_workspace_mode_enters_call_identity() -> None:
