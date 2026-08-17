@@ -195,7 +195,6 @@ async def create_run(
     budget_usd: float | None = None,
     default_child_model: str | None = None,
     workspace: str = "fresh",
-    auto_archive_on_completion: bool = False,
 ) -> WfRun:
     """Create a run that snapshots a script, then wake it.
 
@@ -511,7 +510,6 @@ async def create_run(
             budget_usd=budget_usd,
             default_child_model=run_default_child_model,
             depth=child_depth,
-            auto_archive_on_completion=auto_archive_on_completion,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)

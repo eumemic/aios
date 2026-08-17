@@ -12,6 +12,7 @@ directly, which is exactly the surface under test.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -478,10 +479,11 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
-async def test_terminal_archive_activates_prune_without_touching_live_run(
+async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_override(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Terminal completion makes detail reclaimable; a live run remains sacred."""
+    """Every terminal run archives; callers have no run-lifetime flag that can prevent it."""
+    assert "auto_archive_on_completion" not in inspect.signature(service.create_run).parameters
     pool = wf_runtime
     terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
     live_id = await _make_run(pool, _GATE_SCRIPT, name="live_not_prunable")

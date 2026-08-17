@@ -78,7 +78,6 @@ class Workflow(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
-    auto_archive_on_completion: bool = False
 
 
 class WorkflowVersion(BaseModel):
