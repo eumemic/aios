@@ -13,11 +13,12 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from aios.actors import Actor
+from aios.logging import get_logger
 from aios.models.skills import AgentSkillRef
-from aios.models.target_urls import validate_outbound_target_url
+from aios.models.target_urls import OutboundTargetBlockedError, validate_outbound_target_url
 from aios.retirements.registry import tolerated_rename_map
 from aios.retirements.telemetry import record_tolerance_hit
 
@@ -101,6 +102,7 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 PreemptPolicy = Literal["preempt", "wait"]
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
+log = get_logger(__name__)
 
 # Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
 # Agent/workflow/run/session rows persisted before a rename carry the pre-rename builtin tool
@@ -176,6 +178,16 @@ _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 # ── MCP server declaration ────────────────────────────────────────────────────
 
 
+def _persisted_read_context() -> dict[str, Any]:
+    """A FRESH validation context per hydrate.
+
+    The URL validator records a fired tolerance into this dict for the after-validator to
+    read, so it MUST NOT be a shared module-level constant — one legacy row would then
+    mark every spec hydrated afterwards, process-wide.
+    """
+    return {"persisted_read": True}
+
+
 class McpServerSpec(BaseModel):
     """One entry in an agent's ``mcp_servers`` list.
 
@@ -209,8 +221,74 @@ class McpServerSpec(BaseModel):
     url: str = Field(min_length=1)
     include_instructions: bool = True
 
-    _validate_url = field_validator("url")(validate_outbound_target_url)
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v: str, info: ValidationInfo) -> str:
+        try:
+            return validate_outbound_target_url(v)
+        except OutboundTargetBlockedError:
+            if not (isinstance(info.context, dict) and info.context.get("persisted_read")):
+                raise
+            # Tolerated so one legacy row cannot 500 the whole endpoint (#2062). The
+            # *marker* is not set here: it is derived on demand by
+            # ``url_blocked_by_policy`` below, which cannot go stale or be clobbered.
+            log.warning("mcp_server.persisted_url_tolerated", url=v)
+            return v
+
     headers: dict[str, str] | None = Field(default=None)
+
+    @property
+    def url_blocked_by_policy(self) -> bool:
+        """True when current outbound policy FORBIDS this server's ``url``.
+
+        The distinction the read path would otherwise erase. Tolerating an
+        already-persisted blocked URL keeps ``GET /v1/agents/{id}`` from 500ing (#2062),
+        but "I tolerated this" must never look identical to "this is currently valid": a
+        log line is invisible to every in-process consumer of this authority-bearing
+        object, so the object itself answers the question. A caller that reports or acts
+        on a server's operability branches on this.
+
+        DERIVED, never stored — deliberately not a field:
+
+        * A stored flag would be **persisted**. Every DB write serializes specs with
+          ``model_dump()``, so the marker would land in the JSONB and go stale the moment
+          policy or the operator allowlist changed — the same lie relocated.
+        * A stored flag would be **forgeable**. ``extra="forbid"`` rejects an inbound
+          ``url_blocked_by_policy`` key outright; a real field would instead let a stored
+          row or ingress body assert its own safety.
+        * A stored flag **decays under re-validation**, which is how this was caught: a
+          field set during ``model_validate_persisted`` reverts to its default when the
+          spec is re-validated without that context (e.g. ``Agent(...)`` construction),
+          silently turning a marked server back into an ordinary-looking one.
+
+        Being a property also keeps it off the wire and out of the OpenAPI contract for
+        free (it is not a field), and costs nothing on paths that never read it.
+
+        NOT a security boundary: the fail-closed authority is connect-time
+        ``PinnedTransport``, which re-resolves and refuses a blocked host on every request
+        regardless of this value. This is the legibility fix.
+        """
+        try:
+            validate_outbound_target_url(self.url)
+        except OutboundTargetBlockedError:
+            return True
+        except ValueError:
+            # A malformed/unsupported URL shape is a different failure class that the
+            # field validator raises on for every path, tolerated or not. Report it as
+            # not-policy-blocked rather than conflating the two.
+            return False
+        return False
+
+    @classmethod
+    def model_validate_persisted(cls, value: Any) -> McpServerSpec:
+        """Hydrate a stored spec while tolerating URL rules added after it was written.
+
+        Scoped deliberately to :class:`OutboundTargetBlockedError` — the one rule applied
+        retroactively to already-persisted rows (#2062). A missing field, a wrong type, or
+        any other malformed shape still raises: that is real corruption, and hiding it
+        behind a 200 would trade a loud bug for a silent one.
+        """
+        return cls.model_validate(value, context=_persisted_read_context())
 
     @field_validator("name")
     @classmethod

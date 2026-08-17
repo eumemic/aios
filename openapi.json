@@ -18595,8 +18595,15 @@
             "title": "Allowed Hosts"
           },
           "metadata": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Metadata"
           },
           "created_at": {
@@ -19478,6 +19485,30 @@
               }
             ],
             "title": "Archived At"
+          },
+          "terminal_summary": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Summary"
+          },
+          "journal_pruned_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal Pruned At"
           },
           "usage": {
             "anyOf": [

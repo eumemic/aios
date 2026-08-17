@@ -92,3 +92,34 @@ async def conn_two_accounts(
         yield conn
     finally:
         await conn.close()
+
+
+@pytest.fixture
+async def live_conn(request: pytest.FixtureRequest) -> AsyncIterator[asyncpg.Connection[Any]]:
+    """Asyncpg connection to a migrated DB, TRUNCATEd before the test.
+
+    Resolves its target in two ways so the same test body runs both in CI and
+    on a workstation with no Docker:
+
+    * ``AIOS_TEST_LIVE_DB_URL`` — an externally provided, already-migrated
+      Postgres (local dev / sandboxes where testcontainers can't run);
+    * otherwise the standard session-scoped ``migrated_db_url`` testcontainer
+      fixture, so these tests execute on the normal integration shard.
+    """
+    import os
+
+    url = os.environ.get("AIOS_TEST_LIVE_DB_URL") or request.getfixturevalue("migrated_db_url")
+    conn = await asyncpg.connect(url)
+    await register_jsonb_codec(conn)
+    rows = await conn.fetch(
+        "SELECT tablename FROM pg_tables "
+        "WHERE schemaname = 'public' AND tablename <> 'alembic_version'"
+    )
+    if rows:
+        await conn.execute(
+            "TRUNCATE " + ", ".join(r["tablename"] for r in rows) + " RESTART IDENTITY CASCADE"
+        )
+    try:
+        yield conn
+    finally:
+        await conn.close()

@@ -1086,6 +1086,11 @@ async def _open_agent_capability(
     workspace = spec.get("workspace", "shared")
     if workspace not in {"shared", "fresh"}:
         return await _reject("bad_agent_call", "agent() workspace must be shared or fresh")
+    auto_archive = spec.get("auto_archive_on_completion", True)
+    if not isinstance(auto_archive, bool):
+        return await _reject(
+            "bad_agent_call", "agent() auto_archive_on_completion must be a boolean"
+        )
     model = spec.get("model")
     if model is not None and not isinstance(model, str):
         return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
@@ -1194,6 +1199,7 @@ async def _open_agent_capability(
             depth=run.depth - 1,
             litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
             workspace_path=run.workspace_path if workspace == "shared" else None,
+            auto_archive_on_completion=auto_archive,
         ),
         account_id=account_id,
     )
@@ -1545,8 +1551,18 @@ async def _commit_terminal_and_dispatch(
         # event is written — the run is singly-inbound, so its terminal state already
         # carries the one outcome (§3.6); this also lets a cancelled run resolve as
         # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
+        summary = {
+            key: payload[key]
+            for key in ("is_error", "error", "usage", "duration_ms", "cancelled")
+            if key in payload
+        }
         await wf_queries.set_run_terminal(
-            conn, run.id, status=status, output=output, account_id=run.account_id
+            conn,
+            run.id,
+            status=status,
+            output=output,
+            account_id=run.account_id,
+            terminal_summary=summary,
         )
         cascade_children = (
             await seed_outbound_cancel_conn(

@@ -157,6 +157,7 @@ def agent(
     model: str | None = None,
     label: str | None = None,
     workspace: str = "shared",
+    auto_archive_on_completion: bool = True,
 ) -> _Capability:
     """Invoke an agent child and await its ``return``/``error`` result.
 
@@ -187,6 +188,7 @@ def agent(
             else canonical_schema_json(output_schema),
             "model": model,
             "workspace": workspace,
+            "auto_archive_on_completion": auto_archive_on_completion,
         },
         annotations,
     )

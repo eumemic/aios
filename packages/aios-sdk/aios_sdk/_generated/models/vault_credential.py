@@ -12,7 +12,7 @@ from ..models.vault_credential_auth_type import VaultCredentialAuthType
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.vault_credential_metadata import VaultCredentialMetadata
+    from ..models.vault_credential_metadata_type_0 import VaultCredentialMetadataType0
 
 
 T = TypeVar("T", bound="VaultCredential")
@@ -31,7 +31,7 @@ class VaultCredential:
             display_name (None | str):
             target_url (None | str):
             auth_type (VaultCredentialAuthType):
-            metadata (VaultCredentialMetadata):
+            metadata (None | VaultCredentialMetadataType0):
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
             secret_name (None | str | Unset):
@@ -44,7 +44,7 @@ class VaultCredential:
     display_name: None | str
     target_url: None | str
     auth_type: VaultCredentialAuthType
-    metadata: VaultCredentialMetadata
+    metadata: None | VaultCredentialMetadataType0
     created_at: datetime.datetime
     updated_at: datetime.datetime
     secret_name: None | str | Unset = UNSET
@@ -53,6 +53,10 @@ class VaultCredential:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.vault_credential_metadata_type_0 import (
+            VaultCredentialMetadataType0,
+        )
+
         id = self.id
 
         vault_id = self.vault_id
@@ -65,7 +69,11 @@ class VaultCredential:
 
         auth_type = self.auth_type.value
 
-        metadata = self.metadata.to_dict()
+        metadata: dict[str, Any] | None
+        if isinstance(self.metadata, VaultCredentialMetadataType0):
+            metadata = self.metadata.to_dict()
+        else:
+            metadata = self.metadata
 
         created_at = self.created_at.isoformat()
 
@@ -119,7 +127,9 @@ class VaultCredential:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.vault_credential_metadata import VaultCredentialMetadata
+        from ..models.vault_credential_metadata_type_0 import (
+            VaultCredentialMetadataType0,
+        )
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -142,7 +152,20 @@ class VaultCredential:
 
         auth_type = VaultCredentialAuthType(d.pop("auth_type"))
 
-        metadata = VaultCredentialMetadata.from_dict(d.pop("metadata"))
+        def _parse_metadata(data: object) -> None | VaultCredentialMetadataType0:
+            if data is None:
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                metadata_type_0 = VaultCredentialMetadataType0.from_dict(data)
+
+                return metadata_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | VaultCredentialMetadataType0, data)
+
+        metadata = _parse_metadata(d.pop("metadata"))
 
         created_at = isoparse(d.pop("created_at"))
 

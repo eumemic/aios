@@ -109,6 +109,10 @@ def _resolve_host_ips(host: str) -> list[str] | None:
     return [str(info[4][0]) for info in infos]
 
 
+class OutboundTargetBlockedError(ValueError):
+    """The URL is well-formed but targets an address forbidden by outbound policy."""
+
+
 def validate_outbound_target_url(url: str) -> str:
     """Validate one outbound target URL at the write boundary; return it unchanged.
 
@@ -169,7 +173,7 @@ def validate_outbound_target_url(url: str) -> str:
             # connection attempt.
 
     if blocked:
-        raise ValueError(
+        raise OutboundTargetBlockedError(
             "target URL resolves to a private, internal, or runtime-local address; "
             "allowlist the host via AIOS_OAUTH_ALLOW_INSECURE_HOSTS only for a "
             "deliberately internal deployment"

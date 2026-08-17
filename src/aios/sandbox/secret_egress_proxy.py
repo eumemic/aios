@@ -18,12 +18,11 @@ refuses the request rather than forwarding it (eumemic/eumemic-ops#331).
 
 Security posture:
 
-* **Fail closed everywhere.** The leaf-mint host check is THE enforcement
-  point — the egress CA is unconstrained, so every sandbox trusts any leaf
-  it signs; the proxy refuses to mint a leaf for a host outside the
-  session's resolved allow-set (or for an absent SNI), so the handshake
-  aborts before anything terminates or swaps. A blocked upstream resolution
-  returns a 502 and makes no connection.
+* **Mode-aware SNI dispatch.** The proxy never mints a leaf outside the
+  credential allow-set. Limited networking and absent SNI fail closed;
+  Unrestricted networking blind-relays an unrecognized SNI after worker-side
+  resolution and SSRF validation, preserving the open-egress policy when a
+  credential host shares an IP with an unrelated host.
 * **SNI is authoritative.** The host is taken from the ClientHello SNI and
   drives the allow-set gate, the placeholder→secret swap, AND the upstream
   connection — never the request ``Host`` header, never the original
@@ -65,10 +64,12 @@ import contextlib
 import os
 import re
 import secrets
+import socket
 import ssl
 import tempfile
 import weakref
 from collections.abc import Iterable
+from typing import Literal
 
 import h11
 import httpx
@@ -94,6 +95,27 @@ _READ_CHUNK = 65536
 # never sends one) must not pin a handler indefinitely. Bounds idle time
 # between chunks, not total transfer, so a slow-but-steady upload is unaffected.
 _INBOUND_IDLE_TIMEOUT_S = 60.0
+# IDLE bound on the surviving relay direction once the OTHER one has hit EOF.
+#
+# A relay is two independent half-duplex copies. When one direction ends, the
+# connection is finishing: the peer is given a half-close (``write_eof``) and
+# the surviving copy gets this long to move at least one more byte. Without a
+# bound, an upstream that closes while the sandbox client sits idle leaves the
+# client→upstream copy awaiting a read that can NEVER complete — the dispatch
+# task and BOTH sockets live for the lifetime of the session, on every
+# connection, credential path included.
+#
+# Deliberately an IDLE bound, not a deadline, and deliberately armed only
+# AFTER the first EOF:
+#   * a live, quiet, fully-open connection (long poll, SSE, an interactive
+#     session) is never touched — nothing is armed while both directions live;
+#   * a slow-but-steady transfer after a half-close keeps re-arming, so a
+#     legitimate large download behind a client half-close is not cut off
+#     mid-stream. Only ZERO bytes for the whole window ends it.
+# Same semantics as ``_INBOUND_IDLE_TIMEOUT_S`` above (idle between chunks,
+# not total transfer), which is the bound the terminating path already had and
+# this relay stage was missing.
+_RELAY_HALF_CLOSE_IDLE_S = 30.0
 
 
 class _BodyTooLarge:
@@ -421,6 +443,15 @@ def _decode_basic_credential(value: str) -> str | None:
 # path below and the tests' ``sep._resolve_pinned_ip`` monkeypatch resolve it here.
 _resolve_pinned_ip = resolve_pinned_ip
 
+# The ONLY networking modes that permit blind-relaying an unrecognized SNI.
+# Membership, not inequality: ``Literal`` is an annotation, NOT runtime
+# validation, so a typo, a future mode, or a mis-deserialized field arrives
+# here as an arbitrary string. Gating on "is provably in this set" makes every
+# unknown value land on the STRICT (fail-closed) side; gating on
+# ``!= "limited"`` made every unknown value land on the PERMISSIVE side, which
+# at a credential-exfiltration boundary is the wrong default (aios#2138).
+_RELAY_PERMITTED_MODES: frozenset[str] = frozenset({"unrestricted"})
+
 
 def _h11_send(conn: h11.Connection, event: h11.Event) -> bytes:
     """``conn.send`` returns ``None`` for events that frame no bytes."""
@@ -437,7 +468,13 @@ class SecretEgressProxy:
     secret map is dropped.
     """
 
-    def __init__(self, credentials: Iterable[ResolvedEnvVarCredential]) -> None:
+    def __init__(
+        self,
+        credentials: Iterable[ResolvedEnvVarCredential],
+        *,
+        networking_mode: Literal["limited", "unrestricted"] = "limited",
+        owner_id: str | None = None,
+    ) -> None:
         # Flatten (cred, allowed-host entry) into swap rules. The host is
         # lowercased ONCE here so the SNI gate and the swap map compare
         # against a normalized host — parse_allowed_host_entry stores the
@@ -453,6 +490,12 @@ class SecretEgressProxy:
         # ever reaches the mint path, so a hostile sandbox can't flood
         # distinct SNIs to balloon the leaf cache.
         self._allowed_hosts: frozenset[str] = frozenset(h for h, _, _, _ in self._rules)
+        self._networking_mode = networking_mode
+        # Resolve the string mode to a capability ONCE, at construction, so the
+        # dispatch hot path can never re-derive it with a different (inverted)
+        # test. Unknown/unrecognized ⇒ False ⇒ fail closed.
+        self._relay_unrecognized_sni: bool = networking_mode in _RELAY_PERMITTED_MODES
+        self._owner_id = owner_id
         # Hard cap on the whole-buffered request body (the placeholder→secret
         # swap needs the body buffered, but the sandbox is untrusted, so an
         # over-cap body 413s before any upstream connection). Snapshot the int
@@ -476,6 +519,8 @@ class SecretEgressProxy:
         # primitive, just limits blast radius if the port is exposed.
         self._secret = secrets.token_urlsafe(32)
         self._server: asyncio.Server | None = None
+        self._tls_server: asyncio.Server | None = None
+        self._tls_port: int | None = None
         self._port: int | None = None
         # In-flight connection handlers, tracked so stop() can cancel them
         # (releasing the secret map) rather than block on wait_closed().
@@ -491,21 +536,229 @@ class SecretEgressProxy:
         return self._port
 
     async def start(self) -> None:
-        """Bind ``0.0.0.0:0`` and begin serving TLS. ``asyncio.start_server``
-        binds synchronously, so the port is available the instant the await
-        returns and a bind failure raises immediately (no async bind window
-        to poll)."""
+        """Bind the raw ClientHello dispatcher and private terminating listener."""
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.sni_callback = self._sni_callback
         try:
-            self._server = await asyncio.start_server(self._handle, "0.0.0.0", 0, ssl=ctx)
+            # TLS termination lives on loopback.  The public listener must see
+            # the ClientHello bytes before OpenSSL consumes them so it can send
+            # colliding, unrecognized names straight through under Unrestricted.
+            self._tls_server = await asyncio.start_server(self._handle, "127.0.0.1", 0, ssl=ctx)
+            self._tls_port = self._tls_server.sockets[0].getsockname()[1]
+            self._server = await asyncio.start_server(self._dispatch, "0.0.0.0", 0)
             self._port = self._server.sockets[0].getsockname()[1]
         except BaseException:
-            # Bind never completed; the caller drops its reference, so nothing
-            # else calls stop() — close the httpx client here or it leaks.
             await self.stop()
             raise
         log.info("secret_egress_proxy.started", port=self._port)
+
+    async def _dispatch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._conns.add(task)
+        upstream_writer: asyncio.StreamWriter | None = None
+        try:
+            hello, host = await self._read_client_hello(reader)
+            if host is None:
+                log.warning(
+                    "secret_egress_proxy.sni_refused",
+                    server_name=None,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                    networking_mode=self._networking_mode,
+                )
+                return
+            if host in self._allowed_hosts:
+                assert self._tls_port is not None
+                upstream_reader, upstream_writer = await asyncio.open_connection(
+                    "127.0.0.1", self._tls_port
+                )
+            elif not self._relay_unrecognized_sni:
+                # STRICT path: Limited, and every mode we do not positively
+                # recognize as relay-permitting. Fail closed on the unknown.
+                log.warning(
+                    "secret_egress_proxy.sni_refused",
+                    server_name=host,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                    networking_mode=self._networking_mode,
+                )
+                return
+            else:
+                pinned = await _resolve_pinned_ip(host, _UPSTREAM_PORT)
+                if pinned is None:
+                    log.warning(
+                        "secret_egress_proxy.sni_relay_blocked",
+                        server_name=host,
+                        credential_hosts=sorted(self._allowed_hosts),
+                        owner_id=self._owner_id,
+                    )
+                    return
+                upstream_reader, upstream_writer = await asyncio.open_connection(
+                    pinned, _UPSTREAM_PORT, family=socket.AF_INET if ":" not in pinned else 0
+                )
+                log.info(
+                    "secret_egress_proxy.sni_blind_relay",
+                    server_name=host,
+                    credential_hosts=sorted(self._allowed_hosts),
+                    owner_id=self._owner_id,
+                )
+            upstream_writer.write(hello)
+            await upstream_writer.drain()
+            # One shared flag per connection: whichever direction ends first
+            # sets it, which bounds the other. gather() then completes instead
+            # of parking forever on a peer that has already hung up.
+            peer_ended = asyncio.Event()
+            await asyncio.gather(
+                self._pipe(reader, upstream_writer, peer_ended),
+                self._pipe(upstream_reader, writer, peer_ended),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("secret_egress_proxy.dispatch_error", error_type=type(exc).__name__)
+        finally:
+            if task is not None:
+                self._conns.discard(task)
+            if upstream_writer is not None:
+                upstream_writer.close()
+                with contextlib.suppress(Exception):
+                    await upstream_writer.wait_closed()
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    @staticmethod
+    async def _read_relay_chunk(
+        reader: asyncio.StreamReader, peer_ended: asyncio.Event
+    ) -> bytes | None:
+        """One relay read. ``b""`` on EOF, ``None`` when the idle bound expires.
+
+        While BOTH directions are live the read is unbounded — a quiet but open
+        connection is legitimate. The moment the other direction ends,
+        ``peer_ended`` fires and the read becomes bounded, INCLUDING a read that
+        is already in flight (which is the whole point: the leak was a read
+        parked forever on a peer that had already gone away).
+        """
+        read = asyncio.ensure_future(reader.read(_READ_CHUNK))
+        try:
+            if not peer_ended.is_set():
+                ended = asyncio.ensure_future(peer_ended.wait())
+                try:
+                    await asyncio.wait({read, ended}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    ended.cancel()
+                if read.done():
+                    return read.result()
+            # The peer direction is gone: this side gets a bounded window to
+            # move at least one more byte. Re-armed per chunk, so a transfer
+            # still in flight completes; only a fully idle window ends it.
+            # ``shield`` keeps the in-flight read intact across the bound so
+            # the timeout cancels the WAIT, not the read, which is then
+            # disposed of once, below.
+            try:
+                return await asyncio.wait_for(asyncio.shield(read), _RELAY_HALF_CLOSE_IDLE_S)
+            except TimeoutError:
+                return None
+        finally:
+            # Never awaited here: awaiting (and suppressing) in a finally can
+            # swallow a cancellation aimed at the dispatch task itself, which
+            # stop() relies on. Cancel it, or retrieve its exception so asyncio
+            # does not warn about an unretrieved one.
+            if not read.done():
+                read.cancel()
+            elif not read.cancelled():
+                read.exception()
+
+    @staticmethod
+    async def _pipe(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer_ended: asyncio.Event
+    ) -> None:
+        """Copy one direction of a relay, then half-close and mark it ended.
+
+        The ``finally`` is load-bearing on BOTH counts. Setting ``peer_ended``
+        unblocks the sibling direction (an unbounded read parked on a peer that
+        has already hung up is exactly how a dispatch task and its two sockets
+        leaked on every connection). ``write_eof`` propagates the half-close so
+        the surviving peer learns the stream ended instead of waiting out the
+        idle bound — EOF propagation, not just a timeout.
+        """
+        try:
+            while True:
+                data = await SecretEgressProxy._read_relay_chunk(reader, peer_ended)
+                if not data:  # b"" = clean EOF, None = idle bound expired
+                    return
+                writer.write(data)
+                await writer.drain()
+        finally:
+            peer_ended.set()
+            with contextlib.suppress(Exception):
+                if writer.can_write_eof():
+                    writer.write_eof()
+
+    @staticmethod
+    async def _read_client_hello(reader: asyncio.StreamReader) -> tuple[bytes, str | None]:
+        """Read bounded TLS records through one ClientHello and extract its SNI."""
+        wire = bytearray()
+        handshake = bytearray()
+        while len(wire) < 131072:
+            header = await asyncio.wait_for(reader.readexactly(5), _INBOUND_IDLE_TIMEOUT_S)
+            # ``header[3:5]`` is the TLS record length: two bytes, so its range
+            # IS 0..65535 and a ``length > 65535`` clause here can never fire
+            # (verified: 0 of all 65536 values satisfy it). Dropped rather than
+            # kept as reassuring-looking dead code — it read as a bounds check
+            # that was doing work when it was not. The real bound on a record
+            # is structural (two bytes); the real bound on the HANDSHAKE is the
+            # 131072 wire cap in the loop condition and the ``hello_length``
+            # check below, both of which are live and load-bearing.
+            length = int.from_bytes(header[3:5], "big")
+            if header[0] != 22:  # not a handshake record → not a ClientHello
+                return bytes(wire + header), None
+            payload = await asyncio.wait_for(reader.readexactly(length), _INBOUND_IDLE_TIMEOUT_S)
+            wire.extend(header)
+            wire.extend(payload)
+            handshake.extend(payload)
+            if len(handshake) < 4:
+                continue
+            hello_length = int.from_bytes(handshake[1:4], "big")
+            if handshake[0] != 1 or hello_length > 131072:
+                return bytes(wire), None
+            if len(handshake) >= hello_length + 4:
+                return bytes(wire), SecretEgressProxy._client_hello_sni(
+                    bytes(handshake[4 : hello_length + 4])
+                )
+        return bytes(wire), None
+
+    @staticmethod
+    def _client_hello_sni(hello: bytes) -> str | None:
+        try:
+            pos = 34  # version + random
+            session_len = hello[pos]
+            pos += 1 + session_len
+            cipher_len = int.from_bytes(hello[pos : pos + 2], "big")
+            pos += 2 + cipher_len
+            compression_len = hello[pos]
+            pos += 1 + compression_len
+            extensions_len = int.from_bytes(hello[pos : pos + 2], "big")
+            pos += 2
+            end = pos + extensions_len
+            if end > len(hello):
+                return None
+            while pos + 4 <= end:
+                kind = int.from_bytes(hello[pos : pos + 2], "big")
+                size = int.from_bytes(hello[pos + 2 : pos + 4], "big")
+                value = hello[pos + 4 : pos + 4 + size]
+                pos += 4 + size
+                if pos > end:
+                    return None
+                if kind == 0 and len(value) >= 5 and value[2] == 0:
+                    name_len = int.from_bytes(value[3:5], "big")
+                    if name_len != len(value) - 5:
+                        return None
+                    return value[5:].decode("ascii").lower()
+        except (IndexError, UnicodeDecodeError):
+            return None
+        return None
 
     async def stop(self) -> None:
         """Stop serving and drop the in-memory secret map.
@@ -520,15 +773,17 @@ class SecretEgressProxy:
         failed-bind start() can still clean up.
         """
         try:
-            if self._server is not None:
-                self._server.close()
-                self._server.abort_clients()
+            servers = [s for s in (self._server, self._tls_server) if s is not None]
+            for server in servers:
+                server.close()
+                server.abort_clients()
+            if servers:
                 tasks = list(self._conns)
                 for task in tasks:
                     task.cancel()
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-                await self._server.wait_closed()
+                await asyncio.gather(*(server.wait_closed() for server in servers))
         finally:
             # Drop the secret map and per-host leaves (the documented contract);
             # they are otherwise only reclaimed when the proxy object is GC'd.

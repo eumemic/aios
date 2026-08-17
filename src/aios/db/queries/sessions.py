@@ -309,6 +309,7 @@ async def insert_child_session(
     http_servers: list[HttpServerSpec],
     litellm_extra: dict[str, Any] | None = None,
     workspace_path: str | None = None,
+    archive_when_idle: bool = True,
 ) -> Session | None:
     """Insert a workflow ``agent()`` child under a deterministic ``session_id``.
 
@@ -341,8 +342,8 @@ async def insert_child_session(
                 tools_vocab_epoch
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
-                    NULL, FALSE, $7, $8, 'background', TRUE,
-                    $9::jsonb, $10::jsonb, $11::jsonb, TRUE, $12::jsonb, $13)
+                    NULL, FALSE, $7, $8, 'background', $9,
+                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -354,6 +355,7 @@ async def insert_child_session(
             workspace_path,
             account_id,
             parent_run_id,
+            archive_when_idle,
             json.dumps([t.model_dump() for t in tools]),
             json.dumps([s.model_dump() for s in mcp_servers]),
             json.dumps([s.model_dump() for s in http_servers]),
@@ -518,7 +520,7 @@ async def get_session_frozen_surface(
         return None
     return Surface(
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
     )
 
@@ -1151,14 +1153,16 @@ async def reclaim_session_if_idle(
     row matches → no-op, so a late user/tool message always wins over reclaim. Idempotent via
     ``archived_at IS NULL``. Returns ``True`` iff this call archived the row.
 
-    The caller gates on the session's immutable ``archive_when_idle`` launch flag; this query
-    enforces the idle condition atomically and must be the **last** session write of the step
-    (no write may follow — ``append_event`` fences on ``archived_at IS NULL``).
+    The immutable ``archive_when_idle`` launch flag is enforced in this same conditional
+    UPDATE rather than relying only on the harness caller's pre-check. This keeps every service
+    caller from reclaiming a persistent session and preserves the flag-to-archive decision under
+    one atomic predicate. The update must be the **last** session write of the step (no write may
+    follow — ``append_event`` fences on ``archived_at IS NULL``).
     """
     row = await conn.fetchrow(
         "UPDATE sessions SET archived_at = now(), updated_at = now() "
-        f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND NOT {_SESSION_ACTIVE_EXPR} "
-        "RETURNING id",
+        f"WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND archive_when_idle "
+        f"AND NOT {_SESSION_ACTIVE_EXPR} RETURNING id",
         session_id,
         account_id,
     )

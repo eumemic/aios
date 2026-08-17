@@ -298,3 +298,27 @@ class TestApproxTokensByClassEquivalenceMatrix:
                 got = approx_tokens_by_class(msgs, tools=tools)
                 want = _reference_by_class(msgs, tools=tools)
                 assert got == want, (msgs, tools, got, want)
+
+
+class TestImageTokenBaseline:
+    def test_data_uri_is_counted_and_attributed_to_image(self) -> None:
+        msg = {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "screenshot"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + "a" * 8000}},
+            ],
+        }
+        total = approx_tokens([msg])
+        by_class = approx_tokens_by_class([msg])
+        assert total > 1000
+        assert by_class["image"] > 1000
+        assert by_class["tool_result"] > 0
+        assert sum(by_class.values()) == total
+
+    def test_https_image_url_stays_small(self) -> None:
+        msg = {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}}],
+        }
+        assert approx_tokens([msg]) < 100

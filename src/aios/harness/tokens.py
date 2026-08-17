@@ -130,25 +130,69 @@ def _cache_put(cache: OrderedDict[bytes, int], key: bytes, value: int) -> None:
             cache.popitem(last=False)
 
 
-def _message_body_tokens(msg: Mapping[str, Any]) -> int:
+def _message_body_tokens(msg: Mapping[str, Any], *, image_aware: bool = True) -> int:
     """The pure per-message body cost of ``msg`` (no payload-level framing).
 
     Memoized by content digest; digest failures bypass the cache and
     count directly (never raise).
+
+    ``image_aware`` selects the token BASELINE (see
+    :data:`TOKEN_BASELINE_CURRENT`).  Under the v2 baseline the image
+    payload is priced; under v1 it is not, reproducing the pre-#2050
+    arithmetic byte-for-byte.  The flag participates in the cache key so
+    the two baselines never share a memoized value.
     """
     from litellm import token_counter
 
-    key = _payload_digest(msg)
+    key = _payload_digest((msg, image_aware))
     if key is not None:
         cached = _cache_get(_BODY_CACHE, key)
         if cached is not None:
             return cached
 
     value = int(token_counter(messages=[msg], count_response_tokens=True))
+    # LiteLLM's model-neutral chat counter ignores image_url parts entirely.
+    # Price their URL separately with the same default tokenizer.  Data URIs
+    # therefore contribute their full encoded payload while ordinary remote
+    # URLs remain a small, stable baseline term.
+    content = msg.get("content")
+    if image_aware and isinstance(content, list):
+        for part in content:
+            if not isinstance(part, Mapping) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str):
+                value += int(token_counter(text=image_url["url"]))
 
     if key is not None:
         _cache_put(_BODY_CACHE, key, value)
     return value
+
+
+# The token-accounting BASELINE a NEW session is born at (#2050).
+#
+#   v1 — image-blind: ``litellm.token_counter`` prices an ``image_url`` part at
+#        a near-constant ~90 tokens regardless of payload size.
+#   v2 — image-aware: the image URL is priced with the same default tokenizer,
+#        so an inlined data URI contributes its real encoded payload.
+#
+# ``append_event`` selects arithmetic from the SESSION's stored marker, so this
+# constant only decides where a fresh session STARTS.  Existing sessions are
+# promoted v1 -> v2 exclusively by the backfill's atomic replay-then-flip.
+TOKEN_BASELINE_CURRENT = 2
+
+
+def message_has_image(data: Mapping[str, Any]) -> bool:
+    """Whether ``data`` carries at least one ``image_url`` content part.
+
+    The two baselines differ ONLY on such messages, so callers that must
+    price a message under both baselines can skip the second pass when
+    this is false.
+    """
+    content = data.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(p, Mapping) and p.get("type") == "image_url" for p in content)
 
 
 def _extra_tokens(tools: Any, system_present: bool) -> int:
@@ -187,6 +231,7 @@ def approx_tokens(
     messages: Iterable[Mapping[str, Any]],
     *,
     tools: Iterable[Mapping[str, Any]] | None = None,
+    image_aware: bool = True,
 ) -> int:
     """Estimate the chat-completions token cost of ``messages``.
 
@@ -222,7 +267,7 @@ def approx_tokens(
     cache warms.
     """
     msgs = list(messages)
-    total = sum(_message_body_tokens(m) for m in msgs)
+    total = sum(_message_body_tokens(m, image_aware=image_aware) for m in msgs)
     system_present = any(m.get("role") == "system" for m in msgs)
     total += _extra_tokens(tools, system_present)
     return total
@@ -241,6 +286,7 @@ CONTENT_CLASSES: tuple[str, ...] = (
     "tool_result",
     "thinking",
     "tool_use",
+    "image",
 )
 
 
@@ -275,7 +321,9 @@ def content_class(role: str | None, data: Mapping[str, Any]) -> str:
     return "text"
 
 
-def _count(messages: list[Mapping[str, Any]], *, tools: Any = None) -> int:
+def _count(
+    messages: list[Mapping[str, Any]], *, tools: Any = None, image_aware: bool = True
+) -> int:
     """Single-payload count, sourced from the same memoized primitives as
     :func:`approx_tokens` (issue #1744).
 
@@ -287,12 +335,14 @@ def _count(messages: list[Mapping[str, Any]], *, tools: Any = None) -> int:
     if len(messages) == 1:
         msg = messages[0]
         system_present = msg.get("role") == "system"
-        return _message_body_tokens(msg) + _extra_tokens(tools, system_present)
+        return _message_body_tokens(msg, image_aware=image_aware) + _extra_tokens(
+            tools, system_present
+        )
     if not messages:
         return _extra_tokens(tools, False)
     # General fallback (not used by the current call sites, which only ever
     # pass 0 or 1 messages here, but keep correct for any future caller).
-    total = sum(_message_body_tokens(m) for m in messages)
+    total = sum(_message_body_tokens(m, image_aware=image_aware) for m in messages)
     system_present = any(m.get("role") == "system" for m in messages)
     total += _extra_tokens(tools, system_present)
     return total
@@ -302,6 +352,7 @@ def approx_tokens_by_class(
     messages: Iterable[Mapping[str, Any]],
     *,
     tools: Iterable[Mapping[str, Any]] | None = None,
+    image_aware: bool = True,
 ) -> dict[str, int]:
     """Split the local token cost of ``messages`` (+ ``tools``) by class.
 
@@ -331,28 +382,53 @@ def approx_tokens_by_class(
     if tool_list:
         by_class["tools"] = _count([], tools=tool_list)
 
-    for msg in msgs:
+    for original_msg in msgs:
+        msg = original_msg
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, Mapping) and part.get("type") == "image_url" for part in content
+        ):
+            # Split mixed-part messages without charging framing twice: count
+            # the image-free message normally and assign the exact residual of
+            # the full message to image.
+            #
+            # ``image_aware`` MUST reach both counts (#2050 review): under the
+            # v1 baseline the image payload is not priced, so this residual is
+            # the small image-blind stub cost, and the per-class sum keeps
+            # reconciling to the v1 total.  Costing the residual image-aware
+            # while the total was v1 would credit an image mass the total
+            # never contained.
+            msg = dict(msg)
+            msg["content"] = [
+                part
+                for part in content
+                if not (isinstance(part, Mapping) and part.get("type") == "image_url")
+            ]
+            by_class["image"] += _count([original_msg], image_aware=image_aware) - _count(
+                [msg], image_aware=image_aware
+            )
+
         role = msg.get("role")
         cls = content_class(role, msg)
         if cls == "system":
-            by_class["system"] += _count([msg])
+            by_class["system"] += _count([msg], image_aware=image_aware)
             continue
         if cls == "tool_result":
-            by_class["tool_result"] += _count([msg])
+            by_class["tool_result"] += _count([msg], image_aware=image_aware)
             continue
         if cls == "tool_use":
             # An assistant tool-call turn may also carry thinking and/or
             # leading text.  Attribute the thinking/text portions to their
             # classes and the remainder (the serialized tool_calls) to
             # tool_use, so a thinking+tool_use turn trains both coefficients.
-            _split_assistant(msg, by_class, primary="tool_use")
+            _split_assistant(msg, by_class, primary="tool_use", image_aware=image_aware)
             continue
         if cls == "thinking":
-            _split_assistant(msg, by_class, primary="thinking")
+            _split_assistant(msg, by_class, primary="thinking", image_aware=image_aware)
             continue
         # Plain text (user turns, plain assistant text, orphan tool
         # placeholders rendered as user messages, etc.).
-        by_class["text"] += _count([msg])
+        by_class["text"] += _count([msg], image_aware=image_aware)
 
     return by_class
 
@@ -362,6 +438,7 @@ def _split_assistant(
     by_class: dict[str, int],
     *,
     primary: str,
+    image_aware: bool = True,
 ) -> None:
     """Attribute an assistant turn's tokens across text/thinking/tool_use.
 
@@ -371,17 +448,21 @@ def _split_assistant(
     keeps the per-class sum reconciled to the full-turn cost while still
     crediting each sub-class that is present.
     """
-    full = _count([msg])
+    full = _count([msg], image_aware=image_aware)
 
     text_content = msg.get("content")
     text_tokens = 0
     if text_content:
-        text_tokens = _count([{"role": "assistant", "content": text_content}])
+        text_tokens = _count(
+            [{"role": "assistant", "content": text_content}], image_aware=image_aware
+        )
 
     thinking_tokens = 0
     reasoning = msg.get("reasoning_content")
     if reasoning:
-        thinking_tokens = _count([{"role": "assistant", "content": reasoning}])
+        thinking_tokens = _count(
+            [{"role": "assistant", "content": reasoning}], image_aware=image_aware
+        )
 
     by_class["text"] += text_tokens
     by_class["thinking"] += thinking_tokens

@@ -57,6 +57,53 @@ async def _cumulative(
     return [(r["role"], r["cumulative_tokens"]) for r in rows]
 
 
+async def test_v1_builtin_tool_result_preserves_master_token_series(
+    pool_and_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """The hot builtin/MCP appender must advance an existing v1 series.
+
+    This drives the manually-precomputed path in ``tool_dispatch`` rather than
+    calling ``append_event`` directly.  The expected delta is master's
+    image-blind arithmetic, computed independently from the append result.
+    """
+    from aios.harness import tool_dispatch
+
+    pool, account_id, session_id = pool_and_session
+    data = {
+        "role": "tool",
+        "tool_call_id": "tc_v1_hot_path",
+        "name": "bash",
+        "content": "ordinary builtin result",
+    }
+    expected_delta = _event_token_delta("message", data, None, None, image_aware=False)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET token_baseline_v = 1 WHERE id = $1",
+            session_id,
+        )
+
+    await tool_dispatch._append_tool_result_event(
+        pool,
+        session_id,
+        "tc_v1_hot_path",
+        data,
+        account_id=account_id,
+        tool_parent_channel=None,
+    )
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT cumulative_tokens, token_baseline_v FROM events "
+            "WHERE session_id = $1 AND data->>'tool_call_id' = $2",
+            session_id,
+            "tc_v1_hot_path",
+        )
+    assert row is not None
+    assert row["token_baseline_v"] == 1
+    assert row["cumulative_tokens"] == expected_delta
+
+
 async def test_cumulative_tokens_running_sum_unchanged(
     pool_and_session: tuple[asyncpg.Pool[Any], str, str],
 ) -> None:
