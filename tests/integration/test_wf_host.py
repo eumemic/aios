@@ -181,6 +181,7 @@ async def test_generic_agent_spec_includes_default_workspace() -> None:
         "output_schema": None,
         "model": None,
         "workspace": "shared",
+        "auto_archive_on_completion": True,
     }
 
 

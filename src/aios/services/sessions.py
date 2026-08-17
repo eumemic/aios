@@ -534,6 +534,7 @@ class AskNewSession:
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
     workspace_path: str | None = None
+    auto_archive_on_completion: bool = True
 
 
 @dataclass(frozen=True)
@@ -561,6 +562,7 @@ class TellNewSession:
     depth: int = 0
     litellm_extra: dict[str, Any] | None = None
     workspace_path: str | None = None
+    auto_archive_on_completion: bool = True
 
 
 @dataclass(frozen=True)
@@ -695,6 +697,7 @@ async def create_child_session(
             http_servers=stim.surface.http_servers,
             litellm_extra=stim.litellm_extra or {},
             workspace_path=stim.workspace_path,
+            archive_when_idle=stim.auto_archive_on_completion,
         )
         if child is None:
             return False  # replay: row exists — do NOT re-deliver the request
@@ -864,6 +867,7 @@ async def invoke(
     env: dict[str, str] | None = None,
     outbound_suppression: str | None = None,
     workspace: Literal["shared", "fresh"] = "fresh",
+    auto_archive_on_completion: bool = True,
     launcher_session_id: str | None = None,
     crypto_box: CryptoBox | None = None,
     caller: dict[str, Any] | None = None,
@@ -949,7 +953,7 @@ async def invoke(
             inherit_from_session_id=launcher_session_id,
             workspace=workspace if launcher_session_id is not None else None,
             crypto_box=crypto_box,
-            archive_when_idle=True,
+            archive_when_idle=auto_archive_on_completion,
             frozen_surface=effective_surface,
             frozen_litellm_extra=(child_agent.litellm_extra if child_agent is not None else None),
         )

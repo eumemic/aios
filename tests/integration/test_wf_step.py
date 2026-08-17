@@ -12,6 +12,7 @@ directly, which is exactly the surface under test.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -478,10 +479,11 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
-async def test_terminal_archive_activates_prune_without_touching_live_run(
+async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_override(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Terminal completion makes detail reclaimable; a live run remains sacred."""
+    """Every terminal run archives; callers have no run-lifetime flag that can prevent it."""
+    assert "auto_archive_on_completion" not in inspect.signature(service.create_run).parameters
     pool = wf_runtime
     terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
     live_id = await _make_run(pool, _GATE_SCRIPT, name="live_not_prunable")
@@ -5796,3 +5798,78 @@ async def test_list_runs_enriches_each_run_with_usage(
     usage_b = by_id[run_b].usage
     assert usage_b is not None
     assert usage_b.cost_microusd == 0
+
+
+async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_is_rewakeable(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """TRUE reaches the existing reclaim mechanism; FALSE remains live and accepts another message."""
+    pool = wf_runtime
+
+    async def child(flag: bool, suffix: str) -> Session:
+        parent_run_id = await _make_run(
+            pool, "async def main(input):\n    return 1", name=f"auto_archive_{suffix}"
+        )
+        stim = AskNewSession(
+            session_id=f"ses_auto_archive_{suffix}",
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=parent_run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id=f"req_{suffix}",
+            input="work",
+            auto_archive_on_completion=flag,
+        )
+        await sessions_service.create_child_session(pool, stim, account_id="acc_wf")
+        return await sessions_service.get_session_basic(pool, stim.session_id, account_id="acc_wf")
+
+    ephemeral = await child(True, "true")
+    persistent = await child(False, "false")
+    assert ephemeral.archive_when_idle is True
+    assert persistent.archive_when_idle is False
+    # Reach completion's real idle point: answer each launch request, then append
+    # a tool-free assistant turn reacting to every stimulus. Deleting events is
+    # not equivalent: session activity is derived from scalar watermarks maintained
+    # by append_event, so the initial user stimulus remains unreacted after a delete.
+    for child_session, suffix in ((ephemeral, "true"), (persistent, "false")):
+        async with pool.acquire() as conn:
+            assert await db_queries.write_response_if_absent(
+                conn,
+                child_session.id,
+                account_id="acc_wf",
+                request_id=f"req_{suffix}",
+                outcome=Ok(result={"done": True}),
+            )
+        result = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            child_session.id,
+            await _idle_assistant_turn(pool, child_session.id),
+            account_id="acc_wf",
+        )
+        assert not result.nudged
+        async with pool.acquire() as conn:
+            assert (
+                await db_queries.derive_session_status(conn, child_session.id, account_id="acc_wf")
+                == "idle"
+            )
+
+    # The same real idle transition archives only the opted-in lifetime.
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf")
+        is True
+    )
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, persistent.id, account_id="acc_wf")
+        is False
+    )
+    await sessions_service.append_user_message(
+        pool, persistent.id, "wake again", account_id="acc_wf"
+    )
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.derive_session_status(conn, persistent.id, account_id="acc_wf")
+            == "active"
+        )

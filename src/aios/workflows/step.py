@@ -1086,6 +1086,11 @@ async def _open_agent_capability(
     workspace = spec.get("workspace", "shared")
     if workspace not in {"shared", "fresh"}:
         return await _reject("bad_agent_call", "agent() workspace must be shared or fresh")
+    auto_archive = spec.get("auto_archive_on_completion", True)
+    if not isinstance(auto_archive, bool):
+        return await _reject(
+            "bad_agent_call", "agent() auto_archive_on_completion must be a boolean"
+        )
     model = spec.get("model")
     if model is not None and not isinstance(model, str):
         return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
@@ -1194,6 +1199,7 @@ async def _open_agent_capability(
             depth=run.depth - 1,
             litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
             workspace_path=run.workspace_path if workspace == "shared" else None,
+            auto_archive_on_completion=auto_archive,
         ),
         account_id=account_id,
     )
