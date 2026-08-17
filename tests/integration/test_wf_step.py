@@ -5828,14 +5828,35 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
     persistent = await child(False, "false")
     assert ephemeral.archive_when_idle is True
     assert persistent.archive_when_idle is False
-    # Simulate completion's reacted-through idle point without deleting the request
-    # events (which are referenced by the request-edge ledger). Only the opted-in
-    # lifetime is reclaimed.
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE sessions SET last_reacted_seq = last_stimulus_seq WHERE id = ANY($1::text[])",
-            [ephemeral.id, persistent.id],
+    # Reach completion's real idle point: answer each launch request, then append
+    # a tool-free assistant turn reacting to every stimulus. Deleting events is
+    # not equivalent: session activity is derived from scalar watermarks maintained
+    # by append_event, so the initial user stimulus remains unreacted after a delete.
+    for child_session, suffix in ((ephemeral, "true"), (persistent, "false")):
+        async with pool.acquire() as conn:
+            assert await db_queries.write_response_if_absent(
+                conn,
+                child_session.id,
+                account_id="acc_wf",
+                request_id=f"req_{suffix}",
+                outcome=Ok(result={"done": True}),
+            )
+        result = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            child_session.id,
+            await _idle_assistant_turn(pool, child_session.id),
+            account_id="acc_wf",
         )
+        assert not result.nudged
+        async with pool.acquire() as conn:
+            assert (
+                await db_queries.derive_session_status(
+                    conn, child_session.id, account_id="acc_wf"
+                )
+                == "idle"
+            )
+
+    # The same real idle transition archives only the opted-in lifetime.
     assert (
         await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf")
         is True
