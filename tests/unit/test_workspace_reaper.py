@@ -50,9 +50,16 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     settings.workspace_reaper_dry_run = False
     settings.workspace_reaper_min_archived_age_seconds = 86_400
     settings.workspace_reaper_min_mtime_age_seconds = 0
+    settings.db_url = "postgresql://reaper-test"
     monkeypatch.setattr(workspace_reaper, "get_settings", lambda: settings)
 
-    return {"root": root, "settings": settings}
+    lock_conn = MagicMock()
+    lock_conn.execute = AsyncMock()
+    lock_conn.fetchval = AsyncMock(return_value=False)
+    lock_conn.close = AsyncMock()
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=lock_conn))
+
+    return {"root": root, "settings": settings, "lock_conn": lock_conn}
 
 
 def _mk_workspace(root: Path, account_id: str, session_id: str, *, age_s: float = 10_000.0) -> Path:
@@ -119,7 +126,7 @@ def _fake_pool(
 
     pool = MagicMock()
     pool.acquire.return_value = _Cm()
-    pool._conn = conn  # expose for assertions
+    pool.test_conn = conn  # expose for assertions
     return pool
 
 
@@ -150,6 +157,12 @@ async def test_archived_aged_inactive_session_dir_is_reaped(env: dict[str, Any])
     assert result.reaped == 1
     assert not d.exists(), "an archived/aged/not-active session's workspace must be reaped"
     assert result.bytes_freed > 0
+    lock_conn = env["lock_conn"]
+    assert [call.args[0] for call in lock_conn.execute.await_args_list] == [
+        "SELECT pg_advisory_lock($1::bigint)",
+        "SELECT pg_advisory_unlock($1::bigint)",
+    ]
+    lock_conn.close.assert_awaited_once()
 
 
 async def test_running_session_never_in_candidate_set(env: dict[str, Any]) -> None:
@@ -346,6 +359,55 @@ async def test_symlinked_account_component_to_live_sibling_is_never_followed(
     assert (victim_session / "live-data.txt").exists(), "the victim's live data must remain"
 
 
+async def test_nested_live_workspace_survives_real_sweep_and_rmtree(
+    env: dict[str, Any],
+) -> None:
+    """A live workspace nested in an archived candidate is never deleted."""
+    archived = _mk_workspace(env["root"], "acct1", "sess_archived")
+    live = archived / "child_live_ws"
+    live.mkdir()
+    credentials = live / "OPERATOR_CREDS.txt"
+    credentials.write_text("live-secret")
+    pool = _fake_pool([_row("acct1", "sess_archived", str(archived))], live_paths=[str(live)])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0
+    assert credentials.read_text() == "live-secret"
+
+
+async def test_live_ancestor_workspace_keeps_archived_descendant(
+    env: dict[str, Any],
+) -> None:
+    """A live account-root workspace protects a candidate nested beneath it."""
+    archived = _mk_workspace(env["root"], "acct1", "sess_archived")
+    marker = archived / "scratch.txt"
+    pool = _fake_pool(
+        [_row("acct1", "sess_archived", str(archived))],
+        live_paths=[str(env["root"] / "acct1")],
+    )
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0
+    assert marker.exists()
+
+
+async def test_unrelated_live_workspace_does_not_disable_reaping(
+    env: dict[str, Any],
+) -> None:
+    """Positive control: containment protection does not turn off the reaper."""
+    archived = _mk_workspace(env["root"], "acct1", "sess_archived")
+    unrelated = _mk_workspace(env["root"], "acct1", "sess_live_elsewhere")
+    pool = _fake_pool([_row("acct1", "sess_archived", str(archived))], live_paths=[str(unrelated)])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 1
+    assert not archived.exists()
+    assert unrelated.exists()
+
+
 async def test_live_clone_sharing_archived_parents_canonical_dir_is_skipped(
     env: dict[str, Any],
 ) -> None:
@@ -397,7 +459,7 @@ async def test_nonterminal_shared_run_keeps_archived_launcher_workspace(
 
     assert result.reaped == 0
     assert launcher_dir.exists(), "a non-terminal shared run still uses this workspace"
-    sql = " ".join(call.args[0] for call in pool._conn.fetch.await_args_list)
+    sql = " ".join(call.args[0] for call in pool.test_conn.fetch.await_args_list)
     assert "workspace_mode = 'shared'" in sql
     assert "status IN ('pending', 'running', 'suspended')" in sql
 
@@ -445,7 +507,7 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
     conn.fetch = AsyncMock(side_effect=_route_fetch)
     conn.execute = AsyncMock()
-    conn.fetchval = AsyncMock(return_value=True)
+    env["lock_conn"].fetchval.return_value = True
 
     class _Tx:
         async def __aenter__(self) -> None:
@@ -465,14 +527,14 @@ async def test_shared_run_created_after_scan_is_caught_by_pre_delete_revalidatio
 
     pool = MagicMock()
     pool.acquire.return_value = _Cm()
-    pool._conn = conn
+    pool.test_conn = conn
 
     result = await sweep_archived_workspaces(pool)
 
     assert result.reaped == 0
     assert launcher_dir.exists()
     assert keep_reads == 1
-    conn.fetchval.assert_awaited_once()
+    env["lock_conn"].fetchval.assert_awaited_once()
 
 
 async def test_off_shape_ids_are_never_reaped(env: dict[str, Any]) -> None:
@@ -513,6 +575,27 @@ async def test_fresh_dir_below_mtime_floor_is_kept(env: dict[str, Any]) -> None:
     assert d.exists()
 
 
+async def test_recent_nested_write_is_kept_when_parent_is_old(env: dict[str, Any]) -> None:
+    """Recursive mtime catches activity invisible in the parent directory mtime."""
+    env["settings"].workspace_reaper_min_mtime_age_seconds = 3600
+    d = _mk_workspace(env["root"], "acct1", "sess_archived", age_s=100_000)
+    nested = d / "old-subdir"
+    nested.mkdir()
+    old = time.time() - 100_000
+    os.utime(nested, (old, old))
+    recent = nested / "just-written.txt"
+    recent.write_text("active")
+    # Creating nested changed d; restore it to prove only descendant inspection protects it.
+    os.utime(d, (old, old))
+    pool = _fake_pool([_row("acct1", "sess_archived", str(d))])
+
+    result = await sweep_archived_workspaces(pool)
+
+    assert result.reaped == 0
+    assert result.skipped_too_fresh == 1
+    assert recent.exists()
+
+
 # ── guardrail 4: fail-closed ─────────────────────────────────────────────────
 
 
@@ -551,7 +634,7 @@ async def test_kill_switch_disables_everything(env: dict[str, Any]) -> None:
 
     assert result.reaped == 0
     assert d.exists()
-    pool._conn.fetch.assert_not_awaited()  # disabled ⇒ no DB query at all
+    pool.test_conn.fetch.assert_not_awaited()  # disabled ⇒ no DB query at all
 
 
 async def test_default_settings_ship_dark() -> None:

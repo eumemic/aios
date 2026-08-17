@@ -81,13 +81,24 @@ async def unscoped_workspace_path_is_live(conn: asyncpg.Connection[Any], path: s
             SELECT EXISTS (
                 SELECT 1 FROM sessions
                  WHERE archived_at IS NULL
-                   AND workspace_volume_path = $1
+                   AND workspace_volume_path IS NOT NULL
+                   AND (
+                       workspace_volume_path = $1
+                       OR left(workspace_volume_path, length($1) + 1) = $1 || '/'
+                       OR left($1, length(workspace_volume_path) + 1)
+                          = workspace_volume_path || '/'
+                   )
                 UNION ALL
                 SELECT 1 FROM wf_runs
                  WHERE archived_at IS NULL
                    AND workspace_mode = 'shared'
                    AND status IN ('pending', 'running', 'suspended')
-                   AND workspace_path = $1
+                   AND workspace_path IS NOT NULL
+                   AND (
+                       workspace_path = $1
+                       OR left(workspace_path, length($1) + 1) = $1 || '/'
+                       OR left($1, length(workspace_path) + 1) = workspace_path || '/'
+                   )
             )
             """,
             normalized,
