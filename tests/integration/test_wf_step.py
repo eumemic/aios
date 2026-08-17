@@ -5850,9 +5850,7 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
         assert not result.nudged
         async with pool.acquire() as conn:
             assert (
-                await db_queries.derive_session_status(
-                    conn, child_session.id, account_id="acc_wf"
-                )
+                await db_queries.derive_session_status(conn, child_session.id, account_id="acc_wf")
                 == "idle"
             )
 
