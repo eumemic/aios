@@ -193,9 +193,7 @@ class TestCrossPathConsistency:
         encoded_twice = '"{\\"n\\": 1}"'
         _mock_schema(monkeypatch, _OBJ_SCHEMA)
 
-        session_value, session_error = await _enforce_output_schema(
-            "ses_1", "req_1", encoded_twice
-        )
+        session_value, session_error = await _enforce_output_schema("ses_1", "req_1", encoded_twice)
         run_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.run")
         caller_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.caller")
 

@@ -114,10 +114,7 @@ def _format_error_line(err: jsonschema.exceptions.ValidationError, *, root: str)
             # Preserve jsonschema's useful wording only when its instance echo is
             # independently known to satisfy the documented short-scalar rule.
             return f"  - at {at}: {err.message}"
-        return (
-            f"  - at {at}: expected `{err.validator}: {err.validator_value}` "
-            f"(got {instance})"
-        )
+        return f"  - at {at}: expected `{err.validator}: {err.validator_value}` (got {instance})"
     if err.validator in ("required", "additionalProperties"):
         # These stock messages name missing/unexpected keys without rendering
         # the containing instance.
