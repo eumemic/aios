@@ -260,6 +260,10 @@ async def test_sweep_uses_real_pool_locking_path(
     target.mkdir(parents=True)
     (target / "payload").write_text("orphan")
     settings = get_settings().model_copy(deep=True)
+    # The integration pool targets its per-testcontainer database rather than the
+    # parse-only AIOS_DB_URL configured by CI.  Keep the reaper's dedicated lock
+    # backend on that same database.
+    settings.db_url = migrated_db_url
     settings.workspace_root = tmp_path
     settings.workspace_reaper_enabled = True
     settings.workspace_reaper_dry_run = False
