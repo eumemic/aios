@@ -9,6 +9,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from aios.errors import install_exception_handlers
+
+
+class _ValidatedJsonBody(BaseModel):
+    kind: str
+
+
+_VALIDATING_APP = FastAPI()
+install_exception_handlers(_VALIDATING_APP)
+
+
+@_VALIDATING_APP.put("/lights/1")
+async def _replace_light(body: _ValidatedJsonBody) -> _ValidatedJsonBody:
+    return body
 
 from aios.models.agents import (
     GenericChildBinding,
@@ -306,6 +323,30 @@ def _patch_resolve_auth(headers: dict[str, str] | None = None) -> Any:
         "aios.tools.http_request.resolve_auth_for_target_url",
         AsyncMock(return_value=("vlt_x", headers or {})),
     )
+
+
+def _make_validating_client() -> type:
+    """AsyncClient stand-in that dispatches into a real body-validating ASGI app."""
+
+    class _Stub:
+        def __init__(self, **_: Any) -> None:
+            self._inner = _REAL_ASYNC_CLIENT(
+                transport=httpx.ASGITransport(app=_VALIDATING_APP), base_url="http://test"
+            )
+
+        async def __aenter__(self) -> _Stub:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            await self._inner.aclose()
+
+        async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+            # The fixture server's base_url includes /v1; the local app models
+            # the endpoint below that external API prefix.
+            path = httpx.URL(url).path.removeprefix("/v1")
+            return await self._inner.request(method, path, **kwargs)
+
+    return _Stub
 
 
 def _make_stub_client(
@@ -606,6 +647,52 @@ class TestHttpRequestHandler:
                 "sess_x",
                 {"server_ref": "hue", "path": "/repos/o/r/issues/5#frag", "method": "GET"},
             )
+
+    async def test_json_body_is_accepted_by_body_validating_endpoint(
+        self, _stub_runtime: Any
+    ) -> None:
+        """A tool body is JSON text, so dispatch must identify it as JSON.
+
+        Without the content type FastAPI treats the wire bytes as an opaque body;
+        the production validation formatter then exposes that value as ``b'...'``.
+        """
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            patch("aios.tools.http_request.httpx.AsyncClient", _make_validating_client()),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1",
+                    "method": "PUT",
+                    "body": '{"kind":"allow_all"}',
+                },
+            )
+        assert result["status"] == 200, result
+        assert "b'" not in result["body"]
+
+    async def test_genuinely_malformed_json_body_is_still_rejected(
+        self, _stub_runtime: Any
+    ) -> None:
+        agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
+        with (
+            _patch_load_agent(agent),
+            _patch_resolve_auth(),
+            patch("aios.tools.http_request.httpx.AsyncClient", _make_validating_client()),
+        ):
+            result = await http_request_handler(
+                "sess_x",
+                {
+                    "server_ref": "hue",
+                    "path": "/lights/1",
+                    "method": "PUT",
+                    "body": "not-json",
+                },
+            )
+        assert result["status"] == 422, result
 
     async def test_successful_get(self, _stub_runtime: Any) -> None:
         agent = _agent(http_servers=[_server(routes=[_route("/lights/*")])])
