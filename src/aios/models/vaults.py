@@ -342,7 +342,7 @@ class VaultCredential(BaseModel):
     auth_type: AuthType
     secret_name: str | None = None
     allowed_hosts: list[str] | None = None
-    metadata: dict[str, Any]
+    metadata: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
