@@ -175,6 +175,33 @@ def _stringified_json_hint(instance: Any, schema: dict[str, Any], *, site: str) 
     )
 
 
+def normalize_and_format_schema_violation(
+    instance: Any,
+    schema: dict[str, Any],
+    *,
+    root: str,
+    intro: str,
+    retry_hint: str | None,
+    site: str,
+) -> tuple[Any, str | None]:
+    """Normalize an output-boundary value, then format any remaining violation.
+
+    This is the shared output-schema gate.  Keeping repair and validation in one
+    function prevents a new output boundary from accidentally selecting strict
+    validation while the existing session, workflow, and caller boundaries use
+    the stringified-JSON repair policy.
+    """
+    normalized = normalize_schema_value(instance, schema, site=site)
+    return normalized, format_schema_violation(
+        normalized,
+        schema,
+        root=root,
+        intro=intro,
+        retry_hint=retry_hint,
+        site=site,
+    )
+
+
 def format_schema_violation(
     instance: Any,
     schema: dict[str, Any],

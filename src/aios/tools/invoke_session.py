@@ -65,7 +65,10 @@ from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
-from aios.tools.schema_errors import format_schema_violation, normalize_schema_value
+from aios.tools.schema_errors import (
+    format_schema_violation,
+    normalize_and_format_schema_violation,
+)
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
 # long park never blocks the caller's other turns; we re-poll in a loop so a
@@ -304,9 +307,17 @@ async def _park_and_resolve(
     if resp.outcome != "ok":
         return _error_result(resp.error)
     result = resp.result
-    if output_schema is not None:
-        result = normalize_schema_value(result, output_schema, site="invoke_session.call_output")
-    violation = _validate_output(result, output_schema)
+    if output_schema is None:
+        return _ok_result(result)
+    result, message = normalize_and_format_schema_violation(
+        result,
+        output_schema,
+        root="",
+        intro="output_schema_violation: the answer does not conform to output_schema.",
+        retry_hint=None,
+        site="invoke_session.call_output",
+    )
+    violation = ToolResult(content=message, is_error=True) if message is not None else None
     return violation if violation is not None else _ok_result(result)
 
 

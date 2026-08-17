@@ -40,7 +40,10 @@ from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
-from aios.tools.schema_errors import format_schema_violation, normalize_schema_value
+from aios.tools.schema_errors import (
+    format_schema_violation,
+    normalize_and_format_schema_violation,
+)
 
 log = get_logger(__name__)
 
@@ -232,8 +235,14 @@ async def _enforce_output_schema(
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
     if schema is None:
         return value, None
-    value = normalize_schema_value(value, schema, site="workflow_completion.return")
-    return value, _validate_value(value, schema)
+    return normalize_and_format_schema_violation(
+        value,
+        schema,
+        root="value",
+        intro="output_schema_violation: `value` does not conform to the request's output_schema.",
+        retry_hint="Fix `value` to match the required schema, then call `return` again.",
+        site="workflow_completion.return",
+    )
 
 
 def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | None = None) -> str:

@@ -24,19 +24,21 @@ read itself is covered in tests/integration.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
 from aios.db import queries
+from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.models.sessions import Ok
+from aios.models.tasks import AwaitResponse
+from aios.models.workflows import WfRun
 from aios.tools import workflow_completion
-from aios.tools.invoke_session import _validate_output
 from aios.tools.registry import ToolResult
-from aios.tools.schema_errors import normalize_schema_value
 from aios.tools.workflow_completion import _enforce_output_schema, return_handler
-from aios.workflows.step import _validate_output_against_schema
+from aios.workflows import step as workflow_step
 
 _OBJ_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -171,8 +173,60 @@ class TestRegressionGuardStillRejects:
         finish.assert_not_called()
 
 
+def _run_with_schema() -> WfRun:
+    now = datetime.now(UTC)
+    return WfRun(
+        id="wfr_1",
+        workflow_id="wf_1",
+        account_id="acc_1",
+        environment_id="env_1",
+        request_id="req_1",
+        caller={"kind": "run", "id": "wfr_parent"},
+        request_output_schema=_OBJ_SCHEMA,
+        script="async def main(input): return None",
+        script_sha="sha",
+        host_semantics_epoch=1,
+        status="running",
+        last_event_seq=0,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def _complete_workflow_output(monkeypatch: Any, value: Any) -> tuple[str, Any]:
+    monkeypatch.setattr(
+        wf_queries,
+        "run_children_usage",
+        AsyncMock(return_value=wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)),
+    )
+    commit = AsyncMock()
+    monkeypatch.setattr(workflow_step, "_commit_terminal_and_dispatch", commit)
+    await workflow_step._complete_run(
+        mock.MagicMock(), _run_with_schema(), output=value, is_error=False
+    )
+    assert commit.await_args is not None
+    return commit.await_args.kwargs["status"], commit.await_args.kwargs["output"]
+
+
+async def _resolve_call_output(monkeypatch: Any, value: Any) -> Any:
+    monkeypatch.setattr(
+        "aios.tools.invoke_session._park_on_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result=value)),
+    )
+    from aios.tools.invoke_session import _park_and_resolve
+
+    return await _park_and_resolve(
+        object(),
+        servicer_kind="session",
+        servicer_id="ses_1",
+        request_id="req_1",
+        account_id="acc_1",
+        output_schema=_OBJ_SCHEMA,
+    )
+
+
 class TestCrossPathConsistency:
-    """The same terminal payload receives the same verdict at every boundary."""
+    """The same terminal payload receives the same verdict at all four boundaries."""
 
     async def test_encoded_object_is_accepted_and_normalized_everywhere(
         self, monkeypatch: Any
@@ -181,26 +235,39 @@ class TestCrossPathConsistency:
         _mock_schema(monkeypatch, _OBJ_SCHEMA)
 
         session_value, session_error = await _enforce_output_schema("ses_1", "req_1", encoded)
-        run_value = normalize_schema_value(encoded, _OBJ_SCHEMA, site="test.run")
-        caller_value = normalize_schema_value(encoded, _OBJ_SCHEMA, site="test.caller")
+        workflow_status, workflow_value = await _complete_workflow_output(monkeypatch, encoded)
+        call_session = await _resolve_call_output(monkeypatch, encoded)
+        call_workflow = await _resolve_call_output(monkeypatch, encoded)
 
         assert session_error is None
-        assert _validate_output_against_schema(run_value, _OBJ_SCHEMA) is None
-        assert _validate_output(caller_value, _OBJ_SCHEMA) is None
-        assert session_value == run_value == caller_value == {"n": 1}
+        assert session_value == {"n": 1}  # return / workflow_completion
+        assert (workflow_status, workflow_value) == ("completed", {"n": 1})
+        assert call_session == {"ok": {"n": 1}}
+        assert call_workflow == {"ok": {"n": 1}}
 
-    async def test_double_encoded_object_is_rejected_everywhere(self, monkeypatch: Any) -> None:
-        encoded_twice = '"{\\"n\\": 1}"'
+    async def test_parseable_nonconforming_object_is_rejected_everywhere(
+        self, monkeypatch: Any
+    ) -> None:
+        encoded_invalid = '{"n": "not-an-int"}'
         _mock_schema(monkeypatch, _OBJ_SCHEMA)
 
-        session_value, session_error = await _enforce_output_schema("ses_1", "req_1", encoded_twice)
-        run_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.run")
-        caller_value = normalize_schema_value(encoded_twice, _OBJ_SCHEMA, site="test.caller")
+        session_value, session_error = await _enforce_output_schema(
+            "ses_1", "req_1", encoded_invalid
+        )
+        workflow_status, workflow_value = await _complete_workflow_output(
+            monkeypatch, encoded_invalid
+        )
+        call_session = await _resolve_call_output(monkeypatch, encoded_invalid)
+        call_workflow = await _resolve_call_output(monkeypatch, encoded_invalid)
 
         assert session_error is not None
-        assert _validate_output_against_schema(run_value, _OBJ_SCHEMA) is not None
-        assert _validate_output(caller_value, _OBJ_SCHEMA) is not None
-        assert session_value == run_value == caller_value == encoded_twice
+        assert session_value == encoded_invalid
+        assert workflow_status == "errored"
+        assert "does not conform" in workflow_value
+        for result in (call_session, call_workflow):
+            assert isinstance(result, ToolResult)
+            assert result.is_error
+            assert "output_schema_violation" in result.content
 
 
 class TestNoSchemaPassesThrough:
