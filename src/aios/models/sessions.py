@@ -437,6 +437,11 @@ class Session(BaseModel):
     # available to fresh DB-loaded sessions at the surface-loader choke point.
     surface_frozen: SkipJsonSchema[bool] = Field(default=False, exclude=True)
     archive_when_idle: bool = False  # self-archive on first idle (immutable launch property)
+    # Token-accounting BASELINE lineage (#2050). 1 = pre-image-aware arithmetic;
+    # 2 = image-aware. Selects the arithmetic ``append_event`` applies and is
+    # stamped onto every span the step emits, so a reader can tell which
+    # baseline produced a number instead of assuming the current one.
+    token_baseline_v: SkipJsonSchema[int] = Field(default=1, exclude=True)
     outbound_suppression: OutboundSuppression = "off"  # #710 — intercept side-effecting outbound
     last_event_at: datetime | None = None
     total_events: int = 0

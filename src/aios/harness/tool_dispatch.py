@@ -789,9 +789,16 @@ async def _append_tool_result_event(
             )
     else:
         # Hot path: concrete channel, pure ``approx_tokens`` delta — no DB.
+        token_delta = queries._event_token_delta("message", event_data, None, None)
+        token_delta_v1 = (
+            queries._event_token_delta("message", event_data, None, None, image_aware=False)
+            if queries.message_has_image(event_data)
+            else token_delta
+        )
         precomputed = queries._PrecomputedAppend(
-            token_delta=queries._event_token_delta("message", event_data, None, None),
+            token_delta=token_delta,
             resolved_tool_channel=tool_parent_channel,
+            token_delta_v1=token_delta_v1,
         )
 
     async with pool.acquire() as conn, conn.transaction():
