@@ -579,6 +579,7 @@ from .prune import (  # noqa: E402
     prune_unpinned_archived_agents,
     prune_unpinned_archived_skills,
     prune_unpinned_archived_workflows,
+    reconcile_terminal_archival_batch,
 )
 from .sandboxes import (  # noqa: E402
     acquire_workspace_advisory_xact_lock,
@@ -1026,6 +1027,7 @@ __all__ = [
     "read_windowed_events",
     "reclaim_session_if_idle",
     "recompute_session_channels",
+    "reconcile_terminal_archival_batch",
     "record_trigger_fire",
     "record_trigger_run",
     "redact_memory_version",

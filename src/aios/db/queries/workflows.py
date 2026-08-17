@@ -126,6 +126,8 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        terminal_summary=row.get("terminal_summary"),
+        journal_pruned_at=row.get("journal_pruned_at"),
     )
 
 
@@ -1047,6 +1049,7 @@ async def set_run_terminal(
     status: WfRunStatus,
     output: Any,
     account_id: str,
+    terminal_summary: dict[str, Any] | None = None,
 ) -> None:
     """Flip a run to its terminal ``status`` and store ``output`` in one UPDATE.
 
@@ -1063,13 +1066,16 @@ async def set_run_terminal(
     statuses-filtered watcher's decision must agree with the final row).
     """
     await conn.execute(
-        "UPDATE wf_runs SET status = $3, output = $4::jsonb, updated_at = now() "
+        "UPDATE wf_runs SET status = $3, output = $4::jsonb, "
+        "archived_at = CASE WHEN $5::jsonb IS NULL THEN archived_at ELSE now() END, "
+        "terminal_summary = COALESCE($5::jsonb, terminal_summary), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 "
         "AND status NOT IN ('completed', 'errored', 'cancelled')",
         run_id,
         account_id,
         status,
         json.dumps(output) if output is not None else None,
+        json.dumps(terminal_summary) if terminal_summary is not None else None,
     )
 
 
@@ -1347,13 +1353,16 @@ async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) ->
 
 
 async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[str, Any] | None:
-    """An errored run's ``{kind, …}`` error detail, or ``None``.
+    """Return durable structured error detail for an errored run.
 
-    THE extraction of ``error`` from the ``run_completed`` journal payload —
-    shared by the run awaiter's completion record and the trigger fire path's
-    composed envelope (#819), so the two surfaces can never drift on where
-    ``error.kind`` lives (the row stores only ``status`` + ``output``).
+    Rows created before ``terminal_summary`` was introduced retain their terminal
+    facts in the ``run_completed`` event, so keep that compatibility path until a
+    summary has actually been projected.
     """
+    summary = await conn.fetchval("SELECT terminal_summary FROM wf_runs WHERE id = $1", run_id)
+    if summary is not None:
+        summary_error: dict[str, Any] | None = summary.get("error")
+        return summary_error
     completed = await get_run_completed_event(conn, run_id)
     if completed is None:
         return None
@@ -1386,29 +1395,32 @@ async def derive_run_response(
     was gated off for cancellation, leaving the liveness arm to mislabel it ``child_gone``).
     """
     row = await conn.fetchrow(
-        "SELECT r.status, (r.archived_at IS NOT NULL) AS archived, "
-        "       (SELECT e.payload FROM wf_run_events e "
-        "        WHERE e.run_id = r.id AND e.type = 'run_completed' "
-        "        ORDER BY e.seq DESC LIMIT 1) AS completed "
+        "SELECT r.status, r.output, r.terminal_summary, "
+        "       (r.archived_at IS NOT NULL) AS archived, "
+        "       CASE WHEN r.terminal_summary IS NULL THEN ("
+        "           SELECT e.payload FROM wf_run_events e "
+        "            WHERE e.run_id = r.id AND e.type = 'run_completed' "
+        "            ORDER BY e.seq DESC LIMIT 1"
+        "       ) END AS legacy_completed "
         "FROM wf_runs r WHERE r.id = $1 AND r.account_id = $2",
         run_id,
         account_id,
     )
-    if row is None:  # the run vanished entirely → can never answer
+    if row is None:
         return Err(error={"kind": "child_gone"})
     status = row["status"]
     if status == "cancelled":
         return Err(error={"kind": "cancelled"})
     if status in ("completed", "errored"):
-        completed = row["completed"] if row["completed"] is not None else {}
-        # The run_completed bookend carries its OWN flat {output, is_error, error}
-        # triple (a second on-disk product, untouched here). Collapse it into the
-        # same Outcome kind at the read, rename-tolerant (output ↔ result), rather
-        # than re-pair the triple downstream.
+        summary = row["terminal_summary"]
+        completed = summary if summary is not None else row["legacy_completed"] or {}
         if completed.get("is_error"):
             return Err(error=completed["error"])
-        return Ok(result=completed.get("output"))
-    if row["archived"]:  # non-terminal but archived → can never answer
+        # Output remains on the run row for projected summaries. Legacy events
+        # carry it themselves, including rows whose run output was never copied.
+        result = row["output"] if summary is not None else completed.get("output", row["output"])
+        return Ok(result=result)
+    if row["archived"]:
         return Err(error={"kind": "child_gone"})
     return None
 

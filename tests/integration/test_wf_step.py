@@ -27,6 +27,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.db.queries.prune import prune_archived_runs
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.ids import REQUEST, make_id
@@ -475,6 +476,51 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="OTHER")  # idempotent
     await run_workflow_step(run_id)
     assert await _events(pool, run_id) == before  # journal unchanged
+
+
+async def test_terminal_archive_activates_prune_without_touching_live_run(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Terminal completion makes detail reclaimable; a live run remains sacred."""
+    pool = wf_runtime
+    terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
+    live_id = await _make_run(pool, _GATE_SCRIPT, name="live_not_prunable")
+
+    await run_workflow_step(terminal_id)
+    await run_workflow_step(live_id)  # suspended at its gate: explicitly non-terminal
+
+    async with pool.acquire() as conn:
+        terminal = await wf_queries.get_wf_run(conn, terminal_id, account_id="acc_wf")
+        live = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
+        assert terminal is not None and terminal.status in {"completed", "errored", "cancelled"}
+        assert terminal.archived_at is not None
+        assert live is not None and live.status == "suspended"
+        assert live.archived_at is None
+
+        terminal_history = await conn.fetchval(
+            "SELECT count(*) FROM wf_run_events WHERE run_id=$1", terminal_id
+        )
+        live_history = await conn.fetchval(
+            "SELECT count(*) FROM wf_run_events WHERE run_id=$1", live_id
+        )
+        assert terminal_history > 0 and live_history > 0
+
+        # Make only the terminal run old enough for immediate retention.
+        await conn.execute(
+            "UPDATE wf_runs SET archived_at=now() - interval '1 day' WHERE id=$1",
+            terminal_id,
+        )
+        assert await prune_archived_runs(conn, retention_days=0) == terminal_history
+        assert (
+            await conn.fetchval("SELECT count(*) FROM wf_run_events WHERE run_id=$1", terminal_id)
+            == 0
+        )
+        assert (
+            await conn.fetchval("SELECT count(*) FROM wf_run_events WHERE run_id=$1", live_id)
+            == live_history
+        )
+        live_after = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
+        assert live_after is not None and live_after.archived_at is None
 
 
 # ─── annotations — log()/phase() journaling (B-783) ──────────────────────────
@@ -4519,6 +4565,28 @@ async def test_derive_run_response_reads_the_terminal_record(
     # The cancel semantic the §3.6 merge had to preserve: cancelled, not child_gone.
     assert cancelled == Err(error={"kind": "cancelled"})
     assert pending is None
+
+
+async def test_legacy_errored_run_falls_back_to_completed_event(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A pre-migration terminal row still resolves from its durable journal."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "def main(input):\n    return 1", name="legacy_err")
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        expected_error = await conn.fetchval(
+            "SELECT payload->'error' FROM wf_run_events WHERE run_id=$1 AND type='run_completed'",
+            run_id,
+        )
+        await conn.execute("UPDATE wf_runs SET terminal_summary=NULL WHERE id=$1", run_id)
+        outcome = await wf_queries.derive_run_response(conn, run_id, account_id="acc_wf")
+        resolved_error = await wf_queries.resolve_run_error(conn, run_id)
+
+    assert outcome == Err(error=expected_error)
+    assert resolved_error == expected_error
+    assert expected_error["kind"] == "author_exception"
 
 
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───

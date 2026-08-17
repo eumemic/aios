@@ -54,36 +54,82 @@ import asyncpg
 
 
 async def prune_archived_runs(
-    conn: asyncpg.Connection[Any],
-    *,
-    retention_days: int,
+    conn: asyncpg.Connection[Any], *, retention_days: int, row_limit: int = 500
 ) -> int:
-    """Delete terminal+archived runs older than the window; returns the count.
-
-    Age-keyed on ``wf_runs.archived_at`` (the lifecycle archive stamp set by
-    :func:`aios.db.queries.workflows.archive_run`), exactly as the archived-
-    session sandbox reaper keys on ``sessions.archived_at``. Deleting the
-    ``wf_runs`` row cascades to its ``wf_run_events`` journal (the unbounded-
-    growth driver) and ``wf_run_signals`` via their ``ON DELETE CASCADE`` FKs —
-    so the journal is dropped in the same statement, no separate compaction
-    pass needed.
-
-    Only ``archived_at IS NOT NULL`` rows are candidates, and ``archive_run`` is
-    terminal-only, so a live/suspended/pending run is structurally unreachable
-    here. Time-based only (no count-cap), per the ``trigger_runs`` doctrine.
-    Idempotent: a second sweep over the same window finds nothing left.
-
-    Worker-side / unscoped: the maintenance sweep prunes across all accounts.
-    """
-    result = await conn.execute(
-        """
-        DELETE FROM wf_runs
-         WHERE archived_at IS NOT NULL
-           AND archived_at < now() - make_interval(days => $1)
-        """,
+    """Delete bounded terminal child detail while retaining durable run summaries."""
+    deleted = 0
+    rows = await conn.fetch(
+        """SELECT id FROM wf_runs
+             WHERE archived_at IS NOT NULL
+               AND archived_at < now() - make_interval(days => $1)
+               AND terminal_summary IS NOT NULL
+               AND journal_pruned_at IS NULL
+               AND status IN ('completed','errored','cancelled')
+             ORDER BY archived_at, id LIMIT $2""",
         retention_days,
+        row_limit,
     )
-    # asyncpg returns e.g. "DELETE 3"
+    for row in rows:
+        run_id = row["id"]
+        for table, order in (("wf_run_events", "seq"), ("wf_run_signals", "delivered_at")):
+            result = await conn.execute(
+                f"""DELETE FROM {table} WHERE ctid IN (
+                    SELECT child.ctid FROM {table} child JOIN wf_runs run ON run.id=child.run_id
+                    WHERE child.run_id=$1 AND run.status IN ('completed','errored','cancelled')
+                      AND run.terminal_summary IS NOT NULL
+                      AND run.archived_at < now() - make_interval(days => $2)
+                    ORDER BY child.{order} LIMIT $3)""",
+                run_id,
+                retention_days,
+                row_limit,
+            )
+            deleted += int(result.split()[-1])
+        remaining = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM wf_run_events WHERE run_id=$1) OR "
+            "EXISTS(SELECT 1 FROM wf_run_signals WHERE run_id=$1)",
+            run_id,
+        )
+        if not remaining:
+            await conn.execute(
+                "UPDATE wf_runs SET journal_pruned_at=now() WHERE id=$1 "
+                "AND status IN ('completed','errored','cancelled')",
+                run_id,
+            )
+    return deleted
+
+
+async def reconcile_terminal_archival_batch(
+    conn: asyncpg.Connection[Any], *, row_limit: int = 500
+) -> int:
+    """Archive a bounded historical terminal batch and project its final facts."""
+    result = await conn.execute(
+        """WITH candidates AS (
+               SELECT r.id, r.updated_at, e.payload
+                 FROM wf_runs r
+                 LEFT JOIN LATERAL (
+                     SELECT payload FROM wf_run_events
+                      WHERE run_id = r.id AND type = 'run_completed'
+                      ORDER BY seq DESC LIMIT 1
+                 ) e ON true
+                WHERE (r.archived_at IS NULL OR r.terminal_summary IS NULL)
+                  AND r.status IN ('completed','errored','cancelled')
+                ORDER BY r.updated_at, r.id
+                LIMIT $1
+           )
+           UPDATE wf_runs r
+              SET archived_at = COALESCE(r.archived_at, c.updated_at),
+                  terminal_summary = jsonb_strip_nulls(jsonb_build_object(
+                      'is_error', c.payload->'is_error',
+                      'error', c.payload->'error',
+                      'usage', c.payload->'usage',
+                      'duration_ms', c.payload->'duration_ms',
+                      'cancelled', (r.status = 'cancelled')
+                  ))
+             FROM candidates c WHERE r.id = c.id
+               AND (r.archived_at IS NULL OR r.terminal_summary IS NULL)
+               AND r.status IN ('completed','errored','cancelled')""",
+        row_limit,
+    )
     return int(result.split()[-1])
 
 

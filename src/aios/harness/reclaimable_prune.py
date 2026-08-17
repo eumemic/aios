@@ -100,10 +100,22 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
     # correctness (each prune re-reads liveness), only for promptness. Each
     # family is independently isolated, so a failure mid-sweep does not skip the
     # families that follow.
+    if settings.reclaimable_prune_archival_backfill_enabled:
+        await _prune_one_family(
+            pool,
+            family="runs_archival_backfill",
+            prune=lambda c: queries.reconcile_terminal_archival_batch(
+                c, row_limit=settings.reclaimable_prune_batch_rows
+            ),
+        )
     runs = await _prune_one_family(
         pool,
         family="runs",
-        prune=lambda c: queries.prune_archived_runs(c, retention_days=run_days),
+        prune=lambda c: queries.prune_archived_runs(
+            c,
+            retention_days=run_days,
+            row_limit=settings.reclaimable_prune_batch_rows,
+        ),
     )
     agents = await _prune_one_family(
         pool,

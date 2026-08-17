@@ -682,6 +682,16 @@ class Settings(BaseSettings):
         "on ``trigger_runs_retention_days``; age-keyed on ``archived_at``. "
         "Time-based by design — a count-cap is explicitly rejected (#1461).",
     )
+    reclaimable_prune_batch_rows: int = Field(
+        default=500,
+        ge=1,
+        le=10_000,
+        description="Maximum child rows deleted from one table/run in a prune batch.",
+    )
+    reclaimable_prune_archival_backfill_enabled: bool = Field(
+        default=False,
+        description="Deliberate rollout switch for bounded historical terminal archival.",
+    )
     archived_definition_retention_days: int = Field(
         default=30,
         ge=1,
