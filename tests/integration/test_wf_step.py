@@ -4265,8 +4265,11 @@ async def test_agent_output_schema_end_to_end(
             child_id, {"request_id": request_id, "value": {"answer": 7}}
         )
         assert isinstance(rejected, ToolResult) and rejected.is_error
+        # Providers sometimes double-encode a structured return value. If its
+        # parsed JSON conforms, return_handler must accept and persist the parsed
+        # object rather than reject the tool call into a retry loop.
         ok = await workflow_completion.return_handler(
-            child_id, {"request_id": request_id, "value": {"answer": "done"}}
+            child_id, {"request_id": request_id, "value": '{"answer":"done"}'}
         )
     assert ok == {"status": "returned"}
 

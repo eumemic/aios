@@ -124,7 +124,9 @@ class TestHandlerLivenessFirst:
             workflow_completion, "_closed_request_error", AsyncMock(return_value=None)
         )
         monkeypatch.setattr(
-            workflow_completion, "_enforce_output_schema", AsyncMock(return_value=None)
+            workflow_completion,
+            "_enforce_output_schema",
+            AsyncMock(return_value=({"answer": "x"}, None)),
         )
         finish = AsyncMock(return_value={"ok": True})
         monkeypatch.setattr(workflow_completion, "_finish", finish)
