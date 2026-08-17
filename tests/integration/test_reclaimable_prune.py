@@ -99,7 +99,8 @@ async def _make_archived_run(
         account_id="acc_root",
         terminal_summary={"is_error": False},
     )
-    await wf_queries.archive_run(conn, run.id, account_id="acc_root")
+    # ``set_run_terminal`` now atomically archives terminal runs; the helper's
+    # former explicit ``archive_run`` call became stale and correctly conflicts.
     # Back-date archived_at so it is past the retention window.
     await conn.execute(
         "UPDATE wf_runs SET archived_at = now() - make_interval(days => $2) WHERE id = $1",
