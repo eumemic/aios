@@ -5828,10 +5828,14 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
     persistent = await child(False, "false")
     assert ephemeral.archive_when_idle is True
     assert persistent.archive_when_idle is False
-    # Simulate completion's idle point. Only the opted-in lifetime is reclaimed.
+    # Simulate completion's idle point by advancing the durable reaction
+    # watermark. Deleting event rows does not rewind the denormalized session
+    # watermarks, so it would leave both sessions active rather than model a
+    # completed turn.
     async with pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM events WHERE session_id = ANY($1::text[])", [ephemeral.id, persistent.id]
+            "UPDATE sessions SET last_reacted_seq = last_stimulus_seq WHERE id = ANY($1::text[])",
+            [ephemeral.id, persistent.id],
         )
     assert (
         await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf")
