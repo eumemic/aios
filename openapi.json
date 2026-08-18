@@ -15485,6 +15485,21 @@
             "type": "boolean",
             "title": "Api Key Set"
           },
+          "credentials_set": {
+            "type": "boolean",
+            "title": "Credentials Set",
+            "default": false
+          },
+          "litellm_defaults": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Litellm Defaults"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -15528,11 +15543,18 @@
             "title": "Provider"
           },
           "api_key": {
-            "type": "string",
-            "minLength": 1,
-            "format": "password",
-            "title": "Api Key",
-            "writeOnly": true
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
           },
           "api_base": {
             "anyOf": [
@@ -15544,13 +15566,29 @@
               }
             ],
             "title": "Api Base"
+          },
+          "credentials": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credentials"
+          },
+          "litellm_defaults": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Litellm Defaults"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "provider",
-          "api_key"
+          "provider"
         ],
         "title": "ModelProviderCreate",
         "description": "Request body for ``POST /v1/model-providers``.\n\n``provider`` is a LiteLLM provider name (e.g. ``anthropic``, ``openai``,\n``openrouter``) \u2014 lower-cased and stripped so it matches what\n``litellm.get_llm_provider`` returns at resolve time regardless of the\ncaller's casing. ``api_key`` is write-only and required in v1 (a keyless\narm for unauthenticated self-hosted endpoints is a documented future\nextension, not yet supported)."
@@ -15581,6 +15619,30 @@
               }
             ],
             "title": "Api Base"
+          },
+          "credentials": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credentials"
+          },
+          "litellm_defaults": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Litellm Defaults"
           }
         },
         "additionalProperties": false,

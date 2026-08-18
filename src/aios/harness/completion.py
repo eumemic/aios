@@ -45,7 +45,6 @@ from aios.harness.request_body_budget import (
     is_request_too_large_error,
 )
 from aios.logging import get_logger
-from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
 from aios.services.litellm_params import openai_params_in, silent_drop_controls_in
 
@@ -686,7 +685,9 @@ def _build_litellm_kwargs(
         kwargs["stream_options"] = {"include_usage": True}
     if tools:
         kwargs["tools"] = tools
-    effective_extra = dict(extra or {})
+    from aios.services.model_providers import merge_provider_config
+
+    effective_extra = merge_provider_config(harness_kwargs={}, resolved=auth, agent_extra=extra)
     # Never permit LiteLLM's silent unsupported-parameter path, even when an
     # agent explicitly requests it through ``litellm_extra``.
     #
@@ -716,15 +717,6 @@ def _build_litellm_kwargs(
                 "report success; overridden so an unsupported param fails loud"
             ),
         )
-    if auth is not None and get_settings().inference_credential_policy != "legacy_env":
-        # Account rows are authoritative under non-legacy policies. Inline auth
-        # fields are agent metadata, not account configuration.
-        for key in ("api_key", "api_base", "base_url"):
-            effective_extra.pop(key, None)
-    if auth is not None:
-        kwargs["api_key"] = auth.api_key
-        if auth.api_base is not None and api_base_of(effective_extra) is None:
-            kwargs["api_base"] = auth.api_base
     # LiteLLM's bundled model-capability map is advisory, not authoritative.
     # Centrally allow every standard OpenAI-shaped param the caller supplied so
     # new provider models are not rejected locally before reaching the wire.

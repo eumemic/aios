@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.model_provider_litellm_defaults import ModelProviderLitellmDefaults
+
 
 T = TypeVar("T", bound="ModelProvider")
 
@@ -24,6 +28,9 @@ class ModelProvider:
         created_at (datetime.datetime):
         updated_at (datetime.datetime):
         api_base (None | str | Unset):
+        credentials_set (bool | Unset):  Default: False.
+        litellm_defaults (ModelProviderLitellmDefaults | Unset):
+        version (int | Unset):  Default: 1.
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -33,6 +40,9 @@ class ModelProvider:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     api_base: None | str | Unset = UNSET
+    credentials_set: bool | Unset = False
+    litellm_defaults: ModelProviderLitellmDefaults | Unset = UNSET
+    version: int | Unset = 1
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -52,6 +62,14 @@ class ModelProvider:
             api_base = UNSET
         else:
             api_base = self.api_base
+
+        credentials_set = self.credentials_set
+
+        litellm_defaults: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.litellm_defaults, Unset):
+            litellm_defaults = self.litellm_defaults.to_dict()
+
+        version = self.version
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -74,6 +92,12 @@ class ModelProvider:
         )
         if api_base is not UNSET:
             field_dict["api_base"] = api_base
+        if credentials_set is not UNSET:
+            field_dict["credentials_set"] = credentials_set
+        if litellm_defaults is not UNSET:
+            field_dict["litellm_defaults"] = litellm_defaults
+        if version is not UNSET:
+            field_dict["version"] = version
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -81,6 +105,10 @@ class ModelProvider:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.model_provider_litellm_defaults import (
+            ModelProviderLitellmDefaults,
+        )
+
         d = dict(src_dict)
         id = d.pop("id")
 
@@ -100,6 +128,17 @@ class ModelProvider:
             return cast(None | str | Unset, data)
 
         api_base = _parse_api_base(d.pop("api_base", UNSET))
+
+        credentials_set = d.pop("credentials_set", UNSET)
+
+        _litellm_defaults = d.pop("litellm_defaults", UNSET)
+        litellm_defaults: ModelProviderLitellmDefaults | Unset
+        if isinstance(_litellm_defaults, Unset):
+            litellm_defaults = UNSET
+        else:
+            litellm_defaults = ModelProviderLitellmDefaults.from_dict(_litellm_defaults)
+
+        version = d.pop("version", UNSET)
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -125,6 +164,9 @@ class ModelProvider:
             created_at=created_at,
             updated_at=updated_at,
             api_base=api_base,
+            credentials_set=credentials_set,
+            litellm_defaults=litellm_defaults,
+            version=version,
             archived_at=archived_at,
         )
 

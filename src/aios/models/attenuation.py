@@ -695,6 +695,8 @@ def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
     raw = litellm_extra.get("api_base")
     if raw is None:
         raw = litellm_extra.get("base_url")
+    if raw is None:
+        raw = litellm_extra.get("aws_bedrock_runtime_endpoint")
     return raw if isinstance(raw, str) else None
 
 

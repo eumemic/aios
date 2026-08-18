@@ -162,7 +162,18 @@ from .mint_key_request import MintKeyRequest
 from .mint_key_response import MintKeyResponse
 from .model_provider import ModelProvider
 from .model_provider_create import ModelProviderCreate
+from .model_provider_create_credentials_type_0 import (
+    ModelProviderCreateCredentialsType0,
+)
+from .model_provider_create_litellm_defaults import ModelProviderCreateLitellmDefaults
+from .model_provider_litellm_defaults import ModelProviderLitellmDefaults
 from .model_provider_update import ModelProviderUpdate
+from .model_provider_update_credentials_type_0 import (
+    ModelProviderUpdateCredentialsType0,
+)
+from .model_provider_update_litellm_defaults_type_0 import (
+    ModelProviderUpdateLitellmDefaultsType0,
+)
 from .native_buttons import NativeButtons
 from .o_auth_complete_request import OAuthCompleteRequest
 from .o_auth_start_request import OAuthStartRequest
@@ -507,7 +518,12 @@ __all__ = (
     "MintKeyResponse",
     "ModelProvider",
     "ModelProviderCreate",
+    "ModelProviderCreateCredentialsType0",
+    "ModelProviderCreateLitellmDefaults",
+    "ModelProviderLitellmDefaults",
     "ModelProviderUpdate",
+    "ModelProviderUpdateCredentialsType0",
+    "ModelProviderUpdateLitellmDefaultsType0",
     "NativeButtons",
     "OAuthCompleteRequest",
     "OAuthStartRequest",

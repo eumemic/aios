@@ -21,6 +21,8 @@ added alongside this one without an explicit follow-up decision.
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from functools import lru_cache
 from types import EllipsisType
 from typing import Any
@@ -32,7 +34,13 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.models.attenuation import api_base_of
-from aios.models.model_providers import ModelProvider, ProviderAuth, provider_auth_conflict
+from aios.models.model_providers import (
+    CREDENTIAL_KWARGS,
+    REASONING_KWARGS,
+    ModelProvider,
+    ProviderAuth,
+    provider_auth_conflict,
+)
 from aios.services.inference_credential_telemetry import observe_env_fallback
 
 # Surfaced as a session's stop_reason.message (session-visible) and, on the
@@ -51,8 +59,42 @@ PROVIDER_AUTH_CONFLICT_MESSAGE = (
 )
 
 
-def _encrypt_api_key(api_key: str, crypto_box: CryptoBox, *, account_id: str) -> Any:
-    return crypto_box.derive_account_subkey(account_id).encrypt(api_key)
+def merge_provider_config(
+    *,
+    harness_kwargs: dict[str, Any],
+    resolved: ProviderAuth | None,
+    agent_extra: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge call configuration without ever putting credentials in LlmRequest."""
+    agent = dict(agent_extra or {})
+    if "model" in agent:
+        raise ValueError("model is forbidden in litellm_extra")
+    defaults = deepcopy(resolved.litellm_defaults if resolved else {})
+    if REASONING_KWARGS & agent.keys():
+        for key in REASONING_KWARGS:
+            defaults.pop(key, None)
+    credentials = deepcopy(resolved.credentials if resolved else {})
+    if CREDENTIAL_KWARGS & agent.keys():
+        credentials = {}
+    merged = deepcopy(harness_kwargs)
+    merged.update(defaults)
+    merged.update(credentials)
+    row_extra_body = merged.get("extra_body")
+    agent_extra_body = agent.pop("extra_body", None)
+    merged.update(agent)
+    if isinstance(row_extra_body, dict) and isinstance(agent_extra_body, dict):
+        merged["extra_body"] = {**deepcopy(row_extra_body), **deepcopy(agent_extra_body)}
+    elif agent_extra_body is not None:
+        merged["extra_body"] = deepcopy(agent_extra_body)
+    return merged
+
+
+def _encrypt_credentials(
+    credentials: dict[str, Any], crypto_box: CryptoBox, *, account_id: str
+) -> Any:
+    return crypto_box.derive_account_subkey(account_id).encrypt(
+        json.dumps(credentials, separators=(",", ":"), sort_keys=True)
+    )
 
 
 async def create_model_provider(
@@ -61,16 +103,24 @@ async def create_model_provider(
     *,
     account_id: str,
     provider: str,
-    api_key: str,
+    api_key: str | None,
     api_base: str | None,
+    credentials: dict[str, Any] | None = None,
+    litellm_defaults: dict[str, Any] | None = None,
 ) -> ModelProvider:
+    payload = dict(credentials or {})
+    if api_key is not None:
+        payload["api_key"] = api_key
+    if api_base is not None:
+        payload["api_base"] = api_base
     async with pool.acquire() as conn:
         return await queries.insert_model_provider(
             conn,
             account_id=account_id,
             provider=provider,
             api_base=api_base,
-            blob=_encrypt_api_key(api_key, crypto_box, account_id=account_id),
+            blob=_encrypt_credentials(payload, crypto_box, account_id=account_id),
+            litellm_defaults=litellm_defaults,
         )
 
 
@@ -103,6 +153,8 @@ async def update_model_provider(
     account_id: str,
     api_key: str | None,
     api_base: str | EllipsisType | None = ...,
+    credentials: dict[str, Any] | None = None,
+    litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
 ) -> ModelProvider:
     """Rotate the key and/or edit ``api_base``.
 
@@ -111,14 +163,20 @@ async def update_model_provider(
     at the router — pass ``...`` (the default) to keep, an explicit value
     (including ``None``) to set/clear.
     """
-    blob = (
-        _encrypt_api_key(api_key, crypto_box, account_id=account_id)
-        if api_key is not None
-        else None
-    )
+    payload = dict(credentials or {})
+    if api_key is not None:
+        payload["api_key"] = api_key
+    if api_base is not ... and api_base is not None:
+        payload["api_base"] = api_base
+    blob = _encrypt_credentials(payload, crypto_box, account_id=account_id) if payload else None
     async with pool.acquire() as conn:
         return await queries.update_model_provider(
-            conn, model_provider_id, account_id=account_id, blob=blob, api_base=api_base
+            conn,
+            model_provider_id,
+            account_id=account_id,
+            blob=blob,
+            api_base=api_base,
+            litellm_defaults=litellm_defaults,
         )
 
 
@@ -218,10 +276,20 @@ async def _resolve_provider_auth(
             # are never inherited by a descendant under a non-legacy policy.
             return None
     subkey = crypto_box.derive_account_subkey(resolved.owner_account_id)
+    plaintext = subkey.decrypt(resolved.blob)
+    try:
+        credentials = json.loads(plaintext)
+    except json.JSONDecodeError:
+        # Migration compatibility for rows written by 0140 as a bare API key.
+        credentials = {"api_key": plaintext}
+    if api_base_of(credentials) is not None and not credentials.get("api_key"):
+        raise ValueError("model-provider credentials endpoint requires api_key")
     return ProviderAuth(
-        api_key=subkey.decrypt(resolved.blob),
-        api_base=resolved.api_base,
+        api_key=str(credentials.get("api_key", "")),
+        api_base=api_base_of(credentials) or resolved.api_base,
         owner_account_id=resolved.owner_account_id,
+        credentials=credentials,
+        litellm_defaults=resolved.litellm_defaults or {},
     )
 
 
