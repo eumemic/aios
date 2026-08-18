@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
-
-import conftest
 
 
 def test_db_url_uses_external_database_without_starting_docker(
@@ -13,9 +12,9 @@ def test_db_url_uses_external_database_without_starting_docker(
     external_url = "postgresql://aios:aios@127.0.0.1:5432/aios_test"
     monkeypatch.setenv("AIOS_TEST_DB_URL", external_url)
 
-    def fail_if_docker_is_probed() -> bool:
+    def fail_if_docker_is_probed(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("external database selection must not probe Docker")
 
-    monkeypatch.setattr(conftest, "_docker_available", fail_if_docker_is_probed)
+    monkeypatch.setattr(subprocess, "run", fail_if_docker_is_probed)
 
     assert request.getfixturevalue("db_url") == external_url
