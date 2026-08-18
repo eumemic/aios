@@ -31,6 +31,16 @@ class TestSearchEventsDescription:
         assert "work artifact" in SEARCH_EVENTS_DESCRIPTION
         assert "operator events API" in SEARCH_EVENTS_DESCRIPTION
 
+    def test_documents_trigger_capture_health_semantics(self) -> None:
+        description = SEARCH_EVENTS_DESCRIPTION
+
+        for lifecycle_kind in ("trigger_enabled", "trigger_disabled", "trigger_fired"):
+            assert lifecycle_kind in description
+        assert "at-most-once" in description
+        assert "cannot-determine" in description
+        assert "result_id" in description
+        assert "workflow launch" in description
+
     def test_documents_connector_send_verification(self) -> None:
         description = SEARCH_EVENTS_DESCRIPTION
         parameter_description = SEARCH_EVENTS_PARAMETERS_SCHEMA["properties"]["query"][
