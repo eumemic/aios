@@ -542,8 +542,111 @@ class HttpConnector:
             )
             if _is_fatal_inbound_status(sc):
                 response.raise_for_status()
+            # A REFUSAL IS NOT A DELIVERY. Returning a bare ``None`` made an
+            # admission refusal byte-identical to a transient API blip, so a
+            # held-for-approval human's message vanished with nobody able to
+            # act on it (the aios#2102 class). Parse the server's
+            # machine-readable ``drop_reason`` out of the error envelope and
+            # hand it to an overridable hook BEFORE dropping, so a connector
+            # that can talk back to the sender has something to branch on.
+            await self._dispatch_inbound_refused(
+                connection_id=connection_id,
+                chat_id=chat_id,
+                event_id=eid,
+                status_code=sc,
+                body=response.text[:2000],
+            )
             return None
         return dict(response.json())
+
+    @staticmethod
+    def _parse_drop_reason(body: str) -> str | None:
+        """Pull ``error.detail.drop_reason`` out of an aios error envelope.
+
+        Total by construction: a non-JSON / unexpected body yields ``None``
+        rather than raising inside the drop path.
+        """
+        try:
+            payload = json.loads(body)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return None
+        detail = error.get("detail")
+        if not isinstance(detail, dict):
+            return None
+        reason = detail.get("drop_reason")
+        return reason if isinstance(reason, str) else None
+
+    async def _dispatch_inbound_refused(
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        event_id: str,
+        status_code: int,
+        body: str,
+    ) -> None:
+        """Log the structured refusal, then invoke the subclass hook.
+
+        The hook is best-effort: an exception raised by a subclass's
+        :meth:`on_inbound_refused` must not escalate a routine per-envelope
+        drop into a task-group teardown that kills sibling connections.
+        """
+        drop_reason = self._parse_drop_reason(body)
+        log.warning(
+            "connector.inbound.refused",
+            connector=self.connector,
+            connection_id=connection_id,
+            chat_id=chat_id,
+            event_id=event_id,
+            status_code=status_code,
+            drop_reason=drop_reason,
+        )
+        try:
+            await self.on_inbound_refused(
+                connection_id=connection_id,
+                chat_id=chat_id,
+                event_id=event_id,
+                status_code=status_code,
+                drop_reason=drop_reason,
+            )
+        except Exception:  # pragma: no cover - defensive
+            log.exception(
+                "connector.inbound.refused_hook_failed",
+                connection_id=connection_id,
+                chat_id=chat_id,
+                event_id=event_id,
+            )
+
+    async def on_inbound_refused(
+        self,
+        *,
+        connection_id: str,
+        chat_id: str,
+        event_id: str,
+        status_code: int,
+        drop_reason: str | None,
+    ) -> None:
+        """Called when aios REFUSED an inbound (non-fatal 4xx/5xx).
+
+        Overridable seam so a refusal is distinguishable from a delivery at
+        the connector. ``drop_reason`` is the server's machine-readable
+        reason — notably ``"pending_approval"`` (the sender is held awaiting
+        an operator's audited approval) versus ``"denied_by_policy"`` (a flat
+        denial) versus ``None`` (a transient/unparseable failure).
+
+        The default implementation does nothing beyond the structured
+        ``connector.inbound.refused`` log emitted by the caller. Telling the
+        HUMAN SENDER is deliberately NOT done here — an auto-reply to an
+        unapproved stranger is an outbound side effect with its own
+        abuse/spam-amplification and per-platform-consent questions, and is
+        tracked separately (see eumemic/aios#2147).
+        """
+        return None
 
     async def emit_lifecycle(
         self,

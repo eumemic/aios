@@ -15,6 +15,10 @@ _EXPECTED = {
     InboundDrop.DETACHED: 422,
     InboundDrop.ARCHIVED_TEMPLATE: 422,
     InboundDrop.DENIED_BY_POLICY: 422,
+    # Held awaiting an operator's audited approval. Shares 422 (non-fatal for
+    # the connector runner) but carries its own ``drop_reason`` so a caller can
+    # distinguish "held for approval" from a flat denial and from a delivery.
+    InboundDrop.PENDING_APPROVAL: 422,
     InboundDrop.RATE_LIMITED: 429,
     InboundDrop.ATTACHMENT_STAGING_FAILED: 500,
     InboundDrop.SESSION_MISSING: 404,

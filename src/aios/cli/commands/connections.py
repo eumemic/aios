@@ -24,6 +24,7 @@ from aios.cli.files import PayloadError, load_json_object, resolve_payload
 from aios.cli.output import print_error, print_success
 from aios.cli.runtime import get_state, run_or_die
 from aios_sdk._generated.api.connections import (
+    approve_inbound_grant,
     archive_connection,
     attach_connection,
     bind_chat,
@@ -33,8 +34,10 @@ from aios_sdk._generated.api.connections import (
     get_connection,
     list_bound_chats,
     list_connections,
+    list_pending_inbound_grants,
     list_recent_chats,
     reparent_connection,
+    revoke_inbound_grant,
     set_connection_inbound_policy,
     set_connection_secrets,
     unbind_chat,
@@ -50,7 +53,9 @@ from aios_sdk._generated.models.connection_reparent import ConnectionReparent
 from aios_sdk._generated.models.connection_set_secrets import ConnectionSetSecrets
 from aios_sdk._generated.models.connection_set_secrets_secrets import ConnectionSetSecretsSecrets
 from aios_sdk._generated.models.deny_all import DenyAll
+from aios_sdk._generated.models.inbound_grant_action import InboundGrantAction
 from aios_sdk._generated.models.list_connections_mode_type_0 import ListConnectionsModeType0
+from aios_sdk._generated.models.require_approval import RequireApproval
 
 app = typer.Typer(name="connections", help="Manage connector connections.", no_args_is_help=True)
 
@@ -222,7 +227,7 @@ def set_inbound_policy(
         str,
         typer.Option(
             "--kind",
-            help="Policy kind: allow_all | allow_list | deny_all.",
+            help="Policy kind: allow_all | allow_list | require_approval | deny_all.",
         ),
     ],
     chat_id: Annotated[
@@ -243,15 +248,20 @@ def set_inbound_policy(
         # pre-validate the empty-allow-list case client-side: send what the
         # operator asked for and let the server's 422 surface through
         # call_single (the CLI is a thin wire; the server owns the rule).
-        body: AllowAll | AllowList | DenyAll
+        body: AllowAll | AllowList | RequireApproval | DenyAll
         if kind == "allow_all":
             body = AllowAll()
         elif kind == "deny_all":
             body = DenyAll()
         elif kind == "allow_list":
             body = AllowList(chat_ids=chat_id or [])
+        elif kind == "require_approval":
+            body = RequireApproval(approved=chat_id or [])
         else:
-            print_error(f"unknown --kind {kind!r}: expected allow_all | allow_list | deny_all")
+            print_error(
+                f"unknown --kind {kind!r}: expected allow_all | allow_list | "
+                "require_approval | deny_all"
+            )
             return 64
         call_single(
             ctx,
@@ -260,6 +270,54 @@ def set_inbound_policy(
             body=body,
         )
         return None
+
+    run_or_die(_run)
+
+
+@app.command("approve")
+@covers("approve_inbound_grant")
+def approve(ctx: typer.Context, connection_id: str, chat_id: str) -> None:
+    def _run() -> None:
+        call_single(
+            ctx,
+            approve_inbound_grant.sync_detailed,
+            connection_id=connection_id,
+            body=InboundGrantAction(chat_id=chat_id),
+        )
+
+    run_or_die(_run)
+
+
+@app.command("revoke")
+@covers("revoke_inbound_grant")
+def revoke(ctx: typer.Context, connection_id: str, chat_id: str) -> None:
+    def _run() -> None:
+        call_single(
+            ctx,
+            revoke_inbound_grant.sync_detailed,
+            connection_id=connection_id,
+            body=InboundGrantAction(chat_id=chat_id),
+        )
+
+    run_or_die(_run)
+
+
+@app.command("list-pending")
+@covers("list_pending_inbound_grants")
+def list_pending(ctx: typer.Context, connection_id: str) -> None:
+    def _run() -> None:
+        state = get_state(ctx)
+        with state.sdk_client() as client:
+            page = unwrap(
+                list_pending_inbound_grants.sync_detailed(
+                    client=client, connection_id=connection_id
+                )
+            )
+        render_list(
+            state.output_format,
+            page.to_dict(),
+            columns=("chat_id", "created_at", "updated_at"),
+        )
 
     run_or_die(_run)
 

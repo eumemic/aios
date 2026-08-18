@@ -13,6 +13,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import asyncpg
 from pydantic import TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
 
 from aios.actors import actor_from_row
 from aios.crypto.vault import EncryptedBlob
@@ -22,6 +23,7 @@ from aios.db.queries import (
 from aios.errors import (
     ConflictError,
     NotFoundError,
+    ValidationError,
 )
 from aios.ids import (
     BINDING,
@@ -299,9 +301,27 @@ _CONNECTION_UPDATE_CTE_TAIL = """
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
     raw_policy = row["inbound_policy"]
-    inbound_policy = (
-        _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
-    )
+    try:
+        inbound_policy = (
+            _INBOUND_POLICY_ADAPTER.validate_python(raw_policy) if raw_policy is not None else None
+        )
+    except PydanticValidationError as exc:
+        # A stored policy that no longer parses (hand-edited jsonb, a
+        # rolled-back deploy that wrote a ``kind`` this build doesn't know)
+        # must FAIL CLOSED — and it does, because this raises before any
+        # admission decision, so nothing is delivered.
+        #
+        # But it has to fail closed as a **422**, not a 500. A raw pydantic
+        # ``ValidationError`` escapes as an unhandled exception → 500, and the
+        # connector runner treats 5xx as a routine *per-message* drop: every
+        # inbound on that connection would be silently discarded one at a
+        # time, indistinguishable from a transient API blip, forever. 422
+        # (aios ``ValidationError``) is the terminal "operator must fix the
+        # config" signal the rest of the inbound drop-reason surface uses.
+        raise ValidationError(
+            f"connection {row['id']} has a malformed inbound_policy",
+            detail={"id": row["id"], "reason": "malformed_inbound_policy"},
+        ) from exc
     return Connection(
         id=row["id"],
         connector=row["connector"],
@@ -415,6 +435,37 @@ async def get_connection(
 ) -> Connection:
     row = await conn.fetchrow(
         f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} WHERE c.id = $1 AND c.account_id = $2",
+        connection_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"connection {connection_id} not found",
+            detail={"id": connection_id},
+        )
+    return _row_to_connection(row)
+
+
+async def get_active_connection(
+    conn: asyncpg.Connection[Any], connection_id: str, *, account_id: str
+) -> Connection:
+    """:func:`get_connection` restricted to LIVE rows — archived is a 404.
+
+    ``get_connection`` deliberately returns archived rows: listing, the
+    archive call itself, and audit views all need them. That makes it the
+    wrong validator for a connection-scoped *operator read*, because an
+    archived connection passes it and the scoped query behind it then
+    filters the archived row out — so "this connection is gone" and "this
+    connection has nothing" become the same answer.
+
+    The property this restores is **distinguishability**: every input that
+    cannot be served — missing id, another tenant's id, archived id —
+    raises :class:`NotFoundError`, and an empty list means only "live
+    connection, nothing to show".
+    """
+    row = await conn.fetchrow(
+        f"SELECT {_CONNECTION_COLUMNS} FROM {_CONNECTION_FROM} "
+        "WHERE c.id = $1 AND c.account_id = $2 AND c.archived_at IS NULL",
         connection_id,
         account_id,
     )
@@ -837,6 +888,13 @@ async def reparent_connection(
                  WHERE connection_id = $1
                    AND EXISTS (SELECT 1 FROM updated)
                 RETURNING connection_id
+            ),
+            g_updated AS (
+                UPDATE inbound_grants
+                   SET account_id = $2
+                 WHERE connection_id = $1
+                   AND EXISTS (SELECT 1 FROM updated)
+                RETURNING id
             ),
             r_updated AS (
                 UPDATE routing_rules

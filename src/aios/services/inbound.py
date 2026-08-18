@@ -24,7 +24,14 @@ from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
 from aios.models.connections import inbound_orig_channel
-from aios.models.inbound_policy import AllowAll, AllowList, AllowSenders, DenyAll, InboundPolicy
+from aios.models.inbound_policy import (
+    AllowAll,
+    AllowList,
+    AllowSenders,
+    DenyAll,
+    InboundPolicy,
+    RequireApproval,
+)
 from aios.models.sessions import MAX_USER_MESSAGE_CHARS
 from aios.services.attachment_staging import (
     AttachmentStagingError,
@@ -73,6 +80,7 @@ class InboundDrop(StrEnum):
     DETACHED = "detached"
     ARCHIVED_TEMPLATE = "archived_template"
     DENIED_BY_POLICY = "denied_by_policy"
+    PENDING_APPROVAL = "pending_approval"
     RATE_LIMITED = "rate_limited"
     ATTACHMENT_STAGING_FAILED = "attachment_staging_failed"
     SESSION_MISSING = "session_missing"
@@ -98,6 +106,8 @@ def _admits(policy: InboundPolicy, chat_id: str, sender_id: str | None) -> bool:
             return chat_id in set(policy.chat_ids)
         case AllowSenders():
             return sender_id in set(policy.sender_ids)
+        case RequireApproval():
+            return chat_id in set(policy.approved)
         case DenyAll():
             return False
 
@@ -153,7 +163,42 @@ async def handle_inbound(
     # stranger drops one envelope rather than crash-restarting the connector
     # (which 403/5xx would trigger via ``_is_fatal_inbound_status``).
     policy = connection.inbound_policy_effective
-    if not _admits(policy, chat_id, sender.get("id")):
+    admitted = _admits(policy, chat_id, sender.get("id"))
+
+    # ``RequireApproval`` is an AUTHORITY control, so the operator-writable
+    # ``policy.approved`` list is NOT sufficient evidence of approval (#1503:
+    # an approval must be server-stamped and audited). The audited
+    # ``inbound_grants`` row is the fact; the list is a mirror of it. Admission
+    # requires BOTH — the intersection is strictly more restrictive than either
+    # alone and closes the two holes in opposite directions:
+    #
+    # * list-without-grant (a hand-rolled ``PUT .../inbound-policy``, or a
+    #   dangling entry whose grant was revoked / reaped) → NOT admitted, so the
+    #   operator policy endpoint — the door that actually matters here — cannot
+    #   mint an admission with no approval provenance;
+    # * grant-without-list (an operator revoking by Replacing with the smaller
+    #   list, per the documented §9 revocation shape) → NOT admitted, so that
+    #   documented revocation path keeps working.
+    #
+    # ``approve_inbound_grant`` / ``revoke_inbound_grant`` write the ledger row
+    # and the mirror list in a single statement, so the normal path never
+    # observes a split. A torn write fails CLOSED (denied), never open.
+    if isinstance(policy, RequireApproval):
+        async with pool.acquire() as conn:
+            admitted = admitted and await queries.has_active_inbound_grant(
+                conn, account_id=account_id, connection_id=connection_id, chat_id=chat_id
+            )
+        if not admitted:
+            # Register the audited pending row so an operator can approve this
+            # chat, and report PENDING_APPROVAL rather than a flat denial: the
+            # router maps it to a 422 whose ``drop_reason`` lets a caller tell
+            # "held for approval" apart from "denied" AND from a delivery.
+            async with pool.acquire() as conn:
+                await queries.upsert_pending_inbound_grant(
+                    conn, account_id=account_id, connection_id=connection_id, chat_id=chat_id
+                )
+            return InboundResult(None, None, InboundDrop.PENDING_APPROVAL, False)
+    elif not admitted:
         return InboundResult(None, None, InboundDrop.DENIED_BY_POLICY, False)
 
     # Per-counterparty inbound rate/cost budget (#1504). Admission decides

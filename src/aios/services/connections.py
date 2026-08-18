@@ -31,6 +31,7 @@ from aios.models.connections import (
     RecentChat,
 )
 from aios.models.connectors import ConnectorCapabilities
+from aios.models.inbound_grants import InboundGrant
 from aios.models.inbound_policy import InboundPolicy
 from aios.services.sessions import _evict_sandbox_for_resource_change
 
@@ -116,6 +117,46 @@ async def set_inbound_policy(
     async with pool.acquire() as conn:
         return await queries.set_connection_inbound_policy(
             conn, connection_id, policy=policy, account_id=account_id
+        )
+
+
+async def list_pending_inbound_grants(
+    pool: asyncpg.Pool[Any], connection_id: str, *, account_id: str
+) -> list[InboundGrant]:
+    async with pool.acquire() as conn:
+        # Keep this connection-scoped list symmetric with list_bound_chats:
+        # an absent, archived, or foreign connection is a 404, not an
+        # indistinguishable empty list.
+        #
+        # This MUST be ``get_active_connection``, not ``get_connection``:
+        # ``get_connection`` filters on ``c.id``/``c.account_id`` only and
+        # deliberately returns archived rows, while the grant query below
+        # joins ``connections ... AND c.archived_at IS NULL``. Validating
+        # with the archived-permissive lookup therefore lets an archived
+        # connection pass and then yields ``[]`` from the query — exactly
+        # the "gone" / "nothing pending" ambiguity this validation exists
+        # to remove. The invariant is that EVERY input the query cannot
+        # serve (missing, foreign tenant, archived) raises 404, so an empty
+        # list has one meaning only.
+        await queries.get_active_connection(conn, connection_id, account_id=account_id)
+        return await queries.list_pending_inbound_grants(conn, connection_id, account_id=account_id)
+
+
+async def approve_inbound_grant(
+    pool: asyncpg.Pool[Any], connection_id: str, chat_id: str, *, account_id: str
+) -> InboundGrant:
+    async with pool.acquire() as conn, conn.transaction():
+        return await queries.approve_inbound_grant(
+            conn, connection_id, chat_id, account_id=account_id
+        )
+
+
+async def revoke_inbound_grant(
+    pool: asyncpg.Pool[Any], connection_id: str, chat_id: str, *, account_id: str
+) -> InboundGrant:
+    async with pool.acquire() as conn, conn.transaction():
+        return await queries.revoke_inbound_grant(
+            conn, connection_id, chat_id, account_id=account_id
         )
 
 

@@ -432,6 +432,7 @@ from .connections import (  # noqa: E402
     default_inbound_policy_if_unset,
     delete_chat_session,
     get_active_binding,
+    get_active_connection,
     get_chat_session_row,
     get_connection,
     get_connection_change_high_water,
@@ -519,6 +520,14 @@ from .events import (  # noqa: E402
 from .files import (  # noqa: E402
     insert_file,
     list_upload_paths_for_sessions,
+)
+from .inbound_grants import (  # noqa: E402
+    approve_inbound_grant,
+    has_active_inbound_grant,
+    list_pending_inbound_grants,
+    reap_pending_inbound_grants,
+    revoke_inbound_grant,
+    upsert_pending_inbound_grant,
 )
 from .management_calls import (  # noqa: E402
     get_management_call,
@@ -790,6 +799,7 @@ __all__ = [
     "advance_open_request_scan_floor",
     "append_event",
     "append_request_opened",
+    "approve_inbound_grant",
     "archive_account",
     "archive_active_binding",
     "archive_agent",
@@ -859,6 +869,7 @@ __all__ = [
     "get_account_spent_microusd",
     "get_account_subtree_spent_microusd",
     "get_active_binding",
+    "get_active_connection",
     "get_active_credential_by_target_url",
     "get_agent",
     "get_agent_version",
@@ -912,6 +923,7 @@ __all__ = [
     "get_vault_credential_with_blob",
     "get_wake_priority_context",
     "hard_delete_account",
+    "has_active_inbound_grant",
     "has_active_root_account",
     "increment_session_usage",
     "insert_account_key",
@@ -965,6 +977,7 @@ __all__ = [
     "list_model_providers",
     "list_pending_calls_for_connector",
     "list_pending_calls_for_session_and_connection",
+    "list_pending_inbound_grants",
     "list_pending_management_calls_for_connector",
     "list_pending_trigger_run_refs",
     "list_recent_chat_ids",
@@ -1025,6 +1038,7 @@ __all__ = [
     "read_session_watermarks",
     "read_windowed_context_events",
     "read_windowed_events",
+    "reap_pending_inbound_grants",
     "reclaim_session_if_idle",
     "recompute_session_channels",
     "reconcile_terminal_archival_batch",
@@ -1047,6 +1061,7 @@ __all__ = [
     "resolve_skill_refs",
     "resolve_vault_credential",
     "revoke_account_key",
+    "revoke_inbound_grant",
     "revoke_runtime_token",
     "session_active_predicate",
     "session_errored_predicate",
@@ -1089,6 +1104,7 @@ __all__ = [
     "update_trigger",
     "update_vault",
     "update_vault_credential",
+    "upsert_pending_inbound_grant",
     "workspace_advisory_lock_key",
     "write_response_if_absent",
 ]
