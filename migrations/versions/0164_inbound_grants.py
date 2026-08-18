@@ -1,13 +1,22 @@
 """Runtime inbound approval grants ledger.
 
 Revision ID: 0164
-Revises: 0159
+Revises: 0165
 """
 
 from alembic import op
 
 revision = "0164"
-down_revision = "0159"
+# Re-parented 0159 -> 0165 (fix round, 2026-08-17). This branch was authored when
+# 0159 was master's head; master has since advanced 0159 -> 0161 -> 0162 -> 0163 ->
+# 0165. A git rebase moves the FILE but does NOT re-parent a migration: after the
+# rebase both 0164 (parent 0159) and 0165 (parent 0163) claimed to be heads, so the
+# ladder forked and `alembic upgrade head` fails with "Multiple head revisions are
+# present". Same trap as 0161's re-parent note below-history, and aios#2172/#2126.
+# The revision NUMBER stays 0164 (it is already stamped in the PR's own history and
+# ids are opaque to alembic); only the parent pointer moves so the chain stays linear.
+# Verified before editing: master has exactly ONE head, 0165.
+down_revision = "0165"
 branch_labels = None
 depends_on = None
 
