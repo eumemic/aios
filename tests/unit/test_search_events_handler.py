@@ -402,6 +402,26 @@ class TestSearchEventsHandler:
             await search_events_handler("sess_01TEST", {"query": "SELECT * FROM events_search"})
         assert "failed" in excinfo.value.message.lower()
 
+    async def test_unknown_column_points_to_help_view(self) -> None:
+        import asyncpg.exceptions
+
+        with (
+            _mock_execute(
+                side_effect=asyncpg.exceptions.UndefinedColumnError(
+                    'column "relation" does not exist'
+                )
+            ),
+            _mock_pool(),
+            pytest.raises(ToolBail) as excinfo,
+        ):
+            await search_events_handler(
+                "sess_01TEST", {"query": "SELECT relation FROM search_views_help"}
+            )
+        assert excinfo.value.message == (
+            'Unknown column: column "relation" does not exist; '
+            "query search_views_help for the available columns"
+        )
+
     async def test_timeout_returns_error(self) -> None:
         import asyncpg.exceptions
 

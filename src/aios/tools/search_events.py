@@ -383,6 +383,10 @@ async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> d
         # Expected refusals (#1680): raise ToolBail so the single writer stamps
         # ``is_error`` — never let the raw asyncpg error escape and evict the sandbox.
         raise ToolBail(f"Query timed out after {QUERY_TIMEOUT_MS}ms") from exc
+    except asyncpg.exceptions.UndefinedColumnError as exc:
+        raise ToolBail(
+            f"Unknown column: {exc}; query search_views_help for the available columns"
+        ) from exc
     except Exception as exc:
         log.warning("search_events.query_failed", error=str(exc))
         raise ToolBail(f"Query failed: {exc}") from exc
