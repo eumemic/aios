@@ -149,7 +149,7 @@ class TestProviderAuthConflict:
             is True
         )
 
-    def test_truthy_inline_key_does_not_exempt_redirect_guard(self) -> None:
+    def test_truthy_inline_key_forms_independent_credential_source(self) -> None:
         resolved = ProviderAuth(api_key="k", api_base=None, owner_account_id="acc_parent")
         assert (
             provider_auth_conflict(
@@ -158,7 +158,7 @@ class TestProviderAuthConflict:
                 account_id="acc_child",
                 account_is_root=False,
             )
-            is True
+            is False
         )
 
     @pytest.mark.parametrize("falsy_key", [None, ""])
@@ -283,7 +283,7 @@ async def test_create_encrypts_under_caller_subkey(crypto_box: CryptoBox) -> Non
 
     blob = captured["blob"]
     # Round-trips under the CALLER's own subkey.
-    assert crypto_box.derive_account_subkey("acc_x").decrypt(blob) == "sk-real"
+    assert crypto_box.derive_account_subkey("acc_x").decrypt(blob) == '{"api_key":"sk-real"}'
     # A different account's subkey (or the raw master key) cannot decrypt it.
     with pytest.raises(CryptoDecryptError):
         crypto_box.derive_account_subkey("acc_y").decrypt(blob)

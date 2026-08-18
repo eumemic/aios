@@ -24,9 +24,44 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from aios.models.attenuation import api_base_of
+
+CREDENTIAL_KWARGS = frozenset(
+    {
+        "api_key",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "aws_region_name",
+        "vertex_credentials",
+        "vertex_project",
+        "vertex_location",
+        "azure_ad_token",
+        "client_id",
+        "client_secret",
+        "tenant_id",
+        "extra_headers",
+    }
+)
+ENDPOINT_KWARGS = frozenset({"api_base", "base_url", "aws_bedrock_runtime_endpoint"})
+REASONING_KWARGS = frozenset({"reasoning_effort", "thinking", "output_config"})
+
+
+def _validate_row_content(
+    credentials: dict[str, Any] | None, litellm_defaults: dict[str, Any]
+) -> None:
+    forbidden = (CREDENTIAL_KWARGS | ENDPOINT_KWARGS) & litellm_defaults.keys()
+    if forbidden:
+        raise ValueError(
+            f"litellm_defaults contains credential or endpoint keys: {sorted(forbidden)}"
+        )
+    if credentials is not None:
+        unknown = credentials.keys() - (CREDENTIAL_KWARGS | ENDPOINT_KWARGS)
+        if unknown:
+            raise ValueError(f"credentials contains unsupported keys: {sorted(unknown)}")
+        if api_base_of(credentials) is not None and not credentials.get("api_key"):
+            raise ValueError("credentials endpoint requires api_key")
 
 
 class ModelProviderCreate(BaseModel):
@@ -43,8 +78,20 @@ class ModelProviderCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(min_length=1, max_length=64)
-    api_key: SecretStr = Field(min_length=1)
+    api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
+    credentials: dict[str, Any] | None = None
+    litellm_defaults: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> ModelProviderCreate:
+        credentials = dict(self.credentials or {})
+        if self.api_key is not None:
+            credentials["api_key"] = self.api_key.get_secret_value()
+        if self.api_base is not None:
+            credentials["api_base"] = self.api_base
+        _validate_row_content(credentials or None, self.litellm_defaults)
+        return self
 
     @field_validator("provider")
     @classmethod
@@ -66,6 +113,18 @@ class ModelProviderUpdate(BaseModel):
 
     api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
+    credentials: dict[str, Any] | None = None
+    litellm_defaults: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> ModelProviderUpdate:
+        credentials = dict(self.credentials or {})
+        if self.api_key is not None:
+            credentials["api_key"] = self.api_key.get_secret_value()
+        if "api_base" in self.model_fields_set and self.api_base is not None:
+            credentials["api_base"] = self.api_base
+        _validate_row_content(credentials or None, self.litellm_defaults or {})
+        return self
 
 
 class ModelProvider(BaseModel):
@@ -75,6 +134,9 @@ class ModelProvider(BaseModel):
     provider: str
     api_base: str | None = None
     api_key_set: bool
+    credentials_set: bool = False
+    litellm_defaults: dict[str, Any] = Field(default_factory=dict)
+    version: int = 1
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
@@ -95,6 +157,8 @@ class ProviderAuth:
     api_key: str = field(repr=False)
     api_base: str | None
     owner_account_id: str
+    credentials: dict[str, Any] = field(default_factory=dict, repr=False)
+    litellm_defaults: dict[str, Any] = field(default_factory=dict)
 
 
 def provider_auth_conflict(
@@ -140,6 +204,15 @@ def provider_auth_conflict(
     redirect = api_base_of(litellm_extra)
     if redirect is None:
         return False
+    if litellm_extra is not None and CREDENTIAL_KWARGS & litellm_extra.keys():
+        # Agent endpoint + credential is an independent source; the resolved row
+        # is suppressed wholesale by merge_provider_config. Reject degenerate
+        # api_key values that LiteLLM would treat as environment fallback.
+        inline_key = litellm_extra.get("api_key")
+        if "api_key" not in litellm_extra or (
+            isinstance(inline_key, str) and bool(inline_key.strip())
+        ):
+            return False
     if resolved is not None:
         return resolved.owner_account_id != account_id
     return not account_is_root

@@ -37,6 +37,9 @@ def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
         provider=row["provider"],
         api_base=row["api_base"],
         api_key_set=len(row["ciphertext"]) > 0,
+        credentials_set=len(row["ciphertext"]) > 0,
+        litellm_defaults=dict(row.get("litellm_defaults", {})),
+        version=row.get("version", 1),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -81,14 +84,16 @@ async def insert_model_provider(
     provider: str,
     api_base: str | None,
     blob: EncryptedBlob,
+    litellm_defaults: dict[str, Any] | None = None,
 ) -> ModelProvider:
     await assert_account_accepts_model_provider(conn, account_id=account_id)
     new_id = make_id(MODEL_PROVIDER)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO model_providers (id, account_id, provider, api_base, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO model_providers
+                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             """,
             new_id,
@@ -97,6 +102,7 @@ async def insert_model_provider(
             api_base,
             blob.ciphertext,
             blob.nonce,
+            litellm_defaults or {},
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -146,6 +152,7 @@ async def update_model_provider(
     account_id: str,
     blob: EncryptedBlob | None = None,
     api_base: str | EllipsisType | None = ...,
+    litellm_defaults: dict[str, Any] | EllipsisType | None = ...,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
 
@@ -176,9 +183,12 @@ async def update_model_provider(
     if api_base is not ...:
         args.append(api_base)
         sets.append(f"api_base = ${len(args)}")
+    if litellm_defaults is not ...:
+        args.append(litellm_defaults)
+        sets.append(f"litellm_defaults = ${len(args)}")
     if not sets:
         return current
-    sets.append("updated_at = now()")
+    sets.extend(("version = version + 1", "updated_at = now()"))
     args.append(account_id)
     sql = (
         f"UPDATE model_providers SET {', '.join(sets)} "
@@ -235,6 +245,7 @@ class ResolvedModelProvider(NamedTuple):
     owner_account_id: str
     api_base: str | None
     blob: EncryptedBlob
+    litellm_defaults: dict[str, Any] | None = None
 
 
 async def resolve_model_provider(
@@ -269,7 +280,7 @@ async def resolve_model_provider(
         "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
         "    WHERE a.archived_at IS NULL"
         ") "
-        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce "
+        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce, mp.litellm_defaults "
         "FROM chain c "
         "JOIN model_providers mp ON mp.account_id = c.id "
         "WHERE mp.provider = $2 AND mp.archived_at IS NULL "
@@ -283,4 +294,5 @@ async def resolve_model_provider(
         owner_account_id=row["account_id"],
         api_base=row["api_base"],
         blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+        litellm_defaults=dict(row["litellm_defaults"]),
     )
