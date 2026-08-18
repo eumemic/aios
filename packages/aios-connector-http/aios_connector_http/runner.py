@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import os
@@ -998,7 +999,21 @@ class HttpConnector:
         """Derive a ToolSpec from each ``@tool`` method and PUT the catalog.
 
         Replaces ``connectors.tools_schema`` for this type wholesale on
-        every startup — the runtime container is the source of truth.
+        every startup when the runtime token is root-scoped.
+
+        Schema publication is a root-plane write (``PUT
+        /v1/connectors/{connector}/tools_schema`` is reserved for the
+        root account): a tenant-authed runtime container is *expected*
+        to be refused, tolerates the 403, and serves under the stored
+        catalog — IaC owns schema updates.  Raising here instead would
+        couple container boot to a root-only write and brick every
+        connector on a non-root account (the 2026-08-17/18 fleet-wide
+        connector outage: migration 0154 re-homed the fleet off root and
+        every subsequent connector start died at this call).
+
+        Any other ≥400 still raises: 401 means runtime auth is broken
+        and serving would be futile; 5xx crashloops until the api is
+        healthy, which is the desired dependency-wait behavior.
         """
         client = self._require_client()
         specs = [derive_tool_spec(name, meta.fn) for name, meta in self._tools.items()]
@@ -1006,6 +1021,23 @@ class HttpConnector:
             tools=[ToolsSchemaUpdateToolsItem.from_dict(spec) for spec in specs]
         )
         response = await _put_tools_schema(client=client, connector=self.connector, body=body)
+        if response.status_code == 403:
+            # Log the derived catalog's identity (hash + names, never the
+            # full spec bodies) so an operator can diff it against the
+            # stored ``connectors.tools_schema`` when reconciling drift.
+            derived_sha256 = hashlib.sha256(
+                json.dumps(specs, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            log.warning(
+                "connector.tools.publish_forbidden",
+                connector=self.connector,
+                status_code=response.status_code,
+                tool_count=len(specs),
+                tool_names=sorted(self._tools.keys()),
+                derived_sha256=derived_sha256,
+                body=response.content.decode(errors="replace")[:2000],
+            )
+            return
         if response.status_code >= 400:
             raise RuntimeError(
                 f"failed to publish tools schema: {response.status_code} {response.content!r}"
