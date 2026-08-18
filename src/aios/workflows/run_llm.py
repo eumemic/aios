@@ -238,7 +238,7 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         }, 0
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
-    if auth is None and (
+    if (auth is None or auth.api_key is None) and (
         get_settings().inference_credential_policy == "account_only"
         or get_settings().tenancy_posture == "external_byok"
     ):

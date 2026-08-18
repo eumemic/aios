@@ -61,8 +61,9 @@ async def create_model_provider(
     *,
     account_id: str,
     provider: str,
-    api_key: str,
+    api_key: str | None,
     api_base: str | None,
+    litellm_defaults: dict[str, Any] | None = None,
 ) -> ModelProvider:
     async with pool.acquire() as conn:
         return await queries.insert_model_provider(
@@ -70,7 +71,12 @@ async def create_model_provider(
             account_id=account_id,
             provider=provider,
             api_base=api_base,
-            blob=_encrypt_api_key(api_key, crypto_box, account_id=account_id),
+            blob=(
+                _encrypt_api_key(api_key, crypto_box, account_id=account_id)
+                if api_key is not None
+                else None
+            ),
+            litellm_defaults=litellm_defaults or {},
         )
 
 
@@ -103,6 +109,7 @@ async def update_model_provider(
     account_id: str,
     api_key: str | None,
     api_base: str | EllipsisType | None = ...,
+    litellm_defaults: dict[str, Any] | EllipsisType = ...,
 ) -> ModelProvider:
     """Rotate the key and/or edit ``api_base``.
 
@@ -118,7 +125,12 @@ async def update_model_provider(
     )
     async with pool.acquire() as conn:
         return await queries.update_model_provider(
-            conn, model_provider_id, account_id=account_id, blob=blob, api_base=api_base
+            conn,
+            model_provider_id,
+            account_id=account_id,
+            blob=blob,
+            api_base=api_base,
+            litellm_defaults=litellm_defaults,
         )
 
 
@@ -219,9 +231,10 @@ async def _resolve_provider_auth(
             return None
     subkey = crypto_box.derive_account_subkey(resolved.owner_account_id)
     return ProviderAuth(
-        api_key=subkey.decrypt(resolved.blob),
+        api_key=subkey.decrypt(resolved.blob) if resolved.blob.ciphertext else None,
         api_base=resolved.api_base,
         owner_account_id=resolved.owner_account_id,
+        litellm_defaults=resolved.litellm_defaults,
     )
 
 

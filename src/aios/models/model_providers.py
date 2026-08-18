@@ -24,9 +24,38 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from aios.models.attenuation import api_base_of
+
+REASONING_KWARGS = frozenset({"reasoning_effort", "thinking", "output_config"})
+_FORBIDDEN_DEFAULT_KWARGS = frozenset({"api_key", "api_base", "base_url", "model"})
+
+
+def _validate_litellm_defaults(value: dict[str, Any]) -> dict[str, Any]:
+    forbidden = sorted(value.keys() & _FORBIDDEN_DEFAULT_KWARGS)
+    if forbidden:
+        raise ValueError(
+            f"litellm_defaults contains forbidden binding keys: {', '.join(forbidden)}"
+        )
+    return value
+
+
+def merge_litellm_defaults(
+    defaults: dict[str, Any] | None, explicit: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge account defaults beneath explicit call params without fabricating native blobs."""
+    account = dict(defaults or {})
+    caller = dict(explicit or {})
+    if caller.keys() & REASONING_KWARGS:
+        for key in REASONING_KWARGS:
+            account.pop(key, None)
+    account_body = account.pop("extra_body", None)
+    caller_body = caller.pop("extra_body", None)
+    merged = {**account, **caller}
+    if account_body is not None or caller_body is not None:
+        merged["extra_body"] = {**dict(account_body or {}), **dict(caller_body or {})}
+    return merged
 
 
 class ModelProviderCreate(BaseModel):
@@ -43,8 +72,22 @@ class ModelProviderCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(min_length=1, max_length=64)
-    api_key: SecretStr = Field(min_length=1)
+    api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
+    litellm_defaults: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("litellm_defaults")
+    @classmethod
+    def _defaults_are_non_secret(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_litellm_defaults(value)
+
+    @model_validator(mode="after")
+    def _has_content(self) -> ModelProviderCreate:
+        if self.api_key is None and not self.litellm_defaults:
+            raise ValueError("api_key or litellm_defaults is required")
+        if self.api_base is not None and self.api_key is None:
+            raise ValueError("api_base requires api_key")
+        return self
 
     @field_validator("provider")
     @classmethod
@@ -66,6 +109,12 @@ class ModelProviderUpdate(BaseModel):
 
     api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
+    litellm_defaults: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("litellm_defaults")
+    @classmethod
+    def _defaults_are_non_secret(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_litellm_defaults(value)
 
 
 class ModelProvider(BaseModel):
@@ -75,6 +124,7 @@ class ModelProvider(BaseModel):
     provider: str
     api_base: str | None = None
     api_key_set: bool
+    litellm_defaults: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
@@ -92,9 +142,10 @@ class ProviderAuth:
     redundant boolean-in-disguise (self vs. not-self) smuggled in as an int.
     """
 
-    api_key: str = field(repr=False)
+    api_key: str | None = field(repr=False)
     api_base: str | None
     owner_account_id: str
+    litellm_defaults: dict[str, Any] = field(default_factory=dict)
 
 
 def provider_auth_conflict(
