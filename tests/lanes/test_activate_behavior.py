@@ -200,15 +200,15 @@ class FakeWorld:
             if method == "PUT" and "/triggers/" in path:
                 self.trigger_updates.append(payload)
                 name = path.rsplit("/", 1)[1]
-                live = self.triggers.get(name)
-                if live is None:
+                if name not in self.triggers:
                     return {"status": 404, "body": json.dumps({"detail": "no trigger"})}
-                live.update(
+                live_trig = self.triggers[name]
+                live_trig.update(
                     source=payload["source"],
                     action=payload["action"],
                     enabled=payload.get("enabled", True),
                 )
-                return _ok(live)
+                return _ok(live_trig)
             if method == "POST" and path.endswith("/triggers"):
                 if self.trigger_create_fails:
                     return {"status": 500, "body": json.dumps({"detail": "down"})}
