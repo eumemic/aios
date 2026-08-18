@@ -6,6 +6,7 @@ import hashlib
 import os
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest import mock
 
 import asyncpg
 import pytest
@@ -172,6 +173,83 @@ async def _make_env_cred(
         ),
     )
     return cred.id
+
+
+async def _make_http_cred(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    vault_id: str,
+    target_url: str,
+) -> str:
+    credential = await vaults_service.create_vault_credential(
+        pool,
+        crypto_box,
+        account_id=ACC,
+        vault_id=vault_id,
+        body=VaultCredentialCreate(
+            target_url=target_url,
+            auth_type="bearer_header",
+            token=SecretStr(f"token-{vault_id}"),
+        ),
+    )
+    return credential.id
+
+
+@pytest.mark.parametrize("owner_kind", ["session", "run"])
+async def test_http_credential_collision_uses_active_ranked_database_matches(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox, owner_kind: str
+) -> None:
+    """Exercise the resolver SQL using public writers, not fabricated query rows."""
+    target_url = f"https://collision-{owner_kind}.example.com/mcp"
+    winner_vault = await _make_vault(vault_pool, f"{owner_kind}-winner")
+    archived_vault = await _make_vault(vault_pool, f"{owner_kind}-archived")
+    shadow_one_vault = await _make_vault(vault_pool, f"{owner_kind}-shadow-one")
+    shadow_two_vault = await _make_vault(vault_pool, f"{owner_kind}-shadow-two")
+
+    winner_id = await _make_http_cred(vault_pool, crypto_box, winner_vault, target_url)
+    archived_id = await _make_http_cred(vault_pool, crypto_box, archived_vault, target_url)
+    shadow_one_id = await _make_http_cred(vault_pool, crypto_box, shadow_one_vault, target_url)
+    shadow_two_id = await _make_http_cred(vault_pool, crypto_box, shadow_two_vault, target_url)
+    await vaults_service.archive_vault_credential(
+        vault_pool,
+        vault_id=archived_vault,
+        credential_id=archived_id,
+        account_id=ACC,
+    )
+
+    # The archived match deliberately has rank 0. The first active match at rank 1
+    # must win, and all (only) later active matches must be reported.
+    vault_ids = [archived_vault, winner_vault, shadow_one_vault, shadow_two_vault]
+    owner_id = (
+        await _make_session(vault_pool, vault_ids=vault_ids)
+        if owner_kind == "session"
+        else await _make_run(vault_pool, vault_ids=vault_ids)
+    )
+    resolver = (
+        db_queries.resolve_session_credential
+        if owner_kind == "session"
+        else db_queries.resolve_run_credential
+    )
+
+    async with vault_pool.acquire() as conn:
+        with mock.patch("aios.db.queries.vaults.log") as log:
+            result = await resolver(conn, owner_id, target_url, account_id=ACC)
+        # A mismatched account must not traverse either the binding or credential join.
+        assert await resolver(conn, owner_id, target_url, account_id=ACC_OTHER) is None
+
+    assert result is not None
+    assert result[2] == winner_vault
+    log.warning.assert_called_once_with(
+        "vault.credential_collision",
+        **{f"{owner_kind}_id": owner_id},
+        target_url=target_url,
+        winning_credential_id=winner_id,
+        winning_rank=1,
+        shadowed_credentials=[
+            {"credential_id": shadow_one_id, "rank": 2},
+            {"credential_id": shadow_two_id, "rank": 3},
+        ],
+    )
 
 
 async def _resolve(

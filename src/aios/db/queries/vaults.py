@@ -31,7 +31,10 @@ from aios.ids import (
     VAULT_CREDENTIAL,
     make_id,
 )
+from aios.logging import get_logger
 from aios.models.vaults import AuthType, Vault, VaultCredential
+
+log = get_logger(__name__)
 
 # ─── vaults ─────────────────────────────────────────────────────────────────
 
@@ -782,9 +785,10 @@ async def resolve_session_credential(
     writer (single-sourced from the Literal, #1081), so the cast on the way
     out is exhaustively safe.
     """
-    row = await conn.fetchrow(
+    rows = await conn.fetch(
         """
-        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
+        SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.auth_type,
+               vc.vault_id, sv.rank
           FROM session_vaults sv
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
@@ -793,14 +797,26 @@ async def resolve_session_credential(
            AND sv.account_id = $3
            AND vc.account_id = $3
          ORDER BY sv.rank
-         LIMIT 1
         """,
         session_id,
         target_url,
         account_id,
     )
-    if row is None:
+    if not rows:
         return None
+    row = rows[0]
+    if len(rows) > 1:
+        log.warning(
+            "vault.credential_collision",
+            session_id=session_id,
+            target_url=target_url,
+            winning_credential_id=str(row["credential_id"]),
+            winning_rank=int(row["rank"]),
+            shadowed_credentials=[
+                {"credential_id": str(match["credential_id"]), "rank": int(match["rank"])}
+                for match in rows[1:]
+            ],
+        )
     return (
         EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
         cast(AuthType, str(row["auth_type"])),
@@ -822,9 +838,10 @@ async def resolve_run_credential(
     decrypt + OAuth-refresh + header-render tail downstream is owner-agnostic (it
     keys off ``account_id`` + ``vault_id``), so only this lookup differs by owner.
     """
-    row = await conn.fetchrow(
+    rows = await conn.fetch(
         """
-        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
+        SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.auth_type,
+               vc.vault_id, rv.rank
           FROM wf_run_vaults rv
           JOIN vault_credentials vc ON vc.vault_id = rv.vault_id
          WHERE rv.run_id = $1
@@ -833,14 +850,26 @@ async def resolve_run_credential(
            AND rv.account_id = $3
            AND vc.account_id = $3
          ORDER BY rv.rank
-         LIMIT 1
         """,
         run_id,
         target_url,
         account_id,
     )
-    if row is None:
+    if not rows:
         return None
+    row = rows[0]
+    if len(rows) > 1:
+        log.warning(
+            "vault.credential_collision",
+            run_id=run_id,
+            target_url=target_url,
+            winning_credential_id=str(row["credential_id"]),
+            winning_rank=int(row["rank"]),
+            shadowed_credentials=[
+                {"credential_id": str(match["credential_id"]), "rank": int(match["rank"])}
+                for match in rows[1:]
+            ],
+        )
     return (
         EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
         cast(AuthType, str(row["auth_type"])),
