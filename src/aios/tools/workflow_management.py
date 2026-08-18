@@ -386,6 +386,7 @@ def _register() -> None:
         description=CREATE_WORKFLOW_DESCRIPTION,
         parameters_schema=WorkflowCreate.model_json_schema(),
         handler=create_workflow_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
     registry.register(
@@ -393,6 +394,7 @@ def _register() -> None:
         description=UPDATE_WORKFLOW_DESCRIPTION,
         parameters_schema=_UpdateWorkflowArgs.model_json_schema(),
         handler=update_workflow_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
     registry.register(
@@ -400,6 +402,7 @@ def _register() -> None:
         description=ARCHIVE_WORKFLOW_DESCRIPTION,
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=archive_workflow_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
     registry.register(
@@ -407,6 +410,7 @@ def _register() -> None:
         description=UNARCHIVE_WORKFLOW_DESCRIPTION,
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=unarchive_workflow_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
     registry.register(
@@ -442,6 +446,7 @@ def _register() -> None:
         description=ARCHIVE_RUN_DESCRIPTION,
         parameters_schema=_ArchiveRunArgs.model_json_schema(),
         handler=archive_run_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
     registry.register(
@@ -456,6 +461,7 @@ def _register() -> None:
         description=RESUME_GATE_DESCRIPTION,
         parameters_schema=_ResumeGateArgs.model_json_schema(),
         handler=resume_gate_handler,
+        parallel_safe=False,
         transport="agent_tool",
     )
 

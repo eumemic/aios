@@ -300,6 +300,7 @@ def _register() -> None:
         description=EDIT_DESCRIPTION,
         parameters_schema=EDIT_PARAMETERS_SCHEMA,
         handler=edit_handler,
+        parallel_safe=False,
         transport="agent_tool",
         executes="sandbox",
     )

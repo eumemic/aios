@@ -283,6 +283,7 @@ def _register() -> None:
         description=TRIGGER_UPDATE_DESCRIPTION,
         parameters_schema=TRIGGER_UPDATE_PARAMETERS_SCHEMA,
         handler=trigger_update_handler,
+        parallel_safe=False,
     )
 
 

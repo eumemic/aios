@@ -126,6 +126,7 @@ class ToolDefinition:
     executes: Literal["worker", "sandbox"] = "worker"
     classify_permission: ClassifyPermission | None = None
     resumable: bool = False
+    parallel_safe: bool = True
 
 
 @dataclass(slots=True)
@@ -145,6 +146,7 @@ class ToolRegistry:
         executes: Literal["worker", "sandbox"] = "worker",
         classify_permission: ClassifyPermission | None = None,
         resumable: bool = False,
+        parallel_safe: bool = True,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
 
@@ -165,6 +167,7 @@ class ToolRegistry:
             executes=executes,
             classify_permission=classify_permission,
             resumable=resumable,
+            parallel_safe=parallel_safe,
         )
 
     def resumable_tool_names(self) -> frozenset[str]:
@@ -189,6 +192,11 @@ class ToolRegistry:
         router never crashes on a tool its gate will reject as a value)."""
         tool = self._tools.get(name)
         return tool.executes if tool is not None else "worker"
+
+    def tool_parallel_safe(self, name: str) -> bool:
+        """Whether calls to ``name`` may overlap with calls to the same tool."""
+        tool = self._tools.get(name)
+        return tool.parallel_safe if tool is not None else True
 
     def has(self, name: str) -> bool:
         return name in self._tools
@@ -301,6 +309,11 @@ def tool_executes_class(name: str) -> str:
     function on the module. Defaults unregistered names to ``"worker"``.
     """
     return registry.tool_executes_class(name)
+
+
+def tool_parallel_safe(name: str) -> bool:
+    """Return self-parallel safety, defaulting unknown names to safe."""
+    return registry.tool_parallel_safe(name)
 
 
 def effective_transport(name: str, agent_tools: list[AgentToolSpec]) -> ToolTransport:

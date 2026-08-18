@@ -66,6 +66,7 @@ def _register() -> None:
         description=WAKE_SELF_DESCRIPTION,
         parameters_schema=WAKE_SELF_PARAMETERS_SCHEMA,
         handler=wake_self_handler,
+        parallel_safe=False,
         transport="both",
     )
 

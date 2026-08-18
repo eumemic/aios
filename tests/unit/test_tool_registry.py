@@ -17,6 +17,7 @@ from aios.tools.registry import (
     ToolNotFoundError,
     registry,
     to_openai_tools,
+    tool_parallel_safe,
 )
 
 
@@ -53,6 +54,44 @@ class TestRegister:
         defn = registry.get("dummy")
         assert defn.name == "dummy"
         assert defn.description == "A dummy tool."
+
+    def test_parallel_safe_defaults_true_and_can_be_overridden(self) -> None:
+        registry.clear()
+        for name, parallel_safe in (("reader", True), ("writer", False)):
+            registry.register(
+                name=name,
+                description=name,
+                parameters_schema={"type": "object"},
+                handler=_noop_handler,
+                parallel_safe=parallel_safe,
+            )
+
+        assert registry.get("reader").parallel_safe is True
+        assert registry.get("writer").parallel_safe is False
+        assert tool_parallel_safe("reader") is True
+        assert tool_parallel_safe("writer") is False
+        assert tool_parallel_safe("unknown") is True
+
+    def test_parallel_safe_is_not_exposed_to_model(self) -> None:
+        registry.clear()
+        registry.register(
+            name="write",
+            description="writer",
+            parameters_schema={"type": "object"},
+            handler=_noop_handler,
+            parallel_safe=False,
+        )
+
+        assert to_openai_tools([AgentToolSpec(type="write")]) == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "description": "writer",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
 
     def test_register_rejects_duplicate_name(self) -> None:
         registry.clear()

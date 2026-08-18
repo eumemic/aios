@@ -333,6 +333,7 @@ def _register() -> None:
         description=TRIGGER_CREATE_DESCRIPTION,
         parameters_schema=TRIGGER_CREATE_PARAMETERS_SCHEMA,
         handler=trigger_create_handler,
+        parallel_safe=False,
     )
 
 

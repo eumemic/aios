@@ -45,7 +45,7 @@ from aios.logging import get_logger
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
-from aios.tools.registry import ToolResult
+from aios.tools.registry import ToolResult, tool_parallel_safe
 from aios.tools.workflow_completion import (
     ERROR_TOOL_NAME,
     RETURN_TOOL_NAME,
@@ -65,17 +65,50 @@ def _launch_tasks(
     *,
     prefix: str,
 ) -> None:
-    """Shared launcher: spawn one asyncio task per tool call, register in the InflightToolRegistry."""
+    """Spawn one task per call, serializing self-unsafe tools in emission order."""
     inflight_reg = runtime.require_inflight_tool_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
+        function = call.get("function") or {}
+        name = function.get("name") or ""
+        serialize_key = name if prefix == "mcp_tool" or not tool_parallel_safe(name) else None
+        chain = (
+            inflight_reg.chain_serialized(session_id, serialize_key)
+            if serialize_key is not None
+            else None
+        )
+
+        async def _run(
+            member: dict[str, Any] = call,
+            key: str | None = serialize_key,
+            member_chain: tuple[asyncio.Event | None, asyncio.Event] | None = chain,
+        ) -> None:
+            if key is None or member_chain is None:
+                await coro_factory(member)
+                return
+            predecessor, done = member_chain
+            try:
+                if predecessor is not None:
+                    await predecessor.wait()
+                await coro_factory(member)
+            finally:
+                inflight_reg.finish_serialized(session_id, key, done)
+
         task = asyncio.create_task(
-            coro_factory(call),
+            _run(),
             name=f"{prefix}:{session_id}:{call_id}",
         )
         inflight_reg.add(session_id, call_id, task)
 
-        def _on_done(t: asyncio.Task[None], s: str = session_id, c: str = call_id) -> None:
+        def _on_done(
+            t: asyncio.Task[None],
+            s: str = session_id,
+            c: str = call_id,
+            key: str | None = serialize_key,
+            member_chain: tuple[asyncio.Event | None, asyncio.Event] | None = chain,
+        ) -> None:
+            if key is not None and member_chain is not None:
+                inflight_reg.finish_serialized(s, key, member_chain[1])
             inflight_reg.remove(s, c)
 
         task.add_done_callback(_on_done)

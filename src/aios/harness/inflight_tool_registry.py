@@ -24,6 +24,24 @@ class InflightToolRegistry:
         self._dispatch_seq: dict[str, dict[str, int | None]] = {}
         self._step_tasks: dict[str, asyncio.Task[None]] = {}
         self._step_start_seq: dict[str, int | None] = {}
+        self._serialization_tails: dict[tuple[str, str], asyncio.Event] = {}
+
+    def chain_serialized(
+        self, session_id: str, key: str
+    ) -> tuple[asyncio.Event | None, asyncio.Event]:
+        """Append one member to a worker-local per-session serialization chain."""
+        chain_key = (session_id, key)
+        predecessor = self._serialization_tails.get(chain_key)
+        done = asyncio.Event()
+        self._serialization_tails[chain_key] = done
+        return predecessor, done
+
+    def finish_serialized(self, session_id: str, key: str, done: asyncio.Event) -> None:
+        """Release the successor and discard a completed chain tail."""
+        done.set()
+        chain_key = (session_id, key)
+        if self._serialization_tails.get(chain_key) is done:
+            del self._serialization_tails[chain_key]
 
     def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[None]) -> None:
         """Register a newly-launched tool task.

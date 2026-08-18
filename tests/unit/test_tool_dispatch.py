@@ -27,6 +27,7 @@ from aios.errors import (
     ValidationError,
 )
 from aios.harness import runtime, tool_dispatch
+from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.tool_dispatch import (
     _classify_tool_error,
     _tool_lifecycle,
@@ -46,6 +47,99 @@ _SCHEMA: dict[str, Any] = {
     "required": ["channel_id"],
     "additionalProperties": False,
 }
+
+
+def _call(call_id: str, name: str) -> dict[str, Any]:
+    return {"id": call_id, "function": {"name": name, "arguments": "{}"}}
+
+
+class TestLaunchTaskOrdering:
+    async def test_unsafe_builtins_serialize_in_emit_order(self, monkeypatch: Any) -> None:
+        inflight = InflightToolRegistry()
+        monkeypatch.setattr(runtime, "inflight_tool_registry", inflight)
+        monkeypatch.setattr(tool_dispatch, "tool_parallel_safe", lambda name: name != "write")
+        first_release = asyncio.Event()
+        events: list[str] = []
+
+        async def run(call: dict[str, Any]) -> None:
+            call_id = call["id"]
+            events.append(f"start:{call_id}")
+            if call_id == "a":
+                await first_release.wait()
+            events.append(f"finish:{call_id}")
+
+        tool_dispatch._launch_tasks(
+            "session", [_call("a", "write"), _call("b", "write")], run, prefix="tool"
+        )
+        await asyncio.sleep(0)
+        assert events == ["start:a"]
+        first_release.set()
+        await asyncio.gather(*inflight._tasks["session"].values())
+        assert events == ["start:a", "finish:a", "start:b", "finish:b"]
+
+    async def test_serialization_spans_separate_dispatch_invocations(
+        self, monkeypatch: Any
+    ) -> None:
+        inflight = InflightToolRegistry()
+        monkeypatch.setattr(runtime, "inflight_tool_registry", inflight)
+        monkeypatch.setattr(tool_dispatch, "tool_parallel_safe", lambda name: name != "bash")
+        release = asyncio.Event()
+        started: list[str] = []
+
+        async def run(call: dict[str, Any]) -> None:
+            started.append(call["id"])
+            if call["id"] == "immediate":
+                await release.wait()
+
+        tool_dispatch._launch_tasks("session", [_call("immediate", "bash")], run, prefix="tool")
+        tool_dispatch._launch_tasks("session", [_call("confirmed", "bash")], run, prefix="tool")
+        await asyncio.sleep(0)
+        assert started == ["immediate"]
+        release.set()
+        await asyncio.gather(*inflight._tasks["session"].values())
+        assert started == ["immediate", "confirmed"]
+
+    async def test_parallel_safe_builtins_may_overlap(self, monkeypatch: Any) -> None:
+        inflight = InflightToolRegistry()
+        monkeypatch.setattr(runtime, "inflight_tool_registry", inflight)
+        monkeypatch.setattr(tool_dispatch, "tool_parallel_safe", lambda name: True)
+        release = asyncio.Event()
+        started: list[str] = []
+
+        async def run(call: dict[str, Any]) -> None:
+            started.append(call["id"])
+            await release.wait()
+
+        tool_dispatch._launch_tasks(
+            "session", [_call("a", "read"), _call("b", "read")], run, prefix="tool"
+        )
+        await asyncio.sleep(0)
+        assert started == ["a", "b"]
+        release.set()
+        await asyncio.gather(*inflight._tasks["session"].values())
+
+    async def test_mcp_serializes_same_name_but_not_different_names(self, monkeypatch: Any) -> None:
+        inflight = InflightToolRegistry()
+        monkeypatch.setattr(runtime, "inflight_tool_registry", inflight)
+        release = asyncio.Event()
+        started: list[str] = []
+
+        async def run(call: dict[str, Any]) -> None:
+            started.append(call["id"])
+            if call["id"] == "a":
+                await release.wait()
+
+        tool_dispatch._launch_tasks(
+            "session",
+            [_call("a", "signal_send"), _call("b", "signal_send"), _call("c", "other")],
+            run,
+            prefix="mcp_tool",
+        )
+        await asyncio.sleep(0)
+        assert started == ["a", "c"]
+        release.set()
+        await asyncio.gather(*inflight._tasks["session"].values())
+        assert started == ["a", "c", "b"]
 
 
 class TestValidateArguments:

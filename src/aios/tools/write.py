@@ -220,6 +220,7 @@ def _register() -> None:
         description=WRITE_DESCRIPTION,
         parameters_schema=WRITE_PARAMETERS_SCHEMA,
         handler=write_handler,
+        parallel_safe=False,
         transport="agent_tool",
         executes="sandbox",
     )
