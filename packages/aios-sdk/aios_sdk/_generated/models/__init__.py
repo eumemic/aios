@@ -326,6 +326,8 @@ from .tool_spec_type_type_1 import ToolSpecTypeType1
 from .tool_spec_type_type_2 import ToolSpecTypeType2
 from .tools_schema_update import ToolsSchemaUpdate
 from .tools_schema_update_tools_item import ToolsSchemaUpdateToolsItem
+from .toolset_spec import ToolsetSpec
+from .toolset_spec_name import ToolsetSpecName
 from .trace_entry import TraceEntry
 from .trace_entry_kind import TraceEntryKind
 from .trace_entry_terminal_state_type_0 import TraceEntryTerminalStateType0
@@ -703,6 +705,8 @@ __all__ = (
     "ToolConfirmationRequestResult",
     "ToolResultRequest",
     "ToolResultRequestContentType1Item",
+    "ToolsetSpec",
+    "ToolsetSpecName",
     "ToolSpec",
     "ToolSpecInputSchemaType0",
     "ToolSpecPermissionType0",

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
+    from ..models.toolset_spec import ToolsetSpec
 
 
 T = TypeVar("T", bound="AgentCreate")
@@ -30,7 +31,7 @@ class AgentCreate:
         name (str):
         model (str): LiteLLM model string, e.g. 'anthropic/claude-opus-4-6'.
         system (str | Unset): System prompt; empty by default. Default: ''.
-        tools (list[ToolSpec] | Unset):
+        tools (list[ToolsetSpec | ToolSpec] | Unset):
         skills (list[AgentSkillRef] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
@@ -60,7 +61,7 @@ class AgentCreate:
     name: str
     model: str
     system: str | Unset = ""
-    tools: list[ToolSpec] | Unset = UNSET
+    tools: list[ToolsetSpec | ToolSpec] | Unset = UNSET
     skills: list[AgentSkillRef] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
@@ -74,6 +75,8 @@ class AgentCreate:
     output_style: AgentCreateOutputStyle | Unset = AgentCreateOutputStyle.DEFAULT
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.tool_spec import ToolSpec
+
         name = self.name
 
         model = self.model
@@ -84,7 +87,12 @@ class AgentCreate:
         if not isinstance(self.tools, Unset):
             tools = []
             for tools_item_data in self.tools:
-                tools_item = tools_item_data.to_dict()
+                tools_item: dict[str, Any]
+                if isinstance(tools_item_data, ToolSpec):
+                    tools_item = tools_item_data.to_dict()
+                else:
+                    tools_item = tools_item_data.to_dict()
+
                 tools.append(tools_item)
 
         skills: list[dict[str, Any]] | Unset = UNSET
@@ -187,6 +195,7 @@ class AgentCreate:
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
+        from ..models.toolset_spec import ToolsetSpec
 
         d = dict(src_dict)
         name = d.pop("name")
@@ -196,11 +205,27 @@ class AgentCreate:
         system = d.pop("system", UNSET)
 
         _tools = d.pop("tools", UNSET)
-        tools: list[ToolSpec] | Unset = UNSET
+        tools: list[ToolsetSpec | ToolSpec] | Unset = UNSET
         if _tools is not UNSET:
             tools = []
             for tools_item_data in _tools:
-                tools_item = ToolSpec.from_dict(tools_item_data)
+
+                def _parse_tools_item(data: object) -> ToolsetSpec | ToolSpec:
+                    try:
+                        if not isinstance(data, dict):
+                            raise TypeError()
+                        tools_item_type_0 = ToolSpec.from_dict(data)
+
+                        return tools_item_type_0
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    if not isinstance(data, dict):
+                        raise TypeError()
+                    tools_item_type_1 = ToolsetSpec.from_dict(data)
+
+                    return tools_item_type_1
+
+                tools_item = _parse_tools_item(tools_item_data)
 
                 tools.append(tools_item)
 

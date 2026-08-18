@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
+    from ..models.toolset_spec import ToolsetSpec
 
 
 T = TypeVar("T", bound="AgentUpdate")
@@ -36,7 +37,7 @@ class AgentUpdate:
             name (None | str | Unset):
             model (None | str | Unset):
             system (None | str | Unset):
-            tools (list[ToolSpec] | None | Unset):
+            tools (list[ToolsetSpec | ToolSpec] | None | Unset):
             skills (list[AgentSkillRef] | None | Unset):
             mcp_servers (list[McpServerSpec] | None | Unset):
             http_servers (list[HttpServerSpec] | None | Unset):
@@ -54,7 +55,7 @@ class AgentUpdate:
     name: None | str | Unset = UNSET
     model: None | str | Unset = UNSET
     system: None | str | Unset = UNSET
-    tools: list[ToolSpec] | None | Unset = UNSET
+    tools: list[ToolsetSpec | ToolSpec] | None | Unset = UNSET
     skills: list[AgentSkillRef] | None | Unset = UNSET
     mcp_servers: list[McpServerSpec] | None | Unset = UNSET
     http_servers: list[HttpServerSpec] | None | Unset = UNSET
@@ -72,6 +73,7 @@ class AgentUpdate:
             AgentUpdateLitellmExtraType0,
         )
         from ..models.agent_update_metadata_type_0 import AgentUpdateMetadataType0
+        from ..models.tool_spec import ToolSpec
 
         version = self.version
 
@@ -99,7 +101,12 @@ class AgentUpdate:
         elif isinstance(self.tools, list):
             tools = []
             for tools_type_0_item_data in self.tools:
-                tools_type_0_item = tools_type_0_item_data.to_dict()
+                tools_type_0_item: dict[str, Any]
+                if isinstance(tools_type_0_item_data, ToolSpec):
+                    tools_type_0_item = tools_type_0_item_data.to_dict()
+                else:
+                    tools_type_0_item = tools_type_0_item_data.to_dict()
+
                 tools.append(tools_type_0_item)
 
         else:
@@ -254,6 +261,7 @@ class AgentUpdate:
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
+        from ..models.toolset_spec import ToolsetSpec
 
         d = dict(src_dict)
         version = d.pop("version")
@@ -285,7 +293,7 @@ class AgentUpdate:
 
         system = _parse_system(d.pop("system", UNSET))
 
-        def _parse_tools(data: object) -> list[ToolSpec] | None | Unset:
+        def _parse_tools(data: object) -> list[ToolsetSpec | ToolSpec] | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -296,14 +304,32 @@ class AgentUpdate:
                 tools_type_0 = []
                 _tools_type_0 = data
                 for tools_type_0_item_data in _tools_type_0:
-                    tools_type_0_item = ToolSpec.from_dict(tools_type_0_item_data)
+
+                    def _parse_tools_type_0_item(
+                        data: object,
+                    ) -> ToolsetSpec | ToolSpec:
+                        try:
+                            if not isinstance(data, dict):
+                                raise TypeError()
+                            tools_type_0_item_type_0 = ToolSpec.from_dict(data)
+
+                            return tools_type_0_item_type_0
+                        except (TypeError, ValueError, AttributeError, KeyError):
+                            pass
+                        if not isinstance(data, dict):
+                            raise TypeError()
+                        tools_type_0_item_type_1 = ToolsetSpec.from_dict(data)
+
+                        return tools_type_0_item_type_1
+
+                    tools_type_0_item = _parse_tools_type_0_item(tools_type_0_item_data)
 
                     tools_type_0.append(tools_type_0_item)
 
                 return tools_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(list[ToolSpec] | None | Unset, data)
+            return cast(list[ToolsetSpec | ToolSpec] | None | Unset, data)
 
         tools = _parse_tools(d.pop("tools", UNSET))
 
