@@ -26,6 +26,8 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, cast
 
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
+from aios.models.common import ListResponse
+from aios.models.pagination import DEFAULT_PAGE_LIMIT, decode_cursor
 
 
 def _lock(script: str = "S") -> dict[str, Any]:
@@ -84,8 +86,20 @@ class FakeWorld:
         workflow_get_fails: bool = False,
         seed_sessions: list[dict[str, Any]] | None = None,
         seed_triggers: list[dict[str, Any]] | None = None,
+        session_page_limit: int = DEFAULT_PAGE_LIMIT,
+        session_list_fails_after_page: int | None = None,
     ) -> None:
         self.lock = lock if lock is not None else _lock()
+        # GET /v1/sessions is keyset-paginated at DEFAULT_PAGE_LIMIT. Modelling it
+        # as one unbounded page (what this fake used to do) makes the fake
+        # STRUCTURALLY unable to exhibit a first-page-only scan bug.
+        self.session_page_limit = session_page_limit
+        # Every ?cursor= token the script sent back, so a test can assert the
+        # walk actually happened rather than inferring it from the outcome.
+        self.session_list_cursors: list[str | None] = []
+        # Make page N+1 of the session scan unreadable, so a test can pin that an
+        # UNPROVABLE list fails instead of silently reading as "not found".
+        self.session_list_fails_after_page = session_list_fails_after_page
         self.trigger_create_fails = trigger_create_fails
         self.telemetry_path_ok = telemetry_path_ok
         self.trigger_enabled = trigger_enabled
@@ -168,11 +182,7 @@ class FakeWorld:
                 return _ok(self.agents[payload["name"]])
 
             if method == "GET" and path.startswith("/v1/sessions?"):
-                # The real API filters by the agent_id query param.
-                want = path.split("agent_id=")[1].split("&")[0]
-                return _ok(
-                    {"data": [s for s in self.sessions.values() if s.get("agent_id") == want]}
-                )
+                return self._list_sessions(path)
             if method == "POST" and path == "/v1/sessions":
                 self.sessions["s"] = {
                     "id": "sess-1",
@@ -225,6 +235,65 @@ class FakeWorld:
             return _ok({})
 
         return _tool
+
+    def _list_sessions(self, path: str) -> dict[str, Any]:
+        """Keyset-paginated GET /v1/sessions, matching the real router.
+
+        Mirrors ``aios.api.routers.sessions.list_`` + ``ListResponse.paginate``:
+        a first page carries ``?agent_id=``/``?limit=``; every later page is
+        ``?cursor=<next_cursor>`` ALONE (the token carries the filters back), and
+        a page past the end has ``has_more: false`` / ``next_cursor: null``.
+        Envelope + token are produced by the REAL production codec, not a
+        hand-rolled imitation, so the fake cannot drift from the contract.
+        """
+        if (
+            self.session_list_fails_after_page is not None
+            and len(self.session_list_cursors) >= self.session_list_fails_after_page
+        ):
+            self.session_list_cursors.append("<failed>")
+            return {"status": 500, "body": json.dumps({"detail": "sessions backend down"})}
+
+        query = path.split("?", 1)[1]
+        params = dict(
+            cast(tuple[str, str], tuple(kv.split("=", 1))) for kv in query.split("&") if "=" in kv
+        )
+
+        if "cursor" in params:
+            # The real router 422s if a cursor is mixed with other params.
+            if sorted(params) != ["cursor"]:
+                return {
+                    "status": 422,
+                    "body": json.dumps(
+                        {"detail": "A '?cursor=' request takes no other pagination params."}
+                    ),
+                }
+            self.session_list_cursors.append(params["cursor"])
+            state = decode_cursor(params["cursor"])
+            want = state.filters.get("agent_id")
+            after: str | None = str(state.cursor)
+            limit = state.limit
+        else:
+            self.session_list_cursors.append(None)
+            want = params.get("agent_id")
+            after = None
+            limit = int(params.get("limit", self.session_page_limit))
+
+        # Newest-first (DESC by id), which is what the real endpoint returns.
+        rows = sorted(
+            (s for s in self.sessions.values() if s.get("agent_id") == want),
+            key=lambda s: cast(str, s["id"]),
+            reverse=True,
+        )
+        if after is not None:
+            rows = [s for s in rows if cast(str, s["id"]) < after]
+
+        page = ListResponse[dict[str, Any]].paginate(
+            rows[: limit + 1],
+            limit,
+            cursor=lambda s: cast(str, s["id"]),
+            filters={"agent_id": want},
+        )
+        return _ok(page.model_dump())
 
     def activate(self, merge_sha: str = "sha1") -> dict[str, Any]:
         namespace: dict[str, Any] = {}
@@ -601,3 +670,154 @@ class TestTriggerDriftDetection:
 
         assert world.trigger_updates, "expected a trigger PUT"
         assert "version" not in world.trigger_updates[0]["action"]
+
+
+# ── Fix round 2 (aios#2063): consumer-side guards on lane-session lookup ─────
+
+
+class TestNullTitleIsRejected:
+    """Defect 1: a null/empty lane title must never be used as an identity key.
+
+    ``LockLauncherSession.title`` is ``str | None = None``, so a lock can carry
+    no title at all. Scanning with that key makes ``item.get("title") == title``
+    true for ANY untitled session — ``None == None`` — so activation adopts an
+    unrelated bystander, overwrites its vault bindings, and hangs the lane's
+    cron trigger off it. The producer (lane-expand) lives in another repo, so
+    this is guarded HERE, at the consumer, regardless of what it promises.
+    """
+
+    def test_null_title_lock_does_not_adopt_an_untitled_bystander(self) -> None:
+        lock = _lock()
+        lock["launcher_session"]["title"] = None
+        bystander = _sess("sess-untitled", title=None, vault_ids=["v-private"])
+        world = FakeWorld(lock=lock, seed_sessions=[bystander])
+
+        result = world.activate()
+
+        # Hard, loud failure — not a silent adoption.
+        assert result["outcome"] == "failed"
+        assert _actions(result)["session"] == "error"
+        assert "title" in result["error"]
+        # The bystander is untouched and no lane session was invented.
+        assert world.sessions["sess-untitled"]["vault_ids"] == ["v-private"]
+        assert world.session_updates == []
+        assert len(world.sessions) == 1
+
+    def test_missing_title_key_is_rejected(self) -> None:
+        """An absent ``title`` key is the same defect as an explicit null."""
+        lock = _lock()
+        del lock["launcher_session"]["title"]
+        world = FakeWorld(lock=lock, seed_sessions=[_sess("sess-untitled", title=None)])
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert _actions(result)["session"] == "error"
+        assert world.session_updates == []
+
+    def test_blank_title_is_rejected(self) -> None:
+        """A whitespace-only title is not a usable identity key either."""
+        lock = _lock()
+        lock["launcher_session"]["title"] = "   "
+        world = FakeWorld(lock=lock, seed_sessions=[_sess("sess-blank", title="   ")])
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert _actions(result)["session"] == "error"
+        assert world.session_updates == []
+
+    def test_guard_does_not_fire_on_a_healthy_titled_lock(self) -> None:
+        """NEGATIVE CONTROL: a valid titled lock still activates cleanly."""
+        world = FakeWorld(seed_sessions=[_sess("sess-other", title=None)])
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated"
+        assert result["error"] is None
+        assert _actions(result)["session"] == "created"
+        # The untitled bystander was neither adopted nor modified.
+        assert world.session_updates == []
+        assert world.sessions["sess-other"]["title"] is None
+
+
+class TestSessionScanFollowsPagination:
+    """Defect 2: a first-page-only scan silently creates a DUPLICATE lane session.
+
+    ``GET /v1/sessions`` is keyset-paginated at ``DEFAULT_PAGE_LIMIT`` and hands
+    back an opaque ``next_cursor``. An agent may legitimately own hundreds of
+    sessions; if the lane's own session sorts past page one, a first-page-only
+    scan reads NOT FOUND and creates a second one — two sessions, two cron
+    triggers, one lane.
+    """
+
+    @staticmethod
+    def _crowd(n: int, *, lane_title: str = "t") -> list[dict[str, Any]]:
+        """``n`` bystanders sorting AFTER the lane session on a DESC-by-id scan.
+
+        Ids are zero-padded so ordering is deterministic; the lane session gets
+        the lowest id, so it lands on the LAST page.
+        """
+        crowd = [_sess(f"sess-z{i:04d}", title=f"bystander-{i}") for i in range(n)]
+        return [*crowd, _sess("sess-a-lane", title=lane_title)]
+
+    def test_lane_session_beyond_the_first_page_is_found_not_duplicated(self) -> None:
+        world = FakeWorld(seed_sessions=self._crowd(120))
+        assert len(world.sessions) == 121
+
+        result = world.activate()
+
+        # It must ADOPT the existing lane session, not create a second one.
+        assert _actions(result)["session"] == "unchanged"
+        assert len(world.sessions) == 121, "a duplicate lane session was created"
+        lane_sessions = [s for s in world.sessions.values() if s["title"] == "t"]
+        assert len(lane_sessions) == 1
+        assert lane_sessions[0]["id"] == "sess-a-lane"
+
+    def test_the_scan_actually_walks_every_page(self) -> None:
+        """The walk is real: page 2+ are fetched via the opaque cursor."""
+        world = FakeWorld(seed_sessions=self._crowd(120))
+
+        world.activate()
+
+        # 121 rows at 50/page = 3 pages: first page + 2 cursor follow-ups.
+        first_scan = world.session_list_cursors[:3]
+        assert first_scan[0] is None, "first page must not carry a cursor"
+        assert all(c is not None for c in first_scan[1:]), "later pages must use ?cursor="
+
+    def test_exhaustion_stops_at_the_last_page(self) -> None:
+        """A single-page result must not spin on a stale cursor."""
+        world = FakeWorld(seed_sessions=[_sess("sess-a-lane", title="t")])
+
+        result = world.activate()
+
+        assert _actions(result)["session"] == "unchanged"
+        assert world.session_list_cursors == [None]
+
+    def test_a_truly_absent_lane_session_is_still_created(self) -> None:
+        """NEGATIVE CONTROL: exhausting the pages without a match still creates."""
+        crowd = [_sess(f"sess-z{i:04d}", title=f"bystander-{i}") for i in range(120)]
+        world = FakeWorld(seed_sessions=crowd)
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated"
+        assert _actions(result)["session"] == "created"
+        assert len([s for s in world.sessions.values() if s["title"] == "t"]) == 1
+
+    def test_an_unreadable_later_page_fails_instead_of_creating_a_duplicate(self) -> None:
+        """If the list cannot be PROVEN complete, fail — never fall through to create.
+
+        A mid-walk error means the lane session may exist on a page that was
+        never read. Reporting not-found there is exactly how a duplicate gets
+        created, so an unreadable page is a hard failure.
+        """
+        world = FakeWorld(seed_sessions=self._crowd(120), session_list_fails_after_page=1)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert _actions(result)["session"] == "error"
+        assert "list sessions failed" in result["error"]
+        # Crucially: no session was invented while the list was unproven.
+        assert len(world.sessions) == 121

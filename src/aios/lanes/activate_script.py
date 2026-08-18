@@ -129,6 +129,37 @@ async def find_agent_by_name(name):
     return None, None
 
 
+def lane_title_error(title):
+    """Why ``title`` is unusable as a lane identity key, or None if it is fine.
+
+    ``LockLauncherSession.title`` is ``str | None`` — the lock may legitimately
+    carry no title at all. A null key is CATASTROPHIC as an identity: the scan
+    below compares ``item.get("title") == title``, and ``None == None`` is true
+    for EVERY untitled session on the agent, so activation would adopt an
+    unrelated bystander, overwrite its title and vault bindings, and hang the
+    lane's cron trigger off it. A blank/whitespace title is the same failure
+    wearing a string. Rejecting here is a CONSUMER-side guard: the lock producer
+    (lane-expand) lives in a different repo, so its promises cannot be relied on
+    and must not be trusted as a precondition.
+    """
+    if title is None:
+        return ("lock launcher_session.title is null — refusing to scan with a null "
+                "identity key (it matches every untitled session on the agent)")
+    if not isinstance(title, str):
+        return f"lock launcher_session.title must be a string, got {type(title).__name__}"
+    if not title.strip():
+        return ("lock launcher_session.title is blank — refusing to scan with an empty "
+                "identity key")
+    return None
+
+
+# The scan is bounded so a cursor that never terminates (a server bug, or a
+# forged/looping token) cannot spin forever. At DEFAULT_PAGE_LIMIT=50 rows a
+# page this covers 50k sessions on one agent; past that we FAIL rather than
+# silently treat a truncated list as complete.
+MAX_SESSION_PAGES = 1000
+
+
 async def find_lane_session(agent_id, title):
     """Find THIS LANE's launcher session. Returns (session_dict, None) or (None, error).
 
@@ -137,18 +168,53 @@ async def find_lane_session(agent_id, title):
     "the first non-archived session for the agent" can adopt an unrelated
     bystander and overwrite its title/vault bindings. Archived sessions are
     skipped: archived means retired, not absent.
+
+    ``GET /v1/sessions`` is KEYSET-PAGINATED (aios/models/pagination.py:
+    DEFAULT_PAGE_LIMIT = 50). The first page carries the filters; each further
+    page is fetched with ``?cursor=<next_cursor>`` ALONE — the opaque token
+    carries the keyset position, direction, filters, and page size, and the
+    router 422s if any other param rides along with it. ``next_cursor`` is null
+    exactly when there is no further page.
+
+    Reading only the first page made "not found" indistinguishable from "not on
+    page one", so a lane whose session sorted past the first 50 was reported
+    absent and DUPLICATED. The walk below runs to exhaustion, and any page that
+    cannot be fetched (or a cursor that will not terminate) FAILS the lookup
+    rather than returning a not-found that the caller would answer by creating.
     """
-    resp = await aios_api("GET", f"/v1/sessions?agent_id={agent_id}")
-    if is_error(resp):
-        return None, f"list sessions failed: {resp}"
-    data = body(resp)
-    items = data.get("data", []) if data else []
-    for item in items:
-        if item.get("status") == "archived":
-            continue
-        if item.get("title") == title:
-            return item, None
-    return None, None
+    title_err = lane_title_error(title)
+    if title_err:
+        return None, title_err
+
+    path = f"/v1/sessions?agent_id={agent_id}"
+    pages = 0
+    while True:
+        resp = await aios_api("GET", path)
+        if is_error(resp):
+            # An unreadable page means the list is NOT PROVEN COMPLETE. Reporting
+            # not-found here would make the caller create a duplicate.
+            return None, f"list sessions failed: {resp}"
+        data = body(resp)
+        if not isinstance(data, dict):
+            return None, f"list sessions returned an unreadable body: {data!r}"
+        items = data.get("data", [])
+        for item in items:
+            if item.get("status") == "archived":
+                continue
+            if item.get("title") == title:
+                return item, None
+
+        next_cursor = data.get("next_cursor")
+        if not next_cursor:
+            # Exhausted: every page was read and no lane session matched.
+            return None, None
+
+        pages += 1
+        if pages >= MAX_SESSION_PAGES:
+            return None, (f"session list did not terminate after {MAX_SESSION_PAGES} pages "
+                          f"— refusing to treat a truncated list as complete")
+        # A ?cursor= request takes NO other params; the token carries the filters.
+        path = f"/v1/sessions?cursor={next_cursor}"
 
 
 async def find_trigger_on_session(session_id, trigger_name):
