@@ -43,8 +43,10 @@ async def materialize_store_to_host(
     *,
     store_id: str,
     account_id: str,
-) -> None:
-    """Ensure ``store_id``'s host dir is populated from DB. Idempotent.
+) -> bool:
+    """Ensure ``store_id``'s host dir is populated from DB.
+
+    Returns whether a marked but rolled-back directory was repaired.
 
     Acquires a file lock so concurrent provisioning across sessions
     serializes; the loser observes the marker and returns immediately.
@@ -54,21 +56,27 @@ async def materialize_store_to_host(
     """
     host_dir = memory_store_host_dir(store_id)
     marker = host_dir / MATERIALIZED_MARKER
-    if marker.exists():
-        return
-
     lock_path = memory_store_lock_path(store_id)
     ensure_owned_dir(lock_path.parent)
     with lock_path.open("w") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            if marker.exists():
-                return  # another waiter materialized while we blocked
+            was_materialized = marker.exists()
             ensure_owned_dir(host_dir)
 
             entries = await queries.list_active_memory_paths_and_content(
                 conn, store_id, account_id=account_id
             )
+            live_paths = {path for path, _content in entries}
+            disk_paths = {
+                "/" + str(path.relative_to(host_dir)).replace("\\", "/")
+                for path in host_dir.rglob("*")
+                if path.is_file() and path.name != MATERIALIZED_MARKER
+            }
+            restoring = was_materialized and not live_paths.issubset(disk_paths)
+            if was_materialized and not restoring:
+                return False
+
             for path, content in entries:
                 # Memory paths are guaranteed to start with "/" by the SQL CHECK.
                 target = host_dir / path.lstrip("/")
@@ -80,7 +88,7 @@ async def materialize_store_to_host(
                 # value supersedes ours. Without this guard the stale-
                 # snapshot ``atomic_write`` clobbers the fresher mirror
                 # and leaves DB/disk permanently inconsistent.
-                if target.exists():
+                if target.exists() and not restoring:
                     log.info(
                         "memory.materialize_skipped_existing",
                         store_id=store_id,
@@ -96,6 +104,8 @@ async def materialize_store_to_host(
                 "memory.materialized",
                 store_id=store_id,
                 count=len(entries),
+                restored=restoring,
             )
+            return restoring
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

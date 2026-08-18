@@ -304,3 +304,32 @@ async def test_reaper_skips_session_freshened_during_destroy_of_another() -> Non
         "must re-check idleness under the per-session lock before "
         "calling release()."
     )
+
+
+async def test_reaper_does_not_destroy_active_exec() -> None:
+    """A command may outlive idle TTL; bookkeeping must not kill it."""
+    exec_started = asyncio.Event()
+    exec_continue = asyncio.Event()
+
+    async def execute(*_args: Any, **_kwargs: Any) -> MagicMock:
+        exec_started.set()
+        await exec_continue.wait()
+        return MagicMock()
+
+    destroy = AsyncMock()
+    backend = _backend_with_destroy(destroy)
+    backend.exec = AsyncMock(side_effect=execute)  # type: ignore[method-assign]
+    registry = SandboxRegistry(backend)
+    handle = _handle("sess_active")
+    registry._handles["sess_active"] = handle
+    registry._last_used["sess_active"] = 0.0
+
+    task = asyncio.create_task(
+        registry.exec(handle, "sleep 10", timeout_seconds=30, max_output_bytes=1000)
+    )
+    await exec_started.wait()
+    await registry._reap_idle_once(idle_timeout=0.0)
+
+    destroy.assert_not_awaited()
+    exec_continue.set()
+    await task

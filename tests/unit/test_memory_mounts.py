@@ -121,3 +121,24 @@ async def test_materialize_writes_when_target_absent(
     assert (host_dir / "foo.md").read_text() == "v1"
     assert (host_dir / "sub" / "bar.md").read_text() == "B"
     assert (host_dir / ".materialized").exists()
+
+
+async def test_materialize_repairs_marked_rollback(store_paths: tuple[Path, Path]) -> None:
+    host_dir, lock_path = store_paths
+    host_dir.mkdir()
+    (host_dir / ".materialized").touch()
+
+    async def snapshot(*_args: Any, **_kwargs: Any) -> list[tuple[str, str]]:
+        return [("/restored.md", "from db")]
+
+    with (
+        patch("aios.sandbox.memory_mounts.memory_store_host_dir", return_value=host_dir),
+        patch("aios.sandbox.memory_mounts.memory_store_lock_path", return_value=lock_path),
+        patch("aios.db.queries.list_active_memory_paths_and_content", snapshot),
+    ):
+        restored = await materialize_store_to_host(
+            MagicMock(), store_id="memstore_test", account_id="acc_test_stub"
+        )
+
+    assert restored is True
+    assert (host_dir / "restored.md").read_text() == "from db"

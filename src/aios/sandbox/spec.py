@@ -345,10 +345,21 @@ async def _materialize_memory_mounts(
         echoes = await queries.list_session_memory_store_echoes(
             conn, session_id, account_id=account_id
         )
+        restored_store_ids: list[str] = []
         for echo in echoes:
-            await materialize_store_to_host(
+            restored = await materialize_store_to_host(
                 conn, store_id=echo.memory_store_id, account_id=account_id
             )
+            if restored:
+                restored_store_ids.append(echo.memory_store_id)
+    if restored_store_ids:
+        await sessions_service.append_event(
+            pool,
+            session_id,
+            "lifecycle",
+            {"event": "memory_mount_restored", "store_ids": restored_store_ids},
+            account_id=account_id,
+        )
     return list(echoes)
 
 

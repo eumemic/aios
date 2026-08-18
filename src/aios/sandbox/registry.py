@@ -331,6 +331,8 @@ class SandboxRegistry:
         self._git_proxies: dict[str, GitProxy] = {}
         self._secret_proxies: dict[str, SecretEgressProxy] = {}
         self._last_used: dict[str, float] = {}
+        # A command may outlive idle TTL; the reaper must not tear down its container.
+        self._active_execs: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
@@ -2031,14 +2033,25 @@ class SandboxRegistry:
         max_output_bytes: int,
         cwd: str = "/workspace",
     ) -> CommandResult:
-        """Run ``command`` inside ``handle``'s sandbox via the backend."""
-        return await self._backend.exec(
-            handle,
-            command,
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=max_output_bytes,
-            cwd=cwd,
-        )
+        """Run ``command`` while protecting its sandbox from idle teardown."""
+        owner_id = handle.owner_id
+        self._active_execs[owner_id] = self._active_execs.get(owner_id, 0) + 1
+        self._last_used[owner_id] = time.monotonic()
+        try:
+            return await self._backend.exec(
+                handle,
+                command,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+                cwd=cwd,
+            )
+        finally:
+            remaining = self._active_execs[owner_id] - 1
+            if remaining:
+                self._active_execs[owner_id] = remaining
+            else:
+                self._active_execs.pop(owner_id, None)
+            self._last_used[owner_id] = time.monotonic()
 
     async def release(self, session_id: str) -> None:
         """Tear down one session's sandbox + proxy. No-op if not cached.
@@ -2329,7 +2342,11 @@ class SandboxRegistry:
                 # trusted its stale to_release snapshot. ``evict`` can also
                 # pop _last_used out from under us, so absence means skip.
                 current = self._last_used.get(sid)
-                if current is not None and time.monotonic() - current > idle_timeout:
+                if (
+                    current is not None
+                    and not self._active_execs.get(sid)
+                    and time.monotonic() - current > idle_timeout
+                ):
                     log.info("sandbox.idle_release", owner_id=sid)
                     try:
                         await self._release_owner(sid)
