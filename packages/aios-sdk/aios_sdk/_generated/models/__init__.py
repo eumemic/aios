@@ -185,7 +185,10 @@ from .missing_request_missing import MissingRequestMissing
 from .missing_request_record import MissingRequestRecord
 from .model_provider import ModelProvider
 from .model_provider_create import ModelProviderCreate
+from .model_provider_create_litellm_defaults import ModelProviderCreateLitellmDefaults
+from .model_provider_litellm_defaults import ModelProviderLitellmDefaults
 from .model_provider_update import ModelProviderUpdate
+from .model_provider_update_litellm_defaults import ModelProviderUpdateLitellmDefaults
 from .native_buttons import NativeButtons
 from .o_auth_complete_request import OAuthCompleteRequest
 from .o_auth_start_request import OAuthStartRequest
@@ -606,7 +609,10 @@ __all__ = (
     "MissingRequestRecord",
     "ModelProvider",
     "ModelProviderCreate",
+    "ModelProviderCreateLitellmDefaults",
+    "ModelProviderLitellmDefaults",
     "ModelProviderUpdate",
+    "ModelProviderUpdateLitellmDefaults",
     "NativeButtons",
     "OAuthCompleteRequest",
     "OAuthStartRequest",

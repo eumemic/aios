@@ -21,6 +21,7 @@ from aios.errors import (
 from aios.ids import (
     ACCOUNT,
     ACCOUNT_KEY,
+    MODEL_PROVIDER,
     RUNTIME_TOKEN,
     make_id,
 )
@@ -317,6 +318,18 @@ async def bootstrap_root_account(
                 detail={"display_name": display_name},
             ) from exc
         assert account_row is not None
+        await conn.execute(
+            """
+            INSERT INTO model_providers
+                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults)
+            VALUES (
+                $1, $2, 'anthropic', NULL, ''::bytea, ''::bytea,
+                '{"thinking":{"type":"adaptive","display":"summarized"}}'::jsonb
+            )
+            """,
+            make_id(MODEL_PROVIDER),
+            account_id,
+        )
         await conn.execute(
             """
             INSERT INTO account_keys (key_id, account_id, hash, label)

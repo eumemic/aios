@@ -19,8 +19,9 @@ raw SQL — a mini query-builder, at odds with "raw SQL + asyncpg, no ORM."
 
 from __future__ import annotations
 
+import json
 from types import EllipsisType
-from typing import Any, NamedTuple
+from typing import Any
 
 import asyncpg
 
@@ -37,6 +38,7 @@ def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
         provider=row["provider"],
         api_base=row["api_base"],
         api_key_set=len(row["ciphertext"]) > 0,
+        litellm_defaults=dict(row.get("litellm_defaults", {})),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
@@ -44,16 +46,16 @@ def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
 
 
 async def assert_account_accepts_model_provider(
-    conn: asyncpg.Connection[Any], *, account_id: str
+    conn: asyncpg.Connection[Any], *, account_id: str, has_credentials: bool
 ) -> None:
-    """Reject provider credentials on the credentialless platform root."""
+    """Reject provider credentials (but permit defaults-only rows) on the platform root."""
     is_root = await conn.fetchval(
         "SELECT parent_account_id IS NULL FROM accounts WHERE id = $1 AND archived_at IS NULL",
         account_id,
     )
     if is_root is None:
         raise NotFoundError(f"account {account_id} not found", detail={"id": account_id})
-    if is_root:
+    if is_root and has_credentials:
         raise ConflictError(
             "the platform-root account must remain credentialless",
             detail={"account_id": account_id},
@@ -66,7 +68,7 @@ async def audit_credentialless_root(conn: asyncpg.Connection[Any]) -> None:
         "SELECT count(*) FROM model_providers mp "
         "JOIN accounts a ON a.id = mp.account_id "
         "WHERE a.parent_account_id IS NULL AND a.archived_at IS NULL "
-        "AND mp.archived_at IS NULL"
+        "AND mp.archived_at IS NULL AND length(mp.ciphertext) > 0"
     )
     if count:
         raise RuntimeError(
@@ -80,23 +82,28 @@ async def insert_model_provider(
     account_id: str,
     provider: str,
     api_base: str | None,
-    blob: EncryptedBlob,
+    blob: EncryptedBlob | None,
+    litellm_defaults: dict[str, Any] | None = None,
 ) -> ModelProvider:
-    await assert_account_accepts_model_provider(conn, account_id=account_id)
+    await assert_account_accepts_model_provider(
+        conn, account_id=account_id, has_credentials=blob is not None
+    )
     new_id = make_id(MODEL_PROVIDER)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO model_providers (id, account_id, provider, api_base, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO model_providers
+                (id, account_id, provider, api_base, ciphertext, nonce, litellm_defaults)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
             RETURNING *
             """,
             new_id,
             account_id,
             provider,
             api_base,
-            blob.ciphertext,
-            blob.nonce,
+            blob.ciphertext if blob is not None else b"",
+            blob.nonce if blob is not None else b"",
+            json.dumps(litellm_defaults or {}),
         )
     except asyncpg.UniqueViolationError as exc:
         raise ConflictError(
@@ -146,6 +153,7 @@ async def update_model_provider(
     account_id: str,
     blob: EncryptedBlob | None = None,
     api_base: str | EllipsisType | None = ...,
+    litellm_defaults: dict[str, Any] | EllipsisType = ...,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
 
@@ -158,8 +166,10 @@ async def update_model_provider(
     model-provider row holds a live provider credential, so this path is
     guarded from the start.
     """
-    await assert_account_accepts_model_provider(conn, account_id=account_id)
     current = await get_model_provider(conn, model_provider_id, account_id=account_id)
+    await assert_account_accepts_model_provider(
+        conn, account_id=account_id, has_credentials=blob is not None or current.api_key_set
+    )
     if current.archived_at is not None:
         raise ConflictError(
             f"model provider config {model_provider_id} is archived",
@@ -176,6 +186,9 @@ async def update_model_provider(
     if api_base is not ...:
         args.append(api_base)
         sets.append(f"api_base = ${len(args)}")
+    if litellm_defaults is not ...:
+        args.append(json.dumps(litellm_defaults))
+        sets.append(f"litellm_defaults = ${len(args)}::jsonb")
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -231,10 +244,18 @@ async def archive_model_provider(
     return _row_to_model_provider(row)
 
 
-class ResolvedModelProvider(NamedTuple):
-    owner_account_id: str
-    api_base: str | None
-    blob: EncryptedBlob
+class ResolvedModelProvider:
+    def __init__(
+        self,
+        owner_account_id: str,
+        api_base: str | None,
+        blob: EncryptedBlob,
+        litellm_defaults: dict[str, Any] | None = None,
+    ) -> None:
+        self.owner_account_id = owner_account_id
+        self.api_base = api_base
+        self.blob = blob
+        self.litellm_defaults = litellm_defaults or {}
 
 
 async def resolve_model_provider(
@@ -269,7 +290,7 @@ async def resolve_model_provider(
         "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
         "    WHERE a.archived_at IS NULL"
         ") "
-        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce "
+        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce, mp.litellm_defaults "
         "FROM chain c "
         "JOIN model_providers mp ON mp.account_id = c.id "
         "WHERE mp.provider = $2 AND mp.archived_at IS NULL "
@@ -283,4 +304,5 @@ async def resolve_model_provider(
         owner_account_id=row["account_id"],
         api_base=row["api_base"],
         blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
+        litellm_defaults=dict(row["litellm_defaults"]),
     )

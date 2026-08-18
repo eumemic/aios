@@ -57,7 +57,7 @@ from aios.harness.request_body_budget import (
 from aios.logging import get_logger
 from aios.mcp.schema import sanitize_tools_for_provider
 from aios.models.attenuation import api_base_of
-from aios.models.model_providers import ProviderAuth
+from aios.models.model_providers import ProviderAuth, merge_litellm_defaults
 from aios.services.litellm_params import openai_params_in, silent_drop_controls_in
 
 # Anthropic rejects empty text blocks that some OpenRouter models emit on
@@ -931,7 +931,9 @@ def _build_litellm_kwargs(
         kwargs["stream_options"] = {"include_usage": True}
     if tools:
         kwargs["tools"] = sanitize_tools_for_provider(tools)
-    effective_extra = dict(extra or {})
+    effective_extra = merge_litellm_defaults(
+        auth.litellm_defaults if auth is not None else None, extra
+    )
     # Never permit LiteLLM's silent unsupported-parameter path, even when an
     # agent explicitly requests it through ``litellm_extra``.
     #
@@ -967,7 +969,8 @@ def _build_litellm_kwargs(
         for key in ("api_key", "api_base", "base_url"):
             effective_extra.pop(key, None)
     if auth is not None:
-        kwargs["api_key"] = auth.api_key
+        if auth.api_key is not None:
+            kwargs["api_key"] = auth.api_key
         if auth.api_base is not None and api_base_of(effective_extra) is None:
             kwargs["api_base"] = auth.api_base
     # LiteLLM's bundled model-capability map is advisory, not authoritative.
