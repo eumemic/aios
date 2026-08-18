@@ -34,6 +34,7 @@ from aios.sandbox._subprocess import (
     run_subprocess_with_timeout,
 )
 from aios.sandbox.backends.base import (
+    BASE_IMAGE_ID_LABEL_KEY,
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
@@ -195,9 +196,15 @@ class DockerBackend:
                 ["--volume", _format_volume(mount.host_path, mount.sandbox_path, mount.read_only)]
             )
 
+        # Resolve mutable registry tags before launch and stamp the immutable
+        # chain root on cold starts. Resumes retain the snapshot's inherited ID.
+        labels = dict(spec.labels)
+        if spec.snapshot_image is None and _is_registry_image(spec.image):
+            labels[BASE_IMAGE_ID_LABEL_KEY] = await self.image_id(spec.image)
+
         # Labels (the registry/spec builder is responsible for setting the
         # managed/instance/session labels; backend just passes through).
-        for key, value in spec.labels.items():
+        for key, value in labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", SANDBOX_NETWORK_NAME])
@@ -1050,6 +1057,17 @@ class DockerBackend:
         if fields is None:
             raise SandboxBackendError(f"image not found: {image}")
         return fields[1]
+
+    async def image_id(self, image: str) -> str:
+        if _is_registry_image(image):
+            rc, _stdout, stderr_bytes = await run_docker_cli(["docker", "pull", image])
+            if rc != 0:
+                stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+                raise SandboxBackendError(f"docker pull failed for {image}: {stderr}")
+        fields = await self._inspect_image_fields(image)
+        if fields is None:
+            raise SandboxBackendError(f"image not found: {image}")
+        return fields[0]
 
     async def image_labels(self, image: str) -> dict[str, str] | None:
         fields = await self._inspect_image_fields(image)

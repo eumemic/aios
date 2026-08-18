@@ -100,6 +100,7 @@ class FakeBackend:
     # In-memory image table the store seam reads through (image ref → labels);
     # ``None`` value models "absent" for verified-negative ``image_labels``.
     image_labels_by_ref: dict[str, dict[str, str] | None] = field(default_factory=dict)
+    image_ids_by_ref: dict[str, str] = field(default_factory=dict)
     image_sizes_by_ref: dict[str, int] = field(default_factory=dict)
     # Refs ``remove_image`` should refuse (return False) rather than remove.
     refuse_remove_refs: set[str] = field(default_factory=set)
@@ -107,6 +108,10 @@ class FakeBackend:
     # Results ``run_netns_sidecar`` returns, popped in order (apply, verify);
     # default exit-0 when drained. Set to exercise lockdown apply/verify paths.
     sidecar_results: list[CommandResult] = field(default_factory=list)
+
+    async def image_id(self, image: str) -> str:
+        self.calls.append(("image_id", {"image": image}))
+        return self.image_ids_by_ref.get(image, image)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         self.calls.append(("create", {"session_id": spec.session_id}))

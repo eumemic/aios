@@ -443,6 +443,14 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def image_id(self, image: str) -> str:
+        """Resolve ``image`` to its content ID, refreshing registry references.
+
+        Raises :class:`SandboxBackendError` when the reference cannot be
+        resolved. Callers use this identity to detect mutable-tag advancement.
+        """
+        ...
+
     async def image_labels(self, image: str) -> dict[str, str] | None:
         """Return ``image``'s ``.Config.Labels``, or ``None`` if absent.
 
@@ -598,6 +606,7 @@ def split_label_list(value: str | None) -> list[str]:
 
 
 BASE_IMAGE_LABEL_KEY = "aios.base_image"
+BASE_IMAGE_ID_LABEL_KEY = "aios.base_image_id"
 FLATTENED_LABEL_KEY = "aios.flattened"
 FLATTENED_LABEL_VALUE = "true"
 
