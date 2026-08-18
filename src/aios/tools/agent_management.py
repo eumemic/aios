@@ -256,8 +256,9 @@ UPDATE_AGENT_DESCRIPTION = (
     "Update one of your agents in place, creating a new immutable version. Pass the "
     "current 'version' as an optimistic-concurrency token (a stale token is rejected — "
     "re-read with get_agent and retry). Omitted fields are preserved from the prior "
-    "version. The resulting (merged) tool/server surface must still be a subset of your "
-    "own. In-flight sessions are unaffected (they pin their agent version)."
+    "version without requiring you to re-authorize them. Any newly added tool/server, "
+    "model endpoint, or skill authority must be within your own surface. In-flight "
+    "sessions are unaffected (they pin their agent version)."
 )
 ARCHIVE_AGENT_DESCRIPTION = (
     "Archive one of your agents by id; it disappears from list_agents and is hidden "
