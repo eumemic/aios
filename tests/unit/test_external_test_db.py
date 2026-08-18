@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-import subprocess
 from typing import Any
+
+import pytest
+
+
+@pytest.fixture
+def postgres_container() -> None:
+    """Fail if ``db_url`` resolves its Docker-backed fallback fixture."""
+    raise AssertionError("external database selection must not request Docker")
 
 
 def test_db_url_uses_external_database_without_starting_docker(
@@ -11,10 +18,5 @@ def test_db_url_uses_external_database_without_starting_docker(
 ) -> None:
     external_url = "postgresql://aios:aios@127.0.0.1:5432/aios_test"
     monkeypatch.setenv("AIOS_TEST_DB_URL", external_url)
-
-    def fail_if_docker_is_probed(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("external database selection must not probe Docker")
-
-    monkeypatch.setattr(subprocess, "run", fail_if_docker_is_probed)
 
     assert request.getfixturevalue("db_url") == external_url
