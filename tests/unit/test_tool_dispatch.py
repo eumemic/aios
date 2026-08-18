@@ -175,7 +175,7 @@ class TestToolLifecycleEviction:
         monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
 
         evicted: list[str] = []
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
         async with _tool_lifecycle(
             MagicMock(),
             "ses_1",
@@ -242,7 +242,7 @@ class TestUnofferedToolMessage:
 class TestAgentToolExposureEnforcement:
     def test_non_exposed_registered_builtin_is_refused(self) -> None:
         """The model-path authority check must deny registry membership without exposure."""
-        with pytest.raises(tool_dispatch.ToolBail, match="not exposed on this agent_tool surface"):
+        with pytest.raises(ToolBail, match="not exposed on this agent_tool surface"):
             tool_dispatch.enforce_agent_tool_exposure("trigger_list", frozenset())
 
     def test_exposed_builtin_is_admitted(self) -> None:
@@ -446,7 +446,7 @@ class TestCancelDuringStartSpan:
         monkeypatch.setattr(tool_dispatch, "_trigger_sweep", trigger_sweep)
 
         body_ran = asyncio.Event()
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
 
         async def driver() -> None:
             async with _tool_lifecycle(
@@ -504,7 +504,7 @@ class TestCancelDuringStartSpan:
         )
 
         body_ran = asyncio.Event()
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
 
         async def driver() -> None:
             async with _tool_lifecycle(
@@ -657,7 +657,10 @@ class TestParentChannelThreading:
             ),
         )
 
-        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        call: dict[str, Any] = {
+            "id": "tc_1",
+            "function": {"name": "telegram_send", "arguments": "{}"},
+        }
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",
@@ -693,7 +696,10 @@ class TestParentChannelThreading:
             "aios.services.outbound_tool_quota.reserve_outbound_tool_quota", reserve
         )
 
-        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "not json"}}
+        call: dict[str, Any] = {
+            "id": "tc_1",
+            "function": {"name": "telegram_send", "arguments": "not json"},
+        }
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",
@@ -726,7 +732,10 @@ class TestParentChannelThreading:
             AsyncMock(side_effect=RuntimeError("admission store down")),
         )
 
-        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        call: dict[str, Any] = {
+            "id": "tc_1",
+            "function": {"name": "telegram_send", "arguments": "{}"},
+        }
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",
@@ -759,7 +768,10 @@ class TestParentChannelThreading:
             "aios.services.outbound_tool_quota.mark_outbound_dispatch_completed", mark
         )
 
-        call = {"id": "tc_1", "function": {"name": "telegram_send", "arguments": "{}"}}
+        call: dict[str, Any] = {
+            "id": "tc_1",
+            "function": {"name": "telegram_send", "arguments": "{}"},
+        }
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",
@@ -785,7 +797,7 @@ class TestParentChannelThreading:
         append_event_ev: Any = AsyncMock()
         monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
 
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",
@@ -809,7 +821,7 @@ class TestParentChannelThreading:
         append_event_ev: Any = AsyncMock()
         monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
 
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
         # A non-connector parent stamps focal None — the hot path must still
         # PASS it (None), not fall through to the lookup default.
         await tool_dispatch._execute_tool_async(
@@ -837,7 +849,7 @@ class TestParentChannelThreading:
         monkeypatch.setattr(tool_dispatch, "_append_tool_result_event", append_event_ev)
         monkeypatch.setattr(tool_dispatch, "_evict_session_container", lambda _s: None)
 
-        call = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
+        call: dict[str, Any] = {"id": "tc_1", "function": {"name": "demo", "arguments": "{}"}}
         await tool_dispatch._execute_tool_async(
             MagicMock(),
             "ses_1",

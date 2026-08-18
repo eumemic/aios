@@ -2192,16 +2192,13 @@ def _launch_confirmed_calls(
             # same terminal the pre-classification path produced).
             pending_builtin.append(tc)
     if pending_builtin:
+        confirmed_offered_names = {(tool.get("function") or {}).get("name") for tool in mcp_tools}
         launch_tool_calls(
             pool,
             session_id,
             pending_builtin,
             account_id=account_id,
-            exposed_names=frozenset(
-                (tool.get("function") or {}).get("name")
-                for tool in mcp_tools
-                if (tool.get("function") or {}).get("name")
-            ),
+            exposed_names=frozenset(n for n in confirmed_offered_names if n),
         )
     if pending_blocked_mcp:
         launch_mcp_tool_calls(
