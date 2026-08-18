@@ -37,7 +37,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from aios.config import get_settings
@@ -116,6 +116,12 @@ _STOP_ALL_TIMEOUT_S = 8.0
 # GC reconciler tick interval (durable session sandboxes, §5.5): hourly, with
 # an immediate first tick at boot (replacing the old boot-time orphan reap).
 _GC_INTERVAL_SECONDS = 3600.0
+
+# Recency floor for reconcile-by-absence (§5.5 pass 2). A pointer written
+# within this window is the likeliest to be racing the enumeration that would
+# clear it, and the GC re-runs hourly — so deferring a young pointer costs at
+# most one tick and never permanently withholds collection.
+_ABSENCE_RECONCILE_MIN_AGE = timedelta(minutes=15)
 _EGRESS_REFRESH_INTERVAL_SECONDS = 30.0
 _EGRESS_EVICT_AFTER_SUCCESSES = 3
 
@@ -2794,9 +2800,22 @@ class SandboxRegistry:
         *,
         observed_before: datetime,
     ) -> None:
-        """Clear this host's DB pointers missing from a complete daemon view."""
+        """Clear this host's DB pointers missing from a complete daemon view.
+
+        Absence is evidence, never proof, so the clear is scoped away from
+        state that must never be reconciled by absence:
+
+        * sessions this worker currently holds a sandbox for (``_handles``) —
+          their snapshot may be mid-commit, which no DB predicate can observe;
+        * pointers younger than ``_ABSENCE_RECONCILE_MIN_AGE`` — the ones
+          likeliest to be racing this very enumeration.
+
+        Both are *additive* to the ``observed_before`` CAS, which only protects
+        pointers already written when the enumeration started.
+        """
         from aios.harness import runtime
 
+        protected = sorted(self._handles)
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
             cleared = await queries.unscoped_reconcile_absent_host_snapshots(
@@ -2804,6 +2823,8 @@ class SandboxRegistry:
                 instance_id,
                 sorted(present_refs),
                 observed_before=observed_before,
+                protected_session_ids=protected,
+                min_age=_ABSENCE_RECONCILE_MIN_AGE,
             )
         if cleared:
             log.info("sandbox.gc_absent_pointers_reconciled", cleared=cleared)

@@ -893,6 +893,37 @@ class DockerBackend:
                 seen.add(iid)
                 image_ids.append(iid)
         if not image_ids:
+            # An EMPTY listing is the one result this method cannot take at
+            # face value. The GC reconciles DB pointers BY ABSENCE against it,
+            # and an empty view makes EVERY pointer on this host absent — one
+            # statement nulls snapshot_ref/host/bytes for the whole host,
+            # including live sessions. A transiently-empty read is
+            # indistinguishable from a genuinely empty host at this layer, so
+            # the per-id completeness machinery below never runs: an id that
+            # was never listed is invisible to it.
+            #
+            # Require a SECOND, agreeing observation before reporting "nothing
+            # here" as fact. If the re-read finds ids the first read missed,
+            # the first read is PROVED incomplete and must not drive a negative
+            # reconciliation. A genuinely empty host re-reads empty and still
+            # returns [], so the GC does not stall.
+            rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+            if rc != 0:
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: empty listing could not be "
+                    f"confirmed (exit {rc}): "
+                    f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+                )
+            confirm = [line.strip() for line in stdout_bytes.decode("utf-8").splitlines()]
+            if any(confirm):
+                log.warning(
+                    "sandbox.image_enumeration_incomplete",
+                    reason="empty_listing_not_reproducible",
+                    confirmed=len([iid for iid in confirm if iid]),
+                )
+                raise SandboxBackendError(
+                    "incomplete managed image enumeration: empty listing was not reproducible"
+                )
             return []
 
         # Whole-Config form for labels — see ``_inspect_image_fields`` on why a
