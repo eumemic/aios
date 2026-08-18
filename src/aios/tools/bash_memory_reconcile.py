@@ -135,8 +135,17 @@ class _NeverEqualSig(_Sig):
 
 _SENTINEL_SIG = _NeverEqualSig(size=-1, mtime_ns=-1, ctime_ns=-1, ino=-1)
 
-# Snapshot type: (store_id, store_path) -> stat signature.
-_Snapshot = dict[tuple[str, str], _Sig]
+
+class _Snapshot(dict[tuple[str, str], _Sig]):
+    """Signatures plus the host directories captured before exec.
+
+    Retaining stores independently from runtime's echo cache lets the after
+    pass recover writes even if teardown clears that cache mid-command.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.store_dirs: dict[str, Path] = {}
 
 
 class _Unreadable:
@@ -253,8 +262,9 @@ def _snapshot_sigs(session_id: str) -> _Snapshot:
     to run inline in the caller's thread (callers off the event loop via
     ``asyncio.to_thread``).
     """
-    snapshot: _Snapshot = {}
+    snapshot = _Snapshot()
     for store_id, host_dir in _iter_scannable_stores(session_id):
+        snapshot.store_dirs[store_id] = host_dir
         for fpath, store_path in _walk_store_files(host_dir):
             snapshot[(store_id, store_path)] = _stat_sig(fpath)
     return snapshot
@@ -350,7 +360,7 @@ class _ScanResult:
 
 def _scan_after(
     session_id: str,
-    before: _Snapshot,
+    before: dict[tuple[str, str], _Sig],
     snapshot_ns: int,
     *,
     force_hash: bool,
@@ -368,12 +378,19 @@ def _scan_after(
 
     Runs entirely off the event loop (call via ``asyncio.to_thread``).
     """
-    after_sigs: _Snapshot = {}
+    after_sigs: _Snapshot = _Snapshot()
     candidate_bytes: _BytesMap = {}
     scanned_store_ids: set[str] = set()
     candidate_read_count = 0
 
-    for store_id, host_dir in _iter_scannable_stores(session_id):
+    stores = (
+        before.store_dirs.items()
+        if isinstance(before, _Snapshot)
+        else _iter_scannable_stores(session_id)
+    )
+    for store_id, host_dir in stores:
+        if not host_dir.exists() or not (host_dir / MATERIALIZED_MARKER).exists():
+            continue
         scanned_store_ids.add(store_id)
         for fpath, store_path in _walk_store_files(host_dir):
             after_sig = _stat_sig(fpath)
@@ -508,7 +525,7 @@ def _warn_store_unscannable(
 
 
 async def reconcile_memory_mounts(
-    session_id: str, before: _Snapshot, snapshot_ns: int
+    session_id: str, before: dict[tuple[str, str], _Sig], snapshot_ns: int
 ) -> list[str]:
     """Diff memory mount state against ``before``; write DB changes.
 
@@ -544,7 +561,8 @@ async def reconcile_memory_mounts(
     # paying a thread-pool round trip just to discover an empty result.
     # ``runtime.get_session_memory_mounts`` is a plain dict read (no I/O), so
     # this check is free.
-    if not before and not has_writable_memory_mount(session_id):
+    captured_stores = isinstance(before, _Snapshot) and bool(before.store_dirs)
+    if not before and not captured_stores and not has_writable_memory_mount(session_id):
         telemetry.record_candidate_reads(0)
         return []
 
@@ -602,7 +620,7 @@ async def reconcile_memory_mounts(
 
 async def _reconcile_db_phase(
     session_id: str,
-    before: _Snapshot,
+    before: dict[tuple[str, str], _Sig],
     candidate_bytes: _BytesMap,
     real_deletes: list[tuple[str, str]],
     warnings: list[str],
