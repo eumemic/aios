@@ -49,6 +49,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from aios.errors import NotFoundError
 from aios.harness import runtime
 from aios.models.agents import AgentCreate, AgentUpdate
 from aios.services import agents as agents_service
@@ -153,6 +154,12 @@ class _ListAgentsArgs(BaseModel):
     name: str | None = None
 
 
+class _ResolveRoleArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str = Field(min_length=1)
+
+
 # ─── handler plumbing ────────────────────────────────────────────────────────
 #
 # Handlers map service kwargs explicitly (F1) and otherwise let service errors
@@ -242,6 +249,25 @@ async def list_agents_handler(session_id: str, arguments: dict[str, Any]) -> dic
     return {"agents": [a.model_dump(mode="json", exclude=_AGENT_LIST_EXCLUDE) for a in agents]}
 
 
+async def resolve_role_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the v0 role directory: exact live agent name to current agent id."""
+    pool = runtime.require_pool()
+    account_id = await sessions_service.load_session_account_id(pool, session_id)
+    args = tool_input(_ResolveRoleArgs, arguments)
+    agents = await agents_service.list_agents(
+        pool,
+        account_id=account_id,
+        limit=1,
+        name=args.role,
+    )
+    if not agents:
+        raise NotFoundError(
+            f"no live binding for role {args.role!r}",
+            detail={"role": args.role},
+        )
+    return {"role": args.role, "agent_id": agents[0].id}
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_AGENT_DESCRIPTION = (
@@ -277,6 +303,12 @@ LIST_AGENTS_DESCRIPTION = (
     "or surface bodies. Optional 'name' filter; page with 'limit' and 'after' (the last "
     "id seen); a full page means there may be more — call again. To read an agent's "
     "full config, fetch it with get_agent."
+)
+RESOLVE_ROLE_DESCRIPTION = (
+    "Resolve a role to the current live agent definition id by exact agent name. "
+    "Use this immediately before call_agent instead of remembering or caching an agent id. "
+    "Resolution is account-scoped, excludes archived agents, and fails explicitly when "
+    "the role has no live binding."
 )
 
 
@@ -314,6 +346,13 @@ def _register() -> None:
         description=LIST_AGENTS_DESCRIPTION,
         parameters_schema=_ListAgentsArgs.model_json_schema(),
         handler=list_agents_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name="resolve_role",
+        description=RESOLVE_ROLE_DESCRIPTION,
+        parameters_schema=_ResolveRoleArgs.model_json_schema(),
+        handler=resolve_role_handler,
         transport="agent_tool",
     )
 

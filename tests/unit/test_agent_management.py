@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
-from aios.errors import ConflictError, CryptoDecryptError, ForbiddenError
+from aios.errors import ConflictError, CryptoDecryptError, ForbiddenError, NotFoundError
 from aios.models.agents import Agent
 from aios.services import agents as agents_service
 from aios.tools import agent_management as am
@@ -38,7 +38,14 @@ from aios.tools.registry import openai_tool_entry, registry
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
-_AGENT_TOOLS = ("create_agent", "update_agent", "archive_agent", "get_agent", "list_agents")
+_AGENT_TOOLS = (
+    "create_agent",
+    "update_agent",
+    "archive_agent",
+    "get_agent",
+    "list_agents",
+    "resolve_role",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -339,6 +346,28 @@ class TestReturnShape:
         assert summary["name"] == "a" and summary["version"] == 1
         for heavy in ("system", "tools", "mcp_servers", "http_servers", "metadata"):
             assert heavy not in summary
+
+    async def test_resolve_role_returns_current_agent_id(self, monkeypatch: Any) -> None:
+        mock_list = AsyncMock(return_value=[_agent(id="agt_live", name="ops-agent")])
+        monkeypatch.setattr("aios.services.agents.list_agents", mock_list)
+
+        out = await am.resolve_role_handler("ses_1", {"role": "ops-agent"})
+
+        assert out == {"role": "ops-agent", "agent_id": "agt_live"}
+        assert mock_list.await_args is not None
+        assert mock_list.await_args.kwargs == {
+            "account_id": "acc_x",
+            "limit": 1,
+            "name": "ops-agent",
+        }
+
+    async def test_resolve_role_fails_loudly_without_live_agent(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr("aios.services.agents.list_agents", AsyncMock(return_value=[]))
+
+        with pytest.raises(NotFoundError, match="no live binding for role 'ops-agent'") as exc:
+            await am.resolve_role_handler("ses_1", {"role": "ops-agent"})
+
+        assert exc.value.detail == {"role": "ops-agent"}
 
     async def test_archive_agent_returns_archived_flag(self, monkeypatch: Any) -> None:
         mock_archive = AsyncMock(return_value=None)

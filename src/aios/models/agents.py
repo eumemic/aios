@@ -64,6 +64,7 @@ BuiltinToolType = Literal[
     "archive_agent",
     "get_agent",
     "list_agents",
+    "resolve_role",
     "create_goal",
     "list_obligations",
     "defer_obligations",
