@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -369,6 +370,57 @@ async def unscoped_live_workspace_volume_paths(
         """,
     )
     return [row["workspace_volume_path"] for row in rows]
+
+
+async def unscoped_reconcile_absent_host_snapshots(
+    conn: asyncpg.Connection[Any],
+    instance_id: str,
+    present_refs: Sequence[str],
+    *,
+    observed_before: datetime,
+    protected_session_ids: Sequence[str],
+    min_age: timedelta,
+) -> int:
+    """Clear host-owned pointers absent from one complete image enumeration.
+
+    Three independent guards, because absence is only ever *evidence* here and
+    clearing the pointer destroys a session's DB linkage to durable state:
+
+    * ``snapshot_updated_at <= $3`` — compare-and-swap against the enumeration
+      start, so a concurrent commit cannot have its new pointer erased using
+      host observations taken before that commit completed.
+    * ``id <> ALL($4)`` — **liveness**. A session this host is actively running
+      is never reconciled by absence: its snapshot may legitimately be mid-
+      commit, and the CAS above cannot see that (it protects only pointers
+      already *written*, not ones about to be).
+    * ``snapshot_updated_at <= now() - $5`` — **recency floor**. A pointer
+      written moments ago is the likeliest to be racing an enumeration, and the
+      cheapest correct answer for a young pointer is to leave it for the next
+      tick. The GC runs hourly, so deferring a young pointer costs one tick and
+      never permanently withholds collection.
+
+    The first is a race guard; the second and third are the never-delete
+    protections the pointer clear previously lacked entirely.
+    """
+    status: str = await conn.execute(
+        """
+        UPDATE sessions
+           SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
+               snapshot_updated_at = now()
+         WHERE snapshot_host = $1
+           AND snapshot_ref IS NOT NULL
+           AND snapshot_ref <> ALL($2::text[])
+           AND snapshot_updated_at <= $3
+           AND id <> ALL($4::text[])
+           AND snapshot_updated_at <= now() - $5::interval
+        """,
+        instance_id,
+        list(present_refs),
+        observed_before,
+        list(protected_session_ids),
+        min_age,
+    )
+    return int(status.rsplit(" ", 1)[-1])
 
 
 async def gc_snapshot_session_states(

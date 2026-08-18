@@ -372,6 +372,33 @@ async def test_account_cap_pass_skips_waking_session(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_clears_host_pointer_when_canonical_image_is_absent(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance_id = get_settings().instance_id
+    registry = SandboxRegistry(backend=FakeBackend())
+    reconcile = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        "aios.sandbox.registry.queries.unscoped_reconcile_absent_host_snapshots", reconcile
+    )
+
+    await registry._gc_reconcile_absent_pointers(
+        {snapshot_tag(instance_id, "sess_present")}, instance_id, observed_before=_NOW
+    )
+
+    reconcile.assert_awaited_once()
+    args = reconcile.await_args
+    assert args is not None
+    assert args.args[1:] == (instance_id, [snapshot_tag(instance_id, "sess_present")])
+    assert args.kwargs["observed_before"] == _NOW
+    # Absence alone never justifies the clear: the query is also handed the
+    # live-session exclusion set and a recency floor (this registry holds no
+    # handles, so the exclusion set is legitimately empty here).
+    assert args.kwargs["protected_session_ids"] == []
+    assert args.kwargs["min_age"] > timedelta(0)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_snapshot_evicted_this_tick(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

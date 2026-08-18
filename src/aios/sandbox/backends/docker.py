@@ -849,7 +849,24 @@ class DockerBackend:
         return SnapshotOutcome(kind="flattened", image_id=new[0], unique_bytes=new[1], depth=new[2])
 
     async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
-        """Enumerate managed images (incl. untagged residue) via ``docker images -a``."""
+        """Enumerate managed images (incl. untagged residue) via ``docker images -a``.
+
+        The contract is COMPLETE-OR-RAISE, because the GC reconciles DB
+        pointers **by absence** from this list: an id this method could not
+        resolve must never be silently omitted, or "I could not read it" is
+        read downstream as "it does not exist" (aios#2138).
+
+        Every id from the ``docker images`` listing is therefore accounted for
+        exactly once — either it comes back as a record, or its absence is
+        *proved* by a verified-negative single inspect (``No such image``,
+        i.e. the routine race with a concurrent removal). Anything
+        indeterminate — a batch that raised, an unexplained short read, any
+        other inspect error — raises :class:`SandboxBackendError`.
+
+        Proved-absent ids are dropped rather than fataling the tick: failing
+        closed on a genuine vanish would trade "destroys live state" for
+        "never collects", since the GC removes images on every tick.
+        """
         ls_argv = [
             "docker",
             "images",
@@ -876,6 +893,37 @@ class DockerBackend:
                 seen.add(iid)
                 image_ids.append(iid)
         if not image_ids:
+            # An EMPTY listing is the one result this method cannot take at
+            # face value. The GC reconciles DB pointers BY ABSENCE against it,
+            # and an empty view makes EVERY pointer on this host absent — one
+            # statement nulls snapshot_ref/host/bytes for the whole host,
+            # including live sessions. A transiently-empty read is
+            # indistinguishable from a genuinely empty host at this layer, so
+            # the per-id completeness machinery below never runs: an id that
+            # was never listed is invisible to it.
+            #
+            # Require a SECOND, agreeing observation before reporting "nothing
+            # here" as fact. If the re-read finds ids the first read missed,
+            # the first read is PROVED incomplete and must not drive a negative
+            # reconciliation. A genuinely empty host re-reads empty and still
+            # returns [], so the GC does not stall.
+            rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+            if rc != 0:
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: empty listing could not be "
+                    f"confirmed (exit {rc}): "
+                    f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+                )
+            confirm = [line.strip() for line in stdout_bytes.decode("utf-8").splitlines()]
+            if any(confirm):
+                log.warning(
+                    "sandbox.image_enumeration_incomplete",
+                    reason="empty_listing_not_reproducible",
+                    confirmed=len([iid for iid in confirm if iid]),
+                )
+                raise SandboxBackendError(
+                    "incomplete managed image enumeration: empty listing was not reproducible"
+                )
             return []
 
         # Whole-Config form for labels — see ``_inspect_image_fields`` on why a
@@ -883,6 +931,7 @@ class DockerBackend:
         # Docker inspect's ``missingkey=error``.
         fmt = "{{.Id}}\t{{.Parent}}\t{{.Size}}\t{{json .RepoTags}}\t{{json .Config}}"
         out: list[ManagedImage] = []
+        resolved: set[str] = set()
         for offset in range(0, len(image_ids), _MANAGED_INSPECT_BATCH_SIZE):
             batch = image_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
             try:
@@ -890,22 +939,29 @@ class DockerBackend:
                     ["docker", "image", "inspect", "--format", fmt, *batch]
                 )
             except SandboxBackendError as err:
+                # Unreachable/timed-out daemon: nothing about this batch is
+                # known, and a single-id re-probe would hit the same wall.
                 log.warning(
-                    "sandbox.image_inspect_batch_failed",
+                    "sandbox.image_enumeration_incomplete",
                     offset=offset,
                     size=len(batch),
                     error=str(err),
                 )
-                continue
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: inspect batch at offset {offset} failed"
+                ) from err
             if rc != 0:
+                # NOT fatal by itself: ``docker image inspect`` exits nonzero
+                # when ANY id in the batch is gone, which is the routine race
+                # with a concurrent removal. Parse what did come back; the
+                # per-id reconciliation below decides proved-absent vs unknown.
                 log.warning(
-                    "sandbox.image_inspect_batch_failed",
+                    "sandbox.image_inspect_batch_nonzero",
                     offset=offset,
                     size=len(batch),
                     exit_code=rc,
                     stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
                 )
-                continue
             for line in stdout_bytes.decode("utf-8").splitlines():
                 if not line.strip():
                     continue
@@ -915,6 +971,7 @@ class DockerBackend:
                 size = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
                 repo_tags = _parse_json_str_list(parts[3]) if len(parts) > 3 else ()
                 img_labels = _labels_from_config_json(parts[4]) if len(parts) > 4 else {}
+                resolved.add(image_id)
                 out.append(
                     ManagedImage(
                         image_id=image_id,
@@ -924,6 +981,36 @@ class DockerBackend:
                         labels=img_labels,
                     )
                 )
+
+        # Completeness reconciliation. Any listed id the inspect output did not
+        # account for is UNKNOWN, not absent — whatever dropped it (a nonzero
+        # batch, a short/truncated read, an unparseable line). Only a
+        # verified-negative single probe ("No such image") may downgrade
+        # unknown to absent; an image that reads back fine, or a probe that
+        # cannot answer, fails the whole enumeration closed.
+        for iid in image_ids:
+            if iid in resolved:
+                continue
+            try:
+                fields = await self._inspect_image_fields(iid)
+            except SandboxBackendError as err:
+                log.warning(
+                    "sandbox.image_enumeration_incomplete",
+                    image_id=iid[:19],
+                    error=str(err),
+                )
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: {iid[:19]} could not be resolved"
+                ) from err
+            if fields is not None:
+                log.warning("sandbox.image_enumeration_incomplete", image_id=iid[:19])
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: {iid[:19]} was omitted by the "
+                    "batch inspect but still exists"
+                )
+            # Verified absent: it vanished between the listing and the inspect
+            # (a concurrent removal). Genuinely gone, so genuinely omitted.
+            log.info("sandbox.image_vanished_during_enumeration", image_id=iid[:19])
         return out
 
     async def save_image(self, image: str, path: Path) -> None:
