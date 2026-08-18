@@ -965,6 +965,126 @@ class TestEmitInbound4xxDrop:
             )
 
 
+class TestPublishToolsSchema:
+    """Publishing the tool catalog is a root-plane write.  A tenant-authed
+    container is *expected* to be refused and must tolerate the 403 and
+    serve under the stored catalog; every other >=400 still fails boot.
+
+    Regression guard for the 2026-08-17/18 fleet-wide connector outage:
+    migration 0154 re-homed the fleet off the root account, and because
+    this call raised on any >=400, every connector container died at
+    startup on every build — telegram, whatsapp and signal alike.
+    """
+
+    async def test_403_is_tolerated_and_logged(self, probe: _ProbeConnector) -> None:
+        forbidden_body = (
+            '{"error":{"type":"forbidden","message":"publishing a connector\'s '
+            'tools_schema is reserved for the root account",'
+            '"detail":{"connector":"probe"}}}'
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.content = forbidden_body.encode()
+        with (
+            patch(
+                "aios_connector_http.runner._put_tools_schema",
+                AsyncMock(return_value=mock_response),
+            ),
+            structlog.testing.capture_logs() as records,
+        ):
+            await probe._publish_tools_schema()
+
+        forbidden = [r for r in records if r.get("event") == "connector.tools.publish_forbidden"]
+        assert len(forbidden) == 1, "expected one connector.tools.publish_forbidden record"
+        rec = forbidden[0]
+        assert rec["status_code"] == 403
+        assert rec["connector"] == "probe"
+        assert rec["tool_names"] == sorted(probe._tools.keys())
+        # The derived-catalog hash is what an operator diffs against the
+        # stored schema when reconciling drift.
+        assert len(rec["derived_sha256"]) == 64
+        assert "reserved for the root account" in rec["body"]
+        assert not [r for r in records if r.get("event") == "connector.tools.published"]
+
+    @pytest.mark.parametrize("status_code", [401, 422, 500])
+    async def test_other_errors_still_raise(self, probe: _ProbeConnector, status_code: int) -> None:
+        mock_response = MagicMock()
+        mock_response.status_code = status_code
+        mock_response.content = b"nope"
+        with (
+            patch(
+                "aios_connector_http.runner._put_tools_schema",
+                AsyncMock(return_value=mock_response),
+            ),
+            pytest.raises(RuntimeError, match="failed to publish tools schema"),
+        ):
+            await probe._publish_tools_schema()
+
+    async def test_success_logs_published(self, probe: _ProbeConnector) -> None:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        with (
+            patch(
+                "aios_connector_http.runner._put_tools_schema",
+                AsyncMock(return_value=mock_response),
+            ),
+            structlog.testing.capture_logs() as records,
+        ):
+            await probe._publish_tools_schema()
+        published = [r for r in records if r.get("event") == "connector.tools.published"]
+        assert len(published) == 1
+        assert published[0]["tool_count"] == len(probe._tools)
+
+    async def test_run_reaches_setup_when_publish_is_forbidden(self) -> None:
+        """The boot-path claim: a 403 must not stop the container from
+        serving.  ``_publish_tools_schema`` is called outside ``run``'s
+        try block, so raising there skipped ``setup`` and every loop —
+        which is precisely how the fleet went dark."""
+        setup_reached = asyncio.Event()
+
+        class _BootConnector(HttpConnector):
+            connector = "bootprobe"
+
+            @tool()
+            async def ping(self) -> str:
+                return "pong"
+
+            async def setup(self, tg: asyncio.TaskGroup) -> None:
+                setup_reached.set()
+
+            async def load_answered(self) -> dict[str, str | None]:
+                return {}
+
+            async def _discovery_loop(self, tg: asyncio.TaskGroup) -> None:
+                return
+
+            async def _tool_loop(self) -> None:
+                return
+
+            async def _management_call_loop(self) -> None:
+                return
+
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_response.content = b"forbidden"
+
+        mock_client_cm = MagicMock()
+        mock_client_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_client_cm.__aexit__ = AsyncMock(return_value=False)
+
+        c = _BootConnector(base_url="http://x", token="aios_runtime_x")
+        with (
+            patch("aios_connector_http.runner.Client", return_value=mock_client_cm),
+            patch(
+                "aios_connector_http.runner._put_tools_schema",
+                AsyncMock(return_value=mock_response),
+            ),
+        ):
+            await c.run()
+
+        assert setup_reached.is_set(), "a forbidden publish must not abort the boot path"
+
+
 class TestFocalChannelHelper:
     async def test_returns_canonical_string(self, probe: _ProbeConnector) -> None:
         assert probe.focal_channel("account-x", "chat-42") == "probe/account-x/chat-42"
