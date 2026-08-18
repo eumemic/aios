@@ -129,16 +129,24 @@ async def find_agent_by_name(name):
     return None, None
 
 
-async def find_session_by_agent_name(agent_name, agent_id):
-    """Find a session by its agent_id. Returns (session_dict, None) or (None, error)."""
+async def find_lane_session(agent_id, title):
+    """Find THIS LANE's launcher session. Returns (session_dict, None) or (None, error).
+
+    Identity is (agent_id, title) — the title is the lane-specific name carried
+    by the lock. An agent may legitimately own many active sessions, so taking
+    "the first non-archived session for the agent" can adopt an unrelated
+    bystander and overwrite its title/vault bindings. Archived sessions are
+    skipped: archived means retired, not absent.
+    """
     resp = await aios_api("GET", f"/v1/sessions?agent_id={agent_id}")
     if is_error(resp):
         return None, f"list sessions failed: {resp}"
     data = body(resp)
     items = data.get("data", []) if data else []
-    # Return the first non-archived session for this agent
     for item in items:
-        if item.get("status") != "archived":
+        if item.get("status") == "archived":
+            continue
+        if item.get("title") == title:
             return item, None
     return None, None
 
@@ -286,7 +294,8 @@ async def ensure_session(lock_session, agent_id):
     agent_name = lock_session["agent_id"]  # This is the agent NAME in the lock
     log(f"ensure_session for agent: {agent_name} (resolved id: {agent_id})")
 
-    live, err = await find_session_by_agent_name(agent_name, agent_id)
+    lane_title = lock_session.get("title")
+    live, err = await find_lane_session(agent_id, lane_title)
     if err:
         return None, {"object_kind": "session", "object_name": agent_name, "action": "error",
                        "error": err}
@@ -309,11 +318,27 @@ async def ensure_session(lock_session, agent_id):
                       "object_id": sid}
 
     sid = live["id"]
-    # Sessions don't have optimistic concurrency — update vault_ids if needed
+
+    # environment_id is immutable: no update can reconcile it. Silently accepting
+    # a mismatch would run the lane in the wrong environment while reporting
+    # success, so drift on it FAILS rather than being ignored.
+    want_env = lock_session["environment_id"]
+    live_env = live.get("environment_id")
+    if live_env is not None and live_env != want_env:
+        return sid, {"object_kind": "session", "object_name": agent_name, "action": "error",
+                      "object_id": sid,
+                      "error": (f"immutable field drift: environment_id is {live_env!r}, "
+                                f"lock requires {want_env!r} (session {sid} cannot be "
+                                f"reconciled in place)")}
+
+    # Sessions don't have optimistic concurrency — update mutable fields if needed
     changed = False
     if sorted(lock_session.get("vault_ids", [])) != sorted(live.get("vault_ids", [])):
         changed = True
     if lock_session.get("title") != live.get("title"):
+        changed = True
+    want_awi = lock_session.get("archive_when_idle", False)
+    if live.get("archive_when_idle") is not None and want_awi != live.get("archive_when_idle"):
         changed = True
 
     if not changed:
@@ -323,6 +348,7 @@ async def ensure_session(lock_session, agent_id):
     update_body = {
         "title": lock_session.get("title"),
         "vault_ids": lock_session.get("vault_ids", []),
+        "archive_when_idle": want_awi,
     }
     resp = await aios_api("PUT", f"/v1/sessions/{sid}", update_body)
     if is_error(resp):
@@ -342,10 +368,14 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
         return {"object_kind": "trigger", "object_name": trigger_name, "action": "error",
                 "error": err}
 
-    # Build the trigger source and action
-    source = {"kind": "cron", "schedule": lock_trigger["source"]["schedule"]}
-    if lock_trigger["source"].get("timezone", "UTC") != "UTC":
-        source["timezone"] = lock_trigger["source"]["timezone"]
+    # Build the trigger source and action. timezone is always emitted so the
+    # desired payload is a COMPLETE replace-semantic shape — omitting it when it
+    # equals the default made drift on it invisible to the comparison below.
+    source = {
+        "kind": "cron",
+        "schedule": lock_trigger["source"]["schedule"],
+        "timezone": lock_trigger["source"].get("timezone", "UTC"),
+    }
 
     action = {
         "kind": "workflow",
@@ -384,6 +414,12 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
         changed = True
     if lock_trigger.get("enabled", True) != live.get("enabled"):
         changed = True
+    # A live trigger differing only in timezone or workflow pin is still
+    # divergent from the lock; omitting these reported it as "unchanged".
+    if source.get("timezone") != live_source.get("timezone", "UTC"):
+        changed = True
+    if action.get("workflow_version") != live_action.get("workflow_version"):
+        changed = True
 
     if not changed:
         return {"object_kind": "trigger", "object_name": trigger_name, "action": "unchanged",
@@ -392,14 +428,9 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
     # TriggerUpdate uses replace semantics for source/action
     update_body = {
         "source": source,
-        "action": {
-            **action,
-            # WorkflowActionReplace requires all fields explicitly
-            "workflow_version": action.get("workflow_version"),
-            "version": action.get("version"),
-            "input_template": action.get("input_template"),
-            "vault_ids": action.get("vault_ids", []),
-        },
+        # `action` is already the complete WorkflowActionReplace shape. It has no
+        # `version` field, so emitting one sent an undefined key on every update.
+        "action": dict(action),
         "enabled": lock_trigger.get("enabled", True),
     }
     resp = await aios_api("PUT", f"/v1/sessions/{session_id}/triggers/{trigger_name}", update_body)

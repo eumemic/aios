@@ -82,6 +82,8 @@ class FakeWorld:
         trigger_enabled: bool = True,
         deployed_script_has_repo: bool = True,
         workflow_get_fails: bool = False,
+        seed_sessions: list[dict[str, Any]] | None = None,
+        seed_triggers: list[dict[str, Any]] | None = None,
     ) -> None:
         self.lock = lock if lock is not None else _lock()
         self.trigger_create_fails = trigger_create_fails
@@ -93,6 +95,13 @@ class FakeWorld:
         self.agents: dict[str, Any] = {}
         self.sessions: dict[str, Any] = {}
         self.triggers: dict[str, Any] = {}
+        # Payloads the script actually PUT, so tests can assert on the wire shape.
+        self.session_updates: list[dict[str, Any]] = []
+        self.trigger_updates: list[dict[str, Any]] = []
+        for sess in seed_sessions or []:
+            self.sessions[sess["id"]] = dict(sess)
+        for trig in seed_triggers or []:
+            self.triggers[trig["name"]] = dict(trig)
 
     def tool(self) -> Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]:
         async def _tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -159,18 +168,47 @@ class FakeWorld:
                 return _ok(self.agents[payload["name"]])
 
             if method == "GET" and path.startswith("/v1/sessions?"):
-                return _ok({"data": list(self.sessions.values())})
+                # The real API filters by the agent_id query param.
+                want = path.split("agent_id=")[1].split("&")[0]
+                return _ok(
+                    {"data": [s for s in self.sessions.values() if s.get("agent_id") == want]}
+                )
             if method == "POST" and path == "/v1/sessions":
                 self.sessions["s"] = {
                     "id": "sess-1",
                     "status": "active",
+                    "agent_id": payload.get("agent_id"),
+                    "environment_id": payload.get("environment_id"),
+                    "archive_when_idle": payload.get("archive_when_idle", False),
                     "title": payload.get("title"),
-                    "vault_ids": [],
+                    "vault_ids": payload.get("vault_ids", []),
                 }
                 return _ok(self.sessions["s"])
+            if method == "PUT" and path.startswith("/v1/sessions/") and "/triggers/" not in path:
+                self.session_updates.append(payload)
+                sid = path.rsplit("/", 1)[1]
+                for sess in self.sessions.values():
+                    if sess["id"] == sid:
+                        sess.update(
+                            {k: v for k, v in payload.items() if k != "version"},
+                        )
+                        return _ok(sess)
+                return {"status": 404, "body": json.dumps({"detail": "no session"})}
 
             if method == "GET" and path.endswith("/triggers"):
                 return _ok({"data": list(self.triggers.values())})
+            if method == "PUT" and "/triggers/" in path:
+                self.trigger_updates.append(payload)
+                name = path.rsplit("/", 1)[1]
+                live = self.triggers.get(name)
+                if live is None:
+                    return {"status": 404, "body": json.dumps({"detail": "no trigger"})}
+                live.update(
+                    source=payload["source"],
+                    action=payload["action"],
+                    enabled=payload.get("enabled", True),
+                )
+                return _ok(live)
             if method == "POST" and path.endswith("/triggers"):
                 if self.trigger_create_fails:
                     return {"status": 500, "body": json.dumps({"detail": "down"})}
@@ -411,3 +449,155 @@ class TestFailedChecksHelper:
     def test_diagnostic_error_keys_are_not_treated_as_checks(self) -> None:
         checks = {"trigger_enabled": True, "trigger_error": "some detail"}
         assert self._failed_checks()(checks) == []
+
+
+# ── Remaining review findings (aios#2063, verdict 2026-08-14) ────────────────
+
+
+def _sess(
+    sid: str,
+    *,
+    title: str,
+    agent: str = "ag-1",
+    vault_ids: list[str] | None = None,
+    environment_id: str = "env",
+    archive_when_idle: bool = False,
+    status: str = "active",
+) -> dict[str, Any]:
+    return {
+        "id": sid,
+        "status": status,
+        "agent_id": agent,
+        "environment_id": environment_id,
+        "archive_when_idle": archive_when_idle,
+        "title": title,
+        "vault_ids": vault_ids if vault_ids is not None else [],
+    }
+
+
+class TestSessionIdentity:
+    """Finding 1: activation must not adopt/mutate an unrelated session.
+
+    An agent may legitimately own many active sessions. Selecting 'the first
+    non-archived one' can overwrite a bystander session's title and vault
+    bindings and attach the lane's cron trigger to it.
+    """
+
+    def test_unrelated_session_is_not_hijacked(self) -> None:
+        """A pre-existing unrelated session must be left completely untouched."""
+        bystander = _sess("sess-other", title="someone else's work", vault_ids=["v-private"])
+        world = FakeWorld(seed_sessions=[bystander])
+
+        result = world.activate()
+
+        untouched = world.sessions["sess-other"]
+        assert untouched["title"] == "someone else's work"
+        assert untouched["vault_ids"] == ["v-private"]
+        assert world.session_updates == []
+        # The lane got its own session rather than adopting the bystander.
+        assert _actions(result)["session"] == "created"
+        lane_ids = {s["id"] for s in world.sessions.values() if s["title"] == "t"}
+        assert lane_ids and "sess-other" not in lane_ids
+
+    def test_lane_session_is_readopted_not_duplicated(self) -> None:
+        """The lane's OWN session (matching lane identity) is still adopted."""
+        lane = _sess("sess-lane", title="t")
+        world = FakeWorld(seed_sessions=[_sess("sess-other", title="unrelated"), lane])
+
+        result = world.activate()
+
+        assert _actions(result)["session"] == "unchanged"
+        assert len(world.sessions) == 2  # nothing new created
+
+    def test_immutable_environment_drift_fails_loudly(self) -> None:
+        """environment_id cannot be changed by update; silent acceptance is wrong."""
+        drifted = _sess("sess-lane", title="t", environment_id="env-DIFFERENT")
+        world = FakeWorld(seed_sessions=[drifted])
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "environment_id" in result["error"]
+
+    def test_archive_when_idle_drift_is_reconciled(self) -> None:
+        """archive_when_idle drift must be detected, not silently accepted."""
+        drifted = _sess("sess-lane", title="t", archive_when_idle=True)
+        world = FakeWorld(seed_sessions=[drifted])
+
+        result = world.activate()
+
+        assert _actions(result)["session"] == "updated"
+        assert world.sessions["sess-lane"]["archive_when_idle"] is False
+
+
+def _live_trigger(
+    *,
+    schedule: str = "0 * * * *",
+    timezone: str = "UTC",
+    workflow_version: int | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": "tr-1",
+        "name": "trig",
+        "enabled": enabled,
+        "next_fire": "2026-01-01T00:00:00Z",
+        "source": {"kind": "cron", "schedule": schedule, "timezone": timezone},
+        "action": {
+            "kind": "workflow",
+            "workflow_id": "wf-1",
+            "input_template": {},
+            "vault_ids": [],
+            "workflow_version": workflow_version,
+        },
+    }
+
+
+class TestTriggerDriftDetection:
+    """Finding 2: drift comparison omits timezone and workflow_version."""
+
+    def test_timezone_drift_is_detected(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["source"]["timezone"] = "America/Los_Angeles"
+        world = FakeWorld(lock=lock, seed_triggers=[_live_trigger(timezone="UTC")])
+
+        result = world.activate()
+
+        assert _actions(result)["trigger"] == "updated"
+        assert world.triggers["trig"]["source"]["timezone"] == "America/Los_Angeles"
+
+    def test_workflow_version_drift_is_detected(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["workflow_version"] = 7
+        world = FakeWorld(lock=lock, seed_triggers=[_live_trigger(workflow_version=3)])
+
+        result = world.activate()
+
+        assert _actions(result)["trigger"] == "updated"
+        assert world.triggers["trig"]["action"]["workflow_version"] == 7
+
+    def test_matching_trigger_is_still_unchanged(self) -> None:
+        """The drift fix must not make every run report a spurious update."""
+        lock = _lock()
+        lock["cron_trigger"]["source"]["timezone"] = "America/Los_Angeles"
+        lock["cron_trigger"]["action"]["workflow_version"] = 7
+        world = FakeWorld(
+            lock=lock,
+            seed_triggers=[_live_trigger(timezone="America/Los_Angeles", workflow_version=7)],
+        )
+
+        result = world.activate()
+
+        assert _actions(result)["trigger"] == "unchanged"
+        assert world.trigger_updates == []
+
+    def test_replace_payload_carries_no_undefined_version_field(self) -> None:
+        """The action never models `version`; emitting version=None is a bug."""
+        lock = _lock()
+        lock["cron_trigger"]["action"]["workflow_version"] = 7
+        world = FakeWorld(lock=lock, seed_triggers=[_live_trigger(workflow_version=3)])
+
+        world.activate()
+
+        assert world.trigger_updates, "expected a trigger PUT"
+        assert "version" not in world.trigger_updates[0]["action"]
