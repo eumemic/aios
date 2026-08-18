@@ -13,7 +13,16 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from aios.actors import Actor
 from aios.logging import get_logger
@@ -615,6 +624,78 @@ def resolve_http_server_refs(
 # ── Tool declaration ──────────────────────────────────────────────────────────
 
 
+ToolsetName = Literal[
+    "goal_management",
+    "delegation",
+    "workflow_management",
+    "trigger_management",
+    "agent_management",
+]
+
+
+class ToolsetSpec(BaseModel):
+    """Ingress-only reference to an immutable, curated capability set.
+
+    Toolsets are expanded while validating an agent create/update request. They
+    are never persisted or returned: the resolved agent surface contains only
+    ordinary :class:`ToolSpec` entries, making every granted capability explicit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["toolset"]
+    name: ToolsetName
+    version: Literal[1]
+
+
+# Each tuple is immutable by convention: changing a released tuple would make
+# identical authoring input grant different authority. Add version 2 instead.
+_TOOLSET_CATALOG: dict[tuple[ToolsetName, int], tuple[BuiltinToolType, ...]] = {
+    ("goal_management", 1): (
+        "create_goal",
+        "list_obligations",
+        "defer_obligations",
+    ),
+    ("delegation", 1): (
+        "call_session",
+        "call_agent",
+        "call_workflow",
+        "list_related_sessions",
+        "stop_task",
+        "list_tasks",
+    ),
+    ("workflow_management", 1): (
+        "create_workflow",
+        "update_workflow",
+        "archive_workflow",
+        "unarchive_workflow",
+        "resume_gate",
+        "get_workflow",
+        "list_workflows",
+        "call_workflow",
+        "get_run",
+        "list_runs",
+        "archive_run",
+        "list_run_events",
+    ),
+    ("trigger_management", 1): (
+        "trigger_create",
+        "trigger_remove",
+        "trigger_update",
+        "trigger_list",
+        "list_account_triggers",
+    ),
+    ("agent_management", 1): (
+        "create_agent",
+        "update_agent",
+        "archive_agent",
+        "get_agent",
+        "list_agents",
+        "call_agent",
+    ),
+}
+
+
 class ToolSpec(BaseModel):
     """One entry in an agent's ``tools`` list.
 
@@ -734,6 +815,77 @@ class ToolSpec(BaseModel):
         return self
 
 
+ToolIngressSpec = ToolSpec | ToolsetSpec
+_TOOL_INGRESS_ADAPTER: TypeAdapter[ToolIngressSpec] = TypeAdapter(ToolIngressSpec)
+
+
+def _parse_and_expand_toolsets(raw: Any) -> Any:
+    """Parse an ingress tool list before its members validate as persisted specs."""
+    if not isinstance(raw, list):
+        return raw
+    entries: list[ToolIngressSpec] = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("type") == "toolset":
+            key = (item.get("name"), item.get("version"))
+            if key not in _TOOLSET_CATALOG:
+                raise ValueError(f"unknown toolset {key[0]!r} version {key[1]!r}")
+        entries.append(_TOOL_INGRESS_ADAPTER.validate_python(item))
+    return expand_toolsets(entries)
+
+
+def expand_toolsets(tools: list[ToolIngressSpec]) -> list[ToolSpec]:
+    """Materialize curated toolsets, with explicit declarations winning collisions."""
+    explicit_counts: dict[str, int] = {}
+    explicit: dict[str, ToolSpec] = {}
+    for tool in tools:
+        if isinstance(tool, ToolSpec):
+            explicit_counts[tool.type] = explicit_counts.get(tool.type, 0) + 1
+            explicit[tool.type] = tool
+
+    out: list[ToolSpec] = []
+    emitted: set[str] = set()
+    consumed_overrides: set[str] = set()
+    for entry in tools:
+        if isinstance(entry, ToolSpec):
+            if entry.type not in consumed_overrides:
+                out.append(entry)
+                emitted.add(entry.type)
+            continue
+        for member in _TOOLSET_CATALOG[(entry.name, entry.version)]:
+            if member in emitted:
+                continue
+            emitted.add(member)
+            if explicit_counts.get(member) == 1:
+                out.append(explicit[member])
+                consumed_overrides.add(member)
+            else:
+                out.append(ToolSpec(type=member))
+
+    _warn_incoherent_tools(out)
+    return out
+
+
+def _warn_incoherent_tools(tools: list[ToolSpec]) -> None:
+    """Warn when explicitly-authored protocol capabilities are incomplete."""
+    enabled = {tool.type for tool in tools if tool.enabled}
+    goal_protocol = frozenset(_TOOLSET_CATALOG[("goal_management", 1)])
+    selected = enabled & goal_protocol
+    missing = goal_protocol - enabled
+    if selected and missing:
+        log.warning(
+            "agent.tool_protocol_incomplete",
+            protocol="goal_management",
+            selected=sorted(selected),
+            missing=sorted(missing),
+        )
+
+
+ResolvedIngressTools = Annotated[
+    list[ToolSpec],
+    BeforeValidator(_parse_and_expand_toolsets, json_schema_input_type=list[ToolIngressSpec]),
+]
+
+
 class AgentCreate(BaseModel):
     """Request body for `POST /v1/agents`."""
 
@@ -745,7 +897,7 @@ class AgentCreate(BaseModel):
         description="LiteLLM model string, e.g. 'anthropic/claude-opus-4-6'.",
     )
     system: str = Field(default="", description="System prompt; empty by default.")
-    tools: list[ToolSpec] = Field(default_factory=list)
+    tools: ResolvedIngressTools = Field(default_factory=list)
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
@@ -808,7 +960,7 @@ class AgentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     model: str | None = Field(default=None, min_length=1)
     system: str | None = None
-    tools: list[ToolSpec] | None = None
+    tools: ResolvedIngressTools | None = None
     skills: list[AgentSkillRef] | None = None
     mcp_servers: list[McpServerSpec] | None = None
     http_servers: list[HttpServerSpec] | None = None

@@ -11753,7 +11753,14 @@
           },
           "tools": {
             "items": {
-              "$ref": "#/components/schemas/ToolSpec"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/ToolsetSpec"
+                }
+              ]
             },
             "type": "array",
             "title": "Tools"
@@ -11907,7 +11914,14 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/ToolSpec"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ToolSpec"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ToolsetSpec"
+                    }
+                  ]
                 },
                 "type": "array"
               },
@@ -17986,6 +18000,40 @@
         ],
         "title": "ToolsSchemaUpdate",
         "description": "Body for ``PUT /v1/connectors/{connector}/tools_schema``."
+      },
+      "ToolsetSpec": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "toolset",
+            "title": "Type"
+          },
+          "name": {
+            "type": "string",
+            "enum": [
+              "goal_management",
+              "delegation",
+              "workflow_management",
+              "trigger_management",
+              "agent_management"
+            ],
+            "title": "Name"
+          },
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "name",
+          "version"
+        ],
+        "title": "ToolsetSpec",
+        "description": "Ingress-only reference to an immutable, curated capability set.\n\nToolsets are expanded while validating an agent create/update request. They\nare never persisted or returned: the resolved agent surface contains only\nordinary :class:`ToolSpec` entries, making every granted capability explicit."
       },
       "TraceEntry": {
         "properties": {
