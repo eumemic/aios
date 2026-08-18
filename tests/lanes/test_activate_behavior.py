@@ -526,7 +526,7 @@ class TestFailedChecksHelper:
 def _sess(
     sid: str,
     *,
-    title: str,
+    title: str | None,
     agent: str = "ag-1",
     vault_ids: list[str] | None = None,
     environment_id: str = "env",
