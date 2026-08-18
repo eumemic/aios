@@ -501,15 +501,16 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # ``-n 4 --dist=loadfile`` runs the docker shard in four parallel
-        # xdist workers, one whole-file at a time.  ``loadfile`` is load-
-        # bearing: ``test_memory_cross_session_sync.py`` uses a module-
-        # scoped ``shared_docker_harness`` fixture which would be torn
-        # down + rebuilt per test under the default ``load`` dist.  Four
-        # workers matches public-repo ubuntu-latest runners (4 vCPU /
-        # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
-        # Each worker amortizes its own testcontainer-Postgres + Docker
-        # setup over ~55 tests.
+        # ``-n 2 --dist=loadfile`` bounds Docker-backed concurrency to two
+        # workers. Four workers each owned a testcontainers Postgres while
+        # concurrently creating sandboxes, proxies, and iptables sidecars on
+        # the same 4-vCPU hosted runner; the resulting daemon/network pressure
+        # produced unrelated pass-on-rerun failures (#1967), including an
+        # in-container curl timing out before reaching its recorder. Two
+        # workers retain file-level parallelism without oversubscribing Docker.
+        # ``loadfile`` is load-bearing: ``test_memory_cross_session_sync.py``
+        # uses a module-scoped ``shared_docker_harness`` fixture which would be
+        # torn down + rebuilt per test under the default ``load`` dist.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -521,24 +522,10 @@ jobs:
         # ``docker`` and run here as required checks, red like a correctness
         # bug. The advisory ``perf`` tests run in the separate non-blocking
         # step below (same job, never a required check).
-        # Docker-backed E2E occasionally sees transient daemon/container startup
-        # failures on shared runners. Retry only the recorded failures once; a
-        # deterministic regression still fails the required check.
+        # Fail directly: retrying all recorded failures made a genuinely red
+        # required check indistinguishable from runner contention.
         run: |
-          if ! uv run pytest tests/e2e -q -m "docker and not perf" -n 4 --dist=loadfile --durations=25; then
-            echo "::warning::FLAKE_RETRY e2e-docker"
-            echo "FLAKE_RETRY e2e-docker" >> "$GITHUB_STEP_SUMMARY"
-            echo "FLAKE_RETRY e2e-docker" >> flake-retry-e2e-docker.txt
-            uv run pytest tests/e2e -q -m "docker and not perf" --durations=25 --lf
-          fi
-
-      - name: Upload docker E2E flake-retry marker
-        if: always() && needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake-retry-e2e-docker
-          path: flake-retry-e2e-docker.txt
-          if-no-files-found: ignore
+          uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile --durations=25
 
       - name: E2E perf backstop (docker shard, ADVISORY — non-blocking)
         # The ``perf``-marked scaling backstops (#1661): loud advisory signal,
