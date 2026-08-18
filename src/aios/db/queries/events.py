@@ -91,7 +91,7 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
 # subset of :data:`aios.harness.tokens.CONTENT_CLASSES` -- the ``system`` and
 # ``tools`` classes come from the caller's overhead split, never from a stored
 # message row, so they carry no cumulative column.
-_MESSAGE_CONTENT_CLASSES = ("text", "tool_result", "thinking", "tool_use")
+_MESSAGE_CONTENT_CLASSES = ("text", "tool_result", "thinking", "tool_use", "image")
 
 # Per-class cumulative-mass column names, keyed by content class. Kept next to
 # the classifier so the append-time increment and the read-time seek share one
@@ -101,6 +101,7 @@ _CLASS_MASS_COLUMN = {
     "tool_result": "cumulative_tool_result_mass",
     "thinking": "cumulative_thinking_mass",
     "tool_use": "cumulative_tool_use_mass",
+    "image": "cumulative_image_mass",
 }
 
 
@@ -159,7 +160,7 @@ async def _latest_cumulative_state(
     row = await conn.fetchrow(
         "SELECT cumulative_tokens, cumulative_messages, "
         "       cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
         "FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
         "AND cumulative_tokens IS NOT NULL "
@@ -180,6 +181,7 @@ async def _latest_cumulative_state(
             "tool_result": row["cumulative_tool_result_mass"],
             "thinking": row["cumulative_thinking_mass"],
             "tool_use": row["cumulative_tool_use_mass"],
+            "image": row["cumulative_image_mass"],
         },
     )
 
@@ -456,6 +458,7 @@ async def model_token_class_ratio_fit(
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND data->>'model' = $1
+          AND (data->>'token_baseline_v')::smallint = 2
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -518,6 +521,7 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND created_at >= now() - interval '24 hours'
+          AND (data->>'token_baseline_v')::smallint = 2
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -600,8 +604,9 @@ def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
     for idx, j in enumerate(active):
         c = coefs[idx]
         # Clamp to the physical range; the windower divides by the blend.
-        c = max(_MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
-        out[classes[j]] = c
+        cls = classes[j]
+        c = max(0.001 if cls == "image" else _MODEL_TOKEN_CLASS_MIN, min(_MODEL_TOKEN_CLASS_MAX, c))
+        out[cls] = c
     return out
 
 
@@ -768,6 +773,8 @@ def _event_token_delta(
     data: dict[str, Any],
     orig_channel: str | None,
     focal_at_arrival: str | None,
+    *,
+    image_aware: bool = True,
 ) -> int:
     """Approximate per-event token contribution, computed pre-transaction.
 
@@ -796,8 +803,8 @@ def _event_token_delta(
         # bounded drift the in-lock code accepted (see ``append_event``).
         rendered = render_user_event(data, orig_channel, focal_at_arrival, datetime.now(UTC))
         separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
-        return approx_tokens([rendered, separator])
-    return approx_tokens([data])
+        return approx_tokens([rendered, separator], image_aware=image_aware)
+    return approx_tokens([data], image_aware=image_aware)
 
 
 async def find_tool_result_event(
@@ -1163,6 +1170,26 @@ class _PrecomputedAppend(NamedTuple):
 
     token_delta: int
     resolved_tool_channel: str | None
+    # The SAME event priced under the v1 (image-blind) baseline.  The two
+    # baselines differ only for messages carrying an ``image_url`` part, so
+    # this is the identical object for every other event and costs nothing
+    # extra to carry.  ``append_event`` selects between them using the
+    # session's ``token_baseline_v`` read under the row lock — the delta and
+    # the recorded marker therefore ALWAYS describe the same arithmetic, even
+    # if the backfill flips the marker between this pre-lock compute and the
+    # lock (issue #2050 review).
+    token_delta_v1: int
+
+
+def message_has_image(data: dict[str, Any]) -> bool:
+    """Lazy re-export of :func:`aios.harness.tokens.message_has_image`.
+
+    Imported inside the function body to preserve the litellm-bootstrap
+    deferral the surrounding module relies on.
+    """
+    from aios.harness.tokens import message_has_image as _has
+
+    return _has(data)
 
 
 async def precompute_event_append(
@@ -1197,6 +1224,7 @@ async def precompute_event_append(
     from aios.db.queries import sessions as _sessions_q
 
     delta = 0
+    delta_v1 = 0
     if kind == "message":
         if data.get("role") == "user":
             # USER token count needs the focal channel to render the as-sent
@@ -1208,8 +1236,18 @@ async def precompute_event_append(
                 conn, session_id, account_id=account_id
             )
             delta = _event_token_delta(kind, data, orig_channel, pre_focal)
+            delta_v1 = (
+                _event_token_delta(kind, data, orig_channel, pre_focal, image_aware=False)
+                if message_has_image(data)
+                else delta
+            )
         else:
             delta = _event_token_delta(kind, data, orig_channel, None)
+            delta_v1 = (
+                _event_token_delta(kind, data, orig_channel, None, image_aware=False)
+                if message_has_image(data)
+                else delta
+            )
 
     # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
     # dispatch path supplies it directly (default ``...`` → look it up).
@@ -1223,7 +1261,11 @@ async def precompute_event_append(
             else tool_parent_channel
         )
 
-    return _PrecomputedAppend(token_delta=delta, resolved_tool_channel=resolved_tool_channel)
+    return _PrecomputedAppend(
+        token_delta=delta,
+        resolved_tool_channel=resolved_tool_channel,
+        token_delta_v1=delta_v1,
+    )
 
 
 async def append_event(
@@ -1276,10 +1318,14 @@ async def append_event(
     Drift note (issue #862): a USER message's ``cumulative_tokens`` is
     counted against the focal read BEFORE the lock, so if a ``switch_channel``
     commits between that pre-read and the lock, the token count MAY reflect
-    the pre-switch focal — an acceptable, bounded drift in the same class as
-    the documented vision/tz drifts below (absorbed by ``model_token_class_ratios``
-    calibration).  The STORED ``focal_channel_at_arrival`` is always the
-    locked RETURNING value, never the pre-read.
+    the pre-switch focal — an acceptable, bounded drift, absorbed by
+    ``model_token_class_ratios`` calibration because the mis-rendered envelope
+    is still COUNTED (a ratio error is exactly what the scaling layer corrects).
+    Do NOT read the image under-count noted below as being in this class: it is
+    a CONSTANT against a linear truth, is not counted at all, and calibration
+    therefore cannot touch it (issue #2050).  The STORED
+    ``focal_channel_at_arrival`` is always the locked RETURNING value, never
+    the pre-read.
     """
     new_id = make_id(EVENT)
     data_json = json.dumps(data)
@@ -1401,7 +1447,7 @@ async def append_event(
             "            THEN channels || focal_channel "
             "        ELSE channels END "
             "WHERE id = $1 AND account_id = $2 AND archived_at IS NULL "
-            "RETURNING last_event_seq, focal_channel",
+            "RETURNING last_event_seq, focal_channel, token_baseline_v",
             session_id,
             account_id,
             is_user_message,
@@ -1425,6 +1471,7 @@ async def append_event(
             raise NotFoundError(f"session {session_id} not found", detail={"id": session_id})
         seq = seq_row["last_event_seq"]
         focal_at_arrival: str | None = seq_row["focal_channel"]
+        token_baseline_v = int(seq_row["token_baseline_v"])
 
         # cumulative_tokens = prev running sum + the pre-computed per-event
         # delta.  ``prev`` is the ONLY query between the seq-allocating UPDATE
@@ -1433,13 +1480,24 @@ async def append_event(
         # serialize behind it.  The running sum stays race-free because
         # ``prev`` is read under the session row lock.
         #
-        # NOTE(vision/tz): the USER ``delta`` was rendered without
-        # ``model``/``session_id`` and in the default UTC zone, so inlined
-        # images undercount by ~55 LiteLLM tokens each and a non-UTC account's
-        # envelope is a few tokens narrower than build time.  Both drifts are
-        # bounded and absorbed by ``model_token_class_ratios`` calibration in
+        # NOTE(tz): the USER ``delta`` was rendered in the default UTC zone,
+        # so a non-UTC account's envelope is a few tokens narrower than at
+        # build time.  THAT drift is bounded and absorbed by
+        # ``model_token_class_ratios`` calibration in
         # :func:`read_windowed_events` (see PR #218); exact matching is
-        # impossible anyway, since a later tz/vision change re-renders history.
+        # impossible anyway, since a later tz change re-renders history.
+        #
+        # NOTE(vision): the image term is NOT in that class, and an earlier
+        # version of this comment wrongly grouped it there ("~55 LiteLLM
+        # tokens each ... absorbed by calibration").  ``litellm.token_counter``
+        # prices an ``image_url`` part at a CONSTANT ~89 tokens regardless of
+        # payload size (measured 2026-08-15 on litellm 1.97.0: 89 against
+        # 9,600 / 191,447 / 1,912,670 as text for 10 KB / 200 KB / 2 MB of
+        # image bytes).  A constant against a linear truth is unbounded, and
+        # calibration CANNOT recover it: the scaling layer corrects a RATIO,
+        # and no coefficient multiplied by zero reaches a positive number
+        # (see the ``tokens.py`` invariant).  Fix is explicit image-mass
+        # tracking, issue #2050 / aios#2073 -- not a better ratio.
         # cumulative_messages / cumulative_*_mass extend the SAME append-time
         # running-sum machinery (issue #1657): read the prior running state
         # (one index seek on the latest message row), then increment. The
@@ -1454,19 +1512,50 @@ async def append_event(
         cum_messages: int | None = None
         cum_mass: dict[str, int | None] = {c: None for c in _MESSAGE_CONTENT_CLASSES}
         if kind == "message":
+            # BASELINE SELECTION (issue #2050 review).  ``token_baseline_v`` is
+            # read from the session row under the SAME lock that allocates the
+            # seq, and it selects the arithmetic applied to THIS append.  A v1
+            # session therefore keeps v1 (image-blind) arithmetic and a v1
+            # marker; only the backfill's atomic replay-then-flip promotes a
+            # session to v2.  This is what keeps the marker LOAD-BEARING: the
+            # value stored in ``token_baseline_v`` always describes the
+            # arithmetic that produced the row's cumulative counters.
+            #
+            # Why honour the marker rather than merely birthing new sessions at
+            # v2: ``cumulative_tokens`` is a RUNNING SUM.  Switching arithmetic
+            # part-way leaves a v1-priced prefix and a v2-priced suffix inside
+            # ONE monotonic series, and the windower's drop boundary compares a
+            # v2-scale total against a v1-scale prefix — an incoherent
+            # comparison no marker can repair after the fact.  Per-append
+            # honouring keeps every session internally homogeneous.
+            image_aware = token_baseline_v >= 2
+            effective_delta = delta if image_aware else precomputed.token_delta_v1
             prev = await _latest_cumulative_state(conn, session_id)
-            cum_tokens = (prev.tokens or 0) + delta
+            cum_tokens = (prev.tokens or 0) + effective_delta
             counts_as_message = role in ("user", "assistant")
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
             cls = _message_content_class(role, data)
+            if image_aware:
+                from aios.harness.tokens import approx_tokens_by_class
+
+                event_mass = approx_tokens_by_class([data], image_aware=True)
+                # Reconcile rendering/envelope drift to the event's dominant
+                # class; image itself remains the exact mixed-part residual.
+                event_mass[cls] += effective_delta - sum(
+                    event_mass[c] for c in _MESSAGE_CONTENT_CLASSES
+                )
+            else:
+                # v1 lineage → EXACTLY master's pre-#2050 arithmetic: the whole
+                # (image-blind) delta is attributed to the event's dominant
+                # class, and no mass is ever credited to the ``image`` class.
+                # Reproducing master byte-for-byte here is what makes the
+                # marker safe: a v1 session's stored numbers are indistinguish-
+                # able from what the current production code would have written,
+                # so merging this PR changes NO v1 session's drop boundary.
+                event_mass = {c: 0 for c in _MESSAGE_CONTENT_CLASSES}
+                event_mass[cls] = effective_delta
             for c in _MESSAGE_CONTENT_CLASSES:
-                base = prev.mass.get(c) or 0
-                # A negative ``delta`` cannot lower a class below its prior
-                # running sum: clamp per-event so the stored cumulative stays
-                # monotonic, matching the old query's ``if mass < 0: mass = 0``
-                # per-class flooring of the summed deltas.
-                add = delta if c == cls else 0
-                cum_mass[c] = max(0, base + add)
+                cum_mass[c] = max(0, (prev.mass.get(c) or 0) + event_mass[c])
 
         channel = _resolve_event_channel(
             kind, data, orig_channel, focal_at_arrival, resolved_tool_channel
@@ -1480,11 +1569,11 @@ async def append_event(
             "(id, session_id, seq, kind, data, cumulative_tokens, "
             " cumulative_messages, cumulative_text_mass, "
             " cumulative_tool_result_mass, cumulative_thinking_mass, "
-            " cumulative_tool_use_mass, "
+            " cumulative_tool_use_mass, cumulative_image_mass, token_baseline_v, "
             " orig_channel, focal_channel_at_arrival, channel, "
             " role, tool_name, is_error, sender_name, account_id) "
             "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, "
-            " $12, $13, $14, $15, $16, $17, $18, $19) RETURNING *",
+            " $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING *",
             new_id,
             session_id,
             seq,
@@ -1496,6 +1585,23 @@ async def append_event(
             cum_mass["tool_result"],
             cum_mass["thinking"],
             cum_mass["tool_use"],
+            # ``cumulative_image_mass`` is the ONE counter migration 0161
+            # declared NOT NULL DEFAULT 0; its five siblings (migration 0127)
+            # are nullable.  A column DEFAULT applies only when the column is
+            # OMITTED from the INSERT -- this statement ENUMERATES it, so an
+            # explicit ``None`` reaches the DB and violates the constraint.
+            # Non-message kinds (span/lifecycle/interrupt) skip the mass
+            # computation above, leaving ``cum_mass["image"]`` None, so EVERY
+            # sweep-telemetry span insert failed.  Substituting the column's
+            # own declared default keeps the stored value byte-identical to
+            # what the omission arm would have written, without making the
+            # column list kind-conditional on the append hot path.
+            # Unobservable to readers: both reads of this column filter
+            # ``kind = 'message' AND cumulative_tokens IS NOT NULL``, so no
+            # non-message row is ever inspected.  NOT NULL is preserved -- the
+            # column always carries a value, which is the point.
+            cum_mass["image"] if cum_mass["image"] is not None else 0,
+            token_baseline_v,
             orig_channel,
             focal_at_arrival,
             channel,
@@ -2337,7 +2443,7 @@ async def _retained_class_mass(
     """
     row = await conn.fetchrow(
         "SELECT cumulative_text_mass, cumulative_tool_result_mass, "
-        "       cumulative_thinking_mass, cumulative_tool_use_mass "
+        "       cumulative_thinking_mass, cumulative_tool_use_mass, cumulative_image_mass "
         "FROM events "
         "WHERE session_id = $1 AND account_id = $2 "
         "AND kind = 'message' AND cumulative_tokens IS NOT NULL "
@@ -2352,6 +2458,7 @@ async def _retained_class_mass(
         "tool_result": row["cumulative_tool_result_mass"],
         "thinking": row["cumulative_thinking_mass"],
         "tool_use": row["cumulative_tool_use_mass"],
+        "image": row["cumulative_image_mass"],
     }
     out: dict[str, float] = {}
     for cls, mass in stored.items():

@@ -396,6 +396,40 @@ def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
     return _RESOLV_PREAMBLE + "\n".join(lines)
 
 
+def egress_unread_hosts(
+    *,
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+) -> list[str]:
+    """In-scope hosts ABSENT from ``new_ips`` — i.e. hosts whose IPs were not read.
+
+    Absence and presence-with-an-empty-set are DIFFERENT facts: the first is
+    "could not be read", the second is "read, and this host genuinely owns
+    nothing". Only the second may drive a deletion.
+
+    Exposed (rather than inlined into :func:`build_egress_refresh_script`) so
+    the CALLER can act on the same signal the builder acts on. The builder can
+    only decline to emit deletes; it cannot stop the caller from advancing its
+    ``pinned`` bookkeeping past IPs whose rules were deliberately left
+    installed. Both layers must read the identical predicate or the two
+    disagree — which is how a refusal to delete silently becomes "the rule is
+    installed and nothing remembers it exists".
+
+    NOTE ON REACHABILITY (measured, not assumed): with today's sole in-tree
+    caller this returns ``[]`` unconditionally — ``_seed_pinned_from_installed``
+    writes a key for EVERY in-scope host and ``_merge_egress_resolutions`` only
+    ever copies/``setdefault``s that dict, never deletes a key, and carries an
+    unread host forward at its last-good pins (``if not fresh: continue``). A
+    20k-tick randomized simulation of the merge (resolve failures, empty
+    resolves, rotations, whole-sidecar failure) produced zero non-empty
+    results. **Keep-last-good upstream is the actual live protection**; this
+    predicate is defence-in-depth on a public helper whose contract would
+    otherwise turn a missing key into a delete.
+    """
+    return sorted((credential_hosts | limited_hosts) - set(new_ips))
+
+
 def build_egress_refresh_script(
     *,
     old_ips: dict[str, set[str]],
@@ -432,23 +466,51 @@ def build_egress_refresh_script(
     # The rule tail after ``-d <ip>`` — byte-identical to the provision-time
     # DNAT shape so -C/-D match the installed rules exactly.
     dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
+
+    def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
+        return set().union(*(host_ips.get(host, set()) for host in hosts))
+
+    # FAIL CLOSED on an incomplete inventory. An in-scope host ABSENT from
+    # ``new_ips`` is a host whose IPs could not be READ; a host present with an
+    # empty set is a host that genuinely owns NONE. Those are different facts,
+    # and conflating them (``.get(host, set())``) drops the unread host's live
+    # IPs into the ``old - new`` difference — so one transient/partial resolve
+    # would DELETE firewall rules that are still in force. Deletions are
+    # therefore refused entirely while any in-scope host is unread; adds are
+    # unaffected because an add only ever widens what is already permitted.
+    #
+    # The SAME predicate is read by the caller (``_merge_egress_resolutions``),
+    # which must also hold its ``pinned`` bookkeeping when it fires — see
+    # :func:`egress_unread_hosts`.
+    unread_hosts = egress_unread_hosts(
+        new_ips=new_ips, credential_hosts=credential_hosts, limited_hosts=limited_hosts
+    )
+
+    old_credential_ips = _category_ips(old_ips, credential_hosts)
+    new_credential_ips = _category_ips(new_ips, credential_hosts)
+    old_limited_ips = _category_ips(old_ips, limited_hosts)
+    new_limited_ips = _category_ips(new_ips, limited_hosts)
+
     lines = ["set -e", _IPTABLES_BACKEND_SELECT]
-    for host in sorted(new_ips):
-        added = new_ips[host] - old_ips.get(host, set())
-        for ip in sorted(added):
-            if host in limited_hosts:
-                lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
-            if host in credential_hosts:
-                lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
-    for host in sorted(old_ips):
-        removed = old_ips[host] - new_ips.get(host, set())
-        for ip in sorted(removed):
-            if host in credential_hosts:
-                lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
-            if host in limited_hosts:
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_limited_ips - old_limited_ips):
+        lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_credential_ips - old_credential_ips):
+        lines.append(_add(" -t nat", f"-d {ip} {dnat_tail}"))
+    if unread_hosts:
+        # Surfaced, not silent: the emitted script itself records why no
+        # delete pass ran, so an operator reading the sidecar script sees the
+        # refusal rather than an unexplained absence of deletions.
+        lines.append(
+            "# egress refresh: deletions REFUSED — incomplete host inventory "
+            f"(unread: {' '.join(unread_hosts)})"
+        )
+        return "\n".join(lines)
+    for ip in sorted(old_credential_ips - new_credential_ips):
+        lines.append(_delete(" -t nat", f"-d {ip} {dnat_tail}"))
+    for ip in sorted(old_limited_ips - new_limited_ips):
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     return "\n".join(lines)
 
 

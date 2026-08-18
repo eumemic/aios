@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from aios.errors import CryptoDecryptError
 from aios.ids import VAULT_CREDENTIAL
@@ -32,7 +33,7 @@ from aios.models.environments import (
     UnrestrictedNetworking,
 )
 from aios.models.vaults import RESERVED_SANDBOX_ENV_KEYS
-from aios.sandbox.spec import build_spec_from_session
+from aios.sandbox.spec import _proxy_networking_mode, build_spec_from_session
 from aios.services.vaults import ResolvedEnvVarCredential, mint_secret_placeholder
 from tests.helpers.sandbox import limited_env, patch_build_spec_deps
 
@@ -304,9 +305,78 @@ async def test_secret_proxy_constructed_and_started_when_creds_present() -> None
         plan = await build_spec_from_session("sess_01TEST")
 
     # Constructed with the resolved creds and started exactly once.
-    proxy_cls.assert_called_once_with((_CRED,))
+    proxy_cls.assert_called_once_with((_CRED,), networking_mode="limited", owner_id="sess_01TEST")
     proxy_instance.start.assert_awaited_once()
     assert plan.secret_proxy is proxy_instance
+
+
+# ── proxy networking-mode selection (aios#2138: unknown ⇒ strict) ────────────
+
+
+class _FutureNetworking(BaseModel):
+    """A networking shape ``_proxy_networking_mode`` has NOT been taught.
+
+    Stands in for a class added to ``NetworkingConfig`` later. Deliberately not
+    registered in the discriminated union — the point is what the SELECTOR does
+    with a shape it does not recognize, not what pydantic accepts.
+    """
+
+    type: str = "frobnicated-egress"
+
+
+@pytest.mark.parametrize(
+    ("env_config", "expected"),
+    [
+        pytest.param(_LIMITED_GITHUB, "limited", id="limited"),
+        pytest.param(
+            EnvironmentConfig(networking=UnrestrictedNetworking()), "unrestricted", id="explicit"
+        ),
+        pytest.param(EnvironmentConfig(), "unrestricted", id="networking-none"),
+        pytest.param(None, "unrestricted", id="env-config-none"),
+    ],
+)
+def test_proxy_networking_mode_known_shapes(
+    env_config: EnvironmentConfig | None, expected: str
+) -> None:
+    """The documented shapes map as specified.
+
+    Absent config is UNRESTRICTED on purpose: it is the documented default for
+    open egress, and every other consumer treats it that way (no filter DROP is
+    installed, the #879 containment gate is skipped). Mapping it to ``limited``
+    would make the proxy reset colliding SNIs on the default configuration.
+    """
+    assert _proxy_networking_mode(env_config) == expected
+
+
+def test_proxy_networking_mode_unrecognized_shape_is_strict() -> None:
+    """An unrecognized networking shape selects the STRICT mode.
+
+    The old ternary was ``limited if isinstance(..., LimitedNetworking) else
+    unrestricted`` — every not-yet-known shape fell to the permissive side.
+    """
+    cfg = MagicMock(spec=EnvironmentConfig)
+    cfg.networking = _FutureNetworking()
+    assert _proxy_networking_mode(cfg) == "limited"
+
+
+async def test_secret_proxy_mode_unrestricted_when_no_networking_config() -> None:
+    """End-to-end through build_spec: no networking config ⇒ ``unrestricted``
+    reaches the proxy constructor (the positive control at the spec layer)."""
+    proxy_instance = MagicMock()
+    proxy_instance.start = AsyncMock()
+    proxy_cls = MagicMock(return_value=proxy_instance)
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_config=EnvironmentConfig(),
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        stack.enter_context(patch("aios.sandbox.spec.SecretEgressProxy", proxy_cls))
+        await build_spec_from_session("sess_01TEST")
+
+    proxy_cls.assert_called_once_with(
+        (_CRED,), networking_mode="unrestricted", owner_id="sess_01TEST"
+    )
 
 
 async def test_secret_proxy_not_constructed_when_no_creds() -> None:

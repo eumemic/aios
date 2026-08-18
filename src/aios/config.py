@@ -682,6 +682,16 @@ class Settings(BaseSettings):
         "on ``trigger_runs_retention_days``; age-keyed on ``archived_at``. "
         "Time-based by design — a count-cap is explicitly rejected (#1461).",
     )
+    reclaimable_prune_batch_rows: int = Field(
+        default=500,
+        ge=1,
+        le=10_000,
+        description="Maximum child rows deleted from one table/run in a prune batch.",
+    )
+    reclaimable_prune_archival_backfill_enabled: bool = Field(
+        default=False,
+        description="Deliberate rollout switch for bounded historical terminal archival.",
+    )
     archived_definition_retention_days: int = Field(
         default=30,
         ge=1,
@@ -779,6 +789,14 @@ class Settings(BaseSettings):
         "catchable ``AgentError`` and keeping the run total. Generous by default "
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
+    )
+    workflow_suspended_reap_seconds: float = Field(
+        default=24 * 60 * 60,
+        gt=0,
+        description="Age after which the worker sweep cancel-signals a suspended "
+        "workflow run when every unresolved awaited session/run child is terminal, "
+        "archived, or missing. The signal-and-wake path keeps the workflow step as "
+        "the journal's single writer. Defaults to 24 hours.",
     )
     workflow_call_llm_stale_seconds: float = Field(
         default=1200.0,  # 20 minutes

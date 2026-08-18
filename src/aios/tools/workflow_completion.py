@@ -31,17 +31,21 @@ caller's harvest reads; the periodic ``wf_runs`` sweep is the lost-wake backstop
 
 from __future__ import annotations
 
-import json
 from typing import Any
-
-import jsonschema
 
 from aios.db import queries
 from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
+from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
+from aios.tools.schema_errors import (
+    format_schema_violation,
+    normalize_and_format_schema_violation,
+)
+
+log = get_logger(__name__)
 
 RETURN_TOOL_NAME = "return"
 ERROR_TOOL_NAME = "error"
@@ -184,45 +188,61 @@ def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
     """Validate a ``return`` ``value`` against the request's ``output_schema``.
 
     ``None`` on success; otherwise a model-facing ``output_schema_violation`` error
-    enumerating every failure (mirrors :func:`aios.tools.invoke.validate_arguments`'
-    formatting) so the child self-corrects and calls ``return`` again through the
-    normal tool-error loop. This is the single servicer-side schema gate every
-    obligation answered with ``return`` passes — self-goals (opened by
+    built by the shared no-echo formatter
+    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2:
+    never echoes the full ``value``, states expected-vs-got JSON types, and
+    includes the schema) so the child self-corrects and calls ``return`` again
+    through the normal tool-error loop. This is the single servicer-side schema
+    gate every obligation answered with ``return`` passes — self-goals (opened by
     ``create_goal``) included, since their persisted ``output_schema`` is read off
     the same ``request_opened`` edge.
     """
-    errors = sorted(
-        jsonschema.Draft202012Validator(schema).iter_errors(value),
-        key=lambda e: list(e.absolute_path),
+    return format_schema_violation(
+        value,
+        schema,
+        root="value",
+        intro="output_schema_violation: `value` does not conform to the request's output_schema.",
+        retry_hint="Provide `value` as a conforming object and call `return` again.",
+        site="workflow_completion.return",
     )
-    if not errors:
-        return None
-    lines = [
-        "output_schema_violation: `value` does not match the request's required "
-        f"output_schema. You sent: {json.dumps(value)}",
-        "Errors:",
-    ]
-    for err in errors:
-        path = ".".join(str(p) for p in err.absolute_path)
-        lines.append(f"  - at {'value.' + path if path else 'value'}: {err.message}")
-    lines.append("Fix `value` to match the schema shown with the request and call return again.")
-    return "\n".join(lines)
 
 
-async def _enforce_output_schema(session_id: str, request_id: Any, value: Any) -> str | None:
-    """Validate ``value`` against the schema this request demands, if any.
+async def _enforce_output_schema(
+    session_id: str, request_id: Any, value: Any
+) -> tuple[Any, str | None]:
+    """Validate and, when safe, coerce ``value`` against the requested schema.
 
-    Returns a model-facing error string to bounce back (the child retries), or
-    ``None`` to proceed. A non-str ``request_id`` (or one matching no request) and a
-    non-child session resolve to no schema, leaving the rejection to
-    :func:`respond_to_request` (``unknown_request`` / ``not_a_child``); a request with
-    no ``output_schema`` (the common case) also passes.
+    A top-level JSON string is accepted as its parsed value only when the string
+    does NOT already conform AND the parsed value does. The returned pair is the
+    value to persist and an optional model-facing validation error — acceptance
+    and transformation stay together, so whatever this gate validated is exactly
+    what ``return_handler`` hands to :func:`_finish` (and thus to the awaiting
+    caller); a coercion that were accepted here but not propagated would report a
+    satisfied contract while the consumer got the wrong type.
+
+    The already-conforming check is load-bearing, not an optimization. Coercion
+    is a REPAIR of a value the schema would otherwise reject, never an
+    unconditional ``json.loads`` of every string: under a ``{"type": "string"}``
+    request the conforming value ``'"hello"'`` parses to ``'hello'`` — also
+    conforming — so parsing first would silently rewrite the caller's answer. The
+    same holds for any permissive schema (``{}`` accepts every string, so every
+    JSON-looking string would be mangled). Validate first; only a failing value is
+    a candidate for repair.
     """
     if not isinstance(request_id, str):
-        return None
+        return value, None
     async with runtime.require_pool().acquire() as conn:
         schema = await queries.get_request_output_schema(conn, session_id, request_id=request_id)
-    return None if schema is None else _validate_value(value, schema)
+    if schema is None:
+        return value, None
+    return normalize_and_format_schema_violation(
+        value,
+        schema,
+        root="value",
+        intro="output_schema_violation: `value` does not conform to the request's output_schema.",
+        retry_hint="Fix `value` to match the required schema, then call `return` again.",
+        site="workflow_completion.return",
+    )
 
 
 def _closed_request_message(outcome: Outcome | None = None, closed_at: Any | None = None) -> str:
@@ -310,13 +330,15 @@ async def return_handler(session_id: str, arguments: dict[str, Any]) -> dict[str
     # match it. A mismatch is a tool error the child retries on (no response written),
     # exactly like a malformed tool arg — so the workflow only ever harvests a
     # schema-valid value. error() is unconstrained (a child that can't conform bails).
-    schema_error = await _enforce_output_schema(session_id, request_id, arguments.get("value"))
+    value, schema_error = await _enforce_output_schema(
+        session_id, request_id, arguments.get("value")
+    )
     if schema_error is not None:
         return ToolResult(content=schema_error, is_error=True)
     return await _finish(
         session_id,
         request_id=request_id,
-        outcome=Ok(result=arguments.get("value")),
+        outcome=Ok(result=value),
     )
 
 

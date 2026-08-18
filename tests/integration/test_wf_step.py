@@ -12,6 +12,7 @@ directly, which is exactly the surface under test.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -27,6 +28,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries as db_queries
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
+from aios.db.queries.prune import prune_archived_runs
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
 from aios.ids import REQUEST, make_id
@@ -475,6 +477,52 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     await service.resume_gate(pool, run_id=run_id, call_key=gate_key, result="OTHER")  # idempotent
     await run_workflow_step(run_id)
     assert await _events(pool, run_id) == before  # journal unchanged
+
+
+async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_override(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Every terminal run archives; callers have no run-lifetime flag that can prevent it."""
+    assert "auto_archive_on_completion" not in inspect.signature(service.create_run).parameters
+    pool = wf_runtime
+    terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
+    live_id = await _make_run(pool, _GATE_SCRIPT, name="live_not_prunable")
+
+    await run_workflow_step(terminal_id)
+    await run_workflow_step(live_id)  # suspended at its gate: explicitly non-terminal
+
+    async with pool.acquire() as conn:
+        terminal = await wf_queries.get_wf_run(conn, terminal_id, account_id="acc_wf")
+        live = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
+        assert terminal is not None and terminal.status in {"completed", "errored", "cancelled"}
+        assert terminal.archived_at is not None
+        assert live is not None and live.status == "suspended"
+        assert live.archived_at is None
+
+        terminal_history = await conn.fetchval(
+            "SELECT count(*) FROM wf_run_events WHERE run_id=$1", terminal_id
+        )
+        live_history = await conn.fetchval(
+            "SELECT count(*) FROM wf_run_events WHERE run_id=$1", live_id
+        )
+        assert terminal_history > 0 and live_history > 0
+
+        # Make only the terminal run old enough for immediate retention.
+        await conn.execute(
+            "UPDATE wf_runs SET archived_at=now() - interval '1 day' WHERE id=$1",
+            terminal_id,
+        )
+        assert await prune_archived_runs(conn, retention_days=0) == terminal_history
+        assert (
+            await conn.fetchval("SELECT count(*) FROM wf_run_events WHERE run_id=$1", terminal_id)
+            == 0
+        )
+        assert (
+            await conn.fetchval("SELECT count(*) FROM wf_run_events WHERE run_id=$1", live_id)
+            == live_history
+        )
+        live_after = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
+        assert live_after is not None and live_after.archived_at is None
 
 
 # ─── annotations — log()/phase() journaling (B-783) ──────────────────────────
@@ -4217,8 +4265,11 @@ async def test_agent_output_schema_end_to_end(
             child_id, {"request_id": request_id, "value": {"answer": 7}}
         )
         assert isinstance(rejected, ToolResult) and rejected.is_error
+        # Providers sometimes double-encode a structured return value. If its
+        # parsed JSON conforms, return_handler must accept and persist the parsed
+        # object rather than reject the tool call into a retry loop.
         ok = await workflow_completion.return_handler(
-            child_id, {"request_id": request_id, "value": {"answer": "done"}}
+            child_id, {"request_id": request_id, "value": '{"answer":"done"}'}
         )
     assert ok == {"status": "returned"}
 
@@ -4519,6 +4570,28 @@ async def test_derive_run_response_reads_the_terminal_record(
     # The cancel semantic the §3.6 merge had to preserve: cancelled, not child_gone.
     assert cancelled == Err(error={"kind": "cancelled"})
     assert pending is None
+
+
+async def test_legacy_errored_run_falls_back_to_completed_event(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A pre-migration terminal row still resolves from its durable journal."""
+    pool = wf_runtime
+    run_id = await _make_run(pool, "def main(input):\n    return 1", name="legacy_err")
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        expected_error = await conn.fetchval(
+            "SELECT payload->'error' FROM wf_run_events WHERE run_id=$1 AND type='run_completed'",
+            run_id,
+        )
+        await conn.execute("UPDATE wf_runs SET terminal_summary=NULL WHERE id=$1", run_id)
+        outcome = await wf_queries.derive_run_response(conn, run_id, account_id="acc_wf")
+        resolved_error = await wf_queries.resolve_run_error(conn, run_id)
+
+    assert outcome == Err(error=expected_error)
+    assert resolved_error == expected_error
+    assert expected_error["kind"] == "author_exception"
 
 
 # ─── tool() — a run invokes its declared network/credential tools (slice 2) ───
@@ -5728,3 +5801,78 @@ async def test_list_runs_enriches_each_run_with_usage(
     usage_b = by_id[run_b].usage
     assert usage_b is not None
     assert usage_b.cost_microusd == 0
+
+
+async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_is_rewakeable(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """TRUE reaches the existing reclaim mechanism; FALSE remains live and accepts another message."""
+    pool = wf_runtime
+
+    async def child(flag: bool, suffix: str) -> Session:
+        parent_run_id = await _make_run(
+            pool, "async def main(input):\n    return 1", name=f"auto_archive_{suffix}"
+        )
+        stim = AskNewSession(
+            session_id=f"ses_auto_archive_{suffix}",
+            agent_id=wf_agent_id,
+            environment_id="env_wf",
+            agent_version=1,
+            model=None,
+            parent_run_id=parent_run_id,
+            surface=Surface([], [], []),
+            vault_ids=[],
+            request_id=f"req_{suffix}",
+            input="work",
+            auto_archive_on_completion=flag,
+        )
+        await sessions_service.create_child_session(pool, stim, account_id="acc_wf")
+        return await sessions_service.get_session_basic(pool, stim.session_id, account_id="acc_wf")
+
+    ephemeral = await child(True, "true")
+    persistent = await child(False, "false")
+    assert ephemeral.archive_when_idle is True
+    assert persistent.archive_when_idle is False
+    # Reach completion's real idle point: answer each launch request, then append
+    # a tool-free assistant turn reacting to every stimulus. Deleting events is
+    # not equivalent: session activity is derived from scalar watermarks maintained
+    # by append_event, so the initial user stimulus remains unreacted after a delete.
+    for child_session, suffix in ((ephemeral, "true"), (persistent, "false")):
+        async with pool.acquire() as conn:
+            assert await db_queries.write_response_if_absent(
+                conn,
+                child_session.id,
+                account_id="acc_wf",
+                request_id=f"req_{suffix}",
+                outcome=Ok(result={"done": True}),
+            )
+        result = await sessions_service.append_assistant_and_guard_quiescence(
+            pool,
+            child_session.id,
+            await _idle_assistant_turn(pool, child_session.id),
+            account_id="acc_wf",
+        )
+        assert not result.nudged
+        async with pool.acquire() as conn:
+            assert (
+                await db_queries.derive_session_status(conn, child_session.id, account_id="acc_wf")
+                == "idle"
+            )
+
+    # The same real idle transition archives only the opted-in lifetime.
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, ephemeral.id, account_id="acc_wf")
+        is True
+    )
+    assert (
+        await sessions_service.reclaim_session_if_idle(pool, persistent.id, account_id="acc_wf")
+        is False
+    )
+    await sessions_service.append_user_message(
+        pool, persistent.id, "wake again", account_id="acc_wf"
+    )
+    async with pool.acquire() as conn:
+        assert (
+            await db_queries.derive_session_status(conn, persistent.id, account_id="acc_wf")
+            == "active"
+        )

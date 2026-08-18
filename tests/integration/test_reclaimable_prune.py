@@ -29,6 +29,7 @@ from aios.db.queries.prune import (
     prune_unpinned_archived_agents,
     prune_unpinned_archived_skills,
     prune_unpinned_archived_workflows,
+    reconcile_terminal_archival_batch,
 )
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -91,9 +92,15 @@ async def _make_archived_run(
             run.id,
         )
     await wf_queries.set_run_terminal(
-        conn, run.id, status="completed", output=None, account_id="acc_root"
+        conn,
+        run.id,
+        status="completed",
+        output=None,
+        account_id="acc_root",
+        terminal_summary={"is_error": False},
     )
-    await wf_queries.archive_run(conn, run.id, account_id="acc_root")
+    # ``set_run_terminal`` now atomically archives terminal runs; the helper's
+    # former explicit ``archive_run`` call became stale and correctly conflicts.
     # Back-date archived_at so it is past the retention window.
     await conn.execute(
         "UPDATE wf_runs SET archived_at = now() - make_interval(days => $2) WHERE id = $1",
@@ -187,10 +194,9 @@ async def test_prune_reclaims_ephemera_but_spares_sacred(
         conn, retention_days=settings.archived_definition_retention_days
     )
 
-    # The unreferenced terminal+archived run is gone — and so is its journal
-    # (dropped by the ON DELETE CASCADE, the unbounded-growth driver).
-    assert pruned_runs == 1
-    assert await _count(conn, "wf_runs", "id", run_id) == 0
+    # The compact run summary survives; only bounded child detail is reclaimed.
+    assert pruned_runs == 2
+    assert await _count(conn, "wf_runs", "id", run_id) == 1
     assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
 
     # The live-pinned agent + its version survived despite being archived & old.
@@ -211,9 +217,10 @@ async def test_run_prune_respects_retention_window(conn: asyncpg.Connection[Any]
     young = await _make_archived_run(conn, archived_age_days=5)
     old = await _make_archived_run(conn, archived_age_days=40)
     pruned = await prune_archived_runs(conn, retention_days=30)
-    assert pruned == 1
+    assert pruned == 2
     assert await _count(conn, "wf_runs", "id", young) == 1
-    assert await _count(conn, "wf_runs", "id", old) == 0
+    assert await _count(conn, "wf_runs", "id", old) == 1
+    assert await _count(conn, "wf_run_events", "run_id", old) == 0
 
 
 async def test_run_prune_skips_non_archived_terminal_run(
@@ -244,8 +251,29 @@ async def test_run_prune_is_idempotent(conn: asyncpg.Connection[Any]) -> None:
     await _make_archived_run(conn, archived_age_days=60)
     first = await prune_archived_runs(conn, retention_days=30)
     second = await prune_archived_runs(conn, retention_days=30)
-    assert first == 1
+    assert first == 2
     assert second == 0
+
+
+async def test_archived_legacy_run_is_backfilled_before_detail_prune(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """An already-archived pre-migration run cannot lose its terminal event."""
+    run_id = await _make_archived_run(conn, archived_age_days=60)
+    archived_at = await conn.fetchval("SELECT archived_at FROM wf_runs WHERE id=$1", run_id)
+    await conn.execute("UPDATE wf_runs SET terminal_summary=NULL WHERE id=$1", run_id)
+
+    assert await prune_archived_runs(conn, retention_days=30) == 0
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 2
+
+    assert await reconcile_terminal_archival_batch(conn) == 1
+    row = await conn.fetchrow(
+        "SELECT archived_at, terminal_summary FROM wf_runs WHERE id=$1", run_id
+    )
+    assert row["archived_at"] == archived_at
+    assert row["terminal_summary"] is not None
+    assert await prune_archived_runs(conn, retention_days=30) == 2
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
 
 
 # ─── archived definitions: agents ───────────────────────────────────────────
@@ -488,7 +516,7 @@ async def test_sweep_isolates_family_failure_and_spares_template_pinned_agent(
     # The whole sweep — no exception escapes, and the tally proves every OTHER
     # family still pruned in the same pass.
     result = await sweep_reclaimable_ephemera(pool)
-    assert result.runs == 1
+    assert result.runs == 2
     assert result.agents == 0  # the template-pinned agent is held, not deleted
     assert result.workflows == 1
     assert result.skills == 1
@@ -502,8 +530,8 @@ async def test_sweep_isolates_family_failure_and_spares_template_pinned_agent(
         )
         # The session_template that pinned it is untouched (it was never a target).
         assert await _count(conn, "session_templates", "id", "st_pin") == 1
-        # Every other family genuinely reclaimed its candidate.
-        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        # Every other family genuinely reclaimed its candidate detail.
+        assert await _count(conn, "wf_runs", "id", run_id) == 1
         assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
         assert await _count(conn, "workflows", "id", free_wf.id) == 0
         assert await _count(conn, "skills", "id", "sk_free") == 0
@@ -553,11 +581,12 @@ async def test_sweep_one_family_raise_does_not_disable_the_others(
     # The raise is caught per-family — the sweep returns normally.
     result = await sweep_reclaimable_ephemera(pool)
     assert result.agents == 0  # the failed family is skipped this tick
-    assert result.runs == 1  # the others still pruned
+    assert result.runs == 2  # both child-detail rows were pruned
     assert result.workflows == 1
     assert result.skills == 1
 
     async with pool.acquire() as conn:
-        assert await _count(conn, "wf_runs", "id", run_id) == 0
+        assert await _count(conn, "wf_runs", "id", run_id) == 1
+        assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
         assert await _count(conn, "workflows", "id", free_wf.id) == 0
         assert await _count(conn, "skills", "id", "sk_free2") == 0

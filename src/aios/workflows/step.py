@@ -60,6 +60,10 @@ from aios.services.sessions import (
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
+from aios.tools.schema_errors import (
+    format_schema_violation,
+    normalize_and_format_schema_violation,
+)
 from aios.workflows import run_llm, run_sandbox, run_tools
 from aios.workflows.child_id import child_session_id
 from aios.workflows.child_run_id import child_run_id
@@ -111,22 +115,22 @@ def _unresolvable_ref(schema: dict[str, Any]) -> str | None:
 def _validate_output_against_schema(value: Any, schema: dict[str, Any]) -> str | None:
     """Validate a run's terminal ``output`` against the request's ``output_schema``.
 
-    ``None`` on success; otherwise a human-readable message enumerating every
-    failure (the same shape the session ``return`` tool produces, minus the
-    self-correct hint — a run does NOT bounce-and-retry, it fails loud). Drives
-    the run-target ``output_schema_violation`` error-arm in :func:`_complete_run`.
+    ``None`` on success; otherwise a human-readable message built by the shared
+    no-echo formatter (:func:`aios.tools.schema_errors.format_schema_violation` —
+    #1769 spec v2: never echoes the full ``output``, states expected-vs-got JSON
+    types, and includes the schema), the same shape the session ``return`` tool
+    produces, minus the self-correct hint — a run does NOT bounce-and-retry, it
+    fails loud. Drives the run-target ``output_schema_violation`` error-arm in
+    :func:`_complete_run`.
     """
-    errors = sorted(
-        jsonschema.Draft202012Validator(schema).iter_errors(value),
-        key=lambda e: list(e.absolute_path),
+    return format_schema_violation(
+        value,
+        schema,
+        root="output",
+        intro="run output does not conform to the request's required schema.",
+        retry_hint=None,
+        site="workflows.step.run_output",
     )
-    if not errors:
-        return None
-    lines = [f"run output does not match the request's required schema: {json.dumps(value)}"]
-    for err in errors:
-        path = ".".join(str(p) for p in err.absolute_path)
-        lines.append(f"  - at {'output.' + path if path else 'output'}: {err.message}")
-    return "\n".join(lines)
 
 
 def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
@@ -1086,6 +1090,11 @@ async def _open_agent_capability(
     workspace = spec.get("workspace", "shared")
     if workspace not in {"shared", "fresh"}:
         return await _reject("bad_agent_call", "agent() workspace must be shared or fresh")
+    auto_archive = spec.get("auto_archive_on_completion", True)
+    if not isinstance(auto_archive, bool):
+        return await _reject(
+            "bad_agent_call", "agent() auto_archive_on_completion must be a boolean"
+        )
     model = spec.get("model")
     if model is not None and not isinstance(model, str):
         return await _reject("bad_agent_call", f"agent() model must be a string, got {model!r}")
@@ -1194,6 +1203,7 @@ async def _open_agent_capability(
             depth=run.depth - 1,
             litellm_extra=child_litellm_extra,  # #823: frozen, clamped model identity
             workspace_path=run.workspace_path if workspace == "shared" else None,
+            auto_archive_on_completion=auto_archive,
         ),
         account_id=account_id,
     )
@@ -1399,13 +1409,17 @@ async def _complete_run(
     # No bounce-and-retry — the script already ran (unlike an agent, which the
     # return-tool bounces). Only a *successful* output is schema-checked; an already-
     # errored completion passes through (the error already explains the outcome).
-    if (
-        not is_error
-        and run.request_id is not None
-        and run.request_output_schema is not None
-        and (schema_error := _validate_output_against_schema(output, run.request_output_schema))
-        is not None
-    ):
+    schema_error = None
+    if not is_error and run.request_id is not None and run.request_output_schema is not None:
+        output, schema_error = normalize_and_format_schema_violation(
+            output,
+            run.request_output_schema,
+            root="output",
+            intro="run output does not conform to the request's required schema.",
+            retry_hint=None,
+            site="workflows.step.run_output",
+        )
+    if schema_error is not None:
         output = schema_error
         is_error = True
         error_kind = "output_schema_violation"
@@ -1545,8 +1559,18 @@ async def _commit_terminal_and_dispatch(
         # event is written — the run is singly-inbound, so its terminal state already
         # carries the one outcome (§3.6); this also lets a cancelled run resolve as
         # ``cancelled`` rather than the ``child_gone`` a gated-off response implied.
+        summary = {
+            key: payload[key]
+            for key in ("is_error", "error", "usage", "duration_ms", "cancelled")
+            if key in payload
+        }
         await wf_queries.set_run_terminal(
-            conn, run.id, status=status, output=output, account_id=run.account_id
+            conn,
+            run.id,
+            status=status,
+            output=output,
+            account_id=run.account_id,
+            terminal_summary=summary,
         )
         cascade_children = (
             await seed_outbound_cancel_conn(

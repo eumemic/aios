@@ -51,7 +51,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, cast
 
-import jsonschema
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import ValidationError as PydanticValidationError
 
@@ -66,6 +65,10 @@ from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools.invoke import ToolBail, current_tool_call_id
 from aios.tools.registry import ToolResult, registry
+from aios.tools.schema_errors import (
+    format_schema_violation,
+    normalize_and_format_schema_violation,
+)
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
 # long park never blocks the caller's other turns; we re-poll in a loop so a
@@ -119,6 +122,14 @@ class _CallAgentArgs(BaseModel):
     )
     title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace: Literal["shared", "fresh"] = Field(
+        default="fresh",
+        description=(
+            "Workspace for the child. Defaults to `fresh` (an empty child workspace): "
+            "sharing hands the child LIVE WRITE ACCESS to this session's workspace, so it "
+            "is opt-in. Pass `shared` explicitly to hand the child this session's workspace."
+        ),
+    )
     vault_ids: list[str] | None = Field(
         default=None,
         description="Parent-held vault ids; omitted inherits every vault bound to the parent.",
@@ -133,6 +144,10 @@ class _CallAgentArgs(BaseModel):
             "Parent-held resources to attach; repository selections contain only "
             "url and mount_path. Omitted inherits all parent resource mounts."
         ),
+    )
+    auto_archive_on_completion: bool = Field(
+        default=True,
+        description="Archive the spawned session when it becomes idle after completion.",
     )
     outbound_suppression: OutboundSuppression | None = Field(
         default=None, description="Outbound suppression; omitted inherits the parent's setting."
@@ -159,8 +174,12 @@ class _CallWorkflowArgs(BaseModel):
     )
     input: Any = Field(default=None, description="The run input (JSON or a string).")
     workspace: Literal["shared", "fresh"] = Field(
-        default="shared",
-        description="Share this session workspace live, or use a fresh empty run workspace.",
+        default="fresh",
+        description=(
+            "Workspace for the run. Defaults to `fresh` (an empty run workspace): sharing "
+            "hands the run LIVE WRITE ACCESS to this session's workspace, so it is opt-in. "
+            "Pass `shared` explicitly to hand the run this session's workspace."
+        ),
     )
     output_schema: dict[str, Any] | None = Field(
         default=None,
@@ -196,26 +215,27 @@ def _validate_output(value: Any, schema: dict[str, Any] | None) -> ToolResult | 
     """Validate the resolved ``value`` against ``output_schema`` (fail-loud).
 
     ``None`` on success (or no schema); otherwise a model-visible error ToolResult
-    (``output_schema_violation``) so the caller sees a non-conforming answer as an
-    error rather than silently accepting it — mirrors ``workflow_completion``'s
-    ``return`` enforcement, but on the *caller* side for a run/peer answer that
-    bypassed the servicer's own ``return`` schema gate.
+    (``output_schema_violation``) built by the shared no-echo formatter
+    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2) so
+    the caller sees a non-conforming answer as an error rather than silently
+    accepting it — mirrors ``workflow_completion``'s ``return`` enforcement, but
+    on the *caller* side for a run/peer answer that bypassed the servicer's own
+    ``return`` schema gate. No retry hint: the CALLER doesn't own the answer, it
+    can't make the peer/run re-answer by retrying this call.
     """
     if schema is None:
         return None
-    errors = sorted(
-        jsonschema.Draft202012Validator(schema).iter_errors(value),
-        key=lambda e: list(e.absolute_path),
+    message = format_schema_violation(
+        value,
+        schema,
+        root="",
+        intro="output_schema_violation: the answer does not conform to output_schema.",
+        retry_hint=None,
+        site="invoke_session.call_output",
     )
-    if not errors:
+    if message is None:
         return None
-    detail = "; ".join(
-        f"at {'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}" for e in errors
-    )
-    return ToolResult(
-        content=f"output_schema_violation: the answer does not match output_schema ({detail})",
-        is_error=True,
-    )
+    return ToolResult(content=message, is_error=True)
 
 
 def _ok_result(result: Any) -> dict[str, Any]:
@@ -286,8 +306,19 @@ async def _park_and_resolve(
     )
     if resp.outcome != "ok":
         return _error_result(resp.error)
-    violation = _validate_output(resp.result, output_schema)
-    return violation if violation is not None else _ok_result(resp.result)
+    result = resp.result
+    if output_schema is None:
+        return _ok_result(result)
+    result, message = normalize_and_format_schema_violation(
+        result,
+        output_schema,
+        root="",
+        intro="output_schema_violation: the answer does not conform to output_schema.",
+        retry_hint=None,
+        site="invoke_session.call_output",
+    )
+    violation = ToolResult(content=message, is_error=True) if message is not None else None
+    return violation if violation is not None else _ok_result(result)
 
 
 def _caller(session_id: str) -> dict[str, Any]:
@@ -363,6 +394,8 @@ async def call_agent_handler(
         resources=cast(list[SessionResource], args.resources),
         env=args.env,
         outbound_suppression=args.outbound_suppression,
+        workspace=args.workspace,
+        auto_archive_on_completion=args.auto_archive_on_completion,
         launcher_session_id=session_id,
         crypto_box=runtime.require_crypto_box(),
         caller=_caller(session_id),

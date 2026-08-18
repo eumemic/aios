@@ -79,6 +79,7 @@ async def _seed_valid_span(
             "cost_usd": None,
             "local_tokens": local_tokens,
             "local_tokens_by_class": _by_class(local_tokens),
+            "token_baseline_v": 2,
             "model": model,
         },
         account_id=account_id,

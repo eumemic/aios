@@ -67,11 +67,11 @@ class TestValidateArguments:
         assert "'target' was unexpected" in err
 
     def test_wrong_type_is_reported(self) -> None:
+        """#1769 spec v2: no instance echo — the diagnosis is expected-vs-got
+        JSON type names, not a repr of the sent value."""
         err = validate_arguments({"channel_id": 42}, _SCHEMA)
         assert err is not None
-        assert "42" in err  # what was sent
-        # jsonschema's message varies; just assert we got SOMETHING useful
-        assert "channel_id" in err or "type" in err.lower() or "42" in err
+        assert "expected string or null, got integer" in err
 
     def test_multi_error_accumulation(self) -> None:
         """Missing required + extra property → BOTH surface in a single
@@ -82,13 +82,14 @@ class TestValidateArguments:
         assert "'channel_id' is a required property" in err
         assert "'target' was unexpected" in err
 
-    def test_passed_arguments_echoed_for_context(self) -> None:
-        """The error includes the arguments the model sent so the model
-        can see exactly what shape it produced vs. what was expected.
-        """
+    def test_arguments_not_echoed(self) -> None:
+        """#1769: the shared no-echo formatter never dumps the full sent
+        arguments — only per-error expected/got lines plus the schema."""
         err = validate_arguments({"target": "oops"}, _SCHEMA)
         assert err is not None
-        assert '"target": "oops"' in err
+        assert '"target": "oops"' not in err
+        assert "'channel_id' is a required property" in err
+        assert "'target' was unexpected" in err
 
     def test_error_ends_with_hint_to_consult_schema(self) -> None:
         """Closing guidance points the model back at the tool's
@@ -839,7 +840,13 @@ class TestParentChannelThreading:
         # The hot path passes ``precomputed=`` (not ``tool_parent_channel=``);
         # its resolved channel echoes the supplied stamp with no DB round-trip.
         assert "tool_parent_channel" not in captured
-        assert captured["precomputed"].resolved_tool_channel == "tg:42"
+        precomputed = captured["precomputed"]
+        assert precomputed.resolved_tool_channel == "tg:42"
+        # Ordinary tool results have identical v1/master and v2 prices.  Both
+        # must be explicit and non-zero: a missing v1 value must never silently
+        # masquerade as a zero-token append.
+        assert precomputed.token_delta_v1 == precomputed.token_delta
+        assert precomputed.token_delta_v1 > 0
 
 
 def _mock_pool_conn() -> tuple[Any, Any]:
@@ -889,7 +896,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
@@ -920,7 +927,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)

@@ -1562,6 +1562,13 @@ async def _run_session_step_body(
             "cost_usd": cost_usd,
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
+            # LINEAGE, not a constant (#2050 review).  Stamping an
+            # unconditional 2 here would admit spans from v1 / mid-backfill
+            # sessions into the v2 calibration fit, training it on
+            # mixed-baseline data.  The session's own marker is the only
+            # honest answer: it is exactly the baseline whose arithmetic
+            # produced the counts in this span.
+            "token_baseline_v": getattr(session, "token_baseline_v", 1),
             "model": agent.model,
             **(
                 llm_response.admission_report.as_event_fields()

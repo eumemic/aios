@@ -191,6 +191,77 @@ def _root_and_child(*, create: bool) -> tuple[str | None, str | None]:
     return root, child
 
 
+def _snapshot_provider_resolution(root: str) -> None:
+    """Remember non-root live accounts that can currently reach a live provider."""
+    op.get_bind().execute(
+        sa.text(
+            """
+            CREATE TEMP TABLE migration_0154_provider_accounts ON COMMIT DROP AS
+            WITH RECURSIVE ancestry(account_id, ancestor_id) AS (
+                SELECT id, id FROM accounts WHERE archived_at IS NULL
+                UNION ALL
+                SELECT ancestry.account_id, accounts.parent_account_id
+                FROM ancestry
+                JOIN accounts ON accounts.id = ancestry.ancestor_id
+                WHERE accounts.parent_account_id IS NOT NULL
+            )
+            SELECT DISTINCT ancestry.account_id
+            FROM ancestry
+            JOIN model_providers ON model_providers.account_id = ancestry.ancestor_id
+            WHERE model_providers.archived_at IS NULL
+              AND ancestry.account_id <> :root
+            """
+        ),
+        {"root": root},
+    )
+
+
+def _assert_provider_resolution_preserved() -> None:
+    stranded = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """
+                WITH RECURSIVE ancestry(account_id, ancestor_id) AS (
+                    SELECT id, id FROM accounts WHERE archived_at IS NULL
+                    UNION ALL
+                    SELECT ancestry.account_id, accounts.parent_account_id
+                    FROM ancestry
+                    JOIN accounts ON accounts.id = ancestry.ancestor_id
+                    WHERE accounts.parent_account_id IS NOT NULL
+                ), resolved AS (
+                    SELECT DISTINCT ancestry.account_id
+                    FROM ancestry
+                    JOIN model_providers ON model_providers.account_id = ancestry.ancestor_id
+                    WHERE model_providers.archived_at IS NULL
+                )
+                SELECT snapshot.account_id
+                FROM migration_0154_provider_accounts snapshot
+                LEFT JOIN resolved USING (account_id)
+                WHERE resolved.account_id IS NULL
+                ORDER BY snapshot.account_id
+                """
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if stranded:
+        raise RuntimeError(
+            "migration 0154 stranded provider resolution for accounts: " + ", ".join(stranded)
+        )
+
+
+def _reparent_children(source: str, destination: str) -> None:
+    op.get_bind().execute(
+        sa.text(
+            "UPDATE accounts SET parent_account_id=:destination "
+            "WHERE parent_account_id=:source AND id<>:destination"
+        ),
+        {"source": source, "destination": destination},
+    )
+
+
 def _drop_composite_fks() -> None:
     for table, name, _ in _COMPOSITE_FKS:
         op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {name}")
@@ -338,10 +409,12 @@ def upgrade() -> None:
     root, child = _root_and_child(create=True)
     if root is None or child is None:
         return
+    _snapshot_provider_resolution(root)
     _drop_composite_fks()
     _rekey(root, child)
     _plain_move(root, child)
     _move_keys(root, child, retain_one=True)
+    _reparent_children(root, child)
     op.get_bind().execute(
         sa.text(
             "UPDATE accounts SET spent_microusd=CASE WHEN id=:child THEN spent_microusd+:spent ELSE 0 END WHERE id IN (:root,:child)"
@@ -355,6 +428,7 @@ def upgrade() -> None:
         },
     )
     _restore_composite_fks()
+    _assert_provider_resolution_preserved()
 
 
 def downgrade() -> None:
@@ -365,6 +439,14 @@ def downgrade() -> None:
     _rekey(child, root)
     _plain_move(child, root)
     _move_keys(child, root, retain_one=False)
+    # A post-upgrade child may legitimately also be named Eumemic.  Free the
+    # root-level sibling name before moving children back; deleting first is
+    # impossible because the self-FK is ON DELETE RESTRICT.
+    op.get_bind().execute(
+        sa.text("UPDATE accounts SET display_name=:name WHERE id=:child"),
+        {"child": child, "name": f"0154 downgrade ({child})"},
+    )
+    _reparent_children(child, root)
     op.get_bind().execute(
         sa.text(
             "UPDATE accounts SET spent_microusd=(SELECT spent_microusd FROM accounts WHERE id=:child) WHERE id=:root"

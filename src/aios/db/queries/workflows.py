@@ -65,7 +65,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_by=actor_from_row(row),
         created_at=row["created_at"],
@@ -85,7 +85,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         output_model=row["output_model"],
         description=row["description"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         created_at=row["created_at"],
     )
@@ -110,7 +110,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         source_version=row.get("source_version"),
         host_semantics_epoch=row["host_semantics_epoch"],
         tools=load_tool_specs(row["tools"]),
-        mcp_servers=[McpServerSpec.model_validate(s) for s in row["mcp_servers"]],
+        mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
         status=row["status"],
         input=row["input"],
@@ -126,6 +126,8 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         archived_at=row["archived_at"],
+        terminal_summary=row.get("terminal_summary"),
+        journal_pruned_at=row.get("journal_pruned_at"),
     )
 
 
@@ -1047,6 +1049,7 @@ async def set_run_terminal(
     status: WfRunStatus,
     output: Any,
     account_id: str,
+    terminal_summary: dict[str, Any] | None = None,
 ) -> None:
     """Flip a run to its terminal ``status`` and store ``output`` in one UPDATE.
 
@@ -1063,13 +1066,16 @@ async def set_run_terminal(
     statuses-filtered watcher's decision must agree with the final row).
     """
     await conn.execute(
-        "UPDATE wf_runs SET status = $3, output = $4::jsonb, updated_at = now() "
+        "UPDATE wf_runs SET status = $3, output = $4::jsonb, "
+        "archived_at = CASE WHEN $5::jsonb IS NULL THEN archived_at ELSE now() END, "
+        "terminal_summary = COALESCE($5::jsonb, terminal_summary), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 "
         "AND status NOT IN ('completed', 'errored', 'cancelled')",
         run_id,
         account_id,
         status,
         json.dumps(output) if output is not None else None,
+        json.dumps(terminal_summary) if terminal_summary is not None else None,
     )
 
 
@@ -1144,6 +1150,94 @@ async def list_run_ids_needing_step(
         call_llm_stale_seconds,
     )
     return [r["id"] for r in rows]
+
+
+async def signal_stale_suspended_runs(
+    conn: asyncpg.Connection[Any], *, older_than_seconds: float
+) -> list[str]:
+    """Cancel-signal stale suspended runs whose awaited children can no longer answer.
+
+    The journal's unresolved ``call_started`` events are the authoritative awaited
+    roster, and the veto below **fails closed** over that whole roster: a run is
+    eligible only when EVERY unresolved call is *provably* dead. Only two classes are
+    provable, because only they have an authoritative out-of-journal servicer row to
+    interrogate — an ``agent``'s session (dead when missing or archived) and an
+    ``invoke_workflow``'s run (dead when missing, archived, or terminal). Every other
+    capability — ``tool``, ``call_llm``, ``gate``, and any capability added after this
+    was written — is worker-task-or-resume backed with no such row, so its liveness
+    cannot be established here and it VETOES the reap.
+
+    The ``ELSE FALSE`` in the liveness CASE is the load-bearing character: an
+    unrecognised (or NULL) capability takes it, fails the ``IS NOT TRUE`` test, and
+    parks the run. Adding a capability next month therefore makes this reaper strictly
+    MORE conservative with no edit here — the failure direction is a parked run an
+    operator can cancel by hand, never a cancel-signal fired into live work. A
+    long-running ``tool`` exec is exactly the case that must never be reaped: it can
+    legitimately occupy hours and its own re-dispatch backstop lives in
+    ``list_run_ids_needing_step``, not here.
+
+    An unharvested signal means the run has real work pending and belongs to the normal
+    needs-step sweep, not the reaper. Cancellation is inserted through the same durable
+    side table as the operator actuator, preserving the run step as journal single writer.
+    ``ON CONFLICT`` makes concurrent/startup/periodic passes idempotent.
+    """
+    rows = await conn.fetch(
+        """
+        INSERT INTO wf_run_signals (run_id, call_key, kind, result)
+        SELECT r.id, $2, 'cancel', $3::jsonb
+          FROM wf_runs r
+         WHERE r.status = 'suspended' AND r.archived_at IS NULL
+           AND r.updated_at < now() - make_interval(secs => $1)
+           AND EXISTS (
+             SELECT 1 FROM wf_run_events awaited
+              WHERE awaited.run_id = r.id AND awaited.type = 'call_started'
+                AND awaited.payload->>'capability' IN ('agent', 'invoke_workflow')
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = awaited.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_signals s
+              WHERE s.run_id = r.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = s.call_key
+                     AND done.type = 'call_result'))
+           AND NOT EXISTS (
+             SELECT 1 FROM wf_run_events started
+              WHERE started.run_id = r.id AND started.type = 'call_started'
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events done
+                   WHERE done.run_id = r.id AND done.call_key = started.call_key
+                     AND done.type = 'call_result')
+                -- Fail closed: this arm asks "is this unresolved call PROVABLY DEAD?"
+                -- and vetoes unless the answer is a definite TRUE. Only the two
+                -- servicer-row-backed capabilities can answer; everything else --
+                -- tool / call_llm / gate / any capability added later -- falls to
+                -- ELSE FALSE and parks the run. `IS NOT TRUE` also absorbs a NULL
+                -- (missing/!= JSON capability key) into the veto.
+                AND (CASE started.payload->>'capability'
+                  WHEN 'agent' THEN NOT EXISTS (
+                    SELECT 1 FROM sessions child
+                     WHERE child.id = started.payload->>'child_session_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL)
+                  WHEN 'invoke_workflow' THEN NOT EXISTS (
+                    SELECT 1 FROM wf_runs child
+                     WHERE child.id = started.payload->>'child_run_id'
+                       AND child.account_id = r.account_id
+                       AND child.archived_at IS NULL
+                       AND child.status NOT IN ('completed','errored','cancelled'))
+                  ELSE FALSE
+                END) IS NOT TRUE)
+        ON CONFLICT (run_id, call_key) DO NOTHING
+        RETURNING run_id
+        """,
+        older_than_seconds,
+        CANCEL_SIGNAL_CALL_KEY,
+        json.dumps({"kind": "stale_suspended_run"}),
+    )
+    return [row["run_id"] for row in rows]
 
 
 # ─── wf_run_events (the journal — single writer, gapless, idempotent) ─────────
@@ -1259,13 +1353,16 @@ async def get_run_completed_event(conn: asyncpg.Connection[Any], run_id: str) ->
 
 
 async def resolve_run_error(conn: asyncpg.Connection[Any], run_id: str) -> dict[str, Any] | None:
-    """An errored run's ``{kind, …}`` error detail, or ``None``.
+    """Return durable structured error detail for an errored run.
 
-    THE extraction of ``error`` from the ``run_completed`` journal payload —
-    shared by the run awaiter's completion record and the trigger fire path's
-    composed envelope (#819), so the two surfaces can never drift on where
-    ``error.kind`` lives (the row stores only ``status`` + ``output``).
+    Rows created before ``terminal_summary`` was introduced retain their terminal
+    facts in the ``run_completed`` event, so keep that compatibility path until a
+    summary has actually been projected.
     """
+    summary = await conn.fetchval("SELECT terminal_summary FROM wf_runs WHERE id = $1", run_id)
+    if summary is not None:
+        summary_error: dict[str, Any] | None = summary.get("error")
+        return summary_error
     completed = await get_run_completed_event(conn, run_id)
     if completed is None:
         return None
@@ -1298,29 +1395,32 @@ async def derive_run_response(
     was gated off for cancellation, leaving the liveness arm to mislabel it ``child_gone``).
     """
     row = await conn.fetchrow(
-        "SELECT r.status, (r.archived_at IS NOT NULL) AS archived, "
-        "       (SELECT e.payload FROM wf_run_events e "
-        "        WHERE e.run_id = r.id AND e.type = 'run_completed' "
-        "        ORDER BY e.seq DESC LIMIT 1) AS completed "
+        "SELECT r.status, r.output, r.terminal_summary, "
+        "       (r.archived_at IS NOT NULL) AS archived, "
+        "       CASE WHEN r.terminal_summary IS NULL THEN ("
+        "           SELECT e.payload FROM wf_run_events e "
+        "            WHERE e.run_id = r.id AND e.type = 'run_completed' "
+        "            ORDER BY e.seq DESC LIMIT 1"
+        "       ) END AS legacy_completed "
         "FROM wf_runs r WHERE r.id = $1 AND r.account_id = $2",
         run_id,
         account_id,
     )
-    if row is None:  # the run vanished entirely → can never answer
+    if row is None:
         return Err(error={"kind": "child_gone"})
     status = row["status"]
     if status == "cancelled":
         return Err(error={"kind": "cancelled"})
     if status in ("completed", "errored"):
-        completed = row["completed"] if row["completed"] is not None else {}
-        # The run_completed bookend carries its OWN flat {output, is_error, error}
-        # triple (a second on-disk product, untouched here). Collapse it into the
-        # same Outcome kind at the read, rename-tolerant (output ↔ result), rather
-        # than re-pair the triple downstream.
+        summary = row["terminal_summary"]
+        completed = summary if summary is not None else row["legacy_completed"] or {}
         if completed.get("is_error"):
             return Err(error=completed["error"])
-        return Ok(result=completed.get("output"))
-    if row["archived"]:  # non-terminal but archived → can never answer
+        # Output remains on the run row for projected summaries. Legacy events
+        # carry it themselves, including rows whose run output was never copied.
+        result = row["output"] if summary is not None else completed.get("output", row["output"])
+        return Ok(result=result)
+    if row["archived"]:
         return Err(error={"kind": "child_gone"})
     return None
 

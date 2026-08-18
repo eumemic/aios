@@ -298,7 +298,7 @@ from .vault_credential_auth_type import VaultCredentialAuthType
 from .vault_credential_create import VaultCredentialCreate
 from .vault_credential_create_auth_type import VaultCredentialCreateAuthType
 from .vault_credential_create_metadata import VaultCredentialCreateMetadata
-from .vault_credential_metadata import VaultCredentialMetadata
+from .vault_credential_metadata_type_0 import VaultCredentialMetadataType0
 from .vault_credential_update import VaultCredentialUpdate
 from .vault_credential_update_metadata_type_0 import VaultCredentialUpdateMetadataType0
 from .vault_metadata import VaultMetadata
@@ -321,6 +321,7 @@ from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
+from .wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
 from .wf_run_usage import WfRunUsage
 from .wf_run_workspace import WfRunWorkspace
 from .whatsapp_confirm_pairing_request import WhatsappConfirmPairingRequest
@@ -617,7 +618,7 @@ __all__ = (
     "VaultCredentialCreate",
     "VaultCredentialCreateAuthType",
     "VaultCredentialCreateMetadata",
-    "VaultCredentialMetadata",
+    "VaultCredentialMetadataType0",
     "VaultCredentialUpdate",
     "VaultCredentialUpdateMetadataType0",
     "VaultMetadata",
@@ -638,6 +639,7 @@ __all__ = (
     "WfRunEventType",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
+    "WfRunTerminalSummaryType0",
     "WfRunUsage",
     "WfRunWorkspace",
     "WhatsappConfirmPairingRequest",

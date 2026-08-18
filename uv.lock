@@ -310,6 +310,7 @@ source = { editable = "connectors/matrix" }
 dependencies = [
     { name = "aios-connector-http" },
     { name = "asyncpg" },
+    { name = "markdown-it-py" },
     { name = "mautrix" },
     { name = "pydantic-settings" },
 ]
@@ -328,6 +329,7 @@ dev = [
 requires-dist = [
     { name = "aios-connector-http", editable = "packages/aios-connector-http" },
     { name = "asyncpg", specifier = ">=0.30" },
+    { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "mautrix", specifier = "==0.21.1" },
     { name = "pydantic-settings", specifier = ">=2.6" },
 ]
