@@ -122,6 +122,13 @@ _GC_INTERVAL_SECONDS = 3600.0
 # clear it, and the GC re-runs hourly — so deferring a young pointer costs at
 # most one tick and never permanently withholds collection.
 _ABSENCE_RECONCILE_MIN_AGE = timedelta(minutes=15)
+
+# Consecutive aborted GC ticks before the failure is logged at exception level
+# (with traceback) rather than warning. One aborted tick is a hiccup -- Docker
+# restarts, a DB failover. A run of them means no disk has been reclaimed for
+# hours AND the cold-provision admission gate is frozen on an increasingly
+# stale pressure figure, which is an operator-actionable outage.
+_GC_FAILURE_ALARM_TICKS = 3
 _EGRESS_REFRESH_INTERVAL_SECONDS = 30.0
 _EGRESS_EVICT_AFTER_SUCCESSES = 3
 
@@ -2399,20 +2406,71 @@ class SandboxRegistry:
         a Docker/DB hiccup in one tick must not silently disable the GC for the
         worker's lifetime. ``CancelledError`` is not an ``Exception``, so
         ``stop_gc()`` still exits cleanly.
+
+        A failed tick is DELIBERATELY fail-static, and that is a correctness
+        property, not an oversight:
+
+        * ``pressure_callback`` is not invoked, so ``_provisioning_pressure``
+          RETAINS the last tick's value and the cold-provision admission gate
+          keeps whatever state it had. Reporting a fabricated all-clear here
+          (e.g. by swallowing an incomplete image enumeration and reading the
+          resulting empty listing as "0 bytes used") would re-open provisioning
+          onto a possibly-full disk -- the same "could not read it" =>
+          "it does not exist" inversion (aios#2138) this GC exists to remove,
+          relocated from the pointer clear to the budget figure.
+        * No pass is skipped selectively: the budget/account passes are purely
+          observational (they contain no deletion), so "saving" them would
+          reclaim nothing while destroying the backpressure above.
+
+        What the failure costs is REAL, though, and it is invisible: no disk is
+        reclaimed and the admission gate is frozen on a stale figure until a
+        tick succeeds. So the abort is reported with the operator-relevant
+        consequences attached -- how long the GC has been down, and what
+        admission state is being carried forward -- rather than as a bare
+        stack trace.
         """
         first = True
+        consecutive_failures = 0
         while True:
             try:
                 if not first:
                     await asyncio.sleep(_GC_INTERVAL_SECONDS)
                 first = False
                 pressure = await self._gc_once(pool)
+                if consecutive_failures:
+                    log.info(
+                        "sandbox.gc_tick_recovered",
+                        failed_ticks=consecutive_failures,
+                    )
+                consecutive_failures = 0
                 if pressure_callback is not None:
                     callback_result = pressure_callback(pressure)
                     if callback_result is not None:
                         await callback_result
             except Exception:
-                log.exception("sandbox.gc_tick_failed")
+                consecutive_failures += 1
+                carried = self._provisioning_pressure
+                # Escalate once the GC has been down long enough that the
+                # carried-forward figure is materially stale: one aborted tick
+                # is a hiccup, a run of them is an outage with no reclamation.
+                emit = (
+                    log.exception
+                    if consecutive_failures >= _GC_FAILURE_ALARM_TICKS
+                    else log.warning
+                )
+                emit(
+                    "sandbox.gc_tick_failed",
+                    consecutive_failures=consecutive_failures,
+                    # No pass ran to completion: nothing was reclaimed this tick.
+                    reclaimed_this_tick=False,
+                    # The admission gate is frozen on the last good tick's
+                    # figure (fail-static); these are the values still in force.
+                    carried_pool_used_bytes=carried.pool_used_bytes,
+                    carried_pool_budget_bytes=carried.pool_budget_bytes,
+                    carried_pressured_accounts=sorted(carried.pressured_accounts),
+                    provisioning_gate_closed=carried.pressured,
+                    next_attempt_seconds=_GC_INTERVAL_SECONDS,
+                )
 
     async def _gc_once(self, pool: asyncpg.Pool[Any]) -> GcPressureResult:
         """One GC tick: corpse pass, image pass, pool-budget pass, pointer reconcile."""
@@ -2812,6 +2870,30 @@ class SandboxRegistry:
 
         Both are *additive* to the ``observed_before`` CAS, which only protects
         pointers already written when the enumeration started.
+
+        LIVENESS ASSUMPTION (deployment scope limit, not a defect in this
+        build): ``_handles`` is *this process's* in-memory handle table, so it
+        is authoritative for "is this session live?" ONLY while exactly one
+        worker owns a given ``instance_id``. The clear is scoped by
+        ``snapshot_host = instance_id``, so the guard is sound exactly as long
+        as that ownership is 1:1 -- the v1 single-host assumption this module
+        is written to (S5.5).
+
+        Scaling workers horizontally while SHARING ``AIOS_INSTANCE_ID`` makes
+        the assumption silently false: worker A enumerates its own daemon, does
+        not see the tag for a session worker B is actively running, and B's
+        handle is invisible to A's ``_handles``. The liveness conjunct then
+        passes vacuously and A clears a LIVE session's durable-FS pointer.
+        Nothing here detects that -- the failure is silent and indistinguishable
+        from a legitimate reconcile. The recency floor and the
+        ``observed_before`` CAS still apply (so it takes a pointer older than
+        ``_ABSENCE_RECONCILE_MIN_AGE``), but neither closes the hole.
+
+        Two deployments are safe: one worker per ``instance_id``, or a
+        per-worker-unique ``AIOS_INSTANCE_ID`` so each worker only reconciles
+        pointers it owns. Making a shared-instance-id deployment safe requires
+        DB-observable liveness (a worker/lease column) rather than a
+        process-local set; that is the deferred S5.5 multi-host refinement.
         """
         from aios.harness import runtime
 
