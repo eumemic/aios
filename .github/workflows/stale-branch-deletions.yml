@@ -81,11 +81,13 @@ jobs:
               continue
             fi
 
-            # A push workflow's native check belongs to the base commit. Create
-            # this check on the unchanged PR head so an older green result can
-            # no longer authorize merging it.
+            # A push workflow's native check belongs to the base commit. Publish
+            # this result as `detect` on the unchanged PR head: unlike this
+            # workflow's advisory `check` job, `detect` is required by master
+            # branch protection. A base-only stale deletion therefore replaces
+            # the older green required result with a blocking failure.
             check_id=$(gh api --method POST "repos/${GH_REPO}/check-runs" \
-              -f name=check -f head_sha="$head_sha" -f status=in_progress \
+              -f name=detect -f head_sha="$head_sha" -f status=in_progress \
               --jq '.id')
 
             python scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha" \

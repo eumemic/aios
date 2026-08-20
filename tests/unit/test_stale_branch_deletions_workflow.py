@@ -7,9 +7,9 @@ from typing import Any
 
 import yaml
 
-_WORKFLOW = (
-    Path(__file__).resolve().parents[2] / ".github" / "workflows" / "stale-branch-deletions.yml"
-)
+_ROOT = Path(__file__).resolve().parents[2]
+_WORKFLOW = _ROOT / ".github" / "workflows" / "stale-branch-deletions.yml"
+_CODE_VALIDATION_WORKFLOW = _ROOT / ".github" / "workflows" / "code-validation.yml"
 
 
 def _doc() -> dict[Any, Any]:
@@ -41,6 +41,10 @@ def test_base_push_rechecks_open_prs_and_updates_their_head_checks() -> None:
     assert "pulls?state=open&base=${BASE_REF}" in run
     assert 'git ls-tree -r --name-only "$BASE_SHA"' in run
     assert 'head_sha="$head_sha"' in run
+    # The base-push result must replace a context enforced by live branch
+    # protection; publishing the stale-deletion workflow's `check` is advisory.
+    assert "-f name=detect" in run
+    assert "-f name=check" not in run
     assert 'scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha"' in run
     assert "scripts/check_pr_deletions.py" in run
     assert "check-runs/${check_id}" in run
@@ -55,6 +59,21 @@ def test_every_pr_event_compares_the_current_base_and_head_trees() -> None:
     assert 'git ls-tree -r --name-only "$BASE_SHA"' in run
     assert 'scripts/pr_files_from_trees.py "$BASE_SHA" "$HEAD_SHA"' in run
     assert "/pulls/${PR_NUMBER}/files" not in run
+    assert "scripts/check_pr_deletions.py" in run
+
+
+def test_required_detect_context_checks_current_trees_on_every_pr_run() -> None:
+    """A later required-context run must not overwrite the guard with green."""
+    validation: dict[Any, Any] = yaml.safe_load(_CODE_VALIDATION_WORKFLOW.read_text())
+    steps = validation["jobs"]["detect"]["steps"]
+    guard = next(
+        step for step in steps if step.get("name") == "Reject undocumented files missing from the PR head"
+    )
+    run = guard["run"]
+
+    assert guard["if"] == "github.event_name == 'pull_request'"
+    assert 'git ls-tree -r --name-only "$BASE_SHA"' in run
+    assert 'scripts/pr_files_from_trees.py "$BASE_SHA" "$HEAD_SHA"' in run
     assert "scripts/check_pr_deletions.py" in run
 
 
