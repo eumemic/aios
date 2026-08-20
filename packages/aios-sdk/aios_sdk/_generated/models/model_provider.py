@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.model_provider_model_routes import ModelProviderModelRoutes
+
 
 T = TypeVar("T", bound="ModelProvider")
 
@@ -24,6 +28,7 @@ class ModelProvider:
         created_at (datetime.datetime):
         updated_at (datetime.datetime):
         api_base (None | str | Unset):
+        model_routes (ModelProviderModelRoutes | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
 
@@ -33,6 +38,7 @@ class ModelProvider:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     api_base: None | str | Unset = UNSET
+    model_routes: ModelProviderModelRoutes | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -52,6 +58,10 @@ class ModelProvider:
             api_base = UNSET
         else:
             api_base = self.api_base
+
+        model_routes: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.model_routes, Unset):
+            model_routes = self.model_routes.to_dict()
 
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
@@ -74,6 +84,8 @@ class ModelProvider:
         )
         if api_base is not UNSET:
             field_dict["api_base"] = api_base
+        if model_routes is not UNSET:
+            field_dict["model_routes"] = model_routes
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
 
@@ -81,6 +93,8 @@ class ModelProvider:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.model_provider_model_routes import ModelProviderModelRoutes
+
         d = dict(src_dict)
         id = d.pop("id")
 
@@ -100,6 +114,13 @@ class ModelProvider:
             return cast(None | str | Unset, data)
 
         api_base = _parse_api_base(d.pop("api_base", UNSET))
+
+        _model_routes = d.pop("model_routes", UNSET)
+        model_routes: ModelProviderModelRoutes | Unset
+        if isinstance(_model_routes, Unset):
+            model_routes = UNSET
+        else:
+            model_routes = ModelProviderModelRoutes.from_dict(_model_routes)
 
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
@@ -125,6 +146,7 @@ class ModelProvider:
             created_at=created_at,
             updated_at=updated_at,
             api_base=api_base,
+            model_routes=model_routes,
             archived_at=archived_at,
         )
 

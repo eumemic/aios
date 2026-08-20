@@ -1343,16 +1343,19 @@ async def _run_session_step_body(
         # guard (it only picks streaming vs. non-streaming, used below), so it
         # runs concurrently rather than after — on the rare conflict path this
         # spends one harmless extra read alongside the guard's own latch writes.
+        routed_model = agent.model
         (auth, conflict), subscribed = await asyncio.gather(
             model_providers_service.resolve_provider_auth_or_conflict(
                 pool,
                 runtime.require_crypto_box(),
                 account_id=account_id,
-                model=agent.model,
+                model=routed_model,
                 litellm_extra=agent.litellm_extra,
             ),
             has_subscriber(pool, session_id),
         )
+        if auth is not None and "/" not in agent.model:
+            routed_model = auth.model_routes.get(agent.model, agent.model)
         if conflict is not None:
             await _handle_provider_configuration_error(
                 pool,
@@ -1388,13 +1391,13 @@ async def _run_session_step_body(
             if subscribed:
                 return await stream_litellm(
                     llm_request,
-                    model=agent.model,
+                    model=routed_model,
                     pool=pool,
                     auth=auth,
                 )
             return await call_litellm(
                 llm_request,
-                model=agent.model,
+                model=routed_model,
                 auth=auth,
             )
 

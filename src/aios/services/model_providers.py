@@ -63,6 +63,7 @@ async def create_model_provider(
     provider: str,
     api_key: str,
     api_base: str | None,
+    model_routes: dict[str, str] | None = None,
 ) -> ModelProvider:
     async with pool.acquire() as conn:
         return await queries.insert_model_provider(
@@ -70,6 +71,7 @@ async def create_model_provider(
             account_id=account_id,
             provider=provider,
             api_base=api_base,
+            model_routes=model_routes or {},
             blob=_encrypt_api_key(api_key, crypto_box, account_id=account_id),
         )
 
@@ -103,6 +105,7 @@ async def update_model_provider(
     account_id: str,
     api_key: str | None,
     api_base: str | EllipsisType | None = ...,
+    model_routes: dict[str, str] | EllipsisType = ...,
 ) -> ModelProvider:
     """Rotate the key and/or edit ``api_base``.
 
@@ -118,7 +121,12 @@ async def update_model_provider(
     )
     async with pool.acquire() as conn:
         return await queries.update_model_provider(
-            conn, model_provider_id, account_id=account_id, blob=blob, api_base=api_base
+            conn,
+            model_provider_id,
+            account_id=account_id,
+            blob=blob,
+            api_base=api_base,
+            model_routes=model_routes,
         )
 
 
@@ -160,6 +168,34 @@ def _derive_provider(model: str, custom_llm_provider: str | None) -> str | None:
     except Exception:
         return None
     return str(provider)
+
+
+async def resolve_model_route(
+    pool: asyncpg.Pool[Any],
+    *,
+    account_id: str,
+    model: str,
+    litellm_extra: dict[str, Any] | None,
+) -> str:
+    """Resolve an ambiguous bare model through the effective provider row.
+
+    Fully-qualified strings contain ``/`` and are explicit route choices, so
+    they are always honored unchanged.
+    """
+    if "/" in model:
+        return model
+    raw_custom = (litellm_extra or {}).get("custom_llm_provider")
+    custom = raw_custom if isinstance(raw_custom, str) and raw_custom else None
+    provider = _derive_provider(model, custom)
+    if provider is None:
+        return model
+    async with pool.acquire() as conn:
+        resolved = await queries.resolve_model_provider(
+            conn, account_id=account_id, provider=provider
+        )
+    if resolved is None:
+        return model
+    return (resolved.model_routes or {}).get(model, model)
 
 
 async def _resolve_provider_auth(
@@ -222,6 +258,7 @@ async def _resolve_provider_auth(
         api_key=subkey.decrypt(resolved.blob),
         api_base=resolved.api_base,
         owner_account_id=resolved.owner_account_id,
+        model_routes=resolved.model_routes or {},
     )
 
 

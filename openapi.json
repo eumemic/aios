@@ -15481,6 +15481,13 @@
             ],
             "title": "Api Base"
           },
+          "model_routes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Routes"
+          },
           "api_key_set": {
             "type": "boolean",
             "title": "Api Key Set"
@@ -15544,6 +15551,14 @@
               }
             ],
             "title": "Api Base"
+          },
+          "model_routes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Routes",
+            "description": "Bare model aliases mapped to canonical, fully-qualified LiteLLM routes."
           }
         },
         "additionalProperties": false,
@@ -15581,6 +15596,13 @@
               }
             ],
             "title": "Api Base"
+          },
+          "model_routes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Model Routes"
           }
         },
         "additionalProperties": false,

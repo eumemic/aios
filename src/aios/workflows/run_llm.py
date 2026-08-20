@@ -236,6 +236,8 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         return {
             "error": f"call_llm provider-auth resolution failed: {type(exc).__name__}: {exc}"
         }, 0
+    if auth is not None and "/" not in model:
+        model = auth.model_routes.get(model, model)
     if conflict is not None:
         return {"error": f"call_llm refused: {conflict}"}, 0
     if auth is None and (

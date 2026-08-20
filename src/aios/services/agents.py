@@ -29,6 +29,7 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.skills import AgentSkillRef
+from aios.services import model_providers as model_providers_service
 from aios.services import skills as skills_service
 from aios.services.model_binding_authz import enforce_workflow_binding_privilege
 from aios.workflows.generic_child import GENERIC_CHILD_SYSTEM
@@ -127,6 +128,9 @@ async def create_agent(
     spawn-edge reclamp (``workflows/step.py``) independently re-clamps the agent's
     surface ⊆ the run at spawn time and is unchanged by this path.
     """
+    model = await model_providers_service.resolve_model_route(
+        pool, account_id=account_id, model=model, litellm_extra=litellm_extra
+    )
     if creator_session_id is not None:
         # #1636: the model-binding privilege. A ``creator_session_id`` IS a
         # self-authoring (non-operator) principal — it may not bind a ``workflow:``
@@ -217,6 +221,10 @@ async def update_agent(
     while additions remain bounded by the editor; a breach raises :class:`ForbiddenError`.
     With no editor (the HTTP/operator path) anything may be updated.
     """
+    if model is not None:
+        model = await model_providers_service.resolve_model_route(
+            pool, account_id=account_id, model=model, litellm_extra=litellm_extra
+        )
     if editor_session_id is not None:
         # #1636: the model-binding privilege, keyed on the editor being a
         # self-authoring (non-operator) principal. ``model is None`` (the field is

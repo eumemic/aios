@@ -45,6 +45,10 @@ class ModelProviderCreate(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     api_key: SecretStr = Field(min_length=1)
     api_base: str | None = None
+    model_routes: dict[str, str] = Field(
+        default_factory=dict,
+        description="Bare model aliases mapped to canonical, fully-qualified LiteLLM routes.",
+    )
 
     @field_validator("provider")
     @classmethod
@@ -66,6 +70,7 @@ class ModelProviderUpdate(BaseModel):
 
     api_key: SecretStr | None = Field(default=None, min_length=1)
     api_base: str | None = None
+    model_routes: dict[str, str] = Field(default_factory=dict)
 
 
 class ModelProvider(BaseModel):
@@ -74,6 +79,7 @@ class ModelProvider(BaseModel):
     id: str
     provider: str
     api_base: str | None = None
+    model_routes: dict[str, str] = Field(default_factory=dict)
     api_key_set: bool
     created_at: datetime
     updated_at: datetime
@@ -95,6 +101,7 @@ class ProviderAuth:
     api_key: str = field(repr=False)
     api_base: str | None
     owner_account_id: str
+    model_routes: dict[str, str] = field(default_factory=dict)
 
 
 def provider_auth_conflict(
