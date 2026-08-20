@@ -229,8 +229,7 @@ def _is_terminal_model_error(exc: BaseException) -> bool:
 
 
 _MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
-    "The model call failed with a terminal error that retrying cannot fix "
-    "(e.g. invalid request, context-window exceeded, content policy, or auth). "
+    "The model call failed with a terminal error that retrying cannot fix. "
     "To recover, post a message to the session, optionally after switching the "
     "agent's model or trimming the conversation."
 )
@@ -238,13 +237,9 @@ _MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE = (
 
 def _terminal_error_stop_message(provider_error: dict[str, Any]) -> str:
     """Include the provider diagnosis in the console-visible failure message."""
-    exception_class = provider_error["exception_class"]
-    http_status = provider_error["http_status"]
-    status = f" (HTTP {http_status})" if http_status is not None else ""
-    return (
-        f"{_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE}\n\n"
-        f"Provider error: {exception_class}{status}: {provider_error['message']}"
-    )
+    provider_message = provider_error["message"].strip()
+    diagnosis = provider_message or "The provider returned no error detail."
+    return f"{diagnosis}\n\n{_MODEL_TERMINAL_ERROR_STOP_REASON_MESSAGE}"
 
 
 def _retry_delay_for_attempt(attempt: int) -> float | None:

@@ -30,6 +30,7 @@ from aios.harness.loop import (
     _is_terminal_model_error,
     _provider_error_detail,
     _retry_delay_for_attempt,
+    _terminal_error_stop_message,
     run_session_step,
 )
 from aios.harness.window import WindowedEvents
@@ -552,10 +553,11 @@ class TestRunSessionStepOnTerminalModelError:
             "http_status": 400,
             "message": str(error),
         }
-        # The console's failed-turn panel renders stop_reason.message, so keep
-        # the diagnostic visible there as well as available in structured form.
-        assert "BadRequestError (HTTP 400)" in reason["message"]
+        # The console's failed-turn panel renders stop_reason.message, so lead
+        # with the provider's diagnosis rather than an exception label or guesses.
+        assert reason["message"].startswith(str(error))
         assert "request_too_large" in reason["message"]
+        assert "e.g." not in reason["message"]
 
     @pytest.mark.parametrize("cls", _TRANSIENT_ERROR_CLASSES)
     async def test_transient_class_keeps_backoff_ladder(
@@ -573,6 +575,36 @@ class TestRunSessionStepOnTerminalModelError:
             ANY, "sess_x", cause="reschedule", delay_seconds=2, account_id=ANY
         )
         mock_step_dependencies.fail_all_open_requests.assert_not_awaited()
+
+
+class TestTerminalErrorStopMessage:
+    def test_uses_provider_message_without_generic_guesses(self) -> None:
+        message = _terminal_error_stop_message(
+            {
+                "exception_class": "BadRequestError",
+                "http_status": 400,
+                "message": "Your input exceeds the context window by 42 tokens.",
+            }
+        )
+
+        assert "Your input exceeds the context window by 42 tokens." in message
+        assert "To recover, post a message to the session" in message
+        assert "e.g." not in message
+        assert "content policy" not in message
+        assert "BadRequestError" not in message
+
+    @pytest.mark.parametrize("provider_message", ["", "   "])
+    def test_says_when_provider_returned_no_detail(self, provider_message: str) -> None:
+        message = _terminal_error_stop_message(
+            {
+                "exception_class": "BadRequestError",
+                "http_status": 400,
+                "message": provider_message,
+            }
+        )
+
+        assert "The provider returned no error detail." in message
+        assert "e.g." not in message
 
 
 class TestProviderErrorDetail:
