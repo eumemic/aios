@@ -1045,6 +1045,20 @@ class TestCustomTools:
         assert {a.tool_call_id for a in s.awaiting} == {"call_w1"}
         assert s.awaiting[0].kind == "custom"
 
+        # The hold is durable, not just derived: ``lifecycle/tool_requested``
+        # with the awaiting view's ``custom`` kind.
+        events = await harness.all_events(session.id)
+        requested = [
+            e for e in events if e.kind == "lifecycle" and e.data.get("event") == "tool_requested"
+        ]
+        assert len(requested) == 1
+        assert requested[0].data == {
+            "event": "tool_requested",
+            "tool_call_id": "call_w1",
+            "name": "get_weather",
+            "kind": "custom",
+        }
+
     async def test_custom_tool_result_resumes_session(self, harness: Harness) -> None:
         """Submitting a custom tool result via the API resumes the session."""
         account_id = "acc_test_stub"  # PR 3 scaffolding
@@ -1332,6 +1346,96 @@ class TestPermissionPolicies:
         s = await harness.session(session.id)
         assert s.status == "idle"
         assert s.stop_reason == {"type": "end_turn"}
+
+    async def test_hold_appends_tool_requested_lifecycle(self, harness: Harness) -> None:
+        """Holding an always_ask call appends ``lifecycle/tool_requested``.
+
+        The request-side twin of ``tool_confirmed``: awaiting is derived per
+        read (and shifts under policy edits), so the log must record that the
+        harness held this call, ordered after the assistant message that
+        offered it and before the step's ``turn_ended``.
+        """
+        from aios.models.agents import ToolSpec
+
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
+            return {"matches": ["a.txt"]}
+
+        self._override_tool("glob", fake_glob)
+
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_req1")]
+                ),
+            ]
+        )
+        session = await harness.start(
+            "list files",
+            tool_specs=[ToolSpec(type="glob", permission="always_ask")],
+        )
+        await harness.run_step(session.id)
+
+        events = await harness.all_events(session.id)
+        requested = [
+            e for e in events if e.kind == "lifecycle" and e.data.get("event") == "tool_requested"
+        ]
+        assert len(requested) == 1
+        assert requested[0].data == {
+            "event": "tool_requested",
+            "tool_call_id": "call_req1",
+            "name": "glob",
+            "kind": "builtin",
+        }
+        offer_seq = next(
+            e.seq for e in events if e.kind == "message" and e.data.get("role") == "assistant"
+        )
+        turn_end_seq = next(
+            e.seq for e in events if e.kind == "lifecycle" and e.data.get("event") == "turn_ended"
+        )
+        assert offer_seq < requested[0].seq < turn_end_seq
+
+    async def test_tool_requested_not_duplicated_across_steps(self, harness: Harness) -> None:
+        """The full hold → allow → dispatch → respond flow appends exactly one
+        ``tool_requested`` — re-wakes never re-offer prior calls."""
+        from aios.models.agents import ToolSpec
+
+        async def fake_glob(
+            session_id: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
+            return {"matches": ["found.txt"]}
+
+        self._override_tool("glob", fake_glob)
+
+        harness.script_model(
+            [
+                assistant(
+                    tool_calls=[tool_call("glob", {"pattern": "*.txt"}, call_id="call_req2")]
+                ),
+                assistant("Found found.txt"),
+            ]
+        )
+        session = await harness.start(
+            "list files",
+            tool_specs=[ToolSpec(type="glob", permission="always_ask")],
+        )
+        await harness.run_step(session.id)
+        await harness.confirm_tool(session.id, "call_req2", "allow")
+        await harness.run_step(session.id)
+        await harness.wait_for_tools(session.id)
+        await harness.run_step(session.id)
+
+        events = await harness.all_events(session.id)
+        requested = [
+            e for e in events if e.kind == "lifecycle" and e.data.get("event") == "tool_requested"
+        ]
+        confirmed = [
+            e for e in events if e.kind == "lifecycle" and e.data.get("event") == "tool_confirmed"
+        ]
+        assert [e.data["tool_call_id"] for e in requested] == ["call_req2"]
+        assert [e.data["tool_call_id"] for e in confirmed] == ["call_req2"]
+        assert requested[0].seq < confirmed[0].seq
 
     async def test_always_ask_deny_sends_error(self, harness: Harness) -> None:
         """Confirm deny → model sees error with deny message → responds."""
