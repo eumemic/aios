@@ -1,0 +1,37 @@
+name: Stale Branch Deletions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: stale-branch-deletions-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Inspect GitHub's merge-base-correct PR file list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "repos/${GH_REPO}/pulls/${PR_NUMBER}/files?per_page=100" \
+            | jq 'add' > "$RUNNER_TEMP/pr-files.json"
+          git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
+          python scripts/check_pr_deletions.py \
+            "$RUNNER_TEMP/pr-files.json" "$RUNNER_TEMP/base-paths.txt"
