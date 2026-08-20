@@ -14,6 +14,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
 )
 from aios.sandbox.registry import SandboxRegistry
+from aios.sandbox.setup import EgressProvisionResult, HostSkip
 from aios.sandbox.spec import ProvisioningPlan
 from tests.helpers.sandbox import FakeBackend, make_handle
 
@@ -60,14 +61,74 @@ class TestSandboxProvisionSpan:
         ):
             await registry.get_or_provision("sess_01TEST", pool=pool)
 
-        assert append_event.await_count == 2
+        assert append_event.await_count == 3
         start_data = append_event.await_args_list[0].args[3]
-        end_data = append_event.await_args_list[1].args[3]
+        end_data = append_event.await_args_list[2].args[3]
         assert start_data == {"event": "sandbox_provision_start"}
         assert end_data["event"] == "sandbox_provision_end"
         assert end_data["sandbox_provision_start_id"] == "ev_span_start"
         assert end_data["is_error"] is False
         assert end_data["container_id"] == "abc123def456"  # 12-char short id
+
+    async def test_cold_start_emits_typed_egress_outcome(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        pool = MagicMock()
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_span_start"))
+        outcome = EgressProvisionResult(
+            hosts_installed=("api.example.com",),
+            hosts_skipped=(HostSkip(host="missing.example.com", reason="no IPv4 address"),),
+        )
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_make_plan()),
+            ),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch.object(registry, "_apply_egress_rules", AsyncMock(return_value=outcome)),
+            patch("aios.services.sessions.append_event", append_event),
+        ):
+            await registry.get_or_provision("sess_01TEST", pool=pool)
+
+        lifecycle = [c for c in append_event.await_args_list if c.args[2] == "lifecycle"]
+        assert len(lifecycle) == 1
+        assert lifecycle[0].args[3] == {
+            "event": "egress_provisioned",
+            "hosts_installed": ["api.example.com"],
+            "hosts_skipped": [{"host": "missing.example.com", "reason": "no IPv4 address"}],
+        }
+
+    async def test_failure_emits_typed_egress_failure(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        pool = MagicMock()
+        append_event = AsyncMock(return_value=SimpleNamespace(id="ev_span_start"))
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_session",
+                AsyncMock(return_value=_make_plan()),
+            ),
+            patch("aios.sandbox.registry.install_egress_ca", AsyncMock()),
+            patch("aios.sandbox.registry.install_packages", AsyncMock()),
+            patch.object(
+                registry,
+                "_apply_egress_rules",
+                AsyncMock(side_effect=RuntimeError("sidecar unavailable")),
+            ),
+            patch("aios.services.sessions.append_event", append_event),
+            pytest.raises(RuntimeError),
+        ):
+            await registry.get_or_provision("sess_01TEST", pool=pool)
+
+        lifecycle = [c for c in append_event.await_args_list if c.args[2] == "lifecycle"]
+        assert len(lifecycle) == 1
+        assert lifecycle[0].args[3] == {
+            "event": "egress_provision_failed",
+            "reason": "sidecar unavailable",
+        }
 
     async def test_warm_hit_emits_no_span(self) -> None:
         backend = FakeBackend()
@@ -131,8 +192,8 @@ class TestSandboxProvisionSpan:
         ):
             await registry.get_or_provision("sess_01TEST", pool=pool)
 
-        assert append_event.await_count == 2
-        end_data = append_event.await_args_list[1].args[3]
+        assert append_event.await_count == 3
+        end_data = append_event.await_args_list[2].args[3]
         assert end_data["event"] == "sandbox_provision_end"
         assert end_data["is_error"] is True
         assert "container_id" not in end_data

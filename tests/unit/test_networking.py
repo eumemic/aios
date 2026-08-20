@@ -415,7 +415,8 @@ class TestIPv4OnlyResolution:
 
     def test_allowed_host_loop_uses_helper(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
-        assert "for ip in $(resolve_ipv4 api.example.com); do" in script
+        assert "ips=$(resolve_ipv4 api.example.com)" in script
+        assert "for ip in $ips; do" in script
         assert "getent ahostsv4" in script
 
     def test_extra_host_ports_loop_uses_helper(self) -> None:
@@ -431,7 +432,8 @@ class TestIPv4OnlyResolution:
             dnat_target=("aios-worker", 49152),
         )
         assert "PROXY_IP=$(resolve_ipv4 aios-worker | head -n1)" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        assert "ips=$(resolve_ipv4 api.secret.com)" in script
+        assert "for ip in $ips; do" in script
 
     def test_dnat_only_script_defines_and_uses_helper(self) -> None:
         script = build_secret_egress_dnat_script(
@@ -439,7 +441,8 @@ class TestIPv4OnlyResolution:
         )
         assert "resolve_ipv4()" in script
         assert "getent ahostsv4" in script
-        assert "for ip in $(resolve_ipv4 api.secret.com); do" in script
+        assert "ips=$(resolve_ipv4 api.secret.com)" in script
+        assert "for ip in $ips; do" in script
 
     def test_helper_defined_before_first_use(self) -> None:
         """The helper definition must precede every call so the script runs
