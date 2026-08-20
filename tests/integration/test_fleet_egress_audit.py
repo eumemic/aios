@@ -44,7 +44,6 @@ def _plan(session_id: str) -> ProvisioningPlan:
 async def _provision_with_outcome(
     pool: object,
     session_id: str,
-    account_id: str,
     outcome: EgressProvisionResult | BaseException,
 ) -> None:
     """Run the production lifecycle producer while faking only its sandbox I/O."""
@@ -65,9 +64,9 @@ async def _provision_with_outcome(
     ):
         if isinstance(outcome, BaseException):
             with pytest.raises(type(outcome), match=str(outcome)):
-                await registry.get_or_provision(session_id, pool=pool, account_id=account_id)
+                await registry.get_or_provision(session_id, pool=pool)
         else:
-            await registry.get_or_provision(session_id, pool=pool, account_id=account_id)
+            await registry.get_or_provision(session_id, pool=pool)
 
 
 async def test_production_egress_events_persist_and_auditor_alerts_each_adverse_outcome(
@@ -94,11 +93,10 @@ async def test_production_egress_events_persist_and_auditor_alerts_each_adverse_
             sessions.append(session)
         healthy, skipped, failed = sessions
 
-        await _provision_with_outcome(pool, healthy.id, account_id, EgressProvisionResult())
+        await _provision_with_outcome(pool, healthy.id, EgressProvisionResult())
         await _provision_with_outcome(
             pool,
             skipped.id,
-            account_id,
             EgressProvisionResult(
                 hosts_installed=("api.example.com",),
                 hosts_skipped=(HostSkip(host="missing.example.com", reason="no IPv4 address"),),
@@ -107,7 +105,6 @@ async def test_production_egress_events_persist_and_auditor_alerts_each_adverse_
         await _provision_with_outcome(
             pool,
             failed.id,
-            account_id,
             RuntimeError("sidecar unavailable"),
         )
 
