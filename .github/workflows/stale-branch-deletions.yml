@@ -3,17 +3,23 @@ name: Stale Branch Deletions
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  # A base-only change can turn an unchanged PR into a stale deletion. Recheck
+  # every open PR and publish a new check against its head in that case.
+  push:
+    branches: [master]
 
 permissions:
   contents: read
   pull-requests: read
+  checks: write
 
 concurrency:
-  group: stale-branch-deletions-${{ github.event.pull_request.number }}
+  group: stale-branch-deletions-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,3 +41,67 @@ jobs:
           git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
           python scripts/check_pr_deletions.py \
             "$RUNNER_TEMP/pr-files.json" "$RUNNER_TEMP/base-paths.txt"
+
+  recheck-open-prs:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Re-evaluate open PR heads against the new base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.ref_name }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
+          gh api --paginate --slurp \
+            "repos/${GH_REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" \
+            | jq 'add' > "$RUNNER_TEMP/open-prs.json"
+
+          jq -c '.[]' "$RUNNER_TEMP/open-prs.json" | while read -r pr; do
+            number=$(jq -r '.number' <<<"$pr")
+            head_sha=$(jq -r '.head.sha' <<<"$pr")
+            title=$(jq -r '.title' <<<"$pr")
+            body=$(jq -r '.body // ""' <<<"$pr")
+
+            # GitHub's PR-files endpoint is merge-base-relative, so it omits a
+            # file added only to the base after this PR diverged. Compare the
+            # current trees here: that base-only file is precisely the stale
+            # deletion this push-triggered pass must catch.
+            git fetch --no-tags origin "pull/${number}/head"
+            fetched_head=$(git rev-parse FETCH_HEAD)
+            if [ "$fetched_head" != "$head_sha" ]; then
+              echo "PR ${number} moved while rechecking; skipping obsolete head ${head_sha}"
+              continue
+            fi
+
+            # A push workflow's native check belongs to the base commit. Create
+            # this check on the unchanged PR head so an older green result can
+            # no longer authorize merging it.
+            check_id=$(gh api --method POST "repos/${GH_REPO}/check-runs" \
+              -f name=check -f head_sha="$head_sha" -f status=in_progress \
+              --jq '.id')
+
+            python scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha" \
+              > "$RUNNER_TEMP/pr-${number}-files.json"
+
+            set +e
+            output=$(PR_TITLE="$title" PR_BODY="$body" \
+              python scripts/check_pr_deletions.py \
+                "$RUNNER_TEMP/pr-${number}-files.json" \
+                "$RUNNER_TEMP/base-paths.txt" 2>&1)
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then conclusion=success; else conclusion=failure; fi
+
+            jq -n --arg conclusion "$conclusion" --arg output "$output" '{
+              status: "completed",
+              conclusion: $conclusion,
+              output: {title: "Stale branch deletion guard", summary: $output}
+            }' | gh api --method PATCH "repos/${GH_REPO}/check-runs/${check_id}" \
+              --input - >/dev/null
+          done
