@@ -74,6 +74,7 @@ from aios.logging import get_logger
 from aios.models.agents import (
     McpServerSpec,
     StepSurface,
+    is_mcp_tool_name,
 )
 from aios.models.events import (
     ERRORED_LIFECYCLE_STATUS,
@@ -1798,6 +1799,52 @@ async def _run_session_step_body(
             )
 
         if needs_confirm or custom:
+            # Record the hold durably: ``lifecycle/tool_requested``, the
+            # request-side twin of ``tool_confirmed``. The awaiting view is
+            # derived per read (and shifts under policy edits), so without
+            # this event the log shows confirmations that were never visibly
+            # requested — stream consumers had to re-derive policy to learn
+            # "this call is now waiting on an external party". ``kind``
+            # mirrors the awaiting view's vocabulary (mcp/builtin for
+            # confirmation gates, custom for client-executed tools).
+            # Lifecycle events are not stimuli (db/queries/events.py:
+            # ``is_stimulus``) and are invisible to context builds and the
+            # confirmed-dispatch SQL (both filter on other kinds/values), so
+            # these appends schedule no step. They can notify event-stream
+            # subscribers, but the markers remain advisory. No idempotency
+            # guard: fresh ``offered_calls`` are
+            # partitioned exactly once per completion — re-wakes never
+            # re-offer prior calls — and a crash landing between the
+            # assistant append and this one merely omits the marker while
+            # ``awaiting`` stays the actionable truth.
+            for tc, held_kind in [
+                (tc, "mcp" if is_mcp_tool_name(_tc_name(tc)) else "builtin") for tc in needs_confirm
+            ] + [(tc, "custom") for tc in custom]:
+                if not tc.get("id"):
+                    continue
+                try:
+                    await sessions_service.append_event(
+                        pool,
+                        session_id,
+                        "lifecycle",
+                        {
+                            "event": "tool_requested",
+                            "tool_call_id": tc["id"],
+                            "name": _tc_name(tc),
+                            "kind": held_kind,
+                        },
+                        account_id=account_id,
+                    )
+                except Exception:
+                    # The awaiting view is the actionable state. Marker writes
+                    # are best-effort so an archive fence or one bad marker
+                    # cannot fail the turn or suppress later markers.
+                    log.warning(
+                        "step.tool_requested_marker_failed",
+                        session_id=session_id,
+                        tool_call_id=tc["id"],
+                        exc_info=True,
+                    )
             log.info(
                 "step.external_tools_pending",
                 session_id=session_id,
