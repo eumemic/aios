@@ -31,12 +31,17 @@ def test_base_only_file_is_a_deletion_from_unchanged_pr_head(tmp_path: Path, mon
     comparer = _load("pr_files_from_trees", _ROOT / "scripts" / "pr_files_from_trees.py")
     guard = _load("check_pr_deletions", _ROOT / "scripts" / "check_pr_deletions.py")
     monkeypatch.chdir(tmp_path)
-    assert guard.find_suspicious_deletions(comparer.compare(pr_head, pr_head), "Work", {"existing.py"}) == []
+    assert (
+        guard.find_suspicious_deletions(comparer.compare(pr_head, pr_head), "Work", {"existing.py"})
+        == []
+    )
 
     (tmp_path / "new_on_base.py").write_text("landed = True\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "advance base"], cwd=tmp_path, check=True)
-    new_base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    new_base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+    ).strip()
 
     files = comparer.compare(new_base, pr_head)
     assert guard.find_suspicious_deletions(

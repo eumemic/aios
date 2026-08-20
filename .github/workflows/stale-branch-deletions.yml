@@ -25,20 +25,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Inspect GitHub's merge-base-correct PR file list
+      - name: Compare the current base and PR head trees
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          gh api --paginate --slurp \
-            "repos/${GH_REPO}/pulls/${PR_NUMBER}/files?per_page=100" \
-            | jq 'add' > "$RUNNER_TEMP/pr-files.json"
+          # The PR-files API compares from the merge base and therefore omits
+          # files added to the base after a stale head diverged. Always compare
+          # the two current trees, on every kind of PR evaluation.
+          git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+            || git fetch --no-tags origin "$HEAD_SHA"
           git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
+          python scripts/pr_files_from_trees.py "$BASE_SHA" "$HEAD_SHA" \
+            > "$RUNNER_TEMP/pr-files.json"
           python scripts/check_pr_deletions.py \
             "$RUNNER_TEMP/pr-files.json" "$RUNNER_TEMP/base-paths.txt"
 
