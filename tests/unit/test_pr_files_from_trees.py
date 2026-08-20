@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -18,7 +20,9 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
-def test_base_only_file_is_a_deletion_from_unchanged_pr_head(tmp_path: Path, monkeypatch) -> None:
+def test_base_only_file_is_a_deletion_from_unchanged_pr_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """PR is green at B; adding a base file makes a fresh evaluation red."""
     subprocess.run(["git", "init", "-q", "-b", "master"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
