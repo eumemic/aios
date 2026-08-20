@@ -25,7 +25,12 @@ def test_parser_handles_annotated_and_unannotated_revisions(tmp_path: Path) -> N
     assert check_history(load_revisions(tmp_path)) == "0159"
 
 
-def test_rejects_revision_whose_parent_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("include_valid_root", [False, True])
+def test_rejects_revision_whose_parent_is_missing(
+    tmp_path: Path, *, include_valid_root: bool
+) -> None:
+    if include_valid_root:
+        _migration(tmp_path / "0158_base.py", "0158", None)
     _migration(tmp_path / "0161_disconnected.py", "0161", "DOES_NOT_EXIST")
 
     with pytest.raises(MigrationHistoryError, match="unknown down_revision") as exc_info:
