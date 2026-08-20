@@ -9,9 +9,7 @@ import sys
 
 
 def tree(commit: str) -> dict[str, str]:
-    output = subprocess.check_output(
-        ["git", "ls-tree", "-r", "-z", commit], text=True
-    )
+    output = subprocess.check_output(["git", "ls-tree", "-r", "-z", commit], text=True)
     entries: dict[str, str] = {}
     for record in output.split("\0"):
         if not record:
