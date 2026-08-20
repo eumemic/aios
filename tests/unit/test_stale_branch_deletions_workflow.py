@@ -40,15 +40,32 @@ def test_base_push_rechecks_open_prs_and_updates_their_head_checks() -> None:
 
     assert "pulls?state=open&base=${BASE_REF}" in run
     assert 'git ls-tree -r --name-only "$BASE_SHA"' in run
-    assert 'head_sha="$head_sha"' in run
+    assert '--arg head_sha "$head_sha"' in run
     # The base-push result must replace a context enforced by live branch
     # protection; publishing the stale-deletion workflow's `check` is advisory.
-    assert "-f name=detect" in run
-    assert "-f name=check" not in run
+    assert "--arg name detect" in run
+    assert "--arg name check" not in run
     assert 'scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha"' in run
     assert "scripts/check_pr_deletions.py" in run
-    assert "check-runs/${check_id}" in run
+    assert 'status: "completed"' in run
+    assert "done < <(jq -c" in run
+    assert 'exit "$aggregate_rc"' in run
     assert "conclusion=failure" in run
+
+
+def test_one_pr_failure_does_not_prevent_later_completed_results() -> None:
+    """Per-PR failures are aggregated only after every open PR is handled."""
+    job = _doc()["jobs"]["recheck-open-prs"]
+    run = next(step["run"] for step in job["steps"] if "run" in step)
+
+    loop_start = run.index("while read -r pr; do")
+    loop_end = run.index("done < <(jq -c", loop_start)
+    loop = run[loop_start:loop_end]
+    assert "set +e" in loop
+    assert "aggregate_rc=1" in loop
+    assert "\n              exit " not in loop
+    assert 'status: "completed"' in loop
+    assert "status=in_progress" not in loop
 
 
 def test_every_pr_event_compares_the_current_base_and_head_trees() -> None:
@@ -67,7 +84,9 @@ def test_required_detect_context_checks_current_trees_on_every_pr_run() -> None:
     validation: dict[Any, Any] = yaml.safe_load(_CODE_VALIDATION_WORKFLOW.read_text())
     steps = validation["jobs"]["detect"]["steps"]
     guard = next(
-        step for step in steps if step.get("name") == "Reject undocumented files missing from the PR head"
+        step
+        for step in steps
+        if step.get("name") == "Reject undocumented files missing from the PR head"
     )
     run = guard["run"]
 
