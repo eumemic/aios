@@ -19,6 +19,7 @@ raw SQL — a mini query-builder, at odds with "raw SQL + asyncpg, no ORM."
 
 from __future__ import annotations
 
+import json
 from types import EllipsisType
 from typing import Any, NamedTuple
 
@@ -36,6 +37,7 @@ def _row_to_model_provider(row: asyncpg.Record) -> ModelProvider:
         id=row["id"],
         provider=row["provider"],
         api_base=row["api_base"],
+        model_routes=dict(row.get("model_routes") or {}),
         api_key_set=len(row["ciphertext"]) > 0,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -81,20 +83,23 @@ async def insert_model_provider(
     provider: str,
     api_base: str | None,
     blob: EncryptedBlob,
+    model_routes: dict[str, str] | None = None,
 ) -> ModelProvider:
     await assert_account_accepts_model_provider(conn, account_id=account_id)
     new_id = make_id(MODEL_PROVIDER)
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO model_providers (id, account_id, provider, api_base, ciphertext, nonce)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO model_providers
+                (id, account_id, provider, api_base, model_routes, ciphertext, nonce)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
             RETURNING *
             """,
             new_id,
             account_id,
             provider,
             api_base,
+            json.dumps(model_routes or {}),
             blob.ciphertext,
             blob.nonce,
         )
@@ -146,6 +151,7 @@ async def update_model_provider(
     account_id: str,
     blob: EncryptedBlob | None = None,
     api_base: str | EllipsisType | None = ...,
+    model_routes: dict[str, str] | EllipsisType = ...,
 ) -> ModelProvider:
     """Update a config's key and/or ``api_base``.
 
@@ -176,6 +182,9 @@ async def update_model_provider(
     if api_base is not ...:
         args.append(api_base)
         sets.append(f"api_base = ${len(args)}")
+    if model_routes is not ...:
+        args.append(json.dumps(model_routes))
+        sets.append(f"model_routes = ${len(args)}::jsonb")
     if not sets:
         return current
     sets.append("updated_at = now()")
@@ -235,6 +244,7 @@ class ResolvedModelProvider(NamedTuple):
     owner_account_id: str
     api_base: str | None
     blob: EncryptedBlob
+    model_routes: dict[str, str] | None = None
 
 
 async def resolve_model_provider(
@@ -269,7 +279,7 @@ async def resolve_model_provider(
         "    FROM accounts a JOIN chain c ON a.id = c.parent_account_id "
         "    WHERE a.archived_at IS NULL"
         ") "
-        "SELECT mp.account_id, mp.api_base, mp.ciphertext, mp.nonce "
+        "SELECT mp.account_id, mp.api_base, mp.model_routes, mp.ciphertext, mp.nonce "
         "FROM chain c "
         "JOIN model_providers mp ON mp.account_id = c.id "
         "WHERE mp.provider = $2 AND mp.archived_at IS NULL "
@@ -282,5 +292,6 @@ async def resolve_model_provider(
     return ResolvedModelProvider(
         owner_account_id=row["account_id"],
         api_base=row["api_base"],
+        model_routes=dict(row["model_routes"] or {}),
         blob=EncryptedBlob(ciphertext=bytes(row["ciphertext"]), nonce=bytes(row["nonce"])),
     )

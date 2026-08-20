@@ -396,6 +396,41 @@ async def test_update_racing_archive_raises_conflict(crypto_box: CryptoBox) -> N
         )
 
 
+# ─── canonical model-route resolution ─────────────────────────────────────────
+
+
+async def test_resolve_model_route_normalizes_bare_alias() -> None:
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+    route_row = MagicMock()
+    route_row.model_routes = {"gpt-5.6-sol": "openai/responses/gpt-5.6-sol"}
+
+    with patch(
+        "aios.services.model_providers.queries.resolve_model_provider",
+        AsyncMock(return_value=route_row),
+    ):
+        resolved = await service.resolve_model_route(
+            pool, account_id="acc_x", model="gpt-5.6-sol", litellm_extra=None
+        )
+
+    assert resolved == "openai/responses/gpt-5.6-sol"
+
+
+async def test_resolve_model_route_honors_explicit_route() -> None:
+    conn = MagicMock()
+    pool = fake_pool_yielding_conn(conn)
+
+    resolved = await service.resolve_model_route(
+        pool,
+        account_id="acc_x",
+        model="openai/chat/gpt-5.6-sol",
+        litellm_extra=None,
+    )
+
+    assert resolved == "openai/chat/gpt-5.6-sol"
+    conn.fetchval.assert_not_called()
+
+
 # ─── resolve_provider_auth ─────────────────────────────────────────────────────
 
 

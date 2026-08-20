@@ -185,7 +185,10 @@ from .missing_request_missing import MissingRequestMissing
 from .missing_request_record import MissingRequestRecord
 from .model_provider import ModelProvider
 from .model_provider_create import ModelProviderCreate
+from .model_provider_create_model_routes import ModelProviderCreateModelRoutes
+from .model_provider_model_routes import ModelProviderModelRoutes
 from .model_provider_update import ModelProviderUpdate
+from .model_provider_update_model_routes import ModelProviderUpdateModelRoutes
 from .native_buttons import NativeButtons
 from .o_auth_complete_request import OAuthCompleteRequest
 from .o_auth_start_request import OAuthStartRequest
@@ -606,7 +609,10 @@ __all__ = (
     "MissingRequestRecord",
     "ModelProvider",
     "ModelProviderCreate",
+    "ModelProviderCreateModelRoutes",
+    "ModelProviderModelRoutes",
     "ModelProviderUpdate",
+    "ModelProviderUpdateModelRoutes",
     "NativeButtons",
     "OAuthCompleteRequest",
     "OAuthStartRequest",

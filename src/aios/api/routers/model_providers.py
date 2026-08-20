@@ -43,6 +43,7 @@ async def create(
         provider=body.provider,
         api_key=body.api_key.get_secret_value(),
         api_base=body.api_base,
+        model_routes=body.model_routes,
     )
 
 
@@ -95,6 +96,7 @@ async def update(
     keep; explicit ``null`` → clear.
     """
     api_base = body.api_base if "api_base" in body.model_fields_set else ...
+    model_routes = body.model_routes if "model_routes" in body.model_fields_set else ...
     return await service.update_model_provider(
         pool,
         crypto_box,
@@ -102,6 +104,7 @@ async def update(
         account_id=account_id,
         api_key=body.api_key.get_secret_value() if body.api_key is not None else None,
         api_base=api_base,
+        model_routes=model_routes,
     )
 
 
