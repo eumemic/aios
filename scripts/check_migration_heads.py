@@ -62,9 +62,11 @@ def check_history(revisions: dict[str, str | None], *, current_tip: str | None =
         )
 
     children: dict[str, list[str]] = defaultdict(list)
-    for revision, parent in revisions.items():
-        if parent is not None:
-            children[parent].append(revision)
+    # NB: distinct names from the `revision, parent` unpacked above — reusing them
+    # rebinds `parent` from `str` to `str | None` and mypy --strict rejects it.
+    for child_revision, child_parent in revisions.items():
+        if child_parent is not None:
+            children[child_parent].append(child_revision)
 
     collisions = [(parent, sorted(nodes)) for parent, nodes in children.items() if len(nodes) > 1]
     heads = sorted(set(revisions) - {parent for parent in revisions.values() if parent is not None})
