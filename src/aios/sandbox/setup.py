@@ -44,6 +44,7 @@ the registry and the orchestrator backend-agnostic.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -53,6 +54,41 @@ from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 from aios.sandbox.env_keys import PATH_ENV_KEY
 
 log = get_logger("aios.sandbox.setup")
+
+
+@dataclass(frozen=True)
+class HostSkip:
+    host: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class EgressProvisionResult:
+    hosts_installed: tuple[str, ...] = ()
+    hosts_skipped: tuple[HostSkip, ...] = ()
+
+
+_EGRESS_INSTALLED_PREFIX = "AIOS_EGRESS_INSTALLED "
+_EGRESS_SKIPPED_PREFIX = "AIOS_EGRESS_SKIPPED "
+
+
+def _parse_egress_provision_result(stdout: str) -> EgressProvisionResult:
+    installed: set[str] = set()
+    skipped: dict[str, HostSkip] = {}
+    for line in stdout.splitlines():
+        if line.startswith(_EGRESS_INSTALLED_PREFIX):
+            host = line.removeprefix(_EGRESS_INSTALLED_PREFIX)
+            installed.add(host)
+            skipped.pop(host, None)
+        elif line.startswith(_EGRESS_SKIPPED_PREFIX):
+            value = line.removeprefix(_EGRESS_SKIPPED_PREFIX)
+            host, reason = value.split("\t", 1)
+            if host not in installed:
+                skipped[host] = HostSkip(host=host, reason=reason)
+    return EgressProvisionResult(
+        hosts_installed=tuple(sorted(installed)),
+        hosts_skipped=tuple(skipped[host] for host in sorted(skipped)),
+    )
 
 
 # Hardcoded absolute system PATH because docker --env doesn't expand $PATH;
@@ -378,12 +414,24 @@ def _nat_dnat_lines(dnat_hosts: Sequence[str], dnat_target: tuple[str, int]) -> 
         'if [ -n "$PROXY_IP" ]; then',
     ]
     for host in sorted(dnat_hosts):
-        lines.append(f"  for ip in $(resolve_ipv4 {host}); do")
+        lines.append(f"  ips=$(resolve_ipv4 {host})")
+        lines.append(
+            f"  if [ -z \"$ips\" ]; then printf '%s\\t%s\\n' "
+            f"'{_EGRESS_SKIPPED_PREFIX}{host}' 'no IPv4 address'; "
+            f"else echo '{_EGRESS_INSTALLED_PREFIX}{host}'; fi"
+        )
+        lines.append("  for ip in $ips; do")
         lines.append(
             '    "$IPT" -t nat -A OUTPUT -d "$ip" -p tcp --dport 443 '
             f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"'
         )
         lines.append("  done")
+    lines.append("else")
+    for host in sorted(dnat_hosts):
+        lines.append(
+            f"  printf '%s\\t%s\\n' '{_EGRESS_SKIPPED_PREFIX}{host}' "
+            f"'proxy alias {proxy_alias} has no IPv4 address'"
+        )
     lines.append("fi")
     return lines
 
@@ -607,7 +655,12 @@ def build_iptables_script(
     for host in sorted(allowed_hosts):
         lines.append("")
         lines.append(f"# Allow {host}")
-        lines.append(f"for ip in $(resolve_ipv4 {host}); do")
+        lines.append(f"ips=$(resolve_ipv4 {host})")
+        lines.append(
+            f"if [ -z \"$ips\" ]; then printf '%s\\t%s\\n' '{_EGRESS_SKIPPED_PREFIX}{host}' 'no IPv4 address'; "
+            f"else echo '{_EGRESS_INSTALLED_PREFIX}{host}'; fi"
+        )
+        lines.append("for ip in $ips; do")
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
@@ -777,7 +830,7 @@ async def apply_network_lockdown(
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
     runtime: str | None = None,
-) -> None:
+) -> EgressProvisionResult:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
     Called after package installation so ``pip install`` etc. can reach
@@ -889,6 +942,7 @@ async def apply_network_lockdown(
         extra_host_port_count=len(extra_host_ports),
         dnat_host_count=len(dnat_hosts),
     )
+    return _parse_egress_provision_result(result.stdout)
 
 
 async def apply_secret_egress_dnat(
@@ -898,7 +952,7 @@ async def apply_secret_egress_dnat(
     dnat_hosts: Sequence[str],
     dnat_target: tuple[str, int],
     runtime: str | None = None,
-) -> None:
+) -> EgressProvisionResult:
     """Install the credential-host → proxy DNAT in an OPEN-egress sandbox (#1153).
 
     The Unrestricted sibling of :func:`apply_network_lockdown`: for an
@@ -988,3 +1042,4 @@ async def apply_secret_egress_dnat(
         owner_id=handle.owner_id,
         dnat_host_count=len(dnat_hosts),
     )
+    return _parse_egress_provision_result(result.stdout)

@@ -66,6 +66,7 @@ from aios.sandbox.git_proxy import GitProxy
 from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     PACKAGE_REGISTRY_HOSTS,
+    EgressProvisionResult,
     apply_network_lockdown,
     apply_secret_egress_dnat,
     build_egress_dump_script,
@@ -335,6 +336,7 @@ class SandboxRegistry:
         self._reaper_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
         self._egress_refresh_task: asyncio.Task[None] | None = None
+        self._egress_provision_results: dict[str, EgressProvisionResult] = {}
         self._egress_states: dict[str, EgressRefreshState] = {}
         self._provisioning_pressure = GcPressureResult()
         # Consecutive salvage failures keyed by full corpse id. The value is
@@ -545,7 +547,9 @@ class SandboxRegistry:
         account_id: str | None = None,
     ) -> SandboxHandle:
         if pool is None:
-            return await self._provision(session_id)
+            provisioned = await self._provision(session_id)
+            self._egress_provision_results.pop(session_id)
+            return provisioned
 
         from aios.services import sessions as sessions_service
 
@@ -558,9 +562,33 @@ class SandboxRegistry:
         handle: SandboxHandle | None = None
         try:
             handle = await self._provision(session_id)
+            outcome = self._egress_provision_results.pop(session_id)
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "lifecycle",
+                {
+                    "event": "egress_provisioned",
+                    "hosts_installed": list(outcome.hosts_installed),
+                    "hosts_skipped": [
+                        {"host": item.host, "reason": item.reason} for item in outcome.hosts_skipped
+                    ],
+                },
+                account_id=account_id,
+            )
             return handle
-        except Exception:
+        except Exception as err:
             is_error = True
+            self._egress_provision_results.pop(session_id, None)
+            if handle is not None:
+                await self._destroy_quietly(handle, session_id)
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "lifecycle",
+                {"event": "egress_provision_failed", "reason": str(err)},
+                account_id=account_id,
+            )
             raise
         finally:
             end_payload: dict[str, Any] = {
@@ -658,7 +686,9 @@ class SandboxRegistry:
             if not await self._prewarmed_setup_satisfied(spec):
                 await install_egress_ca(self._backend, handle)
                 await install_packages(self._backend, handle, plan.env_config)
-            await self._apply_egress_rules(handle, plan)
+            self._egress_provision_results[session_id] = await self._apply_egress_rules(
+                handle, plan
+            )
         except BaseException:
             await self._destroy_quietly(handle, session_id)
             raise
@@ -852,7 +882,9 @@ class SandboxRegistry:
                     dnat_hosts.append(host)
         return dnat_hosts, dnat_target
 
-    async def _apply_egress_rules(self, handle: SandboxHandle, plan: ProvisioningPlan) -> None:
+    async def _apply_egress_rules(
+        self, handle: SandboxHandle, plan: ProvisioningPlan
+    ) -> EgressProvisionResult:
         """Wire the sandbox's egress rules from the provisioning plan.
 
         Three cases (#1153):
@@ -884,7 +916,7 @@ class SandboxRegistry:
                 # Open the filter OUTPUT for the rewritten (post-DNAT) flow to
                 # the proxy endpoint — mirrors the git_proxy precedent. (#878)
                 extra_host_ports.append((WORKER_NETWORK_ALIAS, dnat_target[1]))
-            await apply_network_lockdown(
+            outcome = await apply_network_lockdown(
                 self._backend,
                 handle,
                 networking,
@@ -899,13 +931,15 @@ class SandboxRegistry:
         elif dnat_target is not None:
             # Unrestricted (or no networking config) WITH env-var credentials:
             # install the DNAT-only swap chokepoint, leaving general egress open.
-            await apply_secret_egress_dnat(
+            outcome = await apply_secret_egress_dnat(
                 self._backend,
                 handle,
                 dnat_hosts=dnat_hosts,
                 dnat_target=dnat_target,
                 runtime=plan.spec.runtime,
             )
+        else:
+            outcome = EgressProvisionResult()
         # else: Unrestricted, no credentials → nothing (today's early return).
         if dnat_target is not None:
             limited_hosts: set[str] = set()
@@ -920,6 +954,7 @@ class SandboxRegistry:
                 fallback_proxy_port=dnat_target[1],
                 runtime=plan.spec.runtime,
             )
+        return outcome
 
     async def _stamp_egress_state(
         self,
