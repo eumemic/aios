@@ -30,10 +30,20 @@ async def test_audit_reads_24h_authoritative_stream_and_alerts_every_finding(
 ) -> None:
     now = datetime.now(UTC)
     rows = [
-        {"id": "fail", "session_id": "s1", "account_id": "a1", "created_at": now,
-         "data": {"event": "egress_provision_failed", "reason": "down"}},
-        {"id": "skip", "session_id": "s2", "account_id": "a2", "created_at": now,
-         "data": {"event": "egress_provisioned", "hosts_skipped": [{"host": "x"}]}},
+        {
+            "id": "fail",
+            "session_id": "s1",
+            "account_id": "a1",
+            "created_at": now,
+            "data": {"event": "egress_provision_failed", "reason": "down"},
+        },
+        {
+            "id": "skip",
+            "session_id": "s2",
+            "account_id": "a2",
+            "created_at": now,
+            "data": {"event": "egress_provisioned", "hosts_skipped": [{"host": "x"}]},
+        },
     ]
     conn = MagicMock()
     conn.fetch = AsyncMock(return_value=rows)
