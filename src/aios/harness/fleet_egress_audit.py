@@ -31,24 +31,26 @@ class EgressAuditFinding:
 @dataclass(frozen=True)
 class EgressAuditResult:
     events_examined: int
+    healthy_events_observed: int
     findings: tuple[EgressAuditFinding, ...]
 
 
-# Keep the time predicate in Postgres.  Worker clocks are not authoritative for
+class EgressLifecycleWriterSilentError(RuntimeError):
+    """No fully healthy provision proves the lifecycle writer is live."""
+
+
+# Keep the time predicate in Postgres. Worker clocks are not authoritative for
 # event timestamps, and passing a Python cutoff can introduce clock-skew gaps.
-_FLEET_EGRESS_FINDINGS_SQL = """
+#
+# This intentionally reads *all* provision outcomes rather than only findings.
+# Healthy provisions are the audit's positive dead-man signal: without one, a
+# successful empty query is indistinguishable from a silent lifecycle writer.
+_FLEET_EGRESS_EVENTS_SQL = """
 SELECT id, session_id, account_id, created_at, data
   FROM events
  WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
    AND kind = 'lifecycle'
-   AND (
-       data->>'event' = 'egress_provision_failed'
-       OR (
-           data->>'event' = 'egress_provisioned'
-           AND jsonb_typeof(data->'hosts_skipped') = 'array'
-           AND jsonb_array_length(data->'hosts_skipped') > 0
-       )
-   )
+   AND data->>'event' IN ('egress_provisioned', 'egress_provision_failed')
  ORDER BY created_at, session_id, seq
 """
 
@@ -62,8 +64,18 @@ async def run_fleet_egress_audit(pool: asyncpg.Pool[Any]) -> EgressAuditResult:
     retries on its next tick.
     """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_FLEET_EGRESS_FINDINGS_SQL)
+        rows = await conn.fetch(_FLEET_EGRESS_EVENTS_SQL)
 
+    adverse_rows = [
+        row
+        for row in rows
+        if row["data"]["event"] == "egress_provision_failed"
+        or bool(row["data"].get("hosts_skipped"))
+    ]
+    healthy_events_observed = sum(
+        row["data"]["event"] == "egress_provisioned" and row["data"].get("hosts_skipped") == []
+        for row in rows
+    )
     findings = tuple(
         EgressAuditFinding(
             event_id=row["id"],
@@ -73,7 +85,7 @@ async def run_fleet_egress_audit(pool: asyncpg.Pool[Any]) -> EgressAuditResult:
             event=row["data"]["event"],
             data=dict(row["data"]),
         )
-        for row in rows
+        for row in adverse_rows
     )
     for finding in findings:
         log.warning(
@@ -87,5 +99,19 @@ async def run_fleet_egress_audit(pool: asyncpg.Pool[Any]) -> EgressAuditResult:
             hosts_skipped=finding.data.get("hosts_skipped"),
         )
 
-    log.info("fleet_egress_audit.swept", findings=len(findings), window_hours=24)
-    return EgressAuditResult(events_examined=len(rows), findings=findings)
+    if not healthy_events_observed:
+        raise EgressLifecycleWriterSilentError(
+            "no healthy egress_provisioned event observed in the last 24 hours"
+        )
+
+    log.info(
+        "fleet_egress_audit.swept",
+        findings=len(findings),
+        healthy_events_observed=healthy_events_observed,
+        window_hours=24,
+    )
+    return EgressAuditResult(
+        events_examined=len(rows),
+        healthy_events_observed=healthy_events_observed,
+        findings=findings,
+    )

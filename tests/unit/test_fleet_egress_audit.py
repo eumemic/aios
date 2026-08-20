@@ -31,6 +31,13 @@ async def test_audit_reads_24h_authoritative_stream_and_alerts_every_finding(
     now = datetime.now(UTC)
     rows = [
         {
+            "id": "healthy",
+            "session_id": "s0",
+            "account_id": "a0",
+            "created_at": now,
+            "data": {"event": "egress_provisioned", "hosts_skipped": []},
+        },
+        {
             "id": "fail",
             "session_id": "s1",
             "account_id": "a1",
@@ -56,9 +63,23 @@ async def test_audit_reads_24h_authoritative_stream_and_alerts_every_finding(
     assert "FROM events" in sql
     assert "INTERVAL '24 hours'" in sql
     assert "egress_provision_failed" in sql
-    assert "jsonb_array_length" in sql
+    assert "egress_provisioned" in sql
+    assert result.events_examined == 3
+    assert result.healthy_events_observed == 1
     assert [finding.event_id for finding in result.findings] == ["fail", "skip"]
     assert warning.call_count == 2
+
+
+async def test_silent_writer_never_reports_health(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+    healthy = MagicMock()
+    monkeypatch.setattr(audit.log, "info", healthy)
+
+    with pytest.raises(audit.EgressLifecycleWriterSilentError, match="no healthy"):
+        await audit.run_fleet_egress_audit(_pool(conn))
+
+    healthy.assert_not_called()
 
 
 async def test_read_failure_propagates_and_never_reports_health(
