@@ -573,6 +573,12 @@ class Settings(BaseSettings):
         "forbids per bash call; this runs occasionally, off the hot path, as "
         "a correctness backstop, not a real-time gate).",
     )
+    fleet_egress_audit_interval_seconds: float = Field(
+        default=3600.0,
+        gt=0.0,
+        description="Interval for the fleet-wide audit of adverse sandbox egress "
+        "provisioning events. An immediate sweep runs at worker startup.",
+    )
 
     tool_broker_socket_path: Path | None = Field(
         default=None,
