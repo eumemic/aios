@@ -43,7 +43,7 @@ MAX_RENDERED_OBLIGATIONS = 10
 # Requests up to this size remain verbatim in the always-on reminder. Beyond it,
 # render a loud refusal instruction rather than a plausible-looking prefix. This
 # bounds the reserved tail while making instruction loss impossible to miss.
-_TASK_MAX = 8192
+MAX_TASK_SUMMARY_CHARS = 8192
 _TASK_TRUNCATED = "[TASK TRUNCATED — return an error; do not act on or infer the missing task]"
 
 # Max chars of a rendered ``output_schema`` contract (#1522). Kept narrower
@@ -95,8 +95,8 @@ def _request_content(summary: str | None) -> str:
     """Render a verbatim task, or a loud marker when that is impossible."""
     if summary is None:
         return "[TASK CONTENT UNAVAILABLE — return an error; do not infer the task]"
-    if len(summary) > _TASK_MAX:
-        return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {_TASK_MAX})"
+    if len(summary) > MAX_TASK_SUMMARY_CHARS:
+        return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {MAX_TASK_SUMMARY_CHARS})"
     return summary
 
 
@@ -254,7 +254,7 @@ def max_obligations_block_local(obligations: list[Obligation]) -> int:
     set is **already fetched** by ``compute_step_prelude``, so this bounds from the
     REAL obligations — the real count (capped at :data:`MAX_RENDERED_OBLIGATIONS`
     + the ``+K more`` marker line) and each rendered task (verbatim through
-    :data:`_TASK_MAX`, then replaced by a fixed loud marker). Strictly tighter than
+    :data:`MAX_TASK_SUMMARY_CHARS`, then replaced by a fixed loud marker). Strictly tighter than
     a synthetic max; the produced tail at
     send time is guaranteed ≤ this bound, so reserving it never overshoots
     ``window_max``.

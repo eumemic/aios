@@ -19,6 +19,7 @@ from aios.tools.workflow_completion import _validate_value
 from aios.workflows.determinism import canonical_schema_json
 from aios.workflows.step import (
     _reject_invalid_output_schema,
+    _reject_oversized_agent_input,
     _SpawnResult,
     _unresolvable_ref,
 )
@@ -31,6 +32,30 @@ _SCHEMA = {
     "required": ["answer"],
     "additionalProperties": False,
 }
+
+
+@pytest.mark.asyncio
+async def test_agent_input_limit_counts_serialized_unicode_code_points() -> None:
+    recorded: list[tuple[str, str]] = []
+
+    async def reject(kind: str, message: str) -> _SpawnResult:
+        recorded.append((kind, message))
+        return _SpawnResult(rejected=True, needs_rewake=False)
+
+    # Strings are measured directly, in code points rather than UTF-8 bytes.
+    assert await _reject_oversized_agent_input("é" * 8192, reject=reject) is None
+
+    # For objects, JSON syntax and escaping are part of the serialized child message.
+    oversized = {"task": "x" * 8181}  # serialized length: 8193
+    result = await _reject_oversized_agent_input(oversized, reject=reject)
+    assert result is not None and result.rejected
+    assert recorded == [
+        (
+            "input_too_large",
+            "agent() input is 8193 Unicode code points after JSON serialization; "
+            "limit 8192 (the bounded always-on obligation reminder cannot carry larger inputs)",
+        )
+    ]
 
 
 def test_validate_value_accepts_conforming() -> None:

@@ -163,8 +163,12 @@ def agent(
 
     ``agent_id`` omitted spawns the generic workflow subagent over the run's frozen
     surface. ``agent_id`` supplied spawns that named agent. ``input`` is required and
-    must not be None; ``model`` is a per-call model override; ``label`` is an
-    observability annotation and does not enter the call key.
+    must not be None. Its persisted child-message representation is limited to 8192
+    Unicode code points (strings directly; other values after JSON serialization,
+    including syntax and escaping); larger inputs raise a catchable
+    ``AgentError(kind="input_too_large")`` before a child is created. ``model`` is a
+    per-call model override; ``label`` is an observability annotation and does not
+    enter the call key.
     """
     if input is None:
         raise ValueError("agent() requires a non-None input (the child's first message)")

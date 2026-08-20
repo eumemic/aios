@@ -625,6 +625,11 @@ async def stimulate(pool: asyncpg.Pool[Any], stim: Stimulus, *, account_id: str)
     return await _stimulate_existing_tell(pool, stim, account_id=account_id)
 
 
+def serialize_request_input(input: Any) -> str:
+    """Serialize an internal request exactly as it will appear in its user event."""
+    return input if isinstance(input, str) else json.dumps(input)
+
+
 def _obligation_summary(content: str) -> str:
     """The verbatim request input carried by the durable obligation edge.
 
@@ -681,7 +686,7 @@ async def create_child_session(
     """
     awaited = isinstance(stim, AskNewSession)
     output_schema = stim.output_schema if isinstance(stim, AskNewSession) else None
-    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    content = serialize_request_input(stim.input)
     async with pool.acquire() as conn, conn.transaction():
         child = await queries.insert_child_session(
             conn,
@@ -771,7 +776,7 @@ async def _stimulate_existing_ask(
     """
 
     session = stim.session
-    content = stim.input if isinstance(stim.input, str) else json.dumps(stim.input)
+    content = serialize_request_input(stim.input)
     request_meta: dict[str, Any] = {"request_id": stim.request_id}
     if stim.output_schema is not None:
         request_meta["output_schema"] = stim.output_schema

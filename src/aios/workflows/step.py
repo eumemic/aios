@@ -45,6 +45,7 @@ from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, RateLimitedError
 from aios.harness import runtime
+from aios.harness.obligations import MAX_TASK_SUMMARY_CHARS
 from aios.jobs.app import defer_run_wake, defer_trigger_fire, defer_wake
 from aios.logging import get_logger
 from aios.models.attenuation import api_base_of, surface_of
@@ -57,6 +58,7 @@ from aios.services.sessions import (
     create_child_session,
     fail_open_child_requests_conn,
     seed_outbound_cancel_conn,
+    serialize_request_input,
     write_gate_opened,
 )
 from aios.tools.registry import tool_executes_class
@@ -1018,6 +1020,28 @@ async def _reject_invalid_output_schema(
     return None
 
 
+async def _reject_oversized_agent_input(
+    input: Any,
+    *,
+    reject: Callable[[str, str], Awaitable[_SpawnResult]],
+) -> _SpawnResult | None:
+    """Reject input that cannot fit verbatim in the durable obligations reminder.
+
+    Measurement matches child-session persistence: strings are used directly and
+    all other workflow values are JSON-serialized. Python ``len`` therefore counts
+    Unicode code points, including JSON syntax and escaping for non-string inputs.
+    """
+    size = len(serialize_request_input(input))
+    if size <= MAX_TASK_SUMMARY_CHARS:
+        return None
+    return await reject(
+        "input_too_large",
+        f"agent() input is {size} Unicode code points after JSON serialization; "
+        f"limit {MAX_TASK_SUMMARY_CHARS} (the bounded always-on obligation reminder "
+        "cannot carry larger inputs)",
+    )
+
+
 async def _open_agent_capability(
     conn: asyncpg.Connection[Any],
     pool: asyncpg.Pool[Any],
@@ -1063,6 +1087,10 @@ async def _open_agent_capability(
         return _SpawnResult(rejected=True, needs_rewake=False)
 
     spec = cap.spec if isinstance(cap.spec, dict) else {}
+    if (
+        oversized := await _reject_oversized_agent_input(spec.get("input"), reject=_reject)
+    ) is not None:
+        return oversized
     # agent() carries output_schema as a canonical JSON *string* (so a schema's floats
     # survive the call_key hash); reconstruct the dict. None means no schema demanded.
     output_schema_raw = spec.get("output_schema")
