@@ -64,21 +64,24 @@ jobs:
             "repos/${GH_REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" \
             | jq 'add' > "$RUNNER_TEMP/open-prs.json"
 
-          jq -c '.[]' "$RUNNER_TEMP/open-prs.json" | while read -r pr; do
-            number=$(jq -r '.number' <<<"$pr")
-            head_sha=$(jq -r '.head.sha' <<<"$pr")
-            title=$(jq -r '.title' <<<"$pr")
-            body=$(jq -r '.body // ""' <<<"$pr")
+          recheck_pr() {
+            local pr="$1" number head_sha title body fetched_head
+            local output conclusion payload files="$RUNNER_TEMP/pr-files.json"
+            number=$(jq -r '.number' <<<"$pr") || return 1
+            head_sha=$(jq -r '.head.sha' <<<"$pr") || return 1
+            title=$(jq -r '.title' <<<"$pr") || return 1
+            body=$(jq -r '.body // ""' <<<"$pr") || return 1
+            files="$RUNNER_TEMP/pr-${number}-files.json"
 
             # GitHub's PR-files endpoint is merge-base-relative, so it omits a
             # file added only to the base after this PR diverged. Compare the
             # current trees here: that base-only file is precisely the stale
             # deletion this push-triggered pass must catch.
-            git fetch --no-tags origin "pull/${number}/head"
-            fetched_head=$(git rev-parse FETCH_HEAD)
+            git fetch --no-tags origin "pull/${number}/head" || return 1
+            fetched_head=$(git rev-parse FETCH_HEAD) || return 1
             if [ "$fetched_head" != "$head_sha" ]; then
               echo "PR ${number} moved while rechecking; skipping obsolete head ${head_sha}"
-              continue
+              return 0
             fi
 
             # A push workflow's native check belongs to the base commit. Publish
@@ -86,26 +89,39 @@ jobs:
             # workflow's advisory `check` job, `detect` is required by master
             # branch protection. A base-only stale deletion therefore replaces
             # the older green required result with a blocking failure.
-            check_id=$(gh api --method POST "repos/${GH_REPO}/check-runs" \
-              -f name=detect -f head_sha="$head_sha" -f status=in_progress \
-              --jq '.id')
+            #
+            # Evaluate first and create the check already completed. This avoids
+            # ever stranding an in-progress check if a later command/API fails.
+            if ! output=$(python scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha" \
+              2>&1 > "$files"); then
+              conclusion=failure
+              output="Could not compare current trees: ${output}"
+            elif output=$(PR_TITLE="$title" PR_BODY="$body" \
+              python scripts/check_pr_deletions.py "$files" \
+                "$RUNNER_TEMP/base-paths.txt" 2>&1); then
+              conclusion=success
+            else
+              conclusion=failure
+            fi
 
-            python scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha" \
-              > "$RUNNER_TEMP/pr-${number}-files.json"
-
-            set +e
-            output=$(PR_TITLE="$title" PR_BODY="$body" \
-              python scripts/check_pr_deletions.py \
-                "$RUNNER_TEMP/pr-${number}-files.json" \
-                "$RUNNER_TEMP/base-paths.txt" 2>&1)
-            rc=$?
-            set -e
-            if [ "$rc" -eq 0 ]; then conclusion=success; else conclusion=failure; fi
-
-            jq -n --arg conclusion "$conclusion" --arg output "$output" '{
+            payload=$(jq -n --arg head_sha "$head_sha" \
+              --arg conclusion "$conclusion" --arg output "$output" '{
+              name: "detect",
+              head_sha: $head_sha,
               status: "completed",
               conclusion: $conclusion,
               output: {title: "Stale branch deletion guard", summary: $output}
-            }' | gh api --method PATCH "repos/${GH_REPO}/check-runs/${check_id}" \
-              --input - >/dev/null
-          done
+            }') || return 1
+            gh api --method POST "repos/${GH_REPO}/check-runs" \
+              --input - <<<"$payload" >/dev/null || return 1
+          }
+
+          # Handle each PR as an independent unit. In particular, errexit must
+          # not let one fetch/API/comparison failure preserve stale results on
+          # all later PRs.
+          while read -r pr; do
+            if ! recheck_pr "$pr"; then
+              number=$(jq -r '.number // "unknown"' <<<"$pr" 2>/dev/null || echo unknown)
+              echo "::error::Could not recheck PR ${number}; continuing with remaining PRs"
+            fi
+          done < <(jq -c '.[]' "$RUNNER_TEMP/open-prs.json")
