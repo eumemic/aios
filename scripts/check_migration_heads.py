@@ -49,6 +49,18 @@ def load_revisions(versions_dir: Path) -> dict[str, str | None]:
 
 
 def check_history(revisions: dict[str, str | None], *, current_tip: str | None = None) -> str:
+    missing_parents = sorted(
+        (revision, parent)
+        for revision, parent in revisions.items()
+        if parent is not None and parent not in revisions
+    )
+    if missing_parents:
+        revision, parent = missing_parents[0]
+        raise MigrationHistoryError(
+            f'unknown down_revision: {revision} declares down_revision="{parent}", '
+            "but that revision is not present"
+        )
+
     children: dict[str, list[str]] = defaultdict(list)
     for revision, parent in revisions.items():
         if parent is not None:
