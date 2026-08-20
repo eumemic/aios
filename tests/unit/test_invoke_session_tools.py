@@ -226,6 +226,26 @@ async def test_invoke_agent_create_then_invoke(monkeypatch: Any) -> None:
     assert kwargs["caller"] == {"kind": "session", "id": _CALLER}
 
 
+@pytest.mark.parametrize(
+    "tool_args, expected", [({}, None), ({"vault_ids": None}, None), ({"vault_ids": []}, [])]
+)
+async def test_call_workflow_preserves_inherit_vs_empty_vault_selection(
+    monkeypatch: Any, tool_args: dict[str, Any], expected: list[str] | None
+) -> None:
+    """Omitted/null inherits all caller vaults; explicit empty attenuates to none."""
+    run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
+    monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="done")),
+    )
+
+    await invoke_builtin(_CALLER, "call_workflow", {"workflow_id": "wf_1", **tool_args})
+
+    assert run_mock.await_args is not None
+    assert run_mock.await_args.kwargs["vault_ids"] == expected
+
+
 async def test_invoke_workflow_create_run_then_await(monkeypatch: Any) -> None:
     run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
     monkeypatch.setattr("aios.services.workflows.create_run", run_mock)

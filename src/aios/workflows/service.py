@@ -224,9 +224,10 @@ async def create_run(
     tenant's env id and leak its image/env-vars/networking into this run).
 
     ``vault_ids`` binds credentials to the run (resolved at tool-call time, like a
-    session's). **Launch-time attenuation:** when ``launcher_session_id`` is set (an
-    agent launching the run), the requested vaults must be a subset of the launcher's
-    own — authority never exceeds the invoker, so a breach raises
+    session's). When ``launcher_session_id`` is set, omitted/null snapshots all vaults
+    currently held by that session, an explicit empty list binds none, and a nonempty
+    list narrows to that subset. **Launch-time attenuation:** requested vaults must be a
+    subset of the launcher's own — authority never exceeds the invoker, so a breach raises
     :class:`ForbiddenError`. With no launcher (the HTTP/operator path) the requested
     vaults bind as-is, account-scoped. Insert + bind are one transaction, so a breach
     or a bad vault leaves no run row; the wake fires only after commit.
@@ -288,7 +289,10 @@ async def create_run(
             "version / expected_version are not valid for an inline run "
             "(an inline run has no workflow version history)",
         )
-    requested = list(vault_ids or [])
+    # Preserve the caller's three-way selection: None inherits a session launcher's
+    # current bindings, while [] is deliberate attenuation. Operator launches have
+    # no authority source to inherit from, so omitted remains none there.
+    requested = list(vault_ids) if vault_ids is not None else []
     effective_run_id = run_id or make_id(WORKFLOW_RUN)
     # #794 top edge: an agent-launched run cannot exceed the launcher's own surface.
     # #835: the launcher's effective surface is read INSIDE the run transaction (below),
@@ -442,9 +446,10 @@ async def create_run(
                 )
             child_depth = parent_depth - 1
         if launcher_session_id is not None:
-            held = set(
-                await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
-            )
+            held_ids = await get_session_vault_ids(conn, launcher_session_id, account_id=account_id)
+            held = set(held_ids)
+            if vault_ids is None:
+                requested = list(held_ids)
             ungranted = [v for v in requested if v not in held]
             if ungranted:
                 raise ForbiddenError(
