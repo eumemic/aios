@@ -96,15 +96,7 @@ def install_socket_guard(monkeypatch: Any) -> None:
         # AI_NUMERICHOST is a local parser used by URL validation, not DNS.
         if flags & socket.AI_NUMERICHOST:
             return real_getaddrinfo(host, *args, **kwargs)
-        try:
-            guard_external_host(host)
-        except ExternalEgressBlocked:
-            # URL-validation tests use invented public names. Give them a stable
-            # globally routed address without consulting the machine's DNS; the
-            # socket guard below still prevents any connection to that address.
-            port = args[0] if args else kwargs.get("port")
-            socktype = kwargs.get("type", args[2] if len(args) > 2 else socket.SOCK_STREAM)
-            return [(socket.AF_INET, socktype, 6, "", ("93.184.216.34", port or 0))]
+        guard_external_host(host)
         return real_getaddrinfo(host, *args, **kwargs)
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
