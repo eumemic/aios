@@ -48,6 +48,33 @@ def load_revisions(versions_dir: Path) -> dict[str, str | None]:
     return revisions
 
 
+def _heads(revisions: dict[str, str | None]) -> list[str]:
+    return sorted(set(revisions) - {parent for parent in revisions.values() if parent is not None})
+
+
+def check_against_base(
+    branch_revisions: dict[str, str | None], base_revisions: dict[str, str | None]
+) -> str:
+    """Check the union of a pushed branch and the live base migration histories."""
+    base_tip = check_history(base_revisions)
+    combined = dict(base_revisions)
+    for revision, parent in branch_revisions.items():
+        if revision in combined and combined[revision] != parent:
+            raise MigrationHistoryError(
+                f"revision {revision} has different parents on the branch and live base"
+            )
+        combined[revision] = parent
+
+    heads = _heads(combined)
+    if len(heads) != 1:
+        raise MigrationHistoryError(
+            f"migration branch does not extend the current base head ({base_tip}): "
+            f"combined heads are {' and '.join(heads)}\n"
+            f"  -> re-parent your migration onto the current base head ({base_tip})"
+        )
+    return check_history(combined, current_tip=base_tip)
+
+
 def check_history(revisions: dict[str, str | None], *, current_tip: str | None = None) -> str:
     missing_parents = sorted(
         (revision, parent)
@@ -69,7 +96,7 @@ def check_history(revisions: dict[str, str | None], *, current_tip: str | None =
             children[child_parent].append(child_revision)
 
     collisions = [(parent, sorted(nodes)) for parent, nodes in children.items() if len(nodes) > 1]
-    heads = sorted(set(revisions) - {parent for parent in revisions.values() if parent is not None})
+    heads = _heads(revisions)
     if len(heads) == 1 and not collisions:
         return heads[0]
 
@@ -91,9 +118,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("versions_dir", type=Path, nargs="?", default=Path("migrations/versions"))
     parser.add_argument("--current-tip")
+    parser.add_argument(
+        "--base-versions-dir",
+        type=Path,
+        help="live base versions directory to union with the branch before checking",
+    )
     args = parser.parse_args()
     try:
-        head = check_history(load_revisions(args.versions_dir), current_tip=args.current_tip)
+        revisions = load_revisions(args.versions_dir)
+        if args.base_versions_dir is None:
+            head = check_history(revisions, current_tip=args.current_tip)
+        else:
+            head = check_against_base(revisions, load_revisions(args.base_versions_dir))
     except (MigrationHistoryError, SyntaxError, ValueError) as error:
         print(error)
         return 1
