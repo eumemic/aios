@@ -8,6 +8,7 @@ import pytest
 from aios.harness.connector_liveness import (
     BoundConnectionActivity,
     ConnectorLivenessDetector,
+    DockerConnectorHealthReader,
     TransportHealth,
 )
 
@@ -18,6 +19,35 @@ class _HealthReader:
 
     async def read(self) -> dict[str, TransportHealth]:
         return self.health
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_replica_is_not_hidden_by_healthy_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unhealthy = MagicMock()
+    unhealthy.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {"Status": "running", "Health": {"Status": "unhealthy"}},
+        }
+    )
+    stale_healthy = MagicMock()
+    stale_healthy.show = AsyncMock(
+        return_value={
+            "Names": ["/old-whatsapp"],
+            "State": {"Status": "running", "Health": {"Status": "healthy"}},
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[unhealthy, stale_healthy])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+
+    assert health["whatsapp"].healthy is False
+    assert health["whatsapp"].detail == "unhealthy"
 
 
 @pytest.mark.asyncio
