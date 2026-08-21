@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
+from psycopg.errors import LockNotAvailable
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from aios.cli.app import app
+from aios.cli.commands.ops import _run_migrate
 
 runner = CliRunner()
 
@@ -98,3 +103,71 @@ def test_migrate_configures_logging_before_running_migrations(monkeypatch):
     assert called.index("configure_logging") < called.index("upgrade_to_head"), (
         "configure_logging must be called before upgrade_to_head"
     )
+
+
+def _migrate_patches(upgrade_to_head: Mock) -> tuple[Any, ...]:
+    settings = SimpleNamespace(db_url="postgresql://localhost/test", log_level="INFO")
+    return (
+        patch("aios.config.get_settings", return_value=settings),
+        patch("aios.logging.configure_logging"),
+        patch("aios.logging.get_logger"),
+        patch("aios.db.migrations.upgrade_to_head", upgrade_to_head),
+        patch("aios.db.migrations.apply_procrastinate_schema", new_callable=AsyncMock),
+        patch("time.sleep"),
+    )
+
+
+def test_migrate_retries_lock_errors_then_succeeds():
+    lock_error = LockNotAvailable("lock timeout")
+    wrapped_lock_error = OperationalError("ALTER TABLE events", {}, lock_error)
+    upgrade_to_head = Mock(side_effect=[lock_error, wrapped_lock_error, None])
+
+    patches = _migrate_patches(upgrade_to_head)
+    with patches[0], patches[1], patches[2] as logger, patches[3], patches[4], patches[5] as sleep:
+        assert _run_migrate() == 0
+
+    assert upgrade_to_head.call_count == 3
+    assert sleep.call_count == 2
+    assert logger.return_value.warning.call_count == 2
+
+
+def test_migrate_does_not_retry_non_lock_error():
+    migration_error = RuntimeError("broken migration")
+    upgrade_to_head = Mock(side_effect=migration_error)
+
+    patches = _migrate_patches(upgrade_to_head)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5] as sleep,
+        pytest.raises(RuntimeError, match="broken migration") as raised,
+    ):
+        _run_migrate()
+
+    assert raised.value is migration_error
+    upgrade_to_head.assert_called_once_with("postgresql://localhost/test")
+    sleep.assert_not_called()
+
+
+def test_migrate_propagates_last_lock_error_after_attempts_exhausted():
+    lock_errors = [LockNotAvailable(f"lock timeout {attempt}") for attempt in range(10)]
+    upgrade_to_head = Mock(side_effect=lock_errors)
+
+    patches = _migrate_patches(upgrade_to_head)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5] as sleep,
+        pytest.raises(LockNotAvailable) as raised,
+    ):
+        _run_migrate()
+
+    assert raised.value is lock_errors[-1]
+    assert upgrade_to_head.call_count == 10
+    assert sleep.call_count == 9

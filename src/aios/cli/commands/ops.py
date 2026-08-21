@@ -8,11 +8,14 @@ migrations — they do NOT talk to the HTTP API.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
 import typer
+from psycopg.errors import LockNotAvailable
+from sqlalchemy.exc import OperationalError
 
 from aios.crypto.vault import CryptoBox, EncryptedBlob
 from aios.errors import CryptoDecryptError
@@ -168,10 +171,20 @@ def _run_rekey() -> int:
     return asyncio.run(_run_rekey_async())
 
 
+_MIGRATE_MAX_ATTEMPTS = 10
+_MIGRATE_RETRY_SLEEP_SECONDS = 1.0
+
+
+def _is_lock_not_available(exc: BaseException) -> bool:
+    return isinstance(exc, LockNotAvailable) or (
+        isinstance(exc, OperationalError) and isinstance(exc.orig, LockNotAvailable)
+    )
+
+
 def _run_migrate() -> int:
     from aios.config import get_settings
     from aios.db.migrations import apply_procrastinate_schema, upgrade_to_head
-    from aios.logging import configure_logging
+    from aios.logging import configure_logging, get_logger
 
     settings = get_settings()
     # Configure logging before running migrations so migration-emitted audit
@@ -182,8 +195,22 @@ def _run_migrate() -> int:
     # on the prod `aios migrate` path. logging.py's own docstring prescribes
     # calling configure_logging at the migrate command's start.
     configure_logging(settings.log_level)
+    logger = get_logger("aios.migrate")
     db_url = settings.db_url
-    upgrade_to_head(db_url)
+    for attempt in range(1, _MIGRATE_MAX_ATTEMPTS + 1):
+        try:
+            upgrade_to_head(db_url)
+            break
+        except (LockNotAvailable, OperationalError) as exc:
+            if not _is_lock_not_available(exc) or attempt == _MIGRATE_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "migration.lock_retry",
+                attempt=attempt,
+                max_attempts=_MIGRATE_MAX_ATTEMPTS,
+                retry_in_seconds=_MIGRATE_RETRY_SLEEP_SECONDS,
+            )
+            time.sleep(_MIGRATE_RETRY_SLEEP_SECONDS)
     asyncio.run(apply_procrastinate_schema(db_url, verbose=True))
     return 0
 
