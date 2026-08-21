@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
-from scripts.ci_queue_watchdog import evaluate_runs
+from scripts.ci_queue_watchdog import InsufficientHistory, evaluate_runs
 
 _ROOT = Path(__file__).parents[2]
 
@@ -81,3 +84,72 @@ def test_watchdog_ignores_healthy_and_non_master_pending_runs() -> None:
     ]
 
     assert evaluate_runs(runs, now=now) is None
+
+
+def test_watchdog_reports_unknown_when_pending_run_has_insufficient_history() -> None:
+    now = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    completed = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30 + n)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10 + n)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(1, 20)
+    ]
+    pending = {
+        "id": 99,
+        "status": "queued",
+        "created_at": (now - timedelta(hours=24)).isoformat(),
+        "head_branch": "master",
+    }
+
+    verdict = evaluate_runs([pending, *completed], now=now)
+
+    assert verdict == InsufficientHistory(
+        status="unknown", completed_runs=19, required_runs=20
+    )
+
+
+def test_watchdog_cli_fails_and_writes_unknown_for_insufficient_history(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    runs = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30 + n)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10 + n)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(1, 20)
+    ]
+    runs.append(
+        {
+            "id": 99,
+            "status": "queued",
+            "created_at": (now - timedelta(hours=24)).isoformat(),
+            "head_branch": "master",
+        }
+    )
+    input_path = tmp_path / "runs.json"
+    output_path = tmp_path / "result.json"
+    input_path.write_text(json.dumps({"workflow_runs": runs}))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/ci_queue_watchdog.py"),
+            str(input_path),
+            "--output",
+            str(output_path),
+        ],
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(output_path.read_text()) == {
+        "status": "unknown",
+        "completed_runs": 19,
+        "required_runs": 20,
+    }
