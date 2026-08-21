@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from aios.harness import trigger_runner
+from aios.harness import runtime, trigger_runner
 from aios.models.triggers import SandboxCommandAction
 
 
@@ -18,11 +18,9 @@ async def test_sandbox_observation_is_finished_on_cancellation(
     registry = Mock()
     registry.get_or_provision.side_effect = asyncio.CancelledError
 
-    monkeypatch.setattr(trigger_runner.runtime, "require_pool", Mock(return_value=Mock()))
-    monkeypatch.setattr(
-        trigger_runner.runtime, "require_sandbox_registry", Mock(return_value=registry)
-    )
-    monkeypatch.setattr(trigger_runner.runtime, "require_tool_broker", Mock(return_value=broker))
+    monkeypatch.setattr(runtime, "require_pool", Mock(return_value=Mock()))
+    monkeypatch.setattr(runtime, "require_sandbox_registry", Mock(return_value=registry))
+    monkeypatch.setattr(runtime, "require_tool_broker", Mock(return_value=broker))
 
     trigger = SimpleNamespace(owner_session_id="session-1")
     action = SandboxCommandAction(command="true")
