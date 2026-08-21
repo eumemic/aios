@@ -475,13 +475,18 @@ jobs:
 
       - name: E2E tests (non-docker shard)
         # These tests are "non-docker" only in the sandbox-image sense: most
-        # still provision a Postgres testcontainer. Running four independent
-        # container stacks concurrently repeatedly exhausted hosted-runner
-        # resources, and retrying only ``--lf`` cannot reliably reconstruct
-        # failed fixture setup. Run serially so each stack is torn down before
-        # the next starts.
+        # still provision a Postgres testcontainer. Run serially so each stack
+        # is torn down before the next starts. If runner/container startup is
+        # transiently unhealthy, retry the complete serial shard: ``--lf``
+        # cannot reconstruct a failure during session fixture setup. A stable
+        # regression remains blocking because it fails both attempts.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
-        run: uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25
+        run: |
+          if ! uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25; then
+            echo "::warning::FLAKE_RETRY e2e-non-docker"
+            echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
+            uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25
+          fi
 
       - name: E2E tests (docker shard)
         # ``-n 2 --dist=loadfile`` bounds Docker-backed concurrency to two
