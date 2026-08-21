@@ -315,13 +315,15 @@ class Settings(BaseSettings):
     sandbox_snapshot_pool_bytes: int | None = Field(
         default=None,
         ge=0,
-        description="Per-host snapshot pressure threshold in bytes (durable session "
-        "sandboxes, §5.7). Crossing it emits an operator diagnostic but never "
-        "authorizes deletion of canonical session state. Required in "
-        "production once the eumemic-ops prune-cron exemption lands (that "
-        "exemption removes the only existing disk control). ``None`` ⇒ "
-        "unbounded retention (dev default); operators MUST set real host "
-        "headroom in production. v1 enforces per-host and reports global.",
+        description="Enforced per-host snapshot bound in bytes. GC reclaims the "
+        "least-recently-used inactive snapshots until usage reaches this bound; "
+        "``None`` leaves development pools unbounded.",
+    )
+    sandbox_snapshot_pool_reclaim_mode: Literal["dry_run", "enforce"] = Field(
+        default="dry_run",
+        description="Snapshot-pool pressure response. ``dry_run`` reports the exact "
+        "image refs and reclaimable bytes without deleting; switch to ``enforce`` "
+        "after observing at least one complete GC interval.",
     )
     sandbox_snapshot_empty_floor_bytes: int = Field(
         default=8192,
