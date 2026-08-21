@@ -41,6 +41,8 @@ def mock_services(monkeypatch: Any) -> dict[str, AsyncMock]:
     load_account = AsyncMock(return_value="acct_TEST")
     event = MagicMock(id="evt_TEST")
     tell = AsyncMock(return_value=event)
+    mark_workflow_wake = AsyncMock(return_value=[])
+    list_wake_outcomes = AsyncMock()
     monkeypatch.setattr(
         "aios.tools.wake_self.sessions_service.load_session_account_id",
         load_account,
@@ -49,9 +51,19 @@ def mock_services(monkeypatch: Any) -> dict[str, AsyncMock]:
         "aios.tools.wake_self.sessions_service.tell_existing_session",
         tell,
     )
+    monkeypatch.setattr(
+        "aios.tools.wake_self.queries.mark_trigger_run_woken_by_workflow_session",
+        mark_workflow_wake,
+    )
+    monkeypatch.setattr(
+        "aios.tools.wake_self.queries.list_recent_trigger_wake_outcomes",
+        list_wake_outcomes,
+    )
     return {
         "load_account": load_account,
         "tell": tell,
+        "mark_workflow_wake": mark_workflow_wake,
+        "list_wake_outcomes": list_wake_outcomes,
     }
 
 
@@ -67,6 +79,8 @@ class TestWakeSelfHandler:
         mock_services["tell"].assert_awaited_once_with(
             mock_runtime_pool, "sess_TEST", content="ping", cause="message", account_id="acct_TEST"
         )
+        conn = mock_runtime_pool.acquire.return_value.__aenter__.return_value
+        mock_services["mark_workflow_wake"].assert_awaited_once_with(conn, "sess_TEST")
         assert result == {
             "woken": True,
             "session_id": "sess_TEST",
