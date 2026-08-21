@@ -58,6 +58,29 @@ async def test_heartbeat_withheld_until_discovery_is_authoritative(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "crash-left-alive"
+    heartbeat.touch()
+    old = time.time() - 3600
+    os.utime(heartbeat, (old, old))
+    original_identity = (heartbeat.stat().st_dev, heartbeat.stat().st_ino)
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.01
+
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await asyncio.sleep(0.03)
+        assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+        assert connector._heartbeat_owned
+        assert connector._heartbeat_identity == original_identity
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_does_not_claim_or_remove_preexisting_file(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "operator-owned"
@@ -74,6 +97,30 @@ async def test_heartbeat_does_not_claim_or_remove_preexisting_file(tmp_path: Pat
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.touch()
+    owned_stat = heartbeat.stat()
+    connector._heartbeat_owned = True
+    connector._heartbeat_identity = (owned_stat.st_dev, owned_stat.st_ino)
+
+    # Keep the old inode referenced so the filesystem cannot immediately reuse
+    # its number for the replacement and make this identity test ambiguous.
+    with heartbeat.open() as old_inode:
+        heartbeat.unlink()
+        heartbeat.write_text("replacement")
+        assert (heartbeat.stat().st_dev, heartbeat.stat().st_ino) != connector._heartbeat_identity
+
+        await connector._remove_owned_heartbeat(heartbeat)
+        assert not old_inode.closed
+
+    assert heartbeat.read_text() == "replacement"
+    assert not connector._heartbeat_owned
+    assert connector._heartbeat_identity is None
 
 
 @pytest.mark.asyncio
