@@ -30,7 +30,7 @@ T = TypeVar("T", bound="TriggerCreated")
 
 @_attrs_define
 class TriggerCreated:
-    """Create/update response — the trigger echo plus a one-time ``ingest_token``.
+    """Create/update response — trigger echo, one-time token, and lint warnings.
 
     Subclasses :class:`TriggerEcho` so every existing read-field caller keeps
     working; adds ``ingest_token``, the plaintext ingest secret surfaced
@@ -55,6 +55,7 @@ class TriggerCreated:
             created_at (datetime.datetime):
             updated_at (datetime.datetime):
             ingest_token (None | str | Unset):
+            warnings (list[str] | Unset):
     """
 
     id: str
@@ -70,6 +71,7 @@ class TriggerCreated:
     created_at: datetime.datetime
     updated_at: datetime.datetime
     ingest_token: None | str | Unset = UNSET
+    warnings: list[str] | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -138,6 +140,10 @@ class TriggerCreated:
         else:
             ingest_token = self.ingest_token
 
+        warnings: list[str] | Unset = UNSET
+        if not isinstance(self.warnings, Unset):
+            warnings = self.warnings
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -158,6 +164,8 @@ class TriggerCreated:
         )
         if ingest_token is not UNSET:
             field_dict["ingest_token"] = ingest_token
+        if warnings is not UNSET:
+            field_dict["warnings"] = warnings
 
         return field_dict
 
@@ -316,6 +324,8 @@ class TriggerCreated:
 
         ingest_token = _parse_ingest_token(d.pop("ingest_token", UNSET))
 
+        warnings = cast(list[str], d.pop("warnings", UNSET))
+
         trigger_created = cls(
             id=id,
             name=name,
@@ -330,6 +340,7 @@ class TriggerCreated:
             created_at=created_at,
             updated_at=updated_at,
             ingest_token=ingest_token,
+            warnings=warnings,
         )
 
         trigger_created.additional_properties = d
