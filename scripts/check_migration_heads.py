@@ -55,8 +55,21 @@ def _heads(revisions: dict[str, str | None]) -> list[str]:
 def check_against_base(
     branch_revisions: dict[str, str | None], base_revisions: dict[str, str | None]
 ) -> str:
-    """Check the union of a pushed branch and the live base migration histories."""
+    """Check branch migrations individually against the live base history."""
     base_tip = check_history(base_revisions)
+
+    # A branch-only revision cannot legitimize another branch-only revision. Each
+    # new migration must have been authored directly against a parent that is
+    # independently present on the live base. Checking this before constructing
+    # the union prevents a copied/stacked parent from masking the violation.
+    for revision in sorted(set(branch_revisions) - set(base_revisions)):
+        parent = branch_revisions[revision]
+        if parent not in base_revisions:
+            raise MigrationHistoryError(
+                f'revision {revision} declares down_revision="{parent}", but that parent '
+                "is not present on the live base"
+            )
+
     combined = dict(base_revisions)
     for revision, parent in branch_revisions.items():
         if revision in combined and combined[revision] != parent:
