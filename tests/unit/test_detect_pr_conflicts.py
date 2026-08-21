@@ -82,6 +82,39 @@ def test_persistently_unknown_mergeability_is_an_error() -> None:
     assert posted == []
 
 
+def test_classification_failures_do_not_block_other_conflicted_prs() -> None:
+    detector = _load_module()
+    posted: list[int] = []
+
+    class GitHub:
+        def get(self, path: str) -> Any:
+            if "pulls?" in path:
+                return (
+                    [{"number": 1, "draft": False}, {"number": 2, "draft": False}]
+                    if "page=1" in path
+                    else []
+                )
+            number = int(path.rsplit("/", 1)[-1])
+            if number == 1:
+                raise RuntimeError("injected GET failure")
+            return {
+                "number": number,
+                "draft": False,
+                "mergeable": False,
+                "mergeable_state": "dirty",
+            }
+
+        def post(self, path: str, body: dict[str, str]) -> Any:
+            posted.append(int(path.split("/issues/", 1)[1].split("/", 1)[0]))
+            return {}
+
+    with pytest.raises(RuntimeError) as caught:
+        detector.detect_conflicts(GitHub(), "eumemic/aios", "master", "abc123")
+
+    assert posted == [2]
+    assert "pull #1: RuntimeError: injected GET failure (classify)" in str(caught.value)
+
+
 def test_notification_failures_do_not_block_other_conflicted_prs() -> None:
     detector = _load_module()
     attempted: list[int] = []

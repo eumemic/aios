@@ -94,15 +94,22 @@ def detect_conflicts(
 ) -> list[int]:
     """Comment on each non-draft open PR GitHub classifies as ``dirty``."""
     conflicted: list[int] = []
-    notification_failures: list[tuple[int, Exception]] = []
+    per_pull_failures: list[tuple[int | None, str, Exception]] = []
     short_sha = sha[:12]
     for summary in _open_pull_requests(github, repo, base):
         if summary.get("draft") is True:
             continue
         number = summary.get("number")
         if not isinstance(number, int):
-            raise RuntimeError("GitHub pull response had no integer number")
-        pull = _mergeability(github, repo, number, sleep)
+            per_pull_failures.append(
+                (None, "classify", RuntimeError("GitHub pull response had no integer number"))
+            )
+            continue
+        try:
+            pull = _mergeability(github, repo, number, sleep)
+        except Exception as exc:
+            per_pull_failures.append((number, "classify", exc))
+            continue
         if pull.get("draft") is True or pull.get("mergeable_state") != "dirty":
             continue
 
@@ -115,14 +122,16 @@ def detect_conflicts(
         try:
             github.post(f"/repos/{repo}/issues/{number}/comments", {"body": message})
         except Exception as exc:
-            notification_failures.append((number, exc))
+            per_pull_failures.append((number, "notify", exc))
 
-    if notification_failures:
+    if per_pull_failures:
         details = "; ".join(
-            f"pull #{number}: {type(exc).__name__}: {exc}" for number, exc in notification_failures
+            f"pull #{number if number is not None else '<unknown>'}: "
+            f"{type(exc).__name__}: {exc} ({stage})"
+            for number, stage, exc in per_pull_failures
         )
         raise RuntimeError(
-            f"Failed to notify {len(notification_failures)} conflicted pull request(s): {details}"
+            f"Failed to process {len(per_pull_failures)} pull request(s): {details}"
         )
     return conflicted
 
