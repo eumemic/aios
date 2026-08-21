@@ -77,7 +77,13 @@ async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -
     assert r.status_code == 200, r.text
     assert [w["id"] for w in r.json()["data"]] == [workflow["id"]]
 
-    # Launch a run (201, pending).
+    # Seed an older run, then launch another and immediately ask for the newest
+    # filtered run. This mutation guards the collection's recency contract.
+    older = await http_client.post(
+        "/v1/runs",
+        json={"workflow_id": workflow["id"], "environment_id": env_id, "input": {"x": 0}},
+    )
+    assert older.status_code == 201, older.text
     r = await http_client.post(
         "/v1/runs",
         json={"workflow_id": workflow["id"], "environment_id": env_id, "input": {"x": 1}},
@@ -90,7 +96,7 @@ async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -
     # Fetch + list it.
     r = await http_client.get(f"/v1/runs/{run['id']}")
     assert r.status_code == 200 and r.json()["id"] == run["id"]
-    r = await http_client.get("/v1/runs", params={"workflow_id": workflow["id"]})
+    r = await http_client.get("/v1/runs", params={"workflow_id": workflow["id"], "limit": 1})
     assert r.status_code == 200 and [x["id"] for x in r.json()["data"]] == [run["id"]]
 
     # Its journal is readable (a fresh pending run has no events yet — the worker

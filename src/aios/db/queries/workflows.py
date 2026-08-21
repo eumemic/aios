@@ -557,26 +557,41 @@ async def list_wf_runs(
     parent run). The run-side analog of filtering sessions by
     ``parent_run_id`` for a run's ``agent()`` children.
 
+    Ordering is ``created_at DESC, id DESC``. The id is only a deterministic
+    tiebreaker; it is not the recency source because callers may supply run ids.
+    The opaque ``after`` cursor identifies the last row, whose ordering tuple is
+    resolved server-side for the next keyset page.
+
     When ``launcher_session_id`` is set, the launcher filter lists ALL of a
     session's runs including terminal ones, so it is NOT fully served by the
     ``wf_runs_launcher_active_idx`` partial index (which covers only ``status IN
-    ('pending','running','suspended')``); the account-scoped ``ORDER BY id DESC``
-    keyset still applies.
+    ('pending','running','suspended')``).
     """
-    return await _list_scoped(
-        conn,
-        table="wf_runs",
-        account_id=account_id,
-        row=_row_to_wf_run,
-        limit=limit,
-        after=after,
-        filters=[
-            ("workflow_id", workflow_id),
-            ("status", status),
-            ("parent_run_id", parent_run_id),
-            ("launcher_session_id", launcher_session_id),
-        ],
+    args: list[Any] = [account_id]
+    where = ["r.archived_at IS NULL", "r.account_id = $1"]
+    for column, value in (
+        ("workflow_id", workflow_id),
+        ("status", status),
+        ("parent_run_id", parent_run_id),
+        ("launcher_session_id", launcher_session_id),
+    ):
+        if value is not None:
+            args.append(value)
+            where.append(f"r.{column} = ${len(args)}")
+    if after is not None:
+        args.append(after)
+        where.append(
+            f"(r.created_at, r.id) < ("
+            f"SELECT cursor.created_at, cursor.id FROM wf_runs AS cursor "
+            f"WHERE cursor.id = ${len(args)} AND cursor.account_id = $1)"
+        )
+    args.append(limit)
+    rows = await conn.fetch(
+        f"SELECT r.* FROM wf_runs AS r WHERE {' AND '.join(where)} "
+        f"ORDER BY r.created_at DESC, r.id DESC LIMIT ${len(args)}",
+        *args,
     )
+    return [_row_to_wf_run(row) for row in rows]
 
 
 async def archive_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: str) -> WfRun:

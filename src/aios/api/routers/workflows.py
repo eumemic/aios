@@ -234,9 +234,11 @@ async def list_runs(
     parent_run_id: str | None = None,
     limit: PageLimit = None,
 ) -> ListResponse[WfRun]:
-    """List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
-    ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs."""
+    """List the account's runs in ``created_at DESC, id DESC`` order (newest
+    first). The id is a deterministic tiebreaker. First page: optional
+    ``workflow_id`` / ``status`` / ``parent_run_id`` filters + ``limit``;
+    subsequent pages: ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a
+    run's child runs."""
     st = page_cursor(
         cursor,
         {

@@ -20,6 +20,7 @@ from aios.db.pool import create_pool, register_jsonb_codec
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.models.agents import ToolSpec
+from aios.models.workflows import WfRun
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 
 
@@ -547,7 +548,41 @@ async def test_version_reads_account_scoped(wf_conn: asyncpg.Connection[Any]) ->
     assert (await wf_queries.list_workflow_versions(wf_conn, wf.id, account_id="acc_other")) == []
 
 
-# ─── list_wf_runs — launcher filter (the agent list_runs default scoping) ─────
+# ─── list_wf_runs — recency + launcher filters ────────────────────────────────
+
+
+async def test_list_wf_runs_orders_by_created_at_not_caller_supplied_id(
+    wf_conn: asyncpg.Connection[Any],
+) -> None:
+    """A freshly created run is the first filtered result even when its caller-
+    supplied id sorts before an older run id."""
+    wf = await wf_queries.insert_workflow(
+        wf_conn, account_id="acc_root", name="recency", script="S"
+    )
+
+    async def create_run(run_id: str) -> WfRun:
+        return await wf_queries.insert_wf_run(
+            wf_conn,
+            run_id=run_id,
+            account_id="acc_root",
+            workflow_id=wf.id,
+            environment_id="env_root",
+            script=wf.script,
+            script_sha="sha",
+            host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+            depth=10,
+        )
+
+    older = await create_run("wfr_z")
+    newer = await create_run("wfr_a")
+    await wf_conn.execute(
+        "UPDATE wf_runs SET created_at = created_at - interval '1 hour' WHERE id = $1",
+        older.id,
+    )
+
+    runs = await wf_queries.list_wf_runs(wf_conn, account_id="acc_root", workflow_id=wf.id, limit=1)
+
+    assert [run.id for run in runs] == [newer.id]
 
 
 async def test_list_wf_runs_filters_by_launcher_session(wf_conn: asyncpg.Connection[Any]) -> None:

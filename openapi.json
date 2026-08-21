@@ -10555,7 +10555,7 @@
           "runs"
         ],
         "summary": "List Runs",
-        "description": "List the account's runs, newest first. First page: optional ``workflow_id`` /\n``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:\n``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs.",
+        "description": "List the account's runs in ``created_at DESC, id DESC`` order (newest\nfirst). The id is a deterministic tiebreaker. First page: optional\n``workflow_id`` / ``status`` / ``parent_run_id`` filters + ``limit``;\nsubsequent pages: ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a\nrun's child runs.",
         "operationId": "list_runs",
         "parameters": [
           {
