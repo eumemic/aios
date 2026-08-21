@@ -168,7 +168,7 @@ def _stringified_json_hint(instance: Any, schema: dict[str, Any], *, site: str) 
         return None
     if not jsonschema.Draft202012Validator(schema).is_valid(parsed):
         return None
-    log.info("return_value_stringified_json", site=site)
+    log.info("schema_value_stringified_json", site=site)
     return (
         "the string you sent is itself JSON that parses to a conforming value — "
         "pass that value directly, not wrapped in a string."
