@@ -828,6 +828,39 @@ class TestLogging:
         assert len(failed) == 1
         assert failed[0]["reason"] == "connection_state_race"
 
+    async def test_dispatch_call_reports_down_after_repeated_serve_failures(
+        self, probe: _ProbeConnector
+    ) -> None:
+        probe._connections["conn_X"] = _ConnectionState(
+            connection_id="conn_X",
+            external_account_id="acct_X",
+            serve_status="restarting",
+            last_serve_error="RuntimeError: polling failed",
+            serve_restart_count=probe.RECONNECT_FAILURE_THRESHOLD,
+        )
+
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "connection_id": "conn_X",
+                    "tool_call_id": "call_down",
+                    "session_id": "sess_down",
+                    "name": "race",
+                    "arguments": "{}",
+                }
+            )
+
+        result = probe.results[0]
+        assert result.kwargs["is_error"] is True
+        assert json.loads(result.kwargs["content"]) == {
+            "error": "connector is down; operator intervention required",
+            "code": "connector_down",
+            "connection_id": "conn_X",
+            "reconnect_attempts": probe.RECONNECT_FAILURE_THRESHOLD,
+        }
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert failed[0]["reason"] == "connector_down"
+
     async def test_dispatch_call_keyerror_unrelated_to_connection_id_passes_through(
         self, probe: _ProbeConnector
     ) -> None:
@@ -1137,9 +1170,16 @@ class TestIsolatedServeConnection:
         )
         c._fetch_runtime_secrets = AsyncMock(return_value={})  # type: ignore[method-assign]
 
-        await c._isolated_serve_connection("conn_1", {})
+        with structlog.testing.capture_logs() as records:
+            await c._isolated_serve_connection("conn_1", {})
 
         assert attempts == 3
+        reconnects = [
+            record
+            for record in records
+            if record["event"] == "connector.connection.reconnect_attempt"
+        ]
+        assert [record["attempt"] for record in reconnects] == [1, 2]
         state = c._connections["conn_1"]
         assert state.serve_status == "serving"
         assert state.serve_restart_count == 2
