@@ -1005,7 +1005,12 @@ class HttpConnector:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
-                await self._remove_owned_heartbeat(heartbeat_path)
+                # There is no atomic POSIX operation to unlink a pathname only
+                # if it still names a known inode.  Leaving our heartbeat to go
+                # stale avoids deleting an operator replacement in a final
+                # stat-to-unlink race.
+                self._heartbeat_owned = False
+                self._heartbeat_identity = None
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -1033,8 +1038,19 @@ class HttpConnector:
             stat = os.fstat(fd)
             if not created and time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
                 return None
+            identity = (stat.st_dev, stat.st_ino)
+            if created:
+                # The pathname can be replaced after O_EXCL succeeds.  Establish
+                # ownership from the descriptor, then ensure the path still
+                # names that inode before publishing the claim.
+                try:
+                    path_stat = path.stat()
+                except FileNotFoundError:
+                    return None
+                if (path_stat.st_dev, path_stat.st_ino) != identity:
+                    return None
             os.utime(fd, None)
-            return (stat.st_dev, stat.st_ino)
+            return identity
         finally:
             os.close(fd)
 
