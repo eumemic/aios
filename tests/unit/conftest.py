@@ -24,6 +24,10 @@ from tests.unit.no_external_egress import install_socket_guard
 # per-test fixture phase.
 _EGRESS_GUARD_PATCH = pytest.MonkeyPatch()
 install_socket_guard(_EGRESS_GUARD_PATCH)
+# URL model construction is intentionally a pure write-boundary check in unit
+# tests. Give that subsystem's existing resolver seam a controlled offline
+# result; resolver-specific tests replace the seam with explicit answers.
+_EGRESS_GUARD_PATCH.setattr("aios.models.target_urls._resolve_host_ips", lambda _host: None)
 
 from procrastinate import App  # noqa: E402
 from procrastinate.testing import InMemoryConnector  # noqa: E402
