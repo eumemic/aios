@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -575,6 +575,31 @@ async def test_corpse_rearchive_race_fails_closed_and_salvages() -> None:
 
     registry._snapshot_and_record.assert_awaited_once()
     assert any(call[0] == "force_remove" for call in backend.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("legacy", "removed"), [(True, False), (False, True)])
+async def test_tarball_cache_removal_discriminates_legacy_ref(
+    tmp_path: Path, legacy: bool, removed: bool
+) -> None:
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    store = TarballStore(backend, tmp_path)
+    registry._store = store
+    sid = "sess_durable"
+    durable_ref = f"{sid}/generation.tar"
+    state = SessionSnapshotState(
+        sid, "acct", None, _NOW, durable_ref, get_settings().instance_id, 7
+    )
+    verdict = _canonical_verdict(sid, size_bytes=7)
+    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
+    store.is_legacy_ref = Mock(side_effect=[False, legacy])  # type: ignore[method-assign]
+    store.exists = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    retained = await registry._gc_image_pass([verdict], {sid: state}, get_settings().instance_id)
+
+    assert (verdict.removal_ref in backend.removed_image_refs) is removed
+    assert retained == ([] if removed else [verdict])
 
 
 @pytest.mark.asyncio
