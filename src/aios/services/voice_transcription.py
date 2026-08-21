@@ -47,13 +47,17 @@ async def transcribe_voice_attachments(
     if not voice_attachments:
         return content
 
-    auth, conflict = await resolve_provider_auth_or_conflict(
-        pool,
-        crypto_box,
-        account_id=account_id,
-        model=_TRANSCRIPTION_MODEL,
-        litellm_extra=None,
-    )
+    try:
+        auth, conflict = await resolve_provider_auth_or_conflict(
+            pool,
+            crypto_box,
+            account_id=account_id,
+            model=_TRANSCRIPTION_MODEL,
+            litellm_extra=None,
+        )
+    except Exception as err:
+        # Credential infrastructure must not prevent delivery or attachment staging.
+        return _append_notice(content, f"{_FAILURE_PREFIX}{err}.]")
     if conflict is not None:
         return _append_notice(content, f"{_FAILURE_PREFIX}{conflict}.]")
     if auth is None or auth.api_base is None:
