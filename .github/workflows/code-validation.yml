@@ -501,16 +501,12 @@ jobs:
           if-no-files-found: ignore
 
       - name: E2E tests (docker shard)
-        # ``-n 2 --dist=loadfile`` bounds Docker-backed concurrency to two
-        # workers. Four workers each owned a testcontainers Postgres while
-        # concurrently creating sandboxes, proxies, and iptables sidecars on
-        # the same 4-vCPU hosted runner; the resulting daemon/network pressure
-        # produced unrelated pass-on-rerun failures (#1967), including an
-        # in-container curl timing out before reaching its recorder. Two
-        # workers retain file-level parallelism without oversubscribing Docker.
-        # ``loadfile`` is load-bearing: ``test_memory_cross_session_sync.py``
-        # uses a module-scoped ``shared_docker_harness`` fixture which would be
-        # torn down + rebuilt per test under the default ``load`` dist.
+        # Run Docker-backed tests serially. Even two workers concurrently own
+        # testcontainers Postgres instances while creating sandboxes, proxies,
+        # and iptables sidecars; on a 4-vCPU hosted runner that contention can
+        # make otherwise healthy in-container requests time out. Serializing
+        # the shard keeps the required check deterministic instead of hiding
+        # contention behind retries.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
@@ -525,7 +521,7 @@ jobs:
         # Fail directly: retrying all recorded failures made a genuinely red
         # required check indistinguishable from runner contention.
         run: |
-          uv run pytest tests/e2e -q -m "docker and not perf" -n 2 --dist=loadfile --durations=25
+          uv run pytest tests/e2e -q -m "docker and not perf" --durations=25
 
       - name: E2E perf backstop (docker shard, ADVISORY — non-blocking)
         # The ``perf``-marked scaling backstops (#1661): loud advisory signal,
