@@ -19,6 +19,14 @@ class _Connector(HttpConnector):
     connector = "probe"
 
 
+def test_configured_heartbeat_path_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    configured = tmp_path / "configured-alive"
+    monkeypatch.setenv("AIOS_CONNECTOR_HEARTBEAT_PATH", str(configured))
+    assert resolve_heartbeat_path() == configured
+
+
 def test_heartbeat_path_is_writable_outside_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
