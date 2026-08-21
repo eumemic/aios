@@ -54,8 +54,8 @@ from aios.retirements.boot_gate import (
 from aios.sandbox.volumes import attachments_root, memory_stores_root, uploads_root
 
 # How long the api startup loops between boot-admission proof attempts while the
-# DB is behind / unreachable. Short enough that readiness flips green promptly
-# once the post-deploy migrate lands; long enough not to hammer the DB.
+# DB is mismatched / unreachable. Short enough to recover promptly after an
+# operator fixes the schema; long enough not to hammer the DB.
 _BOOT_GATE_RETRY_SECONDS = 2.0
 
 
@@ -65,8 +65,8 @@ async def _await_retirements_admissible(pool: Any, log: Any) -> None:
     Refuses to return — keeping the api unready (``app.state.retirements_ok``
     stays ``False``, so ``/ready`` answers 503) — until
     :func:`assert_retirements_admissible` passes. Under Coolify's rolling
-    deploy this is exactly the window where the old healthy container keeps
-    serving while the new one waits out the post-deploy migrate (#1575).
+    deploy the previous healthy immutable image remains available while the
+    candidate refuses traffic (#1575).
     """
     logged_wait = False
     while True:

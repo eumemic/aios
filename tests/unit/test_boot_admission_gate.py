@@ -133,10 +133,26 @@ def _single_contracted() -> Retirement:
 def patch_registry(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Return a helper that swaps :data:`boot_gate.REGISTRY` for a test set."""
 
+    monkeypatch.setattr(boot_gate, "expected_schema_head", lambda: _AHEAD_REV)
+
     def _set(registry: tuple[Retirement, ...]) -> None:
         monkeypatch.setattr(boot_gate, "REGISTRY", registry)
 
     return _set
+
+
+async def test_db_behind_code_head_refuses_even_without_retirements(patch_registry: Any) -> None:
+    """Mutation: code at head must refuse a live DB one migration behind."""
+    patch_registry(())
+    pool = _FakePool(_FakeConn(version="0165"))
+    with pytest.raises(DatabaseBehindContract, match="code head"):
+        await assert_retirements_admissible(pool)
+
+
+async def test_db_at_code_head_passes_without_retirements(patch_registry: Any) -> None:
+    """Discrimination: a correctly migrated DB remains admissible."""
+    patch_registry(())
+    await assert_retirements_admissible(_FakePool(_FakeConn(version=_AHEAD_REV)))
 
 
 async def test_behind_db_refuses_readiness(patch_registry: Any) -> None:
@@ -222,9 +238,9 @@ async def test_uncontracted_descriptor_is_skipped(patch_registry: Any) -> None:
         token="not_yet",
     )
     patch_registry((uncontracted,))
-    # Even a behind/empty DB is admissible because nothing is contracted; the
-    # gate must not even query.
-    conn = _FakeConn(version=_BEHIND_REV)
+    # It skips retirement residue checks, but the universal schema-head proof
+    # still runs and must pass.
+    conn = _FakeConn(version=_AHEAD_REV)
     await assert_retirements_admissible(_FakePool(conn))
     assert conn.count_queries == []
 

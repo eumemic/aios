@@ -104,38 +104,27 @@ when you've touched API-layer code.
 
 ## Database migrations
 
-- **Migrations run post-deploy.** Coolify executes `aios migrate` as the
-  **post-deployment** command on aios-api. It runs in the **new** container,
-  which has the new migration scripts baked in. (A pre-deploy command always
-  runs in the OLD container by design, so it would migrate against the previous
-  deployment's code and never see the new migration files — the
-  alembic-0055-phantom symptom on 2026-05-23.)
+- **Schema-bearing promotions are schema-then-code.** Run `aios migrate` from
+  the candidate immutable image with bounded lock acquisition, require a zero
+  exit status, verify the live Alembic revision equals that image's single head,
+  and only then promote API and worker containers. A failed migration fails the
+  deployment; it must never be recorded as a successful promotion.
 
-- **The new-code/old-schema window.** Between "new container starts serving
-  traffic" and "post-deploy migrate completes," the new code is briefly running
-  against the **old** schema. For **purely-additive** migrations (`add column`,
-  `add table`, `add index`) this is safe: the new code's reads/writes against
-  the old schema keep working, and the migration is invisible to the running
-  container until it completes.
+- **Startup fails closed on schema mismatch.** API and worker compare the live
+  `alembic_version` to the migration head shipped in their image. They do not
+  serve or process work until the revisions are exactly equal. This is defence
+  in depth, not a substitute for schema-first promotion.
 
-- **Destructive migrations need expand/contract.** For `drop column`,
-  `drop table`, `change type`, etc., the new code might query a soon-to-be-removed
-  column during the window. A PR that introduces a destructive migration **MUST**
-  either:
-  - **Split into three deploys:** deploy A (code handles both old and new
-    schema) → deploy B (run the migration via post-deploy as usual) → deploy C
-    (code requires the new schema), **OR**
-  - **Ship together with code that handles both schemas** across the window:
-    read-tolerant of either form, write-tolerant of either form.
+- **Destructive migrations require expand/contract.** Split incompatible
+  changes across deploys so the old code remains valid after the forward
+  migration and the new code is promoted only after schema verification.
 
-- **Only aios-api owns migrations.** aios-worker, aios-signal, aios-telegram,
-  and aios-whatsapp do **not** run migrations. The eumemic-ops `coolify-flags`
-  audit enforces this constellation-wide: any non-aios-api app with `migrate` in
-  either its pre- or post-deployment command fails the audit.
+- **Rollback is asymmetric.** Automated rollback may restore the previous
+  immutable application images. It must never run Alembic downgrade or otherwise
+  auto-revert migrations; schema rollback is a deliberate operator action.
 
-Operator-facing background lives in eumemic-ops at
-`skills/coolify-api/references/db-direct.md` §"Run migrations against the new
-code (use post_deployment_command)".
+- **Only aios-api owns production migrations.** aios-worker, aios-signal,
+  aios-telegram, and aios-whatsapp do not run migrations.
 
 ## Architecture
 

@@ -4,6 +4,8 @@ Revision ID: 0161
 Revises: 0158
 """
 
+import time
+
 from alembic import op
 
 revision = "0161"
@@ -17,26 +19,43 @@ down_revision = "0159"
 branch_labels = None
 depends_on = None
 
+_MAX_ATTEMPTS = 5
+_LOCK_TIMEOUT = "3s"
+_RETRY_SLEEP_SECONDS = 1.0
+
+
+def _add_events_columns_with_retry() -> None:
+    """Acquire the hot events-table lock with bounded retry, then fail hard."""
+    bind = op.get_bind()
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            # A failed statement aborts its transaction. A savepoint makes each
+            # attempt independently recoverable while Alembic keeps ownership of
+            # the outer migration transaction.
+            with bind.begin_nested():
+                bind.exec_driver_sql(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+                bind.exec_driver_sql(
+                    "ALTER TABLE events "
+                    "ADD COLUMN cumulative_image_mass bigint NOT NULL DEFAULT 0, "
+                    "ADD COLUMN token_baseline_v smallint NOT NULL DEFAULT 1"
+                )
+            return
+        except Exception:
+            if attempt == _MAX_ATTEMPTS:
+                raise
+            time.sleep(_RETRY_SLEEP_SECONDS)
+
 
 def upgrade() -> None:
-    # lock_timeout on the ``events`` ALTER (review finding, #2050).  PG11+
-    # fast-default means adding a DEFAULTed column does NOT rewrite the table,
-    # so this is a catalog-only change -- but it still needs ACCESS EXCLUSIVE,
-    # and ``events`` is one of the two tables holding ~87% of the DB with
-    # appends landing on it continuously.  Without a timeout the ALTER queues
-    # behind any live transaction AND every subsequent append queues behind the
-    # ALTER: a single long-running reader turns a catalog tweak into a
-    # fleet-wide append stall.  Failing fast and retrying is strictly better
-    # than an unbounded convoy.  Scoped to this transaction via SET LOCAL.
-    op.execute("SET LOCAL lock_timeout = '3s'")
-    op.execute(
-        "ALTER TABLE events "
-        "ADD COLUMN cumulative_image_mass bigint NOT NULL DEFAULT 0, "
-        "ADD COLUMN token_baseline_v smallint NOT NULL DEFAULT 1"
-    )
+    # PG11+ fast-default makes this catalog-only, but ACCESS EXCLUSIVE can still
+    # queue every append behind a long reader. Bound each wait, retry transient
+    # contention, and propagate the final failure so deployment cannot go green.
+    _add_events_columns_with_retry()
     op.execute("ALTER TABLE sessions ADD COLUMN token_baseline_v smallint NOT NULL DEFAULT 1")
 
 
 def downgrade() -> None:
+    # Operational rollback is image-only: migrations are never auto-reverted.
+    # This remains for deliberate operator recovery and Alembic completeness.
     op.execute("ALTER TABLE sessions DROP COLUMN token_baseline_v")
     op.execute("ALTER TABLE events DROP COLUMN token_baseline_v, DROP COLUMN cumulative_image_mass")
