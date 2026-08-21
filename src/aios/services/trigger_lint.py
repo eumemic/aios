@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Sequence
 
 UNCONDITIONAL_WAKE_WARNING = (
     "This trigger wakes the owning session on every fire with no condition. "
@@ -15,6 +16,22 @@ UNCONDITIONAL_WAKE_WARNING = (
 
 _GUARD_NODES = (ast.If, ast.IfExp, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.Match)
 _WAKE_RE = re.compile(r"\btool\s+wake_self\b")
+OBSERVED_WAKE_WARNING = (
+    "This recurring trigger has woken its owning session on nearly every recent fire, "
+    "including at least five consecutive fires. Check that its runtime guard is selective."
+)
+
+
+def observed_wake_is_noisy(outcomes: Sequence[bool]) -> bool:
+    """Classify newest-first, 24-hour wake observations.
+
+    Five consecutive wakes catches short noisy histories.  Once there are at
+    least five observations, a greater-than-90% wake rate is the longer-window
+    backstop.  Callers provide only observations from the preceding 24 hours.
+    """
+    if len(outcomes) >= 5 and all(outcomes[:5]):
+        return True
+    return len(outcomes) >= 5 and sum(outcomes) / len(outcomes) > 0.9
 
 
 def _workflow_has_unconditional_wake(script: str) -> bool:

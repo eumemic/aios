@@ -1003,6 +1003,7 @@ async def record_trigger_run(
     error_summary: str | None,
     result_id: str | None,
     started_at: datetime,
+    woke_owner: bool = False,
 ) -> str:
     """Timer-fire audit writer: one complete row at fire completion.
 
@@ -1020,8 +1021,8 @@ async def record_trigger_run(
         INSERT INTO trigger_runs
             (id, trigger_id, account_id, owner_session_id, trigger_name,
              trigger_context, status, error_summary, result_id,
-             started_at, finished_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+             started_at, finished_at, woke_owner)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
         """,
         trigger_run_id,
         trigger_id,
@@ -1033,8 +1034,26 @@ async def record_trigger_run(
         error_summary,
         result_id,
         started_at,
+        woke_owner,
     )
     return trigger_run_id
+
+
+async def list_recent_trigger_wake_outcomes(
+    conn: asyncpg.Connection[Any], trigger_id: str
+) -> list[bool]:
+    """Newest-first observed wake outcomes over the preceding 24 hours."""
+    rows = await conn.fetch(
+        """
+        SELECT woke_owner FROM trigger_runs
+        WHERE trigger_id = $1
+          AND trigger_context = 'cron'
+          AND finished_at >= now() - interval '24 hours'
+        ORDER BY finished_at DESC
+        """,
+        trigger_id,
+    )
+    return [r["woke_owner"] for r in rows]
 
 
 async def list_trigger_runs(

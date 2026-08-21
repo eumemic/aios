@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aios.services.trigger_lint import lint_unconditional_wake
+from aios.services.trigger_lint import lint_unconditional_wake, observed_wake_is_noisy
 
 
 def test_cron_wake_owner_warns() -> None:
@@ -44,3 +44,11 @@ def test_guarded_workflow_wake_does_not_warn() -> None:
 
 def test_non_recurring_source_does_not_warn() -> None:
     assert not lint_unconditional_wake(source_kind="one_shot", action_kind="wake_owner")
+
+
+def test_observed_wake_backstop() -> None:
+    assert observed_wake_is_noisy([True] * 5)
+    assert observed_wake_is_noisy([True] * 10 + [False])
+    assert not observed_wake_is_noisy([False, *([True] * 9)])
+    assert not observed_wake_is_noisy([True] * 4)
+    assert not observed_wake_is_noisy([False, *([True] * 4)])

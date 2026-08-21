@@ -42,6 +42,8 @@ audit and the delivered input can never disagree.
 
 from __future__ import annotations
 
+import secrets
+import shlex
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -64,6 +66,7 @@ from aios.models.triggers import (
 )
 from aios.models.workflows import WfRun
 from aios.services import sessions as sessions_service
+from aios.services.trigger_lint import OBSERVED_WAKE_WARNING, observed_wake_is_noisy
 from aios.services.wake import (
     CrossSessionWakeRoot,
     WakeSessionDepthExceededError,
@@ -222,10 +225,12 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
         )
 
     action = trigger.action
+    woke_owner = False
     if isinstance(action, SandboxCommandAction):
-        status, error_summary, result_id = await _run_sandbox_command(trigger, action)
+        status, error_summary, result_id, woke_owner = await _run_sandbox_command(trigger, action)
     elif isinstance(action, WakeOwnerAction):
         status, error_summary, result_id = await _run_wake_owner(trigger, action)
+        woke_owner = status == "ok"
     elif isinstance(action, WakeSessionAction):
         status, error_summary, result_id = await _run_wake_session(trigger, action)
     else:
@@ -297,6 +302,7 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
     # Standing rows (cron tick fires + run_completion event fires): echo
     # columns, the audit record, and the auto-disable decision commit in ONE
     # transaction, so the echo cache and the audit can never disagree.
+    observed_warning = False
     async with pool.acquire() as conn, conn.transaction():
         failures = await queries.record_trigger_fire(
             conn,
@@ -326,6 +332,13 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 error_summary=error_summary,
                 result_id=result_id,
                 started_at=started_at,
+                woke_owner=woke_owner,
+            )
+        observed_warning = False
+        if trigger.source == "cron":
+            outcomes = await queries.list_recent_trigger_wake_outcomes(conn, trigger.id)
+            observed_warning = observed_wake_is_noisy(outcomes) and not observed_wake_is_noisy(
+                outcomes[1:]
             )
         await _append_fire_event(
             conn,
@@ -366,6 +379,13 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 name=trigger.name,
                 consecutive_failures=failures,
             )
+    if observed_warning:
+        await _surface_failure(
+            trigger.owner_session_id,
+            trigger.account_id,
+            f"[Trigger '{trigger.name}' warning: {OBSERVED_WAKE_WARNING}]",
+        )
+
     # Surface the auto-disable AFTER the transaction commits — _surface_failure
     # re-acquires the pool, so nesting it inside the open transaction connection
     # risks deadlock on the small pool.
@@ -506,6 +526,7 @@ async def _record_timer_audit(
     error_summary: str | None,
     result_id: str | None,
     started_at: datetime,
+    woke_owner: bool = False,
 ) -> str:
     """Write a timer fire's audit row — owns the TriggerRow → kwargs projection."""
     trun_id = await queries.record_trigger_run(
@@ -519,13 +540,14 @@ async def _record_timer_audit(
         error_summary=error_summary,
         result_id=result_id,
         started_at=started_at,
+        woke_owner=woke_owner,
     )
     return trun_id
 
 
 async def _run_sandbox_command(
     trigger: queries.TriggerRow, action: SandboxCommandAction
-) -> tuple[TriggerFireStatus, str | None, str | None]:
+) -> tuple[TriggerFireStatus, str | None, str | None, bool]:
     """Run a ``sandbox_command`` action — bash in the session's sandbox.
 
     Byte-identical to today's scheduled-task fire: statuses ok/error/timeout,
@@ -536,13 +558,21 @@ async def _run_sandbox_command(
     sandbox_registry = runtime.require_sandbox_registry()
     status: TriggerFireStatus
     error_summary: str | None = None
+    observation_token = secrets.token_urlsafe(24)
+    tool_broker = runtime.require_tool_broker()
+    tool_broker.begin_trigger_observation(observation_token)
     try:
         handle = await sandbox_registry.get_or_provision(trigger.owner_session_id, pool=pool)
-        # Bind the sandbox-run method to a clearer local name.
+        # Export only for this command process. The tool CLI forwards the
+        # unguessable token to the broker, which observes successful attempts
+        # even when static syntax says the call is guarded.
+        command = (
+            f"export AIOS_TRIGGER_OBSERVATION={shlex.quote(observation_token)}; {action.command}"
+        )
         run_in_sandbox = sandbox_registry.exec
         result = await run_in_sandbox(
             handle,
-            action.command,
+            command,
             timeout_seconds=action.timeout_seconds,
             max_output_bytes=action.max_output_bytes,
         )
@@ -578,7 +608,8 @@ async def _run_sandbox_command(
         )
         status = "error"
         error_summary = f"sandbox error: {type(e).__name__}: {e!s:.200}"
-    return status, error_summary, None
+    woke_owner = tool_broker.finish_trigger_observation(observation_token)
+    return status, error_summary, None, woke_owner
 
 
 async def _run_wake_owner(
