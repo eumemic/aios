@@ -154,10 +154,12 @@ class DockerConnectorHealthReader:
                 detail = status or state
             if healthy:
                 detail = "healthy"
-            # Any healthy replica means this connector type can receive. If none
-            # are healthy retain the most specific unhealthy observation.
+            # A connector type is healthy only when every observed container is
+            # healthy. Containers cannot be correlated to individual connection
+            # rows, so allowing one replica to overwrite an unhealthy one could
+            # hide the failure of the replica serving a bound connection.
             previous = result.get(connector)
-            if previous is None or healthy:
+            if previous is None or (previous.healthy and not healthy):
                 result[connector] = TransportHealth(healthy=healthy, detail=detail)
         return result
 
