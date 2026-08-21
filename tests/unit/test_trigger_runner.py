@@ -11,7 +11,9 @@ from aios.models.triggers import SandboxCommandAction
 
 
 @pytest.mark.asyncio
-async def test_sandbox_observation_is_finished_on_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sandbox_observation_is_finished_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     broker = Mock()
     registry = Mock()
     registry.get_or_provision.side_effect = asyncio.CancelledError

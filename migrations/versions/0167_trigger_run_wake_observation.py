@@ -13,9 +13,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE trigger_runs ADD COLUMN woke_owner boolean NOT NULL DEFAULT false"
-    )
+    op.execute("ALTER TABLE trigger_runs ADD COLUMN woke_owner boolean NOT NULL DEFAULT false")
     op.execute(
         "CREATE INDEX trigger_runs_recent_wakes "
         "ON trigger_runs (trigger_id, finished_at DESC) "
