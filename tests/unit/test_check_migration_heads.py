@@ -102,15 +102,16 @@ def test_live_base_mutation_rejects_stale_parent_then_accepts_current_tip() -> N
 
 
 def test_rejects_parent_available_only_on_branch_not_live_base() -> None:
-    base = {"0158": None, "0159": "0158"}
+    base = {"0158": None}
     branch = {"0158": None, "0160": "0158", "0161": "0160"}
 
     with pytest.raises(MigrationHistoryError) as exc_info:
         check_against_base(branch, base)
 
-    message = str(exc_info.value)
-    assert "combined heads are 0159 and 0161" in message
-    assert "current base head (0159)" in message
+    assert str(exc_info.value) == (
+        'revision 0161 declares down_revision="0160", but that parent '
+        "is not present on the live base"
+    )
 
 
 def test_known_good_repository_has_expected_revision_count_and_one_head() -> None:
