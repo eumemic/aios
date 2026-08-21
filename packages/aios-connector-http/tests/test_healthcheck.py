@@ -123,6 +123,41 @@ async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> No
     assert connector._heartbeat_identity is None
 
 
+
+@pytest.mark.asyncio
+async def test_heartbeat_does_not_claim_path_replaced_after_create(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.01
+    real_fstat = os.fstat
+    replaced = False
+
+    def replace_after_fstat(fd: int) -> os.stat_result:
+        nonlocal replaced
+        created = real_fstat(fd)
+        if not replaced:
+            heartbeat.unlink()
+            heartbeat.write_text("operator")
+            replaced = True
+        return created
+
+    monkeypatch.setattr(os, "fstat", replace_after_fstat)
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await asyncio.sleep(0.03)
+        assert replaced
+        assert heartbeat.read_text() == "operator"
+        assert not connector._heartbeat_owned
+        assert connector._heartbeat_identity is None
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 @pytest.mark.asyncio
 async def test_heartbeat_stops_while_a_connection_is_restarting(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
