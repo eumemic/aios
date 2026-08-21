@@ -468,7 +468,7 @@ class TriggerEcho(BaseModel):
 
 
 class TriggerCreated(TriggerEcho):
-    """Create/update response — the trigger echo plus a one-time ``ingest_token``.
+    """Create/update response — trigger echo, one-time token, and lint warnings.
 
     Subclasses :class:`TriggerEcho` so every existing read-field caller keeps
     working; adds ``ingest_token``, the plaintext ingest secret surfaced
@@ -481,6 +481,7 @@ class TriggerCreated(TriggerEcho):
     """
 
     ingest_token: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AccountTriggerEcho(BaseModel):
