@@ -493,7 +493,10 @@ jobs:
             echo "::warning::FLAKE_RETRY e2e-non-docker"
             echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
             echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
-            uv run pytest tests/e2e -q -m "not docker" -n 4 --durations=25 --lf
+            # Retry the recorded failures serially. A second xdist run can
+            # reproduce transient testcontainer/runner resource contention
+            # instead of determining whether the test itself is stable.
+            uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25 --lf
           fi
 
       - name: Upload non-docker E2E flake-retry marker
