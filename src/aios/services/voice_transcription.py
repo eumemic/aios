@@ -87,7 +87,7 @@ async def transcribe_voice_attachments(
                 if not isinstance(transcript, str) or not transcript.strip():
                     raise ValueError("proxy returned an empty transcript")
                 result = _append_notice(result, f"[Voice note transcript: {transcript.strip()}]")
-            except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError) as err:
+            except (httpx.HTTPError, json.JSONDecodeError, OSError, ValueError, TypeError) as err:
                 result = _append_notice(result, f"{_FAILURE_PREFIX}{err}.]")
             finally:
                 await attachment.stream.seek(0)  # type: ignore[attr-defined]
