@@ -57,6 +57,7 @@ import inspect
 import json
 import os
 import signal as _signal
+import time
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -100,7 +101,7 @@ from aios_sdk._generated.models.tools_schema_update_tools_item import (
 from aios_sdk._generated.types import Unset
 from ulid import ULID
 
-from .healthcheck import resolve_heartbeat_path
+from .healthcheck import heartbeat_max_age_seconds, resolve_heartbeat_path
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
@@ -1004,13 +1005,7 @@ class HttpConnector:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
-                if self._heartbeat_owned and self._heartbeat_identity is not None:
-                    with contextlib.suppress(FileNotFoundError):
-                        stat = await asyncio.to_thread(heartbeat_path.stat)
-                        if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
-                            await asyncio.to_thread(heartbeat_path.unlink)
-                    self._heartbeat_owned = False
-                    self._heartbeat_identity = None
+                await self._remove_owned_heartbeat(heartbeat_path)
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -1019,6 +1014,56 @@ class HttpConnector:
                 for event in self._connection_served.values():
                     event.clear()
                 await self.teardown()
+
+    @staticmethod
+    def _claim_heartbeat(path: Path) -> tuple[int, int] | None:
+        """Create a heartbeat, or recover one old enough to be crash debris.
+
+        Fresh pre-existing paths are left alone.  File-descriptor based updates
+        ensure a pathname replacement race cannot make us touch the replacement.
+        """
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        created = False
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
+            created = True
+        except FileExistsError:
+            fd = os.open(path, flags)
+        try:
+            stat = os.fstat(fd)
+            if not created and time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+                return None
+            os.utime(fd, None)
+            return (stat.st_dev, stat.st_ino)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _refresh_heartbeat(path: Path, identity: tuple[int, int]) -> bool:
+        """Refresh only the inode previously claimed by this process."""
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return False
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity:
+                return False
+            os.utime(fd, None)
+            return True
+        finally:
+            os.close(fd)
+
+    async def _remove_owned_heartbeat(self, path: Path) -> None:
+        """Remove our heartbeat without unlinking a pathname replacement."""
+        if self._heartbeat_owned and self._heartbeat_identity is not None:
+            with contextlib.suppress(FileNotFoundError):
+                stat = await asyncio.to_thread(path.stat)
+                if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
+                    await asyncio.to_thread(path.unlink)
+        self._heartbeat_owned = False
+        self._heartbeat_identity = None
 
     async def _heartbeat_loop(self, path: Path) -> None:
         """Publish connector transport health for the container probe.
@@ -1035,26 +1080,24 @@ class HttpConnector:
             if self._discovery_cursor is not None and all(
                 state.serve_status == "serving" for state in self._connections.values()
             ):
-                exists = await asyncio.to_thread(path.exists)
-                if not exists:
-                    try:
-                        await asyncio.to_thread(path.touch, exist_ok=False)
-                    except FileExistsError:
-                        # An operator raced creation; never claim their inode.
-                        pass
-                    else:
-                        stat = await asyncio.to_thread(path.stat)
-                        self._heartbeat_owned = True
-                        self._heartbeat_identity = (stat.st_dev, stat.st_ino)
-                elif self._heartbeat_owned and self._heartbeat_identity is not None:
-                    stat = await asyncio.to_thread(path.stat)
-                    if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
-                        await asyncio.to_thread(path.touch)
-                    else:
+                if self._heartbeat_owned and self._heartbeat_identity is not None:
+                    if not await asyncio.to_thread(
+                        self._refresh_heartbeat, path, self._heartbeat_identity
+                    ):
                         # The path was replaced after our claim. Relinquish it;
                         # never mutate or later unlink the replacement.
                         self._heartbeat_owned = False
                         self._heartbeat_identity = None
+                else:
+                    try:
+                        identity = await asyncio.to_thread(self._claim_heartbeat, path)
+                    except FileNotFoundError:
+                        # The path vanished between O_EXCL and opening it. Retry
+                        # on the next short heartbeat interval.
+                        identity = None
+                    if identity is not None:
+                        self._heartbeat_owned = True
+                        self._heartbeat_identity = identity
             await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:
