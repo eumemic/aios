@@ -107,9 +107,7 @@ def test_watchdog_reports_unknown_when_pending_run_has_insufficient_history() ->
 
     verdict = evaluate_runs([pending, *completed], now=now)
 
-    assert verdict == InsufficientHistory(
-        status="unknown", completed_runs=19, required_runs=20
-    )
+    assert verdict == InsufficientHistory(status="unknown", completed_runs=19, required_runs=20)
 
 
 def test_watchdog_cli_fails_and_writes_unknown_for_insufficient_history(tmp_path: Path) -> None:
