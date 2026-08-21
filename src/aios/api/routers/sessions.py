@@ -12,6 +12,8 @@ Postgres ``LISTEN``/``NOTIFY``.
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, File, Query, UploadFile, status
@@ -62,6 +64,7 @@ from aios.models.sessions import (
     SessionCloneRequest,
     SessionCreate,
     SessionInterruptRequest,
+    SessionOrderBy,
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
@@ -135,6 +138,7 @@ async def list_(
         Query(alias="status"),
     ] = None,
     parent_run_id: str | None = None,
+    order_by: SessionOrderBy | None = None,
     limit: PageLimit = None,
 ) -> ListResponse[Session]:
     """List sessions, newest first, keyset-paginated.
@@ -152,29 +156,63 @@ async def list_(
             "agent_id": agent_id,
             "status": status_filter,
             "parent_run_id": parent_run_id,
+            "order_by": order_by,
             "limit": limit,
         },
     )
-    after = str(st.cursor) if st is not None else None
+    after: tuple[datetime | None, str] | None = None
+    if st is not None:
+        try:
+            raw_anchor, anchor_id = json.loads(str(st.cursor))
+            after = (
+                datetime.fromisoformat(raw_anchor) if raw_anchor is not None else None,
+                str(anchor_id),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("Malformed pagination cursor.") from exc
     page_limit = resolve_page_limit(st, limit)
     if st is not None:
         agent_id = st.filters.get("agent_id")
         status_filter = st.filters.get("status")
         parent_run_id = st.filters.get("parent_run_id")
+        order_by = st.filters.get("order_by", "created_at")
+    order_by = order_by or "created_at"
+    if order_by not in ("created_at", "last_event_at", "updated_at"):
+        raise ValidationError("Malformed pagination cursor.")
     items = await service.list_sessions(
         pool,
         agent_id=agent_id,
         status=status_filter,
         parent_run_id=parent_run_id,
+        order_by=order_by,
         limit=page_limit + 1,
         after=after,
         account_id=account_id,
     )
+
+    def cursor_value(session: Session) -> str:
+        timestamp = (
+            session.last_event_at
+            if order_by == "last_event_at"
+            else session.updated_at
+            if order_by == "updated_at"
+            else session.created_at
+        )
+        return json.dumps(
+            [timestamp.isoformat() if timestamp is not None else None, session.id],
+            separators=(",", ":"),
+        )
+
     return ListResponse[Session].paginate(
         items,
         page_limit,
-        cursor=lambda x: x.id,
-        filters={"agent_id": agent_id, "status": status_filter, "parent_run_id": parent_run_id},
+        cursor=cursor_value,
+        filters={
+            "agent_id": agent_id,
+            "status": status_filter,
+            "parent_run_id": parent_run_id,
+            "order_by": order_by,
+        },
     )
 
 
