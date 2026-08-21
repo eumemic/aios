@@ -1,9 +1,9 @@
 """Unit tests for agent() structured output: value validation + prompt guidance.
 
 The runtime pieces (storage, the per-request DB read, the end-to-end spawn→return
-flow) are covered in tests/integration/test_wf_step.py. These cover the two pure
-functions: the ``return`` value validator and the per-request schema guidance the
-context builder renders into the child's request message.
+flow) are covered in tests/integration/test_wf_step.py. These cover per-request
+schema guidance rendered into the child request message. The normalization-aware
+output gates are covered by ``test_return_value_coercion.py``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 import pytest
 
 from aios.harness.context import render_user_event
-from aios.tools.workflow_completion import _validate_value
 from aios.workflows.determinism import canonical_schema_json
 from aios.workflows.step import (
     _reject_invalid_output_schema,
@@ -31,20 +30,6 @@ _SCHEMA = {
     "required": ["answer"],
     "additionalProperties": False,
 }
-
-
-def test_validate_value_accepts_conforming() -> None:
-    assert _validate_value({"answer": "hi"}, _SCHEMA) is None
-
-
-def test_validate_value_rejects_with_path_and_retry_hint() -> None:
-    err = _validate_value({"answer": 1}, _SCHEMA)
-    assert err is not None
-    assert "value.answer" in err  # the failing path, scoped under `value`
-    assert "call `return` again" in err  # the model is told to retry
-    # A bare-scalar schema is honored too (output_schema replaces `value` wholesale).
-    assert _validate_value("hi", {"type": "number"}) is not None
-    assert _validate_value(3, {"type": "number"}) is None
 
 
 def test_render_surfaces_request_schema_per_request() -> None:

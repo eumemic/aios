@@ -40,10 +40,7 @@ from aios.logging import get_logger
 from aios.models.sessions import Err, Ok, Outcome
 from aios.services import sessions as sessions_service
 from aios.tools.registry import ToolResult, openai_tool_entry, registry
-from aios.tools.schema_errors import (
-    format_schema_violation,
-    normalize_and_format_schema_violation,
-)
+from aios.tools.schema_errors import normalize_and_format_schema_violation
 
 log = get_logger(__name__)
 
@@ -182,29 +179,6 @@ async def _finish(
         return _UNKNOWN_REQUEST
     # responded | duplicate — either way the request now has exactly one response.
     return {"status": "errored" if isinstance(outcome, Err) else "returned"}
-
-
-def _validate_value(value: Any, schema: dict[str, Any]) -> str | None:
-    """Validate a ``return`` ``value`` against the request's ``output_schema``.
-
-    ``None`` on success; otherwise a model-facing ``output_schema_violation`` error
-    built by the shared no-echo formatter
-    (:func:`aios.tools.schema_errors.format_schema_violation` — #1769 spec v2:
-    never echoes the full ``value``, states expected-vs-got JSON types, and
-    includes the schema) so the child self-corrects and calls ``return`` again
-    through the normal tool-error loop. This is the single servicer-side schema
-    gate every obligation answered with ``return`` passes — self-goals (opened by
-    ``create_goal``) included, since their persisted ``output_schema`` is read off
-    the same ``request_opened`` edge.
-    """
-    return format_schema_violation(
-        value,
-        schema,
-        root="value",
-        intro="output_schema_violation: `value` does not conform to the request's output_schema.",
-        retry_hint="Provide `value` as a conforming object and call `return` again.",
-        site="workflow_completion.return",
-    )
 
 
 async def _enforce_output_schema(

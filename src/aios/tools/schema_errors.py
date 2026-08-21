@@ -1,12 +1,6 @@
 """Shared JSON-Schema-violation formatter (#1769 spec v2).
 
-Three call sites format a jsonschema validation failure into a model-facing
-error string: :func:`aios.tools.invoke.validate_arguments` (every tool-call's
-arguments), :func:`aios.tools.workflow_completion._validate_value` (a
-``return``-tool answer against its request's ``output_schema``, plus
-:func:`aios.workflows.step._validate_output_against_schema` for a workflow
-run's terminal output), and :func:`aios.tools.invoke_session._validate_output`
-(a ``call_session``/``call_workflow`` caller checking a peer/run's answer).
+Schema-validation call sites format jsonschema failures into model-facing errors.
 Before this module each site rolled its own message by reusing jsonschema's
 stock ``err.message``, which embeds a full ``repr()`` of the failing instance
 — and *also* echoed the whole argument/value payload a second time via

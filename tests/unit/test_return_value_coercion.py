@@ -226,7 +226,11 @@ async def _resolve_call_output(monkeypatch: Any, value: Any) -> Any:
 
 
 class TestCrossPathConsistency:
-    """The same terminal payload receives the same verdict at all four boundaries."""
+    """The same terminal payload receives the same verdict at three distinct gates.
+
+    The two caller-side results exercise the same ``_park_and_resolve`` gate;
+    handler-specific wiring is covered in ``test_invoke_session_tools.py``.
+    """
 
     async def test_encoded_object_is_accepted_and_normalized_everywhere(
         self, monkeypatch: Any

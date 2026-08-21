@@ -17,7 +17,8 @@ not goal-named duplicates — are the canonical verbs of record:
 * **CLOSE** a goal → ``return``/``error`` (servicer authority, schema-validated):
   ``return(request_id=<goal_id>, value=…)`` completes it (the session's persisted
   ``output_schema`` is enforced servicer-side by ``return``'s own schema gate,
-  ``workflow_completion._enforce_output_schema`` → ``_validate_value``, so a
+  ``workflow_completion._enforce_output_schema`` and the shared normalization
+  gate, so a
   non-conforming value is rejected with ``output_schema_violation`` and the goal
   stays open) and ``error(request_id=<goal_id>, message=…)`` abandons it.
 * **LIST** open goals → ``list_obligations`` (origin=self) and/or ``list_calls``
