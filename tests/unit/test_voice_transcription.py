@@ -10,6 +10,17 @@ from aios.services.attachment_staging import InboundAttachment
 from aios.services.voice_transcription import transcribe_voice_attachments
 
 
+class FailingReadUpload:
+    filename: str | None = "voice-3664.ogg"
+    content_type: str | None = "audio/ogg"
+
+    async def read(self, size: int = -1) -> bytes:
+        raise OSError("disk read failed")
+
+    async def seek(self, offset: int) -> None:
+        pass
+
+
 class MemoryUpload:
     filename: str | None = "voice-3664.ogg"
     content_type: str | None = "audio/ogg"
@@ -91,6 +102,29 @@ async def test_empty_or_corrupt_audio_failure_is_loud(
 
     assert content.startswith("[Voice transcription failed:")
     assert await upload.stream.read() == payload
+
+
+@pytest.mark.asyncio
+async def test_stream_read_failure_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "aios.services.voice_transcription.resolve_provider_auth_or_conflict",
+        AsyncMock(
+            return_value=(ProviderAuth("proxy-secret", "http://oai-proxy/v1", "acc_1"), None)
+        ),
+    )
+    upload = InboundAttachment(FailingReadUpload(), "voice-3664.ogg", "audio/ogg")
+
+    content = await transcribe_voice_attachments(
+        pool=MagicMock(),
+        crypto_box=MagicMock(),
+        account_id="acc_1",
+        connector="telegram",
+        content="",
+        attachments=[upload],
+        transport=httpx.MockTransport(AsyncMock()),
+    )
+
+    assert content == "[Voice transcription failed: disk read failed.]"
 
 
 @pytest.mark.asyncio
