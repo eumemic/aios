@@ -1039,6 +1039,35 @@ async def record_trigger_run(
     return trigger_run_id
 
 
+async def mark_trigger_run_woken_by_workflow_session(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[tuple[str, str, str, str]]:
+    """Attribute a workflow-child ``wake_self`` to its originating cron fire.
+
+    Trigger-launched workflow runs are stored as ``trigger_runs.result_id``.  A
+    workflow's model/builtin surface executes in child sessions whose
+    ``parent_run_id`` points at that run, so this durable join covers the sibling
+    effector without relying on the sandbox-only observation HTTP header.
+    """
+    rows = await conn.fetch(
+        """
+        UPDATE trigger_runs tr
+        SET woke_owner = true
+        FROM sessions s
+        WHERE s.id = $1
+          AND s.parent_run_id = tr.result_id
+          AND tr.trigger_context = 'cron'
+          AND tr.status = 'ok'
+          AND NOT tr.woke_owner
+        RETURNING tr.trigger_id, tr.account_id, tr.owner_session_id, tr.trigger_name
+        """,
+        session_id,
+    )
+    return [
+        (r["trigger_id"], r["account_id"], r["owner_session_id"], r["trigger_name"]) for r in rows
+    ]
+
+
 async def list_recent_trigger_wake_outcomes(
     conn: asyncpg.Connection[Any], trigger_id: str
 ) -> list[bool]:
