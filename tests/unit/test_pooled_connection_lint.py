@@ -58,6 +58,24 @@ async def work(pool, client):
     )
 
 
+def test_unrecognised_db_surface_reports_allowlist_uncertainty() -> None:
+    violations = check_source(
+        """
+async def work(pool):
+    async with pool.acquire() as conn:
+        await queries.new_database_query(conn, value=1)
+""",
+        filename="example.py",
+    )
+
+    assert len(violations) == 1
+    assert str(violations[0]) == (
+        "example.py:4:9: PCA002 'queries.new_database_query' is not a recognised DB surface — "
+        "add it to the allowlist if it is one, or move the await outside the connection scope "
+        "if it is not"
+    )
+
+
 def test_fabricated_repository_pragma_does_not_suppress_violation() -> None:
     assert _messages(
         """
