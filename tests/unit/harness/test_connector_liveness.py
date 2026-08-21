@@ -94,10 +94,10 @@ async def test_alarm_requires_unhealthy_transport_and_stale_session(
 
 
 @pytest.mark.asyncio
-async def test_stopped_or_absent_container_fires_after_silence(
+async def test_stopped_container_is_observed_by_docker_reader_after_silence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mutation path: stopping/removing the connector is observed out-of-process."""
+    """Stopping the connector is observed through the production Docker reader."""
     now = datetime(2026, 8, 21, tzinfo=UTC)
     monkeypatch.setattr(
         "aios.harness.connector_liveness.read_bound_connection_activity",
@@ -107,16 +107,30 @@ async def test_stopped_or_absent_container_fires_after_silence(
             ]
         ),
     )
+    stopped = MagicMock()
+    stopped.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-telegram"],
+            "State": {"Status": "exited"},
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[stopped])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
     alarm = MagicMock()
     detector = ConnectorLivenessDetector(
         object(),
         thresholds={"telegram": 3 * 86400},
-        health_reader=_HealthReader({}),
+        health_reader=DockerConnectorHealthReader(),
         alarm=alarm,
         rate_limit_seconds=3600,
     )
 
     await detector.check_once(now=now, monotonic_now=10000)
 
+    docker.containers.list.assert_awaited_once_with(all=True)
+    stopped.show.assert_awaited_once_with()
+    docker.close.assert_awaited_once_with()
     alarm.assert_called_once()
-    assert "container absent" in alarm.call_args.args[1]["finding"]
+    assert "transport unhealthy (exited)" in alarm.call_args.args[1]["finding"]

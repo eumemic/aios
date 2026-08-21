@@ -108,16 +108,19 @@ async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> No
     connector._heartbeat_owned = True
     connector._heartbeat_identity = (owned_stat.st_dev, owned_stat.st_ino)
 
-    # Keep the old inode referenced so the filesystem cannot immediately reuse
-    # its number for the replacement and make this identity test ambiguous.
-    with heartbeat.open() as old_inode:
-        heartbeat.unlink()
-        heartbeat.write_text("replacement")
-        assert (heartbeat.stat().st_dev, heartbeat.stat().st_ino) != connector._heartbeat_identity
+    # Keep the old inode referenced until the replacement exists so the
+    # filesystem cannot immediately reuse its number, then close it before
+    # cleanup.  Verify the pathname itself survives (an open file descriptor
+    # can still be read after its pathname has been unlinked).
+    old_inode = heartbeat.open()
+    heartbeat.unlink()
+    heartbeat.write_text("replacement")
+    assert (heartbeat.stat().st_dev, heartbeat.stat().st_ino) != connector._heartbeat_identity
+    old_inode.close()
 
-        await connector._remove_owned_heartbeat(heartbeat)
-        assert not old_inode.closed
+    await connector._remove_owned_heartbeat(heartbeat)
 
+    assert heartbeat.exists()
     assert heartbeat.read_text() == "replacement"
     assert not connector._heartbeat_owned
     assert connector._heartbeat_identity is None
