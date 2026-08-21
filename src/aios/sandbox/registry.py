@@ -50,6 +50,9 @@ from aios.sandbox.backends.base import (
     ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
     FLATTENED_LABEL_VALUE,
+    INSTANCE_LABEL_KEY,
+    MANAGED_LABEL_KEY,
+    MANAGED_LABEL_VALUE,
     PREWARM_LABEL_KEY,
     SESSION_LABEL_KEY,
     VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
@@ -2545,9 +2548,17 @@ class SandboxRegistry:
         await self._gc_canonical_store_pass(now)
 
         # Docker cache and canonical store have independent budgets/verdicts.
-        docker_budget = settings.sandbox_docker_cache_high_watermark_bytes
+        docker_budget = (
+            settings.sandbox_docker_cache_high_watermark_bytes
+            if isinstance(self._store, TarballStore)
+            else settings.sandbox_snapshot_pool_bytes
+        )
         pool_pressure = await self._gc_pool_budget_pass(
-            retained, image_states, docker_budget, instance_id
+            retained,
+            image_states,
+            docker_budget,
+            instance_id,
+            dry_run=settings.sandbox_snapshot_pool_reclaim_mode == "dry_run",
         )
         if isinstance(self._store, TarballStore):
             used = self._store.used_bytes()
@@ -2837,21 +2848,101 @@ class SandboxRegistry:
         states: dict[str, SessionSnapshotState],
         pool_bytes: int | None,
         instance_id: str,
+        *,
+        dry_run: bool | None = None,
     ) -> GcPressureResult:
-        """Return host pressure; lifecycle eligibility is never widened by it."""
+        """Reclaim inactive snapshots least-recently-used until the host bound holds."""
         if pool_bytes is None:
             return GcPressureResult()
+        if dry_run is None:
+            dry_run = get_settings().sandbox_snapshot_pool_reclaim_mode == "dry_run"
         base_sizes: dict[str, int] = {}
-        total = sum(
-            [
-                await self._unique_bytes_for_image(v.image, base_sizes)
-                for v in retained
-                if v.is_canonical
-            ]
+        sized = [
+            (v, await self._unique_bytes_for_image(v.image, base_sizes))
+            for v in retained
+            if v.is_canonical
+        ]
+        before = sum(size for _, size in sized)
+        after = before
+        deleted_refs: list[str] = []
+        reclaimable_refs: list[str] = []
+        candidates = sorted(
+            (
+                (v, size)
+                for v, size in sized
+                if v.session_id is not None
+                and v.session_id not in self._handles
+                and v.session_id in states
+            ),
+            key=lambda item: (
+                states[item[0].session_id or ""].last_event_at or datetime.min.replace(tzinfo=UTC)
+            ),
         )
-        if total > pool_bytes:
-            log.error("sandbox.snapshot_pool_pressure", used_bytes=total, budget_bytes=pool_bytes)
-        return GcPressureResult(pool_used_bytes=total, pool_budget_bytes=pool_bytes)
+        for verdict, size in candidates:
+            if after <= pool_bytes:
+                break
+            reclaimable_refs.append(verdict.removal_ref)
+            if dry_run:
+                continue
+            if await self._reclaim_pool_candidate(verdict, states, instance_id):
+                deleted_refs.append(verdict.removal_ref)
+                retained.remove(verdict)
+                after -= size
+        log_method = log.error if after > pool_bytes else log.info
+        log_method(
+            "sandbox.snapshot_pool_reclaim",
+            before_bytes=before,
+            after_bytes=after,
+            reclaimed_bytes=before - after,
+            budget_bytes=pool_bytes,
+            deleted_refs=deleted_refs,
+            reclaimable_refs=reclaimable_refs,
+            dry_run=dry_run,
+            blocked_reason=(
+                "dry_run"
+                if dry_run and before > pool_bytes
+                else "all_remaining_images_in_use_or_removal_refused"
+                if after > pool_bytes
+                else None
+            ),
+        )
+        return GcPressureResult(pool_used_bytes=after, pool_budget_bytes=pool_bytes)
+
+    async def _reclaim_pool_candidate(
+        self,
+        verdict: GcImageVerdict,
+        states: dict[str, SessionSnapshotState],
+        instance_id: str,
+    ) -> bool:
+        """Revalidate identity, containment, ownership, and liveness before deletion."""
+        session_id = verdict.session_id
+        assert session_id is not None
+        async with self._lock_for(session_id):
+            if self._handles.get(session_id) is not None:
+                return False
+            fresh = await self._fresh_session_state(session_id)
+            candidate = states.get(session_id)
+            if (
+                fresh is None
+                or candidate is None
+                or fresh.archived_at is not None
+                or fresh.snapshot_ref != verdict.removal_ref
+                or fresh.snapshot_host != instance_id
+                or verdict.removal_ref != snapshot_tag(instance_id, session_id)
+                or verdict.image.labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE
+                or verdict.image.labels.get(INSTANCE_LABEL_KEY) != instance_id
+                or verdict.image.labels.get(SESSION_LABEL_KEY) != session_id
+            ):
+                return False
+            pressure_verdict = dataclasses.replace(verdict, reason="protected_live")
+            removed = await self._remove_canonical_image_and_clear_pointer(
+                pressure_verdict, instance_id, states
+            )
+            if removed:
+                await self._append_fs_event(
+                    session_id, SANDBOX_FS_RESET_EVENT, {"reason": "snapshot_pool_pressure"}
+                )
+            return removed
 
     async def _gc_account_cap_pass(
         self,
@@ -3037,6 +3128,14 @@ class SandboxRegistry:
                     or candidate is None
                     or row["archived_at"] != candidate.archived_at
                     or row["archived_at"] is None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                ):
+                    return False
+            elif verdict.reason == "protected_live":
+                if (
+                    row is None
+                    or row["archived_at"] is not None
                     or row["snapshot_ref"] != verdict.removal_ref
                     or row["snapshot_host"] != instance_id
                 ):
