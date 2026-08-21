@@ -7,8 +7,13 @@ import socket
 from typing import Any
 
 
-class ExternalEgressBlocked(RuntimeError):
-    """Raised when a unit test attempts to contact a non-loopback host."""
+class ExternalEgressBlocked(OSError):
+    """Raised when a unit test attempts to contact a non-loopback host.
+
+    This is an ``OSError`` so application code that deliberately handles DNS
+    failure can follow that degraded path while an unhandled lookup still
+    fails the test loudly.
+    """
 
 
 def guard_external_host(host: Any) -> None:
