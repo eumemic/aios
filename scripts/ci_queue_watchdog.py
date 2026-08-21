@@ -22,14 +22,23 @@ class Breach:
     html_url: str
 
 
+@dataclass(frozen=True)
+class InsufficientHistory:
+    """An unknown verdict caused by too few completed runs."""
+
+    status: str
+    completed_runs: int
+    required_runs: int
+
+
 def _timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def evaluate_runs(
     runs: list[dict[str, Any]], *, now: datetime | None = None, sample_size: int = 20
-) -> Breach | None:
-    """Return a breach when the oldest live master run exceeds twice recent p95."""
+) -> Breach | InsufficientHistory | None:
+    """Return a failure verdict for a breach or an indeterminate threshold."""
     now = now or datetime.now(UTC)
     master = [run for run in runs if run.get("head_branch") == "master"]
     pending = [run for run in master if run.get("status") in _NONTERMINAL]
@@ -46,7 +55,11 @@ def evaluate_runs(
         reverse=True,
     )[:sample_size]
     if len(completed) < sample_size:
-        return None
+        return InsufficientHistory(
+            status="unknown",
+            completed_runs=len(completed),
+            required_runs=sample_size,
+        )
 
     durations = sorted(
         int((_timestamp(run["updated_at"]) - _timestamp(run["created_at"])).total_seconds())
