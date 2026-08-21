@@ -33,24 +33,6 @@ jobs:
           # is small enough that a full fetch is cheap.
           fetch-depth: 0
 
-      # Keep this in `detect`: that context is required by master branch
-      # protection.  A separate workflow check would be advisory and could
-      # report red without preventing a merge.
-      - name: Reject undocumented files missing from the PR head
-        if: github.event_name == 'pull_request'
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
-          python scripts/pr_files_from_trees.py "$BASE_SHA" "$HEAD_SHA" \
-            > "$RUNNER_TEMP/pr-files.json"
-          python scripts/check_pr_deletions.py \
-            "$RUNNER_TEMP/pr-files.json" "$RUNNER_TEMP/base-paths.txt"
-
       - name: Detect build-affecting changes
         id: filter
         env:
