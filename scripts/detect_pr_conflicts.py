@@ -77,6 +77,10 @@ def _mergeability(
             break
         if attempt < 5:
             sleep(2**attempt)
+    if pull.get("mergeable") is None and pull.get("mergeable_state") == "unknown":
+        raise RuntimeError(
+            f"GitHub could not determine mergeability for pull #{number} after 6 attempts"
+        )
     return pull
 
 
@@ -90,6 +94,7 @@ def detect_conflicts(
 ) -> list[int]:
     """Comment on each non-draft open PR GitHub classifies as ``dirty``."""
     conflicted: list[int] = []
+    notification_failures: list[tuple[int, Exception]] = []
     short_sha = sha[:12]
     for summary in _open_pull_requests(github, repo, base):
         if summary.get("draft") is True:
@@ -106,8 +111,19 @@ def detect_conflicts(
             f"CONFLICTED: {base} `{short_sha}` cannot be merged into this branch cleanly. "
             "Rebase the branch before review or fix-round work continues."
         )
-        github.post(f"/repos/{repo}/issues/{number}/comments", {"body": message})
         conflicted.append(number)
+        try:
+            github.post(f"/repos/{repo}/issues/{number}/comments", {"body": message})
+        except Exception as exc:
+            notification_failures.append((number, exc))
+
+    if notification_failures:
+        details = "; ".join(
+            f"pull #{number}: {type(exc).__name__}: {exc}" for number, exc in notification_failures
+        )
+        raise RuntimeError(
+            f"Failed to notify {len(notification_failures)} conflicted pull request(s): {details}"
+        )
     return conflicted
 
 

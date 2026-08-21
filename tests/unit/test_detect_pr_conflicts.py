@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 def _load_module() -> Any:
     path = Path(__file__).parents[2] / "scripts" / "detect_pr_conflicts.py"
@@ -46,7 +48,7 @@ def test_flags_remaining_pr_after_competing_pr_merges() -> None:
     ]
 
 
-def test_clean_unknown_and_draft_prs_are_not_flagged() -> None:
+def test_persistently_unknown_mergeability_is_an_error() -> None:
     detector = _load_module()
     posted: list[str] = []
 
@@ -73,10 +75,41 @@ def test_clean_unknown_and_draft_prs_are_not_flagged() -> None:
             posted.append(path)
             return {}
 
-    assert (
+    with pytest.raises(RuntimeError, match="could not determine mergeability for pull #4"):
         detector.detect_conflicts(
             GitHub(), "eumemic/aios", "master", "def456", sleep=lambda _seconds: None
         )
-        == []
-    )
     assert posted == []
+
+
+def test_notification_failures_do_not_block_other_conflicted_prs() -> None:
+    detector = _load_module()
+    attempted: list[int] = []
+
+    class GitHub:
+        def get(self, path: str) -> Any:
+            if "pulls?" in path:
+                return (
+                    [{"number": 1, "draft": False}, {"number": 2, "draft": False}]
+                    if "page=1" in path
+                    else []
+                )
+            number = int(path.rsplit("/", 1)[-1])
+            return {
+                "number": number,
+                "draft": False,
+                "mergeable": False,
+                "mergeable_state": "dirty",
+            }
+
+        def post(self, path: str, body: dict[str, str]) -> Any:
+            number = int(path.split("/issues/", 1)[1].split("/", 1)[0])
+            attempted.append(number)
+            raise RuntimeError(f"injected failure {number}")
+
+    with pytest.raises(RuntimeError) as caught:
+        detector.detect_conflicts(GitHub(), "eumemic/aios", "master", "abc123")
+
+    assert attempted == [1, 2]
+    assert "pull #1: RuntimeError: injected failure 1" in str(caught.value)
+    assert "pull #2: RuntimeError: injected failure 2" in str(caught.value)
