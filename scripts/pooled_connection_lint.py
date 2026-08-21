@@ -20,10 +20,11 @@ class Violation:
     filename: str
     line: int
     column: int
+    code: str
     message: str
 
     def __str__(self) -> str:
-        return f"{self.filename}:{self.line}:{self.column}: PCA001 {self.message}"
+        return f"{self.filename}:{self.line}:{self.column}: {self.code} {self.message}"
 
 
 def _expression_name(node: ast.AST) -> str | None:
@@ -494,15 +495,38 @@ class _Checker(ast.NodeVisitor):
         held = set().union(*self.held) if self.held else set()
         if held and not self._is_db_await(node.value, held) and not self._has_linked_pragma(node):
             connection = sorted(held)[0]
+            symbol = self._unrecognised_surface(node.value, held)
+            if symbol is not None:
+                code = "PCA002"
+                message = (
+                    f"'{symbol}' is not a recognised DB surface — add it to the allowlist "
+                    "if it is one, or move the await outside the connection scope if it is not"
+                )
+            else:
+                code = "PCA001"
+                message = f"pooled connection '{connection}' held across non-DB await"
             self.violations.append(
                 Violation(
                     self.filename,
                     node.lineno,
                     node.col_offset + 1,
-                    f"pooled connection '{connection}' held across non-DB await",
+                    code,
+                    message,
                 )
             )
         self.generic_visit(node)
+
+    @staticmethod
+    def _unrecognised_surface(expression: ast.AST, held: set[str]) -> str | None:
+        if not isinstance(expression, ast.Call):
+            return None
+        symbol = _expression_name(expression.func)
+        if symbol is None or symbol in _DB_HELPER_SYMBOLS:
+            return None
+        values = [*expression.args, *(keyword.value for keyword in expression.keywords)]
+        if sum(_expression_name(value) in held for value in values) != 1:
+            return None
+        return symbol
 
     def _is_db_await(self, expression: ast.AST, held: set[str]) -> bool:
         if not isinstance(expression, ast.Call):
