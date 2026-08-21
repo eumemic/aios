@@ -541,9 +541,10 @@ async def update_memory_with_version(
         async with conn.transaction():
             cur = await conn.fetchrow(
                 "SELECT * FROM memories WHERE memory_store_id = $1 AND id = $2 "
-                "AND deleted_at IS NULL FOR UPDATE",
+                "AND deleted_at IS NULL AND account_id = $3 FOR UPDATE",
                 store_id,
                 memory_id,
+                account_id,
             )
             if cur is None:
                 raise NotFoundError(
@@ -599,7 +600,7 @@ async def update_memory_with_version(
                 "UPDATE memories SET content = $1, content_sha256 = $2, "
                 "content_size_bytes = $3, path = $4, current_version_id = $5, "
                 "updated_at = now() "
-                "WHERE memory_store_id = $6 AND id = $7 RETURNING *",
+                "WHERE memory_store_id = $6 AND id = $7 AND account_id = $8 RETURNING *",
                 next_content,
                 next_sha,
                 next_size,
@@ -607,6 +608,7 @@ async def update_memory_with_version(
                 version_id,
                 store_id,
                 memory_id,
+                account_id,
             )
     except asyncpg.UniqueViolationError as exc:
         assert next_path_for_conflict is not None
@@ -642,9 +644,10 @@ async def delete_memory_with_version(
     async with conn.transaction():
         cur = await conn.fetchrow(
             "SELECT path FROM memories WHERE memory_store_id = $1 AND id = $2 "
-            "AND deleted_at IS NULL FOR UPDATE",
+            "AND deleted_at IS NULL AND account_id = $3 FOR UPDATE",
             store_id,
             memory_id,
+            account_id,
         )
         if cur is None:
             raise NotFoundError(
@@ -673,9 +676,10 @@ async def delete_memory_with_version(
 
         await conn.execute(
             "UPDATE memories SET deleted_at = now(), updated_at = now() "
-            "WHERE memory_store_id = $1 AND id = $2",
+            "WHERE memory_store_id = $1 AND id = $2 AND account_id = $3",
             store_id,
             memory_id,
+            account_id,
         )
 
 
@@ -785,11 +789,12 @@ async def redact_memory_version(
             "UPDATE memory_versions SET path = NULL, content = NULL, "
             "content_sha256 = NULL, content_size_bytes = NULL, "
             "redacted_at = now(), redacted_by_type = $1, redacted_by_ref = $2 "
-            "WHERE memory_store_id = $3 AND id = $4 RETURNING *",
+            "WHERE memory_store_id = $3 AND id = $4 AND account_id = $5 RETURNING *",
             actor_type,
             actor_ref,
             store_id,
             version_id,
+            account_id,
         )
     assert row is not None
     return _row_to_memory_version(row, include_content=False)
