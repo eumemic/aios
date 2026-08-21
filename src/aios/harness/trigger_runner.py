@@ -608,7 +608,10 @@ async def _run_sandbox_command(
         )
         status = "error"
         error_summary = f"sandbox error: {type(e).__name__}: {e!s:.200}"
-    woke_owner = tool_broker.finish_trigger_observation(observation_token)
+    finally:
+        # Cancellation and other BaseException paths must not leave the
+        # per-fire observation token registered in the broker.
+        woke_owner = tool_broker.finish_trigger_observation(observation_token)
     return status, error_summary, None, woke_owner
 
 
