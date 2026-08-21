@@ -399,7 +399,7 @@ async def test_reconcile_clears_host_pointer_when_canonical_image_is_absent(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_skips_snapshot_evicted_this_tick(
+async def test_observational_pressure_allows_pointer_reconciliation(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An observational pressure pass retains the canonical image and allows
@@ -423,11 +423,6 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
     set_pointer = AsyncMock()
     monkeypatch.setattr("aios.sandbox.registry.queries.unscoped_set_session_snapshot", set_pointer)
 
-    # Pointer reconciliation legitimately heals the NULL pointer.
-    await registry._gc_reconcile_pointers([verdict], states, instance_id, already_evicted=set())
-    set_pointer.assert_awaited_once()
-    set_pointer.reset_mock()
-
     # Pass 3 reports disk pressure (2 MB snapshot vs 1 MB pool budget) without removal.
     pressure = await registry._gc_pool_budget_pass([verdict], states, 1_000_000, instance_id)
     assert pressure.pressured
@@ -436,7 +431,7 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
 
     # Pressure reports capacity state without deleting or suppressing reconciliation.
     await registry._gc_reconcile_pointers([verdict], states, instance_id)
-    assert set_pointer.await_count == 1
+    set_pointer.assert_awaited_once()
 
 
 @pytest.mark.asyncio

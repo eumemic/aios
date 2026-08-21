@@ -2858,8 +2858,6 @@ class SandboxRegistry:
         retained: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         instance_id: str,
-        *,
-        already_evicted: set[str] | None = None,
     ) -> GcPressureResult:
         """Report account pressure without deleting canonical session state."""
         from aios.harness import runtime
@@ -2951,8 +2949,6 @@ class SandboxRegistry:
         retained: list[GcImageVerdict],
         states: dict[str, SessionSnapshotState],
         instance_id: str,
-        *,
-        already_evicted: set[str] | None = None,
     ) -> None:
         """Heal a NULL/stale pointer for a retained canonical tag (§5.5 pass 4).
 
@@ -2960,11 +2956,6 @@ class SandboxRegistry:
         sessions whose ``snapshot_host`` is this host (or NULL, for the crash
         heal). Multi-host compare-and-swap is deferred — the ``snapshot_host``
         column is the seam that makes it additive.
-
-        ``already_evicted`` names sessions whose canonical image passes 3/3b
-        removed this tick. They are still in ``retained`` (the eviction passes
-        don't mutate it) with a tick-start NULL/stale pointer, so without this
-        skip the heal would write a pointer to an image that no longer exists.
         """
         # This pass enumerates Docker images and therefore has authority only
         # when Docker itself is the canonical store.  In TarballStore mode an
@@ -2972,7 +2963,6 @@ class SandboxRegistry:
         # would make an external ``docker image prune -af`` destructive.
         if not isinstance(self._store, LocalDaemonStore):
             return
-        skip = already_evicted or set()
         base_sizes: dict[str, int] = {}  # shared across the pass (sessions share a base)
         for v in retained:
             if not v.is_canonical:
@@ -2980,8 +2970,6 @@ class SandboxRegistry:
             sid = v.session_id
             if sid is None:
                 continue
-            if sid in skip:
-                continue  # evicted this tick — its image is gone; never resurrect the pointer
             st = states.get(sid)
             if st is None:
                 continue
