@@ -87,6 +87,21 @@ class TestWakeSelfHandler:
             "event_id": "evt_TEST",
         }
 
+    async def test_observation_failure_does_not_fail_delivered_wake(
+        self,
+        mock_services: dict[str, AsyncMock],
+    ) -> None:
+        mock_services["mark_workflow_wake"].side_effect = RuntimeError("telemetry unavailable")
+
+        result = await wake_self_handler("sess_TEST", {"content": "ping"})
+
+        assert result == {
+            "woken": True,
+            "session_id": "sess_TEST",
+            "event_id": "evt_TEST",
+        }
+        mock_services["tell"].assert_awaited_once()
+
     async def test_empty_content_rejected(self, mock_services: dict[str, AsyncMock]) -> None:
         with pytest.raises(WakeSelfArgumentError):
             await wake_self_handler("sess_TEST", {"content": ""})

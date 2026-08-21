@@ -1053,7 +1053,12 @@ async def record_trigger_run(
             (id, trigger_id, account_id, owner_session_id, trigger_name,
              trigger_context, status, error_summary, result_id,
              started_at, finished_at, woke_owner)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(),
+            $11 OR ($6 = 'cron' AND $9 IS NOT NULL AND EXISTS (
+                SELECT 1 FROM workflow_run_owner_wakes WHERE workflow_run_id = $9
+            ))
+        )
         """,
         trigger_run_id,
         trigger_id,
@@ -1080,6 +1085,18 @@ async def mark_trigger_run_woken_by_workflow_session(
     ``parent_run_id`` points at that run, so this durable join covers the sibling
     effector without relying on the sandbox-only observation HTTP header.
     """
+    # Record the effect against the workflow run first. This row is durable even
+    # when the child executes before the trigger runner writes trigger_runs; the
+    # audit INSERT reconciles it once create_run returns the result id.
+    await conn.execute(
+        """
+        INSERT INTO workflow_run_owner_wakes (workflow_run_id)
+        SELECT parent_run_id FROM sessions
+        WHERE id = $1 AND parent_run_id IS NOT NULL
+        ON CONFLICT (workflow_run_id) DO NOTHING
+        """,
+        session_id,
+    )
     rows = await conn.fetch(
         """
         UPDATE trigger_runs tr
