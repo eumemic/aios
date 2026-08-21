@@ -89,11 +89,22 @@ def _runtime_tool_broker() -> Iterator[None]:
     from aios.sandbox.tool_broker import ToolBroker
 
     previous = runtime.tool_broker
-    runtime.tool_broker = ToolBroker()
+    if previous is not None:
+        # A wider-scoped harness (notably shared_docker_harness) owns a live
+        # broker.  Replacing it here would disconnect every function-scoped
+        # test from the broker that the module fixture started.
+        yield
+        return
+
+    broker = ToolBroker()
+    runtime.tool_broker = broker
     try:
         yield
     finally:
-        runtime.tool_broker = previous
+        # Do not clobber a broker installed by a fixture that started after
+        # this one; only undo our own installation.
+        if runtime.tool_broker is broker:
+            runtime.tool_broker = previous
 
 
 @pytest.fixture
