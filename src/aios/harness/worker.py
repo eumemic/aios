@@ -65,6 +65,7 @@ from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.retirements.boot_gate import (
     RetirementsNotAdmissible,
+    assert_at_head,
     assert_retirements_admissible,
 )
 from aios.sandbox.backends import select_sandbox_backend
@@ -215,6 +216,7 @@ async def _await_retirements_admissible(
     logged_wait = False
     while not latch.is_set():
         try:
+            await assert_at_head(pool)
             await assert_retirements_admissible(pool)
             return
         except RetirementsNotAdmissible as exc:

@@ -118,7 +118,8 @@ def test_ready_503_when_boot_gate_not_admitted() -> None:
     """Before the boot-admission gate (#1575) flips green, ``/ready`` is 503.
 
     Even with a perfectly healthy DB, an un-admitted process (the boot gate is
-    still looping on a behind / residue-bearing DB) must report unready — that
+    still looping on a DB behind the code head / contract or carrying residue)
+    must report unready — that
     is what keeps the NEW container out of rotation while the OLD healthy one
     serves under a rolling deploy. The DB is never even queried.
     """

@@ -25,9 +25,11 @@ import structlog
 from aios.retirements import Retirement, Surface, boot_gate
 from aios.retirements.boot_gate import (
     DatabaseBehindContract,
+    DatabaseNotAtHead,
     DatabaseUnavailable,
     LiveResidueDetected,
     RetirementsNotAdmissible,
+    assert_at_head,
     assert_retirements_admissible,
 )
 
@@ -137,6 +139,24 @@ def patch_registry(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(boot_gate, "REGISTRY", registry)
 
     return _set
+
+
+async def test_assert_at_head_refuses_db_behind_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0500")
+    with pytest.raises(DatabaseNotAtHead):
+        await assert_at_head(_FakePool(_FakeConn(version="0499")))
+
+
+async def test_assert_at_head_admits_matching_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0500")
+    await assert_at_head(_FakePool(_FakeConn(version="0500")))
+
+
+async def test_assert_at_head_admits_db_ahead_of_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0500")
+    await assert_at_head(_FakePool(_FakeConn(version="0501")))
 
 
 async def test_behind_db_refuses_readiness(patch_registry: Any) -> None:
