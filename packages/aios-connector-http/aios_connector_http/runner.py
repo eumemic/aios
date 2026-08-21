@@ -100,6 +100,7 @@ from aios_sdk._generated.models.tools_schema_update_tools_item import (
 from aios_sdk._generated.types import Unset
 from ulid import ULID
 
+from .healthcheck import DEFAULT_HEARTBEAT_PATH
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
@@ -236,6 +237,12 @@ class HttpConnector:
 
     # Subclasses MUST set this — the connector type the container serves.
     connector: str = ""
+
+    # Docker HEALTHCHECK reads the file this loop maintains. The heartbeat is
+    # deliberately withheld while any active (therefore operator-intended)
+    # connection is restarting, so a live Python process cannot green-wash a
+    # dead inbound transport.
+    HEARTBEAT_INTERVAL = 5.0
 
     def __init__(
         self,
@@ -974,6 +981,12 @@ class HttpConnector:
             self._client = client
             self._answered = await self.load_answered()
             await self._publish_tools_schema()
+            heartbeat_path = Path(
+                os.environ.get("AIOS_CONNECTOR_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_PATH)
+            )
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(heartbeat_path), name="aios-connector-heartbeat"
+            )
             try:
                 async with asyncio.TaskGroup() as tg:
                     # ``setup()`` registers any container-wide long-running
@@ -986,6 +999,11 @@ class HttpConnector:
                     tg.create_task(self._management_call_loop(), name="aios-management-loop")
                     self._ready_event.set()  # all background loops scheduled
             finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+                with contextlib.suppress(FileNotFoundError):
+                    await asyncio.to_thread(heartbeat_path.unlink)
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -994,6 +1012,20 @@ class HttpConnector:
                 for event in self._connection_served.values():
                     event.clear()
                 await self.teardown()
+
+    async def _heartbeat_loop(self, path: Path) -> None:
+        """Publish connector transport health for the container probe.
+
+        An active connection in restart backoff is an unhealthy transport. A
+        connector with no active connections remains healthy: archiving is the
+        structural declaration that a retired channel is no longer expected to
+        carry traffic.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            if all(state.serve_status == "serving" for state in self._connections.values()):
+                await asyncio.to_thread(path.touch)
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:
         """Derive a ToolSpec from each ``@tool`` method and PUT the catalog.
