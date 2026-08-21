@@ -147,7 +147,7 @@ def test_watchdog_cli_fails_and_writes_unknown_for_insufficient_history(tmp_path
         check=False,
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert json.loads(output_path.read_text()) == {
         "status": "unknown",
         "completed_runs": 19,
