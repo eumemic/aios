@@ -103,10 +103,12 @@ def test_live_base_mutation_rejects_stale_parent_then_accepts_current_tip() -> N
 
 def test_rejects_parent_available_only_on_branch_not_live_base() -> None:
     base = {"0158": None}
-    branch = {"0158": None, "0160": "0158", "0161": "0160"}
+    single_migration = {"0158": None, "0160": "0158"}
+    stacked_migrations = {**single_migration, "0161": "0160"}
 
+    assert check_against_base(single_migration, base) == "0160"
     with pytest.raises(MigrationHistoryError) as exc_info:
-        check_against_base(branch, base)
+        check_against_base(stacked_migrations, base)
 
     assert str(exc_info.value) == (
         'revision 0161 declares down_revision="0160", but that parent '
