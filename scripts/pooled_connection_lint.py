@@ -393,6 +393,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "_insert_workflow_version",
         "_journal_agent_rejection",
         "_latest_cumulative_state",
+        "_lint_trigger",
         "_list_all_echoes",
         "_list_all_writable_store_ids",
         "_list_attached_resource_ids",
