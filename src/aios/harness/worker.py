@@ -47,6 +47,10 @@ from aios.db.listen import (
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, create_pool, normalize_dsn
 from aios.harness import runtime
 from aios.harness.attachment_gc import sweep_orphan_attachments
+from aios.harness.connector_liveness import (
+    DEFAULT_THRESHOLDS_SECONDS,
+    run_connector_liveness_detector,
+)
 from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inbound_grants_reaper import sweep_inbound_grants
@@ -405,6 +409,7 @@ async def worker_main() -> None:
     heartbeat_task: asyncio.Task[None] | None = None
     scheduler_task: asyncio.Task[None] | None = None
     watchdog_task: asyncio.Task[None] | None = None
+    connector_liveness_task: asyncio.Task[None] | None = None
     supervised_latch = asyncio.Event()
     supervised_failure: _SupervisedTaskFailure = {"exception": None}
     lock_conn.add_termination_listener(
@@ -733,6 +738,20 @@ async def worker_main() -> None:
             name="production_watchdogs",
         )
 
+        connector_thresholds = {
+            **DEFAULT_THRESHOLDS_SECONDS,
+            **settings.connector_liveness_thresholds_seconds,
+        }
+        connector_liveness_task = asyncio.create_task(
+            run_connector_liveness_detector(
+                pool,
+                thresholds=connector_thresholds,
+                interval_seconds=settings.connector_liveness_interval_seconds,
+                rate_limit_seconds=settings.connector_liveness_rate_limit_seconds,
+            ),
+            name="connector_liveness_detector",
+        )
+
         # Start liveness heartbeat AFTER all critical resources are up,
         # so the healthcheck can't go green until the worker is fully
         # operational. Touch once now for an immediate green signal,
@@ -806,6 +825,8 @@ async def worker_main() -> None:
             await _cancel_and_drain(scheduler_task)
         if watchdog_task is not None:
             await _cancel_and_drain(watchdog_task)
+        if connector_liveness_task is not None:
+            await _cancel_and_drain(connector_liveness_task)
         if sandbox_registry is not None:
             sandbox_registry.stop_reaper()
             sandbox_registry.stop_gc()

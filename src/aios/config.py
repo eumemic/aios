@@ -612,6 +612,16 @@ class Settings(BaseSettings):
     worker_watchdog_activity_rows: int = Field(default=100, ge=1, le=1000)
     worker_watchdog_max_specimens: int = Field(default=20, ge=1, le=1000)
     worker_watchdog_specimen_dir: Path = Field(default=Path("/tmp/aios-freeze-specimens"))
+    connector_liveness_interval_seconds: float = Field(default=60.0, gt=0)
+    connector_liveness_rate_limit_seconds: float = Field(default=3600.0, gt=0)
+    connector_liveness_thresholds_seconds: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-connector bound-session silence thresholds. Values override the "
+            "detector's explicit channel defaults; connection metadata may override "
+            "its own connector threshold with liveness_silence_threshold_seconds."
+        ),
+    )
     workspace_root_validation: Literal["enforce", "warn", "off"] = Field(
         default="warn",
         description="Live-session workspace-root startup validation mode. warn reports every "
