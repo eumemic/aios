@@ -17,7 +17,9 @@ def test_slow_ci_pytest_invocations_report_durations() -> None:
         and '"docker and perf"' not in line
     ]
 
-    assert len(slow_invocations) == 5
+    # Docker E2E has a second, last-failed-only invocation for its isolated
+    # retry; all required-path invocations must retain slow-test diagnostics.
+    assert len(slow_invocations) == 6
     assert all("--durations=25" in invocation for invocation in slow_invocations)
 
 
