@@ -170,6 +170,28 @@ async def test_refresh_skips_contended_session_lock() -> None:
     assert not _sidecar_scripts(backend)
 
 
+async def test_merge_carries_unresolved_in_scope_host_so_builder_guard_stays_defense_in_depth() -> (
+    None
+):
+    """Keep-last-good prevents the builder's incomplete-inventory guard becoming live."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    registry._handles["sess_X"] = make_handle(session_id="sess_X")
+    registry._egress_states["sess_X"] = _state(
+        credential_hosts=frozenset({"unresolved.example"}),
+        pinned={"unresolved.example": {"9.9.9.9": 0}},
+    )
+
+    await registry._merge_egress_resolutions("sess_X", {"unresolved.example": set()})
+
+    assert registry._egress_states["sess_X"].pinned == {"unresolved.example": {"9.9.9.9": 0}}, (
+        "merge must keep unresolved hosts in its inventory or the builder guard becomes load-bearing"
+    )
+    assert not _sidecar_scripts(backend), (
+        "merge made the builder guard load-bearing instead of carrying last-good pins"
+    )
+
+
 async def test_successful_resolves_union_then_evict_after_three_omissions() -> None:
     backend = FakeBackend()
     registry = SandboxRegistry(backend)
