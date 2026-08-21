@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
-from scripts.ci_queue_watchdog import InsufficientHistory, evaluate_runs
+from scripts.ci_queue_watchdog import Breach, InsufficientHistory, evaluate_runs
 
 _ROOT = Path(__file__).parents[2]
 
@@ -49,7 +49,10 @@ def test_watchdog_flags_oldest_nonterminal_master_run_past_twice_p95() -> None:
 
     verdict = evaluate_runs([pending, *completed], now=now)
 
-    assert verdict is not None
+    # Narrow to Breach: the union's other arm (InsufficientHistory) carries none of
+    # these fields, so asserting the TYPE is both what mypy needs and a stronger
+    # assertion than `is not None` -- it pins that a wedged queue yields a Breach.
+    assert isinstance(verdict, Breach)
     assert verdict.run_id == 99
     assert verdict.age_seconds == 41 * 60
     assert verdict.p95_seconds == 20 * 60
