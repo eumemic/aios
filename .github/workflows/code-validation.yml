@@ -474,34 +474,14 @@ jobs:
           }
 
       - name: E2E tests (non-docker shard)
-        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
-        # runners.  Default ``load`` dist (not ``loadfile``): the
-        # non-docker set has no module-scoped fixtures — the only one in
-        # tests/e2e lives in docker-marked test_memory_cross_session_sync.
-        # Each worker spins its own session-scoped testcontainer Postgres,
-        # so there is no cross-worker DB state at all.  Measured locally:
-        # 141 s serial → 44 s at ``-n 4``. Retry pytest's recorded failures
-        # once to tolerate a transient testcontainer startup failure while
-        # preserving a second failure as a blocking signal.
+        # These tests are "non-docker" only in the sandbox-image sense: most
+        # still provision a Postgres testcontainer. Running four independent
+        # container stacks concurrently repeatedly exhausted hosted-runner
+        # resources, and retrying only ``--lf`` cannot reliably reconstruct
+        # failed fixture setup. Run serially so each stack is torn down before
+        # the next starts.
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
-        run: |
-          if ! uv run pytest tests/e2e -q -m "not docker" -n 4 --durations=25; then
-            echo "::warning::FLAKE_RETRY e2e-non-docker"
-            echo "FLAKE_RETRY e2e-non-docker" >> "$GITHUB_STEP_SUMMARY"
-            echo "FLAKE_RETRY e2e-non-docker" >> flake-retry-e2e-non-docker.txt
-            # Retry the recorded failures serially. A second xdist run can
-            # reproduce transient testcontainer/runner resource contention
-            # instead of determining whether the test itself is stable.
-            uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25 --lf
-          fi
-
-      - name: Upload non-docker E2E flake-retry marker
-        if: always() && needs.detect.outputs.run_checks == 'true' && matrix.shard == 'non-docker'
-        uses: actions/upload-artifact@v4
-        with:
-          name: flake-retry-e2e-non-docker
-          path: flake-retry-e2e-non-docker.txt
-          if-no-files-found: ignore
+        run: uv run pytest tests/e2e -q -m "not docker" -n 0 --durations=25
 
       - name: E2E tests (docker shard)
         # ``-n 2 --dist=loadfile`` bounds Docker-backed concurrency to two
