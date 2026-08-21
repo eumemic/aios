@@ -39,15 +39,52 @@ def guard_external_host(host: Any) -> None:
 class GuardedSocket(socket.socket):
     """Socket that permits local test servers but rejects external peers."""
 
-    def connect(self, address: Any) -> None:
+    def _guard_address(self, address: Any) -> None:
         if self.family != socket.AF_UNIX:
             guard_external_host(address[0])
+
+    def connect(self, address: Any) -> None:
+        self._guard_address(address)
         super().connect(address)
 
     def connect_ex(self, address: Any) -> int:
-        if self.family != socket.AF_UNIX:
-            guard_external_host(address[0])
+        self._guard_address(address)
         return super().connect_ex(address)
+
+    def _guard_peer(self) -> None:
+        if self.family != socket.AF_UNIX:
+            self._guard_address(self.getpeername())
+
+    def send(self, data: Any, flags: int = 0) -> int:
+        self._guard_peer()
+        return super().send(data, flags)
+
+    def sendall(self, data: Any, flags: int = 0) -> None:
+        self._guard_peer()
+        super().sendall(data, flags)
+
+    def sendfile(self, file: Any, offset: int = 0, count: int | None = None) -> int:
+        self._guard_peer()
+        return super().sendfile(file, offset, count)
+
+    def sendto(self, data: Any, *args: Any) -> int:
+        """Guard the destination in both sendto(data, address) call forms."""
+        self._guard_address(args[-1])
+        return super().sendto(data, *args)
+
+    def sendmsg(
+        self,
+        buffers: Any,
+        ancdata: Any = (),
+        flags: int = 0,
+        address: Any = None,
+    ) -> int:
+        """Guard a connectionless sendmsg destination when one is supplied."""
+        if address is not None:
+            self._guard_address(address)
+            return super().sendmsg(buffers, ancdata, flags, address)
+        self._guard_peer()
+        return super().sendmsg(buffers, ancdata, flags)
 
 
 def install_socket_guard(monkeypatch: Any) -> None:
