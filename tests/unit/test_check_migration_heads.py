@@ -102,7 +102,7 @@ def test_live_base_mutation_rejects_stale_parent_then_accepts_current_tip() -> N
 
 
 def test_rejects_parent_available_only_on_branch_not_live_base() -> None:
-    base = {"0158": None}
+    base: dict[str, str | None] = {"0158": None}
     single_migration = {"0158": None, "0160": "0158"}
     stacked_migrations = {**single_migration, "0161": "0160"}
 
