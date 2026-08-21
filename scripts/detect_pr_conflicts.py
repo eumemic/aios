@@ -130,9 +130,7 @@ def detect_conflicts(
             f"{type(exc).__name__}: {exc} ({stage})"
             for number, stage, exc in per_pull_failures
         )
-        raise RuntimeError(
-            f"Failed to process {len(per_pull_failures)} pull request(s): {details}"
-        )
+        raise RuntimeError(f"Failed to process {len(per_pull_failures)} pull request(s): {details}")
     return conflicted
 
 
