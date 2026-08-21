@@ -5364,12 +5364,21 @@ async def test_bash_class_other_tool_not_callable(
     # Declare read so the gate's FIRST clause (not-in-RUN_TOOLS) is what rejects it —
     # not the declared-tools clause — pinning the not-callable string.
     run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="read")], name="wt-bash-i")
-    await run_workflow_step(run_id)  # park at the read frontier (routes to the sandbox executor)
-    await _drain_sandbox_tasks()  # task: gate_run_tool → not-callable {"error": …}
-    await run_workflow_step(run_id)  # harvest the error value → complete
+    await run_workflow_step(run_id)
     run = await _get_run(pool, run_id)
-    assert run is not None and run.status == "completed"  # recoverable, NOT errored
-    assert run.output == {"error": "tool 'read' is not callable from a workflow run"}
+    assert run is not None and run.status == "errored"
+    assert run.output == "tool 'read' is not callable from a workflow run"
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    refusal = next(e for e in events if e.type == "call_result")
+    assert refusal.payload == {
+        "result": None,
+        "is_error": True,
+        "error": {
+            "kind": "tool_not_callable",
+            "message": "tool 'read' is not callable from a workflow run",
+        },
+    }
     assert _backend_create_count(backend) == 0  # never provisioned
     assert _backend_exec_count(backend) == 0
 
