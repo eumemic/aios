@@ -12,6 +12,11 @@ def test_external_host_is_rejected_before_dns_or_connect() -> None:
         guard_external_host("api.vendor.example")
 
 
+def test_external_dns_lookup_is_rejected() -> None:
+    with pytest.raises(ExternalEgressBlocked, match=r"api\.vendor\.example"):
+        socket.getaddrinfo("api.vendor.example", 443)
+
+
 def test_loopback_hosts_remain_available_to_local_server_tests() -> None:
     for host in ("localhost", "127.0.0.1", "::1"):
         guard_external_host(host)
@@ -42,3 +47,13 @@ def test_connectionless_external_send_is_rejected_before_os_call(
 def test_connectionless_loopback_send_remains_available() -> None:
     with GuardedSocket(socket.AF_INET, socket.SOCK_DGRAM) as guarded_socket:
         assert guarded_socket.sendto(b"", ("127.0.0.1", 9)) == 0
+
+
+def test_unix_socket_operations_remain_available() -> None:
+    left, right = socket.socketpair()
+    try:
+        left.sendall(b"local")
+        assert right.recv(5) == b"local"
+    finally:
+        left.close()
+        right.close()
