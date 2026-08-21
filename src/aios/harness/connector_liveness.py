@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import aiodocker
 
@@ -164,13 +164,17 @@ class DockerConnectorHealthReader:
         return result
 
 
+class TransportHealthReader(Protocol):
+    async def read(self) -> dict[str, TransportHealth]: ...
+
+
 class ConnectorLivenessDetector:
     def __init__(
         self,
         pool: Any,
         *,
         thresholds: Mapping[str, float],
-        health_reader: DockerConnectorHealthReader,
+        health_reader: TransportHealthReader,
         alarm: Callable[[str, dict[str, Any]], None],
         rate_limit_seconds: float,
     ) -> None:
