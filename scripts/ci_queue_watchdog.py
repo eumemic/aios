@@ -86,9 +86,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     payload = json.loads(args.runs.read_text())
-    breach = evaluate_runs(payload["workflow_runs"])
-    args.output.write_text(json.dumps(asdict(breach) if breach else None))
-    return int(breach is not None)
+    verdict = evaluate_runs(payload["workflow_runs"])
+    args.output.write_text(json.dumps(asdict(verdict) if verdict else None))
+    if isinstance(verdict, InsufficientHistory):
+        return 2
+    return int(isinstance(verdict, Breach))
 
 
 if __name__ == "__main__":
