@@ -1,0 +1,120 @@
+name: Stale Branch Deletions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # A base-only change can turn an unchanged PR into a stale deletion. Recheck
+  # every open PR and publish a new check against its head in that case.
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+concurrency:
+  group: stale-branch-deletions-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compare the current base and PR head trees
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The PR-files API compares from the merge base and therefore omits
+          # files added to the base after a stale head diverged. Always compare
+          # the two current trees, on every kind of PR evaluation.
+          git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
+            || git fetch --no-tags origin "$HEAD_SHA"
+          git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
+          python scripts/pr_files_from_trees.py "$BASE_SHA" "$HEAD_SHA" \
+            > "$RUNNER_TEMP/pr-files.json"
+          python scripts/check_pr_deletions.py \
+            "$RUNNER_TEMP/pr-files.json" "$RUNNER_TEMP/base-paths.txt"
+
+  recheck-open-prs:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Re-evaluate open PR heads against the new base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.ref_name }}
+          BASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git ls-tree -r --name-only "$BASE_SHA" > "$RUNNER_TEMP/base-paths.txt"
+          gh api --paginate --slurp \
+            "repos/${GH_REPO}/pulls?state=open&base=${BASE_REF}&per_page=100" \
+            | jq 'add' > "$RUNNER_TEMP/open-prs.json"
+
+          aggregate_rc=0
+          while read -r pr; do
+            number=$(jq -r '.number' <<<"$pr")
+            head_sha=$(jq -r '.head.sha' <<<"$pr")
+            title=$(jq -r '.title' <<<"$pr")
+            body=$(jq -r '.body // ""' <<<"$pr")
+
+            # GitHub's PR-files endpoint is merge-base-relative, so it omits a
+            # file added only to the base after this PR diverged. Compare the
+            # exact current head from the API with the current base tree. Run
+            # the whole evaluation in a non-errexit subshell so its diagnostics
+            # become the terminal check output even if fetch/comparison fails.
+            set +e
+            output=$(
+              set -euo pipefail
+              git cat-file -e "${head_sha}^{commit}" 2>/dev/null \
+                || git fetch --no-tags origin "$head_sha"
+              python scripts/pr_files_from_trees.py "$BASE_SHA" "$head_sha" \
+                > "$RUNNER_TEMP/pr-${number}-files.json"
+              PR_TITLE="$title" PR_BODY="$body" \
+                python scripts/check_pr_deletions.py \
+                  "$RUNNER_TEMP/pr-${number}-files.json" \
+                  "$RUNNER_TEMP/base-paths.txt"
+            2>&1)
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              conclusion=success
+            else
+              conclusion=failure
+              aggregate_rc=1
+            fi
+
+            # Publish the result already completed. This avoids an in-progress
+            # check being stranded if evaluation or a later API call fails.
+            set +e
+            jq -n --arg name detect --arg head_sha "$head_sha" \
+              --arg conclusion "$conclusion" --arg output "$output" '{
+              name: $name,
+              head_sha: $head_sha,
+              status: "completed",
+              conclusion: $conclusion,
+              output: {title: "Stale branch deletion guard", summary: $output}
+            }' | gh api --method POST "repos/${GH_REPO}/check-runs" \
+              --input - >/dev/null
+            publish_rc=$?
+            set -e
+            if [ "$publish_rc" -ne 0 ]; then
+              echo "Could not publish detect result for PR ${number} (${head_sha})" >&2
+              aggregate_rc=1
+            fi
+          done < <(jq -c '.[]' "$RUNNER_TEMP/open-prs.json")
+
+          exit "$aggregate_rc"
