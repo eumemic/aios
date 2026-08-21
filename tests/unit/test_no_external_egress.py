@@ -32,9 +32,11 @@ def test_ip_address_objects_are_classified_without_live_dns() -> None:
 def test_connectionless_external_send_is_rejected_before_os_call(
     operation: str, args: tuple[object, ...]
 ) -> None:
-    with GuardedSocket(socket.AF_INET, socket.SOCK_DGRAM) as guarded_socket:
-        with pytest.raises(ExternalEgressBlocked):
-            getattr(guarded_socket, operation)(*args)
+    with (
+        GuardedSocket(socket.AF_INET, socket.SOCK_DGRAM) as guarded_socket,
+        pytest.raises(ExternalEgressBlocked),
+    ):
+        getattr(guarded_socket, operation)(*args)
 
 
 def test_connectionless_loopback_send_remains_available() -> None:
