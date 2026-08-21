@@ -293,6 +293,10 @@ class HttpConnector:
         # Durable (cross-restart) cursor persistence is the #1906
         # consumer's job; container restarts simply re-run ``fresh``.
         self._discovery_cursor: int | None = None
+        # Set only when this process creates the heartbeat inode. Cleanup must
+        # never remove an operator-selected file that predated startup.
+        self._heartbeat_owned = False
+        self._heartbeat_identity: tuple[int, int] | None = None
 
     # ── serve-restart tunables (overridable on subclasses) ────────────
 
@@ -1000,8 +1004,13 @@ class HttpConnector:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
-                with contextlib.suppress(FileNotFoundError):
-                    await asyncio.to_thread(heartbeat_path.unlink)
+                if self._heartbeat_owned and self._heartbeat_identity is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        stat = await asyncio.to_thread(heartbeat_path.stat)
+                        if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
+                            await asyncio.to_thread(heartbeat_path.unlink)
+                    self._heartbeat_owned = False
+                    self._heartbeat_identity = None
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -1021,8 +1030,31 @@ class HttpConnector:
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         while True:
-            if all(state.serve_status == "serving" for state in self._connections.values()):
-                await asyncio.to_thread(path.touch)
+            # Empty is healthy only after discovery's authoritative fresh
+            # snapshot completed. Before that, absence means unknown.
+            if self._discovery_cursor is not None and all(
+                state.serve_status == "serving" for state in self._connections.values()
+            ):
+                exists = await asyncio.to_thread(path.exists)
+                if not exists:
+                    try:
+                        await asyncio.to_thread(path.touch, exist_ok=False)
+                    except FileExistsError:
+                        # An operator raced creation; never claim their inode.
+                        pass
+                    else:
+                        stat = await asyncio.to_thread(path.stat)
+                        self._heartbeat_owned = True
+                        self._heartbeat_identity = (stat.st_dev, stat.st_ino)
+                elif self._heartbeat_owned and self._heartbeat_identity is not None:
+                    stat = await asyncio.to_thread(path.stat)
+                    if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
+                        await asyncio.to_thread(path.touch)
+                    else:
+                        # The path was replaced after our claim. Relinquish it;
+                        # never mutate or later unlink the replacement.
+                        self._heartbeat_owned = False
+                        self._heartbeat_identity = None
             await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:

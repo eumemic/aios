@@ -39,10 +39,49 @@ def test_heartbeat_path_is_writable_outside_container(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_withheld_until_discovery_is_authoritative(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    connector.HEARTBEAT_INTERVAL = 0.01
+
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await asyncio.sleep(0.03)
+        assert not heartbeat.exists()
+        connector._discovery_cursor = 0
+        await asyncio.sleep(0.03)
+        assert heartbeat.exists()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_does_not_claim_or_remove_preexisting_file(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "operator-owned"
+    heartbeat.write_text("keep")
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.01
+
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await asyncio.sleep(0.03)
+        assert heartbeat.read_text() == "keep"
+        assert not connector._heartbeat_owned
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_stops_while_a_connection_is_restarting(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
     connector.HEARTBEAT_INTERVAL = 0.01
+    connector._discovery_cursor = 0  # authoritative empty snapshot completed
     connector._connections["conn_1"] = _ConnectionState("conn_1", "account")
 
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
