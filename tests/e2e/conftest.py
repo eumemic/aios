@@ -61,7 +61,7 @@ import contextlib
 import inspect
 import socket
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -74,6 +74,26 @@ from tests.helpers.connections import authed_client, wait_for_health, wired_app
 
 if TYPE_CHECKING:
     from aios.sandbox.backends.docker import DockerBackend
+
+
+@pytest.fixture(autouse=True)
+def _runtime_tool_broker() -> Iterator[None]:
+    """Mirror worker startup for trigger fires exercised by the E2E harness.
+
+    Sandbox trigger execution registers wake observations with the process-wide
+    broker.  E2E tests install the pool and sandbox registry directly rather
+    than starting ``worker_main``, so install the remaining runtime dependency
+    here and restore any broker supplied by an individual test afterward.
+    """
+    from aios.harness import runtime
+    from aios.sandbox.tool_broker import ToolBroker
+
+    previous = runtime.tool_broker
+    runtime.tool_broker = ToolBroker()
+    try:
+        yield
+    finally:
+        runtime.tool_broker = previous
 
 
 @pytest.fixture
