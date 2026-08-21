@@ -6,9 +6,7 @@ from tests.helpers.sandbox import FakeBackend, make_handle
 
 
 def _result(stdout: str = "") -> CommandResult:
-    return CommandResult(
-        exit_code=0, stdout=stdout, stderr="", timed_out=False, truncated=False
-    )
+    return CommandResult(exit_code=0, stdout=stdout, stderr="", timed_out=False, truncated=False)
 
 
 async def test_live_stamp_and_refresh_preserve_unresolved_host_last_good() -> None:
