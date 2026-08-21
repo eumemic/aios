@@ -4,14 +4,30 @@ import asyncio
 import os
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from aios_connector_http.healthcheck import heartbeat_is_fresh
+from aios_connector_http.healthcheck import (
+    DEFAULT_HEARTBEAT_PATH,
+    heartbeat_is_fresh,
+    resolve_heartbeat_path,
+)
 from aios_connector_http.runner import HttpConnector, _ConnectionState
 
 
 class _Connector(HttpConnector):
     connector = "probe"
+
+
+def test_heartbeat_path_is_writable_outside_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AIOS_CONNECTOR_HEARTBEAT_PATH", raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    with patch("pathlib.Path.exists", return_value=False):
+        path = resolve_heartbeat_path()
+    assert path == tmp_path / DEFAULT_HEARTBEAT_PATH.name
+    path.touch()
 
 
 @pytest.mark.asyncio

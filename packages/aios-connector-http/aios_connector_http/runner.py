@@ -100,7 +100,7 @@ from aios_sdk._generated.models.tools_schema_update_tools_item import (
 from aios_sdk._generated.types import Unset
 from ulid import ULID
 
-from .healthcheck import DEFAULT_HEARTBEAT_PATH
+from .healthcheck import resolve_heartbeat_path
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
@@ -984,9 +984,7 @@ class HttpConnector:
             self._client = client
             self._answered = await self.load_answered()
             await self._publish_tools_schema()
-            heartbeat_path = Path(
-                os.environ.get("AIOS_CONNECTOR_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_PATH)
-            )
+            heartbeat_path = resolve_heartbeat_path()
             heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(heartbeat_path), name="aios-connector-heartbeat"
             )
