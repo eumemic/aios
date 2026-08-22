@@ -48,4 +48,8 @@ async def test_cron_audit_reconciles_an_early_workflow_wake() -> None:
 
     insert_sql = conn.execute.await_args.args[0]
     assert "SELECT 1 FROM workflow_run_owner_wakes" in insert_sql
-    assert "workflow_run_id = $9" in insert_sql
+    # ``result_id`` is inserted into an unconstrained text column and otherwise
+    # compared only with NULL when this branch short-circuits. Keep an explicit
+    # type anchor so asyncpg/Postgres can prepare non-workflow timer fires too.
+    assert "$9::text IS NOT NULL" in insert_sql
+    assert "workflow_run_id = $9::text" in insert_sql
