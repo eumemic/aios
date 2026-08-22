@@ -396,6 +396,13 @@ async def _do_http_request(
         k: v for k, v in caller_headers.items() if k.lower() not in _RESERVED_HEADERS
     }
     request_headers.update(auth_headers)
+    # ``body`` is a JSON string by the tool contract.  httpx's ``content=``
+    # correctly encodes it to bytes, but intentionally does not infer a media
+    # type; without this header FastAPI treats those bytes as an opaque scalar
+    # instead of running its JSON decoder.  Preserve an explicit caller media
+    # type for the rare non-JSON endpoint.
+    if body is not None and not any(k.lower() == "content-type" for k in request_headers):
+        request_headers["Content-Type"] = "application/json"
 
     try:
         # PinnedTransport resolves-validates-pins the connect IP per request (every
