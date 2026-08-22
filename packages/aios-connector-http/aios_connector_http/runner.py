@@ -57,6 +57,7 @@ import inspect
 import json
 import os
 import signal as _signal
+import time
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -100,6 +101,7 @@ from aios_sdk._generated.models.tools_schema_update_tools_item import (
 from aios_sdk._generated.types import Unset
 from ulid import ULID
 
+from .healthcheck import heartbeat_max_age_seconds, resolve_heartbeat_path
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
@@ -237,6 +239,12 @@ class HttpConnector:
     # Subclasses MUST set this — the connector type the container serves.
     connector: str = ""
 
+    # Docker HEALTHCHECK reads the file this loop maintains. The heartbeat is
+    # deliberately withheld while any active (therefore operator-intended)
+    # connection is restarting, so a live Python process cannot green-wash a
+    # dead inbound transport.
+    HEARTBEAT_INTERVAL = 5.0
+
     def __init__(
         self,
         *,
@@ -286,6 +294,10 @@ class HttpConnector:
         # Durable (cross-restart) cursor persistence is the #1906
         # consumer's job; container restarts simply re-run ``fresh``.
         self._discovery_cursor: int | None = None
+        # Set only when this process creates the heartbeat inode. Cleanup must
+        # never remove an operator-selected file that predated startup.
+        self._heartbeat_owned = False
+        self._heartbeat_identity: tuple[int, int] | None = None
 
     # ── serve-restart tunables (overridable on subclasses) ────────────
 
@@ -974,6 +986,10 @@ class HttpConnector:
             self._client = client
             self._answered = await self.load_answered()
             await self._publish_tools_schema()
+            heartbeat_path = resolve_heartbeat_path()
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(heartbeat_path), name="aios-connector-heartbeat"
+            )
             try:
                 async with asyncio.TaskGroup() as tg:
                     # ``setup()`` registers any container-wide long-running
@@ -986,6 +1002,15 @@ class HttpConnector:
                     tg.create_task(self._management_call_loop(), name="aios-management-loop")
                     self._ready_event.set()  # all background loops scheduled
             finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+                # There is no atomic POSIX operation to unlink a pathname only
+                # if it still names a known inode.  Leaving our heartbeat to go
+                # stale avoids deleting an operator replacement in a final
+                # stat-to-unlink race.
+                self._heartbeat_owned = False
+                self._heartbeat_identity = None
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -994,6 +1019,102 @@ class HttpConnector:
                 for event in self._connection_served.values():
                     event.clear()
                 await self.teardown()
+
+    @staticmethod
+    def _claim_heartbeat(path: Path) -> tuple[int, int] | None:
+        """Create a heartbeat, or recover one old enough to be crash debris.
+
+        Fresh pre-existing paths are left alone.  File-descriptor based updates
+        ensure a pathname replacement race cannot make us touch the replacement.
+        """
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        created = False
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
+            created = True
+        except FileExistsError:
+            fd = os.open(path, flags)
+        try:
+            stat = os.fstat(fd)
+            if not created and time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+                return None
+            identity = (stat.st_dev, stat.st_ino)
+            if created:
+                # The pathname can be replaced after O_EXCL succeeds.  Establish
+                # ownership from the descriptor, then ensure the path still
+                # names that inode before publishing the claim.
+                try:
+                    path_stat = path.stat()
+                except FileNotFoundError:
+                    return None
+                if (path_stat.st_dev, path_stat.st_ino) != identity:
+                    return None
+            os.utime(fd, None)
+            return identity
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _refresh_heartbeat(path: Path, identity: tuple[int, int]) -> bool:
+        """Refresh only the inode previously claimed by this process."""
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return False
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity:
+                return False
+            os.utime(fd, None)
+            return True
+        finally:
+            os.close(fd)
+
+    async def _remove_owned_heartbeat(self, path: Path) -> None:
+        """Remove our heartbeat without unlinking a pathname replacement."""
+        if self._heartbeat_owned and self._heartbeat_identity is not None:
+            with contextlib.suppress(FileNotFoundError):
+                stat = await asyncio.to_thread(path.stat)
+                if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
+                    await asyncio.to_thread(path.unlink)
+        self._heartbeat_owned = False
+        self._heartbeat_identity = None
+
+    async def _heartbeat_loop(self, path: Path) -> None:
+        """Publish connector transport health for the container probe.
+
+        An active connection in restart backoff is an unhealthy transport. A
+        connector with no active connections remains healthy: archiving is the
+        structural declaration that a retired channel is no longer expected to
+        carry traffic.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            # Empty is healthy only after discovery's authoritative fresh
+            # snapshot completed. Before that, absence means unknown.
+            if self._discovery_cursor is not None and all(
+                state.serve_status == "serving" for state in self._connections.values()
+            ):
+                if self._heartbeat_owned and self._heartbeat_identity is not None:
+                    if not await asyncio.to_thread(
+                        self._refresh_heartbeat, path, self._heartbeat_identity
+                    ):
+                        # The path was replaced after our claim. Relinquish it;
+                        # never mutate or later unlink the replacement.
+                        self._heartbeat_owned = False
+                        self._heartbeat_identity = None
+                else:
+                    try:
+                        identity = await asyncio.to_thread(self._claim_heartbeat, path)
+                    except FileNotFoundError:
+                        # The path vanished between O_EXCL and opening it. Retry
+                        # on the next short heartbeat interval.
+                        identity = None
+                    if identity is not None:
+                        self._heartbeat_owned = True
+                        self._heartbeat_identity = identity
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:
         """Derive a ToolSpec from each ``@tool`` method and PUT the catalog.
