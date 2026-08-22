@@ -40,8 +40,7 @@ class _PruneConnection:
             ("archived_at IS NOT NULL", run.archived_age_days is not None),
             (
                 "archived_at < now() - make_interval(days => $1)",
-                run.archived_age_days is not None
-                and run.archived_age_days > retention_days,
+                run.archived_age_days is not None and run.archived_age_days > retention_days,
             ),
             ("terminal_summary IS NOT NULL", run.has_summary),
             ("journal_pruned_at IS NULL", not run.journal_pruned),
@@ -54,9 +53,7 @@ class _PruneConnection:
 
     async def fetch(self, sql: str, retention_days: int, row_limit: int) -> list[dict[str, str]]:
         self.candidates = [
-            run_id
-            for run_id, run in self.runs.items()
-            if self._eligible(sql, run, retention_days)
+            run_id for run_id, run in self.runs.items() if self._eligible(sql, run, retention_days)
         ][:row_limit]
         if self.mutate_after_fetch:
             # Model rows becoming unsafe between candidate selection and child DELETE.
