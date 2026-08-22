@@ -62,6 +62,13 @@ async def test_archival_feeder_failure_degrades_sweep_result(
     result = await reclaimable_prune.sweep_reclaimable_ephemera(pool)
 
     assert calls == ["runs_archival", "runs", "agents", "workflows", "skills"]
+    assert result == reclaimable_prune.PruneResult(
+        runs=2,
+        agents=3,
+        workflows=5,
+        skills=7,
+        failed_families=("runs_archival",),
+    )
     assert result.total == 17
     assert result.degraded
     assert result.failed_families == ("runs_archival",)
