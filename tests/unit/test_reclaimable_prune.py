@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from aios.db import queries
 from aios.harness import reclaimable_prune
 
 
@@ -40,22 +41,20 @@ async def test_archival_feeder_failure_degrades_sweep_result(
 
         return prune
 
+    monkeypatch.setattr(queries, "reconcile_terminal_archival_batch", fail_archival)
+    monkeypatch.setattr(queries, "prune_archived_runs", successful("runs", 2))
     monkeypatch.setattr(
-        reclaimable_prune.queries, "reconcile_terminal_archival_batch", fail_archival
-    )
-    monkeypatch.setattr(reclaimable_prune.queries, "prune_archived_runs", successful("runs", 2))
-    monkeypatch.setattr(
-        reclaimable_prune.queries,
+        queries,
         "prune_unpinned_archived_agents",
         successful("agents", 3),
     )
     monkeypatch.setattr(
-        reclaimable_prune.queries,
+        queries,
         "prune_unpinned_archived_workflows",
         successful("workflows", 5),
     )
     monkeypatch.setattr(
-        reclaimable_prune.queries,
+        queries,
         "prune_unpinned_archived_skills",
         successful("skills", 7),
     )
