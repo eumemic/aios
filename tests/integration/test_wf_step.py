@@ -479,10 +479,10 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
-async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_override(
+async def test_terminal_run_remains_visible_during_archive_grace_window(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Every terminal run archives; callers have no run-lifetime flag that can prevent it."""
+    """Terminal archival is maintenance-driven; suspended runs remain ineligible."""
     assert "auto_archive_on_completion" not in inspect.signature(service.create_run).parameters
     pool = wf_runtime
     terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
@@ -495,7 +495,7 @@ async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_ove
         terminal = await wf_queries.get_wf_run(conn, terminal_id, account_id="acc_wf")
         live = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
         assert terminal is not None and terminal.status in {"completed", "errored", "cancelled"}
-        assert terminal.archived_at is not None
+        assert terminal.archived_at is None
         assert live is not None and live.status == "suspended"
         assert live.archived_at is None
 
