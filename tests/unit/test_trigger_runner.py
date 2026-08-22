@@ -8,13 +8,14 @@ import pytest
 
 from aios.harness import runtime, trigger_runner
 from aios.models.triggers import SandboxCommandAction
+from aios.sandbox.tool_broker import ToolBroker
 
 
 @pytest.mark.asyncio
 async def test_sandbox_observation_is_finished_on_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    broker = Mock()
+    broker = ToolBroker()
     registry = Mock()
     registry.get_or_provision.side_effect = asyncio.CancelledError
 
@@ -28,5 +29,4 @@ async def test_sandbox_observation_is_finished_on_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await trigger_runner._run_sandbox_command(trigger, action)  # type: ignore[arg-type]
 
-    token = broker.begin_trigger_observation.call_args.args[0]
-    broker.finish_trigger_observation.assert_called_once_with(token)
+    assert broker._trigger_observations == {}
