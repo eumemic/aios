@@ -1055,8 +1055,8 @@ async def record_trigger_run(
              started_at, finished_at, woke_owner)
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(),
-            $11 OR ($6 = 'cron' AND $9 IS NOT NULL AND EXISTS (
-                SELECT 1 FROM workflow_run_owner_wakes WHERE workflow_run_id = $9
+            $11 OR ($6 = 'cron' AND $9::text IS NOT NULL AND EXISTS (
+                SELECT 1 FROM workflow_run_owner_wakes WHERE workflow_run_id = $9::text
             ))
         )
         """,
