@@ -164,7 +164,9 @@ async def sweep_reclaimable_ephemera(pool: asyncpg.Pool[Any]) -> PruneResult:
         skills=skills,
         failed_families=tuple(failed_families),
     )
-    if result.total:
+    # Emit degraded zero-count sweeps too: otherwise an all-family failure is
+    # represented in the return value but disappears from the aggregate event.
+    if result.total or result.degraded:
         log.info(
             "reclaimable_prune.swept",
             runs=result.runs,
