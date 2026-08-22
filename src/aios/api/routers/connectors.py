@@ -43,6 +43,7 @@ from aios.api.sse import (
     preflight_subscription,
     runtime_connector_calls_stream,
 )
+from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import (
     open_listen_for_connection_discovery,
@@ -73,6 +74,7 @@ from aios.services.inbound_budget import (
     check_inbound_budget_agent,
     check_inbound_budget_session,
 )
+from aios.services.voice_transcription import transcribe_voice_attachments
 
 log = get_logger("aios.api.routers.connectors")
 
@@ -173,8 +175,10 @@ def _parse_form_json(field: str, raw: str | None, *, default: Any = None) -> Any
 
 async def _do_inbound(
     pool: Any,
+    crypto_box: CryptoBox,
     *,
     account_id: str,
+    connector: str,
     connection_id: str,
     event_id: str,
     chat_id: str,
@@ -202,6 +206,14 @@ async def _do_inbound(
         )
         for upload in (attachments or [])
     ]
+    content = await transcribe_voice_attachments(
+        pool=pool,
+        crypto_box=crypto_box,
+        account_id=account_id,
+        connector=connector,
+        content=content,
+        attachments=inbound_attachments,
+    )
     result = await inbound_service.handle_inbound(
         pool,
         connection_id=connection_id,
@@ -550,6 +562,7 @@ async def get_connection_discovery(
 )
 async def post_runtime_inbound(
     pool: PoolDep,
+    crypto_box: CryptoBoxDep,
     auth: RuntimeAuthDep,
     connection_id: Annotated[str, Form(description="The connection this inbound belongs to.")],
     event_id: Annotated[str, Form(description="Client-supplied dedup key (ULID).")],
@@ -594,7 +607,9 @@ async def post_runtime_inbound(
     _check_runtime_connection_scope(auth_connection_ids, connection_id)
     return await _do_inbound(
         pool,
+        crypto_box,
         account_id=account_id,
+        connector=connection.connector,
         connection_id=connection_id,
         event_id=event_id,
         chat_id=chat_id,
