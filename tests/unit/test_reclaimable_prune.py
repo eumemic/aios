@@ -65,3 +65,4 @@ async def test_archival_feeder_failure_degrades_sweep_result(
     assert result.total == 17
     assert result.degraded
     assert result.failed_families == ("runs_archival",)
+    assert result != reclaimable_prune.PruneResult(2, 3, 5, 7)
