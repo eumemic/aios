@@ -34,7 +34,7 @@ from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import host_dir_reaper
 from aios.harness.host_dir_reaper import _scan_run_workspaces, sweep_host_dirs
-from aios.workflows.service import run_workspace_dir
+from aios.sandbox.volumes import run_workspace_dir
 
 
 @pytest.fixture
