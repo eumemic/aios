@@ -18354,6 +18354,13 @@
               }
             ],
             "title": "Ingest Token"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
           }
         },
         "type": "object",
@@ -18372,7 +18379,7 @@
           "updated_at"
         ],
         "title": "TriggerCreated",
-        "description": "Create/update response \u2014 the trigger echo plus a one-time ``ingest_token``.\n\nSubclasses :class:`TriggerEcho` so every existing read-field caller keeps\nworking; adds ``ingest_token``, the plaintext ingest secret surfaced\nEXACTLY ONCE for ``external_event`` sources (mint at create, re-mint on a\nsource-replace TO ``external_event`` = rotation), ``None`` otherwise. The\nplaintext is never persisted and can never be re-read \u2014 losing it means\nrotating via ``update_trigger``. The full ingress URL\n(``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side and\nis deliberately not stored."
+        "description": "Create/update response \u2014 trigger echo, one-time token, and lint warnings.\n\nSubclasses :class:`TriggerEcho` so every existing read-field caller keeps\nworking; adds ``ingest_token``, the plaintext ingest secret surfaced\nEXACTLY ONCE for ``external_event`` sources (mint at create, re-mint on a\nsource-replace TO ``external_event`` = rotation), ``None`` otherwise. The\nplaintext is never persisted and can never be re-read \u2014 losing it means\nrotating via ``update_trigger``. The full ingress URL\n(``POST /v1/triggers/ingest/{ingest_token}``) is derivable client-side and\nis deliberately not stored."
       },
       "TriggerEcho": {
         "properties": {

@@ -61,7 +61,7 @@ import contextlib
 import inspect
 import socket
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -74,6 +74,37 @@ from tests.helpers.connections import authed_client, wait_for_health, wired_app
 
 if TYPE_CHECKING:
     from aios.sandbox.backends.docker import DockerBackend
+
+
+@pytest.fixture(autouse=True)
+def _runtime_tool_broker() -> Iterator[None]:
+    """Mirror worker startup for trigger fires exercised by the E2E harness.
+
+    Sandbox trigger execution registers wake observations with the process-wide
+    broker.  E2E tests install the pool and sandbox registry directly rather
+    than starting ``worker_main``, so install the remaining runtime dependency
+    here and restore any broker supplied by an individual test afterward.
+    """
+    from aios.harness import runtime
+    from aios.sandbox.tool_broker import ToolBroker
+
+    previous = runtime.tool_broker
+    if previous is not None:
+        # A wider-scoped harness (notably shared_docker_harness) owns a live
+        # broker.  Replacing it here would disconnect every function-scoped
+        # test from the broker that the module fixture started.
+        yield
+        return
+
+    broker = ToolBroker()
+    runtime.tool_broker = broker
+    try:
+        yield
+    finally:
+        # Do not clobber a broker installed by a fixture that started after
+        # this one; only undo our own installation.
+        if runtime.tool_broker is broker:
+            runtime.tool_broker = previous
 
 
 @pytest.fixture
