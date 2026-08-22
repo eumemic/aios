@@ -991,6 +991,37 @@ async def finalize_trigger_run(
     )
 
 
+async def record_workflow_trigger_failure(
+    conn: asyncpg.Connection[Any], *, run_id: str, error_summary: str
+) -> None:
+    """Turn a workflow trigger's optimistic launch success into a failure when its
+    asynchronously launched run errors. ``result_id`` is the durable launch→fire link.
+
+    One-shot triggers have already been deleted, so only their audit row is updated.
+    A standing trigger receives the failed echo only while this is still its most
+    recent launch; a late completion must not overwrite a newer fire's outcome.
+    """
+    await conn.execute(
+        """
+        WITH failed_fires AS (
+            UPDATE trigger_runs
+            SET status = 'error', error_summary = $2, finished_at = now()
+            WHERE result_id = $1 AND status = 'ok'
+            RETURNING trigger_id, started_at
+        )
+        UPDATE triggers AS trigger
+        SET last_fire_status = 'error',
+            consecutive_failures = trigger.consecutive_failures + 1,
+            updated_at = now()
+        FROM failed_fires AS failed
+        WHERE trigger.id = failed.trigger_id
+          AND trigger.last_fire_at = failed.started_at
+        """,
+        run_id,
+        error_summary,
+    )
+
+
 async def record_trigger_run(
     conn: asyncpg.Connection[Any],
     *,

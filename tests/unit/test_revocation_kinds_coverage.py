@@ -34,6 +34,8 @@ FULFILLED_KINDS: frozenset[str] = frozenset(
         "no_return",
         # the run answered but its output failed the request's acceptance contract
         "output_schema_violation",
+        # a context-ineligible run tool is the run servicer's own terminal error
+        "tool_not_callable",
         # session harness-erroring: the servicer's own step latches its death
         "model_terminal_error",
         "model_call_deadline",
