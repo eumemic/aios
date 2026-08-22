@@ -643,6 +643,8 @@ async def test_sweep_one_family_raise_does_not_disable_the_others(
     assert result.runs == 2  # both child-detail rows were pruned
     assert result.workflows == 1
     assert result.skills == 1
+    assert result.degraded
+    assert result.failed_families == ("agents",)
 
     async with pool.acquire() as conn:
         assert await _count(conn, "wf_runs", "id", run_id) == 1
