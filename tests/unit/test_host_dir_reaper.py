@@ -23,6 +23,7 @@ These tests assert the DB-liveness keep-set directly, never a container set:
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -326,7 +327,7 @@ async def test_symlink_child_is_not_submitted_for_deletion(
     link = roots["runs"] / "wfr_done"
     link.symlink_to(target)
     rmtree = MagicMock()
-    monkeypatch.setattr(host_dir_reaper.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
     monkeypatch.setattr(
         wf_queries,
         "unscoped_terminal_run_ids",
