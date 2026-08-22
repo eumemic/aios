@@ -38,6 +38,7 @@ from aios.models.agents import (
 )
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import WfRun
+from aios.sandbox.volumes import run_workspace_dir
 from aios.services import agents as agents_service
 from aios.services import attenuation as attenuation_service
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -339,9 +340,7 @@ async def create_run(
         else:
             workspace_path = None
         if workspace == "fresh":
-            workspace_path = str(
-                (get_settings().workspace_root / account_id / "_runs" / effective_run_id).resolve()
-            )
+            workspace_path = str(run_workspace_dir(account_id, effective_run_id))
         source_version: int | None
         if inline is not None:
             # ── inline-script arm (T5, #1466) ──────────────────────────────────

@@ -33,7 +33,8 @@ import pytest
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import host_dir_reaper
-from aios.harness.host_dir_reaper import sweep_host_dirs
+from aios.harness.host_dir_reaper import _scan_run_workspaces, sweep_host_dirs
+from aios.workflows.service import run_workspace_dir
 
 
 @pytest.fixture
@@ -45,12 +46,16 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     the tmp roots.
     """
     repos_root = tmp_path / "_session_repos"
-    runs_root = tmp_path / "_runs"
+    runs_root = tmp_path / "acc_test" / "_runs"
     repos_root.mkdir()
-    runs_root.mkdir()
+    runs_root.mkdir(parents=True)
 
     monkeypatch.setattr(host_dir_reaper, "session_repos_root", lambda sid: repos_root / sid)
-    monkeypatch.setattr(host_dir_reaper, "run_workspace_dir", lambda rid: runs_root / rid)
+    monkeypatch.setattr(
+        host_dir_reaper,
+        "run_workspace_dir",
+        lambda account_id, run_id: tmp_path / account_id / "_runs" / run_id,
+    )
 
     settings = MagicMock()
     settings.host_dir_reaper_enabled = True
@@ -58,6 +63,20 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(host_dir_reaper, "get_settings", lambda: settings)
 
     return {"repos": repos_root, "runs": runs_root, "settings": settings}
+
+
+def test_service_workspace_builder_is_enumerated_by_reaper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canonical writer path must always be visible to the run reaper."""
+    settings = MagicMock(workspace_root=tmp_path)
+    monkeypatch.setattr("aios.sandbox.volumes.get_settings", lambda: settings)
+    workspace = run_workspace_dir("acc_one", "wfr_done")
+    workspace.mkdir(parents=True)
+
+    candidates = _scan_run_workspaces(min_age_seconds=0, now=time.time())
+
+    assert [candidate.path for candidate in candidates] == [workspace]
 
 
 def _mkdir_aged(parent: Path, name: str, *, age_s: float = 10_000.0) -> Path:
@@ -117,6 +136,26 @@ async def test_suspended_run_dir_survives_terminal_is_reaped(
     assert removed == 1
     assert suspended.exists(), "a suspended (DB-live) run's _runs dir must survive"
     assert not terminal.exists(), "a terminal run's _runs dir must be reaped"
+
+
+async def test_legacy_top_level_run_dir_is_reaped(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-account-scoping ``<workspace_root>/_runs`` residue remains swept."""
+    legacy_root = roots["runs"].parents[1] / "_runs"
+    legacy_root.mkdir()
+    legacy = _mkdir_aged(legacy_root, "wfr_legacy")
+    monkeypatch.setattr(
+        wf_queries,
+        "unscoped_terminal_run_ids",
+        AsyncMock(return_value={"wfr_legacy"}),
+    )
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 1
+    assert not legacy.exists()
 
 
 async def test_runs_absent_from_db_is_kept(
