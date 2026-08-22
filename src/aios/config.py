@@ -698,9 +698,11 @@ class Settings(BaseSettings):
         le=10_000,
         description="Maximum child rows deleted from one table/run in a prune batch.",
     )
-    reclaimable_prune_archival_backfill_enabled: bool = Field(
-        default=False,
-        description="Deliberate rollout switch for bounded historical terminal archival.",
+    wf_runs_archive_grace_days: int = Field(
+        default=7,
+        ge=1,
+        description="Days after a workflow run becomes terminal before the maintenance "
+        "sweep archives it, feeding terminal history into T6 retention.",
     )
     archived_definition_retention_days: int = Field(
         default=30,
