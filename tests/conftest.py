@@ -124,7 +124,13 @@ def postgres_container() -> Iterator[Any]:
 
 
 @pytest.fixture(scope="session")
-def db_url(postgres_container: Any) -> str:
+def db_url(request: pytest.FixtureRequest) -> str:
+    """Return an external test DB when configured, otherwise start the container."""
+    external_url = os.environ.get("AIOS_TEST_DB_URL")
+    if external_url:
+        return external_url
+
+    postgres_container = request.getfixturevalue("postgres_container")
     host = postgres_container.get_container_host_ip()
     port = postgres_container.get_exposed_port(5432)
     user = postgres_container.username

@@ -231,6 +231,29 @@ async def test_launch_time_attenuation(vault_pool: asyncpg.Pool[Any]) -> None:
     both = await _make_session(pool, agent, vault_ids=[vx, vy])
     wf = await wf_service.create_workflow(pool, account_id=ACC, name="w-launch", script=_SCRIPT)
 
+    # Omitted selection snapshots every vault currently held by a session launcher.
+    inherited = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        workflow_id=wf.id,
+        environment_id=ENV,
+        launcher_session_id=both,
+    )
+    async with pool.acquire() as conn:
+        assert await wf_queries.get_run_vault_ids(conn, inherited.id, account_id=ACC) == [vx, vy]
+
+    # Explicit empty selection deliberately attenuates to no vaults.
+    empty = await wf_service.create_run(
+        pool,
+        account_id=ACC,
+        workflow_id=wf.id,
+        environment_id=ENV,
+        vault_ids=[],
+        launcher_session_id=both,
+    )
+    async with pool.acquire() as conn:
+        assert await wf_queries.get_run_vault_ids(conn, empty.id, account_id=ACC) == []
+
     # Held vault → succeeds and binds.
     ok = await wf_service.create_run(
         pool,

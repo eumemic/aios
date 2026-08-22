@@ -10,12 +10,18 @@ the focused queries to pin the pairing + supersession logic without a database.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from aios.harness import model_workflow
+from aios.harness.completion import LlmRequest
+from aios.harness.model_binding import WorkflowModelRef
 from aios.harness.model_workflow import HarvestedInference, ParkState, take_pending_harvest
+from aios.services import sessions as sessions_service
+from aios.services import workflows as workflows_service
 
 
 class _FakeConn:
@@ -131,3 +137,32 @@ def test_event_kind_constants() -> None:
     # The park/harvest events are span-kind bookkeeping (excluded from replay).
     assert model_workflow.PARK_EVENT == "model_workflow_park"
     assert model_workflow.HARVEST_EVENT == "model_workflow_harvest"
+
+
+@pytest.mark.asyncio
+async def test_model_workflow_launch_inherits_session_vaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sibling trusted session→run edge deliberately uses omitted/inherit semantics."""
+    launch = AsyncMock(return_value=(SimpleNamespace(id="run_1"), "req_1"))
+    monkeypatch.setattr(workflows_service, "launch_awaited_run", launch)
+    monkeypatch.setattr(
+        sessions_service,
+        "get_session_basic",
+        AsyncMock(return_value=SimpleNamespace(environment_id="env_1", parent_run_id=None)),
+    )
+    monkeypatch.setattr(sessions_service, "append_event", AsyncMock())
+    monkeypatch.setattr(model_workflow, "_launch_harvest_task", lambda *args, **kwargs: None)
+
+    await model_workflow.launch_model_workflow_park(
+        _FakePool(),
+        "ses_1",
+        ref=WorkflowModelRef("wf_1"),
+        request=LlmRequest(messages=[]),
+        reacting_to=1,
+        account_id="acc_1",
+    )
+
+    assert launch.await_args is not None
+    assert launch.await_args.kwargs["launcher_session_id"] == "ses_1"
+    assert launch.await_args.kwargs.get("vault_ids") is None

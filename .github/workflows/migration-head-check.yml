@@ -1,0 +1,43 @@
+name: Migration head check
+
+on:
+  pull_request:
+    paths:
+      - migrations/**
+      - scripts/check_migration_heads.py
+      - tests/unit/test_check_migration_heads.py
+      - .github/workflows/migration-head-check.yml
+
+concurrency:
+  group: migration-head-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  migration-head:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # On pull_request, checkout's default ref is refs/pull/<n>/merge. This is
+      # deliberately the merge result, not the stale PR head.
+      - name: Check out merge ref
+        uses: actions/checkout@v4
+
+      - name: Check out current base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: _base
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Detect branched Alembic history
+        run: |
+          set -euo pipefail
+          base_tip=$(uv run python scripts/check_migration_heads.py _base/migrations/versions | sed 's/^alembic history has one head: //')
+          uv run python scripts/check_migration_heads.py migrations/versions --current-tip "${base_tip}"
+
+      - name: Mutation and parser self-tests
+        run: uv run pytest tests/unit/test_check_migration_heads.py -q

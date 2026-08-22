@@ -185,9 +185,13 @@ class _CallWorkflowArgs(BaseModel):
         default=None,
         description="Optional JSON Schema the run output must satisfy (validated fail-loud).",
     )
-    vault_ids: list[str] = Field(
-        default_factory=list,
-        description="Vault ids to bind to the run — a subset of the vaults bound to you.",
+    vault_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Vault ids to bind to the run. Omit or pass null to inherit all vaults "
+            "currently bound to this session; pass [] to bind none; a nonempty list "
+            "must be a subset of the session's vaults."
+        ),
     )
     budget_usd: float | None = Field(
         default=None, gt=0, description="Optional shared USD spend ceiling for the run."

@@ -561,6 +561,14 @@ async def worker_main() -> None:
         )
         _supervise(memory_reconcile_audit_task, latch=supervised_latch, fatal=supervised_failure)
 
+        # Audit the authoritative event stream for every failed or partial
+        # sandbox-egress provisioning outcome in the preceding 24 hours.
+        fleet_egress_audit_task = asyncio.create_task(
+            _fleet_egress_audit_loop(pool),
+            name="fleet_egress_audit",
+        )
+        _supervise(fleet_egress_audit_task, latch=supervised_latch, fatal=supervised_failure)
+
         # Start the archived-session workspace reaper (#40 — the 45G hole): GC
         # the per-session ``/workspace`` host dir of archived sessions, which
         # the #1192 reaper does NOT cover. Ships DARK
@@ -982,6 +990,29 @@ async def _memory_reconcile_audit_loop(pool: asyncpg.Pool[Any]) -> None:
             )
         except Exception:
             log.exception("memory_reconcile_audit.tick_failed")
+
+
+async def _fleet_egress_audit_loop(pool: asyncpg.Pool[Any]) -> None:
+    """Run the fleet egress audit immediately and then at its configured cadence.
+
+    A failed authoritative read is an alert, never a healthy tick.  The inner
+    audit logs health only after a successful query; this loop logs failures
+    distinctly and keeps retrying rather than silently losing the auditor.
+    """
+    log = get_logger("aios.worker.fleet_egress_audit")
+    from aios.harness.fleet_egress_audit import run_fleet_egress_audit
+
+    interval = get_settings().fleet_egress_audit_interval_seconds
+    first = True
+    while True:
+        try:
+            if not first:
+                await asyncio.sleep(interval)
+            first = False
+            result = await run_fleet_egress_audit(pool)
+            log.info("fleet_egress_audit.tick", findings=len(result.findings))
+        except Exception:
+            log.exception("fleet_egress_audit.tick_failed")
 
 
 async def _reclaimable_prune_loop(pool: asyncpg.Pool[Any]) -> None:
