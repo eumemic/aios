@@ -312,6 +312,36 @@ async def test_symlink_child_is_never_followed(
     assert (outside / "precious").exists()
 
 
+async def test_symlink_child_is_not_submitted_for_deletion(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The symlink gate itself prevents a link from reaching ``rmtree``.
+
+    Pointing at a sibling keeps the resolved target confined to the reserved
+    root, so the resolved-parent defence cannot mask removal of the explicit
+    symlink check.  ``rmtree`` is replaced with a destructive-path spy because
+    the stdlib implementation independently refuses symlinks.
+    """
+    target = _mkdir_aged(roots["runs"], "wfr_live")
+    link = roots["runs"] / "wfr_done"
+    link.symlink_to(target)
+    rmtree = MagicMock()
+    monkeypatch.setattr(host_dir_reaper.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(
+        wf_queries,
+        "unscoped_terminal_run_ids",
+        AsyncMock(return_value={"wfr_done"}),
+    )
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 0
+    rmtree.assert_not_called()
+    assert link.is_symlink()
+    assert (target / "marker").exists()
+
+
 async def test_root_itself_is_never_removed(
     roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
