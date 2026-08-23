@@ -1289,8 +1289,15 @@ async def list_sessions(
     parent_run_id: str | None = None,
     limit: int = 50,
     after: str | None = None,
+    ids: list[str] | None = None,
+    view: Literal["full", "lite"] = "full",
 ) -> list[Session]:
     # See ``get_session`` for the rationale on the snapshot wrap.
+    # ``view=lite`` is the roster/status path: same rows + derived status /
+    # last_event_at / awaiting, but skip vaults, resource echoes, triggers,
+    # and obligations (those hydrate every account session on the full list).
+    if ids is not None and len(ids) == 0:
+        return []
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         sessions = await queries.list_sessions(
             conn,
@@ -1300,16 +1307,27 @@ async def list_sessions(
             limit=limit,
             after=after,
             account_id=account_id,
+            ids=ids,
         )
         if not sessions:
             return sessions
-        sid_list = [s.id for s in sessions]
-        vault_map = await queries.batch_get_session_vault_ids(conn, sid_list, account_id=account_id)
-        echoes_map = await _batch_list_all_echoes(conn, sid_list, account_id=account_id)
-        trigger_map = await queries.batch_list_session_triggers(
-            conn, sid_list, account_id=account_id
-        )
+        if view == "lite":
+            vault_map = None
+            echoes_map = None
+            trigger_map = None
+        else:
+            sid_list = [s.id for s in sessions]
+            vault_map = await queries.batch_get_session_vault_ids(
+                conn, sid_list, account_id=account_id
+            )
+            echoes_map = await _batch_list_all_echoes(conn, sid_list, account_id=account_id)
+            trigger_map = await queries.batch_list_session_triggers(
+                conn, sid_list, account_id=account_id
+            )
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
+    if view == "lite":
+        return [s.model_copy(update={"awaiting": awaiting_by_sid.get(s.id, [])}) for s in sessions]
+    assert vault_map is not None and echoes_map is not None and trigger_map is not None
     obligations_by_sid = await compute_obligations(pool, sessions, account_id=account_id)
     enriched: list[Session] = [
         s.model_copy(

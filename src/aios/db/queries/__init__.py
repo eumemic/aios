@@ -68,6 +68,7 @@ async def _list_scoped[T](
     filters: list[tuple[str, Any]] | None = None,
     extra_select: str | None = None,
     include_archived: bool = False,
+    ids: list[str] | None = None,
 ) -> list[T]:
     """Keyset-paginated SELECT scoped by ``account_id`` (+ ``archived_at IS NULL``
     unless ``include_archived``).
@@ -86,6 +87,9 @@ async def _list_scoped[T](
     ``agent()`` children (#831). The default keeps every other resource listing
     archive-blind, as before.
 
+    ``ids`` is an optional ``id = ANY($n)`` filter (static column, values
+    parameterized). An empty list is a deliberate empty result — no query.
+
     Readability note: the ``archived_at`` this toggles on a run's ``agent()``
     CHILD SESSIONS is a different concept from ``wf_runs.archived_at`` (set by
     ``archive_run``). Same column name, two unrelated lifecycles: a child session
@@ -93,8 +97,13 @@ async def _list_scoped[T](
     post-mortem usage roll-up); a RUN is archived as its own terminal disposition
     (feeding #10's prune). Don't conflate "this run's children are archived" with
     "this run is archived"."""
+    if ids is not None and len(ids) == 0:
+        return []
     args: list[Any] = [account_id]
     where = ["account_id = $1"] if include_archived else ["archived_at IS NULL", "account_id = $1"]
+    if ids is not None:
+        args.append(list(ids))
+        where.append(f"id = ANY(${len(args)})")
     for column, value in filters or []:
         if value is None:
             continue

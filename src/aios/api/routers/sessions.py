@@ -12,7 +12,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
@@ -136,6 +136,8 @@ async def list_(
     ] = None,
     parent_run_id: str | None = None,
     limit: PageLimit = None,
+    ids: Annotated[list[str] | None, Query()] = None,
+    view: Literal["full", "lite"] | None = None,
 ) -> ListResponse[Session]:
     """List sessions, newest first, keyset-paginated.
 
@@ -145,7 +147,19 @@ async def list_(
     (alive or archived), and ``?status=archived`` lists the terminal ones. Each
     row carries the derived ``status`` ({active, idle, archived}) and cumulative
     ``usage``.
+
+    ``view=lite`` skips vaults / resource echoes / triggers / obligations and
+    still returns ``id``, derived ``status``, ``last_event_at``, and
+    ``awaiting`` — the cheap path for a roster that already knows its session
+    ids. ``ids=`` restricts the page to those session ids (account-scoped).
     """
+    if ids is not None:
+        ids = [i for i in ids if i]
+        if len(ids) > MAX_PAGE_LIMIT:
+            raise ValidationError(
+                f"ids exceeds {MAX_PAGE_LIMIT} entries",
+                detail={"max": MAX_PAGE_LIMIT, "got": len(ids)},
+            )
     st = page_cursor(
         cursor,
         {
@@ -153,6 +167,8 @@ async def list_(
             "status": status_filter,
             "parent_run_id": parent_run_id,
             "limit": limit,
+            "ids": ids,
+            "view": view,
         },
     )
     after = str(st.cursor) if st is not None else None
@@ -161,6 +177,9 @@ async def list_(
         agent_id = st.filters.get("agent_id")
         status_filter = st.filters.get("status")
         parent_run_id = st.filters.get("parent_run_id")
+        ids = st.filters.get("ids")
+        view = st.filters.get("view")
+    effective_view: Literal["full", "lite"] = view if view in ("full", "lite") else "full"
     items = await service.list_sessions(
         pool,
         agent_id=agent_id,
@@ -169,12 +188,20 @@ async def list_(
         limit=page_limit + 1,
         after=after,
         account_id=account_id,
+        ids=ids,
+        view=effective_view,
     )
     return ListResponse[Session].paginate(
         items,
         page_limit,
         cursor=lambda x: x.id,
-        filters={"agent_id": agent_id, "status": status_filter, "parent_run_id": parent_run_id},
+        filters={
+            "agent_id": agent_id,
+            "status": status_filter,
+            "parent_run_id": parent_run_id,
+            "ids": ids,
+            "view": effective_view if effective_view != "full" else None,
+        },
     )
 
 
