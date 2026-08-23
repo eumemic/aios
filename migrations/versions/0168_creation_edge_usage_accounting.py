@@ -36,47 +36,15 @@ def upgrade() -> None:
     )
 
     # Existing workflow agent() children already have an unambiguous creation
-    # edge.  Backfill those before considering session caller provenance.
+    # edge. Backfill those before considering explicit resource provenance.
     op.execute("UPDATE sessions SET creator_run_id = parent_run_id WHERE parent_run_id IS NOT NULL")
-    # Historical call_agent children are ephemeral (archive_when_idle) fresh
-    # sessions whose first request_opened frame names the creating session.
-    # Existing-session call_session targets are not ephemeral, so they are
-    # intentionally excluded: invocation never changes accounting ownership.
-    op.execute(r"""
-        UPDATE sessions s
-           SET creator_session_id = (
-               SELECT e.data->'caller'->>'id'
-                 FROM events e
-                 JOIN sessions creator
-                   ON creator.id = e.data->'caller'->>'id'
-                  AND creator.account_id = s.account_id
-                WHERE e.session_id = s.id
-                  AND e.account_id = s.account_id
-                  AND e.kind = 'lifecycle'
-                  AND e.data->>'event' = 'request_opened'
-                  AND e.data->'caller'->>'kind' = 'session'
-                  AND e.data->'caller'->>'id' <> s.id
-                ORDER BY e.seq
-                LIMIT 1
-           )
-         WHERE s.creator_run_id IS NULL
-           AND s.archive_when_idle = TRUE
-           AND EXISTS (
-               SELECT 1
-                 FROM events e
-                 JOIN sessions creator
-                   ON creator.id = e.data->'caller'->>'id'
-                  AND creator.account_id = s.account_id
-                WHERE e.session_id = s.id
-                  AND e.account_id = s.account_id
-                  AND e.kind = 'lifecycle'
-                  AND e.data->>'event' = 'request_opened'
-                  AND e.data->'caller'->>'kind' = 'session'
-                  AND e.data->'caller'->>'id' <> s.id
-           )
-    """)
-    # Soft resource provenance predates this migration and is a useful fallback
-    # for any session-created resource not covered by the invocation substrate.
+    # Soft resource provenance predates this migration and records who created
+    # the resource, rather than who later invoked it. It is the only safe legacy
+    # session -> session backfill. In particular, archive_when_idle plus a first
+    # request_opened event is NOT creation evidence: the public API can create a
+    # self-archiving root which call_session invokes later. Ambiguous historical
+    # rows intentionally remain roots instead of transferring their spend to an
+    # invocation peer. New call_agent writes creator_session_id at insert time.
     op.execute(r"""
         UPDATE sessions s
            SET creator_session_id = s.created_by_ref
