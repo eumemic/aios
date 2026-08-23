@@ -925,7 +925,7 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
         raise ValueError(f"shared workflow run {run_id!r} has no workspace pointer")
     else:
         # Legacy pre-M2 run rows/tests have no persisted pointer.
-        workspace_path = ensure_run_workspace_dir(run_id)
+        workspace_path = ensure_run_workspace_dir(run.account_id, run_id)
 
     tool_broker = runtime.require_tool_broker()
     tool_socket_host_path = settings.tool_broker_socket_path

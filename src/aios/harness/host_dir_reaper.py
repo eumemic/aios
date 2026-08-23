@@ -182,14 +182,47 @@ async def _reap_session_repos(
     return removed
 
 
+def _scan_run_workspaces(*, min_age_seconds: float, now: float) -> list[_Candidate]:
+    """Enumerate account-scoped run scratch plus legacy top-level residue.
+
+    Account and ``_runs`` directories pass the same symlink and resolved-parent
+    confinement gates as run directories before their children are scanned.
+    """
+    workspace_root = run_workspace_dir("_", "_").parents[2]
+    resolved_workspace_root = workspace_root.resolve()
+    if not resolved_workspace_root.exists():
+        return []
+
+    roots = [resolved_workspace_root / "_runs"]  # pre-account-scoping residue
+    for account_dir in resolved_workspace_root.iterdir():
+        if account_dir.name == "_runs" or account_dir.is_symlink() or not account_dir.is_dir():
+            continue
+        resolved_account_dir = account_dir.resolve()
+        if resolved_account_dir.parent != resolved_workspace_root:
+            continue
+        runs_root = run_workspace_dir(account_dir.name, "_").parent
+        if runs_root.is_symlink() or not runs_root.is_dir():
+            continue
+        resolved_runs_root = runs_root.resolve()
+        if resolved_runs_root.parent != resolved_account_dir:
+            continue
+        roots.append(resolved_runs_root)
+
+    candidates: list[_Candidate] = []
+    for root in roots:
+        if root.is_symlink():
+            continue
+        candidates.extend(_scan_children(root, min_age_seconds=min_age_seconds, now=now))
+    return candidates
+
+
 async def _reap_runs(pool: asyncpg.Pool[Any], *, min_age_seconds: float, now: float) -> int:
-    """Reap ``_runs/<run_id>`` scratch for TERMINAL runs ONLY.
+    """Reap account-scoped and legacy run scratch for TERMINAL runs ONLY.
 
     NOT reconstructible ⇒ reap ONLY on a positively observed terminal status;
     a suspended/running/pending/absent run is kept. Fail-closed on DB error.
     """
-    root = run_workspace_dir("_").parent
-    candidates = _scan_children(root, min_age_seconds=min_age_seconds, now=now)
+    candidates = _scan_run_workspaces(min_age_seconds=min_age_seconds, now=now)
     if not candidates:
         return 0
     owner_ids = [c.owner_id for c in candidates]
