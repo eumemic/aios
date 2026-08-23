@@ -99,8 +99,7 @@ async def _make_archived_run(
         account_id="acc_root",
         terminal_summary={"is_error": False},
     )
-    # ``set_run_terminal`` now atomically archives terminal runs; the helper's
-    # former explicit ``archive_run`` call became stale and correctly conflicts.
+    await wf_queries.archive_run(conn, run.id, account_id="acc_root")
     # Back-date archived_at so it is past the retention window.
     await conn.execute(
         "UPDATE wf_runs SET archived_at = now() - make_interval(days => $2) WHERE id = $1",
@@ -253,6 +252,66 @@ async def test_run_prune_is_idempotent(conn: asyncpg.Connection[Any]) -> None:
     second = await prune_archived_runs(conn, retention_days=30)
     assert first == 2
     assert second == 0
+
+
+async def test_terminal_archival_respects_grace_window_and_is_idempotent(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    workflow = await wf_queries.insert_workflow(
+        conn, account_id="acc_root", name="archive_grace", script="x"
+    )
+    old = await wf_queries.insert_wf_run(
+        conn,
+        account_id="acc_root",
+        workflow_id=workflow.id,
+        environment_id="env_root",
+        script="x",
+        host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+        script_sha="old",
+        depth=10,
+    )
+    young = await wf_queries.insert_wf_run(
+        conn,
+        account_id="acc_root",
+        workflow_id=workflow.id,
+        environment_id="env_root",
+        script="x",
+        host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+        script_sha="young",
+        depth=10,
+    )
+    for run in (old, young):
+        await wf_queries.set_run_terminal(
+            conn,
+            run.id,
+            status="completed",
+            output=None,
+            account_id="acc_root",
+            terminal_summary={"is_error": False},
+        )
+    await conn.execute(
+        "UPDATE wf_runs SET updated_at=now() - interval '8 days' WHERE id=$1", old.id
+    )
+
+    assert await reconcile_terminal_archival_batch(conn, grace_days=7) == 1
+    assert await conn.fetchval("SELECT archived_at FROM wf_runs WHERE id=$1", old.id) is not None
+    assert await conn.fetchval("SELECT archived_at FROM wf_runs WHERE id=$1", young.id) is None
+    assert await reconcile_terminal_archival_batch(conn, grace_days=7) == 0
+
+
+async def test_run_signal_detail_is_pruned_with_events(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    run_id = await _make_archived_run(conn, archived_age_days=60)
+    await conn.execute(
+        "INSERT INTO wf_run_signals (run_id, call_key, kind, result) "
+        "VALUES ($1, 'cancel', 'cancel', '{}'::jsonb)",
+        run_id,
+    )
+
+    assert await prune_archived_runs(conn, retention_days=30) == 3
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
+    assert await _count(conn, "wf_run_signals", "run_id", run_id) == 0
 
 
 async def test_archived_legacy_run_is_backfilled_before_detail_prune(
@@ -584,6 +643,8 @@ async def test_sweep_one_family_raise_does_not_disable_the_others(
     assert result.runs == 2  # both child-detail rows were pruned
     assert result.workflows == 1
     assert result.skills == 1
+    assert result.degraded
+    assert result.failed_families == ("agents",)
 
     async with pool.acquire() as conn:
         assert await _count(conn, "wf_runs", "id", run_id) == 1
