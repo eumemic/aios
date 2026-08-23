@@ -1463,6 +1463,7 @@ async def list_sessions(
     parent_run_id: str | None = None,
     limit: int = 50,
     after: str | None = None,
+    ids: list[str] | None = None,
 ) -> list[Session]:
     """Keyset-paginated session list with derived ``status`` ({active, idle}).
 
@@ -1510,6 +1511,7 @@ async def list_sessions(
             "(SELECT e.created_at FROM events e WHERE e.session_id = sessions.id "
             "ORDER BY e.seq DESC LIMIT 1) AS last_event_at"
         ),
+        ids=ids,
     )
 
 

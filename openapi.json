@@ -1714,7 +1714,7 @@
           "sessions"
         ],
         "summary": "List ",
-        "description": "List sessions, newest first, keyset-paginated.\n\nSoft-archived sessions are hidden by default. Two filters surface them so a\nworkflow run's spent ``agent()`` children stay enumerable with their terminal\nstatus and token usage (#831): ``?parent_run_id=`` lists a run's children\n(alive or archived), and ``?status=archived`` lists the terminal ones. Each\nrow carries the derived ``status`` ({active, idle, archived}) and cumulative\n``usage``.",
+        "description": "List sessions, newest first, keyset-paginated.\n\nSoft-archived sessions are hidden by default. Two filters surface them so a\nworkflow run's spent ``agent()`` children stay enumerable with their terminal\nstatus and token usage (#831): ``?parent_run_id=`` lists a run's children\n(alive or archived), and ``?status=archived`` lists the terminal ones. Each\nrow carries the derived ``status`` ({active, idle, archived}) and cumulative\n``usage``.\n\n``view=lite`` skips vaults / resource echoes / triggers / obligations and\nstill returns ``id``, derived ``status``, ``last_event_at``, and\n``awaiting`` \u2014 the cheap path for a roster that already knows its session\nids. ``ids=`` restricts the page to those session ids (account-scoped).",
         "operationId": "list_sessions",
         "parameters": [
           {
@@ -1802,6 +1802,45 @@
                 }
               ],
               "title": "Limit"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ids"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "full",
+                    "lite"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "View"
             }
           },
           {

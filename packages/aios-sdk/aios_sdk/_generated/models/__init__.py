@@ -131,6 +131,7 @@ from .list_session_events_chat_type_type_0 import ListSessionEventsChatTypeType0
 from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
+from .list_sessions_view_type_0 import ListSessionsViewType0
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
@@ -476,6 +477,7 @@ __all__ = (
     "ListSessionEventsDir",
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
+    "ListSessionsViewType0",
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
     "McpServerSpec",
