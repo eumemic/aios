@@ -118,13 +118,24 @@ async def _run_call_llm_task(
     """Run one inference, charge its cost, write its result signal, wake the run."""
     try:
         result, cost_microusd = await invoke_call_llm(run=run, spec=spec)
+        raw_usage = result.get("usage")
+        usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
         try:
             # Charge the cost meter and write the signal in ONE transaction so a budget
             # read on the next step never sees the result without its spend (charge once,
             # at the inference site).
             async with pool.acquire() as conn, conn.transaction():
                 await wf_queries.add_run_call_llm_cost_microusd(
-                    conn, run.id, cost_microusd, account_id=run.account_id
+                    conn,
+                    run.id,
+                    cost_microusd,
+                    account_id=run.account_id,
+                    input_tokens=int(usage.get("input_tokens", 0) or 0),
+                    output_tokens=int(usage.get("output_tokens", 0) or 0),
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
+                    cache_creation_input_tokens=int(
+                        usage.get("cache_creation_input_tokens", 0) or 0
+                    ),
                 )
                 await wf_queries.insert_run_signal(
                     conn,
@@ -258,7 +269,12 @@ async def invoke_call_llm(*, run: WfRun, spec: dict[str, Any]) -> tuple[dict[str
         # estimates, so a run can't dodge its budget by timing out. Result is the
         # recoverable error value the script branches on.
         cost = estimate_cost_usd(model, exc.usage) if exc.usage else None
-        return {"error": f"call_llm timed out: {exc}"}, _to_microusd(cost)
+        return {
+            "error": f"call_llm timed out: {exc}",
+            # Partial provider counters are still bought inference and feed the
+            # same run meter as a successful raw turn.
+            "usage": exc.usage,
+        }, _to_microusd(cost)
     except Exception as exc:  # provider error — surface as a recoverable value
         log.warning("call_llm.provider_error", run_id=run.id, model=model, error=str(exc))
         return {"error": f"call_llm failed: {type(exc).__name__}: {exc}"}, 0

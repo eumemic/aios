@@ -107,7 +107,7 @@ the **child-session** events produced when a run spawns agent sessions:
 Source of truth: `aios.models.workflows.WfRunEvent` and
 `aios.models.events.Event`.
 
-## (d) Per-run cost / token / wall-clock usage on the read path (#1324)
+## (d) Per-run cost / token / wall-clock usage on the read path (#1324, #2151)
 
 `GET /v1/runs/{id}` (`WfRun`) and `GET /v1/runs` (`list_runs`) carry a `usage`
 object — the run's realized spend, the machine-observer's cost-substrate. It is
@@ -116,6 +116,12 @@ source the in-script `budget()` builtin consumes, so the run's `budget_usd`
 *ceiling* and its `usage.cost_microusd` *spend* are both legible from the read
 path (not buried in a builtin). On `list_runs` the whole page is enriched in one
 batched aggregate — no per-run fan-out.
+
+Creation-edge accounting adds `usage.own`, `usage.subtree`, `usage.own_rate`,
+and `usage.subtree_rate`. These values cross session/run boundaries to arbitrary
+depth and include archived descendants. See
+[`inference-accounting.md`](inference-accounting.md). The older flat fields below
+remain as compatibility fields for the direct-child budget view.
 
 `usage` fields (`WfRunUsage`):
 

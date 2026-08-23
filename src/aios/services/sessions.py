@@ -21,6 +21,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import EVENTS_ARCHIVED_NOTIFY, open_listen_for_events
+from aios.db.queries import accounting as accounting_queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import (
     ConflictError,
@@ -35,6 +36,7 @@ from aios.harness.window import WindowedEvents
 from aios.ids import GITHUB_REPOSITORY, MEMORY_STORE, REQUEST, make_id, split_id
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
+from aios.models.accounting import DEFAULT_USAGE_WINDOW_SECONDS, UsageNodeRef
 from aios.models.agents import (
     StepSurface,
     is_mcp_tool_name,
@@ -54,6 +56,7 @@ from aios.models.sessions import (
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
+    SessionUsage,
     split_resources_by_type,
 )
 from aios.models.tasks import TaskHandle
@@ -381,6 +384,9 @@ async def create_session(
             account_id=account_id,
             frozen_surface=frozen_surface,
             frozen_litellm_extra=frozen_litellm_extra,
+            # A freshly created call_agent child inherits from exactly one
+            # launcher. Later call_session invocations do not touch this edge.
+            creator_session_id=inherit_from_session_id,
         )
         effective_vault_ids = (
             inherited_vault_ids if inherit_from_session_id is not None else vault_ids
@@ -1182,6 +1188,20 @@ async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: s
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         session = await queries.get_session(conn, session_id, account_id=account_id)
         session = await _enrich_session(conn, session, account_id=account_id)
+        attributed = await accounting_queries.usage_for_node(
+            conn,
+            UsageNodeRef(kind="session", id=session.id),
+            account_id=account_id,
+            window_seconds=DEFAULT_USAGE_WINDOW_SECONDS,
+        )
+        if attributed is not None:
+            session = session.model_copy(
+                update={
+                    "usage": SessionUsage.model_validate(
+                        {**session.usage.model_dump(), **attributed.model_dump()}
+                    )
+                }
+            )
     awaiting_by_sid = await compute_awaiting(pool, [session], account_id=account_id)
     obligations_by_sid = await compute_obligations(pool, [session], account_id=account_id)
     return session.model_copy(
@@ -1315,6 +1335,7 @@ async def list_sessions(
             vault_map = None
             echoes_map = None
             trigger_map = None
+            attributed_by_sid = None
         else:
             sid_list = [s.id for s in sessions]
             vault_map = await queries.batch_get_session_vault_ids(
@@ -1324,10 +1345,21 @@ async def list_sessions(
             trigger_map = await queries.batch_list_session_triggers(
                 conn, sid_list, account_id=account_id
             )
+            attributed_by_sid = await accounting_queries.usage_for_nodes(
+                conn,
+                [UsageNodeRef(kind="session", id=sid) for sid in sid_list],
+                account_id=account_id,
+                window_seconds=DEFAULT_USAGE_WINDOW_SECONDS,
+            )
     awaiting_by_sid = await compute_awaiting(pool, sessions, account_id=account_id)
     if view == "lite":
         return [s.model_copy(update={"awaiting": awaiting_by_sid.get(s.id, [])}) for s in sessions]
-    assert vault_map is not None and echoes_map is not None and trigger_map is not None
+    assert (
+        vault_map is not None
+        and echoes_map is not None
+        and trigger_map is not None
+        and attributed_by_sid is not None
+    )
     obligations_by_sid = await compute_obligations(pool, sessions, account_id=account_id)
     enriched: list[Session] = [
         s.model_copy(
@@ -1337,6 +1369,12 @@ async def list_sessions(
                 "triggers": trigger_map[s.id],
                 "awaiting": awaiting_by_sid.get(s.id, []),
                 "obligations": obligations_by_sid.get(s.id, []),
+                "usage": SessionUsage.model_validate(
+                    {
+                        **s.usage.model_dump(),
+                        **attributed_by_sid[("session", s.id)].model_dump(),
+                    }
+                ),
             }
         )
         for s in sessions

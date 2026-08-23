@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aios.actors import Actor
+from aios.models.accounting import AttributedUsage, UsageNodeRef
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -105,7 +106,7 @@ class WorkflowVersion(BaseModel):
     created_at: datetime
 
 
-class WfRunUsage(BaseModel):
+class WfRunUsage(AttributedUsage):
     """Per-run cost / token / iteration / wall-clock — the machine-observer's substrate.
 
     The read-path projection of a run's actual spend (#1324). The numbers are summed
@@ -114,10 +115,12 @@ class WfRunUsage(BaseModel):
     (on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both
     legible from the read path.
 
-    EVERY field is ``int | None``, and absence is reported as **explicit null**, never
-    a silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this
-    must not inherit — see the substrate-different-verdict invariant). The observer
-    reads null as *cannot-determine* and fails loud, NOT as "zero spend":
+    Every legacy flat metric is ``int | None``, and absence is reported as
+    **explicit null**, never a silent ``0`` or an omitted key (cf. the
+    ``vault_ids:null`` read-path disease this must not inherit — see the
+    substrate-different-verdict invariant). The observer reads null as
+    *cannot-determine* and fails loud, NOT as "zero spend". Creation accounting
+    is carried separately by the inherited ``own``/``subtree`` and rate fields:
 
     * ``cost_microusd`` / ``*_tokens`` — summed over the run's child sessions. A run
       with no children sums to ``0`` (a real, observed zero — distinct from null).
@@ -234,6 +237,7 @@ class WfRun(BaseModel):
     # which never needs it and must not pay the extra aggregate query. ``budget_usd``
     # above is the ceiling; ``usage.cost_microusd`` is the spend against it.
     usage: WfRunUsage | None = None
+    usage_parent: UsageNodeRef | None = None
 
 
 class WfRunEvent(BaseModel):

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
+    from ..models.usage_node_ref import UsageNodeRef
     from ..models.wf_run_caller_type_0 import WfRunCallerType0
     from ..models.wf_run_request_output_schema_type_0 import (
         WfRunRequestOutputSchemaType0,
@@ -78,6 +79,7 @@ class WfRun:
             terminal_summary (None | Unset | WfRunTerminalSummaryType0):
             journal_pruned_at (datetime.datetime | None | Unset):
             usage (None | Unset | WfRunUsage):
+            usage_parent (None | Unset | UsageNodeRef):
     """
 
     id: str
@@ -112,9 +114,11 @@ class WfRun:
     terminal_summary: None | Unset | WfRunTerminalSummaryType0 = UNSET
     journal_pruned_at: datetime.datetime | None | Unset = UNSET
     usage: None | Unset | WfRunUsage = UNSET
+    usage_parent: None | Unset | UsageNodeRef = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
@@ -271,6 +275,14 @@ class WfRun:
         else:
             usage = self.usage
 
+        usage_parent: dict[str, Any] | None | Unset
+        if isinstance(self.usage_parent, Unset):
+            usage_parent = UNSET
+        elif isinstance(self.usage_parent, UsageNodeRef):
+            usage_parent = self.usage_parent.to_dict()
+        else:
+            usage_parent = self.usage_parent
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -331,6 +343,8 @@ class WfRun:
             field_dict["journal_pruned_at"] = journal_pruned_at
         if usage is not UNSET:
             field_dict["usage"] = usage
+        if usage_parent is not UNSET:
+            field_dict["usage_parent"] = usage_parent
 
         return field_dict
 
@@ -339,6 +353,7 @@ class WfRun:
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
+        from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
@@ -595,6 +610,23 @@ class WfRun:
 
         usage = _parse_usage(d.pop("usage", UNSET))
 
+        def _parse_usage_parent(data: object) -> None | Unset | UsageNodeRef:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                usage_parent_type_0 = UsageNodeRef.from_dict(data)
+
+                return usage_parent_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UsageNodeRef, data)
+
+        usage_parent = _parse_usage_parent(d.pop("usage_parent", UNSET))
+
         wf_run = cls(
             id=id,
             account_id=account_id,
@@ -628,6 +660,7 @@ class WfRun:
             terminal_summary=terminal_summary,
             journal_pruned_at=journal_pruned_at,
             usage=usage,
+            usage_parent=usage_parent,
         )
 
         wf_run.additional_properties = d

@@ -31,6 +31,7 @@ from aios.db.queries import (
 )
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
+from aios.models.accounting import UsageNodeRef
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
@@ -128,6 +129,15 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         archived_at=row["archived_at"],
         terminal_summary=row.get("terminal_summary"),
         journal_pruned_at=row.get("journal_pruned_at"),
+        usage_parent=(
+            UsageNodeRef(kind="session", id=row["creator_session_id"])
+            if row.get("creator_session_id") is not None
+            else (
+                UsageNodeRef(kind="run", id=row["creator_run_id"])
+                if row.get("creator_run_id") is not None
+                else None
+            )
+        ),
     )
 
 
@@ -671,6 +681,20 @@ async def insert_wf_run(
     replay re-attaches the existing row (re-fetched here) instead of erroring; the
     default (``None``) mints a fresh ULID for which the conflict can never fire."""
     new_id = run_id if run_id is not None else make_id(WORKFLOW_RUN)
+    creator_session_id: str | None = None
+    creator_run_id: str | None = None
+    caller_kind = caller.get("kind") if caller is not None else None
+    caller_id = caller.get("id") if caller is not None else None
+    if caller_kind == "session" and isinstance(caller_id, str):
+        creator_session_id = caller_id
+    elif caller_kind == "run" and isinstance(caller_id, str):
+        creator_run_id = caller_id
+    elif launcher_session_id is not None:
+        # Detached launches have no request caller. Their owning/launching
+        # session is the creator; parent_run_id remains execution lineage.
+        creator_session_id = launcher_session_id
+    elif parent_run_id is not None:
+        creator_run_id = parent_run_id
     try:
         row = await conn.fetchrow(
             """
@@ -680,10 +704,10 @@ async def insert_wf_run(
                  workspace_mode, workspace_path,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
-                 depth, tools_vocab_epoch)
+                 depth, tools_vocab_epoch, creator_session_id, creator_run_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
-                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23)
+                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -710,6 +734,8 @@ async def insert_wf_run(
             default_child_model,
             depth,
             TOOLS_VOCAB_EPOCH,
+            creator_session_id,
+            creator_run_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -795,25 +821,65 @@ async def get_run_call_llm_cost_microusd(
 
 
 async def add_run_call_llm_cost_microusd(
-    conn: asyncpg.Connection[Any], run_id: str, delta_microusd: int, *, account_id: str
+    conn: asyncpg.Connection[Any],
+    run_id: str,
+    delta_microusd: int,
+    *,
+    account_id: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
 ) -> None:
-    """Charge ``delta_microusd`` to the run's ``call_llm`` inference meter (#1633).
+    """Charge one raw ``call_llm`` inference to its run-level meters.
 
-    The increment is a single atomic ``col = col + $delta`` so concurrent charges
-    never lose an update; ``delta_microusd`` is clamped at ``0`` (an unreported
-    LiteLLM cost is ``None`` → charged as 0, never negative). Charge **once at the
-    inference site**, in the same transaction that journals the ``call_llm``
-    result, so a budget read on the next step sees the spend.
+    The cumulative columns and rolling-rate ledger are written atomically, in
+    the same outer transaction as the result signal.  Cost-only callers remain
+    source-compatible; the token kwargs complete the run's own usage vector.
     """
-    if delta_microusd <= 0:
-        return
-    await conn.execute(
-        "UPDATE wf_runs SET call_llm_cost_microusd = call_llm_cost_microusd + $2 "
-        "WHERE id = $1 AND account_id = $3",
-        run_id,
-        delta_microusd,
-        account_id,
+    deltas = (
+        max(0, input_tokens),
+        max(0, output_tokens),
+        max(0, cache_read_input_tokens),
+        max(0, cache_creation_input_tokens),
+        max(0, delta_microusd),
     )
+    if not any(deltas):
+        return
+    async with conn.transaction():
+        charged_run_id = await conn.fetchval(
+            "UPDATE wf_runs SET "
+            "call_llm_input_tokens = call_llm_input_tokens + $2, "
+            "call_llm_output_tokens = call_llm_output_tokens + $3, "
+            "call_llm_cache_read_input_tokens = call_llm_cache_read_input_tokens + $4, "
+            "call_llm_cache_creation_input_tokens = "
+            "call_llm_cache_creation_input_tokens + $5, "
+            "call_llm_cost_microusd = call_llm_cost_microusd + $6 "
+            "WHERE id = $1 AND account_id = $7 RETURNING id",
+            run_id,
+            *deltas,
+            account_id,
+        )
+        if charged_run_id is None:
+            return
+        await conn.execute(
+            "INSERT INTO inference_usage_ledger "
+            "(account_id, run_id, input_tokens, output_tokens, "
+            " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            account_id,
+            run_id,
+            *deltas,
+        )
+        # ``accounts.spent_microusd`` is the canonical all-inference scalar.
+        # Raw workflow inference used to update only the run meter, which made
+        # public usage and spend admission read zero. Keep both projections in
+        # the same transaction so they cannot diverge.
+        await conn.execute(
+            "UPDATE accounts SET spent_microusd = spent_microusd + $1 WHERE id = $2",
+            deltas[4],
+            account_id,
+        )
 
 
 async def runs_children_usage(

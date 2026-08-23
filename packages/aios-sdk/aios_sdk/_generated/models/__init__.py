@@ -26,6 +26,7 @@ from .agent_version_preempt_policy import AgentVersionPreemptPolicy
 from .allow_all import AllowAll
 from .allow_list import AllowList
 from .allow_senders import AllowSenders
+from .attributed_usage import AttributedUsage
 from .await_response import AwaitResponse
 from .await_response_error_type_0 import AwaitResponseErrorType0
 from .await_response_outcome_type_0 import AwaitResponseOutcomeType0
@@ -132,6 +133,7 @@ from .list_session_events_dir import ListSessionEventsDir
 from .list_session_events_kind_type_0 import ListSessionEventsKindType0
 from .list_sessions_status_type_0 import ListSessionsStatusType0
 from .list_sessions_view_type_0 import ListSessionsViewType0
+from .list_usage_consumers_metric import ListUsageConsumersMetric
 from .mcp_permission_policy import McpPermissionPolicy
 from .mcp_permission_policy_type import McpPermissionPolicyType
 from .mcp_server_spec import McpServerSpec
@@ -294,6 +296,14 @@ from .trigger_update import TriggerUpdate
 from .trigger_update_metadata_type_0 import TriggerUpdateMetadataType0
 from .unrestricted_networking import UnrestrictedNetworking
 from .update_account_request import UpdateAccountRequest
+from .usage_consumer import UsageConsumer
+from .usage_consumer_kind import UsageConsumerKind
+from .usage_consumers_response import UsageConsumersResponse
+from .usage_consumers_response_metric import UsageConsumersResponseMetric
+from .usage_counters import UsageCounters
+from .usage_node_ref import UsageNodeRef
+from .usage_node_ref_kind import UsageNodeRefKind
+from .usage_rate import UsageRate
 from .validation_error import ValidationError
 from .validation_error_context import ValidationErrorContext
 from .vault import Vault
@@ -382,6 +392,7 @@ __all__ = (
     "AllowAll",
     "AllowList",
     "AllowSenders",
+    "AttributedUsage",
     "AwaitingToolCall",
     "AwaitingToolCallKind",
     "AwaitResponse",
@@ -478,6 +489,7 @@ __all__ = (
     "ListSessionEventsKindType0",
     "ListSessionsStatusType0",
     "ListSessionsViewType0",
+    "ListUsageConsumersMetric",
     "McpPermissionPolicy",
     "McpPermissionPolicyType",
     "McpServerSpec",
@@ -620,6 +632,14 @@ __all__ = (
     "TriggerUpdateMetadataType0",
     "UnrestrictedNetworking",
     "UpdateAccountRequest",
+    "UsageConsumer",
+    "UsageConsumerKind",
+    "UsageConsumersResponse",
+    "UsageConsumersResponseMetric",
+    "UsageCounters",
+    "UsageNodeRef",
+    "UsageNodeRefKind",
+    "UsageRate",
     "ValidationError",
     "ValidationErrorContext",
     "Vault",

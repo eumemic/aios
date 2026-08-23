@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
+
+if TYPE_CHECKING:
+    from ..models.usage_counters import UsageCounters
+    from ..models.usage_rate import UsageRate
+
 
 T = TypeVar("T", bound="WfRunUsage")
 
@@ -21,10 +26,12 @@ class WfRunUsage:
     (on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both
     legible from the read path.
 
-    EVERY field is ``int | None``, and absence is reported as **explicit null**, never
-    a silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this
-    must not inherit — see the substrate-different-verdict invariant). The observer
-    reads null as *cannot-determine* and fails loud, NOT as "zero spend":
+    Every legacy flat metric is ``int | None``, and absence is reported as
+    **explicit null**, never a silent ``0`` or an omitted key (cf. the
+    ``vault_ids:null`` read-path disease this must not inherit — see the
+    substrate-different-verdict invariant). The observer reads null as
+    *cannot-determine* and fails loud, NOT as "zero spend". Creation accounting
+    is carried separately by the inherited ``own``/``subtree`` and rate fields:
 
     * ``cost_microusd`` / ``*_tokens`` — summed over the run's child sessions. A run
       with no children sums to ``0`` (a real, observed zero — distinct from null).
@@ -38,6 +45,10 @@ class WfRunUsage:
       so it is reported as ``None`` rather than a misleading partial span.
 
         Attributes:
+            own (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
+            subtree (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
+            own_rate (None | Unset | UsageRate):
+            subtree_rate (None | Unset | UsageRate):
             cost_microusd (int | None | Unset):
             input_tokens (int | None | Unset):
             output_tokens (int | None | Unset):
@@ -47,6 +58,10 @@ class WfRunUsage:
             wall_clock_ms (int | None | Unset):
     """
 
+    own: UsageCounters | Unset = UNSET
+    subtree: UsageCounters | Unset = UNSET
+    own_rate: None | Unset | UsageRate = UNSET
+    subtree_rate: None | Unset | UsageRate = UNSET
     cost_microusd: int | None | Unset = UNSET
     input_tokens: int | None | Unset = UNSET
     output_tokens: int | None | Unset = UNSET
@@ -57,6 +72,32 @@ class WfRunUsage:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.usage_rate import UsageRate
+
+        own: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.own, Unset):
+            own = self.own.to_dict()
+
+        subtree: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.subtree, Unset):
+            subtree = self.subtree.to_dict()
+
+        own_rate: dict[str, Any] | None | Unset
+        if isinstance(self.own_rate, Unset):
+            own_rate = UNSET
+        elif isinstance(self.own_rate, UsageRate):
+            own_rate = self.own_rate.to_dict()
+        else:
+            own_rate = self.own_rate
+
+        subtree_rate: dict[str, Any] | None | Unset
+        if isinstance(self.subtree_rate, Unset):
+            subtree_rate = UNSET
+        elif isinstance(self.subtree_rate, UsageRate):
+            subtree_rate = self.subtree_rate.to_dict()
+        else:
+            subtree_rate = self.subtree_rate
+
         cost_microusd: int | None | Unset
         if isinstance(self.cost_microusd, Unset):
             cost_microusd = UNSET
@@ -102,6 +143,14 @@ class WfRunUsage:
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
+        if own is not UNSET:
+            field_dict["own"] = own
+        if subtree is not UNSET:
+            field_dict["subtree"] = subtree
+        if own_rate is not UNSET:
+            field_dict["own_rate"] = own_rate
+        if subtree_rate is not UNSET:
+            field_dict["subtree_rate"] = subtree_rate
         if cost_microusd is not UNSET:
             field_dict["cost_microusd"] = cost_microusd
         if input_tokens is not UNSET:
@@ -121,7 +170,57 @@ class WfRunUsage:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.usage_counters import UsageCounters
+        from ..models.usage_rate import UsageRate
+
         d = dict(src_dict)
+        _own = d.pop("own", UNSET)
+        own: UsageCounters | Unset
+        if isinstance(_own, Unset):
+            own = UNSET
+        else:
+            own = UsageCounters.from_dict(_own)
+
+        _subtree = d.pop("subtree", UNSET)
+        subtree: UsageCounters | Unset
+        if isinstance(_subtree, Unset):
+            subtree = UNSET
+        else:
+            subtree = UsageCounters.from_dict(_subtree)
+
+        def _parse_own_rate(data: object) -> None | Unset | UsageRate:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                own_rate_type_0 = UsageRate.from_dict(data)
+
+                return own_rate_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UsageRate, data)
+
+        own_rate = _parse_own_rate(d.pop("own_rate", UNSET))
+
+        def _parse_subtree_rate(data: object) -> None | Unset | UsageRate:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                subtree_rate_type_0 = UsageRate.from_dict(data)
+
+                return subtree_rate_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UsageRate, data)
+
+        subtree_rate = _parse_subtree_rate(d.pop("subtree_rate", UNSET))
 
         def _parse_cost_microusd(data: object) -> int | None | Unset:
             if data is None:
@@ -191,6 +290,10 @@ class WfRunUsage:
         wall_clock_ms = _parse_wall_clock_ms(d.pop("wall_clock_ms", UNSET))
 
         wf_run_usage = cls(
+            own=own,
+            subtree=subtree,
+            own_rate=own_rate,
+            subtree_rate=subtree_rate,
             cost_microusd=cost_microusd,
             input_tokens=input_tokens,
             output_tokens=output_tokens,

@@ -17,10 +17,16 @@ from typing import Any
 
 import asyncpg
 
+from aios.db.queries import accounting as accounting_queries
 from aios.db.queries import workflows as wf_queries
 from aios.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from aios.ids import REQUEST, make_id
 from aios.jobs.app import defer_run_wake
+from aios.models.accounting import (
+    DEFAULT_USAGE_WINDOW_SECONDS,
+    AttributedUsage,
+    UsageNodeRef,
+)
 from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
@@ -513,14 +519,18 @@ def _wall_clock_ms(run: WfRun) -> int | None:
     return max(0, round((run.updated_at - run.created_at).total_seconds() * 1000))
 
 
-def _run_usage(run: WfRun, children: wf_queries.RunChildrenUsage) -> WfRunUsage:
+def _run_usage(
+    run: WfRun,
+    children: wf_queries.RunChildrenUsage,
+    attributed: AttributedUsage | None = None,
+) -> WfRunUsage:
     """Project a run + its summed child usage into the read-path :class:`WfRunUsage`.
 
     cost/tokens are the real summed children; ``iteration_count`` is explicit
     ``None`` (no per-run iteration counter exists on any substrate yet — see the
     model docstring); ``wall_clock_ms`` is terminal-only (:func:`_wall_clock_ms`).
     """
-    return WfRunUsage(
+    usage = WfRunUsage(
         cost_microusd=children.cost_microusd,
         input_tokens=children.input_tokens,
         output_tokens=children.output_tokens,
@@ -529,13 +539,24 @@ def _run_usage(run: WfRun, children: wf_queries.RunChildrenUsage) -> WfRunUsage:
         iteration_count=None,
         wall_clock_ms=_wall_clock_ms(run),
     )
+    return (
+        WfRunUsage.model_validate({**usage.model_dump(), **attributed.model_dump()})
+        if attributed is not None
+        else usage
+    )
 
 
 async def get_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
         run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
         children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
-        return run.model_copy(update={"usage": _run_usage(run, children)})
+        attributed = await accounting_queries.usage_for_node(
+            conn,
+            UsageNodeRef(kind="run", id=run.id),
+            account_id=account_id,
+            window_seconds=DEFAULT_USAGE_WINDOW_SECONDS,
+        )
+        return run.model_copy(update={"usage": _run_usage(run, children, attributed)})
 
 
 async def archive_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
@@ -549,7 +570,13 @@ async def archive_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) 
     async with pool.acquire() as conn:
         run = await wf_queries.archive_run(conn, run_id, account_id=account_id)
         children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
-        return run.model_copy(update={"usage": _run_usage(run, children)})
+        attributed = await accounting_queries.usage_for_node(
+            conn,
+            UsageNodeRef(kind="run", id=run.id),
+            account_id=account_id,
+            window_seconds=DEFAULT_USAGE_WINDOW_SECONDS,
+        )
+        return run.model_copy(update={"usage": _run_usage(run, children, attributed)})
 
 
 async def list_runs(
@@ -579,7 +606,20 @@ async def list_runs(
         usage_by_run = await wf_queries.runs_children_usage(
             conn, [r.id for r in runs], account_id=account_id
         )
-        return [r.model_copy(update={"usage": _run_usage(r, usage_by_run[r.id])}) for r in runs]
+        attributed_by_run = await accounting_queries.usage_for_nodes(
+            conn,
+            [UsageNodeRef(kind="run", id=run.id) for run in runs],
+            account_id=account_id,
+            window_seconds=DEFAULT_USAGE_WINDOW_SECONDS,
+        )
+        return [
+            r.model_copy(
+                update={
+                    "usage": _run_usage(r, usage_by_run[r.id], attributed_by_run[("run", r.id)])
+                }
+            )
+            for r in runs
+        ]
 
 
 async def list_run_events(

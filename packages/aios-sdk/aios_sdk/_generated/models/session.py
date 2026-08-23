@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..models.session_stop_reason_type_0 import SessionStopReasonType0
     from ..models.session_usage import SessionUsage
     from ..models.trigger_echo import TriggerEcho
+    from ..models.usage_node_ref import UsageNodeRef
 
 
 T = TypeVar("T", bound="Session")
@@ -57,7 +58,12 @@ class Session:
             awaiting (list[AwaitingToolCall] | Unset):
             obligations (list[Obligation] | Unset):
             vault_ids (list[str] | Unset):
-            usage (SessionUsage | Unset): Cumulative token usage across all model calls in a session.
+            usage (SessionUsage | Unset): Session inference usage, with backward-compatible own counters.
+
+                The flat counters retain their historical self-only meaning.  New clients
+                should use ``own`` and ``subtree``; those fields cross session/run creation
+                boundaries transitively and include archived descendants.
+            usage_parent (None | Unset | UsageNodeRef):
             resources (list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset):
             triggers (list[TriggerEcho] | Unset):
             created_by (Actor | None | Unset):
@@ -88,6 +94,7 @@ class Session:
     obligations: list[Obligation] | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     usage: SessionUsage | Unset = UNSET
+    usage_parent: None | Unset | UsageNodeRef = UNSET
     resources: list[GithubRepositoryResourceEcho | MemoryStoreResourceEcho] | Unset = (
         UNSET
     )
@@ -110,6 +117,7 @@ class Session:
         from ..models.actor import Actor
         from ..models.memory_store_resource_echo import MemoryStoreResourceEcho
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
+        from ..models.usage_node_ref import UsageNodeRef
 
         id = self.id
 
@@ -167,6 +175,14 @@ class Session:
         usage: dict[str, Any] | Unset = UNSET
         if not isinstance(self.usage, Unset):
             usage = self.usage.to_dict()
+
+        usage_parent: dict[str, Any] | None | Unset
+        if isinstance(self.usage_parent, Unset):
+            usage_parent = UNSET
+        elif isinstance(self.usage_parent, UsageNodeRef):
+            usage_parent = self.usage_parent.to_dict()
+        else:
+            usage_parent = self.usage_parent
 
         resources: list[dict[str, Any]] | Unset = UNSET
         if not isinstance(self.resources, Unset):
@@ -264,6 +280,8 @@ class Session:
             field_dict["vault_ids"] = vault_ids
         if usage is not UNSET:
             field_dict["usage"] = usage
+        if usage_parent is not UNSET:
+            field_dict["usage_parent"] = usage_parent
         if resources is not UNSET:
             field_dict["resources"] = resources
         if triggers is not UNSET:
@@ -304,6 +322,7 @@ class Session:
         from ..models.session_stop_reason_type_0 import SessionStopReasonType0
         from ..models.session_usage import SessionUsage
         from ..models.trigger_echo import TriggerEcho
+        from ..models.usage_node_ref import UsageNodeRef
 
         d = dict(src_dict)
         id = d.pop("id")
@@ -391,6 +410,23 @@ class Session:
             usage = UNSET
         else:
             usage = SessionUsage.from_dict(_usage)
+
+        def _parse_usage_parent(data: object) -> None | Unset | UsageNodeRef:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                usage_parent_type_0 = UsageNodeRef.from_dict(data)
+
+                return usage_parent_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UsageNodeRef, data)
+
+        usage_parent = _parse_usage_parent(d.pop("usage_parent", UNSET))
 
         _resources = d.pop("resources", UNSET)
         resources: (
@@ -536,6 +572,7 @@ class Session:
             obligations=obligations,
             vault_ids=vault_ids,
             usage=usage,
+            usage_parent=usage_parent,
             resources=resources,
             triggers=triggers,
             created_by=created_by,
