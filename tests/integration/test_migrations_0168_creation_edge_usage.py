@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from typing import cast
 
 import asyncpg
 import pytest
@@ -74,8 +75,11 @@ async def _execute(db_url: str, sql: str) -> None:
 async def _creator(db_url: str, session_id: str) -> str | None:
     conn = await asyncpg.connect(db_url)
     try:
-        return await conn.fetchval(
-            "SELECT creator_session_id FROM sessions WHERE id = $1", session_id
+        return cast(
+            "str | None",
+            await conn.fetchval(
+                "SELECT creator_session_id FROM sessions WHERE id = $1", session_id
+            ),
         )
     finally:
         await conn.close()
