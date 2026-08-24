@@ -225,6 +225,9 @@ class WfRun(BaseModel):
     # in this run-level meter; the ``budget_usd`` gate is the SUM of this and the
     # child-session rollup (``usage.cost_microusd``). Charged once at the inference site.
     call_llm_cost_microusd: int = 0
+    # False on pre-0168 runs unless an explicit bounded repair later proves the
+    # historical journals complete. Never render unavailable tokens as measured zero.
+    call_llm_tokens_complete: bool = True
     last_event_seq: int
     created_at: datetime
     updated_at: datetime

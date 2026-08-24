@@ -9,6 +9,8 @@ import asyncpg
 from aios.db.queries import accounting as accounting_queries
 from aios.models.accounting import UsageConsumersResponse, UsageMetric
 
+USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS = 5_000
+
 
 async def ranked_consumers(
     pool: asyncpg.Pool[Any],
@@ -20,6 +22,9 @@ async def ranked_consumers(
 ) -> UsageConsumersResponse:
     """Return additive account roots ranked by live subtree rate."""
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        await conn.execute(
+            f"SET LOCAL statement_timeout = '{USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS}ms'"
+        )
         coverage_started_at, total_rate, items = await accounting_queries.ranked_consumers(
             conn,
             account_id=account_id,

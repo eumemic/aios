@@ -12,6 +12,7 @@ from typing import Any
 
 import asyncpg
 
+from aios.errors import AiosError
 from aios.models.accounting import (
     AttributedUsage,
     UsageConsumer,
@@ -30,8 +31,11 @@ _COUNTER_NAMES = (
 )
 
 
-def _counters(row: Any, prefix: str) -> UsageCounters:
-    return UsageCounters(**{name: int(row[f"{prefix}_{name}"] or 0) for name in _COUNTER_NAMES})
+def _counters(row: Any, prefix: str, *, tokens_complete: bool = True) -> UsageCounters:
+    return UsageCounters(
+        **{name: int(row[f"{prefix}_{name}"] or 0) for name in _COUNTER_NAMES},
+        tokens_complete=tokens_complete,
+    )
 
 
 def _rate(counters: UsageCounters, *, window_seconds: int, observed_seconds: int) -> UsageRate:
@@ -53,8 +57,8 @@ def _attributed(row: Any, *, window_seconds: int) -> AttributedUsage:
     own_window = _counters(row, "own_window")
     subtree_window = _counters(row, "subtree_window")
     return AttributedUsage(
-        own=_counters(row, "own"),
-        subtree=_counters(row, "subtree"),
+        own=_counters(row, "own", tokens_complete=bool(row["own_tokens_complete"])),
+        subtree=_counters(row, "subtree", tokens_complete=bool(row["subtree_tokens_complete"])),
         own_rate=_rate(
             own_window, window_seconds=window_seconds, observed_seconds=observed_seconds
         ),
@@ -96,14 +100,14 @@ tree(root_kind, root_id, kind, id) AS (
       ) child ON TRUE
 ),
 node_usage(kind, id, cost_microusd, input_tokens, output_tokens,
-           cache_read_input_tokens, cache_creation_input_tokens) AS (
+           cache_read_input_tokens, cache_creation_input_tokens, tokens_complete) AS (
     SELECT 'session', s.id, s.cost_microusd, s.input_tokens, s.output_tokens,
-           s.cache_read_input_tokens, s.cache_creation_input_tokens
+           s.cache_read_input_tokens, s.cache_creation_input_tokens, TRUE
       FROM sessions s WHERE s.account_id = $3
     UNION ALL
     SELECT 'run', w.id, w.call_llm_cost_microusd, w.call_llm_input_tokens,
            w.call_llm_output_tokens, w.call_llm_cache_read_input_tokens,
-           w.call_llm_cache_creation_input_tokens
+           w.call_llm_cache_creation_input_tokens, w.call_llm_tokens_complete
       FROM wf_runs w WHERE w.account_id = $3
 ),
 window_node(kind, id, cost_microusd, input_tokens, output_tokens,
@@ -124,6 +128,7 @@ totals AS (
            SUM(n.output_tokens)::bigint AS subtree_output_tokens,
            SUM(n.cache_read_input_tokens)::bigint AS subtree_cache_read_input_tokens,
            SUM(n.cache_creation_input_tokens)::bigint AS subtree_cache_creation_input_tokens,
+           BOOL_AND(n.tokens_complete) AS subtree_tokens_complete,
            SUM(COALESCE(wn.cost_microusd, 0))::bigint AS subtree_window_cost_microusd,
            SUM(COALESCE(wn.input_tokens, 0))::bigint AS subtree_window_input_tokens,
            SUM(COALESCE(wn.output_tokens, 0))::bigint AS subtree_window_output_tokens,
@@ -153,11 +158,13 @@ SELECT r.kind AS root_kind, r.id AS root_id,
        own.output_tokens AS own_output_tokens,
        own.cache_read_input_tokens AS own_cache_read_input_tokens,
        own.cache_creation_input_tokens AS own_cache_creation_input_tokens,
+       own.tokens_complete AS own_tokens_complete,
        total.subtree_cost_microusd,
        total.subtree_input_tokens,
        total.subtree_output_tokens,
        total.subtree_cache_read_input_tokens,
        total.subtree_cache_creation_input_tokens,
+       total.subtree_tokens_complete,
        COALESCE(own_window.cost_microusd, 0)::bigint AS own_window_cost_microusd,
        COALESCE(own_window.input_tokens, 0)::bigint AS own_window_input_tokens,
        COALESCE(own_window.output_tokens, 0)::bigint AS own_window_output_tokens,
@@ -233,16 +240,43 @@ def _ranked_consumers_sql(metric: UsageMetric) -> str:
     }[metric]
     return rf"""
 WITH RECURSIVE
+tree(root_kind, root_id, kind, id) AS (
+    SELECT 'session', s.id, 'session', s.id
+      FROM sessions s
+     WHERE s.account_id = $1
+       AND s.creator_session_id IS NULL AND s.creator_run_id IS NULL
+    UNION
+    SELECT 'run', w.id, 'run', w.id
+      FROM wf_runs w
+     WHERE w.account_id = $1
+       AND w.creator_session_id IS NULL AND w.creator_run_id IS NULL
+    UNION
+    SELECT t.root_kind, t.root_id, child.kind, child.id
+      FROM tree t
+      JOIN LATERAL (
+           SELECT 'session'::text AS kind, s.id
+             FROM sessions s
+            WHERE s.account_id = $1
+              AND ((t.kind = 'session' AND s.creator_session_id = t.id)
+                OR (t.kind = 'run' AND s.creator_run_id = t.id))
+           UNION ALL
+           SELECT 'run'::text AS kind, w.id
+             FROM wf_runs w
+            WHERE w.account_id = $1
+              AND ((t.kind = 'session' AND w.creator_session_id = t.id)
+                OR (t.kind = 'run' AND w.creator_run_id = t.id))
+      ) child ON TRUE
+),
 nodes(kind, id, parent_kind, parent_id, label, status, created_at, archived_at,
       cost_microusd, input_tokens, output_tokens, cache_read_input_tokens,
-      cache_creation_input_tokens) AS (
+      cache_creation_input_tokens, tokens_complete) AS (
     SELECT 'session', s.id,
            CASE WHEN s.creator_session_id IS NOT NULL THEN 'session'
                 WHEN s.creator_run_id IS NOT NULL THEN 'run' END,
            COALESCE(s.creator_session_id, s.creator_run_id),
            COALESCE(s.title, s.agent_id, s.id), {_SESSION_STATUS_SQL},
            s.created_at, s.archived_at, s.cost_microusd, s.input_tokens,
-           s.output_tokens, s.cache_read_input_tokens, s.cache_creation_input_tokens
+           s.output_tokens, s.cache_read_input_tokens, s.cache_creation_input_tokens, TRUE
       FROM sessions s WHERE s.account_id = $1
     UNION ALL
     SELECT 'run', w.id,
@@ -252,18 +286,9 @@ nodes(kind, id, parent_kind, parent_id, label, status, created_at, archived_at,
            COALESCE(w.workflow_id, 'inline workflow ' || w.id), w.status,
            w.created_at, w.archived_at, w.call_llm_cost_microusd,
            w.call_llm_input_tokens, w.call_llm_output_tokens,
-           w.call_llm_cache_read_input_tokens, w.call_llm_cache_creation_input_tokens
+           w.call_llm_cache_read_input_tokens, w.call_llm_cache_creation_input_tokens,
+           w.call_llm_tokens_complete
       FROM wf_runs w WHERE w.account_id = $1
-),
-closure(ancestor_kind, ancestor_id, descendant_kind, descendant_id) AS (
-    SELECT n.kind, n.id, n.kind, n.id FROM nodes n
-    UNION
-    SELECT parent.kind, parent.id, c.descendant_kind, c.descendant_id
-      FROM closure c
-      JOIN nodes current
-        ON current.kind = c.ancestor_kind AND current.id = c.ancestor_id
-      JOIN nodes parent
-        ON parent.kind = current.parent_kind AND parent.id = current.parent_id
 ),
 window_node(kind, id, cost_microusd, input_tokens, output_tokens,
             cache_read_input_tokens, cache_creation_input_tokens) AS (
@@ -277,13 +302,14 @@ window_node(kind, id, cost_microusd, input_tokens, output_tokens,
      GROUP BY 1, 2
 ),
 rollup AS (
-    SELECT c.ancestor_kind, c.ancestor_id,
+    SELECT t.root_kind, t.root_id,
            SUM(n.cost_microusd)::bigint AS subtree_cost_microusd,
            SUM(n.input_tokens)::bigint AS subtree_input_tokens,
            SUM(n.output_tokens)::bigint AS subtree_output_tokens,
            SUM(n.cache_read_input_tokens)::bigint AS subtree_cache_read_input_tokens,
            SUM(n.cache_creation_input_tokens)::bigint
                AS subtree_cache_creation_input_tokens,
+           BOOL_AND(n.tokens_complete) AS subtree_tokens_complete,
            SUM(COALESCE(wn.cost_microusd, 0))::bigint
                AS subtree_window_cost_microusd,
            SUM(COALESCE(wn.input_tokens, 0))::bigint
@@ -296,11 +322,11 @@ rollup AS (
                AS subtree_window_cache_read_input_tokens,
            SUM(COALESCE(wn.cache_creation_input_tokens, 0))::bigint
                AS subtree_window_cache_creation_input_tokens
-      FROM closure c
-      JOIN nodes n ON n.kind = c.descendant_kind AND n.id = c.descendant_id
+      FROM tree t
+      JOIN nodes n ON n.kind = t.kind AND n.id = t.id
       LEFT JOIN window_node wn
-        ON wn.kind = c.descendant_kind AND wn.id = c.descendant_id
-     GROUP BY c.ancestor_kind, c.ancestor_id
+        ON wn.kind = t.kind AND wn.id = t.id
+     GROUP BY t.root_kind, t.root_id
 ),
 coverage AS (
     SELECT usage_ledger_started_at AS coverage_started_at,
@@ -320,6 +346,7 @@ rankable AS (
            n.output_tokens AS own_output_tokens,
            n.cache_read_input_tokens AS own_cache_read_input_tokens,
            n.cache_creation_input_tokens AS own_cache_creation_input_tokens,
+           n.tokens_complete AS own_tokens_complete,
            COALESCE(wn.cost_microusd, 0)::bigint AS own_window_cost_microusd,
            COALESCE(wn.input_tokens, 0)::bigint AS own_window_input_tokens,
            COALESCE(wn.output_tokens, 0)::bigint AS own_window_output_tokens,
@@ -327,17 +354,29 @@ rankable AS (
                AS own_window_cache_read_input_tokens,
            COALESCE(wn.cache_creation_input_tokens, 0)::bigint
                AS own_window_cache_creation_input_tokens,
-           coverage.coverage_started_at, coverage.observed_seconds,
            SUM(r.{metric_column}) OVER ()::bigint AS pool_window_metric
       FROM nodes n
-      JOIN rollup r ON r.ancestor_kind = n.kind AND r.ancestor_id = n.id
+      JOIN rollup r ON r.root_kind = n.kind AND r.root_id = n.id
       LEFT JOIN window_node wn ON wn.kind = n.kind AND wn.id = n.id
-      CROSS JOIN coverage
      WHERE n.parent_id IS NULL
+),
+graph_state AS (
+    SELECT (SELECT COUNT(*) FROM nodes) = (SELECT COUNT(*) FROM tree) AS graph_complete,
+           (SELECT COUNT(*) FROM nodes)::bigint AS graph_node_count,
+           (SELECT COUNT(*) FROM tree)::bigint AS graph_traversal_rows
 )
-SELECT * FROM rankable
- ORDER BY {metric_column} DESC, created_at DESC, id DESC
- LIMIT $3
+SELECT ranked.*, coverage.coverage_started_at, coverage.observed_seconds,
+       graph_state.graph_complete, graph_state.graph_node_count,
+       graph_state.graph_traversal_rows
+  FROM graph_state
+  CROSS JOIN coverage
+  LEFT JOIN LATERAL (
+       SELECT * FROM rankable
+        ORDER BY {metric_column} DESC, created_at DESC, id DESC
+        LIMIT $3
+  ) ranked ON TRUE
+ ORDER BY ranked.{metric_column} DESC NULLS LAST,
+          ranked.created_at DESC NULLS LAST, ranked.id DESC NULLS LAST
 """
 
 
@@ -351,6 +390,15 @@ async def ranked_consumers(
 ) -> tuple[datetime, float, list[UsageConsumer]]:
     """Rank additive root consumers by rolling subtree rate in one view."""
     rows = await conn.fetch(_ranked_consumers_sql(metric), account_id, window_seconds, limit)
+    if rows and not bool(rows[0]["graph_complete"]):
+        raise AiosError(
+            "usage creation graph contains a rootless component",
+            detail={
+                "account_id": account_id,
+                "node_count": int(rows[0]["graph_node_count"]),
+                "reachable_count": int(rows[0]["graph_traversal_rows"]),
+            },
+        )
     if rows:
         coverage_started_at = rows[0]["coverage_started_at"]
         observed_seconds = int(rows[0]["observed_seconds"])
@@ -368,10 +416,11 @@ async def ranked_consumers(
             ),
         )
 
-    pool_window = int(rows[0]["pool_window_metric"] or 0) if rows else 0
+    ranked_rows = [row for row in rows if row["id"] is not None]
+    pool_window = int(ranked_rows[0]["pool_window_metric"] or 0) if ranked_rows else 0
     scale = 3600 / max(1, observed_seconds)
     items: list[UsageConsumer] = []
-    for rank, row in enumerate(rows, start=1):
+    for rank, row in enumerate(ranked_rows, start=1):
         usage = _attributed(row, window_seconds=window_seconds)
         window_value = (
             int(row["subtree_window_cost_microusd"])

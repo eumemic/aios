@@ -123,6 +123,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         ),
         default_child_model=row.get("default_child_model"),
         call_llm_cost_microusd=row.get("call_llm_cost_microusd", 0) or 0,
+        call_llm_tokens_complete=bool(row.get("call_llm_tokens_complete", True)),
         last_event_seq=row["last_event_seq"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -871,15 +872,10 @@ async def add_run_call_llm_cost_microusd(
             run_id,
             *deltas,
         )
-        # ``accounts.spent_microusd`` is the canonical all-inference scalar.
-        # Raw workflow inference used to update only the run meter, which made
-        # public usage and spend admission read zero. Keep both projections in
-        # the same transaction so they cannot diverge.
-        await conn.execute(
-            "UPDATE accounts SET spent_microusd = spent_microusd + $1 WHERE id = $2",
-            deltas[4],
-            account_id,
-        )
+        # Migration 0168's wf_runs trigger projects the cost delta into the
+        # canonical account meter in this transaction. Keeping that projection
+        # in the database also covers old workers during rolling cutover and
+        # prevents an old/new application dual-write from charging twice.
 
 
 async def runs_children_usage(

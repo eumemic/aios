@@ -12,7 +12,9 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.db.queries import accounting as accounting_queries
 from aios.db.queries import workflows as wf_queries
+from aios.errors import AiosError
 from aios.models.accounting import UsageNodeRef
+from aios.services import accounting as accounting_service
 from aios.services import sessions as sessions_service
 from aios.services import workflows as workflows_service
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
@@ -275,6 +277,14 @@ async def test_cycle_is_bounded_and_each_node_counts_once(
         )
         assert usage is not None
         assert usage.subtree.cost_microusd == 600
+        with pytest.raises(AiosError, match="rootless component"):
+            await accounting_queries.ranked_consumers(
+                conn,
+                account_id=ACCOUNT,
+                window_seconds=86_400,
+                metric="cost_microusd",
+                limit=1,
+            )
 
 
 async def test_ranked_view_fingers_known_hot_root_in_one_query(
@@ -308,3 +318,70 @@ async def test_ranked_view_fingers_known_hot_root_in_one_query(
         assert consumers[0].id == hot.id
         assert consumers[0].usage.subtree.cost_microusd == 10_000
         assert sum(item.share for item in consumers) == pytest.approx(1.0)
+
+
+async def test_ranked_limit_one_traverses_one_row_per_account_node(
+    accounting_pool: asyncpg.Pool[Any],
+) -> None:
+    root_id, _run_id, child_id, agent_id, environment_id = await _seed_agent_workflow_agent_chain(
+        accounting_pool
+    )
+    depth = 256
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    parent = child_id
+    for index in range(depth):
+        session_id = f"ses_linear_{index:04d}"
+        rows.append(
+            (
+                session_id,
+                agent_id,
+                environment_id,
+                f"/tmp/{session_id}",
+                ACCOUNT,
+                parent,
+            )
+        )
+        parent = session_id
+
+    async with accounting_pool.acquire() as conn:
+        await conn.executemany(
+            "INSERT INTO sessions "
+            "(id, agent_id, environment_id, workspace_volume_path, account_id, "
+            " creator_session_id) VALUES ($1, $2, $3, $4, $5, $6)",
+            rows,
+        )
+        result = await conn.fetch(
+            accounting_queries._ranked_consumers_sql("cost_microusd"),
+            ACCOUNT,
+            86_400,
+            1,
+        )
+        assert len(result) == 1
+        # root + run + child + the deep descendants: the recursive work table
+        # is linear even though the response limit is one.
+        expected_nodes = depth + 3
+        assert int(result[0]["graph_node_count"]) == expected_nodes
+        assert int(result[0]["graph_traversal_rows"]) == expected_nodes
+        assert result[0]["id"] == root_id
+
+
+async def test_ranked_timeout_rolls_back_and_releases_pool_connection(
+    accounting_pool: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _slow_query(conn: asyncpg.Connection[Any], **_kwargs: Any) -> Any:
+        await conn.execute("SELECT pg_sleep(0.05)")
+        raise AssertionError("statement timeout did not fire")
+
+    monkeypatch.setattr(accounting_service, "USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS", 1)
+    monkeypatch.setattr(accounting_queries, "ranked_consumers", _slow_query)
+    with pytest.raises(asyncpg.QueryCanceledError):
+        await accounting_service.ranked_consumers(
+            accounting_pool,
+            account_id=ACCOUNT,
+            window_seconds=86_400,
+            metric="cost_microusd",
+            limit=1,
+        )
+
+    async with accounting_pool.acquire() as conn:
+        assert await conn.fetchval("SELECT 1") == 1

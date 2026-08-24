@@ -15,6 +15,12 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # This revision takes ACCESS EXCLUSIVE locks as it adds columns. Bound how
+    # long deploy waits for old writers and how long the whole repair statement
+    # may run; PostgreSQL rolls the revision back atomically on either timeout.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '5min'")
+
     # One immutable accounting parent per node.  Two nullable typed FKs avoid a
     # polymorphic id with no referential integrity; the XOR check makes the
     # creation graph single-parented (roots leave both NULL).
@@ -128,8 +134,10 @@ def upgrade() -> None:
             "(account_id, creator_run_id) WHERE creator_run_id IS NOT NULL"
         )
 
-    # Raw call_llm() already had a run-level cost meter.  Add its token peers so
-    # a workflow run's own inference is the same complete vector as a session's.
+    # Raw call_llm() already had a run-level cost meter. Add its token peers.
+    # Existing runs start explicitly incomplete: journals may be pruned or
+    # malformed, so zero is not evidence of a measured zero. New runs default
+    # complete because every post-migration writer persists all four counters.
     for column in (
         "call_llm_input_tokens",
         "call_llm_output_tokens",
@@ -140,66 +148,119 @@ def upgrade() -> None:
             f"ALTER TABLE wf_runs ADD COLUMN {column} bigint NOT NULL DEFAULT 0 "
             f"CHECK ({column} >= 0)"
         )
-
-    # Recover historical raw-turn tokens wherever the durable run journal is
-    # still present. The call_started row identifies call_llm unambiguously;
-    # the unique (run_id, call_key, type) memo guarantees one matching result.
-    # Pruned journals cannot supply tokens, so cost remains the exact historical
-    # source of truth for those older runs.
+    op.execute(
+        "ALTER TABLE wf_runs ADD COLUMN call_llm_tokens_complete boolean NOT NULL DEFAULT FALSE"
+    )
+    op.execute("ALTER TABLE wf_runs ALTER COLUMN call_llm_tokens_complete SET DEFAULT TRUE")
     op.execute(r"""
-        UPDATE wf_runs r
-           SET call_llm_input_tokens = history.input_tokens,
-               call_llm_output_tokens = history.output_tokens,
-               call_llm_cache_read_input_tokens = history.cache_read_input_tokens,
-               call_llm_cache_creation_input_tokens = history.cache_creation_input_tokens
-          FROM (
-               SELECT started.run_id,
-                      SUM(CASE WHEN jsonb_typeof(done.payload->'result'->'usage'->'input_tokens')
-                                         = 'number'
-                               THEN (done.payload->'result'->'usage'->>'input_tokens')::bigint
-                               ELSE 0 END)::bigint AS input_tokens,
-                      SUM(CASE WHEN jsonb_typeof(done.payload->'result'->'usage'->'output_tokens')
-                                         = 'number'
-                               THEN (done.payload->'result'->'usage'->>'output_tokens')::bigint
-                               ELSE 0 END)::bigint AS output_tokens,
-                      SUM(CASE WHEN jsonb_typeof(
-                                             done.payload->'result'->'usage'
-                                                 ->'cache_read_input_tokens'
-                                         ) = 'number'
-                               THEN (done.payload->'result'->'usage'
-                                         ->>'cache_read_input_tokens')::bigint
-                               ELSE 0 END)::bigint AS cache_read_input_tokens,
-                      SUM(CASE WHEN jsonb_typeof(
-                                             done.payload->'result'->'usage'
-                                                 ->'cache_creation_input_tokens'
-                                         ) = 'number'
-                               THEN (done.payload->'result'->'usage'
-                                         ->>'cache_creation_input_tokens')::bigint
-                               ELSE 0 END)::bigint AS cache_creation_input_tokens
-                 FROM wf_run_events started
-                 JOIN wf_run_events done
-                   ON done.run_id = started.run_id
-                  AND done.call_key = started.call_key
-                  AND done.type = 'call_result'
-                WHERE started.type = 'call_started'
-                  AND started.payload->>'capability' = 'call_llm'
-                GROUP BY started.run_id
-          ) history
-         WHERE r.id = history.run_id
+        DO $$
+        BEGIN
+            IF to_regclass('_aios_0168_wf_run_usage_archive') IS NOT NULL THEN
+                IF EXISTS (
+                    SELECT 1
+                      FROM _aios_0168_wf_run_usage_archive archived
+                      LEFT JOIN wf_runs r
+                        ON r.id = archived.run_id
+                       AND r.account_id = archived.account_id
+                     WHERE r.id IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'cannot restore archived 0168 run usage: a workflow run is missing';
+                END IF;
+                UPDATE wf_runs r
+                   SET call_llm_input_tokens = a.call_llm_input_tokens,
+                       call_llm_output_tokens = a.call_llm_output_tokens,
+                       call_llm_cache_read_input_tokens = a.call_llm_cache_read_input_tokens,
+                       call_llm_cache_creation_input_tokens = a.call_llm_cache_creation_input_tokens,
+                       call_llm_tokens_complete = a.call_llm_tokens_complete
+                  FROM _aios_0168_wf_run_usage_archive a
+                 WHERE r.id = a.run_id
+                   AND r.account_id = a.account_id;
+                DROP TABLE _aios_0168_wf_run_usage_archive;
+            END IF;
+        END
+        $$
     """)
 
-    # Repair the original workflows-as-models accounting omission: historical
-    # raw call_llm cost lived only on wf_runs, while every public/account limit
-    # read trusts accounts.spent_microusd. Future charges dual-write atomically.
+    # Make the database own the canonical account projection. The trigger is
+    # deliberately installed before historical reconciliation: an old writer
+    # blocked by this migration's table lock resumes after COMMIT and still
+    # dual-writes its delta exactly once. New application writers update only
+    # the run meter, so old/new cutover cannot double-charge the account.
+    op.execute(r"""
+        CREATE FUNCTION _aios_charge_workflow_account_spend() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        DECLARE
+            delta bigint;
+        BEGIN
+            delta := NEW.call_llm_cost_microusd - OLD.call_llm_cost_microusd;
+            IF delta < 0 THEN
+                RAISE EXCEPTION 'wf_runs.call_llm_cost_microusd is append-only';
+            END IF;
+            IF delta > 0 THEN
+                UPDATE accounts
+                   SET spent_microusd = spent_microusd + delta
+                 WHERE id = NEW.account_id;
+            END IF;
+            RETURN NEW;
+        END
+        $$
+    """)
+    op.execute(r"""
+        CREATE TRIGGER wf_runs_charge_account_spend_trg
+        AFTER UPDATE OF call_llm_cost_microusd ON wf_runs
+        FOR EACH ROW
+        WHEN (NEW.call_llm_cost_microusd <> OLD.call_llm_cost_microusd)
+        EXECUTE FUNCTION _aios_charge_workflow_account_spend()
+    """)
+
+    # Historical account repair is safe only when durable meters prove one of
+    # two exact states: account spend equals retained session spend (raw workflow
+    # cost is wholly missing), or it equals session + raw workflow spend (already
+    # repaired). Any other state may contain deleted-session spend or a partial
+    # manual repair; fail closed and require operator reconciliation instead of
+    # silently adding or omitting money.
+    op.execute(r"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                WITH session_meter AS (
+                    SELECT account_id, SUM(cost_microusd)::bigint AS total
+                      FROM sessions GROUP BY account_id
+                ),
+                run_meter AS (
+                    SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
+                      FROM wf_runs GROUP BY account_id
+                )
+                SELECT 1
+                  FROM accounts a
+                  JOIN run_meter r ON r.account_id = a.id AND r.total > 0
+                  LEFT JOIN session_meter s ON s.account_id = a.id
+                 WHERE a.spent_microusd NOT IN (
+                     COALESCE(s.total, 0), COALESCE(s.total, 0) + r.total
+                 )
+            ) THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'ambiguous historical workflow spend; reconcile account meter before 0168',
+                    HINT = 'spent_microusd must equal retained session spend, or retained session plus workflow spend';
+            END IF;
+        END
+        $$
+    """)
     op.execute(r"""
         UPDATE accounts a
-           SET spent_microusd = a.spent_microusd + raw.total_microusd
+           SET spent_microusd = a.spent_microusd + r.total
           FROM (
-               SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total_microusd
-                 FROM wf_runs
-                GROUP BY account_id
-          ) raw
-         WHERE a.id = raw.account_id
+               SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
+                 FROM wf_runs GROUP BY account_id
+          ) r
+          LEFT JOIN (
+               SELECT account_id, SUM(cost_microusd)::bigint AS total
+                 FROM sessions GROUP BY account_id
+          ) s ON s.account_id = r.account_id
+         WHERE a.id = r.account_id
+           AND r.total > 0
+           AND a.spent_microusd = COALESCE(s.total, 0)
     """)
 
     # Rates need deltas, not cumulative rows. Per-account coverage makes a
@@ -207,6 +268,28 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE accounts ADD COLUMN usage_ledger_started_at timestamptz NOT NULL DEFAULT now()"
     )
+    op.execute(r"""
+        DO $$
+        BEGIN
+            IF to_regclass('_aios_0168_account_usage_archive') IS NOT NULL THEN
+                IF EXISTS (
+                    SELECT 1
+                      FROM _aios_0168_account_usage_archive archived
+                      LEFT JOIN accounts a ON a.id = archived.account_id
+                     WHERE a.id IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'cannot restore archived 0168 coverage: an account is missing';
+                END IF;
+                UPDATE accounts a
+                   SET usage_ledger_started_at = archived.usage_ledger_started_at
+                  FROM _aios_0168_account_usage_archive archived
+                 WHERE a.id = archived.account_id;
+                DROP TABLE _aios_0168_account_usage_archive;
+            END IF;
+        END
+        $$
+    """)
     op.execute(r"""
         CREATE TABLE inference_usage_ledger (
             id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -226,6 +309,44 @@ def upgrade() -> None:
             )
         )
     """)
+    op.execute(r"""
+        DO $$
+        BEGIN
+            IF to_regclass('_aios_0168_inference_usage_ledger_archive') IS NOT NULL THEN
+                INSERT INTO inference_usage_ledger (
+                    id,
+                    account_id,
+                    session_id,
+                    run_id,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                    cost_microusd,
+                    occurred_at
+                )
+                OVERRIDING SYSTEM VALUE
+                SELECT id,
+                       account_id,
+                       session_id,
+                       run_id,
+                       input_tokens,
+                       output_tokens,
+                       cache_read_input_tokens,
+                       cache_creation_input_tokens,
+                       cost_microusd,
+                       occurred_at
+                  FROM _aios_0168_inference_usage_ledger_archive;
+                PERFORM setval(
+                    pg_get_serial_sequence('inference_usage_ledger', 'id'),
+                    COALESCE((SELECT MAX(id) FROM inference_usage_ledger), 1),
+                    EXISTS (SELECT 1 FROM inference_usage_ledger)
+                );
+                DROP TABLE _aios_0168_inference_usage_ledger_archive;
+            END IF;
+        END
+        $$
+    """)
     op.execute(
         "CREATE INDEX inference_usage_ledger_session_window_idx "
         "ON inference_usage_ledger (session_id, occurred_at DESC) "
@@ -242,21 +363,48 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE inference_usage_ledger")
-    # ``IF EXISTS`` also makes local iteration safe for databases that briefly
-    # ran the pre-review singleton coverage design of this unreleased revision.
-    op.execute("DROP TABLE IF EXISTS inference_usage_ledger_state")
-    op.execute("ALTER TABLE accounts DROP COLUMN IF EXISTS usage_ledger_started_at")
+    # Older application revisions do not know about the rolling ledger or
+    # token-completeness flag. Archive that evidence instead of deleting it;
+    # a later re-upgrade restores it before accepting new writes. Account spend
+    # remains at its canonical value rather than attempting a lossy subtraction.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '5min'")
+    op.execute("LOCK TABLE wf_runs, accounts, inference_usage_ledger IN ACCESS EXCLUSIVE MODE")
     op.execute(r"""
-        UPDATE accounts a
-           SET spent_microusd = GREATEST(0, a.spent_microusd - raw.total_microusd)
-          FROM (
-               SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total_microusd
-                 FROM wf_runs
-                GROUP BY account_id
-          ) raw
-         WHERE a.id = raw.account_id
+        CREATE TABLE _aios_0168_wf_run_usage_archive AS
+        SELECT id AS run_id,
+               account_id,
+               call_llm_input_tokens,
+               call_llm_output_tokens,
+               call_llm_cache_read_input_tokens,
+               call_llm_cache_creation_input_tokens,
+               call_llm_tokens_complete
+          FROM wf_runs
     """)
+    op.execute(r"""
+        CREATE TABLE _aios_0168_account_usage_archive AS
+        SELECT id AS account_id, usage_ledger_started_at
+          FROM accounts
+    """)
+    op.execute(r"""
+        CREATE TABLE _aios_0168_inference_usage_ledger_archive AS
+        SELECT id,
+               account_id,
+               session_id,
+               run_id,
+               input_tokens,
+               output_tokens,
+               cache_read_input_tokens,
+               cache_creation_input_tokens,
+               cost_microusd,
+               occurred_at
+          FROM inference_usage_ledger
+    """)
+    op.execute("DROP TABLE inference_usage_ledger")
+    op.execute("DROP TRIGGER wf_runs_charge_account_spend_trg ON wf_runs")
+    op.execute("DROP FUNCTION _aios_charge_workflow_account_spend()")
+    op.execute("ALTER TABLE accounts DROP COLUMN usage_ledger_started_at")
+    op.execute("ALTER TABLE wf_runs DROP COLUMN call_llm_tokens_complete")
     for column in reversed(
         (
             "call_llm_input_tokens",
@@ -269,10 +417,8 @@ def downgrade() -> None:
     for table in reversed(("sessions", "wf_runs")):
         op.execute(f"DROP INDEX {table}_creator_run_idx")
         op.execute(f"DROP INDEX {table}_creator_session_idx")
-        op.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_creator_run_account_fk")
-        op.execute(
-            f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_creator_session_account_fk"
-        )
+        op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {table}_creator_run_account_fk")
+        op.execute(f"ALTER TABLE {table} DROP CONSTRAINT {table}_creator_session_account_fk")
     op.execute("ALTER TABLE wf_runs DROP CONSTRAINT wf_runs_creator_not_self_ck")
     op.execute("ALTER TABLE sessions DROP CONSTRAINT sessions_creator_not_self_ck")
     for table in reversed(("sessions", "wf_runs")):

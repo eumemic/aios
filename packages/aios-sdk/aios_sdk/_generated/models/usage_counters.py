@@ -21,6 +21,7 @@ class UsageCounters:
         output_tokens (int | Unset):  Default: 0.
         cache_read_input_tokens (int | Unset):  Default: 0.
         cache_creation_input_tokens (int | Unset):  Default: 0.
+        tokens_complete (bool | Unset):  Default: True.
     """
 
     cost_microusd: int | Unset = 0
@@ -28,6 +29,7 @@ class UsageCounters:
     output_tokens: int | Unset = 0
     cache_read_input_tokens: int | Unset = 0
     cache_creation_input_tokens: int | Unset = 0
+    tokens_complete: bool | Unset = True
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -40,6 +42,8 @@ class UsageCounters:
         cache_read_input_tokens = self.cache_read_input_tokens
 
         cache_creation_input_tokens = self.cache_creation_input_tokens
+
+        tokens_complete = self.tokens_complete
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -54,6 +58,8 @@ class UsageCounters:
             field_dict["cache_read_input_tokens"] = cache_read_input_tokens
         if cache_creation_input_tokens is not UNSET:
             field_dict["cache_creation_input_tokens"] = cache_creation_input_tokens
+        if tokens_complete is not UNSET:
+            field_dict["tokens_complete"] = tokens_complete
 
         return field_dict
 
@@ -70,12 +76,15 @@ class UsageCounters:
 
         cache_creation_input_tokens = d.pop("cache_creation_input_tokens", UNSET)
 
+        tokens_complete = d.pop("tokens_complete", UNSET)
+
         usage_counters = cls(
             cost_microusd=cost_microusd,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
+            tokens_complete=tokens_complete,
         )
 
         usage_counters.additional_properties = d

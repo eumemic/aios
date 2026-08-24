@@ -36,6 +36,7 @@ class UsageCounters(BaseModel):
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    tokens_complete: bool = True
 
     @property
     def total_tokens(self) -> int:

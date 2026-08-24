@@ -19103,6 +19103,11 @@
             "type": "integer",
             "title": "Cache Creation Input Tokens",
             "default": 0
+          },
+          "tokens_complete": {
+            "type": "boolean",
+            "title": "Tokens Complete",
+            "default": true
           }
         },
         "type": "object",
@@ -20235,6 +20240,11 @@
             "type": "integer",
             "title": "Call Llm Cost Microusd",
             "default": 0
+          },
+          "call_llm_tokens_complete": {
+            "type": "boolean",
+            "title": "Call Llm Tokens Complete",
+            "default": true
           },
           "last_event_seq": {
             "type": "integer",
