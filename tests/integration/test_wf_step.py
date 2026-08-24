@@ -1648,7 +1648,9 @@ async def test_return_real_dispatch_appends_result_and_does_not_archive(
             mock.patch("aios.tools.workflow_completion.defer_run_wake", new=AsyncMock()) as wake,
             mock.patch("aios.harness.sweep.defer_wake", new=AsyncMock()),
         ):
-            await tool_dispatch._execute_tool_async(pool, cid, call, account_id="acc_wf")
+            await tool_dispatch._execute_tool_async(
+                pool, cid, call, account_id="acc_wf", exposed_names=frozenset({"return"})
+            )
     finally:
         runtime.inflight_tool_registry = prev_reg
 

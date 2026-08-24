@@ -203,6 +203,7 @@ class TestWorkerResultAfterDeny:
                     "function": {"name": "echo_for_deny_race", "arguments": "{}"},
                 },
                 account_id=account_id,
+                exposed_names=frozenset({"echo_for_deny_race"}),
             )
 
         # The bug: the deny silently lost. Two tool-role events exist
