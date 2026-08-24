@@ -13,6 +13,7 @@ from aios.mcp.schema import (
     mcp_origin_for,
     qualify_mcp_tool_name,
     sanitize_tools_for_provider,
+    uniquify_advertised_tool_names,
 )
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -121,3 +122,122 @@ class TestSanitizeToolsForProvider:
         )
         assert "outputSchema" not in kwargs["tools"][0]["function"]
         assert "outputSchema" in tools[0]["function"]
+
+
+def _fn_envelope(name: str, *, server: str, tool: str) -> dict:
+    return make_function_tool(
+        name,
+        Tool(name=tool, description="", inputSchema={"type": "object"}),
+        origin_server=server,
+        origin_tool=tool,
+    )
+
+
+class TestUniquifyAdvertisedToolNames:
+    def test_already_unique_list_is_same_object(self) -> None:
+        t = Tool(name="search_posts", description="", inputSchema={"type": "object"})
+        catalog, s1, t1 = qualify_mcp_tool_name("x", "search_posts")
+        custom, s2, t2 = qualify_mcp_tool_name("custom_api_x_com_QFZ6ZWJR", "search_posts")
+        tools = [
+            make_function_tool(catalog, t, origin_server=s1, origin_tool=t1),
+            make_function_tool(custom, t, origin_server=s2, origin_tool=t2),
+        ]
+        assert catalog != custom
+        assert uniquify_advertised_tool_names(tools) is tools
+
+    def test_catalog_x_and_leftover_custom_collision(self) -> None:
+        """Production mute: both mounts advertised the same name after sanitize."""
+        collided = "mcp__x__search_posts"
+        tools = [
+            _fn_envelope(collided, server="x", tool="search_posts"),
+            _fn_envelope(collided, server="custom_api_x_com_QFZ6ZWJR", tool="search_posts"),
+        ]
+        out = uniquify_advertised_tool_names(tools)
+        names = [item["function"]["name"] for item in out]
+        assert names[0] == collided
+        assert names[1] != names[0]
+        assert len(names) == len(set(names))
+        assert all(_NAME_RE.match(name) and len(name) <= PROVIDER_TOOL_NAME_MAX for name in names)
+        assert mcp_origin_for(names[0], out) == ("x", "search_posts")
+        assert mcp_origin_for(names[1], out) == ("custom_api_x_com_QFZ6ZWJR", "search_posts")
+        cleaned = sanitize_tools_for_provider(out)
+        assert [item["function"]["name"] for item in cleaned] == names
+
+    def test_sanitized_server_segments_that_qualify_identically(self) -> None:
+        t = Tool(name="search_posts", description="", inputSchema={"type": "object"})
+        a, s1, t1 = qualify_mcp_tool_name("api.x.com", "search_posts")
+        b, s2, t2 = qualify_mcp_tool_name("api_x_com", "search_posts")
+        assert a == b == "mcp__api_x_com__search_posts"
+        tools = [
+            make_function_tool(a, t, origin_server=s1, origin_tool=t1),
+            make_function_tool(b, t, origin_server=s2, origin_tool=t2),
+        ]
+        out = uniquify_advertised_tool_names(tools)
+        names = [item["function"]["name"] for item in out]
+        assert names[0] == a
+        assert names[1] != names[0]
+        assert all(_NAME_RE.match(name) and len(name) <= PROVIDER_TOOL_NAME_MAX for name in names)
+        assert mcp_origin_for(names[0], out) == (s1, t1)
+        assert mcp_origin_for(names[1], out) == (s2, t2)
+
+    def test_sixty_four_char_cap_collision(self) -> None:
+        collided = "n" * PROVIDER_TOOL_NAME_MAX
+        tools = [
+            _fn_envelope(collided, server="server_one", tool="long_tool"),
+            _fn_envelope(collided, server="server_two", tool="long_tool"),
+        ]
+        out = uniquify_advertised_tool_names(tools)
+        names = [item["function"]["name"] for item in out]
+        assert names[0] == collided
+        assert names[1] != names[0]
+        assert all(_NAME_RE.match(name) and len(name) <= PROVIDER_TOOL_NAME_MAX for name in names)
+        assert mcp_origin_for(names[0], out) == ("server_one", "long_tool")
+        assert mcp_origin_for(names[1], out) == ("server_two", "long_tool")
+
+    def test_sanitize_uniquifies_even_without_prior_origin_rewrite(self) -> None:
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__x__search_posts",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__x__search_posts",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                },
+            },
+        ]
+        cleaned = sanitize_tools_for_provider(tools)
+        names = [item["function"]["name"] for item in cleaned]
+        assert names[0] == "mcp__x__search_posts"
+        assert names[1] != names[0]
+        assert all(_NAME_RE.match(name) and len(name) <= PROVIDER_TOOL_NAME_MAX for name in names)
+        assert cleaned is not tools
+
+    def test_build_kwargs_never_sends_duplicate_names(self) -> None:
+        collided = "mcp__x__search_posts"
+        tools = [
+            _fn_envelope(collided, server="x", tool="search_posts"),
+            _fn_envelope(collided, server="custom_api_x_com_QFZ6ZWJR", tool="search_posts"),
+        ]
+        unique = uniquify_advertised_tool_names(tools)
+        kwargs = _build_litellm_kwargs(
+            model="anthropic/claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=unique,
+            auth=None,
+            extra=None,
+            session_id=None,
+            stream=False,
+        )
+        names = [item["function"]["name"] for item in kwargs["tools"]]
+        assert len(names) == len(set(names))
+        assert all(_NAME_RE.match(name) for name in names)
