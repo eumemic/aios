@@ -600,16 +600,23 @@ class TestDiscoverSessionMcpTools:
         assert pool.drain_degraded_events() == []
 
     async def _emit_for(
-        self, agent: Any, pending: list[tuple[str, str | None, str]]
+        self,
+        agent: Any,
+        pending: list[tuple[str, str | None, str]],
+        pool: Any = None,
     ) -> list[dict[str, Any]]:
-        """Drive the prelude with pre-seeded DOWN edges; return emitted events."""
+        """Drive the prelude with pre-seeded DOWN edges; return emitted events.
+
+        ``pool`` lets a caller supply one already armed through the real breaker
+        path, for edges that carry an owner.
+        """
         from unittest.mock import MagicMock
 
         from aios.harness import runtime
         from aios.harness.loop import discover_session_mcp_tools
         from aios.mcp.pool import McpSessionPool
 
-        pool = McpSessionPool()
+        pool = pool if pool is not None else McpSessionPool()
         pool._pending_degraded_events.extend(pending)
         emitted: list[dict[str, Any]] = []
 
@@ -672,6 +679,24 @@ class TestDiscoverSessionMcpTools:
             [("https://someone-elses/mcp", "vlt_other", ""), ("https://mine/mcp", None, "")],
         )
         assert [e["server"] for e in events] == ["mine"]
+
+    async def test_edge_from_a_since_removed_mount_reports_under_its_own_name(self) -> None:
+        """An attributed edge records the mount name that produced it. The agent
+        surface can change between arming and delivery, so that name need not be
+        in the CURRENT surface — the edge still describes a real transition and
+        must report under the name it happened as, not crash the prelude looking
+        the name back up."""
+        from aios.mcp.pool import McpSessionPool, degraded_edge_owner
+
+        pool = McpSessionPool()
+        with degraded_edge_owner("sess_x", "removed"):
+            pool.mark_unhealthy("https://old/mcp", "vlt_gone", "", backoff_s=60)
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="current", url="https://current/mcp")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="current")],
+        )
+        events = await self._emit_for(agent, [], pool=pool)
+        assert [(e["server"], e["url"]) for e in events] == [("removed", "https://old/mcp")]
 
     async def test_colliding_server_tool_names_are_uniquified(self) -> None:
         """Two servers advertising the same function.name stay dispatchable."""

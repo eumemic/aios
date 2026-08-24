@@ -2131,14 +2131,13 @@ async def discover_session_mcp_tools(
             if (url, vault_id) not in attributed_identities
         ]
         for down_url, _down_vault_id, mount_name in owned_edges:
-            owner = next(spec for spec in servers if spec.name == mount_name)
             await sessions_service.append_event(
                 pool,
                 session_id,
                 "span",
                 {
                     "event": "mcp_server_unavailable",
-                    "server": owner.name,
+                    "server": mount_name,
                     "url": down_url,
                     "is_error": False,
                 },
