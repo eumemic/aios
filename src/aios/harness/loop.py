@@ -2109,7 +2109,9 @@ async def discover_session_mcp_tools(
                     },
                     account_id=account_id,
                 )
-    return tools, instructions_by_server
+    from aios.mcp.schema import uniquify_advertised_tool_names
+
+    return uniquify_advertised_tool_names(tools), instructions_by_server
 
 
 async def _dispatch_confirmed_tools(

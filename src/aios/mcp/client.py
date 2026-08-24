@@ -583,12 +583,11 @@ async def discover_mcp_tools(
     tools: list[dict[str, Any]] = []
     for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
         advertised, origin_server, origin_tool = qualify_mcp_tool_name(server_name, tool.name)
-        origin = (
-            {"origin_server": origin_server, "origin_tool": origin_tool}
-            if advertised != f"mcp__{server_name}__{tool.name}"
-            else {}
+        tools.append(
+            make_function_tool(
+                advertised, tool, origin_server=origin_server, origin_tool=origin_tool
+            )
         )
-        tools.append(make_function_tool(advertised, tool, **origin))
     if _pool is not None and binding_id is not None:
         # Cache the freshly-discovered result so the next step (same binding
         # identity, no list_changed) serves it without a list_tools() RPC (#1391).
