@@ -282,18 +282,23 @@ class McpSessionPool:
         # rotation) also reset it. So the count is truly *consecutive*: any
         # intervening success breaks the streak.
         self._failure_count: dict[_PoolKey, int] = {}
-        # URLs whose breaker is currently OPEN, keyed by url. Backs
-        # :meth:`degraded_servers` and dedupes the ``mcp_server_unavailable``
+        # Keys whose breaker is currently OPEN. Backs :meth:`degraded_servers` /
+        # :meth:`degraded_identities` and dedupes the ``mcp_server_unavailable``
         # observability event to the DOWN transition (the breaker's open edge),
         # not every failure while it stays open (#1698).
-        self._degraded_urls: set[str] = set()
-        # DOWN-transition edges (URLs) recorded since the last drain. The
-        # breaker arms in ``acquire``/discovery — code with no session context —
-        # so it records the edge here; a caller WITH session context
+        #
+        # Keyed by ``_PoolKey``, not by url, because the breaker it reports on is
+        # (#2233). Two mounts of one url pinned to different vaults are different
+        # identities with different circuits: one failing must not report the
+        # other degraded to the model.
+        self._degraded_keys: set[_PoolKey] = set()
+        # DOWN-transition edges recorded since the last drain. The breaker arms
+        # in ``acquire``/discovery — code with no session context — so it records
+        # the edge here; a caller WITH session context
         # (``discover_session_mcp_tools``) drains this via
         # :meth:`drain_degraded_events` and emits exactly one durable
         # ``mcp_server_unavailable`` session event per edge (#1698 (e)).
-        self._pending_degraded_events: list[str] = []
+        self._pending_degraded_events: list[_PoolKey] = []
 
     def _condition_for(self, key: _PoolKey) -> asyncio.Condition:
         cond = self._conditions.get(key)
@@ -738,12 +743,8 @@ class McpSessionPool:
             return False
         # At/over threshold: (re)open the circuit for the cooldown window.
         self._unhealthy_until[key] = time.monotonic() + _BREAKER_UNHEALTHY_BACKOFF_S
-        transitioned_down = url not in self._degraded_urls
-        self._degraded_urls.add(url)
+        transitioned_down = self._mark_degraded(key)
         if transitioned_down:
-            # Record the edge for a session-context caller to emit exactly one
-            # durable ``mcp_server_unavailable`` event (#1698 (e)).
-            self._pending_degraded_events.append(url)
             log.warning(
                 "mcp_pool.breaker_opened",
                 url=url,
@@ -752,17 +753,53 @@ class McpSessionPool:
             )
         return transitioned_down
 
-    def drain_degraded_events(self) -> list[str]:
-        """Pop and return the DOWN-transition URLs recorded since the last drain.
+    def _mark_degraded(self, key: _PoolKey) -> bool:
+        """Mark ``key`` degraded; return True only on the DOWN edge.
+
+        The SINGLE writer to the degraded set, and the single place the edge is
+        derived — the two must not be separated, which is exactly how the
+        discovery path used to emit no event at all. The edge was derived from
+        set membership in :meth:`_record_connect_failure`, but
+        :meth:`mark_unhealthy` seeded the set with a bare ``add`` and no edge
+        accounting; the discovery leg calls ``note_discovery_failure`` *then*
+        ``mark_unhealthy``, so the set was already seeded by failure #1 and the
+        edge test was False forever after — ``mcp_server_unavailable`` never
+        fired for a discovery failure. Routing both through here makes "entered
+        the degraded set" and "is an edge" the same event by construction.
+        """
+        if key in self._degraded_keys:
+            return False
+        self._degraded_keys.add(key)
+        # Record the edge for a session-context caller to emit exactly one
+        # durable ``mcp_server_unavailable`` event (#1698 (e)).
+        self._pending_degraded_events.append(key)
+        return True
+
+    def drain_degraded_events(self) -> list[tuple[str, str | None]]:
+        """Pop and return the DOWN-transition identities since the last drain.
 
         A session-context caller (the per-turn discovery prelude) calls this and
-        emits one durable ``mcp_server_unavailable`` session event per URL, so
-        each breaker DOWN edge surfaces exactly once regardless of which path
+        emits one durable ``mcp_server_unavailable`` session event per identity,
+        so each breaker DOWN edge surfaces exactly once regardless of which path
         (connect vs discovery) armed it (#1698 (e)).
+
+        Projects each ``_PoolKey`` to ``(url, vault_id)``: the pool's public
+        degraded surface speaks identity, while ``headers_key`` stays an internal
+        transport detail. Consumers match it against a spec with
+        :meth:`~aios.models.agents.McpServerSpec.matches_resolved_identity`.
         """
-        drained = self._pending_degraded_events
+        drained = [(key[0], key[1]) for key in self._pending_degraded_events]
         self._pending_degraded_events = []
         return drained
+
+    def degraded_identities(self) -> set[tuple[str, str | None]]:
+        """``(url, vault_id)`` for every currently-OPEN breaker.
+
+        The level view behind :meth:`drain_degraded_events`' edge view, for a
+        caller rendering current state (the prompt's degraded-server line)
+        rather than reacting to a transition.
+        """
+        return {(key[0], key[1]) for key in self._degraded_keys}
 
     def note_discovery_failure(self, url: str, vault_id: str | None, headers_key: str) -> bool:
         """Record a discovery-path failure against the shared breaker (#1698).
@@ -787,33 +824,35 @@ class McpSessionPool:
         """Open the circuit for this transport key for ``backoff_s`` seconds.
 
         Retained for the discovery retry path that forces the window open
-        directly. Also marks the URL degraded so it surfaces in
-        :meth:`degraded_servers`; the DOWN-transition event is emitted off the
-        counter path (:meth:`note_discovery_failure`), so this returns nothing.
+        directly. Marks the key degraded through the shared
+        :meth:`_mark_degraded` recorder — the discovery leg reaches here BEFORE
+        its failure counter hits K, so this is where that path's DOWN edge is
+        born; routing it through the recorder rather than a bare ``add`` is what
+        makes the edge fire at all.
         """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until[key] = (now if now is not None else time.monotonic()) + backoff_s
-        self._degraded_urls.add(url)
+        self._mark_degraded(key)
         log.warning("mcp_pool.marked_unhealthy", url=url, backoff_s=backoff_s)
 
     def mark_healthy(self, url: str, vault_id: str | None, headers_key: str) -> None:
         """Clear backoff + failure counter for this key (a successful connect).
 
         Resets the consecutive-failure counter so the breaker re-arms from zero,
-        clears any open window, and drops the URL from ``_degraded_urls`` unless
-        another key on the same URL is still open — a successful re-probe
-        re-closes the circuit (AC #4).
+        clears any open window, and drops THIS key from the degraded set — a
+        successful re-probe re-closes the circuit (AC #4).
+
+        The discard is unconditional. Gating it on "no other key on this url is
+        still open" would mean a mount that just proved itself healthy stays
+        reported degraded because a *different identity* at the same url is
+        down — the same cross-identity bleed this granularity exists to remove,
+        pointed the other way. The coarse view (:meth:`degraded_servers`) is
+        derived, so it still drops the url once every key on it has healed.
         """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until.pop(key, None)
         self._failure_count.pop(key, None)
-        if not self._url_has_open_breaker(url):
-            self._degraded_urls.discard(url)
-
-    def _url_has_open_breaker(self, url: str) -> bool:
-        """True if any key on ``url`` still has an unexpired backoff window."""
-        now = time.monotonic()
-        return any(k[0] == url and until > now for k, until in self._unhealthy_until.items())
+        self._degraded_keys.discard(key)
 
     def _clear_breaker_by_vault(self, vault_id: str) -> None:
         """Drop breaker state (window + counter) for every key on ``vault_id``.
@@ -826,19 +865,24 @@ class McpSessionPool:
             del self._unhealthy_until[key]
         for key in [k for k in self._failure_count if k[1] == vault_id]:
             del self._failure_count[key]
-        # A URL with no remaining open key on any vault leaves the degraded set.
-        self._degraded_urls = {u for u in self._degraded_urls if self._url_has_open_breaker(u)}
+        # Only the rotated vault's keys heal. Filtering instead on "has no open
+        # window" would also clear keys whose cooldown merely lapsed, and a
+        # lapsed cooldown is deliberately NOT a heal (see :meth:`is_unhealthy`).
+        self._degraded_keys = {k for k in self._degraded_keys if k[1] != vault_id}
 
     def degraded_servers(self) -> list[str]:
         """Return the URLs whose breaker is currently OPEN (#1698 (e)).
 
+        The url-level projection of :meth:`degraded_identities`, kept for
+        in-process introspection and tests. Prefer ``degraded_identities`` where
+        two mounts may share a url: this view cannot tell them apart.
+
         This is an in-memory, per-worker accessor (reflecting only THIS worker's
-        breaker state, not persisted) for tests and in-process introspection; the
-        wired external artifact the ops-agent consumes is the durable
-        ``mcp_server_unavailable`` session event emitted on the breaker's DOWN
-        edge (see :meth:`drain_degraded_events`), not this accessor.
+        breaker state, not persisted); the wired external artifact the ops-agent
+        consumes is the durable ``mcp_server_unavailable`` session event emitted
+        on the breaker's DOWN edge (see :meth:`drain_degraded_events`).
         """
-        return sorted(self._degraded_urls)
+        return sorted({key[0] for key in self._degraded_keys})
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
         """Close idle entries unused longer than ``idle_timeout`` seconds.

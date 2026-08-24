@@ -453,6 +453,11 @@ class TestDiscoverSessionMcpTools:
         # Mark the slow server's transport key unhealthy (as a prior discovery
         # timeout would). vault_id is None here (resolve mocked to no-cred).
         pool.mark_unhealthy("https://mcp.slow", None, _headers_key(None), backoff_s=60.0)
+        # That DOWN edge belongs to the earlier turn we are simulating, not to
+        # this one — a real prior turn would already have drained and emitted it.
+        # Under test it is the skip that matters, so drop it rather than let it
+        # land in this prelude's event emission.
+        pool.drain_degraded_events()
 
         discovered: list[str] = []
 
@@ -554,8 +559,8 @@ class TestDiscoverSessionMcpTools:
         )
 
         pool = McpSessionPool()
-        # Simulate the breaker having recorded a DOWN edge for this url.
-        pool._pending_degraded_events.append("https://mcp.down")
+        # Simulate the breaker having recorded a DOWN edge for this identity.
+        pool._pending_degraded_events.append(("https://mcp.down", None, ""))
 
         async def _discover(*_a: Any, **_k: Any) -> tuple[list[dict[str, Any]], str | None]:
             return [], None

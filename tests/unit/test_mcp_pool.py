@@ -882,9 +882,53 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "v", EMPTY_KEY, {})
             drained = pool.drain_degraded_events()
-            assert drained == [URL], "exactly one DOWN edge despite repeated failures"
+            assert drained == [(URL, "v")], "exactly one DOWN edge despite repeated failures"
             # A second drain is empty (deduped).
             assert pool.drain_degraded_events() == []
+
+    def test_discovery_path_emits_exactly_one_down_edge(self) -> None:
+        """#2233: the discovery leg's DOWN edge must actually fire.
+
+        ``discover_mcp_tools``' retry leg calls ``note_discovery_failure`` and
+        then ``mark_unhealthy``. When the degraded set had a second writer, the
+        ``mark_unhealthy`` on failure #1 seeded it before the counter ever
+        reached K, so the edge test in the counter path was False forever and
+        ``mcp_server_unavailable`` never fired for a discovery failure at all.
+        Drives the two calls in the client's real order.
+        """
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD
+
+        pool = McpSessionPool()
+        for _ in range(_BREAKER_FAILURE_THRESHOLD + 2):
+            pool.note_discovery_failure(URL, "v", EMPTY_KEY)
+            pool.mark_unhealthy(URL, "v", EMPTY_KEY, backoff_s=60.0)
+        assert pool.drain_degraded_events() == [(URL, "v")]
+        assert pool.drain_degraded_events() == []
+
+    def test_one_identity_healing_does_not_clear_its_same_url_sibling(self) -> None:
+        """#2233: two mounts of one url pinned to different vaults are separate
+        circuits in BOTH directions.
+
+        The sibling's window is deliberately left UNEXPIRED — with an expired
+        one the assertion passes even under a url-gated discard, so the test
+        would not discriminate.
+        """
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_work", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_home", EMPTY_KEY, backoff_s=60.0)
+        assert pool.degraded_identities() == {(URL, "vlt_work"), (URL, "vlt_home")}
+
+        pool.mark_healthy(URL, "vlt_work", EMPTY_KEY)
+        assert pool.is_unhealthy(URL, "vlt_home", EMPTY_KEY), "sibling window must still be open"
+        # The healed mount is gone; only the still-open sibling remains.
+        assert pool.degraded_identities() == {(URL, "vlt_home")}
+        # The coarse url view is derived, so the url stays listed while any key
+        # on it is open.
+        assert pool.degraded_servers() == [URL]
+
+        pool.mark_healthy(URL, "vlt_home", EMPTY_KEY)
+        assert pool.degraded_identities() == set()
+        assert pool.degraded_servers() == []
 
     async def test_breaker_reprobes_after_cooldown_and_recloses_on_success(self) -> None:
         """AC #4: after the cooldown the key re-probes; a successful acquire

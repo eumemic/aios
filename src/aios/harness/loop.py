@@ -2098,22 +2098,31 @@ async def discover_session_mcp_tools(
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
-        down_urls = _pool.drain_degraded_events()
-        if down_urls:
-            url_to_name = {s.url: s.name for s in agent.mcp_servers}
-            for down_url in down_urls:
-                await sessions_service.append_event(
-                    pool,
-                    session_id,
-                    "span",
-                    {
-                        "event": "mcp_server_unavailable",
-                        "server": url_to_name.get(down_url, down_url),
-                        "url": down_url,
-                        "is_error": False,
-                    },
-                    account_id=account_id,
-                )
+        down_identities = _pool.drain_degraded_events()
+        for down_url, down_vault_id in down_identities:
+            # Attribute the edge to the mount that owns that identity. Keying by
+            # url alone was last-wins across same-url mounts, so the event could
+            # name a mount whose credential is perfectly healthy (#2233).
+            owner = next(
+                (
+                    s
+                    for s in agent.mcp_servers
+                    if s.matches_resolved_identity(down_url, down_vault_id)
+                ),
+                None,
+            )
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "mcp_server_unavailable",
+                    "server": owner.name if owner is not None else down_url,
+                    "url": down_url,
+                    "is_error": False,
+                },
+                account_id=account_id,
+            )
     from aios.mcp.schema import uniquify_advertised_tool_names
 
     return uniquify_advertised_tool_names(tools), instructions_by_server
