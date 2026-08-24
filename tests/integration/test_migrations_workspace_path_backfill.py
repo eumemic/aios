@@ -8,7 +8,7 @@ provision time, lands outside the workspace jail, and surfaces
 ``ForbiddenError`` on every tool call.  Migration 0057 backfills the legacy
 rows to absolute by prepending the operator-supplied ``AIOS_WORKSPACE_ROOT``.
 
-These tests exercise the real alembic CLI against a fresh Postgres for each
+These tests run the real alembic chain against a fresh database for each
 case so each migration run gets an isolated ``alembic_version`` and
 ``sessions`` table.
 """
@@ -16,56 +16,21 @@ case so each migration run gets an isolated ``alembic_version`` and
 from __future__ import annotations
 
 import asyncio
-import os
-import shutil
 import subprocess
-from collections.abc import Iterator
-from pathlib import Path
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 
 def _run_alembic_with_env(
     args: list[str], db_url: str, *, workspace_root: str
 ) -> subprocess.CompletedProcess[str]:
-    """Like ``_run_alembic`` but also threads ``AIOS_WORKSPACE_ROOT`` through.
-
-    The 0057 migration reads ``AIOS_WORKSPACE_ROOT`` to know the prefix it
-    should prepend to legacy relative paths.  ``test_migrations._run_alembic``
-    starts from a clean env (only ``PATH`` / ``AIOS_DB_URL`` / ``HOME``) so we
-    can't reuse it directly.
-    """
-    uv = shutil.which("uv")
-    if uv is None:
-        raise FileNotFoundError("uv not found on PATH")
-    return subprocess.run(
-        [uv, "run", "alembic", *args],
-        cwd=PROJECT_ROOT,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
-            "AIOS_DB_URL": db_url,
-            "AIOS_WORKSPACE_ROOT": workspace_root,
-            "HOME": str(Path.home()),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    """``run_alembic`` with ``AIOS_WORKSPACE_ROOT`` threaded through — the
+    0057 migration reads it as the prefix for legacy relative paths."""
+    return run_alembic(args, db_url, extra_env={"AIOS_WORKSPACE_ROOT": workspace_root})
 
 
 async def _list_workspace_paths(db_url: str) -> list[tuple[str, str]]:
@@ -146,10 +111,10 @@ async def _seed_session(db_url: str, *, session_id: str, workspace_volume_path: 
 
 @needs_docker
 @pytest.mark.integration
-def test_relative_path_rewritten_to_absolute(postgres: object) -> None:
+def test_relative_path_rewritten_to_absolute(migration_db_url: str) -> None:
     """A row with ``workspaces/acc/sess`` is rewritten by 0057 to
     ``<AIOS_WORKSPACE_ROOT>/acc/sess`` with no other changes."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     workspace_root = "/var/lib/aios/workspaces"
 
     # Upgrade only as far as 0056 so we can seed the legacy state.
@@ -174,11 +139,11 @@ def test_relative_path_rewritten_to_absolute(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_absolute_paths_untouched(postgres: object) -> None:
+def test_absolute_paths_untouched(migration_db_url: str) -> None:
     """Rows whose ``workspace_volume_path`` is already absolute must be
     left alone.  The migration's ``WHERE`` clause filters on
     ``NOT LIKE '/%'`` so an absolute path never matches."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     workspace_root = "/var/lib/aios/workspaces"
 
     result = _run_alembic_with_env(["upgrade", "0056"], db_url, workspace_root=workspace_root)
@@ -196,7 +161,7 @@ def test_absolute_paths_untouched(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_migration_is_idempotent(postgres: object) -> None:
+def test_migration_is_idempotent(migration_db_url: str) -> None:
     """``upgrade -> downgrade -> upgrade`` converges on the same absolute path.
 
     Idempotency here means "the migration is reversible and re-applicable":
@@ -206,7 +171,7 @@ def test_migration_is_idempotent(postgres: object) -> None:
     protects a hypothetical ``upgrade -> upgrade`` against double-prefixing
     is exercised indirectly: it's what ensures a re-application produces a
     stable result rather than compounding.)"""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     workspace_root = "/var/lib/aios/workspaces"
 
     result = _run_alembic_with_env(["upgrade", "0056"], db_url, workspace_root=workspace_root)
@@ -238,10 +203,10 @@ def test_migration_is_idempotent(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_reverses_rewrite(postgres: object) -> None:
+def test_downgrade_reverses_rewrite(migration_db_url: str) -> None:
     """``downgrade 0056`` strips the prepended ``AIOS_WORKSPACE_ROOT`` prefix
     so the row returns to its original relative form."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     workspace_root = "/var/lib/aios/workspaces"
 
     result = _run_alembic_with_env(["upgrade", "0056"], db_url, workspace_root=workspace_root)

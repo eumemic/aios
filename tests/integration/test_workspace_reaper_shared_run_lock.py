@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -301,24 +303,26 @@ async def test_reaper_lock_survives_real_to_thread_delete(
     key = queries.workspace_advisory_lock_key(queries.normalized_workspace_path(path))
     owner = await asyncpg.connect(migrated_db_url)
     contender = await asyncpg.connect(migrated_db_url)
-    thread_entered = asyncio.Event()
-    release_thread = asyncio.Event()
+    # threading.Event, not asyncio.Event: both events are touched from the
+    # worker thread, and asyncio.Event is not thread-safe — a foreign-thread
+    # ``set()`` enqueues the waiter's wakeup without stirring the parked
+    # selector, which stalled this test ~300 s per run until unrelated
+    # socket activity happened to wake the loop.
+    thread_entered = threading.Event()
+    release_thread = threading.Event()
 
     def slow_delete() -> None:
         thread_entered.set()
-        # Prove the event loop remains free while the filesystem operation waits.
-        while not release_thread.is_set():
-            import time
-
-            time.sleep(0.005)
-        import shutil
-
+        # Hold the deletion open until the loop-side assertions have run;
+        # a plain blocking wait here leaves the event loop entirely free.
+        if not release_thread.wait(timeout=30):
+            raise TimeoutError("loop never released the deletion thread")
         shutil.rmtree(target)
 
     try:
         await owner.execute("SELECT pg_advisory_lock($1::bigint)", key)
         delete_task = asyncio.create_task(asyncio.to_thread(slow_delete))
-        await thread_entered.wait()
+        assert await asyncio.to_thread(thread_entered.wait, 30)
         blocked = asyncio.create_task(contender.execute("SELECT pg_advisory_lock($1::bigint)", key))
         await asyncio.sleep(0.05)
         assert not blocked.done(), "separate backend entered during to_thread deletion"

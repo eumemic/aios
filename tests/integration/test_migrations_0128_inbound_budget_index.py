@@ -13,7 +13,7 @@ plan whose scan node over ``events`` is an index scan on the new index rather
 than a ``Seq Scan``. On master (no index) the EXPLAIN assertion fails with a
 ``Seq Scan`` — this is the master-failing pin.
 
-Mirrors the testcontainer-Postgres shape of
+Mirrors the migration-test shape of
 ``test_migrations_0097_unique_tool_result.py`` and the ``EXPLAIN (FORMAT
 JSON)`` plan-shape assertion style of ``tests/e2e/test_sweep_perf.py``.
 """
@@ -22,14 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # A minimal account/agent/env/session chain so admitted-inbound ``role=user``
 # events (and a wake-bearing lifecycle) have a session to hang off. The two
@@ -91,17 +90,6 @@ WHERE account_id = $1
 _INDEX_NAME = "events_inbound_budget_idx"
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -128,10 +116,10 @@ def _collect_nodes(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
 
 @needs_docker
 @pytest.mark.integration
-def test_clean_database_creates_inbound_budget_index(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_clean_database_creates_inbound_budget_index(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
     indexdef = asyncio.run(
@@ -152,14 +140,14 @@ def test_clean_database_creates_inbound_budget_index(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_count_query_uses_index_not_seq_scan(postgres: object) -> None:
+def test_count_query_uses_index_not_seq_scan(migration_db_url: str) -> None:
     """The master-failing pin: EXPLAIN of the exact ``_count_recent_inbounds``
     query must seek the new index over ``events``, never a ``Seq Scan``. On
     master (no index) the only ``events`` scan is a ``Seq Scan`` and this
     assertion fails."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL + _EVENTS_SQL))
 

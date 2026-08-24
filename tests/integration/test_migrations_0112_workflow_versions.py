@@ -11,13 +11,12 @@ Covers the two halves the migration must get right:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # Two pre-existing workflows at different versions (0075-era in-place updates: the
 # head survives on the row, older snapshots are gone). The backfill snapshots the
@@ -29,16 +28,6 @@ INSERT INTO workflows (id, account_id, name, version, script)
 VALUES ('wf_a', 'acc_root', 'alpha', 1, 'SCRIPT_A'),
        ('wf_b', 'acc_root', 'beta', 5, 'SCRIPT_B');
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _fetch(db_url: str, sql: str, *args: object) -> list[asyncpg.Record]:
@@ -60,14 +49,14 @@ async def _execute(db_url: str, sql: str, *args: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_backfill_snapshots_each_workflow_head(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_backfill_snapshots_each_workflow_head(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0111"], db_url)
+    up = run_alembic(["upgrade", "0111"], db_url)
     assert up.returncode == 0, f"upgrade to 0111 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0112"], db_url)
+    up = run_alembic(["upgrade", "0112"], db_url)
     assert up.returncode == 0, f"upgrade to 0112 failed:\n{up.stderr}\n{up.stdout}"
 
     rows = asyncio.run(
@@ -87,10 +76,10 @@ def test_backfill_snapshots_each_workflow_head(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_version_rows_are_insert_only(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_version_rows_are_insert_only(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0112"], db_url)
+    up = run_alembic(["upgrade", "0112"], db_url)
     assert up.returncode == 0, f"upgrade to 0112 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
     asyncio.run(
@@ -113,11 +102,11 @@ def test_version_rows_are_insert_only(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_drops_table_and_constraint(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_downgrade_drops_table_and_constraint(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    assert _run_alembic(["upgrade", "0112"], db_url).returncode == 0
-    down = _run_alembic(["downgrade", "0111"], db_url)
+    assert run_alembic(["upgrade", "0112"], db_url).returncode == 0
+    down = run_alembic(["downgrade", "0111"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
 
     exists = asyncio.run(_fetch(db_url, "SELECT to_regclass('public.workflow_versions') AS t"))

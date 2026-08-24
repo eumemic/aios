@@ -2,66 +2,18 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-from collections.abc import Iterator
-from pathlib import Path
-
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-@pytest.fixture(scope="module")
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
-def _alembic_url(pg: object) -> str:
-    """Return the connection URL alembic env.py expects."""
-    from testcontainers.postgres import PostgresContainer
-
-    assert isinstance(pg, PostgresContainer)
-    host = pg.get_container_host_ip()
-    port = pg.get_exposed_port(5432)
-    user = pg.username
-    password = pg.password
-    db = pg.dbname
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
-
-
-def _run_alembic(args: list[str], db_url: str) -> subprocess.CompletedProcess[str]:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise FileNotFoundError("uv not found on PATH")
-    return subprocess.run(
-        [uv, "run", "alembic", *args],
-        cwd=PROJECT_ROOT,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
-            "AIOS_DB_URL": db_url,
-            "HOME": str(Path.home()),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 
 @needs_docker
 @pytest.mark.integration
-def test_migration_creates_all_tables(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    result = _run_alembic(["upgrade", "head"], db_url)
+def test_migration_creates_all_tables(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    result = run_alembic(["upgrade", "head"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
     # Now connect with asyncpg and verify all 5 tables + key indexes exist.

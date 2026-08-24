@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 _CHAIN_SQL = """
 INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
@@ -32,17 +31,6 @@ VALUES ('sess_a', 'vault_b', 0, 'acc_a');
 """
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres; each test mutates alembic_version."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -53,24 +41,24 @@ async def _execute(db_url: str, sql: str) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_clean_database_upgrades_to_composite_fk_backstop(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_clean_database_upgrades_to_composite_fk_backstop(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
 
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
 
 @needs_docker
 @pytest.mark.integration
-def test_legacy_cross_tenant_session_vault_fails_validation(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_legacy_cross_tenant_session_vault_fails_validation(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0092"], db_url)
+    up = run_alembic(["upgrade", "0092"], db_url)
     assert up.returncode == 0, f"upgrade to 0092 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL + _LEGACY_CROSS_TENANT_SESSION_VAULT_SQL))
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
 
     assert up.returncode != 0, f"upgrade should have failed loud:\n{up.stdout}"
     output = up.stderr + up.stdout

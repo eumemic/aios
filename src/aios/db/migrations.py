@@ -12,20 +12,37 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, TextIO
 from unittest import mock
 
+if TYPE_CHECKING:
+    from alembic.config import Config
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def alembic_config(*, stdout: TextIO | None = None) -> Config:
+    """Alembic ``Config`` bound to the repo's ``alembic.ini`` + ``migrations/``.
+
+    The one home for where the migration ladder lives on disk — shared by
+    :func:`upgrade_to_head` and the test-side runner
+    (``tests/helpers/alembic.py``) so the two cannot drift.
+    """
+    from alembic.config import Config
+
+    cfg = Config(
+        str(_REPO_ROOT / "alembic.ini"), stdout=stdout if stdout is not None else sys.stdout
+    )
+    cfg.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
+    return cfg
 
 
 def upgrade_to_head(db_url: str) -> None:
     """In-process equivalent of ``alembic upgrade head`` against ``db_url``."""
     from alembic import command
-    from alembic.config import Config
 
-    cfg = Config(str(_REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(_REPO_ROOT / "migrations"))
     with mock.patch.dict(os.environ, {"AIOS_DB_URL": db_url}):
-        command.upgrade(cfg, "head")
+        command.upgrade(alembic_config(), "head")
 
 
 async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> None:

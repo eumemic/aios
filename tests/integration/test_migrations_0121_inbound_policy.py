@@ -14,21 +14,20 @@ out of their own agent. These tests pin:
   leak into this connection's AllowList, and LIKE metacharacters are escaped;
 * a zero-history connection backfills fail-closed (NULL → resolves to DenyAll).
 
-Each test mutates ``alembic_version`` / seeds rows, so the container is
-function-scoped. Modeled on tests/integration/test_migrations_0108_*.
+Each test mutates ``alembic_version`` / seeds rows, so each test gets its
+own database. Modeled on tests/integration/test_migrations_0108_*.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # FK chain to head, then seed connections + chat_sessions + events at revision
 # 0120 (one BELOW our migration) so the 0120→0121 upgrade runs the backfill over
@@ -92,16 +91,6 @@ _EVENTS_SQL = (
 )
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -123,35 +112,35 @@ async def _fetch_policy(db_url: str, connection_id: str) -> object:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
+def test_upgrade_and_clean_downgrade_round_trip(migration_db_url: str) -> None:
     """0121 upgrades and downgrades cleanly with zero connection rows."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0121"], db_url)
+    up = run_alembic(["upgrade", "0121"], db_url)
     assert up.returncode == 0, f"upgrade to 0121 failed:\n{up.stderr}\n{up.stdout}"
 
-    down = _run_alembic(["downgrade", "0120"], db_url)
+    down = run_alembic(["downgrade", "0120"], db_url)
     assert down.returncode == 0, f"downgrade to 0120 failed:\n{down.stderr}\n{down.stdout}"
 
 
 @needs_docker
 @pytest.mark.integration
-def test_backfill_unions_ledger_and_slash_safe_history(postgres: object) -> None:
+def test_backfill_unions_ledger_and_slash_safe_history(migration_db_url: str) -> None:
     """The backfill writes an AllowList that is the UNION of the ledger and the
     slash-safe events scan, scoped to the connection's own prefix; a
     zero-history connection stays NULL (→ DenyAll)."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
     # Seed at 0120 (one below our migration) so the 0120→0121 upgrade backfills
     # over pre-existing rows.
-    up120 = _run_alembic(["upgrade", "0120"], db_url)
+    up120 = run_alembic(["upgrade", "0120"], db_url)
     assert up120.returncode == 0, f"upgrade to 0120 failed:\n{up120.stderr}\n{up120.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _CONNECTIONS_SQL))
     asyncio.run(_execute(db_url, _CHAT_SESSIONS_SQL))
     asyncio.run(_execute(db_url, _EVENTS_SQL))
 
-    up121 = _run_alembic(["upgrade", "0121"], db_url)
+    up121 = run_alembic(["upgrade", "0121"], db_url)
     assert up121.returncode == 0, f"upgrade to 0121 failed:\n{up121.stderr}\n{up121.stdout}"
 
     signal_policy = asyncio.run(_fetch_policy(db_url, "conn_signal"))

@@ -5,20 +5,19 @@ downgrade refusal once a ``wake_session`` row exists, that a ``wake_session``
 row INSERTs under the new CHECK and is REJECTED under the old, and that every
 pre-existing action kind still inserts under the new CHECK.
 
-Each test mutates ``alembic_version``, so the container is function-scoped.
+Each test mutates ``alembic_version``, so each test gets its own database.
 Modeled on tests/integration/test_migrations_0086_triggers_slice2.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # FK chain for seeding a trigger row at head (NOT-NULL-without-default columns).
 _CHAIN_SQL = """
@@ -47,17 +46,6 @@ VALUES
 """
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -81,26 +69,28 @@ async def _insert_raises(db_url: str, sql: str) -> bool:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
+def test_upgrade_and_clean_downgrade_round_trip(migration_db_url: str) -> None:
     """With zero wake_session rows, 0107 upgrades and downgrades cleanly."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0107"], db_url)
+    up = run_alembic(["upgrade", "0107"], db_url)
     assert up.returncode == 0, f"upgrade to 0107 failed:\n{up.stderr}\n{up.stdout}"
 
-    down = _run_alembic(["downgrade", "0106"], db_url)
+    down = run_alembic(["downgrade", "0106"], db_url)
     assert down.returncode == 0, f"downgrade to 0106 failed:\n{down.stderr}\n{down.stdout}"
 
 
 @needs_docker
 @pytest.mark.integration
-def test_wake_session_row_accepted_under_new_check_rejected_under_old(postgres: object) -> None:
+def test_wake_session_row_accepted_under_new_check_rejected_under_old(
+    migration_db_url: str,
+) -> None:
     """A wake_session row INSERTs at head (0107) and is rejected at the prior
     revision (0106) — the CHECK swap is what makes the kind representable."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
     # Under 0106 (prior head) the row is unrepresentable: ELSE false.
-    up106 = _run_alembic(["upgrade", "0106"], db_url)
+    up106 = run_alembic(["upgrade", "0106"], db_url)
     assert up106.returncode == 0, f"upgrade to 0106 failed:\n{up106.stderr}\n{up106.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     assert asyncio.run(_insert_raises(db_url, _WAKE_SESSION_ROW_SQL)), (
@@ -108,18 +98,18 @@ def test_wake_session_row_accepted_under_new_check_rejected_under_old(postgres: 
     )
 
     # Under 0107 the same row inserts.
-    up107 = _run_alembic(["upgrade", "0107"], db_url)
+    up107 = run_alembic(["upgrade", "0107"], db_url)
     assert up107.returncode == 0, f"upgrade to 0107 failed:\n{up107.stderr}\n{up107.stdout}"
     asyncio.run(_execute(db_url, _WAKE_SESSION_ROW_SQL))
 
 
 @needs_docker
 @pytest.mark.integration
-def test_every_prior_kind_still_inserts_under_new_check(postgres: object) -> None:
+def test_every_prior_kind_still_inserts_under_new_check(migration_db_url: str) -> None:
     """The four pre-existing branches stay byte-identical, so every prior
     action kind still inserts under the 0107 CHECK."""
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0107"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0107"], db_url)
     assert up.returncode == 0, f"upgrade to 0107 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
 
@@ -165,16 +155,16 @@ def test_every_prior_kind_still_inserts_under_new_check(postgres: object) -> Non
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_refuses_wake_session_rows(postgres: object) -> None:
+def test_downgrade_refuses_wake_session_rows(migration_db_url: str) -> None:
     """A wake_session row is unrepresentable under the prior predicate, so the
     downgrade fails hard and rolls back (the 0086 stance)."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0107"], db_url)
+    up = run_alembic(["upgrade", "0107"], db_url)
     assert up.returncode == 0, f"upgrade to 0107 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _WAKE_SESSION_ROW_SQL))
 
-    down = _run_alembic(["downgrade", "0106"], db_url)
+    down = run_alembic(["downgrade", "0106"], db_url)
     assert down.returncode != 0, f"downgrade should have failed loud:\n{down.stdout}"
     assert "cannot downgrade" in down.stderr

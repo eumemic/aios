@@ -9,7 +9,6 @@ target's historical or future subtree spend to that caller.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import cast
 
@@ -17,8 +16,8 @@ import asyncpg
 import psycopg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 _SEED_SQL = r"""
 INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
@@ -54,16 +53,6 @@ VALUES
      '"caller":{"kind":"session","id":"ses_caller_0169","awaited":true}}'::jsonb,
      'acc_0169');
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:
@@ -155,14 +144,14 @@ async def _workflow_spend_watermark(db_url: str) -> tuple[int, int, int]:
 
 @needs_docker
 @pytest.mark.integration
-def test_backfill_does_not_infer_creation_from_archive_when_idle(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_backfill_does_not_infer_creation_from_archive_when_idle(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0166"], db_url)
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode == 0, f"upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
 
     # The invocation-only edge remains unowned even though the target opted
@@ -178,10 +167,10 @@ def test_backfill_does_not_infer_creation_from_archive_when_idle(postgres: objec
     [(0, 0), (100, 100), (50, 50)],
 )
 def test_historical_workflow_spend_is_reconciled_exactly_once(
-    postgres: object, *, spent_microusd: int, accounted_microusd: int
+    migration_db_url: str, *, spent_microusd: int, accounted_microusd: int
 ) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(
         _seed_workflow_spend(
@@ -190,11 +179,11 @@ def test_historical_workflow_spend_is_reconciled_exactly_once(
             run_cost_microusd=100,
         )
     )
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend_watermark(db_url, accounted_microusd))
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode == 0, f"upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
     assert asyncio.run(_account_spend(db_url)) == 100
     assert asyncio.run(_workflow_spend_watermark(db_url)) == (
@@ -218,12 +207,12 @@ def test_historical_workflow_spend_is_reconciled_exactly_once(
 
 @needs_docker
 @pytest.mark.integration
-def test_old_writer_commit_across_migration_snapshot_is_not_lost(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+def test_old_writer_commit_across_migration_snapshot_is_not_lost(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend(db_url, spent_microusd=0, run_cost_microusd=100))
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend_watermark(db_url, 0))
 
@@ -234,7 +223,7 @@ def test_old_writer_commit_across_migration_snapshot_is_not_lost(postgres: objec
             "UPDATE wf_runs SET call_llm_cost_microusd = "
             "call_llm_cost_microusd + 40 WHERE id = 'run_spend_0169'"
         )
-        future = executor.submit(_run_alembic, ["upgrade", "0169"], db_url)
+        future = executor.submit(run_alembic, ["upgrade", "0169"], db_url)
         assert not future.done()
         writer.commit()
         up = future.result(timeout=30)
@@ -246,15 +235,15 @@ def test_old_writer_commit_across_migration_snapshot_is_not_lost(postgres: objec
 
 @needs_docker
 @pytest.mark.integration
-def test_missing_workflow_spend_watermark_fails_closed(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+def test_missing_workflow_spend_watermark_fails_closed(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend(db_url, spent_microusd=50, run_cost_microusd=100))
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode != 0
     assert "missing workflow spend accounting watermark" in up.stderr
     assert asyncio.run(_account_spend(db_url)) == 50
@@ -262,16 +251,16 @@ def test_missing_workflow_spend_watermark_fails_closed(postgres: object) -> None
 
 @needs_docker
 @pytest.mark.integration
-def test_workflow_spend_watermark_above_retained_cost_fails_closed(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+def test_workflow_spend_watermark_above_retained_cost_fails_closed(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend(db_url, spent_microusd=101, run_cost_microusd=100))
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend_watermark(db_url, 101))
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode != 0
     assert "workflow spend accounting watermark exceeds retained run cost" in up.stderr
     assert asyncio.run(_account_spend(db_url)) == 101
@@ -279,18 +268,18 @@ def test_workflow_spend_watermark_above_retained_cost_fails_closed(postgres: obj
 
 @needs_docker
 @pytest.mark.integration
-def test_coincidental_aggregate_equality_does_not_fake_provenance(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+def test_coincidental_aggregate_equality_does_not_fake_provenance(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     # The existing 100 is unrelated spend. Its equality with the retained run
     # meter proves nothing about whether that run was charged.
     asyncio.run(_seed_workflow_spend(db_url, spent_microusd=100, run_cost_microusd=100))
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend_watermark(db_url, 0))
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode == 0, f"upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
     assert asyncio.run(_account_spend(db_url)) == 200
     assert asyncio.run(_workflow_spend_watermark(db_url)) == (100, 100, 100)
@@ -299,10 +288,10 @@ def test_coincidental_aggregate_equality_does_not_fake_provenance(postgres: obje
 @needs_docker
 @pytest.mark.integration
 def test_historical_tokens_are_incomplete_and_downgrade_is_lossless(
-    postgres: object,
+    migration_db_url: str,
 ) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0166"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0166"], db_url)
     assert up.returncode == 0, f"upgrade to 0166 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend(db_url, spent_microusd=0, run_cost_microusd=100))
     asyncio.run(
@@ -315,10 +304,10 @@ def test_historical_tokens_are_incomplete_and_downgrade_is_lossless(
             ' \'{"result":{"usage":{"input_tokens":"17"}}}\'::jsonb)',
         )
     )
-    up = _run_alembic(["upgrade", "0168"], db_url)
+    up = run_alembic(["upgrade", "0168"], db_url)
     assert up.returncode == 0, f"upgrade to 0168 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_seed_workflow_spend_watermark(db_url, 0))
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode == 0, f"upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
 
     async def _usage_state() -> tuple[tuple[int, int, bool], int, object]:
@@ -364,7 +353,7 @@ def test_historical_tokens_are_incomplete_and_downgrade_is_lossless(
     before_downgrade = asyncio.run(_usage_state())
     assert before_downgrade[:2] == ((17, 9, False), 23)
 
-    down = _run_alembic(["downgrade", "0166"], db_url)
+    down = run_alembic(["downgrade", "0166"], db_url)
     assert down.returncode == 0, f"downgrade to 0166 failed:\n{down.stderr}\n{down.stdout}"
 
     async def _archived_state() -> tuple[tuple[int, int, bool], int, int, int]:
@@ -404,7 +393,7 @@ def test_historical_tokens_are_incomplete_and_downgrade_is_lossless(
 
     assert asyncio.run(_archived_state()) == ((17, 9, False), 23, 100, 100)
 
-    up = _run_alembic(["upgrade", "0169"], db_url)
+    up = run_alembic(["upgrade", "0169"], db_url)
     assert up.returncode == 0, f"re-upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
     restored = asyncio.run(_usage_state())
     assert restored[:2] == ((17, 9, False), 23)
