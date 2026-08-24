@@ -1,7 +1,7 @@
 """Creation-edge inference accounting and rolling usage ledger.
 
 Revision ID: 0168
-Revises: 0166
+Revises: 0167
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0168"
-down_revision = "0166"
+down_revision = "0167"
 branch_labels = None
 depends_on = None
 
@@ -20,6 +20,7 @@ def upgrade() -> None:
     # may run; PostgreSQL rolls the revision back atomically on either timeout.
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("SET LOCAL statement_timeout = '5min'")
+    op.execute("LOCK TABLE workflow_spend_accounting_watermarks IN ACCESS EXCLUSIVE MODE")
 
     # One immutable accounting parent per node.  Two nullable typed FKs avoid a
     # polymorphic id with no referential integrity; the XOR check makes the
@@ -201,6 +202,20 @@ def upgrade() -> None:
                 UPDATE accounts
                    SET spent_microusd = spent_microusd + delta
                  WHERE id = NEW.account_id;
+                INSERT INTO workflow_spend_accounting_watermarks AS watermark (
+                    account_id,
+                    accounted_run_cost_microusd,
+                    last_observed_run_cost_microusd,
+                    last_applied_delta_microusd,
+                    reconciled_at
+                ) VALUES (NEW.account_id, delta, delta, delta, now())
+                ON CONFLICT (account_id) DO UPDATE
+                    SET accounted_run_cost_microusd =
+                            watermark.accounted_run_cost_microusd + delta,
+                        last_observed_run_cost_microusd =
+                            watermark.accounted_run_cost_microusd + delta,
+                        last_applied_delta_microusd = delta,
+                        reconciled_at = now();
             END IF;
             RETURN NEW;
         END
@@ -214,53 +229,72 @@ def upgrade() -> None:
         EXECUTE FUNCTION _aios_charge_workflow_account_spend()
     """)
 
-    # Historical account repair is safe only when durable meters prove one of
-    # two exact states: account spend equals retained session spend (raw workflow
-    # cost is wholly missing), or it equals session + raw workflow spend (already
-    # repaired). Any other state may contain deleted-session spend or a partial
-    # manual repair; fail closed and require operator reconciliation instead of
-    # silently adding or omitting money.
+    # Aggregate equality cannot prove which historical workflow charges were
+    # already counted: unrelated/manual spend and deleted sessions can produce
+    # the same scalar. Revision 0167 therefore requires an operator-declared
+    # watermark for every account with retained workflow cost. Reconcile only
+    # the unaccounted delta, then advance the watermark atomically. The trigger
+    # above maintains the same provenance for every post-migration charge.
     op.execute(r"""
         DO $$
         BEGIN
             IF EXISTS (
-                WITH session_meter AS (
-                    SELECT account_id, SUM(cost_microusd)::bigint AS total
-                      FROM sessions GROUP BY account_id
-                ),
-                run_meter AS (
+                WITH run_meter AS (
                     SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
                       FROM wf_runs GROUP BY account_id
                 )
                 SELECT 1
-                  FROM accounts a
-                  JOIN run_meter r ON r.account_id = a.id AND r.total > 0
-                  LEFT JOIN session_meter s ON s.account_id = a.id
-                 WHERE a.spent_microusd NOT IN (
-                     COALESCE(s.total, 0), COALESCE(s.total, 0) + r.total
-                 )
+                  FROM run_meter r
+                  LEFT JOIN workflow_spend_accounting_watermarks watermark
+                    ON watermark.account_id = r.account_id
+                 WHERE r.total > 0 AND watermark.account_id IS NULL
             ) THEN
                 RAISE EXCEPTION USING
-                    MESSAGE = 'ambiguous historical workflow spend; reconcile account meter before 0168',
-                    HINT = 'spent_microusd must equal retained session spend, or retained session plus workflow spend';
+                    MESSAGE = 'missing workflow spend accounting watermark before 0168',
+                    HINT = 'at revision 0167, explicitly record how much retained workflow cost is already represented in each account meter';
+            END IF;
+            IF EXISTS (
+                WITH run_meter AS (
+                    SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
+                      FROM wf_runs GROUP BY account_id
+                )
+                SELECT 1
+                  FROM workflow_spend_accounting_watermarks watermark
+                  LEFT JOIN run_meter r ON r.account_id = watermark.account_id
+                 WHERE watermark.accounted_run_cost_microusd > COALESCE(r.total, 0)
+            ) THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'workflow spend accounting watermark exceeds retained run cost',
+                    HINT = 'correct the operator-declared watermark at revision 0167 before retrying 0168';
             END IF;
         END
         $$
     """)
     op.execute(r"""
         UPDATE accounts a
-           SET spent_microusd = a.spent_microusd + r.total
+           SET spent_microusd = a.spent_microusd
+               + r.total - watermark.accounted_run_cost_microusd
           FROM (
                SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
                  FROM wf_runs GROUP BY account_id
           ) r
-          LEFT JOIN (
-               SELECT account_id, SUM(cost_microusd)::bigint AS total
-                 FROM sessions GROUP BY account_id
-          ) s ON s.account_id = r.account_id
+          JOIN workflow_spend_accounting_watermarks watermark
+            ON watermark.account_id = r.account_id
          WHERE a.id = r.account_id
            AND r.total > 0
-           AND a.spent_microusd = COALESCE(s.total, 0)
+    """)
+    op.execute(r"""
+        UPDATE workflow_spend_accounting_watermarks watermark
+           SET last_applied_delta_microusd =
+                   r.total - watermark.accounted_run_cost_microusd,
+               accounted_run_cost_microusd = r.total,
+               last_observed_run_cost_microusd = r.total,
+               reconciled_at = now()
+          FROM (
+               SELECT account_id, SUM(call_llm_cost_microusd)::bigint AS total
+                 FROM wf_runs GROUP BY account_id
+          ) r
+         WHERE watermark.account_id = r.account_id
     """)
 
     # Rates need deltas, not cumulative rows. Per-account coverage makes a
