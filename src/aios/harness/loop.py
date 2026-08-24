@@ -2044,9 +2044,9 @@ async def discover_session_mcp_tools(
             hkey = _headers_key(spec.headers)
             # A cached result is always served (cheap, no RPC) even while the
             # circuit is open; only an uncached discovery is short-circuited.
-            if _pool.get_cached_tools(spec.url, vault_id, hkey, binding_id) is None and (
-                _pool.is_unhealthy(spec.url, vault_id, hkey)
-            ):
+            if _pool.get_cached_tools(
+                spec.url, vault_id, hkey, binding_id, server_name=spec.name
+            ) is None and (_pool.is_unhealthy(spec.url, vault_id, hkey)):
                 raise TimeoutError(
                     f"MCP server {spec.name!r} discovery skipped: "
                     f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"

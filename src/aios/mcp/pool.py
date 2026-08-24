@@ -246,15 +246,26 @@ class McpSessionPool:
         # the leak fix.
         self._close_tasks: set[asyncio.Task[None]] = set()
         # Discovered-tool-list result cache (#1391). Keyed on
-        # ``(_PoolKey, binding_id)`` where ``binding_id`` is the caller's
-        # binding identity (agent id + version, or the frozen-surface hash) —
-        # the precondition that makes the tool set static across steps. Caches
-        # the FULL ``(tools, instructions)`` discovery result so the per-step
-        # prelude no longer re-pays a ``list_tools()`` RPC every turn ("connection
-        # reuse" was never "result reuse"). Invalidated on a binding-identity
-        # change (a new key never hits) or a ``tools/list_changed`` notification
-        # (which drops every binding's entry for the affected _PoolKey).
-        self._tool_cache: dict[tuple[_PoolKey, str], tuple[list[Any], str | None]] = {}
+        # ``(_PoolKey, binding_id, server_name)`` where ``binding_id`` is the
+        # caller's binding identity (agent id + version, or the frozen-surface
+        # hash) — the precondition that makes the tool set static across steps.
+        # Caches the FULL ``(tools, instructions)`` discovery result so the
+        # per-step prelude no longer re-pays a ``list_tools()`` RPC every turn
+        # ("connection reuse" was never "result reuse"). Invalidated on a
+        # binding-identity change (a new key never hits) or a
+        # ``tools/list_changed`` notification (which drops every binding's entry
+        # for the affected _PoolKey).
+        #
+        # ``server_name`` is part of the key because the cached VALUE depends on
+        # it: tools are stored already namespaced as ``mcp__<server_name>__*``,
+        # and the cache is consulted before the calling mount's name is used. Two
+        # mounts of one url on one agent would otherwise share an entry and the
+        # second would serve the first's namespace — the mechanism behind the
+        # duplicate-advertised-name failure #2230 muted at the naming layer.
+        # Distinct pins (#2233) already split the key via ``vault_id``; the name
+        # closes it for unpinned and legacy double mounts too, and restores the
+        # property that the key determines the value.
+        self._tool_cache: dict[tuple[_PoolKey, str, str], tuple[list[Any], str | None]] = {}
         # Per-_PoolKey circuit breaker (#1391). When discovery times out or the
         # transport fails, the key is marked unhealthy until ``unhealthy_until``
         # (monotonic seconds) so the next prelude SKIPS it fast instead of
@@ -623,18 +634,29 @@ class McpSessionPool:
     # ── tool-list result cache (#1391) ────────────────────────────────────
 
     def get_cached_tools(
-        self, url: str, vault_id: str | None, headers_key: str, binding_id: str
+        self,
+        url: str,
+        vault_id: str | None,
+        headers_key: str,
+        binding_id: str,
+        *,
+        server_name: str,
     ) -> tuple[list[Any], str | None] | None:
-        """Return the cached ``(tools, instructions)`` for this binding, or ``None``.
+        """Return the cached ``(tools, instructions)`` for this mount, or ``None``.
 
         The cache key folds the transport identity (``_PoolKey``) together with
-        the caller's ``binding_id`` (agent id + version, or frozen-surface hash).
-        A binding-identity bump (agent-version change) therefore lands on a fresh
-        key and misses — propagating the new tool set to the next step with no
-        explicit invalidation (#1391 staleness guard).
+        the caller's ``binding_id`` (agent id + version, or frozen-surface hash)
+        and the mount's ``server_name``. A binding-identity bump (agent-version
+        change) therefore lands on a fresh key and misses — propagating the new
+        tool set to the next step with no explicit invalidation (#1391 staleness
+        guard) — and two mounts of one url never share an entry (#2233).
+
+        ``server_name`` is keyword-only: it was added to an existing positional
+        signature, so a missed call site fails loudly instead of silently binding
+        some other argument.
         """
         key: _PoolKey = (url, vault_id, headers_key)
-        return self._tool_cache.get((key, binding_id))
+        return self._tool_cache.get((key, binding_id, server_name))
 
     def set_cached_tools(
         self,
@@ -644,10 +666,12 @@ class McpSessionPool:
         binding_id: str,
         tools: list[Any],
         instructions: str | None,
+        *,
+        server_name: str,
     ) -> None:
-        """Cache a successful ``(tools, instructions)`` discovery for this binding."""
+        """Cache a successful ``(tools, instructions)`` discovery for this mount."""
         key: _PoolKey = (url, vault_id, headers_key)
-        self._tool_cache[(key, binding_id)] = (tools, instructions)
+        self._tool_cache[(key, binding_id, server_name)] = (tools, instructions)
 
     def _invalidate_tools_for_pool_key(self, key: _PoolKey) -> None:
         """Drop every binding's cached tool list for one transport key.

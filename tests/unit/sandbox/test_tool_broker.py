@@ -628,6 +628,11 @@ class TestMcpGate:
             agents_service.tool_cache_binding_id(agent),
             discovered_tools,
             None,
+            # Must match the mount the broker resolves, or the seed lands on a
+            # different key and ``acquire.assert_not_awaited()`` below would be
+            # asserting a cache MISS that happens to avoid the pool for some
+            # other reason (#2233 keyed the tool cache by mount name).
+            server_name=server.name,
         )
         call = AsyncMock(return_value={"content": "ok"})
         prior_pool = runtime.mcp_session_pool

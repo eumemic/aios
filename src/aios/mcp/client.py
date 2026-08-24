@@ -567,7 +567,7 @@ async def discover_mcp_tools(
         )
 
     if _pool is not None and binding_id is not None:
-        cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id)
+        cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id, server_name=server_name)
         if cached is not None:
             return cached[0], cached[1]
 
@@ -643,7 +643,15 @@ async def discover_mcp_tools(
     if _pool is not None and binding_id is not None:
         # Cache the freshly-discovered result so the next step (same binding
         # identity, no list_changed) serves it without a list_tools() RPC (#1391).
-        _pool.set_cached_tools(url, vault_id, hkey, binding_id, tools, init_result.instructions)
+        _pool.set_cached_tools(
+            url,
+            vault_id,
+            hkey,
+            binding_id,
+            tools,
+            init_result.instructions,
+            server_name=server_name,
+        )
     return tools, init_result.instructions
 
 
