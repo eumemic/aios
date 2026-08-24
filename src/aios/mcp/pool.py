@@ -776,31 +776,34 @@ class McpSessionPool:
         return True
 
     def drain_degraded_events(self) -> list[tuple[str, str | None]]:
-        """Pop and return the DOWN-transition identities since the last drain.
+        """Pop and return every pending DOWN-transition identity."""
+        return self.drain_degraded_events_matching(lambda _url, _vault_id: True)
 
-        A session-context caller (the per-turn discovery prelude) calls this and
-        emits one durable ``mcp_server_unavailable`` session event per identity,
-        so each breaker DOWN edge surfaces exactly once regardless of which path
-        (connect vs discovery) armed it (#1698 (e)).
+    def drain_degraded_events_matching(
+        self, matches: Callable[[str, str | None], bool]
+    ) -> list[tuple[str, str | None]]:
+        """Pop DOWN edges accepted by ``matches``, preserving all others.
 
-        Projects each ``_PoolKey`` to ``(url, vault_id)``: the pool's public
-        degraded surface speaks identity, while ``headers_key`` stays an internal
-        transport detail. Consumers match it against a spec with
-        :meth:`~aios.models.agents.McpServerSpec.matches_resolved_identity`.
+        The pending queue is worker-scoped while its durable events are
+        session-scoped.  A discovery prelude must therefore claim only identities
+        mounted by its own session; destructively draining unrelated identities
+        would prevent their owning session from ever observing the edge.
 
-        Deduped AFTER projection: ``headers_key`` is part of the breaker key but
-        not of the identity, so two keys differing only in static headers are one
-        degraded identity and must yield one event — the "exactly once per edge"
-        promise above is about identities, not keys.
+        Identities are deduplicated after projecting away ``headers_key``.  All
+        keys for a claimed identity are removed together, while keys belonging to
+        unclaimed identities remain pending for a later prelude.
         """
         seen: set[tuple[str, str | None]] = set()
         drained: list[tuple[str, str | None]] = []
+        remaining: list[_PoolKey] = []
         for key in self._pending_degraded_events:
             identity = (key[0], key[1])
-            if identity not in seen:
+            if not matches(*identity):
+                remaining.append(key)
+            elif identity not in seen:
                 seen.add(identity)
                 drained.append(identity)
-        self._pending_degraded_events = []
+        self._pending_degraded_events = remaining
         return drained
 
     def degraded_identities(self) -> set[tuple[str, str | None]]:

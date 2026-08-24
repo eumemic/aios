@@ -886,6 +886,20 @@ class TestPoolBulkhead:
             # A second drain is empty (deduped).
             assert pool.drain_degraded_events() == []
 
+    def test_selective_drain_preserves_an_unrelated_sessions_edge(self) -> None:
+        """A worker-global queue consumer may claim only its mounted identity."""
+        pool = McpSessionPool()
+        pool._pending_degraded_events.extend(
+            [(URL, "vlt_owner", EMPTY_KEY), ("https://other/mcp", None, EMPTY_KEY)]
+        )
+
+        assert pool.drain_degraded_events_matching(
+            lambda url, vault_id: (url, vault_id) == ("https://other/mcp", None)
+        ) == [("https://other/mcp", None)]
+        assert pool.drain_degraded_events_matching(
+            lambda url, vault_id: (url, vault_id) == (URL, "vlt_owner")
+        ) == [(URL, "vlt_owner")]
+
     def test_discovery_path_emits_exactly_one_down_edge(self) -> None:
         """#2233: the discovery leg's DOWN edge must actually fire.
 
