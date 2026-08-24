@@ -42,6 +42,7 @@ import asyncpg
 from aios.errors import AiosError, NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.mcp.schema import mcp_origin_for
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
@@ -474,12 +475,25 @@ def reject_unoffered_tool_calls(
     _launch_tasks(session_id, tool_calls, _reject_one, prefix="tool_reject")
 
 
+def enforce_agent_tool_exposure(tool_name: str, exposed_names: frozenset[str]) -> None:
+    """Refuse a model-path builtin absent from the executing step's surface.
+
+    This is the authority check at the last common point before model-path
+    builtin execution.  The caller supplies the names exposed on the frozen
+    ``agent_tool`` surface used for inference; registry membership alone is
+    never dispatch authority.
+    """
+    if tool_name not in exposed_names:
+        raise ToolBail(f"tool {tool_name!r} is not exposed on this agent_tool surface")
+
+
 def launch_tool_calls(
     pool: asyncpg.Pool[Any],
     session_id: str,
     tool_calls: list[dict[str, Any]],
     *,
     account_id: str,
+    exposed_names: frozenset[str],
     parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Launch each tool call as an asyncio task. Returns immediately.
@@ -498,6 +512,7 @@ def launch_tool_calls(
             session_id,
             call,
             account_id=account_id,
+            exposed_names=exposed_names,
             parent_focal_at_arrival=parent_focal_at_arrival,
         ),
         prefix="tool",
@@ -543,6 +558,7 @@ async def _execute_tool_async(
     call: dict[str, Any],
     *,
     account_id: str,
+    exposed_names: frozenset[str],
     parent_focal_at_arrival: str | EllipsisType | None = ...,
 ) -> None:
     """Execute one built-in tool call via the shared invoke core, then
@@ -570,6 +586,7 @@ async def _execute_tool_async(
         # run): a call that would refuse anyway — malformed JSON, unknown tool,
         # schema mismatch — must never consume outbound quota capacity (#1903).
         prepare_builtin(tc.name, tc.raw_args)
+        enforce_agent_tool_exposure(tc.name, exposed_names)
         # Durable quota admission (#1903): a short DB-only transaction that
         # atomically counts + inserts a reservation row and releases its pooled
         # connection BEFORE the handler runs. Runs INSIDE ``_tool_lifecycle``,
@@ -1106,7 +1123,8 @@ async def _execute_mcp_tool_admitted(
         raise ToolBail("arguments were not valid JSON")
 
     try:
-        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        origin = mcp_origin_for(tc.name, mcp_tools)
+        server_name, tool_name = origin if origin is not None else _parse_mcp_tool_name(tc.name)
     except ValueError as err:
         raise ToolBail(str(err)) from err
 

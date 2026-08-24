@@ -34,6 +34,7 @@ from aios.services.vaults import (
     SECRET_PLACEHOLDER_PREFIX,
     _extract_auth_payload,
     _merge_auth_payload,
+    build_token_endpoint_post,
     env_var_credential_containment_error,
     is_expiring,
     mint_secret_placeholder,
@@ -492,6 +493,64 @@ class TestUpdateVaultCredentialCallSite:
         assert kwargs["blob"] is not None  # always re-encrypted
 
     @pytest.mark.asyncio
+    async def test_rescoping_env_var_archives_and_recreates_with_carried_secret(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        account_id = "acc_test_stub"
+        existing = VaultCredential(
+            id="vc_1",
+            vault_id="vlt_1",
+            display_name="mailgun",
+            target_url=None,
+            auth_type="environment_variable",
+            secret_name="MAILGUN_API_KEY",
+            allowed_hosts=["mailgun.com"],
+            metadata={"owner": "ops"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt_dict(
+            {"secret_value": "carried-secret"}
+        )
+        replacement = existing.model_copy(
+            update={"id": "vc_2", "allowed_hosts": ["api.mailgun.net"]}
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
+            ),
+            patch.object(
+                queries, "archive_vault_credential", AsyncMock(return_value=existing)
+            ) as archive,
+            patch.object(
+                queries, "insert_vault_credential", AsyncMock(return_value=replacement)
+            ) as insert,
+        ):
+            result = await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"]),
+                account_id=account_id,
+            )
+
+        assert result.id == "vc_2"
+        archive.assert_awaited_once_with(conn, "vlt_1", "vc_1", account_id=account_id)
+        assert insert.await_args is not None
+        kwargs = insert.await_args.kwargs
+        assert kwargs["secret_name"] == "MAILGUN_API_KEY"
+        assert kwargs["allowed_hosts"] == ["api.mailgun.net"]
+        assert crypto_box.derive_account_subkey(account_id).decrypt_dict(kwargs["blob"]) == {
+            "secret_value": "carried-secret"
+        }
+
+    @pytest.mark.asyncio
     async def test_passes_display_name_when_set_even_to_none(self, crypto_box: CryptoBox) -> None:
         account_id = "acc_test_stub"  # PR 3 scaffolding
         existing = _existing_credential()
@@ -526,6 +585,172 @@ class TestUpdateVaultCredentialCallSite:
         assert upd.await_args is not None
         kwargs = upd.await_args.kwargs
         assert kwargs["display_name"] is None  # not Ellipsis — explicitly passed
+
+
+class TestVaultCredentialMetadataReadContract:
+    def test_cleared_metadata_row_parses_as_vault_credential(self) -> None:
+        """The JSON-null value produced by a clear remains readable."""
+        from aios.db.queries.vaults import _row_to_vault_credential
+
+        now = datetime.now(UTC)
+        credential = _row_to_vault_credential(
+            {
+                "id": "vc_cleared",
+                "vault_id": "vlt_1",
+                "display_name": "mailgun",
+                "target_url": None,
+                "auth_type": "environment_variable",
+                "secret_name": "MAILGUN_API_KEY",
+                "allowed_hosts": ["mailgun.com"],
+                "metadata": None,
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+            }
+        )
+
+        assert credential.metadata is None
+
+
+class TestUpdateVaultCredentialMetadataClearParity:
+    """``metadata: null`` must CLEAR metadata identically whether or not the
+    update also rescopes the credential.
+
+    The rescope branch inserts a *replacement* row, so it has to reconstruct
+    every field rather than pass a "leave alone" sentinel. Deciding that
+    reconstruction with ``body.metadata is not None`` conflates *omitted* with
+    *explicitly null*: the same PUT then clears metadata on the ordinary path
+    but silently preserves it on the rescope path. Presence in
+    ``model_fields_set`` — not the value's truthiness/nullity — is what
+    distinguishes the two.
+    """
+
+    @staticmethod
+    def _env_var_credential() -> VaultCredential:
+        return VaultCredential(
+            id="vc_1",
+            vault_id="vlt_1",
+            display_name="mailgun",
+            target_url=None,
+            auth_type="environment_variable",
+            secret_name="MAILGUN_API_KEY",
+            allowed_hosts=["mailgun.com"],
+            metadata={"owner": "ops"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    async def _metadata_sent_for(
+        self, crypto_box: CryptoBox, body: VaultCredentialUpdate, *, rescope: bool
+    ) -> Any:
+        """Drive the service once and return the metadata it handed the DB layer.
+
+        Normalizes across the two branches so the assertions can compare them:
+        the rescope branch reports the replacement row's ``metadata`` kwarg,
+        the ordinary branch reports its ``metadata`` kwarg (``...`` meaning
+        "leave the stored value alone").
+        """
+        account_id = "acc_test_stub"
+        existing = self._env_var_credential()
+        existing_blob = crypto_box.derive_account_subkey(account_id).encrypt_dict(
+            {"secret_value": "carried-secret"}
+        )
+        conn = MagicMock()
+        pool = fake_pool_yielding_conn(conn)
+
+        with (
+            patch.object(
+                queries,
+                "get_vault_credential_with_blob",
+                AsyncMock(return_value=(existing, existing_blob)),
+            ),
+            patch.object(queries, "archive_vault_credential", AsyncMock(return_value=existing)),
+            patch.object(
+                queries, "insert_vault_credential", AsyncMock(return_value=existing)
+            ) as insert,
+            patch.object(
+                queries, "update_vault_credential", AsyncMock(return_value=existing)
+            ) as upd,
+        ):
+            await vaults_service.update_vault_credential(
+                pool,
+                crypto_box,
+                vault_id="vlt_1",
+                credential_id="vc_1",
+                body=body,
+                account_id=account_id,
+            )
+
+        if rescope:
+            assert insert.await_args is not None, "expected the replacement-row path"
+            assert upd.await_args is None
+            return insert.await_args.kwargs["metadata"]
+        assert upd.await_args is not None, "expected the ordinary update path"
+        assert insert.await_args is None
+        return upd.await_args.kwargs["metadata"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_metadata_clears_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # A rescope (allowed_hosts change) combined with an explicit
+        # ``metadata: null`` must CLEAR metadata — not silently carry the
+        # existing {"owner": "ops"} over onto the replacement row.
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata=None),
+            rescope=True,
+        )
+        assert sent is None, f"rescope path failed to clear metadata: sent {sent!r}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_null_metadata_clears_identically_with_and_without_rescope(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # The equivalence IS the property: the same explicitly-null metadata
+        # request must have the same observable effect on the stored metadata
+        # regardless of whether a rescope happened to occur.
+        with_rescope = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata=None),
+            rescope=True,
+        )
+        without_rescope = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(metadata=None),
+            rescope=False,
+        )
+        assert without_rescope is None  # the ordinary path already clears
+        assert with_rescope == without_rescope, (
+            "same request, different outcome depending on rescope: "
+            f"rescope sent {with_rescope!r}, non-rescope sent {without_rescope!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_metadata_preserves_existing_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        # The other direction: omitted is NOT the same as explicitly null. A
+        # rescope that never mentions metadata must carry the existing value
+        # onto the replacement row (the row is new, so "leave alone" has to be
+        # materialized as the old value).
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"]),
+            rescope=True,
+        )
+        assert sent == {"owner": "ops"}, f"omitted metadata was not preserved: sent {sent!r}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_metadata_value_is_written_on_rescope_path(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        sent = await self._metadata_sent_for(
+            crypto_box,
+            VaultCredentialUpdate(allowed_hosts=["api.mailgun.net"], metadata={"owner": "sec"}),
+            rescope=True,
+        )
+        assert sent == {"owner": "sec"}
 
 
 # ── OAuth refresh ────────────────────────────────────────────────────────────
@@ -583,6 +808,53 @@ def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+class TestBuildTokenEndpointPost:
+    """The shared token-endpoint POST kwargs — one seam, two callers.
+
+    ``refresh_credential`` and the authorization-code exchange in
+    :mod:`aios.services.vault_oauth` both build their POST here precisely so the
+    two never drift, so the content-negotiation and client-auth guarantees are
+    pinned once, at the seam.
+    """
+
+    def test_opts_into_json_for_every_auth_method(self) -> None:
+        """RFC 6749 5.1 says token responses are JSON, but GitHub's token
+        endpoint answers form-encoded unless the request asks for JSON. Both
+        callers parse the response as JSON, so the ``Accept`` header is not
+        optional — it is what makes that parse well-founded."""
+        for auth in (
+            None,
+            {"method": "none"},
+            {"method": "client_secret_basic", "client_secret": "shh"},
+            {"method": "client_secret_post", "client_secret": "shh"},
+        ):
+            kwargs = build_token_endpoint_post(
+                {"grant_type": "refresh_token"}, client_id="cid", endpoint_auth=auth
+            )
+            assert kwargs["headers"]["Accept"] == "application/json", auth
+
+    def test_json_opt_in_does_not_disturb_client_auth(self) -> None:
+        """The header rides alongside the auth method, never in place of it."""
+        basic = build_token_endpoint_post(
+            {"grant_type": "refresh_token"},
+            client_id="cid",
+            endpoint_auth={"method": "client_secret_basic", "client_secret": "shh"},
+        )
+        assert isinstance(basic["auth"], httpx.BasicAuth)
+        assert basic["data"]["client_id"] == "cid"
+        assert "client_secret" not in basic["data"]
+
+        post_body: dict[str, str] = {"grant_type": "refresh_token"}
+        post = build_token_endpoint_post(
+            post_body,
+            client_id="cid",
+            endpoint_auth={"method": "client_secret_post", "client_secret": "shh"},
+        )
+        assert "auth" not in post
+        assert post["data"] is post_body
+        assert post_body["client_secret"] == "shh"
 
 
 class TestIsExpiring:
@@ -718,6 +990,42 @@ class TestRefreshCredential:
         assert "client_secret" not in kwargs["data"]
         assert kwargs["data"]["grant_type"] == "refresh_token"
         assert kwargs["data"]["refresh_token"] == "rt-1"
+
+    @pytest.mark.asyncio
+    async def test_refresh_post_asks_for_json(self, crypto_box: CryptoBox) -> None:
+        """The JSON opt-in survives the call site's ``**post_kwargs`` splat.
+
+        ``build_token_endpoint_post`` sets ``Accept: application/json`` and this
+        path parses the reply with ``response.json()``. A form-encoded 200 fails
+        that parse with a ``JSONDecodeError`` — which is not an ``httpx.HTTPError``
+        and so escapes the handler below entirely. Pinned here, at the caller,
+        because the seam test cannot see a ``headers=`` kwarg added alongside the
+        splat that would silently override it.
+        """
+        account_id = "acc_test_stub"
+
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        assert client.post.await_args.kwargs["headers"]["Accept"] == "application/json"
 
     @pytest.mark.asyncio
     async def test_post_method_includes_secret_in_body(self, crypto_box: CryptoBox) -> None:

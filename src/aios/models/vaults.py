@@ -319,13 +319,38 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
 class VaultCredentialUpdate(_VaultCredentialSecrets):
     """Request body for ``PUT /v1/vaults/{vault_id}/credentials/{id}``.
 
-    ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-    immutable — not accepted here. Omitted secret fields are preserved
-    (decrypt-merge-encrypt).
+    ``target_url`` and ``auth_type`` are immutable. For an
+    ``environment_variable`` credential, changing ``secret_name`` or
+    ``allowed_hosts`` atomically archives the old row and creates a replacement
+    with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
     """
 
     display_name: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] | None = None
+    secret_name: str | None = Field(default=None, max_length=128)
+    allowed_hosts: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_environment_variable_scope(self) -> VaultCredentialUpdate:
+        if "secret_name" in self.model_fields_set:
+            if not self.secret_name or not _SECRET_NAME_RE.fullmatch(self.secret_name):
+                raise ValueError(
+                    f"invalid secret_name {self.secret_name!r}: must be a POSIX env var name "
+                    "([A-Za-z_][A-Za-z0-9_]*)"
+                )
+            if self.secret_name in RESERVED_SANDBOX_ENV_KEYS:
+                raise ValueError(
+                    f"secret_name {self.secret_name!r} is reserved by the sandbox runtime"
+                )
+        if "allowed_hosts" in self.model_fields_set:
+            if not self.allowed_hosts:
+                raise ValueError("allowed_hosts must be non-empty")
+            canonical: list[str] = []
+            for entry in self.allowed_hosts:
+                host, prefix = parse_allowed_host_entry(entry)
+                canonical.append(host if prefix is None else host + prefix)
+            self.allowed_hosts = list(dict.fromkeys(canonical))
+        return self
 
 
 class VaultCredential(BaseModel):
@@ -342,6 +367,9 @@ class VaultCredential(BaseModel):
     auth_type: AuthType
     secret_name: str | None = None
     allowed_hosts: list[str] | None = None
+    # Explicit ``metadata: null`` on update means "clear" and is persisted as
+    # JSON null.  The read contract must therefore represent both populated
+    # metadata objects and the cleared state produced by that write path.
     metadata: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime

@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import re
 from typing import Any
 
 from mcp.types import Tool
+
+# Anthropic (and OpenAI) function-tool names: ``^[a-zA-Z0-9_-]{1,64}$``.
+# MCP SEP-986 is more permissive (``.`` / ``/``) and does not enforce 64; the
+# provider 400s. Qualified names are ``mcp__<server>__<tool>``.
+PROVIDER_TOOL_NAME_MAX = 64
+_PROVIDER_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
+
+# Envelope key (sibling of ``function``, never inside it) mapping an advertised
+# name back to the MCP server + raw tool. Stripped before the provider call.
+MCP_ORIGIN_KEY = "_mcp_origin"
 
 
 def sanitize_mcp_schema(node: Any) -> Any:
@@ -31,13 +45,51 @@ def sanitize_mcp_schema(node: Any) -> Any:
     return node
 
 
-def make_function_tool(qualified_name: str, tool: Tool) -> dict[str, Any]:
+def _sanitize_name_segment(raw: str) -> str:
+    cleaned = _UNSAFE_NAME_CHARS.sub("_", raw).strip("_")
+    return cleaned or "x"
+
+
+def qualify_mcp_tool_name(server_name: str, tool_name: str) -> tuple[str, str, str]:
+    """Fit ``mcp__<server>__<tool>`` to the provider name regex.
+
+    Returns ``(advertised, origin_server, origin_tool)``. Dispatch must call the
+    origin tool on the origin server; the advertised name is what the model sees.
+    """
+    server = _sanitize_name_segment(server_name)
+    tool = _sanitize_name_segment(tool_name)
+    advertised = f"mcp__{server}__{tool}"
+    if len(advertised) <= PROVIDER_TOOL_NAME_MAX and _PROVIDER_TOOL_NAME_RE.match(advertised):
+        return advertised, server_name, tool_name
+    digest = hashlib.sha1(f"{server_name}\0{tool_name}".encode()).hexdigest()
+    prefix = f"mcp__{server}__"
+    # ``<truncated>_<hash6>`` must fit after the prefix.
+    room = PROVIDER_TOOL_NAME_MAX - len(prefix) - 7
+    if room >= 1:
+        fitted = f"{prefix}{tool[:room]}_{digest[:6]}"
+        return fitted, server_name, tool_name
+    # Server segment itself leaves no room for a tool — hash the server too.
+    server_h = hashlib.sha1(server_name.encode()).hexdigest()[:8]
+    prefix = f"mcp__{server_h}__"
+    room = max(PROVIDER_TOOL_NAME_MAX - len(prefix) - 7, 1)
+    fitted = f"{prefix}{tool[:room]}_{digest[:6]}"
+    return fitted[:PROVIDER_TOOL_NAME_MAX], server_name, tool_name
+
+
+def make_function_tool(
+    qualified_name: str,
+    tool: Tool,
+    *,
+    origin_server: str | None = None,
+    origin_tool: str | None = None,
+) -> dict[str, Any]:
     """Build the envelope, applying :func:`sanitize_mcp_schema` to ``tool.inputSchema``.
 
     When the tool declares an ``outputSchema`` (MCP 2025-06-18 structured
-    output), propagate it so the model is told the tool produces structured
-    output. Without this the model only ever sees ``inputSchema`` and is blind
-    to the structured payload it will receive (#1493).
+    output), keep it on the *internal* envelope so result-shaping and tests
+    can see it (#1493). :func:`sanitize_tools_for_provider` strips it before
+    the LiteLLM call — Anthropic rejects the unknown field with a 400
+    (``drop_params`` is forced off, so LiteLLM will not silently drop it).
     """
     function: dict[str, Any] = {
         "name": qualified_name,
@@ -51,7 +103,159 @@ def make_function_tool(qualified_name: str, tool: Tool) -> dict[str, Any]:
     output_schema = getattr(tool, "outputSchema", None)
     if output_schema is not None:
         function["outputSchema"] = sanitize_mcp_schema(output_schema)
-    return {
+    envelope: dict[str, Any] = {
         "type": "function",
         "function": function,
     }
+    if origin_server and origin_tool:
+        envelope[MCP_ORIGIN_KEY] = {"server": origin_server, "tool": origin_tool}
+    return envelope
+
+
+def _function_name(tool: dict[str, Any]) -> str | None:
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) else None
+
+
+def _advertised_names_are_unique(tools: list[dict[str, Any]]) -> bool:
+    seen: set[str] = set()
+    for tool in tools:
+        name = _function_name(tool)
+        if name is None:
+            continue
+        if name in seen:
+            return False
+        seen.add(name)
+    return True
+
+
+def _origin_pair(tool: dict[str, Any]) -> tuple[str, str] | None:
+    origin = tool.get(MCP_ORIGIN_KEY)
+    if not isinstance(origin, dict):
+        return None
+    server = origin.get("server")
+    name = origin.get("tool")
+    if isinstance(server, str) and server and isinstance(name, str) and name:
+        return server, name
+    return None
+
+
+def _fit_name_with_suffix(base: str, tag: str) -> str:
+    tag = _sanitize_name_segment(tag)
+    suffix = f"_{tag}"
+    room = PROVIDER_TOOL_NAME_MAX - len(suffix)
+    if room < 1:
+        tag = hashlib.sha1(tag.encode()).hexdigest()[:6]
+        suffix = f"_{tag}"
+        room = PROVIDER_TOOL_NAME_MAX - len(suffix)
+    stem = base[:room].rstrip("_") or "mcp"
+    return f"{stem}{suffix}"[:PROVIDER_TOOL_NAME_MAX]
+
+
+def _disambiguate_advertised_name(base: str, server: str, used: set[str], *, salt: int) -> str:
+    """Fold a short server-derived suffix (then hash) into ``base`` until unique."""
+    server_seg = _sanitize_name_segment(server)
+    digest = hashlib.sha1(f"{server}\0{base}\0{salt}".encode()).hexdigest()
+    tags: list[str] = []
+    for raw in (server_seg[-8:], digest[:6], digest[:8], f"{digest[:4]}{salt}"):
+        tag = _sanitize_name_segment(raw)
+        if tag and tag not in tags:
+            tags.append(tag)
+    for tag in tags:
+        candidate = _fit_name_with_suffix(base, tag)
+        if candidate not in used and _PROVIDER_TOOL_NAME_RE.match(candidate):
+            return candidate
+    raise RuntimeError(f"could not uniquify tool name {base!r}")
+
+
+def uniquify_advertised_tool_names(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first advertised ``function.name``; rewrite later collisions.
+
+    Copy-on-write: returns the input list when names are already unique.
+    Rewritten envelopes keep/gain ``_mcp_origin`` so dispatch can map the
+    new advertised name back to the raw server + tool.
+    """
+    if _advertised_names_are_unique(tools):
+        return tools
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        name = _function_name(tool)
+        if name is None or name not in seen:
+            if name is not None:
+                seen.add(name)
+            out.append(tool)
+            continue
+        item = copy.deepcopy(tool)
+        function = item.get("function")
+        if not isinstance(function, dict):
+            out.append(item)
+            continue
+        origin = _origin_pair(item)
+        server = origin[0] if origin else f"s{index}"
+        new_name = _disambiguate_advertised_name(name, server, seen, salt=index)
+        function["name"] = new_name
+        if origin:
+            item[MCP_ORIGIN_KEY] = {"server": origin[0], "tool": origin[1]}
+        seen.add(new_name)
+        out.append(item)
+    return out
+
+
+def _tool_needs_provider_sanitize(tool: dict[str, Any]) -> bool:
+    if MCP_ORIGIN_KEY in tool:
+        return True
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return False
+    if "outputSchema" in function:
+        return True
+    name = function.get("name")
+    return isinstance(name, str) and _PROVIDER_TOOL_NAME_RE.match(name) is None
+
+
+def sanitize_tools_for_provider(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy-on-write: drop fields / names Anthropic (and OpenAI) 400 on.
+
+    Returns the input list object when nothing needs changing so existing
+    identity assertions on a clean toolset keep holding. Advertised
+    ``function.name`` values on the returned list are unique.
+    """
+    needs_copy = any(_tool_needs_provider_sanitize(tool) for tool in tools)
+    if not needs_copy and _advertised_names_are_unique(tools):
+        return tools
+    cleaned: list[dict[str, Any]] = []
+    for tool in tools:
+        item = copy.deepcopy(tool) if needs_copy else tool
+        if needs_copy:
+            item.pop(MCP_ORIGIN_KEY, None)
+            function = item.get("function")
+            if isinstance(function, dict):
+                function.pop("outputSchema", None)
+                name = function.get("name")
+                if isinstance(name, str) and _PROVIDER_TOOL_NAME_RE.match(name) is None:
+                    function["name"] = _sanitize_name_segment(name)[:PROVIDER_TOOL_NAME_MAX]
+        cleaned.append(item)
+    return uniquify_advertised_tool_names(cleaned)
+
+
+def mcp_origin_for(
+    qualified_name: str, tools: list[dict[str, Any]] | None
+) -> tuple[str, str] | None:
+    """Look up the raw ``(server, tool)`` for an advertised name, if stored."""
+    for tool in tools or []:
+        function = tool.get("function") or {}
+        if function.get("name") != qualified_name:
+            continue
+        origin = tool.get(MCP_ORIGIN_KEY)
+        if not isinstance(origin, dict):
+            return None
+        server = origin.get("server")
+        name = origin.get("tool")
+        if isinstance(server, str) and server and isinstance(name, str) and name:
+            return server, name
+        return None
+    return None

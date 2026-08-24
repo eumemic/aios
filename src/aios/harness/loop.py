@@ -1693,7 +1693,7 @@ async def _run_session_step_body(
     tool_calls: list[dict[str, Any]] = assistant_msg.get("tool_calls") or []
 
     if tool_calls:
-        # ── harness invariant (#1773 defect 2): the callable set ≡ the offered set ──
+        # ── harness invariant (#1683, #1773 defect 2): callable set ≡ offered set ──
         #
         # ``tools`` (== ``step_ctx.tools``, above) is the FROZEN array actually sent
         # with THIS inference call — the model may only invoke a name present in it.
@@ -1749,6 +1749,7 @@ async def _run_session_step_body(
                 session_id,
                 immediate,
                 account_id=account_id,
+                exposed_names=frozenset(n for n in offered_names if n),
                 parent_focal_at_arrival=parent_focal,
             )
             log.info(
@@ -2108,7 +2109,9 @@ async def discover_session_mcp_tools(
                     },
                     account_id=account_id,
                 )
-    return tools, instructions_by_server
+    from aios.mcp.schema import uniquify_advertised_tool_names
+
+    return uniquify_advertised_tool_names(tools), instructions_by_server
 
 
 async def _dispatch_confirmed_tools(
@@ -2238,7 +2241,14 @@ def _launch_confirmed_calls(
             # same terminal the pre-classification path produced).
             pending_builtin.append(tc)
     if pending_builtin:
-        launch_tool_calls(pool, session_id, pending_builtin, account_id=account_id)
+        confirmed_offered_names = {(tool.get("function") or {}).get("name") for tool in mcp_tools}
+        launch_tool_calls(
+            pool,
+            session_id,
+            pending_builtin,
+            account_id=account_id,
+            exposed_names=frozenset(n for n in confirmed_offered_names if n),
+        )
     if pending_blocked_mcp:
         launch_mcp_tool_calls(
             pool,
@@ -2386,6 +2396,7 @@ async def _latch_errored_turn(
         ERRORED_LIFECYCLE_STATUS,
         ERRORED_LIFECYCLE_STOP_REASON,
         account_id=account_id,
+        message=stop_message,
     )
 
 
@@ -2711,12 +2722,16 @@ async def _append_lifecycle(
     stop_reason: str,
     *,
     account_id: str,
+    message: str | None = None,
 ) -> None:
     """Append a lifecycle event."""
+    data: dict[str, Any] = {"event": event, "status": status, "stop_reason": stop_reason}
+    if message is not None:
+        data["message"] = message
     await sessions_service.append_event(
         pool,
         session_id,
         "lifecycle",
-        {"event": event, "status": status, "stop_reason": stop_reason},
+        data,
         account_id=account_id,
     )

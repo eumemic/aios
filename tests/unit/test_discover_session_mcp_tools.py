@@ -496,3 +496,62 @@ class TestDiscoverSessionMcpTools:
         assert ev["is_error"] is False
         # Deduped: the edge queue is drained, so a re-run emits nothing.
         assert pool.drain_degraded_events() == []
+
+    async def test_colliding_server_tool_names_are_uniquified(self) -> None:
+        """Two servers advertising the same function.name stay dispatchable."""
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.schema import mcp_origin_for
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="x", url="https://api.x.com/mcp"),
+                McpServerSpec(name="custom_api_x_com_QFZ6ZWJR", url="https://api.x.com/mcp"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="x"),
+                ToolSpec(
+                    type="mcp_toolset",
+                    enabled=True,
+                    mcp_server_name="custom_api_x_com_QFZ6ZWJR",
+                ),
+            ],
+        )
+
+        def _envelope(server: str) -> dict[str, Any]:
+            return {
+                "type": "function",
+                "function": {
+                    "name": "mcp__x__search_posts",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                },
+                "_mcp_origin": {"server": server, "tool": "search_posts"},
+            }
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [_envelope(name)], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            resolve.return_value = (None, {})
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+
+        names = [item["function"]["name"] for item in tools]
+        assert names[0] == "mcp__x__search_posts"
+        assert names[1] != names[0]
+        assert mcp_origin_for(names[0], tools) == ("x", "search_posts")
+        assert mcp_origin_for(names[1], tools) == ("custom_api_x_com_QFZ6ZWJR", "search_posts")

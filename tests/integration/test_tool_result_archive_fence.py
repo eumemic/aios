@@ -178,7 +178,12 @@ async def test_tool_result_after_phase_b_flip_is_clean_drop(
     }
     task = asyncio.create_task(
         tool_dispatch._execute_tool_async(
-            pool, session_id, call, account_id=_ACCOUNT, parent_focal_at_arrival=None
+            pool,
+            session_id,
+            call,
+            account_id=_ACCOUNT,
+            exposed_names=frozenset({_TOOL_NAME}),
+            parent_focal_at_arrival=None,
         )
     )
     await asyncio.wait_for(tool_started.wait(), timeout=15)

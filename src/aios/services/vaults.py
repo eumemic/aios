@@ -157,15 +157,18 @@ def build_token_endpoint_post(
 
     Mutates ``body`` in place (``client_id`` is always added — it identifies the
     public client; ``client_secret`` is added for the ``client_secret_post``
-    method) and returns the kwargs for ``httpx.AsyncClient.post`` (``data``,
-    plus ``auth`` for ``client_secret_basic``). Shared by the refresh path
-    (:func:`refresh_credential`) and the authorization-code exchange
-    (:mod:`aios.services.vault_oauth`) so the two never drift.
+    method) and returns the kwargs for ``httpx.AsyncClient.post`` (``data`` and
+    a JSON-requesting ``headers``, plus ``auth`` for ``client_secret_basic``).
+    Shared by the refresh path (:func:`refresh_credential`) and the
+    authorization-code exchange (:mod:`aios.services.vault_oauth`) so the two
+    never drift.
     """
     auth = endpoint_auth or {"method": "none"}
     method = auth.get("method", "none")
     body["client_id"] = client_id
-    post_kwargs: dict[str, Any] = {"data": body}
+    # RFC 6749 §5.1 token responses are JSON, but GitHub's token endpoint
+    # answers form-encoded unless the request opts into JSON explicitly.
+    post_kwargs: dict[str, Any] = {"data": body, "headers": {"Accept": "application/json"}}
     if method == "client_secret_basic":
         post_kwargs["auth"] = httpx.BasicAuth(client_id, auth.get("client_secret", ""))
     elif method == "client_secret_post":
@@ -637,15 +640,65 @@ async def update_vault_credential(
         merged = _merge_auth_payload(existing_payload, body, cred.auth_type)
         new_blob = subkey.encrypt_dict(merged)
 
-        updated = await queries.update_vault_credential(
-            conn,
-            vault_id,
-            credential_id,
-            blob=new_blob,
-            display_name=(body.display_name if "display_name" in body.model_fields_set else ...),
-            metadata=body.metadata if "metadata" in body.model_fields_set else ...,
-            account_id=account_id,
+        scope_fields = {"secret_name", "allowed_hosts"} & body.model_fields_set
+        if scope_fields and cred.auth_type != "environment_variable":
+            raise ValidationError(
+                "secret_name and allowed_hosts apply only to environment_variable credentials",
+                detail={"auth_type": cred.auth_type, "fields": sorted(scope_fields)},
+            )
+        secret_name = body.secret_name if "secret_name" in scope_fields else cred.secret_name
+        allowed_hosts = (
+            body.allowed_hosts if "allowed_hosts" in scope_fields else cred.allowed_hosts
         )
+        rescoping = bool(
+            scope_fields
+            and (secret_name != cred.secret_name or allowed_hosts != cred.allowed_hosts)
+        )
+        if rescoping:
+            # The scope-bearing row is immutable: archive it (which also scrubs
+            # its ciphertext) and insert a replacement in the same transaction.
+            # We decrypted before archive, so the replacement can carry the
+            # secret without exposing or re-entering it. The new id also yields
+            # a new sandbox placeholder and therefore provision-time recycle.
+            await queries.archive_vault_credential(
+                conn, vault_id, credential_id, account_id=account_id
+            )
+            updated = await queries.insert_vault_credential(
+                conn,
+                vault_id=vault_id,
+                display_name=(
+                    body.display_name
+                    if "display_name" in body.model_fields_set
+                    else cred.display_name
+                ),
+                target_url=None,
+                secret_name=secret_name,
+                allowed_hosts=allowed_hosts,
+                auth_type=cred.auth_type,
+                blob=new_blob,
+                metadata=(
+                    # Presence in ``model_fields_set`` — not nullity — decides:
+                    # an explicit ``metadata: null`` must CLEAR, exactly as it
+                    # does on the ordinary update path below. Only a genuinely
+                    # OMITTED field falls back to the existing value (the
+                    # replacement row is new, so "leave alone" has to be
+                    # materialized as ``cred.metadata``).
+                    body.metadata if "metadata" in body.model_fields_set else cred.metadata
+                ),
+                account_id=account_id,
+            )
+        else:
+            updated = await queries.update_vault_credential(
+                conn,
+                vault_id,
+                credential_id,
+                blob=new_blob,
+                display_name=(
+                    body.display_name if "display_name" in body.model_fields_set else ...
+                ),
+                metadata=body.metadata if "metadata" in body.model_fields_set else ...,
+                account_id=account_id,
+            )
     # NOTIFY after commit (invariant 6) so the worker evicts the pooled MCP
     # session that still carries the pre-rotation secret (#1030).
     await _notify_evict_vault(pool, vault_id)

@@ -38,7 +38,7 @@ from aios.db import queries
 from aios.logging import get_logger
 from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 from aios.mcp.pool import HttpErrorSink
-from aios.mcp.schema import make_function_tool
+from aios.mcp.schema import make_function_tool, qualify_mcp_tool_name
 from aios.models.vaults import AuthType
 from aios.pinned_transport import PinnedTransport
 from aios.services.vaults import is_expiring, refresh_credential
@@ -580,10 +580,14 @@ async def discover_mcp_tools(
             limit=MAX_TOOLS_PER_SERVER,
         )
 
-    tools: list[dict[str, Any]] = [
-        make_function_tool(f"mcp__{server_name}__{tool.name}", tool)
-        for tool in result.tools[:MAX_TOOLS_PER_SERVER]
-    ]
+    tools: list[dict[str, Any]] = []
+    for tool in result.tools[:MAX_TOOLS_PER_SERVER]:
+        advertised, origin_server, origin_tool = qualify_mcp_tool_name(server_name, tool.name)
+        tools.append(
+            make_function_tool(
+                advertised, tool, origin_server=origin_server, origin_tool=origin_tool
+            )
+        )
     if _pool is not None and binding_id is not None:
         # Cache the freshly-discovered result so the next step (same binding
         # identity, no list_changed) serves it without a list_tools() RPC (#1391).

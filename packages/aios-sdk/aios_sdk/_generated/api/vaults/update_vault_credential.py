@@ -82,10 +82,14 @@ def sync_detailed(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``target_url`` and ``auth_type`` are immutable
-    and not accepted in the body. To rotate an OAuth refresh token, send
-    only the new ``refresh_token`` (and optional ``access_token`` /
-    ``expires_at``); other auth fields stay intact.
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
+    atomically archives the old row and creates a replacement with a new id,
+    carrying its encrypted secret unless ``secret_value`` is supplied. The new
+    id changes sandbox placeholders, so affected sandboxes recycle on their next
+    provision. To rotate an OAuth refresh token, send only the new
+    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
+    auth fields stay intact.
 
     Args:
         vault_id (str):
@@ -94,9 +98,10 @@ def sync_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-            immutable — not accepted here. Omitted secret fields are preserved
-            (decrypt-merge-encrypt).
+            ``target_url`` and ``auth_type`` are immutable. For an
+            ``environment_variable`` credential, changing ``secret_name`` or
+            ``allowed_hosts`` atomically archives the old row and creates a replacement
+            with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -133,10 +138,14 @@ def sync(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``target_url`` and ``auth_type`` are immutable
-    and not accepted in the body. To rotate an OAuth refresh token, send
-    only the new ``refresh_token`` (and optional ``access_token`` /
-    ``expires_at``); other auth fields stay intact.
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
+    atomically archives the old row and creates a replacement with a new id,
+    carrying its encrypted secret unless ``secret_value`` is supplied. The new
+    id changes sandbox placeholders, so affected sandboxes recycle on their next
+    provision. To rotate an OAuth refresh token, send only the new
+    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
+    auth fields stay intact.
 
     Args:
         vault_id (str):
@@ -145,9 +154,10 @@ def sync(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-            immutable — not accepted here. Omitted secret fields are preserved
-            (decrypt-merge-encrypt).
+            ``target_url`` and ``auth_type`` are immutable. For an
+            ``environment_variable`` credential, changing ``secret_name`` or
+            ``allowed_hosts`` atomically archives the old row and creates a replacement
+            with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -179,10 +189,14 @@ async def asyncio_detailed(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``target_url`` and ``auth_type`` are immutable
-    and not accepted in the body. To rotate an OAuth refresh token, send
-    only the new ``refresh_token`` (and optional ``access_token`` /
-    ``expires_at``); other auth fields stay intact.
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
+    atomically archives the old row and creates a replacement with a new id,
+    carrying its encrypted secret unless ``secret_value`` is supplied. The new
+    id changes sandbox placeholders, so affected sandboxes recycle on their next
+    provision. To rotate an OAuth refresh token, send only the new
+    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
+    auth fields stay intact.
 
     Args:
         vault_id (str):
@@ -191,9 +205,10 @@ async def asyncio_detailed(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-            immutable — not accepted here. Omitted secret fields are preserved
-            (decrypt-merge-encrypt).
+            ``target_url`` and ``auth_type`` are immutable. For an
+            ``environment_variable`` credential, changing ``secret_name`` or
+            ``allowed_hosts`` atomically archives the old row and creates a replacement
+            with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -228,10 +243,14 @@ async def asyncio(
      Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``target_url`` and ``auth_type`` are immutable
-    and not accepted in the body. To rotate an OAuth refresh token, send
-    only the new ``refresh_token`` (and optional ``access_token`` /
-    ``expires_at``); other auth fields stay intact.
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
+    atomically archives the old row and creates a replacement with a new id,
+    carrying its encrypted secret unless ``secret_value`` is supplied. The new
+    id changes sandbox placeholders, so affected sandboxes recycle on their next
+    provision. To rotate an OAuth refresh token, send only the new
+    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
+    auth fields stay intact.
 
     Args:
         vault_id (str):
@@ -240,9 +259,10 @@ async def asyncio(
         body (VaultCredentialUpdate): Request body for ``PUT
             /v1/vaults/{vault_id}/credentials/{id}``.
 
-            ``target_url``, ``secret_name``, ``allowed_hosts``, and ``auth_type`` are
-            immutable — not accepted here. Omitted secret fields are preserved
-            (decrypt-merge-encrypt).
+            ``target_url`` and ``auth_type`` are immutable. For an
+            ``environment_variable`` credential, changing ``secret_name`` or
+            ``allowed_hosts`` atomically archives the old row and creates a replacement
+            with a new id. Omitted secret fields are preserved (decrypt-merge-encrypt).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
