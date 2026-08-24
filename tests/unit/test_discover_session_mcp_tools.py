@@ -87,7 +87,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -130,7 +130,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__tool"}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -165,10 +165,10 @@ class TestDiscoverSessionMcpTools:
         seen_urls: list[str] = []
 
         async def _fake_resolve(
-            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
         ) -> tuple[str | None, dict[str, str]]:
-            seen_urls.append(url)
-            return None, {"Authorization": f"Bearer token-for-{url}"}
+            seen_urls.append(spec.url)
+            return None, {"Authorization": f"Bearer token-for-{spec.url}"}
 
         async def _discover(
             url: str,
@@ -180,7 +180,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             tools, _instructions = await discover_session_mcp_tools(
@@ -215,10 +215,9 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _fake_resolve(
-            _pool: Any, _cb: Any, _sid: str, _url: str, **kwargs: Any
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
         ) -> tuple[str | None, dict[str, str]]:
-            pin = kwargs["pinned_vault_id"]
-            return pin, {"Authorization": f"Bearer token-for-{pin}"}
+            return spec.vault_id, {"Authorization": f"Bearer token-for-{spec.vault_id}"}
 
         async def _discover(
             _url: str,
@@ -232,7 +231,7 @@ class TestDiscoverSessionMcpTools:
             ], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             tools, _instructions = await discover_session_mcp_tools(
@@ -266,12 +265,12 @@ class TestDiscoverSessionMcpTools:
         )
 
         async def _fake_resolve(
-            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
         ) -> tuple[str | None, dict[str, str]]:
-            pin = kwargs["pinned_vault_id"]
-            if pin == "vlt_gone":
-                raise PinnedVaultUnavailable(url, pin, "not bound to this session")
-            return pin, {"Authorization": f"Bearer token-for-{pin}"}
+            if spec.vault_id == "vlt_gone":
+                assert spec.vault_id is not None
+                raise PinnedVaultUnavailable(spec.name, spec.vault_id, "not bound to this session")
+            return spec.vault_id, {"Authorization": f"Bearer token-for-{spec.vault_id}"}
 
         async def _discover(
             _url: str,
@@ -283,7 +282,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t"}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             tools, _instructions = await discover_session_mcp_tools(
@@ -324,7 +323,7 @@ class TestDiscoverSessionMcpTools:
             return [], "## linear\n\nbe brief"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -359,7 +358,7 @@ class TestDiscoverSessionMcpTools:
             return [], ""
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -407,7 +406,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -476,7 +475,7 @@ class TestDiscoverSessionMcpTools:
         try:
             with (
                 patch(
-                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
                 ) as resolve,
                 patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
             ):
@@ -527,7 +526,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -576,7 +575,7 @@ class TestDiscoverSessionMcpTools:
         try:
             with (
                 patch(
-                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
                 ) as resolve,
                 patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
                 patch("aios.harness.loop.sessions_service.append_event", side_effect=_append_event),
@@ -642,7 +641,7 @@ class TestDiscoverSessionMcpTools:
             return [_envelope(name)], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})

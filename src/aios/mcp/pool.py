@@ -282,8 +282,8 @@ class McpSessionPool:
         # rotation) also reset it. So the count is truly *consecutive*: any
         # intervening success breaks the streak.
         self._failure_count: dict[_PoolKey, int] = {}
-        # Keys whose breaker is currently OPEN. Backs :meth:`degraded_servers` /
-        # :meth:`degraded_identities` and dedupes the ``mcp_server_unavailable``
+        # Keys whose breaker is currently OPEN. Backs :meth:`degraded_identities`
+        # and dedupes the ``mcp_server_unavailable``
         # observability event to the DOWN transition (the breaker's open edge),
         # not every failure while it stays open (#1698).
         #
@@ -713,7 +713,7 @@ class McpSessionPool:
         skipped fast (agent runs degraded on the other servers' tools) instead
         of re-stalling every step. On expiry the window is cleared here so the
         next probe re-attempts the connect (auto-re-probe); the DOWN marker in
-        ``_degraded_urls`` is retained until an explicit heal/failure edge so a
+        ``_degraded_keys`` is retained until an explicit heal/failure edge so a
         cooldown lapse alone doesn't spuriously fire an UP event.
         """
         key: _PoolKey = (url, vault_id, headers_key)
@@ -846,8 +846,9 @@ class McpSessionPool:
         still open" would mean a mount that just proved itself healthy stays
         reported degraded because a *different identity* at the same url is
         down — the same cross-identity bleed this granularity exists to remove,
-        pointed the other way. The coarse view (:meth:`degraded_servers`) is
-        derived, so it still drops the url once every key on it has healed.
+        pointed the other way. A url stops being reported degraded once every
+        key on it has healed, which falls out of the per-key set rather than
+        needing a scan.
         """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until.pop(key, None)
@@ -869,20 +870,6 @@ class McpSessionPool:
         # window" would also clear keys whose cooldown merely lapsed, and a
         # lapsed cooldown is deliberately NOT a heal (see :meth:`is_unhealthy`).
         self._degraded_keys = {k for k in self._degraded_keys if k[1] != vault_id}
-
-    def degraded_servers(self) -> list[str]:
-        """Return the URLs whose breaker is currently OPEN (#1698 (e)).
-
-        The url-level projection of :meth:`degraded_identities`, kept for
-        in-process introspection and tests. Prefer ``degraded_identities`` where
-        two mounts may share a url: this view cannot tell them apart.
-
-        This is an in-memory, per-worker accessor (reflecting only THIS worker's
-        breaker state, not persisted); the wired external artifact the ops-agent
-        consumes is the durable ``mcp_server_unavailable`` session event emitted
-        on the breaker's DOWN edge (see :meth:`drain_degraded_events`).
-        """
-        return sorted({key[0] for key in self._degraded_keys})
 
     async def _reap_idle_once(self, *, idle_timeout: float, now: float) -> None:
         """Close idle entries unused longer than ``idle_timeout`` seconds.

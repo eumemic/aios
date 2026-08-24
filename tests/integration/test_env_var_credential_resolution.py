@@ -543,10 +543,10 @@ async def test_pinned_resolution_selects_per_vault_and_scopes_to_the_binding(
 
     async with vault_pool.acquire() as conn:
         with mock.patch("aios.db.queries.vaults.log") as log:
-            work = await db_queries.resolve_pinned_session_credential(
+            work = await db_queries.resolve_session_credential(
                 conn, session_id, target_url, vault_id=work_vault, account_id=ACC
             )
-            home = await db_queries.resolve_pinned_session_credential(
+            home = await db_queries.resolve_session_credential(
                 conn, session_id, target_url, vault_id=home_vault, account_id=ACC
             )
         # Each mount gets its own identity — the whole point of the pin.
@@ -563,14 +563,14 @@ async def test_pinned_resolution_selects_per_vault_and_scopes_to_the_binding(
 
         # Authority boundary: bound-ness is proved by the join, not assumed.
         assert (
-            await db_queries.resolve_pinned_session_credential(
+            await db_queries.resolve_session_credential(
                 conn, session_id, target_url, vault_id=unbound_vault, account_id=ACC
             )
             is None
         )
         # And a foreign account cannot traverse it either.
         assert (
-            await db_queries.resolve_pinned_session_credential(
+            await db_queries.resolve_session_credential(
                 conn, session_id, target_url, vault_id=work_vault, account_id=ACC_OTHER
             )
             is None

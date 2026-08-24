@@ -287,7 +287,7 @@ class TestMcpServerSameUrlIdentity:
             )
 
     def test_rejects_same_url_same_pin(self) -> None:
-        with pytest.raises(ValidationError, match=r"vault_id must be distinct per entry"):
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
             self._create(
                 [
                     {"name": "gmail_work", "url": "https://gmail/mcp", "vault_id": "vlt_one"},

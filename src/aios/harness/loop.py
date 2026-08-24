@@ -2001,7 +2001,7 @@ async def discover_session_mcp_tools(
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict.
     """
-    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_target_url
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_mcp_mount
     from aios.tools.registry import effective_transport
 
     enabled_server_names: set[str] = set()
@@ -2029,13 +2029,8 @@ async def discover_session_mcp_tools(
     from aios.mcp.client import _DISCOVERY_UNHEALTHY_BACKOFF_S
 
     async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool,
-            crypto_box,
-            session_id,
-            spec.url,
-            account_id=account_id,
-            pinned_vault_id=spec.vault_id,
+        vault_id, headers = await resolve_auth_for_mcp_mount(
+            pool, crypto_box, session_id, spec, account_id=account_id
         )
         _pool = runtime.mcp_session_pool
         if _pool is not None:
@@ -2103,13 +2098,13 @@ async def discover_session_mcp_tools(
             # Attribute the edge to the mount that owns that identity. Keying by
             # url alone was last-wins across same-url mounts, so the event could
             # name a mount whose credential is perfectly healthy (#2233).
-            owner = next(
+            server_name = next(
                 (
-                    s
+                    s.name
                     for s in agent.mcp_servers
                     if s.matches_resolved_identity(down_url, down_vault_id)
                 ),
-                None,
+                down_url,
             )
             await sessions_service.append_event(
                 pool,
@@ -2117,7 +2112,7 @@ async def discover_session_mcp_tools(
                 "span",
                 {
                     "event": "mcp_server_unavailable",
-                    "server": owner.name if owner is not None else down_url,
+                    "server": server_name,
                     "url": down_url,
                     "is_error": False,
                 },

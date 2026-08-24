@@ -74,7 +74,7 @@ class TestMcpDispatchSpecHeaders:
                 return_value=False,
             ),
             patch(
-                "aios.mcp.client.resolve_auth_for_target_url",
+                "aios.mcp.client.resolve_auth_for_mcp_mount",
                 new_callable=AsyncMock,
                 return_value=(None, {}),
             ),

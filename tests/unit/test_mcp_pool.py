@@ -861,12 +861,12 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "v", EMPTY_KEY, {})
                 assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed pre-K"
-                assert pool.degraded_servers() == []
+                assert sorted({u for u, _ in pool.degraded_identities()}) == []
             # The K-th failure opens the breaker.
             with pytest.raises(MCPUnavailable):
                 await pool.acquire(URL, "v", EMPTY_KEY, {})
             assert pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must be open after K failures"
-            assert pool.degraded_servers() == [URL]
+            assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
 
     async def test_breaker_emits_exactly_one_down_event_on_edge(self) -> None:
         """AC #5: exactly one DOWN-transition edge is queued for the event,
@@ -924,11 +924,11 @@ class TestPoolBulkhead:
         assert pool.degraded_identities() == {(URL, "vlt_home")}
         # The coarse url view is derived, so the url stays listed while any key
         # on it is open.
-        assert pool.degraded_servers() == [URL]
+        assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
 
         pool.mark_healthy(URL, "vlt_home", EMPTY_KEY)
         assert pool.degraded_identities() == set()
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
 
     async def test_breaker_reprobes_after_cooldown_and_recloses_on_success(self) -> None:
         """AC #4: after the cooldown the key re-probes; a successful acquire
@@ -958,7 +958,7 @@ class TestPoolBulkhead:
             entry = await pool.acquire(URL, "v", EMPTY_KEY, {})
             pool.mark_healthy(URL, "v", EMPTY_KEY)
         assert entry.session is good
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
         assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
 
     async def test_successful_acquire_between_failures_resets_counter(self) -> None:
@@ -1009,7 +1009,7 @@ class TestPoolBulkhead:
         await _fail_once()
         assert pool._failure_count.get(key) == 2
         assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed after reset"
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
 
     async def test_evict_by_vault_clears_breaker_state(self) -> None:
         """AC #6 / composes with #1030: ``evict_by_vault`` clears breaker state
@@ -1025,9 +1025,9 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "vault_x", EMPTY_KEY, {})
             assert pool.is_unhealthy(URL, "vault_x", EMPTY_KEY)
-            assert pool.degraded_servers() == [URL]
+            assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
 
         await pool.evict_by_vault("vault_x")
         assert not pool.is_unhealthy(URL, "vault_x", EMPTY_KEY), "breaker cleared on eviction"
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
         assert pool._failure_count == {}

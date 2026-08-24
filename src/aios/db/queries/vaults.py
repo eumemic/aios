@@ -773,6 +773,7 @@ async def resolve_session_credential(
     target_url: str,
     *,
     account_id: str,
+    vault_id: str | None = None,
 ) -> tuple[EncryptedBlob, AuthType, str] | None:
     """Find the first matching credential across a session's bound vaults.
 
@@ -784,6 +785,18 @@ async def resolve_session_credential(
     ``auth_type`` is written only through the ``AuthType``-typed ``insert``
     writer (single-sourced from the Literal, #1081), so the cast on the way
     out is exhaustively safe.
+
+    ``vault_id`` optionally PINS resolution to one vault — an
+    ``McpServerSpec.vault_id`` (#2233), so one session can hold two identities
+    at a single ``target_url``. It NARROWS the same query rather than replacing
+    it: the ``session_vaults`` join stays, so a pin can only ever select among
+    vaults already bound to this session, never reach one that is not. Binding
+    is therefore proved by the join in the one round trip the unpinned path
+    already makes — a separate "is it bound?" probe would be both an extra query
+    and a TOCTOU seam. When pinned, at most one row can match (``session_vaults``
+    is keyed ``(session_id, vault_id)`` and ``vault_credentials`` carries a
+    unique index on ``(vault_id, target_url) WHERE archived_at IS NULL``), so
+    the rank ordering is inert and the collision branch cannot fire.
     """
     rows = await conn.fetch(
         """
@@ -796,11 +809,13 @@ async def resolve_session_credential(
            AND vc.archived_at IS NULL
            AND sv.account_id = $3
            AND vc.account_id = $3
+           AND ($4::text IS NULL OR sv.vault_id = $4)
          ORDER BY sv.rank
         """,
         session_id,
         target_url,
         account_id,
+        vault_id,
     )
     if not rows:
         return None
@@ -817,57 +832,6 @@ async def resolve_session_credential(
                 for match in rows[1:]
             ],
         )
-    return (
-        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
-        cast(AuthType, str(row["auth_type"])),
-        str(row["vault_id"]),
-    )
-
-
-async def resolve_pinned_session_credential(
-    conn: asyncpg.Connection[Any],
-    session_id: str,
-    target_url: str,
-    *,
-    vault_id: str,
-    account_id: str,
-) -> tuple[EncryptedBlob, AuthType, str] | None:
-    """Resolve ``target_url`` from ONE pinned vault, scoped to a session's bindings.
-
-    The pinned twin of :func:`resolve_session_credential`, for an
-    ``McpServerSpec`` carrying a ``vault_id``. It keeps the ``session_vaults``
-    join and drops only the rank ordering, which is what makes the pin a
-    *selector over already-granted authority* rather than a way to reach a new
-    vault: an unbound (or foreign) ``vault_id`` yields zero rows structurally,
-    exactly as an unbound vault does today. Binding is therefore proved by the
-    join, in one round trip — a separate "is it bound?" probe would be both an
-    extra query and a TOCTOU seam.
-
-    At most one row is possible — ``session_vaults`` is keyed
-    ``(session_id, vault_id)`` and ``vault_credentials`` carries a unique index
-    on ``(vault_id, target_url) WHERE archived_at IS NULL`` — so unlike the rank
-    scan there is no collision to log. ``None`` means "this mount has no
-    identity"; the caller fails closed rather than falling back.
-    """
-    row = await conn.fetchrow(
-        """
-        SELECT vc.ciphertext, vc.nonce, vc.auth_type, vc.vault_id
-          FROM session_vaults sv
-          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
-         WHERE sv.session_id = $1
-           AND sv.vault_id = $2
-           AND vc.target_url = $3
-           AND vc.archived_at IS NULL
-           AND sv.account_id = $4
-           AND vc.account_id = $4
-        """,
-        session_id,
-        vault_id,
-        target_url,
-        account_id,
-    )
-    if row is None:
-        return None
     return (
         EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
         cast(AuthType, str(row["auth_type"])),

@@ -569,16 +569,10 @@ def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
         seen.add(server.name)
         pins_by_url.setdefault(server.url, []).append(server.vault_id)
     for url, pins in pins_by_url.items():
-        if len(pins) == 1:
-            continue
-        if any(pin is None for pin in pins):
+        if len(pins) > 1 and (None in pins or len(set(pins)) != len(pins)):
             raise ValueError(
                 f"duplicate mcp server url {url!r}: every entry sharing a url must pin a "
                 f"distinct vault_id"
-            )
-        if len(set(pins)) != len(pins):
-            raise ValueError(
-                f"duplicate mcp server url {url!r}: vault_id must be distinct per entry"
             )
 
 

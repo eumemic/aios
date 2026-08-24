@@ -18,9 +18,11 @@ from aios.mcp.client import (
     _auth_headers_from_payload,
     call_mcp_tool,
     discover_mcp_tools,
+    resolve_auth_for_mcp_mount,
     resolve_auth_for_target_url,
     resolve_auth_for_target_url_run,
 )
+from aios.models.agents import McpServerSpec
 from tests.unit.conftest import fake_pool_yielding_conn
 
 
@@ -254,8 +256,12 @@ class TestResolveAuthForTargetUrl:
             )
 
 
-class TestResolveAuthForTargetUrlPinned:
-    """#2233: ``pinned_vault_id`` resolves one mount's identity from exactly one
+def _mount(*, vault_id: str | None = None) -> McpServerSpec:
+    return McpServerSpec(name="gmail", url="https://gmail/mcp", vault_id=vault_id)
+
+
+class TestResolveAuthForMcpMount:
+    """#2233: a mount's ``vault_id`` resolves its identity from exactly one
     vault instead of the session-wide rank scan, and fails CLOSED — never the
     rank fallback (which would defeat the pin) and never ``(None, {})`` (which
     would connect anonymously against a server that tolerates it).
@@ -267,35 +273,34 @@ class TestResolveAuthForTargetUrlPinned:
 
         return CryptoBox(os.urandom(32))
 
-    async def test_pinned_uses_pinned_query_not_the_rank_scan(self, crypto_box: CryptoBox) -> None:
+    async def test_pinned_mount_narrows_resolution_to_its_own_vault(
+        self, crypto_box: CryptoBox
+    ) -> None:
         """The whole point: two vaults hold a credential for one url, and the
-        pin selects its own rather than whichever the rank scan would win."""
+        pin selects its own rather than whichever the rank scan would win. The
+        narrowing is the ``vault_id`` reaching the query — the same query the
+        unpinned path uses, so the ``session_vaults`` join (and with it the
+        binding check) is never bypassed."""
         payload = json.dumps({"token": "home-token"})
         blob = crypto_box.derive_account_subkey("acc_test_stub").encrypt(payload)
         pool = fake_pool_yielding_conn(MagicMock())
         with (
             patch(
-                "aios.mcp.client.queries.resolve_pinned_session_credential",
-                new_callable=AsyncMock,
-            ) as pinned,
-            patch(
                 "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
-            ) as rank_scan,
+            ) as pinned,
         ):
             pinned.return_value = (blob, "bearer_header", "vlt_home")
-            vault_id, headers = await resolve_auth_for_target_url(
+            vault_id, headers = await resolve_auth_for_mcp_mount(
                 pool,
                 crypto_box,
                 "sess_123",
-                "https://gmail/mcp",
+                _mount(vault_id="vlt_home"),
                 account_id="acc_test_stub",
-                pinned_vault_id="vlt_home",
             )
         assert (vault_id, headers) == ("vlt_home", {"Authorization": "Bearer home-token"})
         pinned.assert_awaited_once()
         assert pinned.await_args_list[0].kwargs["vault_id"] == "vlt_home"
-        rank_scan.assert_not_awaited()
 
     async def test_unpinned_still_uses_the_rank_scan(self, crypto_box: CryptoBox) -> None:
         """Back-compat: an unpinned mount resolves exactly as before."""
@@ -307,17 +312,13 @@ class TestResolveAuthForTargetUrlPinned:
                 "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
             ) as rank_scan,
-            patch(
-                "aios.mcp.client.queries.resolve_pinned_session_credential",
-                new_callable=AsyncMock,
-            ) as pinned,
         ):
             rank_scan.return_value = (blob, "bearer_header", "vlt_first")
-            vault_id, headers = await resolve_auth_for_target_url(
-                pool, crypto_box, "sess_123", "https://gmail/mcp", account_id="acc_test_stub"
+            vault_id, headers = await resolve_auth_for_mcp_mount(
+                pool, crypto_box, "sess_123", _mount(), account_id="acc_test_stub"
             )
         assert (vault_id, headers) == ("vlt_first", {"Authorization": "Bearer rank-token"})
-        pinned.assert_not_awaited()
+        assert rank_scan.await_args_list[0].kwargs["vault_id"] is None
 
     async def test_pin_that_resolves_nothing_raises_instead_of_falling_back(
         self, crypto_box: CryptoBox
@@ -328,25 +329,20 @@ class TestResolveAuthForTargetUrlPinned:
         pool = fake_pool_yielding_conn(MagicMock())
         with (
             patch(
-                "aios.mcp.client.queries.resolve_pinned_session_credential",
-                new_callable=AsyncMock,
-            ) as pinned,
-            patch(
                 "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
-            ) as rank_scan,
+            ) as pinned,
         ):
             pinned.return_value = None
             with pytest.raises(PinnedVaultUnavailable, match="vlt_absent"):
-                await resolve_auth_for_target_url(
+                await resolve_auth_for_mcp_mount(
                     pool,
                     crypto_box,
                     "sess_123",
-                    "https://gmail/mcp",
+                    _mount(vault_id="vlt_absent"),
                     account_id="acc_test_stub",
-                    pinned_vault_id="vlt_absent",
                 )
-            rank_scan.assert_not_awaited()
+            assert pinned.await_args_list[0].kwargs["vault_id"] == "vlt_absent"
 
     async def test_pinned_empty_secret_raises_rather_than_connecting_anonymously(
         self, crypto_box: CryptoBox
@@ -358,19 +354,18 @@ class TestResolveAuthForTargetUrlPinned:
         pool = fake_pool_yielding_conn(MagicMock())
         with (
             patch(
-                "aios.mcp.client.queries.resolve_pinned_session_credential",
+                "aios.mcp.client.queries.resolve_session_credential",
                 new_callable=AsyncMock,
             ) as pinned,
             pytest.raises(PinnedVaultUnavailable, match="no auth header"),
         ):
             pinned.return_value = (blob, "bearer_header", "vlt_home")
-            await resolve_auth_for_target_url(
+            await resolve_auth_for_mcp_mount(
                 pool,
                 crypto_box,
                 "sess_123",
-                "https://gmail/mcp",
+                _mount(vault_id="vlt_home"),
                 account_id="acc_test_stub",
-                pinned_vault_id="vlt_home",
             )
 
 
