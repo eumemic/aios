@@ -319,6 +319,50 @@ class TestMcpServerSameUrlIdentity:
         assert [s.name for s in hydrated] == ["catalog", "custom"]
         assert all(s.vault_id is None for s in hydrated)
 
+    def test_unpinned_spec_serializes_without_the_pin_key(self) -> None:
+        """An unpinned mount must persist EXACTLY as it did before pins existed.
+
+        Every persistence path uses a plain ``model_dump()``, and this model is
+        ``extra="forbid"`` — so emitting ``"vault_id": null`` for unpinned
+        mounts would make any agent-surface write after deploy un-hydratable by
+        a binary predating the field, pins or no pins. Confining that to the
+        writes that actually pin is the whole point of the omission.
+        """
+        unpinned = McpServerSpec(name="gh", url="https://gh/mcp").model_dump()
+        assert "vault_id" not in unpinned
+        assert unpinned == McpServerSpec(name="gh", url="https://gh/mcp").model_dump(mode="json")
+
+        pinned = McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1").model_dump()
+        assert pinned["vault_id"] == "vlt_1"
+
+        # Round-trips both ways: an absent key hydrates back to unpinned.
+        assert McpServerSpec.model_validate(unpinned).vault_id is None
+        assert McpServerSpec.model_validate(pinned).vault_id == "vlt_1"
+        assert McpServerSpec.model_validate_persisted(unpinned).vault_id is None
+
+    def test_workflow_spec_persistence_inherits_the_omission(self) -> None:
+        """``db/queries/workflows.py`` persists mcp_servers through the same
+        ``model_dump()`` call as ``db/queries/agents.py``, so the fix is shared
+        rather than per-resource — assert the shape both writers emit."""
+        from aios.models.workflows import WorkflowCreate
+
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "mcp_servers": [{"name": "gh", "url": "https://gh/mcp"}],
+            }
+        )
+        assert [s.model_dump() for s in wf.mcp_servers] == [
+            {
+                "type": "url",
+                "name": "gh",
+                "url": "https://gh/mcp",
+                "include_instructions": True,
+                "headers": None,
+            }
+        ]
+
     def test_matches_resolved_identity(self) -> None:
         """A pin owns only its own vault; an unpinned mount matches any vault at
         its url (its identity is not knowable statically)."""

@@ -13,7 +13,16 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationInfo,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from aios.actors import Actor
 from aios.logging import get_logger
@@ -249,6 +258,28 @@ class McpServerSpec(BaseModel):
 
     headers: dict[str, str] | None = Field(default=None)
     vault_id: str | None = Field(default=None, min_length=1)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_pin(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Serialize an unpinned mount EXACTLY as it serialized before pins existed.
+
+        Every persistence path writes specs with a plain ``model_dump()``
+        (``db/queries/agents.py``, ``db/queries/workflows.py``), so without this
+        an unpinned mount would still persist ``"vault_id": null`` — and this
+        model is ``extra="forbid"``, so a binary predating the field refuses to
+        hydrate that row. That would make ANY agent-surface write after deploy
+        un-rollback-able, pins or no pins, rather than only the writes that
+        actually use one. Omitting the key when it is unset keeps the persisted
+        bytes identical to today's for every surface that does not pin, which is
+        what confines the roll-forward requirement to the feature's real users.
+
+        Dropping the key is safe in the other direction too: the field defaults
+        to ``None``, so an absent key hydrates back to an unpinned mount.
+        """
+        data: dict[str, Any] = handler(self)
+        if self.vault_id is None:
+            data.pop("vault_id", None)
+        return data
 
     def matches_resolved_identity(self, url: str, vault_id: str | None) -> bool:
         """True when a credential identity resolved at runtime belongs to THIS mount.
