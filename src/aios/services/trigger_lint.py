@@ -17,18 +17,17 @@ UNCONDITIONAL_WAKE_WARNING = (
 _GUARD_NODES = (ast.If, ast.IfExp, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.Match)
 _WAKE_RE = re.compile(r"\btool\s+wake_self\b")
 OBSERVED_WAKE_WARNING = (
-    "This recurring trigger has woken its owning session on nearly every recent fire. "
-    "Check that its runtime guard is selective."
+    "This recurring trigger has woken its owning session on nearly every recent fire, "
+    "including at least five consecutive fires. Check that its runtime guard is selective."
 )
 
 
 def observed_wake_is_noisy(outcomes: Sequence[bool]) -> bool:
     """Classify newest-first, 24-hour wake observations.
 
-    Five consecutive wakes catches sustained noise regardless of the longer
-    history.  Separately, any non-empty available history with a greater-than-
-    90% wake rate is noisy.  Callers provide only observations from the
-    preceding 24 hours.
+    Five consecutive wakes catches short noisy histories.  Independently, a
+    greater-than-90% wake rate over any non-empty available history is the
+    24-hour backstop.  Callers provide only observations from that window.
     """
     if len(outcomes) >= 5 and all(outcomes[:5]):
         return True

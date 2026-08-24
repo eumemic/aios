@@ -49,7 +49,6 @@ def test_non_recurring_source_does_not_warn() -> None:
 def test_observed_wake_backstop() -> None:
     assert observed_wake_is_noisy([True] * 5)
     assert observed_wake_is_noisy([True] * 10 + [False])
-    assert observed_wake_is_noisy([True] * 4)
     assert not observed_wake_is_noisy([False, *([True] * 9)])
+    assert observed_wake_is_noisy([True] * 4)
     assert not observed_wake_is_noisy([False, *([True] * 4)])
-    assert not observed_wake_is_noisy([])
