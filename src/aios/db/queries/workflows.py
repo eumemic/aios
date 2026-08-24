@@ -1067,7 +1067,6 @@ async def set_run_terminal(
     """
     await conn.execute(
         "UPDATE wf_runs SET status = $3, output = $4::jsonb, "
-        "archived_at = CASE WHEN $5::jsonb IS NULL THEN archived_at ELSE now() END, "
         "terminal_summary = COALESCE($5::jsonb, terminal_summary), updated_at = now() "
         "WHERE id = $1 AND account_id = $2 "
         "AND status NOT IN ('completed', 'errored', 'cancelled')",

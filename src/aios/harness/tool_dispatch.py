@@ -42,6 +42,7 @@ import asyncpg
 from aios.errors import AiosError, NotFoundError
 from aios.harness import runtime
 from aios.logging import get_logger
+from aios.mcp.schema import mcp_origin_for
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
@@ -1122,7 +1123,8 @@ async def _execute_mcp_tool_admitted(
         raise ToolBail("arguments were not valid JSON")
 
     try:
-        server_name, tool_name = _parse_mcp_tool_name(tc.name)
+        origin = mcp_origin_for(tc.name, mcp_tools)
+        server_name, tool_name = origin if origin is not None else _parse_mcp_tool_name(tc.name)
     except ValueError as err:
         raise ToolBail(str(err)) from err
 

@@ -2412,9 +2412,15 @@ class TestPoisonEventQuarantine:
             r for r in caplog.records if "context.poison_event_quarantined" in r.getMessage()
         )
         rendered = rec.getMessage()
-        assert "seq=3" in rendered
-        assert "session_id=sess_01TEST" in rendered
-        assert "error_type=RuntimeError" in rendered
+        if rendered.startswith("{"):
+            event = json.loads(rendered)
+            assert event["seq"] == 3
+            assert event["session_id"] == "sess_01TEST"
+            assert event["error_type"] == "RuntimeError"
+        else:
+            assert "seq=3" in rendered
+            assert "session_id=sess_01TEST" in rendered
+            assert "error_type=RuntimeError" in rendered
 
     def test_only_poison_event_quarantined_others_render(
         self, monkeypatch: pytest.MonkeyPatch

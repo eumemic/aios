@@ -8,6 +8,7 @@ from ...client import AuthenticatedClient, Client
 from ...models.http_validation_error import HTTPValidationError
 from ...models.list_response_session import ListResponseSession
 from ...models.list_sessions_status_type_0 import ListSessionsStatusType0
+from ...models.list_sessions_view_type_0 import ListSessionsViewType0
 from ...types import UNSET, Response, Unset
 
 
@@ -18,6 +19,8 @@ def _get_kwargs(
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
+    ids: list[str] | None | Unset = UNSET,
+    view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
@@ -62,6 +65,25 @@ def _get_kwargs(
     else:
         json_limit = limit
     params["limit"] = json_limit
+
+    json_ids: list[str] | None | Unset
+    if isinstance(ids, Unset):
+        json_ids = UNSET
+    elif isinstance(ids, list):
+        json_ids = ids
+
+    else:
+        json_ids = ids
+    params["ids"] = json_ids
+
+    json_view: None | str | Unset
+    if isinstance(view, Unset):
+        json_view = UNSET
+    elif isinstance(view, ListSessionsViewType0):
+        json_view = view.value
+    else:
+        json_view = view
+    params["view"] = json_view
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -113,6 +135,8 @@ def sync_detailed(
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
+    ids: list[str] | None | Unset = UNSET,
+    view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
@@ -126,12 +150,19 @@ def sync_detailed(
     row carries the derived ``status`` ({active, idle, archived}) and cumulative
     ``usage``.
 
+    ``view=lite`` skips vaults / resource echoes / triggers / obligations and
+    still returns ``id``, derived ``status``, ``last_event_at``, and
+    ``awaiting`` — the cheap path for a roster that already knows its session
+    ids. ``ids=`` restricts the page to those session ids (account-scoped).
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
+        ids (list[str] | None | Unset):
+        view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -148,6 +179,8 @@ def sync_detailed(
         status=status,
         parent_run_id=parent_run_id,
         limit=limit,
+        ids=ids,
+        view=view,
         authorization=authorization,
     )
 
@@ -166,6 +199,8 @@ def sync(
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
+    ids: list[str] | None | Unset = UNSET,
+    view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
@@ -179,12 +214,19 @@ def sync(
     row carries the derived ``status`` ({active, idle, archived}) and cumulative
     ``usage``.
 
+    ``view=lite`` skips vaults / resource echoes / triggers / obligations and
+    still returns ``id``, derived ``status``, ``last_event_at``, and
+    ``awaiting`` — the cheap path for a roster that already knows its session
+    ids. ``ids=`` restricts the page to those session ids (account-scoped).
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
+        ids (list[str] | None | Unset):
+        view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -202,6 +244,8 @@ def sync(
         status=status,
         parent_run_id=parent_run_id,
         limit=limit,
+        ids=ids,
+        view=view,
         authorization=authorization,
     ).parsed
 
@@ -214,6 +258,8 @@ async def asyncio_detailed(
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
+    ids: list[str] | None | Unset = UNSET,
+    view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
     """List
@@ -227,12 +273,19 @@ async def asyncio_detailed(
     row carries the derived ``status`` ({active, idle, archived}) and cumulative
     ``usage``.
 
+    ``view=lite`` skips vaults / resource echoes / triggers / obligations and
+    still returns ``id``, derived ``status``, ``last_event_at``, and
+    ``awaiting`` — the cheap path for a roster that already knows its session
+    ids. ``ids=`` restricts the page to those session ids (account-scoped).
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
+        ids (list[str] | None | Unset):
+        view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -249,6 +302,8 @@ async def asyncio_detailed(
         status=status,
         parent_run_id=parent_run_id,
         limit=limit,
+        ids=ids,
+        view=view,
         authorization=authorization,
     )
 
@@ -265,6 +320,8 @@ async def asyncio(
     status: ListSessionsStatusType0 | None | Unset = UNSET,
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
+    ids: list[str] | None | Unset = UNSET,
+    view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
     """List
@@ -278,12 +335,19 @@ async def asyncio(
     row carries the derived ``status`` ({active, idle, archived}) and cumulative
     ``usage``.
 
+    ``view=lite`` skips vaults / resource echoes / triggers / obligations and
+    still returns ``id``, derived ``status``, ``last_event_at``, and
+    ``awaiting`` — the cheap path for a roster that already knows its session
+    ids. ``ids=`` restricts the page to those session ids (account-scoped).
+
     Args:
         cursor (None | str | Unset):
         agent_id (None | str | Unset):
         status (ListSessionsStatusType0 | None | Unset):
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
+        ids (list[str] | None | Unset):
+        view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
     Raises:
@@ -302,6 +366,8 @@ async def asyncio(
             status=status,
             parent_run_id=parent_run_id,
             limit=limit,
+            ids=ids,
+            view=view,
             authorization=authorization,
         )
     ).parsed

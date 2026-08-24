@@ -99,35 +99,44 @@ async def prune_archived_runs(
 
 
 async def reconcile_terminal_archival_batch(
-    conn: asyncpg.Connection[Any], *, row_limit: int = 500
+    conn: asyncpg.Connection[Any], *, grace_days: int = 7, row_limit: int = 500
 ) -> int:
-    """Archive a bounded historical terminal batch and project its final facts."""
+    """Archive a bounded batch of terminal runs older than the grace window.
+
+    The terminal transition updates ``updated_at``, making it the age key for
+    historical rows that predate automatic archival. Already-archived legacy
+    rows missing their durable summary are also projected, irrespective of age.
+    """
     result = await conn.execute(
         """WITH candidates AS (
-               SELECT r.id, r.updated_at, e.payload
+               SELECT r.id, e.payload
                  FROM wf_runs r
                  LEFT JOIN LATERAL (
                      SELECT payload FROM wf_run_events
                       WHERE run_id = r.id AND type = 'run_completed'
                       ORDER BY seq DESC LIMIT 1
                  ) e ON true
-                WHERE (r.archived_at IS NULL OR r.terminal_summary IS NULL)
-                  AND r.status IN ('completed','errored','cancelled')
+                WHERE r.status IN ('completed','errored','cancelled')
+                  AND ((r.archived_at IS NULL
+                        AND r.updated_at < now() - make_interval(days => $1))
+                       OR (r.archived_at IS NOT NULL AND r.terminal_summary IS NULL))
                 ORDER BY r.updated_at, r.id
-                LIMIT $1
+                LIMIT $2
            )
            UPDATE wf_runs r
-              SET archived_at = COALESCE(r.archived_at, c.updated_at),
-                  terminal_summary = jsonb_strip_nulls(jsonb_build_object(
-                      'is_error', c.payload->'is_error',
-                      'error', c.payload->'error',
-                      'usage', c.payload->'usage',
-                      'duration_ms', c.payload->'duration_ms',
-                      'cancelled', (r.status = 'cancelled')
-                  ))
+              SET archived_at = COALESCE(r.archived_at, now()),
+                  terminal_summary = COALESCE(r.terminal_summary,
+                      jsonb_strip_nulls(jsonb_build_object(
+                          'is_error', c.payload->'is_error',
+                          'error', c.payload->'error',
+                          'usage', c.payload->'usage',
+                          'duration_ms', c.payload->'duration_ms',
+                          'cancelled', (r.status = 'cancelled')
+                      )))
              FROM candidates c WHERE r.id = c.id
-               AND (r.archived_at IS NULL OR r.terminal_summary IS NULL)
-               AND r.status IN ('completed','errored','cancelled')""",
+               AND r.status IN ('completed','errored','cancelled')
+               AND (r.archived_at IS NULL OR r.terminal_summary IS NULL)""",
+        grace_days,
         row_limit,
     )
     return int(result.split()[-1])

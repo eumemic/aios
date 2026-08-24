@@ -45,6 +45,7 @@ from aios.harness.request_body_budget import (
     is_request_too_large_error,
 )
 from aios.logging import get_logger
+from aios.mcp.schema import sanitize_tools_for_provider
 from aios.models.attenuation import api_base_of
 from aios.models.model_providers import ProviderAuth
 from aios.services.litellm_params import openai_params_in, silent_drop_controls_in
@@ -685,7 +686,7 @@ def _build_litellm_kwargs(
         # and drops it for adapters which do not.
         kwargs["stream_options"] = {"include_usage": True}
     if tools:
-        kwargs["tools"] = tools
+        kwargs["tools"] = sanitize_tools_for_provider(tools)
     effective_extra = dict(extra or {})
     # Never permit LiteLLM's silent unsupported-parameter path, even when an
     # agent explicitly requests it through ``litellm_extra``.

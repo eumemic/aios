@@ -35,6 +35,7 @@ from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.harness.trigger_runner import run_trigger_step
+from aios.models.agents import ToolSpec
 from aios.models.triggers import TriggerCreate
 from aios.services import triggers as trig_service
 from aios.services import workflows as wf_service
@@ -723,6 +724,129 @@ async def test_one_shot_skip_writes_tombstone(trig_runtime: asyncpg.Pool[Any]) -
     rows = await _carrier_rows(pool, tid)
     assert [(r["trigger_context"], r["status"]) for r in rows] == [("one_shot", "skipped")]
     assert rows[0]["error_summary"] == "owner session archived"
+
+
+async def test_workflow_alarm_refusal_fails_run_and_trigger(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    pool = trig_runtime
+    _, _, session = await seed_agent_env_session(pool, account_id=ACC, prefix="alarm")
+    script = "async def main(input):\n    return await tool('wake_self', {'content': 'alarm'})\n"
+    async with pool.acquire() as conn:
+        workflow = await wf_queries.insert_workflow(
+            conn,
+            account_id=ACC,
+            name=f"w-{secrets.token_hex(4)}",
+            script=script,
+            tools=[ToolSpec(type="wake_self")],
+        )
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "alarm",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": {"kind": "workflow", "workflow_id": workflow.id},
+        },
+    )
+
+    await run_trigger_step(tid)
+    async with pool.acquire() as conn:
+        run_id = await conn.fetchval(
+            "SELECT result_id FROM trigger_runs WHERE trigger_id = $1", tid
+        )
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_wf_run(conn, run_id, account_id=ACC)
+        events = await wf_queries.list_run_events(conn, run_id)
+        trigger_status = await conn.fetchval(
+            "SELECT last_fire_status FROM triggers WHERE id = $1", tid
+        )
+        fire_status = await conn.fetchval(
+            "SELECT status FROM trigger_runs WHERE result_id = $1", run_id
+        )
+    assert run.status == "errored"
+    refusal = next(e for e in events if e.type == "call_result")
+    assert refusal.payload["is_error"] is True
+    assert refusal.payload["error"]["kind"] == "tool_not_callable"
+    assert trigger_status == "error"
+    assert fire_status == "error"
+
+
+async def test_late_workflow_failure_does_not_overwrite_newer_fire(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A workflow completion updates its launch audit, but only the latest
+    launch may update the trigger-level echo and failure counter."""
+    pool = trig_runtime
+    _, _, session = await seed_agent_env_session(pool, account_id=ACC, prefix="late-failure")
+    failing_script = "async def main(input):\n    raise RuntimeError('old run failed')\n"
+    async with pool.acquire() as conn:
+        workflow = await wf_queries.insert_workflow(
+            conn,
+            account_id=ACC,
+            name=f"w-{secrets.token_hex(4)}",
+            script=failing_script,
+        )
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "ordered-workflow-results",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": {"kind": "workflow", "workflow_id": workflow.id},
+        },
+    )
+
+    # Both audit records are produced by the real cron trigger launch path. The
+    # first run pins the failing v1 script; the second pins the successful v2.
+    await run_trigger_step(tid)
+    async with pool.acquire() as conn:
+        old_run_id = await conn.fetchval(
+            "SELECT result_id FROM trigger_runs WHERE trigger_id = $1", tid
+        )
+        await wf_queries.update_workflow(
+            conn,
+            workflow.id,
+            account_id=ACC,
+            expected_version=workflow.version,
+            script=_RETURN_ONE,
+        )
+    await run_trigger_step(tid)
+
+    async with pool.acquire() as conn:
+        fire_rows = await conn.fetch(
+            "SELECT result_id, status FROM trigger_runs "
+            "WHERE trigger_id = $1 ORDER BY started_at, id",
+            tid,
+        )
+    assert len(fire_rows) == 2
+    assert fire_rows[0]["result_id"] == old_run_id
+    new_run_id = fire_rows[1]["result_id"]
+
+    # Finish out of launch order: the newer success establishes the echo, then
+    # the older failure must be confined to its own audit row.
+    await run_workflow_step(new_run_id)
+    await run_workflow_step(old_run_id)
+
+    async with pool.acquire() as conn:
+        fire_rows = await conn.fetch(
+            "SELECT result_id, status FROM trigger_runs "
+            "WHERE trigger_id = $1 ORDER BY started_at, id",
+            tid,
+        )
+        trigger_row = await conn.fetchrow(
+            "SELECT last_fire_status, consecutive_failures FROM triggers WHERE id = $1",
+            tid,
+        )
+    assert [(row["result_id"], row["status"]) for row in fire_rows] == [
+        (old_run_id, "error"),
+        (new_run_id, "ok"),
+    ]
+    assert trigger_row is not None
+    assert trigger_row["last_fire_status"] == "ok"
+    assert trigger_row["consecutive_failures"] == 0
 
 
 async def test_cron_fire_writes_audit_row_and_skip_does_not(

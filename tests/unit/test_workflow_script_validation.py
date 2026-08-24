@@ -162,6 +162,15 @@ def test_custom_tool_name_satisfies_the_declared_surface() -> None:
     validate_workflow_script(script, tools)
 
 
+def test_wake_self_is_rejected_at_authoring_time() -> None:
+    script = "async def main(input):\n    return await tool('wake_self', {'content': 'alarm'})\n"
+    with pytest.raises(ValidationError) as exc:
+        validate_workflow_script(script, [ToolSpec(type="wake_self")])
+    assert "not callable from a workflow run" in str(exc.value)
+    assert "sandbox_command" in str(exc.value)
+    assert exc.value.detail == {"unsupported_tools": ["wake_self"]}
+
+
 # ─── (6) valid, fully-covered ────────────────────────────────────────────────
 
 

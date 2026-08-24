@@ -201,6 +201,7 @@ async def _complete_workflow_output(monkeypatch: Any, value: Any) -> tuple[str, 
     )
     commit = AsyncMock()
     monkeypatch.setattr(workflow_step, "_commit_terminal_and_dispatch", commit)
+    monkeypatch.setattr("aios.db.queries.record_workflow_trigger_failure", AsyncMock())
     await workflow_step._complete_run(
         mock.MagicMock(), _run_with_schema(), output=value, is_error=False
     )

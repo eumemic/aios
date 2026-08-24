@@ -216,22 +216,19 @@ def validate_workspace_path(
 _RUNS_ROOT = "_runs"
 
 
-def run_workspace_dir(run_id: str) -> Path:
-    """Per-run host workspace directory backing ``/workspace`` in a run sandbox (#988).
+def run_workspace_dir(account_id: str, run_id: str) -> Path:
+    """Per-run host workspace directory backing ``/workspace`` in a run sandbox.
 
-    Rooted at ``<workspace_root>/_runs/<run_id>`` — under a reserved prefix so it
-    never collides with a session workspace (``<workspace_root>/<account_id>/…``)
-    and is independent of any user-supplied path. The run sandbox is **ephemeral
-    scratch**: the directory is created at provision and is not part of any durable
-    snapshot machinery. Pure — does not touch the filesystem; use
-    :func:`ensure_run_workspace_dir` to create.
+    Run scratch is account-scoped at
+    ``<workspace_root>/<account_id>/_runs/<run_id>``. Pure — does not touch the
+    filesystem; use :func:`ensure_run_workspace_dir` to create it.
     """
-    return (get_settings().workspace_root / _RUNS_ROOT / run_id).resolve()
+    return (get_settings().workspace_root / account_id / _RUNS_ROOT / run_id).resolve()
 
 
-def ensure_run_workspace_dir(run_id: str) -> Path:
-    """Return the per-run workspace directory, creating it (and its parents) if needed."""
-    return ensure_owned_dir(run_workspace_dir(run_id))
+def ensure_run_workspace_dir(account_id: str, run_id: str) -> Path:
+    """Return the per-run workspace directory, creating it and its parents."""
+    return ensure_owned_dir(run_workspace_dir(account_id, run_id))
 
 
 _MEMORY_STORES_ROOT = "_memory_stores"

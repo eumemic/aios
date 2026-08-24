@@ -479,10 +479,10 @@ async def test_terminal_run_and_double_resume_are_noops(wf_runtime: asyncpg.Pool
     assert await _events(pool, run_id) == before  # journal unchanged
 
 
-async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_override(
+async def test_terminal_run_remains_visible_during_archive_grace_window(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
-    """Every terminal run archives; callers have no run-lifetime flag that can prevent it."""
+    """Terminal archival is maintenance-driven; suspended runs remain ineligible."""
     assert "auto_archive_on_completion" not in inspect.signature(service.create_run).parameters
     pool = wf_runtime
     terminal_id = await _make_run(pool, "def main(input):\n    return 'done'", name="prunable")
@@ -495,7 +495,7 @@ async def test_terminal_run_archives_unconditionally_with_no_caller_lifetime_ove
         terminal = await wf_queries.get_wf_run(conn, terminal_id, account_id="acc_wf")
         live = await wf_queries.get_wf_run(conn, live_id, account_id="acc_wf")
         assert terminal is not None and terminal.status in {"completed", "errored", "cancelled"}
-        assert terminal.archived_at is not None
+        assert terminal.archived_at is None
         assert live is not None and live.status == "suspended"
         assert live.archived_at is None
 
@@ -5366,12 +5366,21 @@ async def test_bash_class_other_tool_not_callable(
     # Declare read so the gate's FIRST clause (not-in-RUN_TOOLS) is what rejects it —
     # not the declared-tools clause — pinning the not-callable string.
     run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="read")], name="wt-bash-i")
-    await run_workflow_step(run_id)  # park at the read frontier (routes to the sandbox executor)
-    await _drain_sandbox_tasks()  # task: gate_run_tool → not-callable {"error": …}
-    await run_workflow_step(run_id)  # harvest the error value → complete
+    await run_workflow_step(run_id)
     run = await _get_run(pool, run_id)
-    assert run is not None and run.status == "completed"  # recoverable, NOT errored
-    assert run.output == {"error": "tool 'read' is not callable from a workflow run"}
+    assert run is not None and run.status == "errored"
+    assert run.output == "tool 'read' is not callable from a workflow run"
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+    refusal = next(e for e in events if e.type == "call_result")
+    assert refusal.payload == {
+        "result": None,
+        "is_error": True,
+        "error": {
+            "kind": "tool_not_callable",
+            "message": "tool 'read' is not callable from a workflow run",
+        },
+    }
     assert _backend_create_count(backend) == 0  # never provisioned
     assert _backend_exec_count(backend) == 0
 

@@ -153,7 +153,18 @@ def validate_workflow_script(script: str, tools: list[ToolSpec]) -> None:
             "(`async def main(input)`)"
         )
 
-    # 4. Tool surface superset (literal-only). A non-literal name is un-AST-able and
+    # 4. Refuse surfaces that advertise a session-only alarm path. A workflow cannot
+    #    wake its launcher session directly; alarms must use the documented
+    #    sandbox_command trigger path, where the seat sandbox calls wake_self.
+    unsupported = sorted(spec.type for spec in tools if spec.type == "wake_self")
+    if unsupported:
+        raise ValidationError(
+            "tool 'wake_self' is not callable from a workflow run; use a "
+            "sandbox_command trigger whose command calls `tool wake_self` instead",
+            detail={"unsupported_tools": unsupported},
+        )
+
+    # 5. Tool surface superset (literal-only). A non-literal name is un-AST-able and
     #    excluded — not a violation.
     declared = declared_tool_names(tools)
     missing = sorted(name for name in _extract_literal_tool_names(tree) if name not in declared)

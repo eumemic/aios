@@ -874,6 +874,32 @@ async def _run_workflow_step_body(
                         "input": spec.get("input"),
                     },
                 )
+                # A context-ineligible tool is an authoring/runtime contract failure,
+                # not a recoverable tool response. Journal the refusal as an error and
+                # fail the run now; otherwise an error-shaped value can be returned and
+                # a monitor whose alarm was discarded completes green.
+                if tool_name not in run_tools.RUN_TOOLS:
+                    message = f"tool {tool_name!r} is not callable from a workflow run"
+                    await wf_queries.append_run_event(
+                        conn,
+                        account_id=account_id,
+                        run_id=run_id,
+                        type="call_result",
+                        call_key=cap.call_key,
+                        payload={
+                            "result": None,
+                            "is_error": True,
+                            "error": {"kind": "tool_not_callable", "message": message},
+                        },
+                    )
+                    await _complete_run(
+                        conn,
+                        run,
+                        output=message,
+                        is_error=True,
+                        error_kind="tool_not_callable",
+                    )
+                    return
                 # Route by execution class: a sandbox tool (bash) launches against
                 # the run's provisioned container, everything else on the worker.
                 # The journaled payload is identical (bash rides the `tool`
@@ -1445,6 +1471,13 @@ async def _complete_run(
         payload=payload,
         output=output,
     )
+    if is_error:
+        # Workflow-trigger actions launch asynchronously. Once their result run
+        # fails, revise the fire audit/echo from optimistic launch-ok to error so
+        # a discarded alarm cannot leave its trigger green.
+        await db_queries.record_workflow_trigger_failure(
+            conn, run_id=run.id, error_summary=str(output)[:200]
+        )
 
 
 async def _cancel_run(conn: asyncpg.Connection[Any], run: WfRun, *, reason: Any = None) -> None:
