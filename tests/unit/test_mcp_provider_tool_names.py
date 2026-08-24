@@ -82,7 +82,7 @@ class TestSanitizeToolsForProvider:
         assert "_mcp_origin" not in cleaned[0]
         assert cleaned[0]["function"]["name"] == "mcp__x__search"
         assert "outputSchema" in tools[0]["function"]
-        assert tools[0]["_mcp_origin"]["tool"] == "search"
+        assert tools[0]["_mcp_origin"] == {"server": "x", "tool": "search"}
 
     def test_origin_lookup(self) -> None:
         advertised, server, tool = qualify_mcp_tool_name(
