@@ -44,8 +44,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +62,25 @@ from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 from aios.pinned_transport import PinnedTransport
 
 log = get_logger("aios.mcp.pool")
+
+# Discovery runs concurrently for multiple session preludes in one worker. Keep
+# the session/mount which initiated pool work in task-local context so a breaker
+# edge can be routed to its producer rather than whichever same-identity mount
+# happens to drain the worker-global queue first.
+_EdgeOwner = tuple[str, str]
+_edge_owner: contextvars.ContextVar[_EdgeOwner | None] = contextvars.ContextVar(
+    "mcp_edge_owner", default=None
+)
+
+
+@contextlib.contextmanager
+def degraded_edge_owner(session_id: str, mount_name: str) -> Iterator[None]:
+    token = _edge_owner.set((session_id, mount_name))
+    try:
+        yield
+    finally:
+        _edge_owner.reset(token)
+
 
 # Consecutive acquire/discovery failures per ``_PoolKey`` before the circuit
 # breaker opens (#1698). Bulkheads a dead/401'ing MCP server: after K straight
@@ -298,7 +318,7 @@ class McpSessionPool:
         # (``discover_session_mcp_tools``) drains this via
         # :meth:`drain_degraded_events` and emits exactly one durable
         # ``mcp_server_unavailable`` session event per edge (#1698 (e)).
-        self._pending_degraded_events: list[_PoolKey] = []
+        self._pending_degraded_events: list[_PoolKey | tuple[_PoolKey, _EdgeOwner | None]] = []
 
     def _condition_for(self, key: _PoolKey) -> asyncio.Condition:
         cond = self._conditions.get(key)
@@ -772,8 +792,18 @@ class McpSessionPool:
         self._degraded_keys.add(key)
         # Record the edge for a session-context caller to emit exactly one
         # durable ``mcp_server_unavailable`` event (#1698 (e)).
-        self._pending_degraded_events.append(key)
+        self._pending_degraded_events.append((key, _edge_owner.get()))
         return True
+
+    @staticmethod
+    def _edge_parts(
+        item: _PoolKey | tuple[_PoolKey, _EdgeOwner | None],
+    ) -> tuple[_PoolKey, _EdgeOwner | None]:
+        # Accept legacy bare keys because a few callers/tests seed the queue to
+        # model an edge produced outside session-aware discovery.
+        if len(item) == 2 and isinstance(item[0], tuple):
+            return item
+        return item, None
 
     def drain_degraded_events(self) -> list[tuple[str, str | None]]:
         """Pop and return every pending DOWN-transition identity."""
@@ -795,14 +825,50 @@ class McpSessionPool:
         """
         seen: set[tuple[str, str | None]] = set()
         drained: list[tuple[str, str | None]] = []
-        remaining: list[_PoolKey] = []
-        for key in self._pending_degraded_events:
+        remaining: list[_PoolKey | tuple[_PoolKey, _EdgeOwner | None]] = []
+        for item in self._pending_degraded_events:
+            key, _owner = self._edge_parts(item)
             identity = (key[0], key[1])
             if not matches(*identity):
-                remaining.append(key)
+                remaining.append(item)
             elif identity not in seen:
                 seen.add(identity)
                 drained.append(identity)
+        self._pending_degraded_events = remaining
+        return drained
+
+    def drain_unattributed_degraded_events_matching(
+        self, matches: Callable[[str, str | None], bool]
+    ) -> list[tuple[str, str | None]]:
+        """Pop matching legacy edges, never edges attributed to another owner."""
+        seen: set[tuple[str, str | None]] = set()
+        drained: list[tuple[str, str | None]] = []
+        remaining: list[_PoolKey | tuple[_PoolKey, _EdgeOwner | None]] = []
+        for item in self._pending_degraded_events:
+            key, owner = self._edge_parts(item)
+            identity = (key[0], key[1])
+            if owner is not None or not matches(*identity):
+                remaining.append(item)
+            elif identity not in seen:
+                seen.add(identity)
+                drained.append(identity)
+        self._pending_degraded_events = remaining
+        return drained
+
+    def drain_degraded_events_for_owner(self, session_id: str) -> list[tuple[str, str | None, str]]:
+        """Pop only DOWN edges produced by ``session_id``'s mount work."""
+        seen: set[tuple[str, str | None, str]] = set()
+        drained: list[tuple[str, str | None, str]] = []
+        remaining: list[_PoolKey | tuple[_PoolKey, _EdgeOwner | None]] = []
+        for item in self._pending_degraded_events:
+            key, owner = self._edge_parts(item)
+            if owner is None or owner[0] != session_id:
+                remaining.append(item)
+                continue
+            edge = (key[0], key[1], owner[1])
+            if edge not in seen:
+                seen.add(edge)
+                drained.append(edge)
         self._pending_degraded_events = remaining
         return drained
 

@@ -2046,16 +2046,26 @@ async def discover_session_mcp_tools(
         _pool = runtime.mcp_session_pool
         if _pool is not None:
             from aios.mcp.client import _headers_key
+            from aios.mcp.pool import degraded_edge_owner
 
             hkey = _headers_key(spec.headers)
-            # A cached result is always served (cheap, no RPC) even while the
-            # circuit is open; only an uncached discovery is short-circuited.
-            if _pool.get_cached_tools(
-                spec.url, vault_id, hkey, binding_id, server_name=spec.name
-            ) is None and (_pool.is_unhealthy(spec.url, vault_id, hkey)):
-                raise TimeoutError(
-                    f"MCP server {spec.name!r} discovery skipped: "
-                    f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"
+            with degraded_edge_owner(session_id, spec.name):
+                # A cached result is always served (cheap, no RPC) even while the
+                # circuit is open; only an uncached discovery is short-circuited.
+                if _pool.get_cached_tools(
+                    spec.url, vault_id, hkey, binding_id, server_name=spec.name
+                ) is None and (_pool.is_unhealthy(spec.url, vault_id, hkey)):
+                    raise TimeoutError(
+                        f"MCP server {spec.name!r} discovery skipped: "
+                        f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"
+                    )
+                return await discover_mcp_tools(
+                    spec.url,
+                    vault_id,
+                    headers,
+                    spec.name,
+                    spec_headers=spec.headers,
+                    binding_id=binding_id,
                 )
         return await discover_mcp_tools(
             spec.url, vault_id, headers, spec.name, spec_headers=spec.headers, binding_id=binding_id
@@ -2107,11 +2117,21 @@ async def discover_session_mcp_tools(
         # Claim by identities resolved for this session, not by declarations.
         # In particular an unpinned declaration does not own every vault at its
         # URL: it owns only the vault selected for this session at runtime.
-        owned_edges = _pool.drain_degraded_events_matching(
+        attributed_edges = _pool.drain_degraded_events_for_owner(session_id)
+        attributed_identities = {(url, vault_id) for url, vault_id, _name in attributed_edges}
+        # Legacy/unattributed edges (including those opened by execution paths
+        # without session context) retain identity-based delivery. Attributed
+        # edges can only be consumed by their recorded producer.
+        legacy_edges = _pool.drain_unattributed_degraded_events_matching(
             lambda down_url, down_vault_id: (down_url, down_vault_id) in resolved_mounts
         )
-        for down_url, down_vault_id in owned_edges:
-            owner = resolved_mounts[(down_url, down_vault_id)]
+        owned_edges = attributed_edges + [
+            (url, vault_id, resolved_mounts[(url, vault_id)].name)
+            for url, vault_id in legacy_edges
+            if (url, vault_id) not in attributed_identities
+        ]
+        for down_url, _down_vault_id, mount_name in owned_edges:
+            owner = next(spec for spec in servers if spec.name == mount_name)
             await sessions_service.append_event(
                 pool,
                 session_id,

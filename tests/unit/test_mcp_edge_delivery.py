@@ -111,3 +111,64 @@ async def test_same_url_session_claims_only_its_resolved_identity() -> None:
         runtime.mcp_session_pool = prior
 
     assert emitted == [("owner", "owner")]
+
+
+@pytest.mark.asyncio
+async def test_same_identity_edge_is_delivered_only_to_producer() -> None:
+    url = "https://shared.example/mcp"
+    breaker_pool = McpSessionPool()
+    sibling = _agent(
+        mcp_servers=[McpServerSpec(name="sibling_mount", url=url, vault_id="v")],
+        tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="sibling_mount")],
+    )
+    origin = _agent(
+        mcp_servers=[McpServerSpec(name="origin_mount", url=url, vault_id="v")],
+        tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="origin_mount")],
+    )
+    emitted = []
+    failed = False
+
+    async def discover(*args, **kwargs):
+        nonlocal failed
+        if args[3] == "origin_mount" and not failed:
+            failed = True
+            breaker_pool.mark_unhealthy(url, "v", "", backoff_s=60)
+            raise TimeoutError("down")
+        return [], None
+
+    async def append(_pool, session_id, _type, event, **kwargs):
+        emitted.append((session_id, event["server"]))
+        return MagicMock()
+
+    prior = runtime.mcp_session_pool
+    runtime.mcp_session_pool = breaker_pool
+    try:
+        with (
+            patch(
+                "aios.mcp.client.resolve_auth_for_mcp_mount",
+                new_callable=AsyncMock,
+                return_value=("v", {}),
+            ),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=discover),
+            patch("aios.harness.loop.sessions_service.append_event", side_effect=append),
+        ):
+            await discover_session_mcp_tools(
+                pool=AsyncMock(), session_id="origin", agent=origin, account_id="acc_test_stub"
+            )
+            # Re-seed an attributed edge to replay the scheduling case where the
+            # sibling prelude reaches draining before its producer.
+            from aios.mcp.pool import degraded_edge_owner
+
+            breaker_pool.mark_healthy(url, "v", "")
+            with degraded_edge_owner("origin", "origin_mount"):
+                breaker_pool.mark_unhealthy(url, "v", "", backoff_s=60)
+            emitted.clear()
+            await discover_session_mcp_tools(
+                pool=AsyncMock(), session_id="sibling", agent=sibling, account_id="acc_test_stub"
+            )
+            await discover_session_mcp_tools(
+                pool=AsyncMock(), session_id="origin", agent=origin, account_id="acc_test_stub"
+            )
+    finally:
+        runtime.mcp_session_pool = prior
+    assert emitted == [("origin", "origin_mount")]
