@@ -17,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.json_schema import SkipJsonSchema
 
 from aios.actors import Actor
+from aios.models.accounting import (
+    AttributedUsage,
+    UsageNodeRef,
+)
 from aios.models.events import Event
 from aios.models.github_repositories import (
     MAX_REPOS_PER_SESSION,
@@ -156,9 +160,15 @@ acceptable for short test/cutover windows.
 MAX_USER_MESSAGE_CHARS = 1_000_000
 
 
-class SessionUsage(BaseModel):
-    """Cumulative token usage across all model calls in a session."""
+class SessionUsage(AttributedUsage):
+    """Session inference usage, with backward-compatible own counters.
 
+    The flat counters retain their historical self-only meaning.  New clients
+    should use ``own`` and ``subtree``; those fields cross session/run creation
+    boundaries transitively and include archived descendants.
+    """
+
+    cost_microusd: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -423,6 +433,7 @@ class Session(BaseModel):
     vault_ids: list[str] = Field(default_factory=list)
     last_event_seq: int
     usage: SessionUsage = Field(default_factory=SessionUsage)
+    usage_parent: UsageNodeRef | None = None
     resources: list[SessionResourceEcho] = Field(default_factory=list)
     triggers: list[TriggerEcho] = Field(default_factory=list)
     created_by: Actor | None = None

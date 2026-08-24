@@ -44,6 +44,7 @@ from aios.ids import (
     TRIGGER,
     make_id,
 )
+from aios.models.accounting import UsageCounters, UsageNodeRef
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.attenuation import Surface
 from aios.models.sessions import (
@@ -167,10 +168,34 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         stop_reason=stop_reason,
         last_event_seq=row["last_event_seq"],
         usage=SessionUsage(
+            cost_microusd=row["cost_microusd"],
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
             cache_read_input_tokens=row["cache_read_input_tokens"],
             cache_creation_input_tokens=row["cache_creation_input_tokens"],
+            own=UsageCounters(
+                cost_microusd=row["cost_microusd"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cache_read_input_tokens=row["cache_read_input_tokens"],
+                cache_creation_input_tokens=row["cache_creation_input_tokens"],
+            ),
+            subtree=UsageCounters(
+                cost_microusd=row["cost_microusd"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cache_read_input_tokens=row["cache_read_input_tokens"],
+                cache_creation_input_tokens=row["cache_creation_input_tokens"],
+            ),
+        ),
+        usage_parent=(
+            UsageNodeRef(kind="session", id=row["creator_session_id"])
+            if row.get("creator_session_id") is not None
+            else (
+                UsageNodeRef(kind="run", id=row["creator_run_id"])
+                if row.get("creator_run_id") is not None
+                else None
+            )
         ),
         created_by=actor_from_row(row),
         created_at=row["created_at"],
@@ -224,6 +249,7 @@ async def insert_session(
     outbound_suppression: str = "off",
     frozen_surface: Surface | None = None,
     frozen_litellm_extra: dict[str, Any] | None = None,
+    creator_session_id: str | None = None,
 ) -> Session:
     """Insert a fresh session row.
 
@@ -250,10 +276,11 @@ async def insert_session(
                 workspace_volume_path, env,
                 focal_channel, focal_locked, account_id, archive_when_idle,
                 outbound_suppression, created_by_type, created_by_ref,
-                tools, mcp_servers, http_servers, surface_frozen, litellm_extra
+                tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
+                creator_session_id
             )
             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
-                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb)
+                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb, $21)
             RETURNING *
             """,
             new_id,
@@ -281,6 +308,7 @@ async def insert_session(
             else None,
             frozen_surface is not None,
             json.dumps(frozen_litellm_extra or {}) if frozen_surface else None,
+            creator_session_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -339,11 +367,11 @@ async def insert_child_session(
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
                 tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
-                tools_vocab_epoch
+                tools_vocab_epoch, creator_run_id
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
                     NULL, FALSE, $7, $8, 'background', $9,
-                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14)
+                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14, $8)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -1617,27 +1645,42 @@ async def increment_session_usage(
     cost_microusd: int = 0,
 ) -> int:
     """Atomically add token and spend counts; return the account spend total."""
+    deltas = (
+        max(0, input_tokens),
+        max(0, output_tokens),
+        max(0, cache_read_input_tokens),
+        max(0, cache_creation_input_tokens),
+        max(0, cost_microusd),
+    )
     async with conn.transaction():
-        await conn.execute(
+        charged_session_id = await conn.fetchval(
             "UPDATE sessions SET "
             "input_tokens = input_tokens + $2, "
             "output_tokens = output_tokens + $3, "
             "cache_read_input_tokens = cache_read_input_tokens + $4, "
             "cache_creation_input_tokens = cache_creation_input_tokens + $5, "
             "cost_microusd = cost_microusd + $6 "
-            "WHERE id = $1 AND account_id = $7",
+            "WHERE id = $1 AND account_id = $7 RETURNING id",
             session_id,
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens,
-            cache_creation_input_tokens,
-            cost_microusd,
+            *deltas,
             account_id,
         )
+        if charged_session_id is None:
+            return 0
+        if any(deltas):
+            await conn.execute(
+                "INSERT INTO inference_usage_ledger "
+                "(account_id, session_id, input_tokens, output_tokens, "
+                " cache_read_input_tokens, cache_creation_input_tokens, cost_microusd) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                account_id,
+                session_id,
+                *deltas,
+            )
         spent = await conn.fetchval(
             "UPDATE accounts SET spent_microusd = spent_microusd + $1 "
             "WHERE id = $2 RETURNING spent_microusd",
-            cost_microusd,
+            deltas[4],
             account_id,
         )
     return int(spent or 0)

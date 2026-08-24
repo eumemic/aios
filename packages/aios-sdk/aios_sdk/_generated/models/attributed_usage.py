@@ -13,38 +13,24 @@ if TYPE_CHECKING:
     from ..models.usage_rate import UsageRate
 
 
-T = TypeVar("T", bound="SessionUsage")
+T = TypeVar("T", bound="AttributedUsage")
 
 
 @_attrs_define
-class SessionUsage:
-    """Session inference usage, with backward-compatible own counters.
+class AttributedUsage:
+    """Own and transitive usage for one node in the accounting tree.
 
-    The flat counters retain their historical self-only meaning.  New clients
-    should use ``own`` and ``subtree``; those fields cross session/run creation
-    boundaries transitively and include archived descendants.
-
-        Attributes:
-            own (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
-            subtree (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
-            own_rate (None | Unset | UsageRate):
-            subtree_rate (None | Unset | UsageRate):
-            cost_microusd (int | Unset):  Default: 0.
-            input_tokens (int | Unset):  Default: 0.
-            output_tokens (int | Unset):  Default: 0.
-            cache_read_input_tokens (int | Unset):  Default: 0.
-            cache_creation_input_tokens (int | Unset):  Default: 0.
+    Attributes:
+        own (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
+        subtree (UsageCounters | Unset): Cumulative inference bought at one node or in one subtree.
+        own_rate (None | Unset | UsageRate):
+        subtree_rate (None | Unset | UsageRate):
     """
 
     own: UsageCounters | Unset = UNSET
     subtree: UsageCounters | Unset = UNSET
     own_rate: None | Unset | UsageRate = UNSET
     subtree_rate: None | Unset | UsageRate = UNSET
-    cost_microusd: int | Unset = 0
-    input_tokens: int | Unset = 0
-    output_tokens: int | Unset = 0
-    cache_read_input_tokens: int | Unset = 0
-    cache_creation_input_tokens: int | Unset = 0
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,16 +60,6 @@ class SessionUsage:
         else:
             subtree_rate = self.subtree_rate
 
-        cost_microusd = self.cost_microusd
-
-        input_tokens = self.input_tokens
-
-        output_tokens = self.output_tokens
-
-        cache_read_input_tokens = self.cache_read_input_tokens
-
-        cache_creation_input_tokens = self.cache_creation_input_tokens
-
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
@@ -95,16 +71,6 @@ class SessionUsage:
             field_dict["own_rate"] = own_rate
         if subtree_rate is not UNSET:
             field_dict["subtree_rate"] = subtree_rate
-        if cost_microusd is not UNSET:
-            field_dict["cost_microusd"] = cost_microusd
-        if input_tokens is not UNSET:
-            field_dict["input_tokens"] = input_tokens
-        if output_tokens is not UNSET:
-            field_dict["output_tokens"] = output_tokens
-        if cache_read_input_tokens is not UNSET:
-            field_dict["cache_read_input_tokens"] = cache_read_input_tokens
-        if cache_creation_input_tokens is not UNSET:
-            field_dict["cache_creation_input_tokens"] = cache_creation_input_tokens
 
         return field_dict
 
@@ -162,30 +128,15 @@ class SessionUsage:
 
         subtree_rate = _parse_subtree_rate(d.pop("subtree_rate", UNSET))
 
-        cost_microusd = d.pop("cost_microusd", UNSET)
-
-        input_tokens = d.pop("input_tokens", UNSET)
-
-        output_tokens = d.pop("output_tokens", UNSET)
-
-        cache_read_input_tokens = d.pop("cache_read_input_tokens", UNSET)
-
-        cache_creation_input_tokens = d.pop("cache_creation_input_tokens", UNSET)
-
-        session_usage = cls(
+        attributed_usage = cls(
             own=own,
             subtree=subtree,
             own_rate=own_rate,
             subtree_rate=subtree_rate,
-            cost_microusd=cost_microusd,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_input_tokens=cache_read_input_tokens,
-            cache_creation_input_tokens=cache_creation_input_tokens,
         )
 
-        session_usage.additional_properties = d
-        return session_usage
+        attributed_usage.additional_properties = d
+        return attributed_usage
 
     @property
     def additional_keys(self) -> list[str]:

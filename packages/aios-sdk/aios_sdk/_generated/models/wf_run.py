@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
     from ..models.tool_spec import ToolSpec
+    from ..models.usage_node_ref import UsageNodeRef
     from ..models.wf_run_caller_type_0 import WfRunCallerType0
     from ..models.wf_run_request_output_schema_type_0 import (
         WfRunRequestOutputSchemaType0,
@@ -74,10 +75,12 @@ class WfRun:
             budget_usd (float | None | Unset):
             default_child_model (None | str | Unset):
             call_llm_cost_microusd (int | Unset):  Default: 0.
+            call_llm_tokens_complete (bool | Unset):  Default: True.
             archived_at (datetime.datetime | None | Unset):
             terminal_summary (None | Unset | WfRunTerminalSummaryType0):
             journal_pruned_at (datetime.datetime | None | Unset):
             usage (None | Unset | WfRunUsage):
+            usage_parent (None | Unset | UsageNodeRef):
     """
 
     id: str
@@ -108,13 +111,16 @@ class WfRun:
     budget_usd: float | None | Unset = UNSET
     default_child_model: None | str | Unset = UNSET
     call_llm_cost_microusd: int | Unset = 0
+    call_llm_tokens_complete: bool | Unset = True
     archived_at: datetime.datetime | None | Unset = UNSET
     terminal_summary: None | Unset | WfRunTerminalSummaryType0 = UNSET
     journal_pruned_at: datetime.datetime | None | Unset = UNSET
     usage: None | Unset | WfRunUsage = UNSET
+    usage_parent: None | Unset | UsageNodeRef = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
@@ -239,6 +245,8 @@ class WfRun:
 
         call_llm_cost_microusd = self.call_llm_cost_microusd
 
+        call_llm_tokens_complete = self.call_llm_tokens_complete
+
         archived_at: None | str | Unset
         if isinstance(self.archived_at, Unset):
             archived_at = UNSET
@@ -270,6 +278,14 @@ class WfRun:
             usage = self.usage.to_dict()
         else:
             usage = self.usage
+
+        usage_parent: dict[str, Any] | None | Unset
+        if isinstance(self.usage_parent, Unset):
+            usage_parent = UNSET
+        elif isinstance(self.usage_parent, UsageNodeRef):
+            usage_parent = self.usage_parent.to_dict()
+        else:
+            usage_parent = self.usage_parent
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -323,6 +339,8 @@ class WfRun:
             field_dict["default_child_model"] = default_child_model
         if call_llm_cost_microusd is not UNSET:
             field_dict["call_llm_cost_microusd"] = call_llm_cost_microusd
+        if call_llm_tokens_complete is not UNSET:
+            field_dict["call_llm_tokens_complete"] = call_llm_tokens_complete
         if archived_at is not UNSET:
             field_dict["archived_at"] = archived_at
         if terminal_summary is not UNSET:
@@ -331,6 +349,8 @@ class WfRun:
             field_dict["journal_pruned_at"] = journal_pruned_at
         if usage is not UNSET:
             field_dict["usage"] = usage
+        if usage_parent is not UNSET:
+            field_dict["usage_parent"] = usage_parent
 
         return field_dict
 
@@ -339,6 +359,7 @@ class WfRun:
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
         from ..models.tool_spec import ToolSpec
+        from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
         from ..models.wf_run_request_output_schema_type_0 import (
             WfRunRequestOutputSchemaType0,
@@ -525,6 +546,8 @@ class WfRun:
 
         call_llm_cost_microusd = d.pop("call_llm_cost_microusd", UNSET)
 
+        call_llm_tokens_complete = d.pop("call_llm_tokens_complete", UNSET)
+
         def _parse_archived_at(data: object) -> datetime.datetime | None | Unset:
             if data is None:
                 return data
@@ -595,6 +618,23 @@ class WfRun:
 
         usage = _parse_usage(d.pop("usage", UNSET))
 
+        def _parse_usage_parent(data: object) -> None | Unset | UsageNodeRef:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, dict):
+                    raise TypeError()
+                usage_parent_type_0 = UsageNodeRef.from_dict(data)
+
+                return usage_parent_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(None | Unset | UsageNodeRef, data)
+
+        usage_parent = _parse_usage_parent(d.pop("usage_parent", UNSET))
+
         wf_run = cls(
             id=id,
             account_id=account_id,
@@ -624,10 +664,12 @@ class WfRun:
             budget_usd=budget_usd,
             default_child_model=default_child_model,
             call_llm_cost_microusd=call_llm_cost_microusd,
+            call_llm_tokens_complete=call_llm_tokens_complete,
             archived_at=archived_at,
             terminal_summary=terminal_summary,
             journal_pruned_at=journal_pruned_at,
             usage=usage,
+            usage_parent=usage_parent,
         )
 
         wf_run.additional_properties = d

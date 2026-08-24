@@ -270,6 +270,10 @@ SESSIONS_POLICY: dict[str, Arm] = {
     # Keep the marker aligned with the copied events. Resetting a v2 clone to
     # v1 would mix old-baseline appends with copied v2 cumulative counters.
     "token_baseline_v": Arm.COPY,
+    # Accounting ownership is creation-specific too. An operator clone is a
+    # fresh root; inheriting either edge would charge it to the source's creator.
+    "creator_session_id": Arm.RESET_DEFAULT,
+    "creator_run_id": Arm.RESET_DEFAULT,
 }
 
 

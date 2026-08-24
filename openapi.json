@@ -9964,6 +9964,94 @@
         }
       }
     },
+    "/v1/usage/consumers": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "List Usage Consumers",
+        "description": "Rank root consumers by rolling creation-subtree inference rate.\n\nRoot consumers are additive: every session/run belongs to exactly one root\nthrough immutable creation edges, so ``share`` values never double-count\nshared invocation work. Archived descendants remain in the rollup. Rates\nupdate on every inference charge and are normalized per hour over the\nrequested rolling window.",
+        "operationId": "list_usage_consumers",
+        "parameters": [
+          {
+            "name": "window_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 2592000,
+              "minimum": 60,
+              "default": 86400,
+              "title": "Window Seconds"
+            }
+          },
+          {
+            "name": "metric",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cost_microusd",
+                "total_tokens"
+              ],
+              "type": "string",
+              "default": "cost_microusd",
+              "title": "Metric"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageConsumersResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workflows": {
       "post": {
         "tags": [
@@ -12233,6 +12321,39 @@
         ],
         "title": "AllowSenders",
         "description": "Admit only canonical connector-supplied sender identifiers."
+      },
+      "AttributedUsage": {
+        "properties": {
+          "own": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "subtree": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "own_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subtree_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "AttributedUsage",
+        "description": "Own and transitive usage for one node in the accounting tree."
       },
       "AwaitResponse": {
         "properties": {
@@ -16536,6 +16657,16 @@
           "usage": {
             "$ref": "#/components/schemas/SessionUsage"
           },
+          "usage_parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageNodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resources": {
             "items": {
               "oneOf": [
@@ -17250,6 +17381,37 @@
       },
       "SessionUsage": {
         "properties": {
+          "own": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "subtree": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "own_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subtree_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cost_microusd": {
+            "type": "integer",
+            "title": "Cost Microusd",
+            "default": 0
+          },
           "input_tokens": {
             "type": "integer",
             "title": "Input Tokens",
@@ -17273,7 +17435,7 @@
         },
         "type": "object",
         "title": "SessionUsage",
-        "description": "Cumulative token usage across all model calls in a session."
+        "description": "Session inference usage, with backward-compatible own counters.\n\nThe flat counters retain their historical self-only meaning.  New clients\nshould use ``own`` and ``subtree``; those fields cross session/run creation\nboundaries transitively and include archived descendants."
       },
       "SessionUserMessage": {
         "properties": {
@@ -18809,6 +18971,221 @@
         "title": "UpdateAccountRequest",
         "description": "Body for ``PATCH /v1/accounts/{id}``.\n\nPartial update: omitted fields are preserved. All fields are optional;\nsubmitting none is a no-op that returns the account row unchanged.\n``config`` is *merged* into the stored config (only the keys present in\nthe submitted object are written), so setting one config item never\ndisturbs the others."
       },
+      "UsageConsumer": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "title": "Rank"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "run"
+            ],
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "archived_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "share": {
+            "type": "number",
+            "title": "Share"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/AttributedUsage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "kind",
+          "id",
+          "label",
+          "status",
+          "created_at",
+          "share",
+          "usage"
+        ],
+        "title": "UsageConsumer",
+        "description": "One root consumer in the ranked account-wide usage view."
+      },
+      "UsageConsumersResponse": {
+        "properties": {
+          "metric": {
+            "type": "string",
+            "enum": [
+              "cost_microusd",
+              "total_tokens"
+            ],
+            "title": "Metric"
+          },
+          "window_seconds": {
+            "type": "integer",
+            "title": "Window Seconds"
+          },
+          "coverage_started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Coverage Started At"
+          },
+          "total_rate_per_hour": {
+            "type": "number",
+            "title": "Total Rate Per Hour"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UsageConsumer"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "metric",
+          "window_seconds",
+          "coverage_started_at",
+          "total_rate_per_hour"
+        ],
+        "title": "UsageConsumersResponse",
+        "description": "Ranked, additive root consumers for one account."
+      },
+      "UsageCounters": {
+        "properties": {
+          "cost_microusd": {
+            "type": "integer",
+            "title": "Cost Microusd",
+            "default": 0
+          },
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens",
+            "default": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens",
+            "default": 0
+          },
+          "cache_read_input_tokens": {
+            "type": "integer",
+            "title": "Cache Read Input Tokens",
+            "default": 0
+          },
+          "cache_creation_input_tokens": {
+            "type": "integer",
+            "title": "Cache Creation Input Tokens",
+            "default": 0
+          },
+          "tokens_complete": {
+            "type": "boolean",
+            "title": "Tokens Complete",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "UsageCounters",
+        "description": "Cumulative inference bought at one node or in one subtree."
+      },
+      "UsageNodeRef": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "session",
+              "run"
+            ],
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "title": "UsageNodeRef",
+        "description": "One immutable parent in the creation-accounting tree."
+      },
+      "UsageRate": {
+        "properties": {
+          "window_seconds": {
+            "type": "integer",
+            "title": "Window Seconds"
+          },
+          "observed_seconds": {
+            "type": "integer",
+            "title": "Observed Seconds"
+          },
+          "complete": {
+            "type": "boolean",
+            "title": "Complete"
+          },
+          "cost_microusd_per_hour": {
+            "type": "number",
+            "title": "Cost Microusd Per Hour",
+            "default": 0.0
+          },
+          "input_tokens_per_hour": {
+            "type": "number",
+            "title": "Input Tokens Per Hour",
+            "default": 0.0
+          },
+          "output_tokens_per_hour": {
+            "type": "number",
+            "title": "Output Tokens Per Hour",
+            "default": 0.0
+          },
+          "cache_read_input_tokens_per_hour": {
+            "type": "number",
+            "title": "Cache Read Input Tokens Per Hour",
+            "default": 0.0
+          },
+          "cache_creation_input_tokens_per_hour": {
+            "type": "number",
+            "title": "Cache Creation Input Tokens Per Hour",
+            "default": 0.0
+          }
+        },
+        "type": "object",
+        "required": [
+          "window_seconds",
+          "observed_seconds",
+          "complete"
+        ],
+        "title": "UsageRate",
+        "description": "Rolling-window inference rate, normalized to one hour.\n\nThe usage ledger starts when the accounting migration lands.  Until one\nfull requested window has elapsed, ``complete`` is false and\n``observed_seconds`` states the actual denominator.  Rates remain useful\nimmediately without pretending pre-ledger history was observed."
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -19890,6 +20267,11 @@
             "title": "Call Llm Cost Microusd",
             "default": 0
           },
+          "call_llm_tokens_complete": {
+            "type": "boolean",
+            "title": "Call Llm Tokens Complete",
+            "default": true
+          },
           "last_event_seq": {
             "type": "integer",
             "title": "Last Event Seq"
@@ -19944,6 +20326,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WfRunUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "usage_parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageNodeRef"
               },
               {
                 "type": "null"
@@ -20126,6 +20518,32 @@
       },
       "WfRunUsage": {
         "properties": {
+          "own": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "subtree": {
+            "$ref": "#/components/schemas/UsageCounters"
+          },
+          "own_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "subtree_rate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageRate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "cost_microusd": {
             "anyOf": [
               {
@@ -20206,7 +20624,7 @@
         },
         "type": "object",
         "title": "WfRunUsage",
-        "description": "Per-run cost / token / iteration / wall-clock \u2014 the machine-observer's substrate.\n\nThe read-path projection of a run's actual spend (#1324). The numbers are summed\nover the run's direct child sessions via ``run_children_usage`` \u2014 the SAME source\n``step.py``'s ``budget()`` builtin consumes \u2014 so a run's ``budget_usd`` *ceiling*\n(on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both\nlegible from the read path.\n\nEVERY field is ``int | None``, and absence is reported as **explicit null**, never\na silent ``0`` or an omitted key (cf. the ``vault_ids:null`` read-path disease this\nmust not inherit \u2014 see the substrate-different-verdict invariant). The observer\nreads null as *cannot-determine* and fails loud, NOT as \"zero spend\":\n\n* ``cost_microusd`` / ``*_tokens`` \u2014 summed over the run's child sessions. A run\n  with no children sums to ``0`` (a real, observed zero \u2014 distinct from null).\n* ``iteration_count`` \u2014 the run's wake/step count. The host keeps **no** per-run\n  iteration counter on any substrate today, so this is reported as ``None``\n  (cannot-determine) rather than fabricated from an unrelated proxy. Reserved for\n  when a real counter lands; surfaced now so the observer's contract is stable.\n* ``wall_clock_ms`` \u2014 wall-clock span ``updated_at - created_at`` in milliseconds,\n  reported ONLY for a TERMINAL run (``updated_at`` is its completion instant). A\n  still-running run's ``updated_at`` is a moving \"last touched\" stamp, not an end,\n  so it is reported as ``None`` rather than a misleading partial span."
+        "description": "Per-run cost / token / iteration / wall-clock \u2014 the machine-observer's substrate.\n\nThe read-path projection of a run's actual spend (#1324). The numbers are summed\nover the run's direct child sessions via ``run_children_usage`` \u2014 the SAME source\n``step.py``'s ``budget()`` builtin consumes \u2014 so a run's ``budget_usd`` *ceiling*\n(on ``WfRun``) and its realized ``cost_microusd`` *spend* (here) are finally both\nlegible from the read path.\n\nEvery legacy flat metric is ``int | None``, and absence is reported as\n**explicit null**, never a silent ``0`` or an omitted key (cf. the\n``vault_ids:null`` read-path disease this must not inherit \u2014 see the\nsubstrate-different-verdict invariant). The observer reads null as\n*cannot-determine* and fails loud, NOT as \"zero spend\". Creation accounting\nis carried separately by the inherited ``own``/``subtree`` and rate fields:\n\n* ``cost_microusd`` / ``*_tokens`` \u2014 summed over the run's child sessions. A run\n  with no children sums to ``0`` (a real, observed zero \u2014 distinct from null).\n* ``iteration_count`` \u2014 the run's wake/step count. The host keeps **no** per-run\n  iteration counter on any substrate today, so this is reported as ``None``\n  (cannot-determine) rather than fabricated from an unrelated proxy. Reserved for\n  when a real counter lands; surfaced now so the observer's contract is stable.\n* ``wall_clock_ms`` \u2014 wall-clock span ``updated_at - created_at`` in milliseconds,\n  reported ONLY for a TERMINAL run (``updated_at`` is its completion instant). A\n  still-running run's ``updated_at`` is a moving \"last touched\" stamp, not an end,\n  so it is reported as ``None`` rather than a misleading partial span."
       },
       "WhatsappConfirmPairingRequest": {
         "properties": {

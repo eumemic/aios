@@ -13,6 +13,9 @@ from typing import Any
 import httpx
 import pytest
 
+from aios.db import queries
+from aios.db.queries import workflows as wf_queries
+from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from tests.helpers.connections import asgi_client
 
 
@@ -653,6 +656,93 @@ class TestUsage:
         )
         assert r.json()["agents"] == 1
         assert r.json()["environments"] == 1
+
+    async def test_usage_includes_workflow_call_llm_spend(
+        self,
+        http_client: httpx.AsyncClient,
+        aios_env: dict[str, str],
+        pool: Any,
+    ) -> None:
+        minted = await http_client.post(
+            "/v1/accounts/children",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+            json={"display_name": "usage-workflow-spend"},
+        )
+        child_key = minted.json()["plaintext_key"]
+        child_id = minted.json()["account_id"]
+        environment = await http_client.post(
+            "/v1/environments",
+            headers=_bearer(child_key),
+            json={"name": "usage-workflow-env"},
+        )
+        assert environment.status_code == 201, environment.text
+
+        async with pool.acquire() as conn:
+            run = await wf_queries.insert_wf_run(
+                conn,
+                account_id=child_id,
+                workflow_id=None,
+                environment_id=environment.json()["id"],
+                script="async def main(input):\n    return input\n",
+                script_sha="usage-workflow-spend",
+                host_semantics_epoch=HOST_SEMANTICS_EPOCH,
+                depth=10,
+            )
+            await wf_queries.add_run_call_llm_cost_microusd(
+                conn, run.id, 12_345, account_id=child_id
+            )
+
+        usage = await http_client.get(
+            f"/v1/accounts/{child_id}/usage",
+            headers=_bearer(aios_env["AIOS_API_KEY"]),
+        )
+        assert usage.status_code == 200, usage.text
+        assert usage.json()["spent_usd"] == 0.012345
+
+    async def test_ranked_consumers_is_one_account_scoped_call(
+        self,
+        http_client: httpx.AsyncClient,
+        aios_env: dict[str, str],
+        pool: Any,
+    ) -> None:
+        headers = _bearer(aios_env["AIOS_API_KEY"])
+        agent = await http_client.post(
+            "/v1/agents", headers=headers, json={"name": "usage-hot", "model": "openrouter/test"}
+        )
+        environment = await http_client.post(
+            "/v1/environments", headers=headers, json={"name": "usage-hot"}
+        )
+        session = await http_client.post(
+            "/v1/sessions",
+            headers=headers,
+            json={
+                "agent_id": agent.json()["id"],
+                "environment_id": environment.json()["id"],
+                "title": "known hot consumer",
+            },
+        )
+        assert session.status_code == 201, session.text
+        async with pool.acquire() as conn:
+            await queries.increment_session_usage(
+                conn,
+                session.json()["id"],
+                account_id="acc_test_stub",
+                input_tokens=1_000,
+                output_tokens=100,
+                cost_microusd=50_000,
+            )
+
+        ranked = await http_client.get(
+            "/v1/usage/consumers?window_seconds=3600&metric=cost_microusd",
+            headers=headers,
+        )
+        assert ranked.status_code == 200, ranked.text
+        body = ranked.json()
+        assert body["items"][0]["id"] == session.json()["id"]
+        assert body["items"][0]["usage"]["own"]["cost_microusd"] == 50_000
+        assert body["items"][0]["usage"]["subtree"]["cost_microusd"] == 50_000
+        assert body["items"][0]["usage"]["subtree_rate"]["cost_microusd_per_hour"] > 0
+        assert body["items"][0]["share"] == 1.0
 
     async def test_usage_cross_tenant_404(
         self, http_client: httpx.AsyncClient, aios_env: dict[str, str]

@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aios.db.queries import sessions as session_queries
+from aios.models.accounting import AttributedUsage
 from aios.models.sessions import AwaitingToolCall, Session
 from aios.services import sessions as sessions_service
 
@@ -166,6 +167,9 @@ class TestListSessionsLiteSkipsFatHydration:
         async def awaiting(*_: Any, **__: Any) -> dict[str, list[Any]]:
             return {}
 
+        async def usage(*_: Any, **__: Any) -> dict[tuple[str, str], AttributedUsage]:
+            return {("session", "sess_1"): AttributedUsage()}
+
         with (
             patch("aios.services.sessions.queries.list_sessions", list_rows),
             patch("aios.services.sessions.queries.batch_get_session_vault_ids", vaults),
@@ -173,6 +177,7 @@ class TestListSessionsLiteSkipsFatHydration:
             patch("aios.services.sessions.queries.batch_list_session_triggers", triggers),
             patch("aios.services.sessions.compute_awaiting", awaiting),
             patch("aios.services.sessions.compute_obligations", obligations),
+            patch("aios.services.sessions.accounting_queries.usage_for_nodes", usage),
         ):
             out = await sessions_service.list_sessions(
                 _Pool(),

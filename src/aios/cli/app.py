@@ -111,6 +111,7 @@ from aios.cli.commands import status as _status  # noqa: E402
 from aios.cli.commands import tail as _tail  # noqa: E402
 from aios.cli.commands import tasks as _tasks  # noqa: E402
 from aios.cli.commands import trace as _trace  # noqa: E402
+from aios.cli.commands import usage as _usage  # noqa: E402
 from aios.cli.commands import vaults as _vaults  # noqa: E402
 from aios.cli.commands import whatsapp as _whatsapp  # noqa: E402
 from aios.cli.commands import workflows as _workflows  # noqa: E402
@@ -130,6 +131,7 @@ app.add_typer(_whatsapp.app, name="whatsapp")
 app.add_typer(_workflows.app, name="workflows")
 app.add_typer(_workflows.runs_app, name="runs")
 app.add_typer(_tasks.app, name="tasks")
+app.add_typer(_usage.app, name="usage")
 
 _ops.register(app)
 _sandbox.register(app)
