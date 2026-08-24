@@ -930,6 +930,44 @@ class TestPoolBulkhead:
         assert pool.degraded_identities() == set()
         assert sorted({u for u, _ in pool.degraded_identities()}) == []
 
+    def test_one_identity_drains_once_across_differing_static_headers(self) -> None:
+        """``headers_key`` is part of the breaker key but not of the identity, so
+        two keys differing only in static headers are ONE degraded identity and
+        must produce ONE event — otherwise the prelude appends duplicate
+        ``mcp_server_unavailable`` rows for a single outage."""
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_1", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_1", K1, backoff_s=60.0)
+        assert pool.drain_degraded_events() == [(URL, "vlt_1")]
+
+    def test_a_retired_identity_is_reclaimed_by_a_successful_probe(self) -> None:
+        """A mount resolves ONE identity at a time, so when its identity changes
+        (a vault gets bound, a credential is archived) the old key is retired —
+        nothing will ever call ``mark_healthy`` with it again, and a lapsed
+        cooldown is deliberately not a heal. Without reclamation it would sit in
+        the degraded set for the life of the worker and, because an unpinned
+        mount matches any vault at its url, report a healthy mount as degraded
+        in the system prompt forever.
+        """
+        pool = McpSessionPool()
+        # The mount resolved no credential and failed; then a vault was bound, so
+        # it now resolves a different identity at the same url and succeeds.
+        pool.mark_unhealthy(URL, None, EMPTY_KEY, backoff_s=60.0)
+        assert pool.degraded_identities() == {(URL, None)}
+        pool._unhealthy_until[(URL, None, EMPTY_KEY)] = time.monotonic() - 1.0  # cooldown lapsed
+        pool.mark_healthy(URL, "vlt_1", EMPTY_KEY)
+        assert pool.degraded_identities() == set()
+
+    def test_reclamation_spares_a_sibling_whose_window_is_still_open(self) -> None:
+        """The reclamation above must not become the url-wide clear it replaced:
+        a same-url identity that is genuinely still in backoff stays degraded."""
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_stale", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_live", EMPTY_KEY, backoff_s=60.0)
+        pool._unhealthy_until[(URL, "vlt_stale", EMPTY_KEY)] = time.monotonic() - 1.0
+        pool.mark_healthy(URL, "vlt_other", EMPTY_KEY)
+        assert pool.degraded_identities() == {(URL, "vlt_live")}
+
     async def test_breaker_reprobes_after_cooldown_and_recloses_on_success(self) -> None:
         """AC #4: after the cooldown the key re-probes; a successful acquire
         re-closes the breaker and drops it from ``degraded_servers()``."""

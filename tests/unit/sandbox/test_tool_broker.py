@@ -594,6 +594,45 @@ class TestMcpGate:
         assert r.status_code == 403
         assert "always_ask" in r.json()["error"]
 
+    async def test_pin_failure_returns_a_coded_envelope_not_a_bare_500(
+        self, broker: ToolBroker
+    ) -> None:
+        """#2233: a pinned mount with no usable credential must reach the sandbox
+        CLI as a branchable envelope. The auth call sits inside the handler's
+        ``try``, so the failure routes through ``_transport_err`` and gets its
+        own ``code`` — retrying will never help, unlike a transport blip.
+        """
+        from aios.mcp.client import PinnedVaultUnavailable
+
+        broker.register_session("sess_X", "s")
+        pinned = McpServerSpec(name="tav", url="https://tav.example/mcp", vault_id="vlt_gone")
+        agent = _agent(tools=[_toolset("tav")], mcp_servers=[pinned])
+        with (
+            _patch_agent(agent),
+            patch.object(ToolBroker, "_mcp_suppressed", new_callable=AsyncMock, return_value=False),
+            patch("aios.harness.runtime.require_pool", return_value=MagicMock()),
+            patch("aios.harness.runtime.require_crypto_box", return_value=MagicMock()),
+            patch(
+                "aios.services.sessions.load_session_account_id",
+                new_callable=AsyncMock,
+                return_value="acc_test_stub",
+            ),
+            patch(
+                "aios.mcp.client.resolve_auth_for_mcp_mount",
+                new_callable=AsyncMock,
+                side_effect=PinnedVaultUnavailable("tav", "vlt_gone", "not bound"),
+            ),
+        ):
+            async with httpx.AsyncClient() as c:
+                r = await c.post(
+                    _url(broker, "s", "mcp", "tav", "echo"),
+                    json={"arguments": {}},
+                )
+        assert r.status_code == 502
+        body = r.json()
+        assert body["code"] == "mcp_pin_unresolved"
+        assert "vlt_gone" in body["error"]
+
     async def test_invoke_uses_binding_cache_without_discovery_network(
         self, broker: ToolBroker
     ) -> None:

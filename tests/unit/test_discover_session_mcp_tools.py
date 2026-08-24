@@ -599,6 +599,80 @@ class TestDiscoverSessionMcpTools:
         # Deduped: the edge queue is drained, so a re-run emits nothing.
         assert pool.drain_degraded_events() == []
 
+    async def _emit_for(
+        self, agent: Any, pending: list[tuple[str, str | None, str]]
+    ) -> list[dict[str, Any]]:
+        """Drive the prelude with pre-seeded DOWN edges; return emitted events."""
+        from unittest.mock import MagicMock
+
+        from aios.harness import runtime
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.pool import McpSessionPool
+
+        pool = McpSessionPool()
+        pool._pending_degraded_events.extend(pending)
+        emitted: list[dict[str, Any]] = []
+
+        async def _discover(*_a: Any, **_k: Any) -> tuple[list[dict[str, Any]], str | None]:
+            return [], None
+
+        async def _append_event(_pool: Any, _sid: str, _kind: str, data: Any, **_k: Any) -> Any:
+            emitted.append(data)
+            return MagicMock()
+
+        prior = runtime.mcp_session_pool
+        runtime.mcp_session_pool = pool
+        try:
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
+                ) as resolve,
+                patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+                patch("aios.harness.loop.sessions_service.append_event", side_effect=_append_event),
+            ):
+                resolve.return_value = (None, {})
+                await discover_session_mcp_tools(
+                    pool=AsyncMock(),
+                    session_id="sess_x",
+                    agent=agent,
+                    account_id="acc_test_stub",
+                )
+        finally:
+            runtime.mcp_session_pool = prior
+        return [e for e in emitted if e.get("event") == "mcp_server_unavailable"]
+
+    async def test_down_edge_names_the_pinned_mount_that_owns_the_identity(self) -> None:
+        """#2233: with two mounts on ONE url, the event must name the identity
+        that actually failed. A url-keyed lookup is last-wins and would name the
+        healthy sibling."""
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_home"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+        events = await self._emit_for(agent, [("https://gmail/mcp", "vlt_work", "")])
+        assert [e["server"] for e in events] == ["work"]
+
+    async def test_edge_for_a_mount_this_agent_does_not_declare_is_dropped(self) -> None:
+        """The edge queue is worker-global but the event is session-scoped, so a
+        DOWN edge armed for a DIFFERENT session drains here too. Stamping it into
+        this session's log would assert that a server this agent does not mount
+        went down."""
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="mine", url="https://mine/mcp")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="mine")],
+        )
+        events = await self._emit_for(
+            agent,
+            [("https://someone-elses/mcp", "vlt_other", ""), ("https://mine/mcp", None, "")],
+        )
+        assert [e["server"] for e in events] == ["mine"]
+
     async def test_colliding_server_tool_names_are_uniquified(self) -> None:
         """Two servers advertising the same function.name stay dispatchable."""
         from aios.harness.loop import discover_session_mcp_tools

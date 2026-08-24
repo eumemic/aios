@@ -181,18 +181,35 @@ def _mcp_server() -> st.SearchStrategy[McpServerSpec]:
     )
 
 
+def _repair_mcp_servers(drawn: list[McpServerSpec]) -> list[McpServerSpec]:
+    """Make a drawn list satisfy :func:`validate_mcp_servers`.
+
+    ``name`` and ``url`` are drawn independently, so a draw can violate either
+    rule. Names dedup (the historical rule). Same-url groups are REPAIRED, not
+    collapsed: each entry in a group is assigned a distinct ``vault_id``, which
+    is exactly the shape #2233 legalizes. Collapsing to one mount per url would
+    be simpler but would make two-mounts-on-one-url unreachable in every
+    property test — pruning the generator of the case the pin exists for.
+    """
+    by_name = list({s.name: s for s in drawn}.values())
+    out: list[McpServerSpec] = []
+    seen_per_url: dict[str, int] = {}
+    for spec in by_name:
+        n = seen_per_url.get(spec.url, 0)
+        seen_per_url[spec.url] = n + 1
+        # First mount of a url keeps whatever pin was drawn (including None);
+        # every later one must pin, distinctly.
+        out.append(spec if n == 0 else spec.model_copy(update={"vault_id": f"vlt_dup_{n}"}))
+    # A first mount that drew a pin colliding with a repair pin is impossible
+    # (repair pins are namespaced), so the group is distinct by construction.
+    return out
+
+
 def mcp_servers_list() -> st.SearchStrategy[list[McpServerSpec]]:
     """An ``mcp_servers`` list satisfying :func:`validate_mcp_servers` — unique
-    ``name`` AND a distinct credential identity per ``url``.
-
-    ``name`` and ``url`` are drawn independently, so dedup on both: by name
-    first (the historical rule), then by url. Collapsing each url to a single
-    entry satisfies the same-url rule vacuously however the pins fell, which
-    keeps the strategy honest without teaching it the rule's internals.
+    ``name``, and a distinct credential identity per ``url``.
     """
-    return st.lists(_mcp_server(), max_size=len(MCP_SERVER_NAMES)).map(
-        lambda ss: list({s.url: s for s in {s.name: s for s in ss}.values()}.values())
-    )
+    return st.lists(_mcp_server(), max_size=len(MCP_SERVER_NAMES)).map(_repair_mcp_servers)
 
 
 # ── http servers (prioritized dimension — #1487 shipped here) ─────────────────

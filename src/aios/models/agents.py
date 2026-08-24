@@ -572,7 +572,8 @@ def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
         if len(pins) > 1 and (None in pins or len(set(pins)) != len(pins)):
             raise ValueError(
                 f"duplicate mcp server url {url!r}: every entry sharing a url must pin a "
-                f"distinct vault_id"
+                f"distinct vault_id, or all but one must be removed — without that they "
+                f"resolve the same credential and only one is reachable"
             )
 
 

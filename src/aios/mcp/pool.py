@@ -787,8 +787,19 @@ class McpSessionPool:
         degraded surface speaks identity, while ``headers_key`` stays an internal
         transport detail. Consumers match it against a spec with
         :meth:`~aios.models.agents.McpServerSpec.matches_resolved_identity`.
+
+        Deduped AFTER projection: ``headers_key`` is part of the breaker key but
+        not of the identity, so two keys differing only in static headers are one
+        degraded identity and must yield one event — the "exactly once per edge"
+        promise above is about identities, not keys.
         """
-        drained = [(key[0], key[1]) for key in self._pending_degraded_events]
+        seen: set[tuple[str, str | None]] = set()
+        drained: list[tuple[str, str | None]] = []
+        for key in self._pending_degraded_events:
+            identity = (key[0], key[1])
+            if identity not in seen:
+                seen.add(identity)
+                drained.append(identity)
         self._pending_degraded_events = []
         return drained
 
@@ -842,18 +853,34 @@ class McpSessionPool:
         clears any open window, and drops THIS key from the degraded set — a
         successful re-probe re-closes the circuit (AC #4).
 
-        The discard is unconditional. Gating it on "no other key on this url is
-        still open" would mean a mount that just proved itself healthy stays
-        reported degraded because a *different identity* at the same url is
-        down — the same cross-identity bleed this granularity exists to remove,
-        pointed the other way. A url stops being reported degraded once every
-        key on it has healed, which falls out of the per-key set rather than
-        needing a scan.
+        This key's discard is unconditional. Gating it on "no other key on this
+        url is still open" would mean a mount that just proved itself healthy
+        stays reported degraded because a *different identity* at the same url
+        is down — the same cross-identity bleed this granularity exists to
+        remove, pointed the other way.
+
+        A successful probe also RECLAIMS any other identity at this url whose
+        backoff window has lapsed. Those are keys nothing probes any more — a
+        mount resolves exactly one identity at a time, so when its resolved
+        identity changes (a vault gets bound, a credential is archived, static
+        headers are edited) the old key is retired: no future ``mark_healthy``
+        can ever name it, and a lapsed window is deliberately not a heal
+        (:meth:`is_unhealthy`). Without this it would sit in the degraded set
+        for the life of the worker, and because an unpinned mount matches ANY
+        vault at its url, the prompt would report a healthy mount as degraded
+        forever. A live sibling — one whose window is still open — is untouched,
+        which is what keeps two pinned identities on one url independent.
         """
         key: _PoolKey = (url, vault_id, headers_key)
         self._unhealthy_until.pop(key, None)
         self._failure_count.pop(key, None)
         self._degraded_keys.discard(key)
+        now = time.monotonic()
+        self._degraded_keys -= {
+            k
+            for k in self._degraded_keys
+            if k[0] == url and self._unhealthy_until.get(k, 0.0) <= now
+        }
 
     def _clear_breaker_by_vault(self, vault_id: str) -> None:
         """Drop breaker state (window + counter) for every key on ``vault_id``.

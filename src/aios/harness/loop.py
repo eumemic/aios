@@ -2093,26 +2093,35 @@ async def discover_session_mcp_tools(
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
-        down_identities = _pool.drain_degraded_events()
-        for down_url, down_vault_id in down_identities:
+        for down_url, down_vault_id in _pool.drain_degraded_events():
             # Attribute the edge to the mount that owns that identity. Keying by
             # url alone was last-wins across same-url mounts, so the event could
             # name a mount whose credential is perfectly healthy (#2233).
-            server_name = next(
+            owner = next(
                 (
-                    s.name
+                    s
                     for s in agent.mcp_servers
                     if s.matches_resolved_identity(down_url, down_vault_id)
                 ),
-                down_url,
+                None,
             )
+            if owner is None:
+                # The queue is worker-global but this event is session-scoped, so
+                # an edge armed on behalf of a DIFFERENT session drains here too.
+                # Stamping it into this session's log would assert that a server
+                # this agent does not even mount went down. Report it to ops and
+                # drop it: the session actually running degraded still sees it in
+                # its own prompt via the level view (``degraded_identities``),
+                # which is per-session-correct.
+                log.warning("mcp.degraded_edge_unclaimed", url=down_url, vault_id=down_vault_id)
+                continue
             await sessions_service.append_event(
                 pool,
                 session_id,
                 "span",
                 {
                     "event": "mcp_server_unavailable",
-                    "server": server_name,
+                    "server": owner.name,
                     "url": down_url,
                     "is_error": False,
                 },

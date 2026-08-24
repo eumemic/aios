@@ -105,3 +105,33 @@ def test_augment_appends_block_when_degraded() -> None:
     assert out.startswith(base)
     assert "━━━ Resource health ━━━" in out
     assert "repos: /workspace/theme AUTH-FAILED since 2026-07-07T19:53:06+00:00" in out
+
+
+def test_degraded_mcp_names_match_by_identity_not_url() -> None:
+    """#2233: two mounts on ONE url are separate circuits, so the prompt must
+    name only the identity whose breaker is open. A url-only membership test
+    would tell the model a healthy pinned mount is down.
+
+    The unpinned arm stays coarse on purpose: an unpinned mount's identity is
+    only knowable at resolution time, so any vault at its url matches it.
+    """
+    from unittest.mock import patch
+
+    from aios.harness.step_context import _session_degraded_mcp_server_names
+    from aios.mcp.pool import McpSessionPool
+    from aios.models.agents import McpServerSpec
+
+    url = "https://gmail/mcp"
+    pool = McpSessionPool()
+    pool.mark_unhealthy(url, "vlt_work", "hk", backoff_s=60.0)
+
+    pinned = [
+        McpServerSpec(name="work", url=url, vault_id="vlt_work"),
+        McpServerSpec(name="home", url=url, vault_id="vlt_home"),
+    ]
+    unpinned = [McpServerSpec(name="either", url=url)]
+
+    with patch("aios.harness.runtime.mcp_session_pool", pool):
+        assert _session_degraded_mcp_server_names(pinned) == ["work"]
+        assert _session_degraded_mcp_server_names(unpinned) == ["either"]
+        assert _session_degraded_mcp_server_names([McpServerSpec(name="x", url="https://o")]) == []
