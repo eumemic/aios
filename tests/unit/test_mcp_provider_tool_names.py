@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from mcp.types import Tool
 
@@ -124,7 +125,7 @@ class TestSanitizeToolsForProvider:
         assert "outputSchema" in tools[0]["function"]
 
 
-def _fn_envelope(name: str, *, server: str, tool: str) -> dict:
+def _fn_envelope(name: str, *, server: str, tool: str) -> dict[str, Any]:
     return make_function_tool(
         name,
         Tool(name=tool, description="", inputSchema={"type": "object"}),
