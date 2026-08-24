@@ -2093,6 +2093,7 @@ async def discover_session_mcp_tools(
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
+
         def _owner_of(down_url: str, down_vault_id: str | None) -> McpServerSpec | None:
             return next(
                 (
