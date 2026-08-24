@@ -34,6 +34,7 @@ from aios.services.vaults import (
     SECRET_PLACEHOLDER_PREFIX,
     _extract_auth_payload,
     _merge_auth_payload,
+    build_token_endpoint_post,
     env_var_credential_containment_error,
     is_expiring,
     mint_secret_placeholder,
@@ -809,6 +810,53 @@ def _expiring_oauth_payload(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+class TestBuildTokenEndpointPost:
+    """The shared token-endpoint POST kwargs — one seam, two callers.
+
+    ``refresh_credential`` and the authorization-code exchange in
+    :mod:`aios.services.vault_oauth` both build their POST here precisely so the
+    two never drift, so the content-negotiation and client-auth guarantees are
+    pinned once, at the seam.
+    """
+
+    def test_opts_into_json_for_every_auth_method(self) -> None:
+        """RFC 6749 5.1 says token responses are JSON, but GitHub's token
+        endpoint answers form-encoded unless the request asks for JSON. Both
+        callers parse the response as JSON, so the ``Accept`` header is not
+        optional — it is what makes that parse well-founded."""
+        for auth in (
+            None,
+            {"method": "none"},
+            {"method": "client_secret_basic", "client_secret": "shh"},
+            {"method": "client_secret_post", "client_secret": "shh"},
+        ):
+            kwargs = build_token_endpoint_post(
+                {"grant_type": "refresh_token"}, client_id="cid", endpoint_auth=auth
+            )
+            assert kwargs["headers"]["Accept"] == "application/json", auth
+
+    def test_json_opt_in_does_not_disturb_client_auth(self) -> None:
+        """The header rides alongside the auth method, never in place of it."""
+        basic = build_token_endpoint_post(
+            {"grant_type": "refresh_token"},
+            client_id="cid",
+            endpoint_auth={"method": "client_secret_basic", "client_secret": "shh"},
+        )
+        assert isinstance(basic["auth"], httpx.BasicAuth)
+        assert basic["data"]["client_id"] == "cid"
+        assert "client_secret" not in basic["data"]
+
+        post_body: dict[str, str] = {"grant_type": "refresh_token"}
+        post = build_token_endpoint_post(
+            post_body,
+            client_id="cid",
+            endpoint_auth={"method": "client_secret_post", "client_secret": "shh"},
+        )
+        assert "auth" not in post
+        assert post["data"] is post_body
+        assert post_body["client_secret"] == "shh"
+
+
 class TestIsExpiring:
     def test_far_future_is_not_expiring(self) -> None:
 
@@ -942,6 +990,42 @@ class TestRefreshCredential:
         assert "client_secret" not in kwargs["data"]
         assert kwargs["data"]["grant_type"] == "refresh_token"
         assert kwargs["data"]["refresh_token"] == "rt-1"
+
+    @pytest.mark.asyncio
+    async def test_refresh_post_asks_for_json(self, crypto_box: CryptoBox) -> None:
+        """The JSON opt-in survives the call site's ``**post_kwargs`` splat.
+
+        ``build_token_endpoint_post`` sets ``Accept: application/json`` and this
+        path parses the reply with ``response.json()``. A form-encoded 200 fails
+        that parse with a ``JSONDecodeError`` — which is not an ``httpx.HTTPError``
+        and so escapes the handler below entirely. Pinned here, at the caller,
+        because the seam test cannot see a ``headers=`` kwarg added alongside the
+        splat that would silently override it.
+        """
+        account_id = "acc_test_stub"
+
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(_http_response(body={"access_token": "new"}))
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        assert client.post.await_args.kwargs["headers"]["Accept"] == "application/json"
 
     @pytest.mark.asyncio
     async def test_post_method_includes_secret_in_body(self, crypto_box: CryptoBox) -> None:

@@ -157,15 +157,18 @@ def build_token_endpoint_post(
 
     Mutates ``body`` in place (``client_id`` is always added — it identifies the
     public client; ``client_secret`` is added for the ``client_secret_post``
-    method) and returns the kwargs for ``httpx.AsyncClient.post`` (``data``,
-    plus ``auth`` for ``client_secret_basic``). Shared by the refresh path
-    (:func:`refresh_credential`) and the authorization-code exchange
-    (:mod:`aios.services.vault_oauth`) so the two never drift.
+    method) and returns the kwargs for ``httpx.AsyncClient.post`` (``data`` and
+    a JSON-requesting ``headers``, plus ``auth`` for ``client_secret_basic``).
+    Shared by the refresh path (:func:`refresh_credential`) and the
+    authorization-code exchange (:mod:`aios.services.vault_oauth`) so the two
+    never drift.
     """
     auth = endpoint_auth or {"method": "none"}
     method = auth.get("method", "none")
     body["client_id"] = client_id
-    post_kwargs: dict[str, Any] = {"data": body}
+    # RFC 6749 §5.1 token responses are JSON, but GitHub's token endpoint
+    # answers form-encoded unless the request opts into JSON explicitly.
+    post_kwargs: dict[str, Any] = {"data": body, "headers": {"Accept": "application/json"}}
     if method == "client_secret_basic":
         post_kwargs["auth"] = httpx.BasicAuth(client_id, auth.get("client_secret", ""))
     elif method == "client_secret_post":
