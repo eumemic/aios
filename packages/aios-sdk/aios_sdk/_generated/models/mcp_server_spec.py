@@ -46,12 +46,25 @@ class McpServerSpec:
     the MCP transport authors itself (Accept, Content-Type, Mcp-Session-Id,
     Mcp-Protocol-Version) are rejected — setting them here is a silent no-op.
 
+    ``vault_id`` optionally PINS this mount's credential to exactly one vault.
+    Unset (the default) resolves as it always has: the first credential for
+    ``url`` across the session's bound vaults in ``rank`` order.  That scan
+    gives a session exactly one identity per URL, so an agent that mounts one
+    MCP server twice (two Gmail accounts, say) would silently share a single
+    token.  A pin makes each mount resolve its own identity, and the pinned
+    lookup joins ``session_vaults`` — so a pin can only ever SELECT among the
+    vaults already bound to the caller, never reach one that is not.  A pinned
+    mount whose vault yields no usable credential fails closed (the model sees
+    a tool error; discovery drops the server) rather than falling back to the
+    rank scan or connecting unauthenticated.
+
         Attributes:
             name (str):
             url (str):
             type_ (Literal['url'] | Unset):  Default: 'url'.
             include_instructions (bool | Unset):  Default: True.
             headers (McpServerSpecHeadersType0 | None | Unset):
+            vault_id (None | str | Unset):
     """
 
     name: str
@@ -59,6 +72,7 @@ class McpServerSpec:
     type_: Literal["url"] | Unset = "url"
     include_instructions: bool | Unset = True
     headers: McpServerSpecHeadersType0 | None | Unset = UNSET
+    vault_id: None | str | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.mcp_server_spec_headers_type_0 import McpServerSpecHeadersType0
@@ -79,6 +93,12 @@ class McpServerSpec:
         else:
             headers = self.headers
 
+        vault_id: None | str | Unset
+        if isinstance(self.vault_id, Unset):
+            vault_id = UNSET
+        else:
+            vault_id = self.vault_id
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -93,6 +113,8 @@ class McpServerSpec:
             field_dict["include_instructions"] = include_instructions
         if headers is not UNSET:
             field_dict["headers"] = headers
+        if vault_id is not UNSET:
+            field_dict["vault_id"] = vault_id
 
         return field_dict
 
@@ -128,12 +150,22 @@ class McpServerSpec:
 
         headers = _parse_headers(d.pop("headers", UNSET))
 
+        def _parse_vault_id(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        vault_id = _parse_vault_id(d.pop("vault_id", UNSET))
+
         mcp_server_spec = cls(
             name=name,
             url=url,
             type_=type_,
             include_instructions=include_instructions,
             headers=headers,
+            vault_id=vault_id,
         )
 
         return mcp_server_spec

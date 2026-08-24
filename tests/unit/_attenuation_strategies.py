@@ -48,6 +48,7 @@ BUILTIN_TYPES = ["bash", "read", "write"]  # BT below gives each a distinct tran
 CUSTOM_NAMES = ["cust_a", "cust_b"]
 MCP_SERVER_NAMES = ["srv_a", "srv_b"]
 MCP_URLS = ["https://mcp-a", "https://mcp-b"]
+MCP_VAULT_IDS = ["vlt_a", "vlt_b"]  # per-mount credential pins (None = unpinned)
 MCP_TOOL_NAMES = ["t1", "t2"]  # discovered-tool names for configs[]
 HTTP_SERVER_NAMES = ["api_a", "api_b"]
 HTTP_BASE_URLS = ["https://http-a", "https://http-b"]
@@ -176,15 +177,21 @@ def _mcp_server() -> st.SearchStrategy[McpServerSpec]:
         url=st.sampled_from(MCP_URLS),
         include_instructions=st.booleans(),
         headers=_mcp_headers(),
+        vault_id=st.none() | st.sampled_from(MCP_VAULT_IDS),
     )
 
 
 def mcp_servers_list() -> st.SearchStrategy[list[McpServerSpec]]:
-    """An ``mcp_servers`` list satisfying :func:`validate_mcp_servers` (unique
-    ``name``) — dedup by name after drawing.
+    """An ``mcp_servers`` list satisfying :func:`validate_mcp_servers` — unique
+    ``name`` AND a distinct credential identity per ``url``.
+
+    ``name`` and ``url`` are drawn independently, so dedup on both: by name
+    first (the historical rule), then by url. Collapsing each url to a single
+    entry satisfies the same-url rule vacuously however the pins fell, which
+    keeps the strategy honest without teaching it the rule's internals.
     """
     return st.lists(_mcp_server(), max_size=len(MCP_SERVER_NAMES)).map(
-        lambda ss: list({s.name: s for s in ss}.values())
+        lambda ss: list({s.url: s for s in {s.name: s for s in ss}.values()}.values())
     )
 
 
