@@ -149,6 +149,61 @@ class TestServerSurvival:
         assert out.mcp_servers[0].headers == {"X-Toolsets": "issues"}  # launcher wins
         assert out != canon(Surface([], [d_srv], []))  # child must declare it identically
 
+    def test_mcp_vault_pin_is_launcher_verbatim(self) -> None:
+        """#2233: ``vault_id`` is payload, not identity — it stays OUT of the
+        ``(name, url)` meet key and the launcher's pin survives.
+
+        A child cannot re-point an inherited mount at a different vault, and no
+        escalation is possible in either direction: resolution still requires
+        the vault to be bound to the CALLING session, so inheriting a pin grants
+        nothing the child could not already reach.
+        """
+        l_srv = McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_launcher")
+        for declared in (
+            McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_child"),
+            McpServerSpec(name="gh", url="https://gh/mcp"),
+        ):
+            out = att(Surface([], [declared], []), Surface([], [l_srv], []))
+            assert out.mcp_servers[0].vault_id == "vlt_launcher"
+
+    def test_author_edge_requires_an_inherited_pin_to_be_restated(self) -> None:
+        """#2233: the author edge does NOT silently inherit the launcher's pin.
+
+        A spawn edge ADOPTS ``attenuate``'s output, so a child session simply
+        gets the launcher's pin (see the test above). An AUTHOR edge instead
+        COMPARES: ``services/agents._enforce_surface_attenuation`` raises
+        ``ForbiddenError`` on ``surface_diff(normalize(declared),
+        clamp(declared, launcher))``, and that diff is full-equality on
+        mcp_servers — so a self-authoring agent must restate an inherited pin
+        byte-identically. Divergence AND omission are both refusals.
+
+        Same rule ``headers`` has always had; the pin just joins it. Worth
+        pinning down because the failure is a user-visible 403 on a path the
+        model can reach through ``create_agent``/``update_agent``.
+        """
+        launcher = Surface(
+            [], [McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1")], []
+        )
+
+        def diff_for(declared_srv: McpServerSpec) -> dict[str, list[str]]:
+            declared = Surface([], [declared_srv], [])
+            return surface_diff(canon(declared), att(declared, launcher))
+
+        # Divergent pin — refused.
+        assert diff_for(McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_2")) == {
+            "mcp_servers": ["gh"]
+        }
+        # Omitted pin — also refused (the natural case for a model that does not
+        # know the field exists).
+        assert diff_for(McpServerSpec(name="gh", url="https://gh/mcp")) == {"mcp_servers": ["gh"]}
+        # Restated identically — allowed.
+        assert diff_for(McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1")) == {}
+
+        # Control: with no pins anywhere the field is inert, so adding it to the
+        # model changes nothing for every surface authored before #2233.
+        unpinned = Surface([], [McpServerSpec(name="gh", url="https://gh/mcp")], [])
+        assert surface_diff(canon(unpinned), att(unpinned, unpinned)) == {}
+
     def test_http_routes_path_permission_ordering_parent_wins_frozen(self) -> None:
         # First-match-wins ordering / permission gates stay launcher-verbatim: a child
         # re-declaring the broad route must NOT escape the launcher's earlier always_ask

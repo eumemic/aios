@@ -491,9 +491,15 @@ def attenuate(
 
     Per identity key in ``declared``: absent from ``launcher`` → drop; present → the
     per-dimension meet, dropping if it bottoms out. MCP servers survive only on a key match
-    and are emitted **launcher-verbatim** (parent-wins-frozen: routes and headers come
-    from the launcher; the child narrows only by dropping whole servers); they key on the
-    joint ``(name, url)`` — a re-pointed name is a different key and drops. http servers
+    and are emitted **launcher-verbatim** (parent-wins-frozen: headers and the ``vault_id``
+    credential pin come from the launcher; the child narrows only by dropping whole
+    servers); they key on the joint ``(name, url)`` — a re-pointed name is a different key
+    and drops, but a re-pointed ``vault_id`` is not part of the key and simply loses to the
+    launcher's. Inheriting a pin grants nothing: resolution still requires the vault to be
+    bound to the calling session. Note the asymmetry between edges — a spawn edge ADOPTS
+    this output, while an author edge COMPARES it (``surface_diff`` is full-equality on
+    mcp_servers), so a self-authoring child must restate an inherited pin byte-identically
+    or be refused. http servers
     survive on a ``base_url`` key; their path patterns / ordering / ``description`` /
     ``enabled`` / ``permission_policy`` are launcher-verbatim, but the child may narrow each
     route's ``methods`` (set intersection; ``None`` = all verbs) — the one read/write
