@@ -1,15 +1,15 @@
 """Creation-edge inference accounting and rolling usage ledger.
 
-Revision ID: 0168
-Revises: 0167
+Revision ID: 0169
+Revises: 0168
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0168"
-down_revision = "0167"
+revision = "0169"
+down_revision = "0168"
 branch_labels = None
 depends_on = None
 
@@ -156,17 +156,17 @@ def upgrade() -> None:
     op.execute(r"""
         DO $$
         BEGIN
-            IF to_regclass('_aios_0168_wf_run_usage_archive') IS NOT NULL THEN
+            IF to_regclass('_aios_0169_wf_run_usage_archive') IS NOT NULL THEN
                 IF EXISTS (
                     SELECT 1
-                      FROM _aios_0168_wf_run_usage_archive archived
+                      FROM _aios_0169_wf_run_usage_archive archived
                       LEFT JOIN wf_runs r
                         ON r.id = archived.run_id
                        AND r.account_id = archived.account_id
                      WHERE r.id IS NULL
                 ) THEN
                     RAISE EXCEPTION
-                        'cannot restore archived 0168 run usage: a workflow run is missing';
+                        'cannot restore archived 0169 run usage: a workflow run is missing';
                 END IF;
                 UPDATE wf_runs r
                    SET call_llm_input_tokens = a.call_llm_input_tokens,
@@ -174,10 +174,10 @@ def upgrade() -> None:
                        call_llm_cache_read_input_tokens = a.call_llm_cache_read_input_tokens,
                        call_llm_cache_creation_input_tokens = a.call_llm_cache_creation_input_tokens,
                        call_llm_tokens_complete = a.call_llm_tokens_complete
-                  FROM _aios_0168_wf_run_usage_archive a
+                  FROM _aios_0169_wf_run_usage_archive a
                  WHERE r.id = a.run_id
                    AND r.account_id = a.account_id;
-                DROP TABLE _aios_0168_wf_run_usage_archive;
+                DROP TABLE _aios_0169_wf_run_usage_archive;
             END IF;
         END
         $$
@@ -231,7 +231,7 @@ def upgrade() -> None:
 
     # Aggregate equality cannot prove which historical workflow charges were
     # already counted: unrelated/manual spend and deleted sessions can produce
-    # the same scalar. Revision 0167 therefore requires an operator-declared
+    # the same scalar. Revision 0168 therefore requires an operator-declared
     # watermark for every account with retained workflow cost. Reconcile only
     # the unaccounted delta, then advance the watermark atomically. The trigger
     # above maintains the same provenance for every post-migration charge.
@@ -250,8 +250,8 @@ def upgrade() -> None:
                  WHERE r.total > 0 AND watermark.account_id IS NULL
             ) THEN
                 RAISE EXCEPTION USING
-                    MESSAGE = 'missing workflow spend accounting watermark before 0168',
-                    HINT = 'at revision 0167, explicitly record how much retained workflow cost is already represented in each account meter';
+                    MESSAGE = 'missing workflow spend accounting watermark before 0169',
+                    HINT = 'at revision 0168, explicitly record how much retained workflow cost is already represented in each account meter';
             END IF;
             IF EXISTS (
                 WITH run_meter AS (
@@ -265,7 +265,7 @@ def upgrade() -> None:
             ) THEN
                 RAISE EXCEPTION USING
                     MESSAGE = 'workflow spend accounting watermark exceeds retained run cost',
-                    HINT = 'correct the operator-declared watermark at revision 0167 before retrying 0168';
+                    HINT = 'correct the operator-declared watermark at revision 0168 before retrying 0169';
             END IF;
         END
         $$
@@ -305,21 +305,21 @@ def upgrade() -> None:
     op.execute(r"""
         DO $$
         BEGIN
-            IF to_regclass('_aios_0168_account_usage_archive') IS NOT NULL THEN
+            IF to_regclass('_aios_0169_account_usage_archive') IS NOT NULL THEN
                 IF EXISTS (
                     SELECT 1
-                      FROM _aios_0168_account_usage_archive archived
+                      FROM _aios_0169_account_usage_archive archived
                       LEFT JOIN accounts a ON a.id = archived.account_id
                      WHERE a.id IS NULL
                 ) THEN
                     RAISE EXCEPTION
-                        'cannot restore archived 0168 coverage: an account is missing';
+                        'cannot restore archived 0169 coverage: an account is missing';
                 END IF;
                 UPDATE accounts a
                    SET usage_ledger_started_at = archived.usage_ledger_started_at
-                  FROM _aios_0168_account_usage_archive archived
+                  FROM _aios_0169_account_usage_archive archived
                  WHERE a.id = archived.account_id;
-                DROP TABLE _aios_0168_account_usage_archive;
+                DROP TABLE _aios_0169_account_usage_archive;
             END IF;
         END
         $$
@@ -346,7 +346,7 @@ def upgrade() -> None:
     op.execute(r"""
         DO $$
         BEGIN
-            IF to_regclass('_aios_0168_inference_usage_ledger_archive') IS NOT NULL THEN
+            IF to_regclass('_aios_0169_inference_usage_ledger_archive') IS NOT NULL THEN
                 INSERT INTO inference_usage_ledger (
                     id,
                     account_id,
@@ -370,13 +370,13 @@ def upgrade() -> None:
                        cache_creation_input_tokens,
                        cost_microusd,
                        occurred_at
-                  FROM _aios_0168_inference_usage_ledger_archive;
+                  FROM _aios_0169_inference_usage_ledger_archive;
                 PERFORM setval(
                     pg_get_serial_sequence('inference_usage_ledger', 'id'),
                     COALESCE((SELECT MAX(id) FROM inference_usage_ledger), 1),
                     EXISTS (SELECT 1 FROM inference_usage_ledger)
                 );
-                DROP TABLE _aios_0168_inference_usage_ledger_archive;
+                DROP TABLE _aios_0169_inference_usage_ledger_archive;
             END IF;
         END
         $$
@@ -405,7 +405,7 @@ def downgrade() -> None:
     op.execute("SET LOCAL statement_timeout = '5min'")
     op.execute("LOCK TABLE wf_runs, accounts, inference_usage_ledger IN ACCESS EXCLUSIVE MODE")
     op.execute(r"""
-        CREATE TABLE _aios_0168_wf_run_usage_archive AS
+        CREATE TABLE _aios_0169_wf_run_usage_archive AS
         SELECT id AS run_id,
                account_id,
                call_llm_input_tokens,
@@ -416,12 +416,12 @@ def downgrade() -> None:
           FROM wf_runs
     """)
     op.execute(r"""
-        CREATE TABLE _aios_0168_account_usage_archive AS
+        CREATE TABLE _aios_0169_account_usage_archive AS
         SELECT id AS account_id, usage_ledger_started_at
           FROM accounts
     """)
     op.execute(r"""
-        CREATE TABLE _aios_0168_inference_usage_ledger_archive AS
+        CREATE TABLE _aios_0169_inference_usage_ledger_archive AS
         SELECT id,
                account_id,
                session_id,
