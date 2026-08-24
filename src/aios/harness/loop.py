@@ -2028,10 +2028,21 @@ async def discover_session_mcp_tools(
     # the agent proceeds degraded on the healthy servers' (possibly cached) tools.
     from aios.mcp.client import _DISCOVERY_UNHEALTHY_BACKOFF_S
 
+    # Populated only after this session successfully resolves a mount. Pending
+    # breaker edges are worker-global, so declaration-only URL matching is not
+    # sufficient: an unpinned mount at a shared URL may resolve to a different
+    # vault than the identity which produced an edge.
+    resolved_mounts: dict[tuple[str, str | None], McpServerSpec] = {}
+
     async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
         vault_id, headers = await resolve_auth_for_mcp_mount(
             pool, crypto_box, session_id, spec, account_id=account_id
         )
+        # Successful pinned resolution is contractually the requested pin. Keep
+        # that invariant here so an explicit pin cannot be weakened by an
+        # inconsistent resolver result (including test doubles).
+        identity_vault_id = spec.vault_id if spec.vault_id is not None else vault_id
+        resolved_mounts[(spec.url, identity_vault_id)] = spec
         _pool = runtime.mcp_session_pool
         if _pool is not None:
             from aios.mcp.client import _headers_key
@@ -2093,27 +2104,14 @@ async def discover_session_mcp_tools(
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
-
-        def _owner_of(down_url: str, down_vault_id: str | None) -> McpServerSpec | None:
-            return next(
-                (
-                    spec
-                    for spec in agent.mcp_servers
-                    if spec.matches_resolved_identity(down_url, down_vault_id)
-                ),
-                None,
-            )
-
-        # Claim only this session's mounts. The queue is worker-global, so a
-        # wholesale drain lets an unrelated session destroy the owner's edge.
+        # Claim by identities resolved for this session, not by declarations.
+        # In particular an unpinned declaration does not own every vault at its
+        # URL: it owns only the vault selected for this session at runtime.
         owned_edges = _pool.drain_degraded_events_matching(
-            lambda down_url, down_vault_id: _owner_of(down_url, down_vault_id) is not None
+            lambda down_url, down_vault_id: (down_url, down_vault_id) in resolved_mounts
         )
         for down_url, down_vault_id in owned_edges:
-            # Matching guarantees an owner. URL-only lookup would still be
-            # last-wins across same-url credential mounts (#2233).
-            owner = _owner_of(down_url, down_vault_id)
-            assert owner is not None
+            owner = resolved_mounts[(down_url, down_vault_id)]
             await sessions_service.append_event(
                 pool,
                 session_id,

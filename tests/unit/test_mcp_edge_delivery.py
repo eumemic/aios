@@ -63,3 +63,51 @@ async def test_unrelated_prelude_cannot_consume_owners_down_edge() -> None:
     assert [
         event["server"] for event in emitted if event.get("event") == "mcp_server_unavailable"
     ] == ["owner"]
+
+
+@pytest.mark.asyncio
+async def test_same_url_session_claims_only_its_resolved_identity() -> None:
+    url = "https://shared.example/mcp"
+    breaker_pool = McpSessionPool()
+    breaker_pool.mark_unhealthy(url, "vlt_owner", "", backoff_s=60)
+    unrelated = _agent(
+        mcp_servers=[McpServerSpec(name="other", url=url)],
+        tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="other")],
+    )
+    owner = _agent(
+        mcp_servers=[McpServerSpec(name="owner", url=url, vault_id="vlt_owner")],
+        tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="owner")],
+    )
+    emitted: list[tuple[str, str]] = []
+
+    async def resolve(_pool, _crypto, session_id, _spec, **_kwargs):
+        return ("vlt_other" if session_id == "unrelated" else "vlt_owner"), {}
+
+    async def discover(*_args, **_kwargs):
+        return [], None
+
+    async def append(_pool, session_id, _type, event, **_kwargs):
+        emitted.append((session_id, event["server"]))
+        return MagicMock()
+
+    prior = runtime.mcp_session_pool
+    runtime.mcp_session_pool = breaker_pool
+    try:
+        with (
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=discover),
+            patch("aios.harness.loop.sessions_service.append_event", side_effect=append),
+        ):
+            await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="unrelated",
+                agent=unrelated,
+                account_id="acc_test_stub",
+            )
+            await discover_session_mcp_tools(
+                pool=AsyncMock(), session_id="owner", agent=owner, account_id="acc_test_stub"
+            )
+    finally:
+        runtime.mcp_session_pool = prior
+
+    assert emitted == [("owner", "owner")]
