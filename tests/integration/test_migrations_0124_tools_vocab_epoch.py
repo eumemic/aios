@@ -17,14 +17,13 @@ the migration against a real Postgres:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # The seven surface tables and their backfill horizon (must match migration 0124).
 _SURFACE_TABLES = (
@@ -45,16 +44,6 @@ VALUES ('acc_root', NULL, TRUE, 'root');
 INSERT INTO workflows (id, account_id, name, version, script, tools)
 VALUES ('wf_old', 'acc_root', 'old', 1, 'S', '[{"type":"bash"}]'::jsonb);
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _fetchval(db_url: str, sql: str, *args: Any) -> Any:
@@ -83,15 +72,15 @@ async def _execute(db_url: str, sql: str) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_epoch_column_and_index_added_to_all_seven_surfaces(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_epoch_column_and_index_added_to_all_seven_surfaces(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
     # Seed an "old DB" row BEFORE 0124 so it has no epoch stamp.
-    up = _run_alembic(["upgrade", "0123"], db_url)
+    up = run_alembic(["upgrade", "0123"], db_url)
     assert up.returncode == 0, f"upgrade to 0123 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0124"], db_url)
+    up = run_alembic(["upgrade", "0124"], db_url)
     assert up.returncode == 0, f"upgrade to 0124 failed:\n{up.stderr}\n{up.stdout}"
 
     for table in _SURFACE_TABLES:
@@ -141,11 +130,11 @@ def test_epoch_column_and_index_added_to_all_seven_surfaces(postgres: object) ->
 
 @needs_docker
 @pytest.mark.integration
-def test_default_retained_so_omitting_column_yields_stale_row(postgres: object) -> None:
+def test_default_retained_so_omitting_column_yields_stale_row(migration_db_url: str) -> None:
     # A direct INSERT that does NOT name tools_vocab_epoch (a raw restore, a write
     # path that forgets it) must land at 0 — stale, never silently current.
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0124"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0124"], db_url)
     assert up.returncode == 0, f"upgrade to 0124 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(
@@ -167,11 +156,11 @@ def test_default_retained_so_omitting_column_yields_stale_row(postgres: object) 
 
 @needs_docker
 @pytest.mark.integration
-def test_partial_index_powers_fast_boot_scan(postgres: object) -> None:
+def test_partial_index_powers_fast_boot_scan(migration_db_url: str) -> None:
     # The boot residue scan fast-paths a table to "clean" when MIN(epoch) >= horizon
     # (the partial stale index is empty); a stale row keeps the table in the scan.
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0124"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0124"], db_url)
     assert up.returncode == 0, f"upgrade to 0124 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(

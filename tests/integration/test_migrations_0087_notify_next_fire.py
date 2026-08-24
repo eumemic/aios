@@ -13,19 +13,18 @@ and assert a PURE ``next_fire`` UPDATE produces a NOTIFY on
 silent behavior. The e2e suite runs at head where ``triggers`` is created
 empty, so the NOTIFY-on-next_fire edge is only exercised here.
 
-Each test mutates ``alembic_version``, so the container is function-scoped.
+Each test mutates ``alembic_version``, so each test gets its own database.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # FK chain required to land a ``triggers`` row at revision 0087:
 # accounts → environments → agents → sessions → triggers. Only NOT-NULL-
@@ -60,17 +59,6 @@ VALUES (
 _NEXT_FIRE_ONLY_UPDATE = (
     "UPDATE triggers SET next_fire = next_fire + interval '7 minutes' WHERE id = 'trg_nf'"
 )
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:
@@ -110,11 +98,11 @@ async def _next_fire_update_notifies(db_url: str, *, timeout_s: float) -> bool:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_0087_next_fire_only_update_notifies(postgres: object) -> None:
+def test_upgrade_0087_next_fire_only_update_notifies(migration_db_url: str) -> None:
     """At 0087, a pure ``next_fire`` UPDATE emits a NOTIFY within ~2s."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0087"], db_url)
+    up = run_alembic(["upgrade", "0087"], db_url)
     assert up.returncode == 0, f"upgrade to 0087 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(_execute(db_url, _CHAIN_SQL))
@@ -127,18 +115,18 @@ def test_upgrade_0087_next_fire_only_update_notifies(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_0086_next_fire_only_update_does_not_notify(postgres: object) -> None:
+def test_downgrade_0086_next_fire_only_update_does_not_notify(migration_db_url: str) -> None:
     """Downgrading to 0086 restores the pre-fix body: a pure ``next_fire``
     UPDATE is silent (mirrors the action-only negative test)."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0087"], db_url)
+    up = run_alembic(["upgrade", "0087"], db_url)
     assert up.returncode == 0, f"upgrade to 0087 failed:\n{up.stderr}\n{up.stdout}"
 
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _TRIGGER_SQL))
 
-    down = _run_alembic(["downgrade", "0086"], db_url)
+    down = run_alembic(["downgrade", "0086"], db_url)
     assert down.returncode == 0, f"downgrade to 0086 failed:\n{down.stderr}\n{down.stdout}"
 
     assert not asyncio.run(_next_fire_update_notifies(db_url, timeout_s=0.5)), (

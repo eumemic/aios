@@ -26,33 +26,26 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import asyncpg
 import pytest
 from nacl.secret import SecretBox
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
+from tests.conftest import PROJECT_ROOT, needs_docker
 
 pytestmark = pytest.mark.integration
 
 _MIGRATION_0154 = PROJECT_ROOT / "migrations" / "versions" / "0154_rehome_fleet_to_eumemic_child.py"
 
 
-@pytest.fixture
-def postgres() -> Iterator[Any]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 def _run_alembic(args: list[str], db_url: str, key: bytes) -> subprocess.CompletedProcess[str]:
+    """Subprocess on purpose — do NOT switch to the in-process runner.
+
+    ``_PreFix0154`` rewrites ``migrations/versions/0154_*.py`` on disk between
+    invocations; a fresh interpreter guarantees alembic loads the rewritten
+    file rather than anything a previous in-process run left cached.
+    """
     uv = shutil.which("uv")
     if uv is None:
         raise FileNotFoundError("uv not found on PATH")
@@ -189,9 +182,9 @@ async def _account_tree(db_url: str) -> list[tuple[str, str | None, str]]:
 
 
 @needs_docker
-def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> None:
+def test_0165_repairs_a_database_the_original_0154_stranded(migration_db_url: str) -> None:
     """RED then GREEN on the state production is actually in."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
 
     assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
@@ -274,9 +267,9 @@ def test_0165_repairs_a_database_the_original_0154_stranded(postgres: Any) -> No
 
 
 @needs_docker
-def test_0165_is_idempotent(postgres: Any) -> None:
+def test_0165_is_idempotent(migration_db_url: str) -> None:
     """Re-running the forward migration changes nothing."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
 
     assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
@@ -298,9 +291,9 @@ def test_0165_is_idempotent(postgres: Any) -> None:
 
 
 @needs_docker
-def test_0165_leaves_a_never_defective_database_untouched(postgres: Any) -> None:
+def test_0165_leaves_a_never_defective_database_untouched(migration_db_url: str) -> None:
     """Positive control: a fresh DB migrated by the corrected 0154."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
 
     assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
@@ -319,9 +312,9 @@ def test_0165_leaves_a_never_defective_database_untouched(postgres: Any) -> None
 
 
 @needs_docker
-def test_0165_noops_without_a_migration_owned_eumemic_child(postgres: Any) -> None:
+def test_0165_noops_without_a_migration_owned_eumemic_child(migration_db_url: str) -> None:
     """An operator-created account merely named Eumemic is not the marker."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
 
     assert _run_alembic(["upgrade", "0159"], db_url, key).returncode == 0

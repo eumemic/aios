@@ -6,10 +6,12 @@ individual test modules don't re-roll the same scaffolding.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import itertools
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 
 import asyncpg
+import psycopg
 import pytest
 
 from aios.db import queries
@@ -123,3 +125,40 @@ async def live_conn(request: pytest.FixtureRequest) -> AsyncIterator[asyncpg.Con
         yield conn
     finally:
         await conn.close()
+
+
+@pytest.fixture(scope="session")
+def migration_db_factory(postgres_container: Any) -> Iterator[Callable[[], str]]:
+    """Mint fresh, empty databases on the shared session Postgres server.
+
+    Migration tests replay alembic chains from zero, so they can't share the
+    already-migrated ``migrated_db_url`` database — but they don't need their
+    own *server* either: aios migrations touch only database-local state
+    (tables, indexes, extensions), never cluster state.  ``CREATE DATABASE``
+    on the shared container (~50 ms) replaces the per-test
+    ``PostgresContainer`` boot (~1.5-4 s) the migration files used to pay.
+    No per-database teardown — the container's session teardown is the
+    cleanup.
+
+    A session-scoped factory (rather than only a function-scoped URL fixture)
+    so a module of read-only tests sharing one replayed schema can mint a
+    single database at module scope.
+    """
+    host = postgres_container.get_container_host_ip()
+    port = postgres_container.get_exposed_port(5432)
+    base = f"postgresql://{postgres_container.username}:{postgres_container.password}@{host}:{port}"
+    counter = itertools.count()
+    with psycopg.connect(f"{base}/{postgres_container.dbname}", autocommit=True) as admin:
+
+        def make() -> str:
+            name = f"aios_mig_{next(counter)}"
+            admin.execute(f'CREATE DATABASE "{name}"')
+            return f"{base}/{name}"
+
+        yield make
+
+
+@pytest.fixture
+def migration_db_url(migration_db_factory: Callable[[], str]) -> str:
+    """A fresh empty database for one test — see ``migration_db_factory``."""
+    return migration_db_factory()

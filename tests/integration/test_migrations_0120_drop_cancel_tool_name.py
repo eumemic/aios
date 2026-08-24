@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any, cast
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # wf_cxl: cancel amid a plain builtin + a custom tool. wf_only: cancel alone → collapses to [].
 # wf_clean: no cancel (left untouched by the EXISTS gate).
@@ -34,16 +33,6 @@ VALUES
   ('wf_clean', 'acc_root', 'clean', 1, 'S',
    '[{"type":"bash"},{"type":"stop_task"}]'::jsonb);
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _fetch_tools(db_url: str, wf_id: str) -> list[dict[str, Any]]:
@@ -66,15 +55,15 @@ async def _execute(db_url: str, sql: str) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_cancel_tool_name_dropped(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_cancel_tool_name_dropped(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
     # Seed AFTER 0119 (the pre-0120 head) so the cancel rows are pristine.
-    up = _run_alembic(["upgrade", "0119"], db_url)
+    up = run_alembic(["upgrade", "0119"], db_url)
     assert up.returncode == 0, f"upgrade to 0119 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0120"], db_url)
+    up = run_alembic(["upgrade", "0120"], db_url)
     assert up.returncode == 0, f"upgrade to 0120 failed:\n{up.stderr}\n{up.stdout}"
 
     # cancel removed; bash + custom untouched, original order preserved.

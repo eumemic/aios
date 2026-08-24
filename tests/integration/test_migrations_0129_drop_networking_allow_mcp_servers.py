@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any, cast
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # acc → three environments:
 #   env_mcp   — limited networking still carrying the dropped allow_mcp_servers key.
@@ -51,16 +50,6 @@ VALUES
 """
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _fetch_config(db_url: str, env_id: str) -> dict[str, Any]:
     conn = await asyncpg.connect(db_url)
     try:
@@ -81,15 +70,15 @@ async def _execute(db_url: str, sql: str) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_allow_mcp_servers_key_stripped(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_allow_mcp_servers_key_stripped(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
     # Seed AFTER 0128 (the pre-0129 head) so the offending row is pristine.
-    up = _run_alembic(["upgrade", "0128"], db_url)
+    up = run_alembic(["upgrade", "0128"], db_url)
     assert up.returncode == 0, f"upgrade to 0128 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = _run_alembic(["upgrade", "0129"], db_url)
+    up = run_alembic(["upgrade", "0129"], db_url)
     assert up.returncode == 0, f"upgrade to 0129 failed:\n{up.stderr}\n{up.stdout}"
 
     # The key is gone; every sibling field is preserved verbatim.

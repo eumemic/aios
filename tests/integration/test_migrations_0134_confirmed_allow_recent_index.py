@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
@@ -44,8 +43,8 @@ import pytest
 
 from aios.db.queries.events import confirmed_unresolved_predicate
 from aios.harness.sweep import CONFIRMED_ROWS_SQL
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 _INDEX_NAME = "events_tool_confirmed_allow_recent_idx"
 
@@ -106,17 +105,6 @@ FROM generate_series(1, {_NOISE_ROW_COUNT}) AS i;
 _CONFIRMED_ROWS_SQL_TEXT = CONFIRMED_ROWS_SQL.format(scope_clause="", age_param="$1")
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -143,10 +131,10 @@ def _collect_nodes(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
 
 @needs_docker
 @pytest.mark.integration
-def test_clean_database_creates_confirmed_allow_recent_index(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_clean_database_creates_confirmed_allow_recent_index(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
     indexdef = asyncio.run(
@@ -179,14 +167,14 @@ def test_clean_database_creates_confirmed_allow_recent_index(postgres: object) -
 
 @needs_docker
 @pytest.mark.integration
-def test_confirmed_rows_sql_uses_index_not_seq_scan(postgres: object) -> None:
+def test_confirmed_rows_sql_uses_index_not_seq_scan(migration_db_url: str) -> None:
     """The master-failing pin: EXPLAIN of the exact ``CONFIRMED_ROWS_SQL`` text
     must prune at the new index (``Index Cond`` on ``created_at``), never a
     ``Seq Scan`` over ``events`` for the ``lc`` node. On master (no index) the
     only access path is a ``Seq Scan`` and this assertion fails."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL + _EVENTS_SQL + _NOISE_SQL))
     asyncio.run(_execute(db_url, "ANALYZE"))

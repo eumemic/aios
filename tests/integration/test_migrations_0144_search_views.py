@@ -44,15 +44,15 @@ import asyncio
 import hashlib
 import importlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable
 from typing import Any
 
 import asyncpg
 import pytest
 
 from aios.tools.search_events import _ALLOWED_RELATIONS
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # ---------------------------------------------------------------------------
 # Seed: two tenants, two sessions. Session X carries the full menagerie —
@@ -580,19 +580,14 @@ def test_lifecycle_redaction_vocabulary_alignment() -> None:
 
 
 @pytest.fixture(scope="module")
-def db_url() -> Iterator[str]:
-    """One container + one ``upgrade head`` + one seed for the whole module —
+def db_url(migration_db_factory: Callable[[], str]) -> str:
+    """One database + one ``upgrade head`` + one seed for the whole module —
     every test below is read-only (the EXPLAIN test's DDL is rolled back)."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        url = _alembic_url(pg)
-        result = _run_alembic(["upgrade", "head"], url)
-        assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
-        asyncio.run(_seed(url))
-        yield url
+    url = migration_db_factory()
+    result = run_alembic(["upgrade", "head"], url)
+    assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
+    asyncio.run(_seed(url))
+    return url
 
 
 async def _seed(db_url: str) -> None:

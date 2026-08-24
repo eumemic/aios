@@ -21,13 +21,12 @@ Covers the deterministic acceptance from the design:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # Two tenants, two stores, two sessions; each session is attached to exactly
 # one store. The isolation invariant: a session only ever sees memories of its
@@ -78,16 +77,6 @@ def _insert_memory_sql(
     )
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _fetch(db_url: str, sql: str, *args: object) -> list[asyncpg.Record]:
     conn = await asyncpg.connect(db_url)
     try:
@@ -106,11 +95,11 @@ async def _execute(db_url: str, sql: str, *args: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_generated_column_and_gin_index_exist_and_populate(postgres: object) -> None:
+def test_generated_column_and_gin_index_exist_and_populate(migration_db_url: str) -> None:
     """The generated STORED column + GIN index exist and the vector is
     populated on insert with no trigger (generated-by-construction)."""
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "head"], db_url).returncode == 0
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "head"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
 
     # Column exists and is GENERATED STORED.
@@ -160,10 +149,10 @@ def test_generated_column_and_gin_index_exist_and_populate(postgres: object) -> 
 
 @needs_docker
 @pytest.mark.integration
-def test_memory_search_scoping(postgres: object) -> None:
+def test_memory_search_scoping(migration_db_url: str) -> None:
     """A session only sees memories of its own attached stores."""
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "head"], db_url).returncode == 0
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "head"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
     asyncio.run(
         _execute(
@@ -208,10 +197,10 @@ def test_memory_search_scoping(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_memory_search_rank_and_handler(postgres: object) -> None:
+def test_memory_search_rank_and_handler(migration_db_url: str) -> None:
     """The tool handler returns ts_rank DESC ordering, scoped to the session."""
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "head"], db_url).returncode == 0
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "head"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
     # mem_hi mentions the keyword many times → higher ts_rank than mem_lo.
     asyncio.run(
@@ -266,10 +255,10 @@ def test_memory_search_rank_and_handler(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_memory_search_soft_deleted_excluded(postgres: object) -> None:
+def test_memory_search_soft_deleted_excluded(migration_db_url: str) -> None:
     """A ``deleted_at``-stamped memory does not appear in the view."""
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "head"], db_url).returncode == 0
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "head"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
     asyncio.run(
         _execute(
@@ -314,11 +303,11 @@ def test_memory_search_soft_deleted_excluded(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_memory_search_runs_read_only(postgres: object) -> None:
+def test_memory_search_runs_read_only(migration_db_url: str) -> None:
     """The handler's execution path is READ ONLY — no mutation is possible
     even though the surface is a narrowed ``{query}`` (not raw SQL)."""
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "head"], db_url).returncode == 0
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "head"], db_url).returncode == 0
     asyncio.run(_execute(db_url, _SEED_SQL))
 
     async def _attempt_write() -> None:
@@ -337,10 +326,10 @@ def test_memory_search_runs_read_only(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_drops_view_index_and_column(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    assert _run_alembic(["upgrade", "0119"], db_url).returncode == 0
-    down = _run_alembic(["downgrade", "0118"], db_url)
+def test_downgrade_drops_view_index_and_column(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    assert run_alembic(["upgrade", "0119"], db_url).returncode == 0
+    down = run_alembic(["downgrade", "0118"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
 
     cols = asyncio.run(

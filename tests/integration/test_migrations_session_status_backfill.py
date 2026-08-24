@@ -33,7 +33,7 @@ These tests:
   completes well under the wall-clock budget a correlated form would blow.
 
 Mirrors ``test_migrations_workspace_path_backfill.py`` (seed-at-N then
-upgrade-to-head against a fresh per-test Postgres).
+upgrade-to-head against a fresh per-test database).
 """
 
 from __future__ import annotations
@@ -41,31 +41,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import (
-    PROJECT_ROOT,
-    _alembic_url,
-    _run_alembic,
-)
+from tests.conftest import PROJECT_ROOT, needs_docker
+from tests.helpers.alembic import run_alembic
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 # ─── direct-SQL seeding (bypasses the service layer) ─────────────────────────
@@ -249,20 +233,20 @@ async def _seed_rich(db_url: str) -> None:
 
 
 @needs_docker
-def test_backfill_computes_every_scalar(postgres: object) -> None:
+def test_backfill_computes_every_scalar(migration_db_url: str) -> None:
     """After ``upgrade head`` runs 0066's backfill, each scalar on each seeded
     session equals its independently-computed expected value."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
     # Stop at 0065 so the scalar columns don't exist yet and we can seed the
     # legacy (pre-0066) event log directly.
-    result = _run_alembic(["upgrade", "0065"], db_url)
+    result = run_alembic(["upgrade", "0065"], db_url)
     assert result.returncode == 0, f"upgrade 0065 failed:\n{result.stderr}\n{result.stdout}"
 
     asyncio.run(_seed_rich(db_url))
 
     # Run 0066's backfill.
-    result = _run_alembic(["upgrade", "head"], db_url)
+    result = run_alembic(["upgrade", "head"], db_url)
     assert result.returncode == 0, (
         "upgrade head (0066 backfill) failed — note the bare correlated form "
         f"ERRORS on the 'tool_calls': null shape:\n{result.stderr}\n{result.stdout}"
@@ -348,7 +332,7 @@ def test_migration_backfill_is_not_correlated() -> None:
 
 
 @needs_docker
-def test_backfill_bounded_on_a_large_session(postgres: object) -> None:
+def test_backfill_bounded_on_a_large_session(migration_db_url: str) -> None:
     """Seed many events for a SINGLE session and assert the backfill stays
     fast. A correlated per-session backfill would re-scan all N events for that
     one session (and again per other session); the set-based form scans the
@@ -356,14 +340,14 @@ def test_backfill_bounded_on_a_large_session(postgres: object) -> None:
     the point — a few thousand events backfill in well under a second
     set-based, whereas the correlated form's cost is visibly super-linear.
 
-    The budget (60s) is deliberately generous: it brackets the WHOLE
-    ``uv run alembic upgrade`` run — process spawn, env bootstrap, and
-    the full migration ladder from 0065 — not just the 0066 statement, so it
-    stays robust on cold CI while still failing a true minutes-long hang.
+    The budget (60s) is deliberately generous: it brackets the whole
+    in-process alembic run — the full migration ladder from 0065, not just
+    the 0066 statement — so it stays robust on cold CI while still failing
+    a true minutes-long hang.
     """
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "0065"], db_url)
+    result = run_alembic(["upgrade", "0065"], db_url)
     assert result.returncode == 0, f"upgrade 0065 failed:\n{result.stderr}\n{result.stdout}"
 
     n_events = 5000
@@ -434,7 +418,7 @@ def test_backfill_bounded_on_a_large_session(postgres: object) -> None:
     asyncio.run(seed())
 
     start = time.monotonic()
-    result = _run_alembic(["upgrade", "head"], db_url)
+    result = run_alembic(["upgrade", "head"], db_url)
     elapsed = time.monotonic() - start
     assert result.returncode == 0, f"upgrade head failed:\n{result.stderr}\n{result.stdout}"
 

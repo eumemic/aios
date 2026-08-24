@@ -17,14 +17,13 @@ rekey.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
 from aios.cli.commands.ops import _REKEY_COLUMNS
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # ``credentials`` (migration 0001) is the pre-multi-tenancy, pre-vaults
 # credential store, superseded by ``vaults``/``vault_credentials`` (0005) and
@@ -37,21 +36,11 @@ from tests.integration.test_migrations import _alembic_url, _run_alembic
 _LEGACY_UNREKEYABLE = {("credentials", "ciphertext")}
 
 
-@pytest.fixture(scope="module")
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 @needs_docker
 @pytest.mark.integration
-def test_rekey_covers_every_encrypted_column(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    result = _run_alembic(["upgrade", "head"], db_url)
+def test_rekey_covers_every_encrypted_column(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    result = run_alembic(["upgrade", "head"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
     async def check() -> None:

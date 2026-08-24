@@ -11,9 +11,7 @@ import asyncio
 import base64
 import importlib.util
 import os
-import shutil
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -22,8 +20,8 @@ import asyncpg
 import pytest
 from nacl.secret import SecretBox
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import PROJECT_ROOT, _alembic_url
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 pytestmark = pytest.mark.integration
 
@@ -111,33 +109,9 @@ def test_revision_and_transactional_upgrade_downgrade_contract() -> None:
     assert migration.upgrade.__module__ == migration.downgrade.__module__
 
 
-@pytest.fixture
-def postgres() -> Iterator[Any]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 def _run_alembic(args: list[str], db_url: str, key: bytes) -> subprocess.CompletedProcess[str]:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise FileNotFoundError("uv not found on PATH")
-    return subprocess.run(
-        [uv, "run", "alembic", *args],
-        cwd=PROJECT_ROOT,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin"),
-            "HOME": str(Path.home()),
-            "AIOS_DB_URL": db_url,
-            "AIOS_VAULT_KEY": base64.b64encode(key).decode(),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    """``run_alembic`` with the vault key threaded — 0154 re-encrypts vault rows."""
+    return run_alembic(args, db_url, extra_env={"AIOS_VAULT_KEY": base64.b64encode(key).decode()})
 
 
 async def _composite_fks(db_url: str) -> set[tuple[str, str]]:
@@ -411,9 +385,9 @@ async def _assert_restored(
 
 
 @needs_docker
-def test_downgrade_handles_nested_eumemic_name(postgres: Any) -> None:
+def test_downgrade_handles_nested_eumemic_name(migration_db_url: str) -> None:
     """A post-cutover Eumemic child must survive downgrade beneath root."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
     assert _run_alembic(["upgrade", "0152"], db_url, key).returncode == 0
 
@@ -481,8 +455,8 @@ def test_downgrade_handles_nested_eumemic_name(postgres: Any) -> None:
 
 
 @needs_docker
-def test_real_postgres_upgrade_and_downgrade_round_trip(postgres: Any) -> None:
-    db_url = _alembic_url(postgres)
+def test_real_postgres_upgrade_and_downgrade_round_trip(migration_db_url: str) -> None:
+    db_url = migration_db_url
     key = os.urandom(SecretBox.KEY_SIZE)
     migration = _migration()
     master = migration._Box(key)

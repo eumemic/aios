@@ -6,13 +6,12 @@ backfills out any pre-existing duplicate rows (keeping the lowest-seq row).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # A minimal account/agent/env/session chain plus an assistant tool_call so a
 # tool-role event has a parent to attach to. Two tool-role rows for the SAME
@@ -49,17 +48,6 @@ VALUES ('evt_x', 'sess_a', 3, 'message',
 """
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres; each test mutates alembic_version."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -78,10 +66,10 @@ async def _fetchval(db_url: str, sql: str) -> object:
 
 @needs_docker
 @pytest.mark.integration
-def test_clean_database_upgrades_to_unique_tool_result_idx(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_clean_database_upgrades_to_unique_tool_result_idx(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
 
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     indexdef = asyncio.run(
@@ -96,14 +84,14 @@ def test_clean_database_upgrades_to_unique_tool_result_idx(postgres: object) -> 
 
 @needs_docker
 @pytest.mark.integration
-def test_preexisting_duplicate_backfilled_keeping_lowest_seq(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_preexisting_duplicate_backfilled_keeping_lowest_seq(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0095"], db_url)
+    up = run_alembic(["upgrade", "0095"], db_url)
     assert up.returncode == 0, f"upgrade to 0095 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL + _DUP_ROWS_SQL))
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
     # Exactly one tool-role row survives — the lowest-seq (winning) one.
@@ -129,10 +117,10 @@ def test_preexisting_duplicate_backfilled_keeping_lowest_seq(postgres: object) -
 
 @needs_docker
 @pytest.mark.integration
-def test_unique_index_rejects_second_tool_result(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
+def test_unique_index_rejects_second_tool_result(migration_db_url: str) -> None:
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "head"], db_url)
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(
         _execute(

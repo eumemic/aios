@@ -30,9 +30,9 @@ import pytest
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.models.sessions import Ok
-from tests.conftest import _docker_available, needs_docker
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 from tests.integration.conftest import seed_agent_env_session
-from tests.integration.test_migrations import _alembic_url, _run_alembic
 
 pytestmark = pytest.mark.integration
 
@@ -323,16 +323,6 @@ def test_floor_bounded_false_allows_batch_any_sid() -> None:
 # ─── 7. migration plan-shape: partial index exists, valid, and is used ───────
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str, *args: Any) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -358,9 +348,9 @@ def _collect_nodes(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
 
 @needs_docker
 @pytest.mark.integration
-def test_migration_creates_valid_partial_index(postgres: object) -> None:
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "head"], db_url)
+def test_migration_creates_valid_partial_index(migration_db_url: str) -> None:
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
 
     async def _check() -> tuple[str | None, bool | None]:
@@ -418,12 +408,12 @@ VALUES ('sess_a', 'agent_a', 'env_a', '/tmp/ws-a', 'acc_root', 1000, 990);
 
 @needs_docker
 @pytest.mark.integration
-def test_floor_bounded_query_uses_partial_index_not_full_scan(postgres: object) -> None:
+def test_floor_bounded_query_uses_partial_index_not_full_scan(migration_db_url: str) -> None:
     """The master-failing pin: EXPLAIN of the floor-bounded ``get_open_obligations``
     SQL must seek ``events_request_opened_seq_idx`` with a seq-range condition,
     not scan every ``request_opened`` row."""
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "head"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "head"], db_url)
     assert up.returncode == 0, f"upgrade to head failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
 

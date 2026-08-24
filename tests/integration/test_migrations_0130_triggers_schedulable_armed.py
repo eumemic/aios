@@ -9,20 +9,19 @@ with a real zombie in the table does not abort; and that the arm is scoped to
 schedulable sources only — an enabled run_completion row keeps NULL
 ``next_fire`` under both the 0108 reactive arm and this schedulable arm.
 
-Each test mutates ``alembic_version``, so the container is function-scoped.
+Each test mutates ``alembic_version``, so each test gets its own database.
 Modeled on tests/integration/test_migrations_0108_triggers_external_event.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # FK chain for seeding a trigger row at head (NOT-NULL-without-default columns).
 _CHAIN_SQL = """
@@ -100,17 +99,6 @@ VALUES
 """
 
 
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
 async def _execute(db_url: str, sql: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
@@ -142,27 +130,27 @@ async def _fetchval(db_url: str, sql: str) -> object:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
+def test_upgrade_and_clean_downgrade_round_trip(migration_db_url: str) -> None:
     """With zero violator rows, 0130 upgrades and downgrades cleanly."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0130"], db_url)
+    up = run_alembic(["upgrade", "0130"], db_url)
     assert up.returncode == 0, f"upgrade to 0130 failed:\n{up.stderr}\n{up.stdout}"
 
-    down = _run_alembic(["downgrade", "0129"], db_url)
+    down = run_alembic(["downgrade", "0129"], db_url)
     assert down.returncode == 0, f"downgrade to 0129 failed:\n{down.stderr}\n{down.stdout}"
 
 
 @needs_docker
 @pytest.mark.integration
-def test_zombie_cron_rejected_under_new_check_accepted_under_old(postgres: object) -> None:
+def test_zombie_cron_rejected_under_new_check_accepted_under_old(migration_db_url: str) -> None:
     """An enabled cron row with NULL next_fire (the #925 zombie) is rejected at
     head (0130) and admitted at the prior revision (0129) — the CHECK is what
     makes the state unrepresentable."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
     # Under 0129 (prior head) the zombie is representable (the schema admits it).
-    up129 = _run_alembic(["upgrade", "0129"], db_url)
+    up129 = run_alembic(["upgrade", "0129"], db_url)
     assert up129.returncode == 0, f"upgrade to 0129 failed:\n{up129.stderr}\n{up129.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _ZOMBIE_CRON_ROW_SQL))
@@ -172,7 +160,7 @@ def test_zombie_cron_rejected_under_new_check_accepted_under_old(postgres: objec
     asyncio.run(_execute(db_url, "DELETE FROM triggers WHERE id = 'trig_zombie'"))
 
     # Under 0130 the same row is rejected.
-    up130 = _run_alembic(["upgrade", "0130"], db_url)
+    up130 = run_alembic(["upgrade", "0130"], db_url)
     assert up130.returncode == 0, f"upgrade to 0130 failed:\n{up130.stderr}\n{up130.stdout}"
     assert asyncio.run(_insert_raises(db_url, _ZOMBIE_CRON_ROW_SQL)), (
         "enabled cron with NULL next_fire must be rejected under 0130"
@@ -181,11 +169,11 @@ def test_zombie_cron_rejected_under_new_check_accepted_under_old(postgres: objec
 
 @needs_docker
 @pytest.mark.integration
-def test_zombie_one_shot_rejected_under_new_check(postgres: object) -> None:
+def test_zombie_one_shot_rejected_under_new_check(migration_db_url: str) -> None:
     """Settled fork 1: the schedulable arm covers one_shot too — an enabled
     one-shot with NULL next_fire is rejected under 0130."""
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0130"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0130"], db_url)
     assert up.returncode == 0, f"upgrade to 0130 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     assert asyncio.run(_insert_raises(db_url, _ZOMBIE_ONE_SHOT_ROW_SQL)), (
@@ -195,12 +183,12 @@ def test_zombie_one_shot_rejected_under_new_check(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_legitimate_rows_still_insert(postgres: object) -> None:
+def test_legitimate_rows_still_insert(migration_db_url: str) -> None:
     """The CHECK admits every legitimate shape: an armed enabled cron, a
     disabled cron with NULL next_fire, and an enabled reactive (run_completion)
     row with NULL next_fire (excluded from the schedulable arm)."""
-    db_url = _alembic_url(postgres)
-    up = _run_alembic(["upgrade", "0130"], db_url)
+    db_url = migration_db_url
+    up = run_alembic(["upgrade", "0130"], db_url)
     assert up.returncode == 0, f"upgrade to 0130 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
 
@@ -212,15 +200,15 @@ def test_legitimate_rows_still_insert(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_auto_disables_preexisting_violators(postgres: object) -> None:
+def test_upgrade_auto_disables_preexisting_violators(migration_db_url: str) -> None:
     """The 0066 lesson: pre-existing violator rows are DISABLED before the
     validating ADD CONSTRAINT, so the migrate succeeds on a table that already
     holds a #925 zombie — and the auto-disable is behaviorally a no-op (the row
     never fired), leaving the row present but ``enabled = false``."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
     # Seed zombies (cron + one_shot) at the prior revision, then migrate.
-    up129 = _run_alembic(["upgrade", "0129"], db_url)
+    up129 = run_alembic(["upgrade", "0129"], db_url)
     assert up129.returncode == 0, f"upgrade to 0129 failed:\n{up129.stderr}\n{up129.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _ZOMBIE_CRON_ROW_SQL))
@@ -228,7 +216,7 @@ def test_upgrade_auto_disables_preexisting_violators(postgres: object) -> None:
     # A legitimately armed row must survive untouched.
     asyncio.run(_execute(db_url, _ARMED_CRON_ROW_SQL))
 
-    up130 = _run_alembic(["upgrade", "0130"], db_url)
+    up130 = run_alembic(["upgrade", "0130"], db_url)
     assert up130.returncode == 0, (
         f"upgrade to 0130 must not abort on pre-existing zombies:\n{up130.stderr}\n{up130.stdout}"
     )

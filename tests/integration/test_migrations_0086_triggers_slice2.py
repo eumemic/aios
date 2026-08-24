@@ -7,19 +7,18 @@ and the ``triggers_run_completion_no_next_fire`` guard (the DB half of the §3
 "reactive rows are unschedulable by the tick" invariant — a service-layer slip
 here would be a tick-speed hot re-claim runaway, hence the constraint).
 
-Each test mutates ``alembic_version``, so the container is function-scoped.
+Each test mutates ``alembic_version``, so each test gets its own database.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # FK chain for seeding a trigger row at head (NOT-NULL-without-default columns
 # only; mirrors test_migrations_0083_triggers.py).
@@ -46,17 +45,6 @@ VALUES
      '{"kind": "wake_owner", "content": "a run completed"}'::jsonb,
      TRUE, NULL);
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:
@@ -92,17 +80,17 @@ async def _column_exists(db_url: str, table: str, column: str) -> bool:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
+def test_upgrade_and_clean_downgrade_round_trip(migration_db_url: str) -> None:
     """With zero slice-2 rows, 0086 upgrades and downgrades cleanly: the audit
     table and the env column appear at head and vanish on downgrade."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0086"], db_url)
+    up = run_alembic(["upgrade", "0086"], db_url)
     assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     assert asyncio.run(_table_exists(db_url, "trigger_runs"))
     assert asyncio.run(_column_exists(db_url, "triggers", "environment_id"))
 
-    down = _run_alembic(["downgrade", "0085"], db_url)
+    down = run_alembic(["downgrade", "0085"], db_url)
     assert down.returncode == 0, f"downgrade to 0085 failed:\n{down.stderr}\n{down.stdout}"
     assert not asyncio.run(_table_exists(db_url, "trigger_runs"))
     assert not asyncio.run(_column_exists(db_url, "triggers", "environment_id"))
@@ -110,17 +98,17 @@ def test_upgrade_and_clean_downgrade_round_trip(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_refuses_slice2_rows(postgres: object) -> None:
+def test_downgrade_refuses_slice2_rows(migration_db_url: str) -> None:
     """A run_completion row is unrepresentable under the 0083 predicates, so
     the downgrade fails hard and rolls back (the 0083 wake_owner stance)."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0086"], db_url)
+    up = run_alembic(["upgrade", "0086"], db_url)
     assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _RUN_COMPLETION_ROW_SQL))
 
-    down = _run_alembic(["downgrade", "0085"], db_url)
+    down = run_alembic(["downgrade", "0085"], db_url)
     assert down.returncode != 0, f"downgrade should have failed loud:\n{down.stdout}"
     assert "cannot downgrade" in down.stderr
 
@@ -131,13 +119,13 @@ def test_downgrade_refuses_slice2_rows(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_run_completion_rows_reject_next_fire(postgres: object) -> None:
+def test_run_completion_rows_reject_next_fire(migration_db_url: str) -> None:
     """The resolved sign-off #2 guard: a run_completion row can never carry a
     next_fire, so it is unschedulable by the scheduler tick BY CONSTRAINT, not
     merely by service-layer discipline."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0086"], db_url)
+    up = run_alembic(["upgrade", "0086"], db_url)
     assert up.returncode == 0, f"upgrade to 0086 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _RUN_COMPLETION_ROW_SQL))

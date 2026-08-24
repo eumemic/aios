@@ -3,35 +3,22 @@
 Migration 0133 adds ``sessions.channels text[] NOT NULL DEFAULT '{}'`` and
 backfills existing rows from the event log's DISTINCT channel set
 (issue #1742). These tests seed sessions + events directly via SQL (the
-pre-migration schema shape), run the real alembic CLI up to head, and
+pre-migration schema shape), run the real alembic chain up to head, and
 assert the backfilled array matches the DISTINCT-channel set the old
 ``list_session_channels`` query would have returned — including the
 zero-channel case, which must land as ``'{}'`` rather than NULL.
 
-Mirrors the testcontainer-Postgres/real-alembic-CLI pattern of
+Mirrors the migration-test pattern of
 ``test_migrations_workspace_path_backfill.py``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 
 async def _seed(db_url: str) -> None:
@@ -129,17 +116,17 @@ async def _channels(db_url: str) -> dict[str, list[str]]:
 
 @needs_docker
 @pytest.mark.integration
-def test_backfill_matches_distinct_channel_sets(postgres: object) -> None:
+def test_backfill_matches_distinct_channel_sets(migration_db_url: str) -> None:
     import asyncio
 
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "0131"], db_url)
+    result = run_alembic(["upgrade", "0131"], db_url)
     assert result.returncode == 0, result.stderr
 
     asyncio.run(_seed(db_url))
 
-    result = _run_alembic(["upgrade", "0133"], db_url)
+    result = run_alembic(["upgrade", "0133"], db_url)
     assert result.returncode == 0, result.stderr
 
     channels = asyncio.run(_channels(db_url))
@@ -150,15 +137,15 @@ def test_backfill_matches_distinct_channel_sets(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_drops_column(postgres: object) -> None:
+def test_downgrade_drops_column(migration_db_url: str) -> None:
     import asyncio
 
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "head"], db_url)
+    result = run_alembic(["upgrade", "head"], db_url)
     assert result.returncode == 0, result.stderr
 
-    result = _run_alembic(["downgrade", "0131"], db_url)
+    result = run_alembic(["downgrade", "0131"], db_url)
     assert result.returncode == 0, result.stderr
 
     async def _has_column() -> bool:

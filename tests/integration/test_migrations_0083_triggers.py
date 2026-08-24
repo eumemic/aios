@@ -10,21 +10,20 @@ serialization, the verbatim ``sandbox_command`` assembly (a schedule_wake-
 origin ``tool wake_self`` row STAYS ``sandbox_command`` — ``wake_owner`` is
 opt-in going forward, never backfilled), and the fail-hard validating SELECT.
 
-Each test mutates ``alembic_version``, so the container is function-scoped.
+Each test mutates ``alembic_version``, so each test gets its own database.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from typing import Any
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 # The FK chain required to land a session_scheduled_tasks row at revision 0081
 # (columns introspected from a 0081 DB): accounts → environments → agents →
@@ -60,17 +59,6 @@ VALUES ('sched_wake', 'ses_mig', 'acc_mig', 'wake-row',
         '2026-06-12 09:00:00+00'::timestamptz,
         'tool wake_self ''{"content":"poll done"}''');
 """
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
 
 
 async def _execute(db_url: str, sql: str) -> None:
@@ -110,17 +98,17 @@ async def _table_exists(db_url: str, name: str) -> bool:
 
 @needs_docker
 @pytest.mark.integration
-def test_backfill_maps_old_rows_verbatim(postgres: object) -> None:
+def test_backfill_maps_old_rows_verbatim(migration_db_url: str) -> None:
     """Seed cron / one_shot / schedule_wake-origin rows at 0081, upgrade to 0083,
     assert the backfill mapping + verbatim sandbox_command assembly."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0081"], db_url)
+    up = run_alembic(["upgrade", "0081"], db_url)
     assert up.returncode == 0, f"upgrade to 0081 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     asyncio.run(_execute(db_url, _OLD_ROWS_SQL))
 
-    up = _run_alembic(["upgrade", "0083"], db_url)
+    up = run_alembic(["upgrade", "0083"], db_url)
     assert up.returncode == 0, f"upgrade to 0083 failed:\n{up.stderr}\n{up.stdout}"
 
     # Table + owner column renamed.
@@ -162,14 +150,14 @@ def test_backfill_maps_old_rows_verbatim(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_validating_select_fails_hard_on_malformed_row(postgres: object) -> None:
+def test_validating_select_fails_hard_on_malformed_row(migration_db_url: str) -> None:
     """A pre-0083 row that backfills to an invalid shape (both schedule and
     fire_at NULL — only reachable by dropping the 0059 XOR) is named by the
     in-migration validating SELECT, which aborts the upgrade BEFORE the new
     columns are made NOT NULL / the CHECKs are added."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    up = _run_alembic(["upgrade", "0081"], db_url)
+    up = run_alembic(["upgrade", "0081"], db_url)
     assert up.returncode == 0, f"upgrade to 0081 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _CHAIN_SQL))
     # Drop the 0059 XOR so a both-NULL row can land; the backfill turns it into a
@@ -185,7 +173,7 @@ def test_validating_select_fails_hard_on_malformed_row(postgres: object) -> None
         )
     )
 
-    up = _run_alembic(["upgrade", "0083"], db_url)
+    up = run_alembic(["upgrade", "0083"], db_url)
     assert up.returncode != 0, f"upgrade should have failed loud:\n{up.stdout}"
     assert "violating the shape contract" in up.stderr
     assert "sched_bad" in up.stderr

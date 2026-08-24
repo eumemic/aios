@@ -8,7 +8,7 @@ from globally exclusive to per-account:
   ``(account_id, connector, external_account_id) WHERE archived_at IS NULL``.
 * downgrade: drops the per-account index, restores the global one.
 
-These tests exercise the real alembic CLI against a fresh Postgres so
+These tests run the real alembic chain against a fresh database so
 each scenario gets an isolated ``alembic_version`` and ``connections``
 catalog state.
 """
@@ -16,24 +16,12 @@ catalog state.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
 
 import asyncpg
 import pytest
 
-from tests.conftest import _docker_available, needs_docker
-from tests.integration.test_migrations import _alembic_url, _run_alembic
-
-
-@pytest.fixture
-def postgres() -> Iterator[object]:
-    """Fresh function-scoped Postgres — each test mutates ``alembic_version``."""
-    if not _docker_available():
-        pytest.skip("Docker not available")
-    from testcontainers.postgres import PostgresContainer
-
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
+from tests.conftest import needs_docker
+from tests.helpers.alembic import run_alembic
 
 
 async def _connections_indexes(db_url: str) -> set[str]:
@@ -59,11 +47,11 @@ async def _version_num(db_url: str) -> str:
 
 @needs_docker
 @pytest.mark.integration
-def test_upgrade_to_0060_swaps_index_to_per_account(postgres: object) -> None:
+def test_upgrade_to_0060_swaps_index_to_per_account(migration_db_url: str) -> None:
     """After upgrade to 0060: per-account index present, global index gone."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "0060"], db_url)
+    result = run_alembic(["upgrade", "0060"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
     indexes = asyncio.run(_connections_indexes(db_url))
@@ -74,14 +62,14 @@ def test_upgrade_to_0060_swaps_index_to_per_account(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_downgrade_to_0059_restores_global_index(postgres: object) -> None:
+def test_downgrade_to_0059_restores_global_index(migration_db_url: str) -> None:
     """Downgrade 0060 -> 0059 restores the pre-migration global index."""
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "0060"], db_url)
+    result = run_alembic(["upgrade", "0060"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
-    result = _run_alembic(["downgrade", "0059"], db_url)
+    result = run_alembic(["downgrade", "0059"], db_url)
     assert result.returncode == 0, f"alembic downgrade failed:\n{result.stderr}\n{result.stdout}"
 
     indexes = asyncio.run(_connections_indexes(db_url))
@@ -92,7 +80,7 @@ def test_downgrade_to_0059_restores_global_index(postgres: object) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_up_down_up_is_idempotent(postgres: object) -> None:
+def test_up_down_up_is_idempotent(migration_db_url: str) -> None:
     """``upgrade -> downgrade -> upgrade`` lands on the same per-account index.
 
     Idempotency here means "the migration is reversible and re-applicable" —
@@ -101,13 +89,13 @@ def test_up_down_up_is_idempotent(postgres: object) -> None:
     re-application safe even when the previous step leaves the catalog in
     an unexpected state.
     """
-    db_url = _alembic_url(postgres)
+    db_url = migration_db_url
 
-    result = _run_alembic(["upgrade", "0060"], db_url)
+    result = run_alembic(["upgrade", "0060"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
-    result = _run_alembic(["downgrade", "0059"], db_url)
+    result = run_alembic(["downgrade", "0059"], db_url)
     assert result.returncode == 0, f"alembic downgrade failed:\n{result.stderr}\n{result.stdout}"
-    result = _run_alembic(["upgrade", "0060"], db_url)
+    result = run_alembic(["upgrade", "0060"], db_url)
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}\n{result.stdout}"
 
     indexes = asyncio.run(_connections_indexes(db_url))
