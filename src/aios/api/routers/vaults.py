@@ -269,10 +269,14 @@ async def update_credential(
     """Update a credential's metadata and/or rotate its auth secrets.
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
-    encrypted payload). ``target_url`` and ``auth_type`` are immutable
-    and not accepted in the body. To rotate an OAuth refresh token, send
-    only the new ``refresh_token`` (and optional ``access_token`` /
-    ``expires_at``); other auth fields stay intact.
+    encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
+    atomically archives the old row and creates a replacement with a new id,
+    carrying its encrypted secret unless ``secret_value`` is supplied. The new
+    id changes sandbox placeholders, so affected sandboxes recycle on their next
+    provision. To rotate an OAuth refresh token, send only the new
+    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
+    auth fields stay intact.
     """
     return await service.update_vault_credential(
         pool,
