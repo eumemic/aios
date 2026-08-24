@@ -2386,6 +2386,7 @@ async def _latch_errored_turn(
         ERRORED_LIFECYCLE_STATUS,
         ERRORED_LIFECYCLE_STOP_REASON,
         account_id=account_id,
+        message=stop_message,
     )
 
 
@@ -2711,12 +2712,16 @@ async def _append_lifecycle(
     stop_reason: str,
     *,
     account_id: str,
+    message: str | None = None,
 ) -> None:
     """Append a lifecycle event."""
+    data: dict[str, Any] = {"event": event, "status": status, "stop_reason": stop_reason}
+    if message is not None:
+        data["message"] = message
     await sessions_service.append_event(
         pool,
         session_id,
         "lifecycle",
-        {"event": event, "status": status, "stop_reason": stop_reason},
+        data,
         account_id=account_id,
     )
