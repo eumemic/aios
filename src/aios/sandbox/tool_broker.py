@@ -398,19 +398,45 @@ class ToolBroker:
         return await agents_service.load_for_session(pool, session, account_id=account_id)
 
     async def _load_auth_for(
-        self, session_id: str, server_url: str
-    ) -> tuple[str | None, dict[str, str]]:
-        """Resolve ``(vault_id, headers)`` for an MCP call out to ``server_url``."""
+        self, session_id: str, server: McpServerSpec
+    ) -> tuple[str | None, dict[str, str]] | Response:
+        """Resolve ``(vault_id, headers)`` for an MCP call out to ``server``.
+
+        Takes the whole spec, not just its url, so a ``vault_id`` pin resolves
+        per mount here exactly as it does on the model dispatch path (#2233) —
+        the broker's routes are already ``/mcp/{server}``, so the mount name
+        crosses the sandbox boundary and no protocol change is needed.
+
+        Returns a 502 envelope (rather than raising) when a pinned mount has no
+        usable credential: these calls sit outside the handlers' ``try`` blocks,
+        so raising would surface as a bare 500 with no CLI-parsable ``code``.
+        Mirrors :func:`_resolve_session`'s ``Response``-or-value idiom.
+        """
         from aios.harness import runtime
-        from aios.mcp.client import resolve_auth_for_target_url
+        from aios.mcp.client import PinnedVaultUnavailable, resolve_auth_for_target_url
         from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        return await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, server_url, account_id=account_id
-        )
+        try:
+            return await resolve_auth_for_target_url(
+                pool,
+                crypto_box,
+                session_id,
+                server.url,
+                account_id=account_id,
+                pinned_vault_id=server.vault_id,
+            )
+        except PinnedVaultUnavailable as exc:
+            log.warning(
+                "tool_broker.mcp_pin_unresolved",
+                server_name=server.name,
+                url=server.url,
+                vault_id=exc.vault_id,
+                reason=exc.reason,
+            )
+            return _err(502, f"MCP server {server.name!r}: {exc}", code="mcp_pin_unresolved")
 
     # ── discovery ─────────────────────────────────────────────────────────
 
@@ -595,7 +621,10 @@ class ToolBroker:
             return resolved
         session_id, server, toolset, _, agent = resolved
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
+        auth = await self._load_auth_for(session_id, server)
+        if isinstance(auth, Response):
+            return auth
+        vault_id, headers = auth
         try:
             tool_dicts, _instructions = await discover_mcp_tools(
                 server.url,
@@ -642,7 +671,10 @@ class ToolBroker:
         session_id, server, _toolset, tool_name, agent = resolved
         assert tool_name is not None  # require_tool=True
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
+        auth = await self._load_auth_for(session_id, server)
+        if isinstance(auth, Response):
+            return auth
+        vault_id, headers = auth
         try:
             tool_dicts, _ = await discover_mcp_tools(
                 server.url,
@@ -710,7 +742,10 @@ class ToolBroker:
             )
             return JSONResponse(outbound_suppression_service.mcp_synthesized_result())
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
+        auth = await self._load_auth_for(session_id, server)
+        if isinstance(auth, Response):
+            return auth
+        vault_id, headers = auth
         try:
             tool_dicts, _ = await discover_mcp_tools(
                 server.url,

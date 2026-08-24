@@ -344,6 +344,27 @@ def _merge_headers(
     return merged
 
 
+class PinnedVaultUnavailable(Exception):
+    """A vault-pinned MCP mount could not resolve an identity.
+
+    Raised INSTEAD of the ``(None, {})`` "no auth to send" return, because for a
+    pinned mount those two outcomes must not look alike.  ``(None, {})`` means
+    "connect anonymously", which against a server that accepts unauthenticated
+    sessions would silently proceed with no identity at all — the failure a pin
+    exists to prevent.  Falling back to the rank scan would be worse still: it
+    would let a mount reach an identity its pin excluded.  So both the
+    not-bound and the no-usable-secret cases fail closed here.
+    """
+
+    def __init__(self, target_url: str, vault_id: str, reason: str) -> None:
+        super().__init__(
+            f"pinned vault {vault_id} has no usable credential for {target_url}: {reason}"
+        )
+        self.target_url = target_url
+        self.vault_id = vault_id
+        self.reason = reason
+
+
 async def resolve_auth_for_target_url(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
@@ -351,6 +372,7 @@ async def resolve_auth_for_target_url(
     target_url: str,
     *,
     account_id: str,
+    pinned_vault_id: str | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     """Resolve auth identity + headers for ``target_url`` via the
     session's bound vaults.
@@ -358,10 +380,19 @@ async def resolve_auth_for_target_url(
     Returns ``(vault_id, headers)`` on the success path, or
     ``(None, {})`` whenever there are no auth headers to send (no
     credential bound, or a credential whose secret material is empty
-    / a refresh re-read missed). ``vault_id`` is the row id of the
-    ``vault_credentials`` entry — stable across OAuth token rotation
+    / a refresh re-read missed). ``vault_id`` is the id of the vault
+    holding the credential — stable across OAuth token rotation
     (``refresh_credential`` updates the row in place), so callers feed
     it to the pool as a stable cache key (see #459).
+
+    ``pinned_vault_id`` (an ``McpServerSpec.vault_id``) narrows resolution to
+    that one vault instead of scanning the session's vaults by rank, so an
+    agent can mount one MCP URL twice and have each mount authenticate as its
+    own identity (#2233).  The pinned lookup still joins ``session_vaults``, so
+    a pin can only SELECT among vaults already bound to this session — never
+    reach one that is not.  Unset, resolution is byte-identical to before.
+    A pinned mount that resolves nothing raises
+    :class:`PinnedVaultUnavailable` rather than returning ``(None, {})``.
 
     For ``oauth2_refresh`` credentials whose ``expires_at`` falls within
     the refresh skew window, the access token is transparently refreshed
@@ -371,12 +402,33 @@ async def resolve_auth_for_target_url(
     to the stale token.
     """
     async with pool.acquire() as conn:
-        cred = await queries.resolve_session_credential(
-            conn, session_id, target_url, account_id=account_id
-        )
+        if pinned_vault_id is None:
+            cred = await queries.resolve_session_credential(
+                conn, session_id, target_url, account_id=account_id
+            )
+        else:
+            cred = await queries.resolve_pinned_session_credential(
+                conn, session_id, target_url, vault_id=pinned_vault_id, account_id=account_id
+            )
         if cred is None:
+            if pinned_vault_id is not None:
+                raise PinnedVaultUnavailable(
+                    target_url,
+                    pinned_vault_id,
+                    "the vault holds no active credential for this target, "
+                    "or is not bound to this session",
+                )
             return None, {}
-    return await _auth_from_credential(pool, crypto_box, cred, target_url, account_id=account_id)
+    vault_id, headers = await _auth_from_credential(
+        pool, crypto_box, cred, target_url, account_id=account_id
+    )
+    if pinned_vault_id is not None and not headers:
+        raise PinnedVaultUnavailable(
+            target_url,
+            pinned_vault_id,
+            "the credential yielded no auth header (empty secret, or a refresh re-read missed)",
+        )
+    return vault_id, headers
 
 
 async def resolve_auth_for_target_url_run(

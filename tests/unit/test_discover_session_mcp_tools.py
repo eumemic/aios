@@ -196,6 +196,104 @@ class TestDiscoverSessionMcpTools:
             "Bearer token-for-https://mcp.linear",
         }
 
+    async def test_each_mount_resolves_with_its_own_pin(self) -> None:
+        """#2233: two mounts on ONE url each carry their own ``vault_id``, and
+        the prelude threads each spec's pin into its own resolution — so the
+        two tool namespaces authenticate as different identities.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_home"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, _url: str, **kwargs: Any
+        ) -> tuple[str | None, dict[str, str]]:
+            pin = kwargs["pinned_vault_id"]
+            return pin, {"Authorization": f"Bearer token-for-{pin}"}
+
+        async def _discover(
+            _url: str,
+            vault_id: str | None,
+            headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [
+                {"name": f"mcp__{name}__t", "vault": vault_id, "auth": headers["Authorization"]}
+            ], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+        assert {(t["name"], t["vault"]) for t in tools} == {
+            ("mcp__work__t", "vlt_work"),
+            ("mcp__home__t", "vlt_home"),
+        }
+
+    async def test_unresolvable_pin_drops_only_that_mount(self) -> None:
+        """Fail-closed at the prelude: a mount whose pin resolves nothing
+        contributes no tools, while its healthy same-url sibling is untouched.
+        The model never sees the broken mount's tools, so it cannot call them.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.client import PinnedVaultUnavailable
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_gone"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+        ) -> tuple[str | None, dict[str, str]]:
+            pin = kwargs["pinned_vault_id"]
+            if pin == "vlt_gone":
+                raise PinnedVaultUnavailable(url, pin, "not bound to this session")
+            return pin, {"Authorization": f"Bearer token-for-{pin}"}
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t"}], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+        assert [t["name"] for t in tools] == ["mcp__work__t"]
+
     async def test_instructions_keyed_by_server_name(self) -> None:
         """Each server's ``InitializeResult.instructions`` flows into the
         returned dict under its server_name key.  Servers that supply no

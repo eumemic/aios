@@ -2030,7 +2030,12 @@ async def discover_session_mcp_tools(
 
     async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
         vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, spec.url, account_id=account_id
+            pool,
+            crypto_box,
+            session_id,
+            spec.url,
+            account_id=account_id,
+            pinned_vault_id=spec.vault_id,
         )
         _pool = runtime.mcp_session_pool
         if _pool is not None:
