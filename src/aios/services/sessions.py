@@ -1110,6 +1110,13 @@ def _classify_awaiting(
     return None
 
 
+# One bound for the awaiting read-model's statements (#2254), sibling of
+# ``USAGE_STATEMENT_TIMEOUT_MS`` (#2249): the floor-bounded scan is
+# milliseconds in steady state; seconds here means a floor-less whale
+# session, and the listing should fail fast rather than hold its slot.
+AWAITING_STATEMENT_TIMEOUT_MS = 10_000
+
+
 async def compute_awaiting(
     pool: asyncpg.Pool[Any], sessions: list[Session], *, account_id: str
 ) -> dict[str, list[AwaitingToolCall]]:
@@ -1121,7 +1128,12 @@ async def compute_awaiting(
     """
     if not sessions:
         return {}
-    async with pool.acquire() as conn:
+    # Bounded like the usage CTEs (#2249) and ``/v1/usage/consumers``: a read
+    # model should degrade (raise at the bound), not hang to the pool's 30s
+    # default while holding a listing request open (#2254).  ``SET LOCAL`` is
+    # transaction-scoped, hence the explicit read-only transaction.
+    async with pool.acquire() as conn, conn.transaction(readonly=True):
+        await conn.execute(f"SET LOCAL statement_timeout = '{AWAITING_STATEMENT_TIMEOUT_MS}ms'")
         unresolved_by_sid = await queries.list_unresolved_tool_calls_batch(
             conn, [s.id for s in sessions], account_id=account_id
         )
