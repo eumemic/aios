@@ -1750,10 +1750,13 @@ def stub_missing_reasoning_content(
 EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
 """Out-of-band marker key tagging a per-step-ephemeral tail message.
 
-Set to ``True`` at construction on the render-only tail blocks
-(:func:`~aios.harness.channels.build_channels_tail_block`,
-:func:`~aios.harness.obligations.build_obligations_tail_block`) whose
-content mutates every step (unread counts/previews; obligation ages/sets).
+Set to ``True`` at construction on any per-step-assembled tail message —
+a render-only block appended after ``build_messages`` rather than sourced
+from the event log.  Producers tag their own dicts; nothing enumerates
+them here.  What makes a message ephemeral is that its content OR its
+position varies per step (unread counts mutate; a constant reminder is
+re-appended at the moving tail), so caching a prefix through it can never
+hit.
 
 The cache-breakpoint recognizer in ``completion.py`` reads this marker —
 never the rendered prose — to decide which message must NOT host the

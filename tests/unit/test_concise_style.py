@@ -1,18 +1,6 @@
-"""Concise output style: the two step-time injections and their budget reserve.
+"""Concise output style: the two step-time injections and the nag reserve.
 
-``agent.concise`` steers the model toward short, direct output via
-
-* a cache-stable rules block joined into the prelude's system prompt, and
-* a one-line tail reminder ("nag") appended by ``compose_step_context`` as
-  the final content of the payload — assembly-time only, never persisted.
-
-The nag is appended BEFORE ``merge_adjacent_user_messages`` runs: when the
-payload already ends in a user turn the merge folds the nag in as that
-turn's final content (this codebase deliberately merges adjacent user
-turns — a standalone-but-adjacent user message would be re-merged by
-LiteLLM's provider transform anyway); after an assistant turn it stands as
-its own final user message.  Either way the reminder is the last thing the
-model reads, exactly once.
+Mechanism and rationale live in ``aios.harness.concise``.
 """
 
 from __future__ import annotations
@@ -27,10 +15,9 @@ import pytest
 
 from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
+    CONCISE_NAG_UPPER_BOUND_LOCAL,
     CONCISE_STYLE_BLOCK,
-    augment_with_concise_style,
     build_concise_nag_message,
-    concise_nag_upper_bound_local,
 )
 from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.harness.step_context import (
@@ -42,6 +29,7 @@ from aios.harness.step_context import (
 from aios.harness.tokens import approx_tokens
 from aios.models.agents import AgentBinding, StepSurface
 from aios.models.events import Event
+from tests.unit.conftest import fake_pool_yielding_conn
 
 _ACCOUNT = "acc_concise"
 _SESSION = "sess_concise"
@@ -76,7 +64,7 @@ def _evt(seq: int, *, role: str, content: str = "hi") -> Event:
     )
 
 
-def _prelude(*, system_prompt: str = "sys", concise_reserve: int = 0) -> StepPrelude:
+def _prelude(*, system_prompt: str = "sys") -> StepPrelude:
     return StepPrelude(
         system_prompt=system_prompt,
         tools=[],
@@ -84,7 +72,6 @@ def _prelude(*, system_prompt: str = "sys", concise_reserve: int = 0) -> StepPre
         tail_block_upper_bound_local=0,
         obligations=[],
         obligations_block_upper_bound_local=0,
-        concise_nag_upper_bound_local=concise_reserve,
     )
 
 
@@ -151,17 +138,13 @@ class TestConciseNag:
             assert not (a.get("role") == "user" and b.get("role") == "user")
 
     async def test_nag_stands_alone_after_assistant_turn(self) -> None:
+        """No channels -> no tail block, but the nag still renders, standing as
+        its own final user message after the trailing assistant turn."""
         events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
         messages = await _compose(_agent(concise=True), events)
         assert messages[-1]["role"] == "user"
         assert _text(messages[-1]) == CONCISE_NAG_CONTENT
         assert messages[-2]["role"] == "assistant"
-        assert _nag_count(messages) == 1
-
-    async def test_nag_present_without_channels(self) -> None:
-        """No channels → no tail block, but the nag still renders."""
-        events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
-        messages = await _compose(_agent(concise=True), events, channels=[])
         assert _nag_count(messages) == 1
 
     async def test_nag_lands_after_channels_tail_block(self) -> None:
@@ -197,29 +180,12 @@ class TestConciseNag:
 # ── the system-prompt rules block ────────────────────────────────────────────
 
 
-class TestConciseAugment:
-    def test_augment_joins_block_iff_concise(self) -> None:
-        assert CONCISE_STYLE_BLOCK in augment_with_concise_style("base", True)
-        assert augment_with_concise_style("base", False) == "base"
-
-
 @pytest.mark.asyncio
 class TestConciseSystemPrompt:
     async def _prelude_for(self, agent: StepSurface) -> StepPrelude:
-        class _StubConn:
-            async def __aenter__(self) -> _StubConn:
-                return self
-
-            async def __aexit__(self, *exc: object) -> None:
-                return None
-
-        class _StubPool:
-            def acquire(self) -> _StubConn:
-                return _StubConn()
-
         with mock.patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])):
             return await compute_step_prelude(
-                _StubPool(),
+                fake_pool_yielding_conn(MagicMock()),
                 _SESSION,
                 account_id=_ACCOUNT,
                 session=mock.Mock(id=_SESSION, parent_run_id=None),
@@ -234,23 +200,17 @@ class TestConciseSystemPrompt:
         prelude = await self._prelude_for(_agent(concise=False))
         assert CONCISE_STYLE_BLOCK not in prelude.system_prompt
 
-    async def test_prelude_reserves_nag_budget_iff_concise(self) -> None:
-        prelude = await self._prelude_for(_agent(concise=True))
-        assert prelude.concise_nag_upper_bound_local == concise_nag_upper_bound_local()
-        prelude = await self._prelude_for(_agent(concise=False))
-        assert prelude.concise_nag_upper_bound_local == 0
-
 
 # ── the windowing reserve ────────────────────────────────────────────────────
 
 
 class TestConciseNagReserve:
-    def test_overhead_includes_nag_reserve(self) -> None:
-        base = prelude_overhead_local(_prelude()).reserves
-        reserved = prelude_overhead_local(_prelude(concise_reserve=7)).reserves
-        assert reserved == base + 7
+    def test_upper_bound_covers_real_builder_output(self) -> None:
+        """The hardcoded reserve must cover the message the builder actually
+        emits -- costed on the REAL builder output, not a re-rolled inline dict."""
+        assert approx_tokens([build_concise_nag_message()]) <= CONCISE_NAG_UPPER_BOUND_LOCAL
 
-    def test_upper_bound_covers_rendered_nag(self) -> None:
-        bound = concise_nag_upper_bound_local()
-        assert bound > 0
-        assert bound >= approx_tokens([{"role": "user", "content": CONCISE_NAG_CONTENT}])
+    def test_reserve_summed_unconditionally(self) -> None:
+        """Reserved for every agent (the omission-marker idiom) -- the prelude
+        carries no per-agent reserve field to forget."""
+        assert prelude_overhead_local(_prelude()).reserves >= CONCISE_NAG_UPPER_BOUND_LOCAL

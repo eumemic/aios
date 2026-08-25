@@ -52,13 +52,6 @@ async def _create(pool: asyncpg.Pool[Any], name: str, **kwargs: Any) -> Any:
     )
 
 
-async def test_concise_defaults_false(pool: asyncpg.Pool[Any]) -> None:
-    agent = await _create(pool, "concise-default")
-    assert agent.concise is False
-    fetched = await agents_service.get_agent(pool, agent.id, account_id="acc_concise")
-    assert fetched.concise is False
-
-
 async def test_concise_round_trip_and_preserve_when_omitted(pool: asyncpg.Pool[Any]) -> None:
     agent = await _create(pool, "concise-rt", concise=True)
     assert agent.concise is True
@@ -101,6 +94,7 @@ async def test_concise_only_update_is_versioned_and_noop_detected(
     pool: asyncpg.Pool[Any],
 ) -> None:
     agent = await _create(pool, "concise-noop")
+    assert agent.concise is False  # the field defaults off
 
     # Flipping ONLY concise creates a new version (it is a config field).
     v2 = await agents_service.update_agent(

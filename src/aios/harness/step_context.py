@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness._text import join_blocks
+from aios.harness.concise import CONCISE_NAG_UPPER_BOUND_LOCAL
 from aios.harness.context import (
     OMISSION_MARKER_UPPER_BOUND_LOCAL,
     build_messages,
@@ -143,9 +144,6 @@ class StepPrelude:
     block, bounded from the actual fetched obligations (real count + each real
     summary, capped) so reserving it keeps the payload under ``window_max``.
 
-    ``concise_nag_upper_bound_local`` is the constant cost of the concise
-    tail reminder the composer appends when ``agent.concise`` — 0 for a
-    non-concise agent (the composer appends nothing).
     """
 
     system_prompt: str
@@ -154,7 +152,6 @@ class StepPrelude:
     tail_block_upper_bound_local: int
     obligations: list[Obligation]
     obligations_block_upper_bound_local: int
-    concise_nag_upper_bound_local: int
 
 
 class PreludeOverheadSplit(NamedTuple):
@@ -189,10 +186,10 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     System prompt + tool schemas (each weighted separately by the
     windower), plus the reserved upper bounds for the post-windowing
     additions: the channels tail block, the obligations tail block
-    (#1413), the concise tail reminder (0 for a non-concise agent), and
-    the omission marker (#738). All reserves are reserved
-    unconditionally — any may not render, but the budget must hold when
-    they do — and are accounted as ``text``-class padding.
+    (#1413), the concise tail reminder, and the omission marker (#738).
+    All reserves are reserved unconditionally — any may not render, but
+    the budget must hold when they do — and are accounted as
+    ``text``-class padding.
 
     Returns a :class:`PreludeOverheadSplit`; ``.total`` reproduces the
     old single scalar exactly (system+tools costed together previously,
@@ -203,7 +200,7 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     reserves_local = (
         prelude.tail_block_upper_bound_local
         + prelude.obligations_block_upper_bound_local
-        + prelude.concise_nag_upper_bound_local
+        + CONCISE_NAG_UPPER_BOUND_LOCAL
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
     return PreludeOverheadSplit(
@@ -287,10 +284,7 @@ async def compute_step_prelude(
         augment_with_focal_paradigm,
         max_tail_block_local,
     )
-    from aios.harness.concise import (
-        augment_with_concise_style,
-        concise_nag_upper_bound_local,
-    )
+    from aios.harness.concise import augment_with_concise_style
     from aios.harness.loop import (
         _switch_channel_tool_spec,
         discover_session_mcp_tools,
@@ -397,7 +391,6 @@ async def compute_step_prelude(
         tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
         obligations_block_upper_bound_local=max_obligations_block_local(obligations),
-        concise_nag_upper_bound_local=concise_nag_upper_bound_local() if agent.concise else 0,
     )
 
 
@@ -714,19 +707,12 @@ async def compose_step_context(
     if obligations_block is not None:
         ctx.messages.append(obligations_block)
 
-    # Concise tail reminder ("nag"): injected at ASSEMBLY time each step so
-    # there is exactly ONE copy, always at maximum recency, and it never
-    # pollutes the persisted transcript. A plain user-content message is the
-    # only mid-transcript steering channel that survives LiteLLM's provider
-    # transforms — Anthropic and Gemini hoist any role:"system" message into
-    # the top-level system param, destroying position. Appended LAST, after
-    # the channels + obligations tails, and BEFORE the merge below: when the
-    # payload already ends in a user turn the merge folds the nag in as its
-    # final content (this codebase deliberately merges adjacent user turns —
-    # a standalone-but-adjacent user message would be re-merged by LiteLLM's
-    # provider transform anyway); after an assistant/tool turn it stands as
-    # its own final user message. Either way the reminder is the last thing
-    # the model reads.
+    # Concise tail reminder ("nag"): appended LAST — after the channels +
+    # obligations tails — and BEFORE the merge below, so a trailing user turn
+    # folds it in as its final content while an assistant/tool turn leaves it
+    # standing as its own final user message.  Why a per-step user-content
+    # injection at all (exactly-once, max recency, never persisted, survives
+    # LiteLLM's provider transforms): see ``aios.harness.concise``.
     if agent.concise:
         ctx.messages.append(build_concise_nag_message())
 

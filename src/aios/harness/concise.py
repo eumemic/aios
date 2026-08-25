@@ -21,7 +21,7 @@ param, destroying position.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from aios.harness._text import join_blocks
 from aios.harness.context import EPHEMERAL_TAIL_KEY
@@ -57,6 +57,17 @@ CONCISE_NAG_CONTENT = (
 always re-appended at the tail), which is why the message carries
 :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`."""
 
+# Local-token reserve for the nag at windowing time, mirroring
+# ``OMISSION_MARKER_UPPER_BOUND_LOCAL`` (context.py): the nag is appended
+# after windowing runs, so without a reserve it could push the send-time
+# payload past ``window_max``.  Reserved UNCONDITIONALLY — like the omission
+# marker and the tail block, any reserve may not render; the named tradeoff
+# is the same one the omission marker already accepted: a non-concise agent
+# over-reserves ~50 local tokens against a >=50k window floor.  The measured
+# cost of the built message is ~44 local tokens; ``TestConciseNagReserve``
+# pins the real builder output under this bound.
+CONCISE_NAG_UPPER_BOUND_LOCAL: Final[int] = 64
+
 
 def augment_with_concise_style(base_system: str, concise: bool) -> str:
     """Join :data:`CONCISE_STYLE_BLOCK` onto the system prompt iff ``concise``."""
@@ -75,18 +86,3 @@ def build_concise_nag_message() -> dict[str, Any]:
     would never be re-usable.
     """
     return {"role": "user", "content": CONCISE_NAG_CONTENT, EPHEMERAL_TAIL_KEY: True}
-
-
-def concise_nag_upper_bound_local() -> int:
-    """Local-token cost of the nag, reserved at windowing time.
-
-    Mirrors :func:`~aios.harness.channels.max_tail_block_local`: the nag is
-    appended after windowing, so ``read_windowed_events`` must subtract its
-    cost from the budget up front or the send-time payload can overshoot
-    ``window_max``. Costing the nag as a standalone message is a correct
-    upper bound for the merged case too — per-message framing overhead
-    exceeds the ``"\\n\\n"`` join ``merge_adjacent_user_messages`` uses.
-    """
-    from aios.harness.tokens import approx_tokens
-
-    return approx_tokens([{"role": "user", "content": CONCISE_NAG_CONTENT}])
