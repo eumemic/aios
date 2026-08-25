@@ -40,11 +40,30 @@ if TYPE_CHECKING:
 # complementary per-session open-goal admission cap.
 MAX_RENDERED_OBLIGATIONS = 10
 
-# Requests up to this size remain verbatim in the always-on reminder. Beyond it,
-# render a loud refusal instruction rather than a plausible-looking prefix. This
-# bounds the reserved tail while making instruction loss impossible to miss.
+# Requests up to this size remain verbatim in the always-on reminder. Beyond it
+# the reminder cannot re-render the task in full without blowing the reserved tail
+# budget (see ``max_obligations_block_local``), so it renders one of two things —
+# and WHICH one turns on whether the original ask is still in the context window:
+#
+# * still in the window (#2221) -> a bounded preview + a pointer to the intact
+#   original. The task is NOT lost; it is sitting earlier in this same prompt, so
+#   an instruction to refuse it is simply false. Emitting one made every task over
+#   this cap structurally unbuildable: the child read the whole task, then read a
+#   trailing order to refuse it, and obeyed.
+# * genuinely gone (evicted, or no summary on the frame) -> the loud refuse marker
+#   (#2080). Here the task really is unrecoverable from context, and a
+#   plausible-looking prefix is what let a sub-agent improvise cross-repo writes.
+#
+# The cap itself is load-bearing and unchanged; only the behaviour AT the cap
+# depends on presence.
 _TASK_MAX = 8192
 _TASK_TRUNCATED = "[TASK TRUNCATED — return an error; do not act on or infer the missing task]"
+
+# Chars of an oversized-but-present task echoed as a bounded preview beside the
+# pointer. Strictly smaller than :data:`_TASK_MAX`, so the abridged render is
+# never fatter than the at-cap VERBATIM render the reserved budget already
+# permits — the fence stays where #2080/#2071 put it.
+_TASK_PREVIEW = 2048
 
 # Max chars of a rendered ``output_schema`` contract (#1522). Kept narrower
 # than the task budget because a schema is a structural contract and usually
@@ -91,12 +110,39 @@ def _format_age(opened_at: datetime, now: datetime) -> str:
     return f"{hours // 24}d"
 
 
-def _request_content(summary: str | None) -> str:
-    """Render a verbatim task, or a loud marker when that is impossible."""
+def _request_content(summary: str | None, *, original_present: bool = False) -> str:
+    """Render a verbatim task, an abridged one, or a loud marker.
+
+    ``original_present`` is the caller's answer to "is the ORIGINAL request user
+    message still in the rendered context window?" — knowable only from the
+    post-windowing slate, so it is threaded in rather than guessed here.
+
+    * ``summary is None`` -> the unavailable marker. No content exists on the
+      frame (pre-#1413), so there is nothing to abridge (#2080 fail-loud).
+    * within :data:`_TASK_MAX` -> verbatim, byte-for-byte.
+    * oversized AND the original is still in the window -> a bounded preview plus
+      a pointer to the intact original (#2221). The task is not lost, so a refuse
+      instruction here is FALSE and — being the last user-role content the model
+      reads — gets obeyed over the real task sitting earlier in the same prompt.
+    * oversized AND the original is gone -> the refuse marker (#2080). Now the
+      task really is unrecoverable, and a plausible prefix is the exact failure
+      that let a sub-agent improvise cross-repo writes.
+
+    Defaults to ``False`` so any caller that does NOT know the window state keeps
+    today's conservative fail-loud behaviour; only a caller holding the slate can
+    opt into the softer render.
+    """
     if summary is None:
         return "[TASK CONTENT UNAVAILABLE — return an error; do not infer the task]"
     if len(summary) > _TASK_MAX:
-        return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {_TASK_MAX})"
+        if not original_present:
+            return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {_TASK_MAX})"
+        return (
+            f"[TASK ABRIDGED IN THIS REMINDER — the full task is intact in the original "
+            f"request message earlier in this context; {len(summary)} characters, reminder "
+            f"budget {_TASK_MAX}. Do not refuse; read the original message above.]\n"
+            f"{summary[:_TASK_PREVIEW]}"
+        )
     return summary
 
 
@@ -121,16 +167,27 @@ def _render_schema(output_schema: dict[str, Any] | None) -> str | None:
     return text
 
 
-def _obligation_line(obligation: Obligation, *, session_id: str, now: datetime) -> str:
+def _obligation_line(
+    obligation: Obligation,
+    *,
+    session_id: str,
+    now: datetime,
+    present_request_ids: frozenset[str] = frozenset(),
+) -> str:
     """One render line for an obligation, oldest-first ordering applied by caller.
 
     The literal ``request_id`` comes first (copy-pasteable; the id the model
-    echoes to ``return``/``error``), followed by origin, age, and the verbatim
-    task. Tasks beyond the render budget are replaced wholesale by a loud marker;
-    no plausible-looking prefix is ever shown.
+    echoes to ``return``/``error``), followed by origin, age, and the task.
+    An oversized task is abridged (preview + pointer) when its original ask is
+    still in the window, and replaced by a loud marker when it is not — see
+    :func:`_request_content`. A plausible prefix is never shown WITHOUT either the
+    pointer or the marker.
     """
     origin = _origin_label(obligation, session_id=session_id)
-    request_content = _request_content(obligation.summary)
+    request_content = _request_content(
+        obligation.summary,
+        original_present=obligation.request_id in present_request_ids,
+    )
     age = _format_age(obligation.opened_at, now)
     return f"• {obligation.request_id} [{origin}] (open {age}) verbatim task: {request_content}"
 
@@ -140,6 +197,7 @@ def build_obligations_tail_block(
     *,
     session_id: str,
     now: datetime | None = None,
+    present_request_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
     """Ephemeral per-step listing of every open awaited obligation (#1413).
 
@@ -151,10 +209,18 @@ def build_obligations_tail_block(
     Header line, then one line per obligation **oldest-first** (the caller already
     fetches them ``ORDER BY req.seq ASC``): the literal ``request_id``, an
     ``[origin]`` label (``api``|``session``|``run``, plus ``self`` for a #1414
-    self-goal), ``(open <age>)``, and the verbatim task (or a loud truncation
-    marker when it exceeds the render budget). The block is
+    self-goal), ``(open <age>)``, and the verbatim task (or, past the render
+    budget, an abridged preview + pointer when the original ask is still in the
+    window, else a loud marker). The block is
     capped at :data:`MAX_RENDERED_OBLIGATIONS` lines + a ``+K more`` marker so the
     reserved tail budget stays bounded regardless of obligation count.
+
+    ``present_request_ids`` is the set of ``request_id``s whose ORIGINAL request
+    user message survived windowing into this step's slate (#2221). The composer
+    computes it from the post-windowing events; it is the ONLY input that can
+    distinguish "oversized but recoverable from context" (abridge + point) from
+    "oversized and genuinely gone" (fail loud). Empty by default, which keeps the
+    conservative #2080 marker for any caller that cannot know.
 
     Returns ``None`` on an empty set (zero tail, zero tokens).
     """
@@ -165,7 +231,11 @@ def build_obligations_tail_block(
     lines = [_HEADER]
     rendered = obligations[:MAX_RENDERED_OBLIGATIONS]
     for ob in rendered:
-        lines.append(_obligation_line(ob, session_id=session_id, now=now))
+        lines.append(
+            _obligation_line(
+                ob, session_id=session_id, now=now, present_request_ids=present_request_ids
+            )
+        )
     remaining = len(obligations) - len(rendered)
     if remaining > 0:
         lines.append(f"…(+{remaining} more)")
@@ -254,10 +324,21 @@ def max_obligations_block_local(obligations: list[Obligation]) -> int:
     set is **already fetched** by ``compute_step_prelude``, so this bounds from the
     REAL obligations — the real count (capped at :data:`MAX_RENDERED_OBLIGATIONS`
     + the ``+K more`` marker line) and each rendered task (verbatim through
-    :data:`_TASK_MAX`, then replaced by a fixed loud marker). Strictly tighter than
-    a synthetic max; the produced tail at
+    :data:`_TASK_MAX`, then either abridged or marker-replaced). Strictly tighter
+    than a synthetic max; the produced tail at
     send time is guaranteed ≤ this bound, so reserving it never overshoots
     ``window_max``.
+
+    **Presence is unknowable here, so the bound assumes the FATTER branch.** This
+    runs at windowing time — BEFORE the slate exists — so it cannot know which
+    oversized tasks will render abridged (#2221: preview + pointer, ~
+    :data:`_TASK_PREVIEW` chars) versus marker-replaced (#2080: a short fixed
+    string). The abridged branch is strictly fatter, so the bound is computed with
+    every request treated as present. Costing the marker branch instead would
+    UNDER-RESERVE — measured 516 reserved against a 3240-token real render for 10
+    oversized obligations — and an under-reserved tail is exactly the
+    ``read_windowed_events`` budget overflow (→ step crash) the cap exists to
+    prevent.
 
     Returns 0 on an empty set (the block is ``None`` and nothing is appended).
     """
@@ -269,9 +350,13 @@ def max_obligations_block_local(obligations: list[Obligation]) -> int:
     # Render with a fixed ``now`` so the age clause has a stable (worst-case-ish)
     # width — ``4d`` etc. are all <= a handful of chars; the count/summary
     # dominate the bound. session_id="" keeps the origin label bare ("self" never
-    # widens the bound vs. the literal caller_kind).
+    # widens the bound vs. the literal caller_kind). Every request is treated as
+    # PRESENT so the bound covers the fatter abridged render (see docstring).
     block = build_obligations_tail_block(
-        obligations, session_id="", now=datetime(1970, 1, 1, tzinfo=UTC)
+        obligations,
+        session_id="",
+        now=datetime(1970, 1, 1, tzinfo=UTC),
+        present_request_ids=frozenset(ob.request_id for ob in obligations),
     )
     if block is None:
         return 0

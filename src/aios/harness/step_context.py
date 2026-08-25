@@ -546,6 +546,41 @@ def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _present_request_ids(events: list[Event]) -> frozenset[str]:
+    """``request_id``s whose ORIGINAL request user message survived windowing.
+
+    The obligations tail (#1413) is rebuilt each step from a full-log query, so it
+    lists obligations whose original ask may or may not still be in the window.
+    That distinction decides how an OVERSIZED task renders (#2221):
+
+    * present -> the task is intact earlier in this same prompt, so the reminder
+      abridges it (bounded preview + a pointer to the original). Telling the model
+      to refuse here is false, and — being the last user-role content it reads —
+      gets obeyed over the real task sitting above.
+    * absent -> the task is genuinely unrecoverable from context, so the reminder
+      keeps #2080's loud refuse marker rather than a plausible-looking prefix.
+
+    Reads the same ``metadata.request.request_id`` stamp that
+    :func:`~aios.harness.context.render_user_event` surfaces as the reply marker,
+    off the POST-windowing slate. Defensive about shape throughout: a malformed
+    ``metadata`` blob yields no id rather than raising inside context assembly.
+    """
+    present: set[str] = set()
+    for event in events:
+        if event.kind != "message":
+            continue
+        metadata = event.data.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        request = metadata.get("request")
+        if not isinstance(request, dict):
+            continue
+        request_id = request.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            present.add(request_id)
+    return frozenset(present)
+
+
 def _stub_reasoning_content_for_thinking_target(
     messages: list[dict[str, Any]], model: str
 ) -> list[dict[str, Any]]:
@@ -703,7 +738,18 @@ async def compose_step_context(
     # obligation IS the stimulus to act on, so it renders even after a tool
     # result (where ``build_obligations_tail_block`` returning non-None already
     # encodes "non-empty").
-    obligations_block = build_obligations_tail_block(prelude.obligations, session_id=session.id)
+    #
+    # ``present_request_ids`` (#2221) is computed from the POST-windowing slate:
+    # the request_ids whose ORIGINAL ask survived into this step's context. It is
+    # the only signal that distinguishes an oversized-but-recoverable task (render
+    # an abridged preview + a pointer to the intact original) from one genuinely
+    # gone (keep #2080's loud refuse marker). Computed here because this is the
+    # only layer that holds both the obligations and the windowed events.
+    obligations_block = build_obligations_tail_block(
+        prelude.obligations,
+        session_id=session.id,
+        present_request_ids=_present_request_ids(events),
+    )
     if obligations_block is not None:
         ctx.messages.append(obligations_block)
 
