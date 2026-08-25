@@ -12,6 +12,7 @@ Revises: 0169
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0171"
@@ -28,5 +29,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # A non-default value carries behavior that the prior schema cannot
+    # represent.  Check both tables before either DROP so refusal leaves the
+    # schema wholly intact, including when only the second target is unsafe.
+    unsafe: list[str] = []
+    bind = op.get_bind()
+    for table in ("agents", "agent_versions"):
+        count = bind.execute(
+            sa.text(f"SELECT count(*) FROM {table} WHERE output_style <> 'default'")
+        ).scalar_one()
+        if count:
+            unsafe.append(f"{table}.output_style ({count} non-default rows)")
+    if unsafe:
+        raise RuntimeError(
+            "cannot downgrade 0171: output_style is not representable in the prior schema: "
+            + ", ".join(unsafe)
+        )
+
     op.execute("ALTER TABLE agents DROP COLUMN IF EXISTS output_style;")
     op.execute("ALTER TABLE agent_versions DROP COLUMN IF EXISTS output_style;")
