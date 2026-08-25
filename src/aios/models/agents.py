@@ -13,7 +13,16 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationInfo,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from aios.actors import Actor
 from aios.logging import get_logger
@@ -212,6 +221,18 @@ class McpServerSpec(BaseModel):
     (validated below) so they can't fail only at connection time; headers
     the MCP transport authors itself (Accept, Content-Type, Mcp-Session-Id,
     Mcp-Protocol-Version) are rejected — setting them here is a silent no-op.
+
+    ``vault_id`` optionally PINS this mount's credential to exactly one vault.
+    Unset (the default) resolves as it always has: the first credential for
+    ``url`` across the session's bound vaults in ``rank`` order.  That scan
+    gives a session exactly one identity per URL, so an agent that mounts one
+    MCP server twice (two Gmail accounts, say) would silently share a single
+    token.  A pin makes each mount resolve its own identity, and the pinned
+    lookup joins ``session_vaults`` — so a pin can only ever SELECT among the
+    vaults already bound to the caller, never reach one that is not.  A pinned
+    mount whose vault yields no usable credential fails closed (the model sees
+    a tool error; discovery drops the server) rather than falling back to the
+    rank scan or connecting unauthenticated.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -236,6 +257,43 @@ class McpServerSpec(BaseModel):
             return v
 
     headers: dict[str, str] | None = Field(default=None)
+    vault_id: str | None = Field(default=None, min_length=1)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_pin(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Serialize an unpinned mount EXACTLY as it serialized before pins existed.
+
+        Every persistence path writes specs with a plain ``model_dump()``
+        (``db/queries/agents.py``, ``db/queries/workflows.py``), so without this
+        an unpinned mount would still persist ``"vault_id": null`` — and this
+        model is ``extra="forbid"``, so a binary predating the field refuses to
+        hydrate that row. That would make ANY agent-surface write after deploy
+        un-rollback-able, pins or no pins, rather than only the writes that
+        actually use one. Omitting the key when it is unset keeps the persisted
+        bytes identical to today's for every surface that does not pin, which is
+        what confines the roll-forward requirement to the feature's real users.
+
+        Dropping the key is safe in the other direction too: the field defaults
+        to ``None``, so an absent key hydrates back to an unpinned mount.
+        """
+        data: dict[str, Any] = handler(self)
+        if self.vault_id is None:
+            data.pop("vault_id", None)
+        return data
+
+    def matches_resolved_identity(self, url: str, vault_id: str | None) -> bool:
+        """True when a credential identity resolved at runtime belongs to THIS mount.
+
+        A pinned mount owns only its own vault's identity.  An unpinned mount's
+        identity is not knowable statically (it depends on the session's rank
+        order at resolution time), so it matches any vault at its ``url`` — the
+        best available answer, and the same coarseness that held before pinning.
+
+        Used to attribute per-identity pool state (an open circuit breaker) back
+        to the mount it actually belongs to, so one pinned mount's failure does
+        not report its healthy same-URL sibling as degraded.
+        """
+        return self.url == url and (self.vault_id is None or self.vault_id == vault_id)
 
     @property
     def url_blocked_by_policy(self) -> bool:
@@ -501,7 +559,8 @@ def validate_http_servers(servers: list[HttpServerSpec]) -> None:
 
 
 def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
-    """Cross-item invariant for ingress ``mcp_servers`` lists: unique ``name``.
+    """Cross-item invariants for ingress ``mcp_servers`` lists: unique ``name``,
+    and a distinct credential identity per ``url``.
 
     ``name`` is the sole join key used everywhere a server is looked up (the
     ``mcp_toolset.mcp_server_name`` cross-reference, the ``mcp__<name>__<tool>``
@@ -515,12 +574,38 @@ def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
     happens to land last in the dict comprehension, which the un-deduped
     input was never guaranteed to reproduce). Reject at the ingress boundary
     rather than let it silently persist.
+
+    ``url`` is the credential-resolution key — the same reason
+    :func:`validate_http_servers` has always rejected a duplicate ``base_url``.
+    Two mounts on one ``url`` are legitimate ONLY when each pins a distinct
+    ``vault_id``; that is what makes them two identities rather than two names
+    for one. Every other same-``url`` shape is rejected:
+
+    * both unpinned — they resolve the same rank-first credential, share one
+      pooled transport and one discovery-cache entry, and log a
+      ``vault.credential_collision`` at every resolution;
+    * same ``vault_id`` twice — identical identity, same collapse;
+    * mixed pinned and unpinned — the unpinned entry's rank scan may land on
+      the pinned entry's vault, so the collapse is merely nondeterministic.
+
+    Ingress-only: already-persisted double mounts keep hydrating (that path runs
+    ``model_validate_persisted`` per item, never this cross-item check) and are
+    forced onto pins the next time the surface is authored.
     """
     seen: set[str] = set()
+    pins_by_url: dict[str, list[str | None]] = {}
     for server in servers:
         if server.name in seen:
             raise ValueError(f"duplicate mcp server name {server.name!r}")
         seen.add(server.name)
+        pins_by_url.setdefault(server.url, []).append(server.vault_id)
+    for url, pins in pins_by_url.items():
+        if len(pins) > 1 and (None in pins or len(set(pins)) != len(pins)):
+            raise ValueError(
+                f"duplicate mcp server url {url!r}: every entry sharing a url must pin a "
+                f"distinct vault_id, or all but one must be removed — without that they "
+                f"resolve the same credential and only one is reachable"
+            )
 
 
 def validate_tools(tools: list[ToolSpec]) -> None:

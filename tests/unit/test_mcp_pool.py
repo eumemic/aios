@@ -861,12 +861,12 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "v", EMPTY_KEY, {})
                 assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed pre-K"
-                assert pool.degraded_servers() == []
+                assert sorted({u for u, _ in pool.degraded_identities()}) == []
             # The K-th failure opens the breaker.
             with pytest.raises(MCPUnavailable):
                 await pool.acquire(URL, "v", EMPTY_KEY, {})
             assert pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must be open after K failures"
-            assert pool.degraded_servers() == [URL]
+            assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
 
     async def test_breaker_emits_exactly_one_down_event_on_edge(self) -> None:
         """AC #5: exactly one DOWN-transition edge is queued for the event,
@@ -882,9 +882,105 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "v", EMPTY_KEY, {})
             drained = pool.drain_degraded_events()
-            assert drained == [URL], "exactly one DOWN edge despite repeated failures"
+            assert drained == [(URL, "v")], "exactly one DOWN edge despite repeated failures"
             # A second drain is empty (deduped).
             assert pool.drain_degraded_events() == []
+
+    def test_selective_drain_preserves_an_unrelated_sessions_edge(self) -> None:
+        """A worker-global queue consumer may claim only its mounted identity."""
+        pool = McpSessionPool()
+        pool._pending_degraded_events.extend(
+            [(URL, "vlt_owner", EMPTY_KEY), ("https://other/mcp", None, EMPTY_KEY)]
+        )
+
+        assert pool.drain_degraded_events_matching(
+            lambda url, vault_id: (url, vault_id) == ("https://other/mcp", None)
+        ) == [("https://other/mcp", None)]
+        assert pool.drain_degraded_events_matching(
+            lambda url, vault_id: (url, vault_id) == (URL, "vlt_owner")
+        ) == [(URL, "vlt_owner")]
+
+    def test_discovery_path_emits_exactly_one_down_edge(self) -> None:
+        """#2233: the discovery leg's DOWN edge must actually fire.
+
+        ``discover_mcp_tools``' retry leg calls ``note_discovery_failure`` and
+        then ``mark_unhealthy``. When the degraded set had a second writer, the
+        ``mark_unhealthy`` on failure #1 seeded it before the counter ever
+        reached K, so the edge test in the counter path was False forever and
+        ``mcp_server_unavailable`` never fired for a discovery failure at all.
+        Drives the two calls in the client's real order.
+        """
+        from aios.mcp.pool import _BREAKER_FAILURE_THRESHOLD
+
+        pool = McpSessionPool()
+        for _ in range(_BREAKER_FAILURE_THRESHOLD + 2):
+            pool.note_discovery_failure(URL, "v", EMPTY_KEY)
+            pool.mark_unhealthy(URL, "v", EMPTY_KEY, backoff_s=60.0)
+        assert pool.drain_degraded_events() == [(URL, "v")]
+        assert pool.drain_degraded_events() == []
+
+    def test_one_identity_healing_does_not_clear_its_same_url_sibling(self) -> None:
+        """#2233: two mounts of one url pinned to different vaults are separate
+        circuits in BOTH directions.
+
+        The sibling's window is deliberately left UNEXPIRED — with an expired
+        one the assertion passes even under a url-gated discard, so the test
+        would not discriminate.
+        """
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_work", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_home", EMPTY_KEY, backoff_s=60.0)
+        assert pool.degraded_identities() == {(URL, "vlt_work"), (URL, "vlt_home")}
+
+        pool.mark_healthy(URL, "vlt_work", EMPTY_KEY)
+        assert pool.is_unhealthy(URL, "vlt_home", EMPTY_KEY), "sibling window must still be open"
+        # The healed mount is gone; only the still-open sibling remains.
+        assert pool.degraded_identities() == {(URL, "vlt_home")}
+        # The coarse url view is derived, so the url stays listed while any key
+        # on it is open.
+        assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
+
+        pool.mark_healthy(URL, "vlt_home", EMPTY_KEY)
+        assert pool.degraded_identities() == set()
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
+
+    def test_one_identity_drains_once_across_differing_static_headers(self) -> None:
+        """``headers_key`` is part of the breaker key but not of the identity, so
+        two keys differing only in static headers are ONE degraded identity and
+        must produce ONE event — otherwise the prelude appends duplicate
+        ``mcp_server_unavailable`` rows for a single outage."""
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_1", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_1", K1, backoff_s=60.0)
+        assert pool.drain_degraded_events() == [(URL, "vlt_1")]
+
+    def test_a_retired_identity_is_reclaimed_by_a_successful_probe(self) -> None:
+        """A mount resolves ONE identity at a time, so when its identity changes
+        (a vault gets bound, a credential is archived) the old key is retired —
+        nothing will ever call ``mark_healthy`` with it again, and a lapsed
+        cooldown is deliberately not a heal. Without reclamation it would sit in
+        the degraded set for the life of the worker and, because an unpinned
+        mount matches any vault at its url, report a healthy mount as degraded
+        in the system prompt forever.
+        """
+        pool = McpSessionPool()
+        # The mount resolved no credential and failed; then a vault was bound, so
+        # it now resolves a different identity at the same url and succeeds.
+        pool.mark_unhealthy(URL, None, EMPTY_KEY, backoff_s=60.0)
+        assert pool.degraded_identities() == {(URL, None)}
+        pool._unhealthy_until[(URL, None, EMPTY_KEY)] = time.monotonic() - 1.0  # cooldown lapsed
+        pool.mark_healthy(URL, "vlt_1", EMPTY_KEY)
+        assert pool.degraded_identities() == set()
+
+    def test_reclamation_spares_a_sibling_whose_window_is_still_open(self) -> None:
+        """The reclamation above must not become the url-wide clear it replaced:
+        a same-url identity that is genuinely still in backoff stays degraded."""
+        pool = McpSessionPool()
+        pool.mark_unhealthy(URL, "vlt_stale", EMPTY_KEY, backoff_s=60.0)
+        pool.mark_unhealthy(URL, "vlt_live", EMPTY_KEY, backoff_s=60.0)
+        pool._unhealthy_until[(URL, "vlt_stale", EMPTY_KEY)] = time.monotonic() - 1.0
+        pool.mark_healthy(URL, "vlt_other", EMPTY_KEY)
+        assert pool.degraded_identities() == {(URL, "vlt_live")}
 
     async def test_breaker_reprobes_after_cooldown_and_recloses_on_success(self) -> None:
         """AC #4: after the cooldown the key re-probes; a successful acquire
@@ -914,7 +1010,7 @@ class TestPoolBulkhead:
             entry = await pool.acquire(URL, "v", EMPTY_KEY, {})
             pool.mark_healthy(URL, "v", EMPTY_KEY)
         assert entry.session is good
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
         assert not pool.is_unhealthy(URL, "v", EMPTY_KEY)
 
     async def test_successful_acquire_between_failures_resets_counter(self) -> None:
@@ -965,7 +1061,7 @@ class TestPoolBulkhead:
         await _fail_once()
         assert pool._failure_count.get(key) == 2
         assert not pool.is_unhealthy(URL, "v", EMPTY_KEY), "breaker must stay closed after reset"
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
 
     async def test_evict_by_vault_clears_breaker_state(self) -> None:
         """AC #6 / composes with #1030: ``evict_by_vault`` clears breaker state
@@ -981,9 +1077,9 @@ class TestPoolBulkhead:
                 with pytest.raises(MCPUnavailable):
                     await pool.acquire(URL, "vault_x", EMPTY_KEY, {})
             assert pool.is_unhealthy(URL, "vault_x", EMPTY_KEY)
-            assert pool.degraded_servers() == [URL]
+            assert sorted({u for u, _ in pool.degraded_identities()}) == [URL]
 
         await pool.evict_by_vault("vault_x")
         assert not pool.is_unhealthy(URL, "vault_x", EMPTY_KEY), "breaker cleared on eviction"
-        assert pool.degraded_servers() == []
+        assert sorted({u for u, _ in pool.degraded_identities()}) == []
         assert pool._failure_count == {}

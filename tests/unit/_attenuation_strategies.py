@@ -48,6 +48,7 @@ BUILTIN_TYPES = ["bash", "read", "write"]  # BT below gives each a distinct tran
 CUSTOM_NAMES = ["cust_a", "cust_b"]
 MCP_SERVER_NAMES = ["srv_a", "srv_b"]
 MCP_URLS = ["https://mcp-a", "https://mcp-b"]
+MCP_VAULT_IDS = ["vlt_a", "vlt_b"]  # per-mount credential pins (None = unpinned)
 MCP_TOOL_NAMES = ["t1", "t2"]  # discovered-tool names for configs[]
 HTTP_SERVER_NAMES = ["api_a", "api_b"]
 HTTP_BASE_URLS = ["https://http-a", "https://http-b"]
@@ -176,16 +177,39 @@ def _mcp_server() -> st.SearchStrategy[McpServerSpec]:
         url=st.sampled_from(MCP_URLS),
         include_instructions=st.booleans(),
         headers=_mcp_headers(),
+        vault_id=st.none() | st.sampled_from(MCP_VAULT_IDS),
     )
+
+
+def _repair_mcp_servers(drawn: list[McpServerSpec]) -> list[McpServerSpec]:
+    """Make a drawn list satisfy :func:`validate_mcp_servers`.
+
+    ``name`` and ``url`` are drawn independently, so a draw can violate either
+    rule. Names dedup (the historical rule). Same-url groups are REPAIRED, not
+    collapsed: each entry in a group is assigned a distinct ``vault_id``, which
+    is exactly the shape #2233 legalizes. Collapsing to one mount per url would
+    be simpler but would make two-mounts-on-one-url unreachable in every
+    property test — pruning the generator of the case the pin exists for.
+    """
+    by_name = list({s.name: s for s in drawn}.values())
+    out: list[McpServerSpec] = []
+    seen_per_url: dict[str, int] = {}
+    for spec in by_name:
+        n = seen_per_url.get(spec.url, 0)
+        seen_per_url[spec.url] = n + 1
+        # First mount of a url keeps whatever pin was drawn (including None);
+        # every later one must pin, distinctly.
+        out.append(spec if n == 0 else spec.model_copy(update={"vault_id": f"vlt_dup_{n}"}))
+    # A first mount that drew a pin colliding with a repair pin is impossible
+    # (repair pins are namespaced), so the group is distinct by construction.
+    return out
 
 
 def mcp_servers_list() -> st.SearchStrategy[list[McpServerSpec]]:
-    """An ``mcp_servers`` list satisfying :func:`validate_mcp_servers` (unique
-    ``name``) — dedup by name after drawing.
+    """An ``mcp_servers`` list satisfying :func:`validate_mcp_servers` — unique
+    ``name``, and a distinct credential identity per ``url``.
     """
-    return st.lists(_mcp_server(), max_size=len(MCP_SERVER_NAMES)).map(
-        lambda ss: list({s.name: s for s in ss}.values())
-    )
+    return st.lists(_mcp_server(), max_size=len(MCP_SERVER_NAMES)).map(_repair_mcp_servers)
 
 
 # ── http servers (prioritized dimension — #1487 shipped here) ─────────────────

@@ -331,16 +331,19 @@ class TestCircuitBreaker:
 
     def test_cache_get_set_and_invalidate(self) -> None:
         pool = McpSessionPool()
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3") is None
-        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], "instr")
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3") == ([{"x": 1}], "instr")
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", server_name="s") is None
+        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], "instr", server_name="s")
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", server_name="s") == (
+            [{"x": 1}],
+            "instr",
+        )
         # Different binding → independent entry.
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4") is None
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4", server_name="s") is None
         # list_changed drops every binding for the key.
-        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4", [{"y": 2}], None)
+        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4", [{"y": 2}], None, server_name="s")
         pool._invalidate_tools_for_pool_key((URL, "v", EMPTY_KEY))
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3") is None
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4") is None
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", server_name="s") is None
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:4", server_name="s") is None
 
     async def test_list_changed_handler_invalidates_only_on_tool_change(self) -> None:
         """The ``ClientSession`` message handler the pool registers (#1391)
@@ -352,11 +355,11 @@ class TestCircuitBreaker:
         key = (URL, "v", EMPTY_KEY)
         handler = pool._make_list_changed_handler(key)
 
-        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], None)
+        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], None, server_name="s")
         await handler(t.ServerNotification(t.ToolListChangedNotification()))
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3") is None
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", server_name="s") is None
 
-        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], None)
+        pool.set_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", [{"x": 1}], None, server_name="s")
         await handler(
             t.ServerNotification(
                 t.LoggingMessageNotification(
@@ -364,13 +367,53 @@ class TestCircuitBreaker:
                 )
             )
         )
-        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3") is not None
+        assert pool.get_cached_tools(URL, "v", EMPTY_KEY, "agt_1:3", server_name="s") is not None
 
     def test_invalidate_by_vault(self) -> None:
         pool = McpSessionPool()
-        pool.set_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", [{"a": 1}], None)
-        pool.set_cached_tools(URL, "vlt_2", EMPTY_KEY, "agt_1:3", [{"b": 2}], None)
+        pool.set_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", [{"a": 1}], None, server_name="s")
+        pool.set_cached_tools(URL, "vlt_2", EMPTY_KEY, "agt_1:3", [{"b": 2}], None, server_name="s")
         pool.invalidate_tools_by_vault("vlt_1")
-        assert pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3") is None
+        assert pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", server_name="s") is None
         # Other vaults' entries survive.
-        assert pool.get_cached_tools(URL, "vlt_2", EMPTY_KEY, "agt_1:3") is not None
+        assert (
+            pool.get_cached_tools(URL, "vlt_2", EMPTY_KEY, "agt_1:3", server_name="s") is not None
+        )
+
+    def test_two_mounts_of_one_url_do_not_share_a_cache_entry(self) -> None:
+        """#2233/#2230: the cached value is namespaced ``mcp__<name>__*``, so the
+        mount name must be part of the key. With everything else identical —
+        same url, same vault, same headers, same binding — mount ``home`` must
+        not be served mount ``work``'s tools.
+        """
+        pool = McpSessionPool()
+        pool.set_cached_tools(
+            URL, "vlt_1", EMPTY_KEY, "agt_1:3", [{"n": "mcp__work__t"}], None, server_name="work"
+        )
+        assert pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", server_name="home") is None
+        pool.set_cached_tools(
+            URL, "vlt_1", EMPTY_KEY, "agt_1:3", [{"n": "mcp__home__t"}], None, server_name="home"
+        )
+        work = pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", server_name="work")
+        home = pool.get_cached_tools(URL, "vlt_1", EMPTY_KEY, "agt_1:3", server_name="home")
+        assert work is not None and work[0] == [{"n": "mcp__work__t"}]
+        assert home is not None and home[0] == [{"n": "mcp__home__t"}]
+
+    async def test_second_mount_of_one_url_rediscovers_its_own_tools(
+        self, pool_runtime: McpSessionPool
+    ) -> None:
+        """End-to-end twin of the above through ``discover_mcp_tools``: on master
+        the second mount is served the first's cached list (``await_count``
+        stays 1) and advertises the wrong namespace.
+        """
+        session = _make_mock_session(["echo"])
+        with (
+            patch("aios.mcp.pool.streamable_http_client", return_value=_transport_mock()),
+            patch("aios.mcp.pool.ClientSession", _session_ctx(session)),
+        ):
+            work, _ = await discover_mcp_tools(URL, "vlt_1", {}, "work", binding_id="agt_1:3")
+            assert session.list_tools.await_count == 1
+            home, _ = await discover_mcp_tools(URL, "vlt_1", {}, "home", binding_id="agt_1:3")
+            assert session.list_tools.await_count == 2
+        assert [t["function"]["name"] for t in work] == ["mcp__work__echo"]
+        assert [t["function"]["name"] for t in home] == ["mcp__home__echo"]

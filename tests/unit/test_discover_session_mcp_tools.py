@@ -87,7 +87,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "url": url}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -130,7 +130,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__tool"}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -165,10 +165,10 @@ class TestDiscoverSessionMcpTools:
         seen_urls: list[str] = []
 
         async def _fake_resolve(
-            _pool: Any, _cb: Any, _sid: str, url: str, **kwargs: Any
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
         ) -> tuple[str | None, dict[str, str]]:
-            seen_urls.append(url)
-            return None, {"Authorization": f"Bearer token-for-{url}"}
+            seen_urls.append(spec.url)
+            return None, {"Authorization": f"Bearer token-for-{spec.url}"}
 
         async def _discover(
             url: str,
@@ -180,7 +180,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t", "auth": headers["Authorization"]}], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", side_effect=_fake_resolve),
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             tools, _instructions = await discover_session_mcp_tools(
@@ -195,6 +195,103 @@ class TestDiscoverSessionMcpTools:
             "Bearer token-for-https://mcp.github",
             "Bearer token-for-https://mcp.linear",
         }
+
+    async def test_each_mount_resolves_with_its_own_pin(self) -> None:
+        """#2233: two mounts on ONE url each carry their own ``vault_id``, and
+        the prelude threads each spec's pin into its own resolution — so the
+        two tool namespaces authenticate as different identities.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_home"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
+        ) -> tuple[str | None, dict[str, str]]:
+            return spec.vault_id, {"Authorization": f"Bearer token-for-{spec.vault_id}"}
+
+        async def _discover(
+            _url: str,
+            vault_id: str | None,
+            headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [
+                {"name": f"mcp__{name}__t", "vault": vault_id, "auth": headers["Authorization"]}
+            ], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+        assert {(t["name"], t["vault"]) for t in tools} == {
+            ("mcp__work__t", "vlt_work"),
+            ("mcp__home__t", "vlt_home"),
+        }
+
+    async def test_unresolvable_pin_drops_only_that_mount(self) -> None:
+        """Fail-closed at the prelude: a mount whose pin resolves nothing
+        contributes no tools, while its healthy same-url sibling is untouched.
+        The model never sees the broken mount's tools, so it cannot call them.
+        """
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.client import PinnedVaultUnavailable
+
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_gone"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+
+        async def _fake_resolve(
+            _pool: Any, _cb: Any, _sid: str, spec: McpServerSpec, **_kw: Any
+        ) -> tuple[str | None, dict[str, str]]:
+            if spec.vault_id == "vlt_gone":
+                assert spec.vault_id is not None
+                raise PinnedVaultUnavailable(spec.name, spec.vault_id, "not bound to this session")
+            return spec.vault_id, {"Authorization": f"Bearer token-for-{spec.vault_id}"}
+
+        async def _discover(
+            _url: str,
+            _vault_id: str | None,
+            _headers: dict[str, str],
+            name: str,
+            **_kwargs: Any,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            return [{"name": f"mcp__{name}__t"}], None
+
+        with (
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", side_effect=_fake_resolve),
+            patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+        ):
+            tools, _instructions = await discover_session_mcp_tools(
+                pool=AsyncMock(),
+                session_id="sess_x",
+                agent=agent,
+                account_id="acc_test_stub",
+            )
+        assert [t["name"] for t in tools] == ["mcp__work__t"]
 
     async def test_instructions_keyed_by_server_name(self) -> None:
         """Each server's ``InitializeResult.instructions`` flows into the
@@ -226,7 +323,7 @@ class TestDiscoverSessionMcpTools:
             return [], "## linear\n\nbe brief"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -261,7 +358,7 @@ class TestDiscoverSessionMcpTools:
             return [], ""
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -309,7 +406,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -355,6 +452,11 @@ class TestDiscoverSessionMcpTools:
         # Mark the slow server's transport key unhealthy (as a prior discovery
         # timeout would). vault_id is None here (resolve mocked to no-cred).
         pool.mark_unhealthy("https://mcp.slow", None, _headers_key(None), backoff_s=60.0)
+        # That DOWN edge belongs to the earlier turn we are simulating, not to
+        # this one — a real prior turn would already have drained and emitted it.
+        # Under test it is the skip that matters, so drop it rather than let it
+        # land in this prelude's event emission.
+        pool.drain_degraded_events()
 
         discovered: list[str] = []
 
@@ -373,7 +475,7 @@ class TestDiscoverSessionMcpTools:
         try:
             with (
                 patch(
-                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
                 ) as resolve,
                 patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
             ):
@@ -424,7 +526,7 @@ class TestDiscoverSessionMcpTools:
             return [{"name": f"mcp__{name}__t"}], f"{name}-instructions"
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})
@@ -456,8 +558,8 @@ class TestDiscoverSessionMcpTools:
         )
 
         pool = McpSessionPool()
-        # Simulate the breaker having recorded a DOWN edge for this url.
-        pool._pending_degraded_events.append("https://mcp.down")
+        # Simulate the breaker having recorded a DOWN edge for this identity.
+        pool._pending_degraded_events.append(("https://mcp.down", None, ""))
 
         async def _discover(*_a: Any, **_k: Any) -> tuple[list[dict[str, Any]], str | None]:
             return [], None
@@ -473,7 +575,7 @@ class TestDiscoverSessionMcpTools:
         try:
             with (
                 patch(
-                    "aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
                 ) as resolve,
                 patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
                 patch("aios.harness.loop.sessions_service.append_event", side_effect=_append_event),
@@ -496,6 +598,105 @@ class TestDiscoverSessionMcpTools:
         assert ev["is_error"] is False
         # Deduped: the edge queue is drained, so a re-run emits nothing.
         assert pool.drain_degraded_events() == []
+
+    async def _emit_for(
+        self,
+        agent: Any,
+        pending: list[tuple[str, str | None, str]],
+        pool: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Drive the prelude with pre-seeded DOWN edges; return emitted events.
+
+        ``pool`` lets a caller supply one already armed through the real breaker
+        path, for edges that carry an owner.
+        """
+        from unittest.mock import MagicMock
+
+        from aios.harness import runtime
+        from aios.harness.loop import discover_session_mcp_tools
+        from aios.mcp.pool import McpSessionPool
+
+        pool = pool if pool is not None else McpSessionPool()
+        pool._pending_degraded_events.extend(pending)
+        emitted: list[dict[str, Any]] = []
+
+        async def _discover(*_a: Any, **_k: Any) -> tuple[list[dict[str, Any]], str | None]:
+            return [], None
+
+        async def _append_event(_pool: Any, _sid: str, _kind: str, data: Any, **_k: Any) -> Any:
+            emitted.append(data)
+            return MagicMock()
+
+        prior = runtime.mcp_session_pool
+        runtime.mcp_session_pool = pool
+        try:
+            with (
+                patch(
+                    "aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock
+                ) as resolve,
+                patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
+                patch("aios.harness.loop.sessions_service.append_event", side_effect=_append_event),
+            ):
+                resolve.return_value = (None, {})
+                await discover_session_mcp_tools(
+                    pool=AsyncMock(),
+                    session_id="sess_x",
+                    agent=agent,
+                    account_id="acc_test_stub",
+                )
+        finally:
+            runtime.mcp_session_pool = prior
+        return [e for e in emitted if e.get("event") == "mcp_server_unavailable"]
+
+    async def test_down_edge_names_the_pinned_mount_that_owns_the_identity(self) -> None:
+        """#2233: with two mounts on ONE url, the event must name the identity
+        that actually failed. A url-keyed lookup is last-wins and would name the
+        healthy sibling."""
+        agent = _agent(
+            mcp_servers=[
+                McpServerSpec(name="work", url="https://gmail/mcp", vault_id="vlt_work"),
+                McpServerSpec(name="home", url="https://gmail/mcp", vault_id="vlt_home"),
+            ],
+            tools=[
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="work"),
+                ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="home"),
+            ],
+        )
+        events = await self._emit_for(agent, [("https://gmail/mcp", "vlt_work", "")])
+        assert [e["server"] for e in events] == ["work"]
+
+    async def test_edge_for_a_mount_this_agent_does_not_declare_is_dropped(self) -> None:
+        """The edge queue is worker-global but the event is session-scoped, so a
+        DOWN edge armed for a DIFFERENT session drains here too. Stamping it into
+        this session's log would assert that a server this agent does not mount
+        went down."""
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="mine", url="https://mine/mcp")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="mine")],
+        )
+        events = await self._emit_for(
+            agent,
+            [("https://someone-elses/mcp", "vlt_other", ""), ("https://mine/mcp", None, "")],
+        )
+        assert [e["server"] for e in events] == ["mine"]
+
+    async def test_edge_from_a_since_removed_mount_reports_under_its_own_name(self) -> None:
+        """An attributed edge records the mount name that produced it. The agent
+        surface can change between arming and delivery, so that name need not be
+        in the CURRENT surface — the edge still describes a real transition and
+        must report under the name it happened as, not crash the prelude looking
+        the name back up."""
+        from aios.mcp.pool import McpSessionPool, degraded_edge_owner
+
+        pool = McpSessionPool()
+        with degraded_edge_owner("sess_x", "removed"):
+            pool.mark_unhealthy("https://old/mcp", "vlt_gone", "", backoff_s=60)
+        agent = _agent(
+            mcp_servers=[McpServerSpec(name="current", url="https://current/mcp")],
+            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="current")],
+        )
+        events = await self._emit_for(agent, [], pool=pool)
+        assert [(e["server"], e["url"]) for e in events] == [("removed", "https://old/mcp")]
 
     async def test_colliding_server_tool_names_are_uniquified(self) -> None:
         """Two servers advertising the same function.name stay dispatchable."""
@@ -539,7 +740,7 @@ class TestDiscoverSessionMcpTools:
             return [_envelope(name)], None
 
         with (
-            patch("aios.mcp.client.resolve_auth_for_target_url", new_callable=AsyncMock) as resolve,
+            patch("aios.mcp.client.resolve_auth_for_mcp_mount", new_callable=AsyncMock) as resolve,
             patch("aios.mcp.client.discover_mcp_tools", side_effect=_discover),
         ):
             resolve.return_value = (None, {})

@@ -120,6 +120,34 @@ class TestWorkflowCreate:
                 }
             )
 
+    def test_rejects_same_mcp_url_without_distinct_pins(self) -> None:
+        """#2233: workflow ingress shares ``validate_mcp_servers``, so the
+        same-url identity rule reaches declared workflow surfaces too."""
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
+            WorkflowCreate.model_validate(
+                {
+                    "name": "w",
+                    "script": "async def main(i): return 1",
+                    "mcp_servers": [
+                        {"name": "gh_a", "url": "https://gh/mcp"},
+                        {"name": "gh_b", "url": "https://gh/mcp"},
+                    ],
+                }
+            )
+
+    def test_accepts_same_mcp_url_with_distinct_pins(self) -> None:
+        workflow = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "mcp_servers": [
+                    {"name": "gh_a", "url": "https://gh/mcp", "vault_id": "vlt_a"},
+                    {"name": "gh_b", "url": "https://gh/mcp", "vault_id": "vlt_b"},
+                ],
+            }
+        )
+        assert [s.vault_id for s in workflow.mcp_servers] == ["vlt_a", "vlt_b"]
+
     def test_accepts_duplicate_http_server_names_with_distinct_base_urls(self) -> None:
         workflow = WorkflowCreate.model_validate(
             {

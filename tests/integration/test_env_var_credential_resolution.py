@@ -516,3 +516,62 @@ async def test_run_materializer_resolves_through_worker_runtime(
 
     assert [(r.secret_name, r.secret_value) for r in resolved] == [("API_KEY", "val")]
     assert resolved[0].placeholder.startswith(SECRET_PLACEHOLDER_PREFIX)
+
+
+async def test_pinned_resolution_selects_per_vault_and_scopes_to_the_binding(
+    vault_pool: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    """#2233: the pinned resolver picks ONE vault's credential at a shared
+    ``target_url``, and the ``session_vaults`` join is the authority boundary.
+
+    Two vaults hold a credential for the same URL. Pinning each in turn returns
+    that vault's own row with no collision WARN (the rank scan logs one every
+    time). A vault that exists in the account and holds a credential for the URL
+    but is NOT bound to the session resolves to ``None`` — that is what keeps a
+    pin a selector over granted authority rather than a way to reach a new vault.
+    """
+    target_url = "https://pinned.example.com/mcp"
+    work_vault = await _make_vault(vault_pool, "pin-work")
+    home_vault = await _make_vault(vault_pool, "pin-home")
+    unbound_vault = await _make_vault(vault_pool, "pin-unbound")
+
+    await _make_http_cred(vault_pool, crypto_box, work_vault, target_url)
+    await _make_http_cred(vault_pool, crypto_box, home_vault, target_url)
+    await _make_http_cred(vault_pool, crypto_box, unbound_vault, target_url)
+
+    session_id = await _make_session(vault_pool, vault_ids=[work_vault, home_vault])
+
+    async with vault_pool.acquire() as conn:
+        with mock.patch("aios.db.queries.vaults.log") as log:
+            work = await db_queries.resolve_session_credential(
+                conn, session_id, target_url, vault_id=work_vault, account_id=ACC
+            )
+            home = await db_queries.resolve_session_credential(
+                conn, session_id, target_url, vault_id=home_vault, account_id=ACC
+            )
+        # Each mount gets its own identity — the whole point of the pin.
+        assert work is not None and work[2] == work_vault
+        assert home is not None and home[2] == home_vault
+        # No shadowing happened, so nothing to warn about.
+        log.warning.assert_not_called()
+
+        # The rank scan, by contrast, collapses both onto one identity.
+        scanned = await db_queries.resolve_session_credential(
+            conn, session_id, target_url, account_id=ACC
+        )
+        assert scanned is not None and scanned[2] == work_vault
+
+        # Authority boundary: bound-ness is proved by the join, not assumed.
+        assert (
+            await db_queries.resolve_session_credential(
+                conn, session_id, target_url, vault_id=unbound_vault, account_id=ACC
+            )
+            is None
+        )
+        # And a foreign account cannot traverse it either.
+        assert (
+            await db_queries.resolve_session_credential(
+                conn, session_id, target_url, vault_id=work_vault, account_id=ACC_OTHER
+            )
+            is None
+        )

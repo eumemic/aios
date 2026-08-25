@@ -439,17 +439,27 @@ def _session_degraded_repos(
 def _session_degraded_mcp_server_names(mcp_servers: list[McpServerSpec]) -> list[str]:
     """Agent-declared ``name`` for each MCP server whose connect breaker is open.
 
-    Scoped to THIS agent's declared servers (by URL) — a different agent's
-    down server never leaks into this prelude. No pool (API process) or no
-    declared servers both render nothing.
+    Scoped to THIS agent's declared servers — a different agent's down server
+    never leaks into this prelude. No pool (API process) or no declared servers
+    both render nothing.
+
+    Matched on credential IDENTITY, not url: two mounts of one url pinned to
+    different vaults have separate circuits, so reporting both because one is
+    open would tell the model a healthy mount is down (#2233). An unpinned
+    mount still matches any vault at its url — its identity is only knowable at
+    resolution time.
     """
     from aios.harness import runtime as harness_runtime
 
     pool = harness_runtime.mcp_session_pool
     if pool is None or not mcp_servers:
         return []
-    degraded_urls = set(pool.degraded_servers())
-    return [s.name for s in mcp_servers if s.url in degraded_urls]
+    degraded = pool.degraded_identities()
+    return [
+        s.name
+        for s in mcp_servers
+        if any(s.matches_resolved_identity(url, vault_id) for url, vault_id in degraded)
+    ]
 
 
 def _build_instructions_block(

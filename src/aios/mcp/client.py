@@ -39,6 +39,7 @@ from aios.logging import get_logger
 from aios.mcp._constants import _MCP_HTTPX_TIMEOUT as _MCP_HTTPX_TIMEOUT_SHARED
 from aios.mcp.pool import HttpErrorSink
 from aios.mcp.schema import make_function_tool, qualify_mcp_tool_name
+from aios.models.agents import McpServerSpec
 from aios.models.vaults import AuthType
 from aios.pinned_transport import PinnedTransport
 from aios.services.vaults import is_expiring, refresh_credential
@@ -344,6 +345,28 @@ def _merge_headers(
     return merged
 
 
+class PinnedVaultUnavailable(Exception):
+    """A vault-pinned MCP mount could not resolve an identity.
+
+    Raised INSTEAD of the ``(None, {})`` "no auth to send" return, because for a
+    pinned mount those two outcomes must not look alike.  ``(None, {})`` means
+    "connect anonymously", which against a server that accepts unauthenticated
+    sessions would silently proceed with no identity at all — the failure a pin
+    exists to prevent.  Falling back to the rank scan would be worse still: it
+    would let a mount reach an identity its pin excluded.  So both the
+    not-bound and the no-usable-secret cases fail closed here.
+    """
+
+    def __init__(self, server_name: str, vault_id: str, reason: str) -> None:
+        super().__init__(
+            f"MCP server {server_name!r} is pinned to vault {vault_id}, "
+            f"which has no usable credential: {reason}"
+        )
+        self.server_name = server_name
+        self.vault_id = vault_id
+        self.reason = reason
+
+
 async def resolve_auth_for_target_url(
     pool: asyncpg.Pool[Any],
     crypto_box: CryptoBox,
@@ -358,10 +381,14 @@ async def resolve_auth_for_target_url(
     Returns ``(vault_id, headers)`` on the success path, or
     ``(None, {})`` whenever there are no auth headers to send (no
     credential bound, or a credential whose secret material is empty
-    / a refresh re-read missed). ``vault_id`` is the row id of the
-    ``vault_credentials`` entry — stable across OAuth token rotation
+    / a refresh re-read missed). ``vault_id`` is the id of the vault
+    holding the credential — stable across OAuth token rotation
     (``refresh_credential`` updates the row in place), so callers feed
     it to the pool as a stable cache key (see #459).
+
+    This is the ``target_url``-keyed arm, used by ``http_servers``, whose
+    ``base_url`` is unique per agent. MCP mounts go through
+    :func:`resolve_auth_for_mcp_mount`, which can pin.
 
     For ``oauth2_refresh`` credentials whose ``expires_at`` falls within
     the refresh skew window, the access token is transparently refreshed
@@ -374,9 +401,58 @@ async def resolve_auth_for_target_url(
         cred = await queries.resolve_session_credential(
             conn, session_id, target_url, account_id=account_id
         )
-        if cred is None:
-            return None, {}
+    if cred is None:
+        return None, {}
     return await _auth_from_credential(pool, crypto_box, cred, target_url, account_id=account_id)
+
+
+async def resolve_auth_for_mcp_mount(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    session_id: str,
+    spec: McpServerSpec,
+    *,
+    account_id: str,
+) -> tuple[str | None, dict[str, str]]:
+    """Resolve auth identity + headers for one MCP MOUNT.
+
+    The mount-keyed sibling of :func:`resolve_auth_for_target_url`, split out
+    rather than folded in behind a flag because the two have different failure
+    CONTRACTS, not just different lookups — same reason the run arm
+    (:func:`resolve_auth_for_target_url_run`) is its own function over the same
+    ``_auth_from_credential`` engine.
+
+    Unpinned, this is byte-identical to the url arm. Pinned
+    (``spec.vault_id``, #2233), resolution narrows to that one vault so an agent
+    can mount one MCP URL twice and have each mount authenticate as its own
+    identity — and a pin that resolves nothing RAISES
+    :class:`PinnedVaultUnavailable` instead of degrading to ``(None, {})``.
+    Taking the whole spec is what lets the failure name the mount, which is the
+    only handle an operator has on which of two same-url mounts is broken.
+    """
+    async with pool.acquire() as conn:
+        cred = await queries.resolve_session_credential(
+            conn, session_id, spec.url, account_id=account_id, vault_id=spec.vault_id
+        )
+    if cred is None:
+        if spec.vault_id is not None:
+            raise PinnedVaultUnavailable(
+                spec.name,
+                spec.vault_id,
+                "the vault holds no active credential for this target, "
+                "or is not bound to this session",
+            )
+        return None, {}
+    vault_id, headers = await _auth_from_credential(
+        pool, crypto_box, cred, spec.url, account_id=account_id
+    )
+    if spec.vault_id is not None and not headers:
+        raise PinnedVaultUnavailable(
+            spec.name,
+            spec.vault_id,
+            "the credential yielded no auth header (empty secret, or a refresh re-read missed)",
+        )
+    return vault_id, headers
 
 
 async def resolve_auth_for_target_url_run(
@@ -515,7 +591,7 @@ async def discover_mcp_tools(
         )
 
     if _pool is not None and binding_id is not None:
-        cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id)
+        cached = _pool.get_cached_tools(url, vault_id, hkey, binding_id, server_name=server_name)
         if cached is not None:
             return cached[0], cached[1]
 
@@ -591,7 +667,15 @@ async def discover_mcp_tools(
     if _pool is not None and binding_id is not None:
         # Cache the freshly-discovered result so the next step (same binding
         # identity, no list_changed) serves it without a list_tools() RPC (#1391).
-        _pool.set_cached_tools(url, vault_id, hkey, binding_id, tools, init_result.instructions)
+        _pool.set_cached_tools(
+            url,
+            vault_id,
+            hkey,
+            binding_id,
+            tools,
+            init_result.instructions,
+            server_name=server_name,
+        )
     return tools, init_result.instructions
 
 

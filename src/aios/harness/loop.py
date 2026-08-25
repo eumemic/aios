@@ -2001,7 +2001,7 @@ async def discover_session_mcp_tools(
     string.  Servers that supplied no instructions (or ``""``) are
     omitted from the dict.
     """
-    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_target_url
+    from aios.mcp.client import discover_mcp_tools, resolve_auth_for_mcp_mount
     from aios.tools.registry import effective_transport
 
     enabled_server_names: set[str] = set()
@@ -2028,23 +2028,44 @@ async def discover_session_mcp_tools(
     # the agent proceeds degraded on the healthy servers' (possibly cached) tools.
     from aios.mcp.client import _DISCOVERY_UNHEALTHY_BACKOFF_S
 
+    # Populated only after this session successfully resolves a mount. Pending
+    # breaker edges are worker-global, so declaration-only URL matching is not
+    # sufficient: an unpinned mount at a shared URL may resolve to a different
+    # vault than the identity which produced an edge.
+    resolved_mounts: dict[tuple[str, str | None], McpServerSpec] = {}
+
     async def _discover_one(spec: McpServerSpec) -> tuple[list[dict[str, Any]], str | None]:
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, spec.url, account_id=account_id
+        vault_id, headers = await resolve_auth_for_mcp_mount(
+            pool, crypto_box, session_id, spec, account_id=account_id
         )
+        # Successful pinned resolution is contractually the requested pin. Keep
+        # that invariant here so an explicit pin cannot be weakened by an
+        # inconsistent resolver result (including test doubles).
+        identity_vault_id = spec.vault_id if spec.vault_id is not None else vault_id
+        resolved_mounts[(spec.url, identity_vault_id)] = spec
         _pool = runtime.mcp_session_pool
         if _pool is not None:
             from aios.mcp.client import _headers_key
+            from aios.mcp.pool import degraded_edge_owner
 
             hkey = _headers_key(spec.headers)
-            # A cached result is always served (cheap, no RPC) even while the
-            # circuit is open; only an uncached discovery is short-circuited.
-            if _pool.get_cached_tools(spec.url, vault_id, hkey, binding_id) is None and (
-                _pool.is_unhealthy(spec.url, vault_id, hkey)
-            ):
-                raise TimeoutError(
-                    f"MCP server {spec.name!r} discovery skipped: "
-                    f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"
+            with degraded_edge_owner(session_id, spec.name):
+                # A cached result is always served (cheap, no RPC) even while the
+                # circuit is open; only an uncached discovery is short-circuited.
+                if _pool.get_cached_tools(
+                    spec.url, vault_id, hkey, binding_id, server_name=spec.name
+                ) is None and (_pool.is_unhealthy(spec.url, vault_id, hkey)):
+                    raise TimeoutError(
+                        f"MCP server {spec.name!r} discovery skipped: "
+                        f"in backoff ({_DISCOVERY_UNHEALTHY_BACKOFF_S:.0f}s) after a prior timeout"
+                    )
+                return await discover_mcp_tools(
+                    spec.url,
+                    vault_id,
+                    headers,
+                    spec.name,
+                    spec_headers=spec.headers,
+                    binding_id=binding_id,
                 )
         return await discover_mcp_tools(
             spec.url, vault_id, headers, spec.name, spec_headers=spec.headers, binding_id=binding_id
@@ -2086,29 +2107,42 @@ async def discover_session_mcp_tools(
     # Observability (#1698 (e)): emit exactly one durable ``mcp_server_unavailable``
     # session event per breaker DOWN transition. The breaker arms in the pool
     # (``acquire``/discovery) which has no session context, so it records the
-    # edge and we drain + stamp it here where session_id is in scope. Deduped on
-    # the breaker edge (drain empties the queue), ``is_error:false`` keeps it out
+    # edge and we claim + stamp it here where session_id is in scope. Deduped on
+    # the breaker edge (claiming removes owned edges), ``is_error:false`` keeps it out
     # of error-filtered views but queryable — mirrors the ``step_timeout``
     # telemetry precedent. Gives the ops-agent an external artifact to detect a
     # session running degraded.
     _pool = runtime.mcp_session_pool
     if _pool is not None:
-        down_urls = _pool.drain_degraded_events()
-        if down_urls:
-            url_to_name = {s.url: s.name for s in agent.mcp_servers}
-            for down_url in down_urls:
-                await sessions_service.append_event(
-                    pool,
-                    session_id,
-                    "span",
-                    {
-                        "event": "mcp_server_unavailable",
-                        "server": url_to_name.get(down_url, down_url),
-                        "url": down_url,
-                        "is_error": False,
-                    },
-                    account_id=account_id,
-                )
+        # Claim by identities resolved for this session, not by declarations.
+        # In particular an unpinned declaration does not own every vault at its
+        # URL: it owns only the vault selected for this session at runtime.
+        attributed_edges = _pool.drain_degraded_events_for_owner(session_id)
+        attributed_identities = {(url, vault_id) for url, vault_id, _name in attributed_edges}
+        # Legacy/unattributed edges (including those opened by execution paths
+        # without session context) retain identity-based delivery. Attributed
+        # edges can only be consumed by their recorded producer.
+        legacy_edges = _pool.drain_unattributed_degraded_events_matching(
+            lambda down_url, down_vault_id: (down_url, down_vault_id) in resolved_mounts
+        )
+        owned_edges = attributed_edges + [
+            (url, vault_id, resolved_mounts[(url, vault_id)].name)
+            for url, vault_id in legacy_edges
+            if (url, vault_id) not in attributed_identities
+        ]
+        for down_url, _down_vault_id, mount_name in owned_edges:
+            await sessions_service.append_event(
+                pool,
+                session_id,
+                "span",
+                {
+                    "event": "mcp_server_unavailable",
+                    "server": mount_name,
+                    "url": down_url,
+                    "is_error": False,
+                },
+                account_id=account_id,
+            )
     from aios.mcp.schema import uniquify_advertised_tool_names
 
     return uniquify_advertised_tool_names(tools), instructions_by_server

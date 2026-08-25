@@ -233,6 +233,148 @@ class TestAgentCreateDuplicateIngressInvariants:
             )
 
 
+class TestMcpServerSameUrlIdentity:
+    """#2233: ``url`` is the credential-resolution key, so two mounts may share
+    one url ONLY when each pins a distinct ``vault_id`` — otherwise they are two
+    names for one identity, collapsing onto a single credential, pooled
+    transport and discovery-cache entry.
+    """
+
+    @staticmethod
+    def _create(servers: list[dict[str, object]]) -> AgentCreate:
+        return AgentCreate.model_validate(
+            {"name": "agent", "model": "gpt-4", "mcp_servers": servers}
+        )
+
+    def test_accepts_same_url_with_distinct_pins(self) -> None:
+        """The feature: one MCP target, two identities, two tool namespaces."""
+        agent = self._create(
+            [
+                {"name": "gmail_work", "url": "https://gmail/mcp", "vault_id": "vlt_work"},
+                {"name": "gmail_home", "url": "https://gmail/mcp", "vault_id": "vlt_home"},
+            ]
+        )
+        assert [s.vault_id for s in agent.mcp_servers] == ["vlt_work", "vlt_home"]
+
+    def test_accepts_distinct_urls_unpinned(self) -> None:
+        """Characterization: the pre-#2233 shape stays valid and unpinned."""
+        agent = self._create(
+            [
+                {"name": "gh", "url": "https://gh/mcp"},
+                {"name": "gl", "url": "https://gl/mcp"},
+            ]
+        )
+        assert [s.vault_id for s in agent.mcp_servers] == [None, None]
+
+    def test_rejects_same_url_both_unpinned(self) -> None:
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
+            self._create(
+                [
+                    {"name": "gmail_work", "url": "https://gmail/mcp"},
+                    {"name": "gmail_home", "url": "https://gmail/mcp"},
+                ]
+            )
+
+    def test_rejects_same_url_mixed_pinned_and_unpinned(self) -> None:
+        """The unpinned entry's rank scan can land on the pinned entry's vault,
+        so the collapse is merely nondeterministic rather than absent."""
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
+            self._create(
+                [
+                    {"name": "gmail_work", "url": "https://gmail/mcp", "vault_id": "vlt_work"},
+                    {"name": "gmail_home", "url": "https://gmail/mcp"},
+                ]
+            )
+
+    def test_rejects_same_url_same_pin(self) -> None:
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
+            self._create(
+                [
+                    {"name": "gmail_work", "url": "https://gmail/mcp", "vault_id": "vlt_one"},
+                    {"name": "gmail_home", "url": "https://gmail/mcp", "vault_id": "vlt_one"},
+                ]
+            )
+
+    def test_agent_update_enforces_the_same_rule(self) -> None:
+        with pytest.raises(ValidationError, match=r"must pin a distinct vault_id"):
+            AgentUpdate.model_validate(
+                {
+                    "version": 1,
+                    "mcp_servers": [
+                        {"name": "a", "url": "https://same/mcp"},
+                        {"name": "b", "url": "https://same/mcp"},
+                    ],
+                }
+            )
+
+    def test_persisted_double_mount_still_hydrates(self) -> None:
+        """Ingress-only: agents persisted before #2233 keep loading. The read
+        path validates each spec individually and never runs the cross-item
+        check, so tightening ingress cannot 500 an existing agent."""
+        legacy = [
+            {"name": "catalog", "url": "https://x/mcp"},
+            {"name": "custom", "url": "https://x/mcp"},
+        ]
+        hydrated = [McpServerSpec.model_validate_persisted(s) for s in legacy]
+        assert [s.name for s in hydrated] == ["catalog", "custom"]
+        assert all(s.vault_id is None for s in hydrated)
+
+    def test_unpinned_spec_serializes_without_the_pin_key(self) -> None:
+        """An unpinned mount must persist EXACTLY as it did before pins existed.
+
+        Every persistence path uses a plain ``model_dump()``, and this model is
+        ``extra="forbid"`` — so emitting ``"vault_id": null`` for unpinned
+        mounts would make any agent-surface write after deploy un-hydratable by
+        a binary predating the field, pins or no pins. Confining that to the
+        writes that actually pin is the whole point of the omission.
+        """
+        unpinned = McpServerSpec(name="gh", url="https://gh/mcp").model_dump()
+        assert "vault_id" not in unpinned
+        assert unpinned == McpServerSpec(name="gh", url="https://gh/mcp").model_dump(mode="json")
+
+        pinned = McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1").model_dump()
+        assert pinned["vault_id"] == "vlt_1"
+
+        # Round-trips both ways: an absent key hydrates back to unpinned.
+        assert McpServerSpec.model_validate(unpinned).vault_id is None
+        assert McpServerSpec.model_validate(pinned).vault_id == "vlt_1"
+        assert McpServerSpec.model_validate_persisted(unpinned).vault_id is None
+
+    def test_workflow_spec_persistence_inherits_the_omission(self) -> None:
+        """``db/queries/workflows.py`` persists mcp_servers through the same
+        ``model_dump()`` call as ``db/queries/agents.py``, so the fix is shared
+        rather than per-resource — assert the shape both writers emit."""
+        from aios.models.workflows import WorkflowCreate
+
+        wf = WorkflowCreate.model_validate(
+            {
+                "name": "w",
+                "script": "async def main(i): return 1",
+                "mcp_servers": [{"name": "gh", "url": "https://gh/mcp"}],
+            }
+        )
+        assert [s.model_dump() for s in wf.mcp_servers] == [
+            {
+                "type": "url",
+                "name": "gh",
+                "url": "https://gh/mcp",
+                "include_instructions": True,
+                "headers": None,
+            }
+        ]
+
+    def test_matches_resolved_identity(self) -> None:
+        """A pin owns only its own vault; an unpinned mount matches any vault at
+        its url (its identity is not knowable statically)."""
+        pinned = McpServerSpec(name="w", url="https://gmail/mcp", vault_id="vlt_work")
+        unpinned = McpServerSpec(name="u", url="https://gmail/mcp")
+        assert pinned.matches_resolved_identity("https://gmail/mcp", "vlt_work")
+        assert not pinned.matches_resolved_identity("https://gmail/mcp", "vlt_home")
+        assert not pinned.matches_resolved_identity("https://other/mcp", "vlt_work")
+        assert unpinned.matches_resolved_identity("https://gmail/mcp", "vlt_home")
+        assert not unpinned.matches_resolved_identity("https://other/mcp", "vlt_home")
+
+
 class TestResolveHttpServerRefs:
     """#953: names-only ``http_servers`` resolution against an acting agent's servers.
 

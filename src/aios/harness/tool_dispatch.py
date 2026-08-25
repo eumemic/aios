@@ -1163,8 +1163,9 @@ async def _execute_mcp_tool_admitted(
         result = suppression_service.mcp_synthesized_result()
     else:
         from aios.mcp.client import (
+            PinnedVaultUnavailable,
             call_mcp_tool,
-            resolve_auth_for_target_url,
+            resolve_auth_for_mcp_mount,
             validate_mcp_arguments,
         )
         from aios.services.outbound_tool_quota import (
@@ -1178,9 +1179,17 @@ async def _execute_mcp_tool_admitted(
             raise ToolBail(schema_error)
 
         crypto_box = runtime.require_crypto_box()
-        vault_id, headers = await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, url, account_id=account_id
-        )
+        try:
+            vault_id, headers = await resolve_auth_for_mcp_mount(
+                pool, crypto_box, session_id, spec, account_id=account_id
+            )
+        except PinnedVaultUnavailable as err:
+            # A misconfigured pin is an expected refusal, not an internal
+            # failure: bail cleanly so the model sees it and stops calling this
+            # mount. Staying on the refusal side of the quota reservation below
+            # keeps a call that never reaches the connector from consuming
+            # dispatch capacity (#1903).
+            raise ToolBail(str(err)) from err
         # Quota admission LAST before the connector invocation: everything
         # above is a refusal path or a pure read and must not consume
         # capacity. A refusal raises ``ToolBail`` (model-visible, nothing

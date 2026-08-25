@@ -74,7 +74,7 @@ class TestMcpDispatchSpecHeaders:
                 return_value=False,
             ),
             patch(
-                "aios.mcp.client.resolve_auth_for_target_url",
+                "aios.mcp.client.resolve_auth_for_mcp_mount",
                 new_callable=AsyncMock,
                 return_value=(None, {}),
             ),
@@ -234,3 +234,65 @@ class TestMcpDispatchSuppression:
         assert kwargs["tool_name"] == "create_issue"
         # arguments come from the lifecycle-yielded _ToolCall.raw_args ("{}").
         assert kwargs["arguments"] == {}
+
+
+class TestMcpDispatchPinFailure:
+    """#2233: a pinned mount whose vault yields nothing must reach the MODEL as
+    a clean refusal, and must not consume outbound dispatch quota — the pin
+    error is a pre-publish refusal, so it stays on the refusal side of the
+    reservation (#1903 ordering).
+    """
+
+    async def test_pin_failure_bails_to_the_model_without_reserving_quota(self) -> None:
+        from aios.mcp.client import PinnedVaultUnavailable
+
+        spec = McpServerSpec(name="gmail_work", url="https://gmail/mcp", vault_id="vlt_gone")
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__gmail_work__send",
+                    "parameters": {"type": "object"},
+                    "strict": False,
+                },
+            }
+        ]
+        tc = _ToolCall(
+            call_id="call_1",
+            name="mcp__gmail_work__send",
+            raw_args="{}",
+            bound_log=MagicMock(),
+        )
+        reserve = AsyncMock()
+        call = AsyncMock()
+
+        with (
+            patch(
+                "aios.harness.tool_dispatch._mcp_call_suppressed",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("aios.harness.tool_dispatch.runtime.require_crypto_box", return_value=object()),
+            patch(
+                "aios.mcp.client.resolve_auth_for_mcp_mount",
+                new_callable=AsyncMock,
+                side_effect=PinnedVaultUnavailable("gmail_work", "vlt_gone", "not bound"),
+            ),
+            patch("aios.services.outbound_tool_quota.reserve_outbound_tool_quota", reserve),
+            patch("aios.mcp.client.call_mcp_tool", call),
+            pytest.raises(ToolBail, match="gmail_work"),
+        ):
+            await _execute_mcp_tool_admitted(
+                MagicMock(),
+                "sess_x",
+                tc,
+                {"gmail_work": spec},
+                mcp_tools=tools,
+                account_id="acc_test_stub",
+                focal_channel=None,
+                parent_focal_at_arrival=None,
+            )
+
+        # Never egressed, and never charged.
+        call.assert_not_awaited()
+        reserve.assert_not_awaited()

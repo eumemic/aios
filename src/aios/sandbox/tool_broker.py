@@ -91,12 +91,23 @@ def _err(status: int, message: str, code: str | None = None) -> JSONResponse:
 
 
 def _transport_err(server_name: str, exc: BaseException) -> JSONResponse:
-    """502 envelope for upstream MCP transport failures.
+    """502 envelope for MCP failures that leave the mount unusable.
 
     Mirrors :func:`aios.mcp.client.call_mcp_tool`'s error shape so the
     CLI can branch on ``code`` rather than substring-matching the
     human-readable message.
+
+    A credential failure gets its own ``code`` because it is not an upstream
+    problem and the operator fix is different: the mount is pinned to a vault
+    that holds nothing usable, so retrying will never help (#2233).
     """
+    from aios.mcp.client import PinnedVaultUnavailable
+
+    if isinstance(exc, PinnedVaultUnavailable):
+        return JSONResponse(
+            {"error": str(exc), "code": "mcp_pin_unresolved"},
+            status_code=502,
+        )
     return JSONResponse(
         {
             "error": f"MCP server '{server_name}' error: {type(exc).__name__}: {exc}",
@@ -398,18 +409,28 @@ class ToolBroker:
         return await agents_service.load_for_session(pool, session, account_id=account_id)
 
     async def _load_auth_for(
-        self, session_id: str, server_url: str
+        self, session_id: str, server: McpServerSpec
     ) -> tuple[str | None, dict[str, str]]:
-        """Resolve ``(vault_id, headers)`` for an MCP call out to ``server_url``."""
+        """Resolve ``(vault_id, headers)`` for an MCP call out to ``server``.
+
+        Takes the whole spec, not just its url, so a ``vault_id`` pin resolves
+        per mount here exactly as it does on the model dispatch path (#2233) —
+        the broker's routes are already ``/mcp/{server}``, so the mount name
+        crosses the sandbox boundary and no protocol change is needed.
+
+        Raises on failure; every caller invokes it INSIDE its existing
+        ``try``/:func:`_transport_err` arm, so a pin failure (and, for free, an
+        ``OAuthRefreshError``) becomes a coded envelope rather than a bare 500.
+        """
         from aios.harness import runtime
-        from aios.mcp.client import resolve_auth_for_target_url
+        from aios.mcp.client import resolve_auth_for_mcp_mount
         from aios.services import sessions as sessions_service
 
         pool = runtime.require_pool()
         crypto_box = runtime.require_crypto_box()
         account_id = await sessions_service.load_session_account_id(pool, session_id)
-        return await resolve_auth_for_target_url(
-            pool, crypto_box, session_id, server_url, account_id=account_id
+        return await resolve_auth_for_mcp_mount(
+            pool, crypto_box, session_id, server, account_id=account_id
         )
 
     # ── discovery ─────────────────────────────────────────────────────────
@@ -595,8 +616,8 @@ class ToolBroker:
             return resolved
         session_id, server, toolset, _, agent = resolved
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
+            vault_id, headers = await self._load_auth_for(session_id, server)
             tool_dicts, _instructions = await discover_mcp_tools(
                 server.url,
                 vault_id,
@@ -642,8 +663,8 @@ class ToolBroker:
         session_id, server, _toolset, tool_name, agent = resolved
         assert tool_name is not None  # require_tool=True
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
+            vault_id, headers = await self._load_auth_for(session_id, server)
             tool_dicts, _ = await discover_mcp_tools(
                 server.url,
                 vault_id,
@@ -710,8 +731,8 @@ class ToolBroker:
             )
             return JSONResponse(outbound_suppression_service.mcp_synthesized_result())
 
-        vault_id, headers = await self._load_auth_for(session_id, server.url)
         try:
+            vault_id, headers = await self._load_auth_for(session_id, server)
             tool_dicts, _ = await discover_mcp_tools(
                 server.url,
                 vault_id,
