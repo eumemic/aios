@@ -17,8 +17,8 @@ UNCONDITIONAL_WAKE_WARNING = (
 _GUARD_NODES = (ast.If, ast.IfExp, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.Match)
 _WAKE_RE = re.compile(r"\btool\s+wake_self\b")
 OBSERVED_WAKE_WARNING = (
-    "This recurring trigger has woken its owning session on nearly every recent fire, "
-    "including at least five consecutive fires. Check that its runtime guard is selective."
+    "This recurring trigger has woken its owning session on nearly every recent fire. "
+    "Check that its runtime guard is selective."
 )
 
 

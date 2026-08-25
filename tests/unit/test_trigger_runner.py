@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -30,3 +31,49 @@ async def test_sandbox_observation_is_finished_on_cancellation(
         await trigger_runner._run_sandbox_command(trigger, action)  # type: ignore[arg-type]
 
     assert broker._trigger_observations == {}
+
+
+@pytest.mark.asyncio
+async def test_observation_reader_failure_does_not_fail_completed_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Connection:
+        @asynccontextmanager
+        async def transaction(self):  # type: ignore[no-untyped-def]
+            yield self
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):  # type: ignore[no-untyped-def]
+            yield Connection()
+
+    trigger = SimpleNamespace(
+        id="trigger-1",
+        source="cron",
+        action=trigger_runner.WakeOwnerAction(content="wake"),
+        session_archived_at=None,
+        enabled=True,
+        owner_session_id="owner",
+        account_id="account",
+        name="watchdog",
+        source_spec={},
+    )
+    deliver = AsyncMock(return_value=("ok", None, None))
+
+    monkeypatch.setattr(runtime, "require_pool", Mock(return_value=Pool()))
+    monkeypatch.setattr(
+        trigger_runner.queries, "unscoped_get_trigger_row", AsyncMock(return_value=trigger)
+    )
+    monkeypatch.setattr(trigger_runner, "_run_wake_owner", deliver)
+    monkeypatch.setattr(trigger_runner.queries, "record_trigger_fire", AsyncMock(return_value=0))
+    monkeypatch.setattr(trigger_runner, "_record_timer_audit", AsyncMock(return_value="audit"))
+    monkeypatch.setattr(trigger_runner, "_append_fire_event", AsyncMock())
+    monkeypatch.setattr(
+        trigger_runner.queries,
+        "list_recent_trigger_wake_outcomes",
+        AsyncMock(side_effect=RuntimeError("telemetry reader unavailable")),
+    )
+
+    await trigger_runner.run_trigger_step("trigger-1")
+
+    deliver.assert_awaited_once()

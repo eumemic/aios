@@ -334,12 +334,6 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 started_at=started_at,
                 woke_owner=woke_owner,
             )
-        observed_warning = False
-        if trigger.source == "cron":
-            outcomes = await queries.list_recent_trigger_wake_outcomes(conn, trigger.id)
-            observed_warning = observed_wake_is_noisy(outcomes) and not observed_wake_is_noisy(
-                outcomes[1:]
-            )
         await _append_fire_event(
             conn,
             trigger,
@@ -379,6 +373,20 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
                 name=trigger.name,
                 consecutive_failures=failures,
             )
+
+    # Observation history is optional telemetry. Read it only after the fire's
+    # audit transaction commits, and never turn a completed action into a
+    # failed/retriable job when the telemetry reader is unavailable.
+    if trigger.source == "cron":
+        try:
+            async with pool.acquire() as conn:
+                outcomes = await queries.list_recent_trigger_wake_outcomes(conn, trigger.id)
+            observed_warning = observed_wake_is_noisy(outcomes) and not observed_wake_is_noisy(
+                outcomes[1:]
+            )
+        except Exception:
+            log.exception("trigger.wake_observation_read_error", trigger_id=trigger.id)
+
     if observed_warning:
         await _surface_failure(
             trigger.owner_session_id,

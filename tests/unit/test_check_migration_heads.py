@@ -65,5 +65,12 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
 
     # Bump this when adding a migration — the count pins accidental
     # deletions/duplications, not a maximum.
-    assert len(revisions) == 160
+    #
+    # Resolved on rebase to the ACTUAL count on this tree (161), not to either
+    # side of the conflict: master said 160 and the branch said 159, and both
+    # were stale. This branch adds no migration; master has gained two since the
+    # branch was cut. A count pin resolved by PICKING A SIDE re-asserts a number
+    # nobody re-measured -- which is how a pin meant to catch accidental
+    # deletions becomes the thing that fails CI.
+    assert len(revisions) == 161
     assert check_history(revisions) in revisions

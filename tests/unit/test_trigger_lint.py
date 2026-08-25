@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from aios.services.trigger_lint import lint_unconditional_wake, observed_wake_is_noisy
+from aios.services.trigger_lint import (
+    OBSERVED_WAKE_WARNING,
+    lint_unconditional_wake,
+    observed_wake_is_noisy,
+)
 
 
 def test_cron_wake_owner_warns() -> None:
@@ -52,3 +56,8 @@ def test_observed_wake_backstop() -> None:
     assert not observed_wake_is_noisy([False, *([True] * 9)])
     assert observed_wake_is_noisy([True] * 4)
     assert not observed_wake_is_noisy([False, *([True] * 4)])
+
+
+def test_observed_wake_warning_does_not_overstate_history() -> None:
+    assert observed_wake_is_noisy([True] * 4)
+    assert "at least five consecutive fires" not in OBSERVED_WAKE_WARNING
