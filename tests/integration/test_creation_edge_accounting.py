@@ -437,7 +437,7 @@ async def test_ranked_timeout_rolls_back_and_releases_pool_connection(
         await conn.execute("SELECT pg_sleep(0.05)")
         raise AssertionError("statement timeout did not fire")
 
-    monkeypatch.setattr(accounting_service, "USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS", 1)
+    monkeypatch.setattr(accounting_service, "USAGE_STATEMENT_TIMEOUT_MS", 1)
     monkeypatch.setattr(accounting_queries, "ranked_consumers", _slow_query)
     with pytest.raises(asyncpg.QueryCanceledError):
         await accounting_service.ranked_consumers(

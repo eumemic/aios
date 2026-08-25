@@ -78,12 +78,34 @@ def _attributed(row: Any, *, window_seconds: int) -> AttributedUsage:
 # verified result-identical on production data (issue #2246).
 SUBTREE_PAIR_CAP = 4096
 
-# Per-statement bound for both usage statements, applied via ``SET LOCAL`` in
-# ``usage_for_nodes`` (the peer of ``USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS``).
-# The account-scan fallback measured 4-6s warm on the largest production
-# account, so 5s would fail it chronically; 10s passes warm and converts a
-# cold-cache stall into an explicit error well before the pool's 30s bound.
+# One bound for every account-scale usage statement: the two hydration
+# statements here (per-fetch asyncpg timeout in ``usage_for_nodes``) and the
+# ranked-consumers view (``SET LOCAL`` in its service, which owns its own
+# transaction).  Both account-scale shapes measured 4-6s warm on the largest
+# production account with JIT off, so 5s would fail them chronically; 10s
+# passes warm and converts a cold-cache stall into an explicit error well
+# before the pool's 30s ``statement_timeout``.
 USAGE_STATEMENT_TIMEOUT_MS = 10_000
+
+
+def _coverage_cte(account_param: str, window_param: str) -> str:
+    """The per-account rate-coverage CTE body, shared by all three statements.
+
+    ``observed_seconds`` is the behavior-bearing clamp every ``_rate()`` divides
+    by; composing it keeps the three statements from drifting.
+    """
+    return f"""
+    SELECT usage_ledger_started_at AS coverage_started_at,
+           LEAST(
+               {window_param},
+               GREATEST(
+                   1,
+                   FLOOR(EXTRACT(EPOCH FROM (now() - usage_ledger_started_at)))::integer
+               )
+           ) AS observed_seconds
+      FROM accounts WHERE id = {account_param}
+"""
+
 
 # The subtree-driven statement: the recursive walk carries each node's own
 # counters (the child probe already touches the row, so the extra columns are
@@ -93,8 +115,10 @@ USAGE_STATEMENT_TIMEOUT_MS = 10_000
 # CTE-to-CTE joins, so the misestimated tree cardinality cannot flip the plan.
 # ``capped`` bounds the walk lazily: recursion stops once ``$5`` rows exist,
 # and ``pair_count = $5`` tells the caller the result is truncated (and thus
-# wrong — fall back).
-_SUBTREE_USAGE_SQL = r"""
+# wrong — fall back).  ``is_root`` is projected in ``capped``, not carried
+# through the recursion, where it would break the ``UNION`` dedup on a
+# malformed cycle re-entering its own root.
+_SUBTREE_USAGE_SQL = rf"""
 WITH RECURSIVE
 roots(kind, id) AS (
     SELECT * FROM unnest($1::text[], $2::text[])
@@ -143,7 +167,8 @@ tree(root_kind, root_id, kind, id, cost_microusd, input_tokens, output_tokens,
       ) child ON TRUE
 ),
 capped AS (
-    SELECT * FROM tree LIMIT $5
+    SELECT tree.*, kind = root_kind AND id = root_id AS is_root
+      FROM tree LIMIT $5
 ),
 totals AS (
     SELECT t.root_kind, t.root_id,
@@ -160,35 +185,29 @@ totals AS (
                AS subtree_window_cache_read_input_tokens,
            SUM(COALESCE(wn.cache_creation_input_tokens, 0))::bigint
                AS subtree_window_cache_creation_input_tokens,
-           MIN(t.cost_microusd) FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           MIN(t.cost_microusd) FILTER (WHERE t.is_root)
                AS own_cost_microusd,
-           MIN(t.input_tokens) FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           MIN(t.input_tokens) FILTER (WHERE t.is_root)
                AS own_input_tokens,
-           MIN(t.output_tokens) FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           MIN(t.output_tokens) FILTER (WHERE t.is_root)
                AS own_output_tokens,
-           MIN(t.cache_read_input_tokens)
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           MIN(t.cache_read_input_tokens) FILTER (WHERE t.is_root)
                AS own_cache_read_input_tokens,
-           MIN(t.cache_creation_input_tokens)
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           MIN(t.cache_creation_input_tokens) FILTER (WHERE t.is_root)
                AS own_cache_creation_input_tokens,
-           BOOL_AND(t.tokens_complete)
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)
+           BOOL_AND(t.tokens_complete) FILTER (WHERE t.is_root)
                AS own_tokens_complete,
-           SUM(COALESCE(wn.cost_microusd, 0))
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)::bigint
+           SUM(COALESCE(wn.cost_microusd, 0)) FILTER (WHERE t.is_root)::bigint
                AS own_window_cost_microusd,
-           SUM(COALESCE(wn.input_tokens, 0))
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)::bigint
+           SUM(COALESCE(wn.input_tokens, 0)) FILTER (WHERE t.is_root)::bigint
                AS own_window_input_tokens,
-           SUM(COALESCE(wn.output_tokens, 0))
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)::bigint
+           SUM(COALESCE(wn.output_tokens, 0)) FILTER (WHERE t.is_root)::bigint
                AS own_window_output_tokens,
            SUM(COALESCE(wn.cache_read_input_tokens, 0))
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)::bigint
+               FILTER (WHERE t.is_root)::bigint
                AS own_window_cache_read_input_tokens,
            SUM(COALESCE(wn.cache_creation_input_tokens, 0))
-               FILTER (WHERE t.kind = t.root_kind AND t.id = t.root_id)::bigint
+               FILTER (WHERE t.is_root)::bigint
                AS own_window_cache_creation_input_tokens
       FROM capped t
       LEFT JOIN LATERAL (
@@ -198,25 +217,16 @@ totals AS (
                   SUM(l.cache_read_input_tokens) AS cache_read_input_tokens,
                   SUM(l.cache_creation_input_tokens) AS cache_creation_input_tokens
              FROM inference_usage_ledger l
-            WHERE l.account_id = $3
+            WHERE (SELECT COUNT(*) FROM capped) < $5
+              AND l.account_id = $3
               AND ((t.kind = 'session' AND l.session_id = t.id)
                 OR (t.kind = 'run' AND l.run_id = t.id))
               AND l.occurred_at >= now() - ($4 * interval '1 second')
       ) wn ON TRUE
      GROUP BY t.root_kind, t.root_id
 ),
-coverage AS (
-    SELECT usage_ledger_started_at AS coverage_started_at,
-           LEAST(
-               $4,
-               GREATEST(
-                   1,
-                   FLOOR(EXTRACT(EPOCH FROM (now() - usage_ledger_started_at)))::integer
-               )
-           ) AS observed_seconds
-      FROM accounts WHERE id = $3
-)
-SELECT r.kind AS root_kind, r.id AS root_id,
+coverage AS ({_coverage_cte("$3", "$4")})
+SELECT total.root_kind, total.root_id,
        total.own_cost_microusd,
        total.own_input_tokens,
        total.own_output_tokens,
@@ -241,8 +251,7 @@ SELECT r.kind AS root_kind, r.id AS root_id,
        total.subtree_window_cache_creation_input_tokens,
        coverage.coverage_started_at, coverage.observed_seconds,
        (SELECT COUNT(*) FROM capped) AS pair_count
-  FROM roots r
-  JOIN totals total ON total.root_kind = r.kind AND total.root_id = r.id
+  FROM totals total
   CROSS JOIN coverage
 """
 
@@ -251,7 +260,7 @@ SELECT r.kind AS root_kind, r.id AS root_id,
 # reduces it with hash joins.  At whole-account subtree scale (the fallback's
 # only caller) this is the best known plan shape; for small root sets it is
 # pathological, which is why ``_SUBTREE_USAGE_SQL`` runs first.
-_BATCH_USAGE_SQL = r"""
+_BATCH_USAGE_SQL = rf"""
 WITH RECURSIVE
 roots(kind, id) AS (
     SELECT * FROM unnest($1::text[], $2::text[])
@@ -324,17 +333,7 @@ totals AS (
       LEFT JOIN window_node wn ON wn.kind = t.kind AND wn.id = t.id
      GROUP BY t.root_kind, t.root_id
 ),
-coverage AS (
-    SELECT usage_ledger_started_at AS coverage_started_at,
-           LEAST(
-               $4,
-               GREATEST(
-                   1,
-                   FLOOR(EXTRACT(EPOCH FROM (now() - usage_ledger_started_at)))::integer
-               )
-           ) AS observed_seconds
-      FROM accounts WHERE id = $3
-)
+coverage AS ({_coverage_cte("$3", "$4")})
 SELECT r.kind AS root_kind, r.id AS root_id,
        own.cost_microusd AS own_cost_microusd,
        own.input_tokens AS own_input_tokens,
@@ -380,24 +379,28 @@ async def usage_for_nodes(
 
     Runs the subtree-driven statement first and falls back to the account-scan
     statement iff the walk overflows ``SUBTREE_PAIR_CAP`` (see the constant's
-    comment).  The transaction wrap exists to scope ``SET LOCAL``: ``jit = off``
-    (JIT compilation costs more than either statement's typical execution) and
-    the statement timeout.  When the caller already holds a transaction this is
-    a savepoint and the settings persist until that transaction ends — every
-    current caller hydrates usage as its final read.
+    comment).  Each statement is bounded client-side (asyncpg cancels the
+    server query on expiry) — statement-scoped by construction, unlike a
+    ``SET LOCAL`` inside a caller's transaction.
     """
     if not roots:
         return {}
     kinds = [root.kind for root in roots]
     ids = [root.id for root in roots]
-    async with conn.transaction():
-        await conn.execute(f"SET LOCAL statement_timeout = '{USAGE_STATEMENT_TIMEOUT_MS}ms'")
-        await conn.execute("SET LOCAL jit = off")
+    timeout = USAGE_STATEMENT_TIMEOUT_MS / 1000
+    rows = await conn.fetch(
+        _SUBTREE_USAGE_SQL,
+        kinds,
+        ids,
+        account_id,
+        window_seconds,
+        SUBTREE_PAIR_CAP + 1,
+        timeout=timeout,
+    )
+    if rows and int(rows[0]["pair_count"]) > SUBTREE_PAIR_CAP:
         rows = await conn.fetch(
-            _SUBTREE_USAGE_SQL, kinds, ids, account_id, window_seconds, SUBTREE_PAIR_CAP + 1
+            _BATCH_USAGE_SQL, kinds, ids, account_id, window_seconds, timeout=timeout
         )
-        if rows and int(rows[0]["pair_count"]) > SUBTREE_PAIR_CAP:
-            rows = await conn.fetch(_BATCH_USAGE_SQL, kinds, ids, account_id, window_seconds)
     return {
         (str(row["root_kind"]), str(row["root_id"])): _attributed(
             row, window_seconds=window_seconds
@@ -523,17 +526,7 @@ rollup AS (
         ON wn.kind = t.kind AND wn.id = t.id
      GROUP BY t.root_kind, t.root_id
 ),
-coverage AS (
-    SELECT usage_ledger_started_at AS coverage_started_at,
-           LEAST(
-               $2,
-               GREATEST(
-                   1,
-                   FLOOR(EXTRACT(EPOCH FROM (now() - usage_ledger_started_at)))::integer
-               )
-           ) AS observed_seconds
-      FROM accounts WHERE id = $1
-),
+coverage AS ({_coverage_cte("$1", "$2")}),
 rankable AS (
     SELECT n.*, r.*,
            n.cost_microusd AS own_cost_microusd,
