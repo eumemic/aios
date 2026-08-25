@@ -1,4 +1,4 @@
-"""Migration 0170 adds ``concise`` to agents + agent_versions.
+"""Migration 0171 adds ``concise`` to agents + agent_versions.
 
 Covers the additive-column contract on a real Postgres: a row seeded
 BEFORE the migration comes out ``concise = false`` (existing agents keep
@@ -17,7 +17,7 @@ import pytest
 from tests.conftest import needs_docker
 from tests.helpers.alembic import run_alembic
 
-# Seeded BEFORE 0170 so the rows predate the column.
+# Seeded BEFORE 0171 so the rows predate the column.
 _SEED_SQL = """
 INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name)
 VALUES ('acc_root', NULL, TRUE, 'root');
@@ -53,8 +53,8 @@ def test_concise_column_added_default_false(migration_db_url: str) -> None:
     assert up.returncode == 0, f"upgrade to 0169 failed:\n{up.stderr}\n{up.stdout}"
     asyncio.run(_execute(db_url, _SEED_SQL))
 
-    up = run_alembic(["upgrade", "0170"], db_url)
-    assert up.returncode == 0, f"upgrade to 0170 failed:\n{up.stderr}\n{up.stdout}"
+    up = run_alembic(["upgrade", "0171"], db_url)
+    assert up.returncode == 0, f"upgrade to 0171 failed:\n{up.stderr}\n{up.stdout}"
 
     for table in ("agents", "agent_versions"):
         meta = asyncio.run(

@@ -9,7 +9,7 @@ every other config field (changing it creates a new agent version).
 Purely additive, safe in the new-code/old-schema deploy window (0139
 precedent).
 
-Revision ID: 0170
+Revision ID: 0171
 Revises: 0169
 Create Date: 2026-08-25
 """
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0170"
+revision: str = "0171"
 down_revision: str = "0169"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
