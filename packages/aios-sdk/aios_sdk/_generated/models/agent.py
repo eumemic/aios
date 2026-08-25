@@ -46,6 +46,7 @@ class Agent:
         http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentLitellmExtra | Unset):
         preempt_policy (AgentPreemptPolicy | Unset):  Default: AgentPreemptPolicy.WAIT.
+        concise (bool | Unset):  Default: False.
         created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
@@ -67,6 +68,7 @@ class Agent:
     http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentLitellmExtra | Unset = UNSET
     preempt_policy: AgentPreemptPolicy | Unset = AgentPreemptPolicy.WAIT
+    concise: bool | Unset = False
     created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -129,6 +131,8 @@ class Agent:
         if not isinstance(self.preempt_policy, Unset):
             preempt_policy = self.preempt_policy.value
 
+        concise = self.concise
+
         created_by: dict[str, Any] | None | Unset
         if isinstance(self.created_by, Unset):
             created_by = UNSET
@@ -172,6 +176,8 @@ class Agent:
             field_dict["litellm_extra"] = litellm_extra
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
+        if concise is not UNSET:
+            field_dict["concise"] = concise
         if created_by is not UNSET:
             field_dict["created_by"] = created_by
         if archived_at is not UNSET:
@@ -263,6 +269,8 @@ class Agent:
         else:
             preempt_policy = AgentPreemptPolicy(_preempt_policy)
 
+        concise = d.pop("concise", UNSET)
+
         def _parse_created_by(data: object) -> Actor | None | Unset:
             if data is None:
                 return data
@@ -315,6 +323,7 @@ class Agent:
             http_servers=http_servers,
             litellm_extra=litellm_extra,
             preempt_policy=preempt_policy,
+            concise=concise,
             created_by=created_by,
             archived_at=archived_at,
         )

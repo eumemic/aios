@@ -869,6 +869,15 @@ class AgentCreate(BaseModel):
             "finish ('wait', default)."
         ),
     )
+    concise: bool = Field(
+        default=False,
+        description=(
+            "Steer the model toward short, direct output: a concise-style "
+            "rules block joins the system prompt and a one-line reminder is "
+            "appended at the context tail each step. Both are assembled at "
+            "step time only — never persisted to the transcript."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentCreate:
@@ -903,6 +912,7 @@ class AgentUpdate(BaseModel):
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
     preempt_policy: PreemptPolicy | None = None
+    concise: bool | None = None
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentUpdate:
@@ -933,6 +943,7 @@ class Agent(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy = "wait"
+    concise: bool = False
     created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
@@ -954,6 +965,7 @@ class AgentVersion(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy = "wait"
+    concise: bool = False
     created_at: datetime
 
 
@@ -1003,7 +1015,7 @@ class StepSurface(BaseModel):
 
     Nominal replacement for the ``Agent | AgentVersion`` structural union (the
     two wire read-models) plus the ``agent_id=""``/``version=0`` sentinel that
-    encoded "no agent at all". Carries **exactly** the ten config fields the
+    encoded "no agent at all". Carries **exactly** the eleven config fields the
     harness consumes off the loaded surface (verified by grep over every
     caller — nothing reads ``name``/``metadata``/``description``/``created_at``
     off it) plus a discriminated :data:`StepBinding` identity.
@@ -1026,6 +1038,7 @@ class StepSurface(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy
+    concise: bool = False
     binding: StepBinding
 
 

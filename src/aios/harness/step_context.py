@@ -142,6 +142,10 @@ class StepPrelude:
     ``obligations_block_upper_bound_local`` is the worst-case size of that
     block, bounded from the actual fetched obligations (real count + each real
     summary, capped) so reserving it keeps the payload under ``window_max``.
+
+    ``concise_nag_upper_bound_local`` is the constant cost of the concise
+    tail reminder the composer appends when ``agent.concise`` — 0 for a
+    non-concise agent (the composer appends nothing).
     """
 
     system_prompt: str
@@ -150,6 +154,7 @@ class StepPrelude:
     tail_block_upper_bound_local: int
     obligations: list[Obligation]
     obligations_block_upper_bound_local: int
+    concise_nag_upper_bound_local: int
 
 
 class PreludeOverheadSplit(NamedTuple):
@@ -184,7 +189,8 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     System prompt + tool schemas (each weighted separately by the
     windower), plus the reserved upper bounds for the post-windowing
     additions: the channels tail block, the obligations tail block
-    (#1413), and the omission marker (#738). All reserves are reserved
+    (#1413), the concise tail reminder (0 for a non-concise agent), and
+    the omission marker (#738). All reserves are reserved
     unconditionally — any may not render, but the budget must hold when
     they do — and are accounted as ``text``-class padding.
 
@@ -197,6 +203,7 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     reserves_local = (
         prelude.tail_block_upper_bound_local
         + prelude.obligations_block_upper_bound_local
+        + prelude.concise_nag_upper_bound_local
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
     return PreludeOverheadSplit(
@@ -279,6 +286,10 @@ async def compute_step_prelude(
     from aios.harness.channels import (
         augment_with_focal_paradigm,
         max_tail_block_local,
+    )
+    from aios.harness.concise import (
+        augment_with_concise_style,
+        concise_nag_upper_bound_local,
     )
     from aios.harness.loop import (
         _switch_channel_tool_spec,
@@ -368,6 +379,9 @@ async def compute_step_prelude(
     )
     system_prompt = augment_system_prompt(agent.system, skill_versions)
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
+    # Cache-stable concise rules block (constant text, so the prompt prefix
+    # stays hot); the per-step tail reminder lives in ``compose_step_context``.
+    system_prompt = augment_with_concise_style(system_prompt, agent.concise)
     system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
     system_prompt = augment_with_resource_health(
@@ -383,6 +397,7 @@ async def compute_step_prelude(
         tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
         obligations_block_upper_bound_local=max_obligations_block_local(obligations),
+        concise_nag_upper_bound_local=concise_nag_upper_bound_local() if agent.concise else 0,
     )
 
 
@@ -608,6 +623,7 @@ async def compose_step_context(
     (custom, awaiting-confirm) gets the "external action" wording.
     """
     from aios.harness.channels import build_channels_tail_block
+    from aios.harness.concise import build_concise_nag_message
     from aios.harness.obligations import build_obligations_tail_block
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
@@ -686,6 +702,7 @@ async def compose_step_context(
     # original request user message. Appended AFTER the channels tail and BEFORE
     # the merge so an unanswered obligation is the FINAL user-role line — the
     # higher-priority stimulus (literal-minded models anchor on the last line).
+    # (When ``agent.concise``, the one-line concise nag below lands after it.)
     #
     # Gated on the open set being non-empty ALONE — deliberately NOT
     # ``_agent_owes_response`` (which suppresses the channels tail on a trailing
@@ -696,6 +713,22 @@ async def compose_step_context(
     obligations_block = build_obligations_tail_block(prelude.obligations, session_id=session.id)
     if obligations_block is not None:
         ctx.messages.append(obligations_block)
+
+    # Concise tail reminder ("nag"): injected at ASSEMBLY time each step so
+    # there is exactly ONE copy, always at maximum recency, and it never
+    # pollutes the persisted transcript. A plain user-content message is the
+    # only mid-transcript steering channel that survives LiteLLM's provider
+    # transforms — Anthropic and Gemini hoist any role:"system" message into
+    # the top-level system param, destroying position. Appended LAST, after
+    # the channels + obligations tails, and BEFORE the merge below: when the
+    # payload already ends in a user turn the merge folds the nag in as its
+    # final content (this codebase deliberately merges adjacent user turns —
+    # a standalone-but-adjacent user message would be re-merged by LiteLLM's
+    # provider transform anyway); after an assistant/tool turn it stands as
+    # its own final user message. Either way the reminder is the last thing
+    # the model reads.
+    if agent.concise:
+        ctx.messages.append(build_concise_nag_message())
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,

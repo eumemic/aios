@@ -190,6 +190,7 @@ def mock_step_dependencies() -> Any:
         window_min=1000,
         window_max=10000,
         preempt_policy="wait",
+        concise=False,
     )
     start_event = SimpleNamespace(id="ev_start")
 

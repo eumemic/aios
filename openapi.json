@@ -11806,6 +11806,11 @@
             "title": "Preempt Policy",
             "default": "wait"
           },
+          "concise": {
+            "type": "boolean",
+            "title": "Concise",
+            "default": false
+          },
           "created_by": {
             "anyOf": [
               {
@@ -11949,6 +11954,12 @@
             "title": "Preempt Policy",
             "description": "Whether a new wake-eligible event (e.g. a user message) arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or waits for the step to finish ('wait', default).",
             "default": "wait"
+          },
+          "concise": {
+            "type": "boolean",
+            "title": "Concise",
+            "description": "Steer the model toward short, direct output: a concise-style rules block joins the system prompt and a one-line reminder is appended at the context tail each step. Both are assembled at step time only \u2014 never persisted to the transcript.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -12159,6 +12170,17 @@
               }
             ],
             "title": "Preempt Policy"
+          },
+          "concise": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concise"
           }
         },
         "additionalProperties": false,
@@ -12236,6 +12258,11 @@
             ],
             "title": "Preempt Policy",
             "default": "wait"
+          },
+          "concise": {
+            "type": "boolean",
+            "title": "Concise",
+            "default": false
           },
           "created_at": {
             "type": "string",

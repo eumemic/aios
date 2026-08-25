@@ -44,6 +44,7 @@ class AgentUpdate:
             window_min (int | None | Unset):
             window_max (int | None | Unset):
             preempt_policy (AgentUpdatePreemptPolicyType0 | None | Unset):
+            concise (bool | None | Unset):
     """
 
     version: int
@@ -60,6 +61,7 @@ class AgentUpdate:
     window_min: int | None | Unset = UNSET
     window_max: int | None | Unset = UNSET
     preempt_policy: AgentUpdatePreemptPolicyType0 | None | Unset = UNSET
+    concise: bool | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_update_litellm_extra_type_0 import (
@@ -177,6 +179,12 @@ class AgentUpdate:
         else:
             preempt_policy = self.preempt_policy
 
+        concise: bool | None | Unset
+        if isinstance(self.concise, Unset):
+            concise = UNSET
+        else:
+            concise = self.concise
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -210,6 +218,8 @@ class AgentUpdate:
             field_dict["window_max"] = window_max
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
+        if concise is not UNSET:
+            field_dict["concise"] = concise
 
         return field_dict
 
@@ -430,6 +440,15 @@ class AgentUpdate:
 
         preempt_policy = _parse_preempt_policy(d.pop("preempt_policy", UNSET))
 
+        def _parse_concise(data: object) -> bool | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(bool | None | Unset, data)
+
+        concise = _parse_concise(d.pop("concise", UNSET))
+
         agent_update = cls(
             version=version,
             name=name,
@@ -445,6 +464,7 @@ class AgentUpdate:
             window_min=window_min,
             window_max=window_max,
             preempt_policy=preempt_policy,
+            concise=concise,
         )
 
         return agent_update
