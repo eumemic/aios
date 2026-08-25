@@ -1886,10 +1886,9 @@ async def _unresolved_tool_calls(
     if not session_ids:
         return {}
     # ``data ? 'tool_calls'`` is the partial-index predicate on
-    # ``events_assistant_tool_calls_idx``; the ``jsonb_array_length > 0``
-    # post-filter narrows to non-empty arrays (the index admits
-    # ``null`` / ``[]`` too).  Without the ``?`` conjunct the planner
-    # falls back to the wider btree backing the ``events``
+    # ``events_assistant_tool_calls_idx``; empty/``null`` arrays the index
+    # admits simply explode to zero LATERAL rows.  Without the ``?`` conjunct
+    # the planner falls back to the wider btree backing the ``events``
     # ``UNIQUE (session_id, seq)`` constraint.
     #
     # ``$3`` carries the optional age bound (seconds); NULL disables it so
@@ -1897,72 +1896,76 @@ async def _unresolved_tool_calls(
     # the connector backfill (#744) passes a positive value to drop stale
     # sends.  ``make_interval`` keeps the bound parameterized rather than
     # string-interpolated into the SQL.
-    asst_rows = await conn.fetch(
+    #
+    # ``a.seq >= s.open_tool_call_floor_seq`` (#2254) is the sweep-maintained
+    # ghost-scan floor (migration 0136): a proven lower bound on the oldest
+    # still-open call's seq, advanced GREATEST-only by the ghost sweep.  It
+    # turns the O(session lifetime) history scan into O(open window).  The
+    # column defaults to 0 (unbounded), so behaviour is unchanged until a
+    # sweep advances it.  Do NOT short-circuit on ``open_tool_call_count``
+    # instead — the counter can undercount (see 0136's migration body); the
+    # floor-seq bound is the sanctioned form.
+    #
+    # The result-pairing check is a per-element ``NOT EXISTS`` probe on the
+    # UNIQUE ``events_tool_result_idx (session_id, data->>'tool_call_id')``
+    # (0097) — O(1) per tool_call — replacing the former second whole-history
+    # scan of every tool-role row plus an in-Python set diff.  Projecting the
+    # exploded ``tool_calls`` element (never the full assistant ``data``
+    # JSONB) keeps multi-KB turn payloads out of the wire/decode path.
+    #
+    # Join order is load-bearing: ``sessions`` drives, so the floor lands in
+    # the ``events_assistant_tool_calls_idx (session_id, seq)`` INDEX COND
+    # (verified by EXPLAIN in prod: 1274ms → 32ms on a 518k-event session).
+    # Written events-first, the planner scanned every assistant turn and
+    # applied the floor as a post-join filter — the bound bought nothing.
+    rows = await conn.fetch(
         """
-        SELECT session_id, data, created_at
-          FROM events
-         WHERE session_id = ANY($1::text[])
-           AND account_id = $2
-           AND kind = 'message'
-           AND role = 'assistant'
-           AND data ? 'tool_calls'
-           AND jsonb_array_length(
-                 COALESCE(NULLIF(data->'tool_calls','null'::jsonb), '[]'::jsonb)
-               ) > 0
+        SELECT a.session_id,
+               tc.item AS tool_call,
+               a.created_at
+          FROM sessions s
+          JOIN events a
+            ON a.session_id = s.id
+           AND a.account_id = $2
+           AND a.kind = 'message'
+           AND a.role = 'assistant'
+           AND a.data ? 'tool_calls'
+           AND a.seq >= s.open_tool_call_floor_seq
+         CROSS JOIN LATERAL jsonb_array_elements(
+               COALESCE(NULLIF(a.data->'tool_calls','null'::jsonb), '[]'::jsonb)
+             ) WITH ORDINALITY AS tc(item, ord)
+         WHERE s.id = ANY($1::text[])
+           AND s.account_id = $2
            AND (
                  $3::bigint IS NULL
-                 OR created_at >= now() - make_interval(secs => $3::bigint)
+                 OR a.created_at >= now() - make_interval(secs => $3::bigint)
                )
-         ORDER BY session_id, seq ASC
+           AND COALESCE(tc.item->>'id', '') <> ''
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM events r
+                  WHERE r.session_id = a.session_id
+                    AND r.account_id = $2
+                    AND r.kind = 'message'
+                    AND r.role = 'tool'
+                    AND r.data->>'tool_call_id' = tc.item->>'id'
+               )
+         ORDER BY a.session_id, a.seq ASC, tc.ord ASC
         """,
         session_ids,
         account_id,
         max_age_seconds,
     )
-    if not asst_rows:
-        return {}
-    results_by_sid = await _tool_result_ids_by_session(conn, session_ids, account_id=account_id)
     out: dict[str, list[dict[str, Any]]] = {}
-    for row in asst_rows:
-        sid: str = row["session_id"]
-        data = row["data"]
-        completed: set[str] = results_by_sid.get(sid, set())
-        for tc in data.get("tool_calls") or []:
-            if tc.get("id") and tc["id"] not in completed:
-                # Shallow copy so the read-model carries the parent
-                # assistant turn's created_at without mutating the parsed
-                # source dict (the jsonb codec may return a shared reference).
-                # Connector-SSE consumers
-                # build their own explicit output dicts, so this extra key
-                # never leaks into their payloads.
-                out.setdefault(sid, []).append({**tc, "_pending_since": row["created_at"]})
-    return out
-
-
-async def _tool_result_ids_by_session(
-    conn: asyncpg.Connection[Any],
-    session_ids: list[str],
-    *,
-    account_id: str,
-) -> dict[str, set[str]]:
-    """Map ``session_id → {tool_call_id}`` for every tool-role event."""
-    rows = await conn.fetch(
-        """
-        SELECT session_id, data->>'tool_call_id' AS tool_call_id
-          FROM events
-         WHERE session_id = ANY($1::text[])
-           AND account_id = $2
-           AND kind = 'message'
-           AND role = 'tool'
-        """,
-        session_ids,
-        account_id,
-    )
-    out: dict[str, set[str]] = {}
-    for r in rows:
-        tcid = r["tool_call_id"]
-        if tcid:
-            out.setdefault(r["session_id"], set()).add(tcid)
+    for row in rows:
+        # Shallow copy so the read-model carries the parent assistant turn's
+        # created_at without mutating the parsed source dict (the jsonb codec
+        # may return a shared reference).  Connector-SSE consumers build their
+        # own explicit output dicts, so this extra key never leaks into their
+        # payloads.
+        out.setdefault(row["session_id"], []).append(
+            {**row["tool_call"], "_pending_since": row["created_at"]}
+        )
     return out
 
 
