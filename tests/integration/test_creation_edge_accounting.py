@@ -293,7 +293,9 @@ async def test_account_scan_fallback_is_result_identical_to_subtree_path(
         UsageNodeRef(kind="run", id="wfr_does_not_exist"),
     ]
 
-    async with accounting_pool.acquire() as conn:
+    # One transaction pins now() (transaction_timestamp) across both paths, so
+    # observed_seconds — and thus every rate — cannot drift between the calls.
+    async with accounting_pool.acquire() as conn, conn.transaction():
         subtree_conn = _FetchCountingConn(conn)
         via_subtree = await accounting_queries.usage_for_nodes(
             subtree_conn,

@@ -381,7 +381,10 @@ async def usage_for_nodes(
     statement iff the walk overflows ``SUBTREE_PAIR_CAP`` (see the constant's
     comment).  Each statement is bounded client-side (asyncpg cancels the
     server query on expiry) — statement-scoped by construction, unlike a
-    ``SET LOCAL`` inside a caller's transaction.
+    ``SET LOCAL`` inside a caller's transaction.  The bound is per statement
+    (an overflowing page pays the probe, measured ~190ms, plus the fallback),
+    and a timeout deliberately does NOT try the other statement: overflow is a
+    plan-shape decision, timeout is a failure, and failures surface raw.
     """
     if not roots:
         return {}
