@@ -9,8 +9,9 @@ and the ``trigger_runner`` maintenance pair.
 What it reclaims (all time-based, per the ``trigger_runs`` doctrine — never a
 count-cap):
 
-- terminal+archived ``wf_runs`` past ``wf_runs_retention_days`` (dropping their
-  ``WfRunEvent`` journals via ``ON DELETE CASCADE``),
+- the journal detail (``wf_run_events`` + ``wf_run_signals``) of
+  terminal+archived ``wf_runs`` past ``wf_runs_retention_days`` — the run row
+  is kept forever as the durable summary,
 - archived agent/skill/workflow definitions past
   ``archived_definition_retention_days`` that NO live session/run still pins.
 

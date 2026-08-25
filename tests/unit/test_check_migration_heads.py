@@ -63,5 +63,7 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
     versions = Path(__file__).resolve().parents[2] / "migrations" / "versions"
     revisions = load_revisions(versions)
 
-    assert len(revisions) == 158
+    # Bump this when adding a migration — the count pins accidental
+    # deletions/duplications, not a maximum.
+    assert len(revisions) == 159
     assert check_history(revisions) in revisions

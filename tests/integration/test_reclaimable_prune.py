@@ -23,6 +23,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.db.pool import create_pool, register_jsonb_codec
+from aios.db.queries import trace as trace_queries
 from aios.db.queries import workflows as wf_queries
 from aios.db.queries.prune import (
     prune_archived_runs,
@@ -78,7 +79,8 @@ async def _make_archived_run(
         depth=10,
     )
     if seq_journal:
-        # A couple of journal rows to prove the cascade drops them.
+        # A couple of journal rows to prove the prune deletes the child
+        # detail directly (the run row survives; nothing cascades).
         await conn.execute(
             "INSERT INTO wf_run_events (id, run_id, seq, type, payload) "
             "VALUES ($1, $2, 0, 'run_started', '{}'::jsonb)",
@@ -150,6 +152,17 @@ async def _insert_session(
         agent_id,
         agent_version,
         archived,
+    )
+
+
+async def _set_journal_completed_divergent(conn: asyncpg.Connection[Any], run_id: str) -> None:
+    """Point the journal's run_completed at a payload that DISAGREES with
+    terminal_summary — the discriminator the trace-preference tests rely on."""
+    await conn.execute(
+        'UPDATE wf_run_events SET payload = \'{"is_error": true, '
+        '"error": {"kind": "from_journal"}}\'::jsonb '
+        "WHERE run_id = $1 AND type = 'run_completed'",
+        run_id,
     )
 
 
@@ -333,6 +346,66 @@ async def test_archived_legacy_run_is_backfilled_before_detail_prune(
     assert row["terminal_summary"] is not None
     assert await prune_archived_runs(conn, retention_days=30) == 2
     assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
+
+
+# ─── trace metadata survives journal pruning (#2245) ────────────────────────
+
+
+async def test_trace_meta_prefers_terminal_summary_when_both_exist(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """Summary wins over a divergent journal payload.
+
+    The journal's ``run_completed`` deliberately DISAGREES with
+    ``terminal_summary`` (is_error True vs False) so a mutant that swaps the
+    preference — or one that keeps reading only the journal — fails here.
+    """
+    run_id = await _make_archived_run(conn, archived_age_days=1)
+    await _set_journal_completed_divergent(conn, run_id)
+
+    meta = await trace_queries.read_run_meta_batched(conn, [run_id], account_id="acc_root")
+    completed = meta[run_id]["run_completed"]
+    assert completed is not None
+    assert completed["is_error"] is False  # from summary, not the journal
+
+
+async def test_trace_meta_survives_journal_prune(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """After the prune empties the journal, the trace still resolves terminal
+    state from ``terminal_summary`` — the #2245 gap: this returned None before
+    the fallback, silently dropping is_error/error from a pruned run's trace.
+    """
+    run_id = await _make_archived_run(conn, archived_age_days=60)
+    await conn.execute(
+        'UPDATE wf_runs SET terminal_summary = \'{"is_error": true, '
+        '"error": {"kind": "from_summary"}}\'::jsonb WHERE id = $1',
+        run_id,
+    )
+    assert await prune_archived_runs(conn, retention_days=30) == 2
+    assert await _count(conn, "wf_run_events", "run_id", run_id) == 0
+
+    meta = await trace_queries.read_run_meta_batched(conn, [run_id], account_id="acc_root")
+    completed = meta[run_id]["run_completed"]
+    assert completed is not None
+    assert completed["is_error"] is True
+    assert completed["error"]["kind"] == "from_summary"
+
+
+async def test_trace_meta_falls_back_to_journal_for_legacy_rows(
+    conn: asyncpg.Connection[Any],
+) -> None:
+    """A pre-summary row (terminal_summary NULL) still resolves from the
+    journal — the legacy arm must not go dead when the summary arm is added."""
+    run_id = await _make_archived_run(conn, archived_age_days=1)
+    await conn.execute("UPDATE wf_runs SET terminal_summary = NULL WHERE id = $1", run_id)
+    await _set_journal_completed_divergent(conn, run_id)
+
+    meta = await trace_queries.read_run_meta_batched(conn, [run_id], account_id="acc_root")
+    completed = meta[run_id]["run_completed"]
+    assert completed is not None
+    assert completed["is_error"] is True
+    assert completed["error"]["kind"] == "from_journal"
 
 
 # ─── archived definitions: agents ───────────────────────────────────────────
