@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from aios.db import queries
 from aios.harness import runtime, trigger_runner
-from aios.models.triggers import SandboxCommandAction
+from aios.models.triggers import SandboxCommandAction, WakeOwnerAction
 from aios.sandbox.tool_broker import ToolBroker
 
 
@@ -39,18 +40,18 @@ async def test_observation_reader_failure_does_not_fail_completed_wake(
 ) -> None:
     class Connection:
         @asynccontextmanager
-        async def transaction(self):  # type: ignore[no-untyped-def]
+        async def transaction(self):
             yield self
 
     class Pool:
         @asynccontextmanager
-        async def acquire(self):  # type: ignore[no-untyped-def]
+        async def acquire(self):
             yield Connection()
 
     trigger = SimpleNamespace(
         id="trigger-1",
         source="cron",
-        action=trigger_runner.WakeOwnerAction(content="wake"),
+        action=WakeOwnerAction(content="wake"),
         session_archived_at=None,
         enabled=True,
         owner_session_id="owner",
@@ -61,15 +62,13 @@ async def test_observation_reader_failure_does_not_fail_completed_wake(
     deliver = AsyncMock(return_value=("ok", None, None))
 
     monkeypatch.setattr(runtime, "require_pool", Mock(return_value=Pool()))
-    monkeypatch.setattr(
-        trigger_runner.queries, "unscoped_get_trigger_row", AsyncMock(return_value=trigger)
-    )
+    monkeypatch.setattr(queries, "unscoped_get_trigger_row", AsyncMock(return_value=trigger))
     monkeypatch.setattr(trigger_runner, "_run_wake_owner", deliver)
-    monkeypatch.setattr(trigger_runner.queries, "record_trigger_fire", AsyncMock(return_value=0))
+    monkeypatch.setattr(queries, "record_trigger_fire", AsyncMock(return_value=0))
     monkeypatch.setattr(trigger_runner, "_record_timer_audit", AsyncMock(return_value="audit"))
     monkeypatch.setattr(trigger_runner, "_append_fire_event", AsyncMock())
     monkeypatch.setattr(
-        trigger_runner.queries,
+        queries,
         "list_recent_trigger_wake_outcomes",
         AsyncMock(side_effect=RuntimeError("telemetry reader unavailable")),
     )
