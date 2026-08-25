@@ -488,9 +488,8 @@ def inject_cache_breakpoints(
     1. **System message** — cache-stable across steps.
     2. **Last tool definition** — cache-stable while tools don't change.
     3. **Last stable conversation message** — the last event-sourced
-       message, skipping any trailing per-step-ephemeral tail block
-       (the channels tail — unread counts, previews; and the open-
-       obligations tail — ages, obligation set), identified by its
+       message, skipping any trailing per-step-assembled tail message
+       (content or position varies per step), identified by its
        out-of-band :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`
        marker, and any empty-assistant separator inserted before it by
        :func:`~aios.harness.context.merge_adjacent_user_messages`.
@@ -535,10 +534,10 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
 
     Walks backward from the end, skipping:
 
-    * Any per-step-ephemeral tail block — identified by its out-of-band
-      :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY` marker
-      (the channels tail and the open-obligations tail, set at
-      construction; always trailing user-role messages when present).
+    * Any per-step-assembled tail message — identified by its out-of-band
+      :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY` marker (producers
+      tag their dicts at construction; always trailing user-role messages
+      when present).
     * Any role-transition separator — inserted by
       the former separator mechanism (now
       :func:`~aios.harness.context.merge_adjacent_user_messages`) to
@@ -559,8 +558,7 @@ def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
 def _is_ephemeral_tail(msg: dict[str, Any]) -> bool:
     """Detect a per-step-ephemeral tail block by its out-of-band marker.
 
-    The tail producers (``build_channels_tail_block``,
-    ``build_obligations_tail_block``) tag their dict at construction with
+    Every per-step tail producer tags its own dict at construction with
     :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`; the marker is sticky
     under :func:`~aios.harness.context._concat_user_messages` merges. We
     read the structural marker — never the rendered prose — so the

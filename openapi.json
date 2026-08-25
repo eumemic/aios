@@ -11806,6 +11806,15 @@
             "title": "Preempt Policy",
             "default": "wait"
           },
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "default": "default"
+          },
           "created_by": {
             "anyOf": [
               {
@@ -11949,6 +11958,16 @@
             "title": "Preempt Policy",
             "description": "Whether a new wake-eligible event (e.g. a user message) arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or waits for the step to finish ('wait', default).",
             "default": "wait"
+          },
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "description": "Output style selector; 'concise' is the only non-default style today: it steers the model toward short, direct output via a concise-style rules block joined into the system prompt and a one-line reminder appended at the context tail each step, both assembled at step time only \u2014 never persisted to the transcript.",
+            "default": "default"
           }
         },
         "additionalProperties": false,
@@ -12159,6 +12178,21 @@
               }
             ],
             "title": "Preempt Policy"
+          },
+          "output_style": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "default",
+                  "concise"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Style"
           }
         },
         "additionalProperties": false,
@@ -12236,6 +12270,15 @@
             ],
             "title": "Preempt Policy",
             "default": "wait"
+          },
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "default": "default"
           },
           "created_at": {
             "type": "string",

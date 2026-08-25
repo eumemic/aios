@@ -49,6 +49,7 @@ def _agent_row(servers: list[dict[str, Any]]) -> dict[str, Any]:
         "window_min": 1,
         "window_max": 10,
         "preempt_policy": "wait",
+        "output_style": "default",
         "created_by_type": None,
         "created_by_ref": None,
         "created_at": now,

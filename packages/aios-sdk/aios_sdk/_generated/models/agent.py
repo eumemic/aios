@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.agent_output_style import AgentOutputStyle
 from ..models.agent_preempt_policy import AgentPreemptPolicy
 from ..types import UNSET, Unset
 
@@ -46,6 +47,7 @@ class Agent:
         http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentLitellmExtra | Unset):
         preempt_policy (AgentPreemptPolicy | Unset):  Default: AgentPreemptPolicy.WAIT.
+        output_style (AgentOutputStyle | Unset):  Default: AgentOutputStyle.DEFAULT.
         created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
@@ -67,6 +69,7 @@ class Agent:
     http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentLitellmExtra | Unset = UNSET
     preempt_policy: AgentPreemptPolicy | Unset = AgentPreemptPolicy.WAIT
+    output_style: AgentOutputStyle | Unset = AgentOutputStyle.DEFAULT
     created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -129,6 +132,10 @@ class Agent:
         if not isinstance(self.preempt_policy, Unset):
             preempt_policy = self.preempt_policy.value
 
+        output_style: str | Unset = UNSET
+        if not isinstance(self.output_style, Unset):
+            output_style = self.output_style.value
+
         created_by: dict[str, Any] | None | Unset
         if isinstance(self.created_by, Unset):
             created_by = UNSET
@@ -172,6 +179,8 @@ class Agent:
             field_dict["litellm_extra"] = litellm_extra
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
+        if output_style is not UNSET:
+            field_dict["output_style"] = output_style
         if created_by is not UNSET:
             field_dict["created_by"] = created_by
         if archived_at is not UNSET:
@@ -263,6 +272,13 @@ class Agent:
         else:
             preempt_policy = AgentPreemptPolicy(_preempt_policy)
 
+        _output_style = d.pop("output_style", UNSET)
+        output_style: AgentOutputStyle | Unset
+        if isinstance(_output_style, Unset):
+            output_style = UNSET
+        else:
+            output_style = AgentOutputStyle(_output_style)
+
         def _parse_created_by(data: object) -> Actor | None | Unset:
             if data is None:
                 return data
@@ -315,6 +331,7 @@ class Agent:
             http_servers=http_servers,
             litellm_extra=litellm_extra,
             preempt_policy=preempt_policy,
+            output_style=output_style,
             created_by=created_by,
             archived_at=archived_at,
         )
