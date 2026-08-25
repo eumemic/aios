@@ -426,22 +426,33 @@ async def read_run_meta_batched(
 
     ``{status, workflow_id, caller, request_id, created_at}`` plus the
     ``run_completed`` payload (``{is_error, error}``) so a root run's terminal
-    state and ``error_kind`` resolve from the journal without a per-node fetch.
-    Account-scoped.
+    state and ``error_kind`` resolve without a per-node fetch. Account-scoped.
+
+    ``terminal_summary`` is preferred over the journal's ``run_completed``
+    event, exactly as ``derive_run_response`` and ``resolve_run_error`` do:
+    once the reclaimable-prune sweep empties a terminal run's journal
+    (``journal_pruned_at``), the summary on the run row is the only surviving
+    record of ``is_error``/``error`` — without this fallback a pruned run's
+    trace silently lost its terminal state. The journal read is the legacy arm
+    for rows that predate summary projection.
     """
     if not run_ids:
         return {}
     rows = await conn.fetch(
         "SELECT r.id, r.status, r.workflow_id, r.caller, r.request_id, r.created_at, "
+        "  r.terminal_summary, "
+        "  CASE WHEN r.terminal_summary IS NULL THEN "
         "  (SELECT e.payload FROM wf_run_events e "
-        "   WHERE e.run_id = r.id AND e.type = 'run_completed' LIMIT 1) AS completed "
+        "   WHERE e.run_id = r.id AND e.type = 'run_completed' "
+        "   ORDER BY e.seq DESC LIMIT 1) END AS legacy_completed "
         "FROM wf_runs r WHERE r.id = ANY($1) AND r.account_id = $2",
         run_ids,
         account_id,
     )
     out: dict[str, dict[str, Any]] = {}
     for r in rows:
-        completed = r["completed"] if r["completed"] is not None else None
+        summary = r["terminal_summary"]
+        completed = summary if summary is not None else r["legacy_completed"]
         out[r["id"]] = {
             "status": r["status"],
             "workflow_id": r["workflow_id"],
