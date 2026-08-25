@@ -256,6 +256,73 @@ async def test_descendant_mutation_moves_root_by_exact_amount_and_peer_invocatio
         )
 
 
+class _FetchCountingConn:
+    """Delegating proxy that counts ``fetch`` calls to observe path selection."""
+
+    def __init__(self, conn: asyncpg.Connection[Any]) -> None:
+        self._conn = conn
+        self.fetch_calls = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+    async def fetch(self, *args: Any, **kwargs: Any) -> Any:
+        self.fetch_calls += 1
+        return await self._conn.fetch(*args, **kwargs)
+
+
+async def test_account_scan_fallback_is_result_identical_to_subtree_path(
+    accounting_pool: asyncpg.Pool[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two ``usage_for_nodes`` statements must agree exactly (#2246).
+
+    The subtree walk overflowing ``SUBTREE_PAIR_CAP`` switches to the
+    account-scan statement; a divergence there would silently misattribute
+    usage only on large accounts, so pin equality on a mixed
+    session -> run -> session chain with rolling-window ledger rows on both
+    node kinds.
+    """
+    root_id, run_id, child_id, _agent_id, _environment_id = await _seed_agent_workflow_agent_chain(
+        accounting_pool
+    )
+    await _charge_known_chain(accounting_pool, root_id, run_id, child_id)
+    roots = [
+        UsageNodeRef(kind="session", id=root_id),
+        UsageNodeRef(kind="run", id=run_id),
+        UsageNodeRef(kind="session", id=child_id),
+        UsageNodeRef(kind="run", id="wfr_does_not_exist"),
+    ]
+
+    # One transaction pins now() (transaction_timestamp) across both paths, so
+    # observed_seconds — and thus every rate — cannot drift between the calls.
+    async with accounting_pool.acquire() as conn, conn.transaction():
+        subtree_conn = _FetchCountingConn(conn)
+        via_subtree = await accounting_queries.usage_for_nodes(
+            subtree_conn,
+            roots,
+            account_id=ACCOUNT,
+            window_seconds=86_400,
+        )
+        assert subtree_conn.fetch_calls == 1
+
+        # A 3-node chain overflows a cap of 1, forcing the account-scan path.
+        monkeypatch.setattr(accounting_queries, "SUBTREE_PAIR_CAP", 1)
+        fallback_conn = _FetchCountingConn(conn)
+        via_account_scan = await accounting_queries.usage_for_nodes(
+            fallback_conn,
+            roots,
+            account_id=ACCOUNT,
+            window_seconds=86_400,
+        )
+        assert fallback_conn.fetch_calls == 2
+
+    assert set(via_subtree) == {("session", root_id), ("run", run_id), ("session", child_id)}
+    assert via_subtree[("session", root_id)].subtree.cost_microusd == 600
+    root_rate = via_subtree[("session", root_id)].subtree_rate
+    assert root_rate is not None and root_rate.cost_microusd_per_hour > 0
+    assert via_account_scan == via_subtree
+
+
 async def test_cycle_is_bounded_and_each_node_counts_once(
     accounting_pool: asyncpg.Pool[Any],
 ) -> None:
@@ -372,7 +439,7 @@ async def test_ranked_timeout_rolls_back_and_releases_pool_connection(
         await conn.execute("SELECT pg_sleep(0.05)")
         raise AssertionError("statement timeout did not fire")
 
-    monkeypatch.setattr(accounting_service, "USAGE_CONSUMERS_STATEMENT_TIMEOUT_MS", 1)
+    monkeypatch.setattr(accounting_service, "USAGE_STATEMENT_TIMEOUT_MS", 1)
     monkeypatch.setattr(accounting_queries, "ranked_consumers", _slow_query)
     with pytest.raises(asyncpg.QueryCanceledError):
         await accounting_service.ranked_consumers(

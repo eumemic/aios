@@ -114,6 +114,12 @@ async def create_pool(db_url: str, *, min_size: int = 1, max_size: int = 8) -> a
         server_settings={
             "statement_timeout": "30000",
             "idle_in_transaction_session_timeout": "60000",
+            # Every aios query is OLTP-shaped; the heaviest ones (the
+            # accounting subtree walks, #2246) measured 170ms-8s of pure JIT
+            # compilation per execution against no observable JIT win, because
+            # their recursive-CTE cost estimates clear jit_above_cost while the
+            # actual row counts stay small.
+            "jit": "off",
             **_POOL_TCP_KEEPALIVE_SETTINGS,
         },
     )

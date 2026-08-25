@@ -67,6 +67,7 @@ async def test_pool_sets_timeouts_and_keepalive() -> None:
         ss = kwargs["server_settings"]
         assert ss["statement_timeout"] == "30000"
         assert ss["idle_in_transaction_session_timeout"] == "60000"
+        assert ss["jit"] == "off"
         assert ss["tcp_keepalives_idle"] == "60"
         assert ss["tcp_keepalives_interval"] == "10"
         assert ss["tcp_keepalives_count"] == "5"
