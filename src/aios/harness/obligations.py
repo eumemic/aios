@@ -59,11 +59,46 @@ MAX_RENDERED_OBLIGATIONS = 10
 _TASK_MAX = 8192
 _TASK_TRUNCATED = "[TASK TRUNCATED — return an error; do not act on or infer the missing task]"
 
+# The genuinely-unavailable marker: NO content was ever persisted on the frame
+# (pre-#1413), so there is nothing to abridge and nothing to point at. Shared by
+# BOTH renderers — the tail block and the reminder surfaces — because #2080's
+# fail-loud property is correct on every surface: an absent task cannot be
+# recovered from anywhere, so improvising one is the exact hazard. Hoisted to a
+# module constant so the two paths can never drift on this wording.
+_TASK_UNAVAILABLE = "[TASK CONTENT UNAVAILABLE — return an error; do not infer the task]"
+
 # Chars of an oversized-but-present task echoed as a bounded preview beside the
 # pointer. Strictly smaller than :data:`_TASK_MAX`, so the abridged render is
 # never fatter than the at-cap VERBATIM render the reserved budget already
 # permits — the fence stays where #2080/#2071 put it.
 _TASK_PREVIEW = 2048
+
+# What an oversized task renders as on a surface that CANNOT establish whether the
+# original ask is still reachable (#2221 round 2): the quiescence nudge and the
+# ``list_obligations`` projection. Both are REMINDERS about a request that is, by
+# construction, still open — so ordering a refusal there is never justified:
+#
+# * the surface cannot prove the original is GONE, and
+# * a refusal order on the nudge path is strictly WORSE than the tail-block bug
+#   this issue opened for. The tail block is ephemeral and rebuilt each step; the
+#   nudge is written to the event log as a DURABLE user message (up to
+#   ``REQUEST_NUDGE_BUDGET`` times) and then sits in the window permanently. #2080's
+#   own evidence is that a model obeys a trailing refuse-order, so emitting one here
+#   re-parks exactly the oversized-payload sessions #2221 exists to unpark.
+#
+# Deliberately carries NO content prefix. On the tail block a preview is safe
+# because presence is ESTABLISHED — the full task is intact earlier in the same
+# prompt, so the preview is redundant signal, not a substitute. Here presence is
+# unknown, and a plausible-looking prefix of an unrecoverable task is precisely
+# #2080's improvisation hazard (a sub-agent read a prefix and invented the rest).
+# A bare char-count pointer refuses BOTH failure modes: it never orders a refusal,
+# and it offers nothing to improvise from. It also keeps the durable nudge event
+# small regardless of task size.
+_REMINDER_ABRIDGED = (
+    "[TASK ABRIDGED IN THIS REMINDER — {chars} characters, over this reminder's "
+    "{cap}-character budget. This is a reminder, not the task: the original request "
+    "message carries it in full. Do not refuse on account of this line.]"
+)
 
 # Max chars of a rendered ``output_schema`` contract (#1522). Kept narrower
 # than the task budget because a schema is a structural contract and usually
@@ -133,7 +168,7 @@ def _request_content(summary: str | None, *, original_present: bool = False) -> 
     opt into the softer render.
     """
     if summary is None:
-        return "[TASK CONTENT UNAVAILABLE — return an error; do not infer the task]"
+        return _TASK_UNAVAILABLE
     if len(summary) > _TASK_MAX:
         if not original_present:
             return f"{_TASK_TRUNCATED} (received {len(summary)} characters; limit {_TASK_MAX})"
@@ -143,6 +178,41 @@ def _request_content(summary: str | None, *, original_present: bool = False) -> 
             f"budget {_TASK_MAX}. Do not refuse; read the original message above.]\n"
             f"{summary[:_TASK_PREVIEW]}"
         )
+    return summary
+
+
+def _reminder_content(summary: str | None) -> str:
+    """Render a task for a **reminder surface that cannot establish presence**.
+
+    The sibling of :func:`_request_content` for the two consumers of
+    :func:`render_owed_entry` — the quiescence-attempt nudge and the
+    ``list_obligations`` tool. Neither holds a post-windowing slate, so neither can
+    answer "is the original ask still in the context?" the way
+    :func:`~aios.harness.step_context.compose_step_context` can.
+
+    This is a DISTINCT function rather than a presence flag on
+    :func:`_request_content` on purpose. A boolean threaded through these callers
+    could only ever be a *guess* at presence, and a guess that says "present" is the
+    false-reassurance hazard #2080 exists to prevent. The surface class is a static
+    fact about the caller, not a runtime claim about the window, so it is encoded
+    in WHICH renderer the caller picks.
+
+    * ``summary is None`` -> the loud unavailable marker, unchanged. Nothing was
+      ever persisted on the frame, so there is no task to point AT; #2080's
+      fail-loud property is correct here and is preserved verbatim.
+    * within :data:`_TASK_MAX` -> verbatim, byte-for-byte (identical to the tail).
+    * oversized -> a NEUTRAL bounded pointer (:data:`_REMINDER_ABRIDGED`) with no
+      refusal imperative and no content prefix.
+
+    The invariant: **a surface that cannot establish the original is GONE must not
+    order a refusal.** These surfaces are reminders about a still-open request, so
+    the honest render is "this line is abridged; the request message has the whole
+    thing" — never "return an error".
+    """
+    if summary is None:
+        return _TASK_UNAVAILABLE
+    if len(summary) > _TASK_MAX:
+        return _REMINDER_ABRIDGED.format(chars=len(summary), cap=_TASK_MAX)
     return summary
 
 
@@ -256,17 +326,33 @@ def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime)
 
     Each entry carries ``request_id``, ``caller_kind`` (the trusted frame kind),
     ``origin`` (``api``/``session``/``run`` plus ``self`` for a #1414 self-goal),
-    the verbatim task in ``summary`` (or a loud truncation marker), a terse
-    ``age``, and the **bounded**
+    the task in ``summary``, a terse ``age``, and the **bounded**
     ``output_schema`` contract (elided to :data:`_SCHEMA_MAX`; ``None`` when the
     request demands no schema). The schema bound is what lets the surfacing render
     stay within :func:`max_obligations_block_local`'s upper bound.
+
+    ``summary`` renders through :func:`_reminder_content`, NOT
+    :func:`_request_content` (#2221 round 2). Both consumers above are REMINDER
+    surfaces: they run without a post-windowing slate, so neither can establish
+    that the original ask has been evicted — and the nudge consumer persists its
+    render as a durable user event. An oversized task therefore renders as a
+    neutral bounded pointer with no refusal imperative; only a genuinely absent
+    ``summary`` (nothing on the frame) still fails loud. The tail block keeps
+    :func:`_request_content`, which CAN prove presence and so can safely show a
+    preview.
     """
     return {
         "request_id": obligation.request_id,
         "caller_kind": obligation.caller_kind or "",
         "origin": _origin_label(obligation, session_id=session_id),
-        "summary": _request_content(obligation.summary),
+        # #2221 round 2: the REMINDER renderer, not ``_request_content``. Both
+        # consumers of this projection (the quiescence nudge, ``list_obligations``)
+        # are reminders about a STILL-OPEN request on a surface that cannot see the
+        # post-windowing slate, so neither can establish that the original ask is
+        # gone — and the nudge writes its render to the event log DURABLY. Emitting
+        # a refuse-order from here re-parks the very sessions #2221 unparks, through
+        # a more permanent door than the ephemeral tail block ever had.
+        "summary": _reminder_content(obligation.summary),
         "age": _format_age(obligation.opened_at, now),
         "output_schema": _render_schema(obligation.output_schema),
     }

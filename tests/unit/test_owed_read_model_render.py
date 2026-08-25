@@ -21,6 +21,7 @@ from typing import Any
 
 from aios.harness.obligations import (
     _SCHEMA_MAX,
+    _TASK_MAX,
     MAX_RENDERED_OBLIGATIONS,
     build_obligations_tail_block,
     max_obligations_block_local,
@@ -84,6 +85,68 @@ class TestRenderOwedEntry:
         entry = render_owed_entry(_ob("req_n", output_schema=None), session_id="sess_x", now=_NOW)
         assert entry["output_schema"] is None
 
+    def test_oversized_task_does_not_order_a_refusal(self) -> None:
+        # THE #2221-round-2 DEFECT, on the read-model projection. This entry feeds
+        # BOTH the quiescence nudge (persisted as a DURABLE user event, up to
+        # REQUEST_NUDGE_BUDGET times) and the list_obligations tool. Neither surface
+        # can establish that the original ask is gone — the request is open by
+        # construction and its message may well still be in the window — so neither
+        # may order a refusal. A refuse-order here is strictly worse than the tail
+        # -block bug: the tail is ephemeral, this one persists in the event log.
+        task = "BUILD TASK — implement the widget. " * 700
+        assert len(task) > _TASK_MAX
+        entry = render_owed_entry(_ob("req_big_task", summary=task), session_id="s", now=_NOW)
+        summary = entry["summary"]
+        assert isinstance(summary, str)
+        # The refuse-instruction, in every phrasing that appears in the module.
+        assert "TASK TRUNCATED" not in summary
+        assert "return an error" not in summary
+        assert "do not act on or infer" not in summary
+        # Still a useful, honest pointer: the size, and where the real task lives.
+        assert str(len(task)) in summary
+        assert "original request message" in summary
+
+    def test_oversized_task_render_is_bounded_and_leaks_no_prefix(self) -> None:
+        # Two properties at once. (a) BOUNDED: this render is persisted on the nudge
+        # path, so a 40x larger task must not produce a 40x larger durable event.
+        # (b) NO PREFIX: unlike the tail block — which shows a preview only because
+        # it has PROVEN the original is present — this surface cannot prove that, and
+        # a plausible-looking prefix of a possibly-unrecoverable task is exactly
+        # #2080's improvisation hazard. So it points, and shows no content at all.
+        marker = "SECRET-TASK-CONTENT-MARKER"
+        small_over = marker + "z" * (_TASK_MAX + 1)
+        huge_over = marker + "z" * (_TASK_MAX * 40)
+        lengths = []
+        for task in (small_over, huge_over):
+            entry = render_owed_entry(_ob("req_x", summary=task), session_id="s", now=_NOW)
+            summary = entry["summary"]
+            assert isinstance(summary, str)
+            assert marker not in summary, "reminder surface must not echo task content"
+            lengths.append(len(summary))
+        # Only the char-count digits differ between the two renders.
+        assert abs(lengths[0] - lengths[1]) < 20
+        assert max(lengths) < 400
+
+    def test_absent_summary_still_fails_loud(self) -> None:
+        # The OTHER direction — the discrimination that proves the fix above did not
+        # simply delete the guard. ``summary is None`` means nothing was ever
+        # persisted on the frame, so the task is unrecoverable from ANY surface and
+        # there is nothing to point at. #2080's fail-loud property is correct here
+        # and must survive.
+        entry = render_owed_entry(_ob("req_nosum", summary=None), session_id="s", now=_NOW)
+        summary = entry["summary"]
+        assert isinstance(summary, str)
+        assert "TASK CONTENT UNAVAILABLE" in summary
+        assert "return an error" in summary
+        assert "do not infer" in summary
+
+    def test_under_cap_task_is_verbatim(self) -> None:
+        # The third direction: the ordinary case must stay byte-for-byte. A fix that
+        # abridged everything would pass both tests above and still be wrong.
+        task = "k" * (_TASK_MAX - 1)
+        entry = render_owed_entry(_ob("req_small", summary=task), session_id="s", now=_NOW)
+        assert entry["summary"] == task
+
     def test_large_schema_is_elided(self) -> None:
         big = {"type": "object", "properties": {f"k{i}": {"type": "string"} for i in range(500)}}
         entry = render_owed_entry(_ob("req_big", output_schema=big), session_id="sess_x", now=_NOW)
@@ -109,6 +172,63 @@ class TestRenderOwedListing:
         )
         assert "output_schema" in text
         assert "shipped" in text
+
+    def test_oversized_task_does_not_order_a_refusal_in_the_nudge(self) -> None:
+        # The DURABLE surface, end-to-end. This exact string is written to the event
+        # log by services.sessions as a {"role": "user"} message (up to
+        # REQUEST_NUDGE_BUDGET times) when a session tries to quiesce while owing an
+        # obligation — i.e. the ordinary case of "child got the task, worked, ended a
+        # turn without answering". #2080's evidence is that a model obeys a trailing
+        # refuse-order, so this content ordering a refusal permanently re-parks the
+        # oversized-payload sessions #2221 exists to unpark.
+        task = "BUILD TASK — implement the widget. " * 700
+        assert len(task) > _TASK_MAX
+        text = render_owed_listing(
+            [_ob("req_nudge", summary=task)], session_id="s", header="H", now=_NOW
+        )
+        assert "TASK TRUNCATED" not in text
+        assert "return an error" not in text
+        assert "do not act on or infer" not in text
+        # The obligation is still identified and pointed at — a reminder, not silence.
+        assert "req_nudge" in text
+        assert "original request message" in text
+
+    def test_nudge_absent_summary_still_fails_loud(self) -> None:
+        # Other direction on the durable surface: a task that was never persisted is
+        # unrecoverable from anywhere, so the nudge must still fail loud (#2080).
+        text = render_owed_listing(
+            [_ob("req_nosum", summary=None)], session_id="s", header="H", now=_NOW
+        )
+        assert "TASK CONTENT UNAVAILABLE" in text
+        assert "return an error" in text
+
+    def test_nudge_discriminates_per_obligation(self) -> None:
+        # Both branches in ONE render: an oversized task must not drag the absent one
+        # into silence, and the absent one must not drag the oversized one into a
+        # refusal. A fix that keyed off the listing as a whole would fail here.
+        text = render_owed_listing(
+            [
+                _ob("req_over", summary="w" * (_TASK_MAX + 10)),
+                _ob("req_none", summary=None),
+            ],
+            session_id="s",
+            header="H",
+            now=_NOW,
+        )
+        over_line = next(ln for ln in text.splitlines() if "req_over" in ln)
+        none_line = next(ln for ln in text.splitlines() if "req_none" in ln)
+        assert "return an error" not in over_line
+        assert "ABRIDGED" in over_line
+        assert "TASK CONTENT UNAVAILABLE" in none_line
+        assert "return an error" in none_line
+
+    def test_nudge_render_stays_small_regardless_of_task_size(self) -> None:
+        # This render is PERSISTED. An unbounded task must not produce an unbounded
+        # durable event — the property that makes the neutral pointer safe to write
+        # up to REQUEST_NUDGE_BUDGET times.
+        obs = [_ob(f"req_{i}", summary="z" * (_TASK_MAX * 30)) for i in range(3)]
+        text = render_owed_listing(obs, session_id="s", header="H", now=_NOW)
+        assert len(text) < 1500
 
     def test_count_capped_with_more_marker(self) -> None:
         n = MAX_RENDERED_OBLIGATIONS + 4
