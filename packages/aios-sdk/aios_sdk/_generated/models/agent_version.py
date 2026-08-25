@@ -8,6 +8,7 @@ from attrs import define as _attrs_define
 from attrs import field as _attrs_field
 from dateutil.parser import isoparse
 
+from ..models.agent_version_output_style import AgentVersionOutputStyle
 from ..models.agent_version_preempt_policy import AgentVersionPreemptPolicy
 from ..types import UNSET, Unset
 
@@ -40,7 +41,7 @@ class AgentVersion:
         http_servers (list[HttpServerSpec] | Unset):
         litellm_extra (AgentVersionLitellmExtra | Unset):
         preempt_policy (AgentVersionPreemptPolicy | Unset):  Default: AgentVersionPreemptPolicy.WAIT.
-        concise (bool | Unset):  Default: False.
+        output_style (AgentVersionOutputStyle | Unset):  Default: AgentVersionOutputStyle.DEFAULT.
     """
 
     agent_id: str
@@ -56,7 +57,7 @@ class AgentVersion:
     http_servers: list[HttpServerSpec] | Unset = UNSET
     litellm_extra: AgentVersionLitellmExtra | Unset = UNSET
     preempt_policy: AgentVersionPreemptPolicy | Unset = AgentVersionPreemptPolicy.WAIT
-    concise: bool | Unset = False
+    output_style: AgentVersionOutputStyle | Unset = AgentVersionOutputStyle.DEFAULT
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,7 +107,9 @@ class AgentVersion:
         if not isinstance(self.preempt_policy, Unset):
             preempt_policy = self.preempt_policy.value
 
-        concise = self.concise
+        output_style: str | Unset = UNSET
+        if not isinstance(self.output_style, Unset):
+            output_style = self.output_style.value
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -131,8 +134,8 @@ class AgentVersion:
             field_dict["litellm_extra"] = litellm_extra
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
-        if concise is not UNSET:
-            field_dict["concise"] = concise
+        if output_style is not UNSET:
+            field_dict["output_style"] = output_style
 
         return field_dict
 
@@ -205,7 +208,12 @@ class AgentVersion:
         else:
             preempt_policy = AgentVersionPreemptPolicy(_preempt_policy)
 
-        concise = d.pop("concise", UNSET)
+        _output_style = d.pop("output_style", UNSET)
+        output_style: AgentVersionOutputStyle | Unset
+        if isinstance(_output_style, Unset):
+            output_style = UNSET
+        else:
+            output_style = AgentVersionOutputStyle(_output_style)
 
         agent_version = cls(
             agent_id=agent_id,
@@ -221,7 +229,7 @@ class AgentVersion:
             http_servers=http_servers,
             litellm_extra=litellm_extra,
             preempt_policy=preempt_policy,
-            concise=concise,
+            output_style=output_style,
         )
 
         agent_version.additional_properties = d

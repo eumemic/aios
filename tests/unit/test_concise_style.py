@@ -12,6 +12,7 @@ from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
@@ -27,7 +28,13 @@ from aios.harness.step_context import (
     prelude_overhead_local,
 )
 from aios.harness.tokens import approx_tokens
-from aios.models.agents import AgentBinding, StepSurface
+from aios.models.agents import (
+    AgentBinding,
+    AgentCreate,
+    AgentUpdate,
+    OutputStyle,
+    StepSurface,
+)
 from aios.models.events import Event
 from tests.unit.conftest import fake_pool_yielding_conn
 
@@ -35,7 +42,7 @@ _ACCOUNT = "acc_concise"
 _SESSION = "sess_concise"
 
 
-def _agent(*, concise: bool) -> StepSurface:
+def _agent(*, output_style: OutputStyle = "default") -> StepSurface:
     return StepSurface(
         model="gpt-test",
         system="you are a test agent",
@@ -47,7 +54,7 @@ def _agent(*, concise: bool) -> StepSurface:
         window_min=1,
         window_max=10,
         preempt_policy="wait",
-        concise=concise,
+        output_style=output_style,
         binding=AgentBinding(agent_id="agt_concise", version=1),
     )
 
@@ -128,7 +135,7 @@ class TestConciseNag:
         """A trailing user inbound merges with the nag (adjacent user turns are
         merged by design); the nag is the final content, exactly once."""
         events = [_evt(1, role="user", content="please respond")]
-        messages = await _compose(_agent(concise=True), events)
+        messages = await _compose(_agent(output_style="concise"), events)
         assert messages[-1]["role"] == "user"
         assert _text(messages[-1]).endswith(CONCISE_NAG_CONTENT)
         assert "please respond" in _text(messages[-1])
@@ -141,7 +148,7 @@ class TestConciseNag:
         """No channels -> no tail block, but the nag still renders, standing as
         its own final user message after the trailing assistant turn."""
         events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
-        messages = await _compose(_agent(concise=True), events)
+        messages = await _compose(_agent(output_style="concise"), events)
         assert messages[-1]["role"] == "user"
         assert _text(messages[-1]) == CONCISE_NAG_CONTENT
         assert messages[-2]["role"] == "assistant"
@@ -151,7 +158,9 @@ class TestConciseNag:
         """With a channels tail rendered (trailing assistant turn), the nag is
         appended after it — the merged final user turn ends with the nag."""
         events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
-        messages = await _compose(_agent(concise=True), events, channels=["signal/+1/chat-a"])
+        messages = await _compose(
+            _agent(output_style="concise"), events, channels=["signal/+1/chat-a"]
+        )
         last = messages[-1]
         assert last["role"] == "user"
         text = _text(last)
@@ -164,7 +173,7 @@ class TestConciseNag:
         stable-prefix cache breakpoint — its position is per-step."""
         assert build_concise_nag_message()[EPHEMERAL_TAIL_KEY] is True
         events = [_evt(1, role="user", content="please respond")]
-        messages = await _compose(_agent(concise=True), events)
+        messages = await _compose(_agent(output_style="concise"), events)
         assert messages[-1].get(EPHEMERAL_TAIL_KEY) is True
 
     async def test_no_nag_when_not_concise(self) -> None:
@@ -173,7 +182,7 @@ class TestConciseNag:
                 [_evt(1, role="user", content="please respond")],
                 [_evt(1, role="user"), _evt(2, role="assistant", content="done")],
             ):
-                messages = await _compose(_agent(concise=False), events, channels=channels)
+                messages = await _compose(_agent(output_style="default"), events, channels=channels)
                 assert _nag_count(messages) == 0
 
 
@@ -195,9 +204,9 @@ class TestConciseSystemPrompt:
             )
 
     async def test_system_prompt_contains_rules_block_iff_concise(self) -> None:
-        prelude = await self._prelude_for(_agent(concise=True))
+        prelude = await self._prelude_for(_agent(output_style="concise"))
         assert CONCISE_STYLE_BLOCK in prelude.system_prompt
-        prelude = await self._prelude_for(_agent(concise=False))
+        prelude = await self._prelude_for(_agent(output_style="default"))
         assert CONCISE_STYLE_BLOCK not in prelude.system_prompt
 
 
@@ -214,3 +223,16 @@ class TestConciseNagReserve:
         """Reserved for every agent (the omission-marker idiom) -- the prelude
         carries no per-agent reserve field to forget."""
         assert prelude_overhead_local(_prelude()).reserves >= CONCISE_NAG_UPPER_BOUND_LOCAL
+
+
+# ── the wire enum ────────────────────────────────────────────────────────────
+
+
+class TestOutputStyleWire:
+    def test_invalid_output_style_rejected(self) -> None:
+        """An unknown style is rejected by the pydantic Literal — the single
+        validation point (no DB CHECK constraint); FastAPI surfaces it as 422."""
+        with pytest.raises(ValidationError):
+            AgentCreate(name="a", model="m", output_style="shouty")
+        with pytest.raises(ValidationError):
+            AgentUpdate(version=1, output_style="shouty")

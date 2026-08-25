@@ -110,6 +110,13 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
 # narrow, automatic, model-phase-only policy.
 PreemptPolicy = Literal["preempt", "wait"]
 
+# How the harness steers the shape of the model's output. "default": no
+# steering. "concise" (the only non-default style today): a concise-style
+# rules block joins the system prompt and a one-line reminder is appended at
+# the context tail each step -- both assembled at step time, never persisted
+# (see ``aios.harness.concise``).
+OutputStyle = Literal["default", "concise"]
+
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 log = get_logger(__name__)
 
@@ -869,13 +876,14 @@ class AgentCreate(BaseModel):
             "finish ('wait', default)."
         ),
     )
-    concise: bool = Field(
-        default=False,
+    output_style: OutputStyle = Field(
+        default="default",
         description=(
-            "Steer the model toward short, direct output: a concise-style "
-            "rules block joins the system prompt and a one-line reminder is "
-            "appended at the context tail each step. Both are assembled at "
-            "step time only — never persisted to the transcript."
+            "Output style selector; 'concise' is the only non-default style "
+            "today: it steers the model toward short, direct output via a "
+            "concise-style rules block joined into the system prompt and a "
+            "one-line reminder appended at the context tail each step, both "
+            "assembled at step time only — never persisted to the transcript."
         ),
     )
 
@@ -912,7 +920,7 @@ class AgentUpdate(BaseModel):
     window_min: int | None = Field(default=None, ge=1)
     window_max: int | None = Field(default=None, ge=1)
     preempt_policy: PreemptPolicy | None = None
-    concise: bool | None = None
+    output_style: OutputStyle | None = None
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentUpdate:
@@ -943,7 +951,7 @@ class Agent(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy = "wait"
-    concise: bool = False
+    output_style: OutputStyle = "default"
     created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
@@ -965,7 +973,7 @@ class AgentVersion(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy = "wait"
-    concise: bool = False
+    output_style: OutputStyle = "default"
     created_at: datetime
 
 
@@ -1038,7 +1046,7 @@ class StepSurface(BaseModel):
     window_min: int
     window_max: int
     preempt_policy: PreemptPolicy
-    concise: bool = False
+    output_style: OutputStyle = "default"
     binding: StepBinding
 
 

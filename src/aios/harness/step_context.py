@@ -375,7 +375,7 @@ async def compute_step_prelude(
     system_prompt = augment_with_focal_paradigm(system_prompt, channels)
     # Cache-stable concise rules block (constant text, so the prompt prefix
     # stays hot); the per-step tail reminder lives in ``compose_step_context``.
-    system_prompt = augment_with_concise_style(system_prompt, agent.concise)
+    system_prompt = augment_with_concise_style(system_prompt, agent.output_style == "concise")
     system_prompt = join_blocks(system_prompt, instructions_block)
     system_prompt = augment_with_memory_stores(system_prompt, memory_store_echoes)
     system_prompt = augment_with_resource_health(
@@ -695,7 +695,7 @@ async def compose_step_context(
     # original request user message. Appended AFTER the channels tail and BEFORE
     # the merge so an unanswered obligation is the FINAL user-role line — the
     # higher-priority stimulus (literal-minded models anchor on the last line).
-    # (When ``agent.concise``, the one-line concise nag below lands after it.)
+    # (When ``output_style == "concise"``, the one-line nag below lands after it.)
     #
     # Gated on the open set being non-empty ALONE — deliberately NOT
     # ``_agent_owes_response`` (which suppresses the channels tail on a trailing
@@ -713,7 +713,7 @@ async def compose_step_context(
     # standing as its own final user message.  Why a per-step user-content
     # injection at all (exactly-once, max recency, never persisted, survives
     # LiteLLM's provider transforms): see ``aios.harness.concise``.
-    if agent.concise:
+    if agent.output_style == "concise":
         ctx.messages.append(build_concise_nag_message())
 
     # Merge consecutive user inbounds into one turn (Anthropic requires

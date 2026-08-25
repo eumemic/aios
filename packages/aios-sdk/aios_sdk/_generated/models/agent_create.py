@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.agent_create_output_style import AgentCreateOutputStyle
 from ..models.agent_create_preempt_policy import AgentCreatePreemptPolicy
 from ..types import UNSET, Unset
 
@@ -48,9 +49,10 @@ class AgentCreate:
         preempt_policy (AgentCreatePreemptPolicy | Unset): Whether a new wake-eligible event (e.g. a user message)
             arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or
             waits for the step to finish ('wait', default). Default: AgentCreatePreemptPolicy.WAIT.
-        concise (bool | Unset): Steer the model toward short, direct output: a concise-style rules block joins the
-            system prompt and a one-line reminder is appended at the context tail each step. Both are assembled at step time
-            only — never persisted to the transcript. Default: False.
+        output_style (AgentCreateOutputStyle | Unset): Output style selector; 'concise' is the only non-default style
+            today: it steers the model toward short, direct output via a concise-style rules block joined into the system
+            prompt and a one-line reminder appended at the context tail each step, both assembled at step time only — never
+            persisted to the transcript. Default: AgentCreateOutputStyle.DEFAULT.
     """
 
     name: str
@@ -66,7 +68,7 @@ class AgentCreate:
     window_min: int | Unset = 50000
     window_max: int | Unset = 150000
     preempt_policy: AgentCreatePreemptPolicy | Unset = AgentCreatePreemptPolicy.WAIT
-    concise: bool | Unset = False
+    output_style: AgentCreateOutputStyle | Unset = AgentCreateOutputStyle.DEFAULT
 
     def to_dict(self) -> dict[str, Any]:
         name = self.name
@@ -125,7 +127,9 @@ class AgentCreate:
         if not isinstance(self.preempt_policy, Unset):
             preempt_policy = self.preempt_policy.value
 
-        concise = self.concise
+        output_style: str | Unset = UNSET
+        if not isinstance(self.output_style, Unset):
+            output_style = self.output_style.value
 
         field_dict: dict[str, Any] = {}
 
@@ -157,8 +161,8 @@ class AgentCreate:
             field_dict["window_max"] = window_max
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
-        if concise is not UNSET:
-            field_dict["concise"] = concise
+        if output_style is not UNSET:
+            field_dict["output_style"] = output_style
 
         return field_dict
 
@@ -248,7 +252,12 @@ class AgentCreate:
         else:
             preempt_policy = AgentCreatePreemptPolicy(_preempt_policy)
 
-        concise = d.pop("concise", UNSET)
+        _output_style = d.pop("output_style", UNSET)
+        output_style: AgentCreateOutputStyle | Unset
+        if isinstance(_output_style, Unset):
+            output_style = UNSET
+        else:
+            output_style = AgentCreateOutputStyle(_output_style)
 
         agent_create = cls(
             name=name,
@@ -264,7 +273,7 @@ class AgentCreate:
             window_min=window_min,
             window_max=window_max,
             preempt_policy=preempt_policy,
-            concise=concise,
+            output_style=output_style,
         )
 
         return agent_create

@@ -33,6 +33,7 @@ from aios.models.agents import (
     AgentVersion,
     HttpServerSpec,
     McpServerSpec,
+    OutputStyle,
     PreemptPolicy,
     ToolSpec,
     load_tool_specs,
@@ -66,7 +67,7 @@ def _row_to_agent(row: asyncpg.Record) -> Agent:
         window_min=row["window_min"],
         window_max=row["window_max"],
         preempt_policy=row["preempt_policy"],
-        concise=row["concise"],
+        output_style=row["output_style"],
         created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -93,7 +94,7 @@ def _row_to_agent_version(row: asyncpg.Record) -> AgentVersion:
         window_min=row["window_min"],
         window_max=row["window_max"],
         preempt_policy=row["preempt_policy"],
-        concise=row["concise"],
+        output_style=row["output_style"],
         created_at=row["created_at"],
     )
 
@@ -115,7 +116,7 @@ async def insert_agent(
     window_min: int,
     window_max: int,
     preempt_policy: PreemptPolicy,
-    concise: bool,
+    output_style: OutputStyle,
 ) -> Agent:
     if window_min >= window_max:
         raise ValidationError(
@@ -135,7 +136,7 @@ async def insert_agent(
                 INSERT INTO agents (
                     id, name, model, system, tools, skills, mcp_servers, http_servers,
                     description, metadata, litellm_extra,
-                    window_min, window_max, preempt_policy, concise,
+                    window_min, window_max, preempt_policy, output_style,
                     version, account_id, tools_vocab_epoch, created_by_type, created_by_ref
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
@@ -156,7 +157,7 @@ async def insert_agent(
                 window_min,
                 window_max,
                 preempt_policy,
-                concise,
+                output_style,
                 account_id,
                 TOOLS_VOCAB_EPOCH,
                 *actor_columns(),
@@ -167,7 +168,7 @@ async def insert_agent(
                 """
                 INSERT INTO agent_versions (
                     agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
-                    litellm_extra, window_min, window_max, preempt_policy, concise,
+                    litellm_extra, window_min, window_max, preempt_policy, output_style,
                     account_id, tools_vocab_epoch
                 )
                 VALUES ($1, 1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb,
@@ -184,7 +185,7 @@ async def insert_agent(
                 window_min,
                 window_max,
                 preempt_policy,
-                concise,
+                output_style,
                 account_id,
                 TOOLS_VOCAB_EPOCH,
             )
@@ -255,7 +256,7 @@ async def update_agent(
     window_min: int | None = None,
     window_max: int | None = None,
     preempt_policy: PreemptPolicy | None = None,
-    concise: bool | None = None,
+    output_style: OutputStyle | None = None,
 ) -> Agent:
     """Update an agent, creating a new version.
 
@@ -291,7 +292,7 @@ async def update_agent(
     new_wmin = window_min if window_min is not None else current.window_min
     new_wmax = window_max if window_max is not None else current.window_max
     new_preempt = preempt_policy if preempt_policy is not None else current.preempt_policy
-    new_concise = concise if concise is not None else current.concise
+    new_output_style = output_style if output_style is not None else current.output_style
     if new_wmin >= new_wmax:
         # Partial-merge semantics: a one-sided update (e.g. ``window_max``
         # alone, set at-or-below the current ``window_min``) only
@@ -323,7 +324,7 @@ async def update_agent(
         and new_wmin == current.window_min
         and new_wmax == current.window_max
         and new_preempt == current.preempt_policy
-        and new_concise == current.concise
+        and new_output_style == current.output_style
     ):
         return current
 
@@ -354,7 +355,7 @@ async def update_agent(
                    description = $10, metadata = $11::jsonb,
                    litellm_extra = $12::jsonb,
                    window_min = $13, window_max = $14,
-                   preempt_policy = $15, concise = $16,
+                   preempt_policy = $15, output_style = $16,
                    updated_at = now()
              WHERE id = $1 AND account_id = $17 AND version = $18
                AND archived_at IS NULL
@@ -375,7 +376,7 @@ async def update_agent(
             new_wmin,
             new_wmax,
             new_preempt,
-            new_concise,
+            new_output_style,
             account_id,
             expected_version,
         )
@@ -400,7 +401,7 @@ async def update_agent(
             """
             INSERT INTO agent_versions (
                 agent_id, version, model, system, tools, skills, mcp_servers, http_servers,
-                litellm_extra, window_min, window_max, preempt_policy, concise,
+                litellm_extra, window_min, window_max, preempt_policy, output_style,
                 account_id, tools_vocab_epoch
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
@@ -418,7 +419,7 @@ async def update_agent(
             new_wmin,
             new_wmax,
             new_preempt,
-            new_concise,
+            new_output_style,
             account_id,
             TOOLS_VOCAB_EPOCH,
         )

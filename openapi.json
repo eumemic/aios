@@ -11806,10 +11806,14 @@
             "title": "Preempt Policy",
             "default": "wait"
           },
-          "concise": {
-            "type": "boolean",
-            "title": "Concise",
-            "default": false
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "default": "default"
           },
           "created_by": {
             "anyOf": [
@@ -11955,11 +11959,15 @@
             "description": "Whether a new wake-eligible event (e.g. a user message) arriving mid-step cancels the in-flight model call so the step restarts against fresh context ('preempt'), or waits for the step to finish ('wait', default).",
             "default": "wait"
           },
-          "concise": {
-            "type": "boolean",
-            "title": "Concise",
-            "description": "Steer the model toward short, direct output: a concise-style rules block joins the system prompt and a one-line reminder is appended at the context tail each step. Both are assembled at step time only \u2014 never persisted to the transcript.",
-            "default": false
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "description": "Output style selector; 'concise' is the only non-default style today: it steers the model toward short, direct output via a concise-style rules block joined into the system prompt and a one-line reminder appended at the context tail each step, both assembled at step time only \u2014 never persisted to the transcript.",
+            "default": "default"
           }
         },
         "additionalProperties": false,
@@ -12171,16 +12179,20 @@
             ],
             "title": "Preempt Policy"
           },
-          "concise": {
+          "output_style": {
             "anyOf": [
               {
-                "type": "boolean"
+                "type": "string",
+                "enum": [
+                  "default",
+                  "concise"
+                ]
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Concise"
+            "title": "Output Style"
           }
         },
         "additionalProperties": false,
@@ -12259,10 +12271,14 @@
             "title": "Preempt Policy",
             "default": "wait"
           },
-          "concise": {
-            "type": "boolean",
-            "title": "Concise",
-            "default": false
+          "output_style": {
+            "type": "string",
+            "enum": [
+              "default",
+              "concise"
+            ],
+            "title": "Output Style",
+            "default": "default"
           },
           "created_at": {
             "type": "string",

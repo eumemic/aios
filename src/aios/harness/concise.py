@@ -1,6 +1,6 @@
 """Concise output style: per-agent steering toward short, direct output.
 
-When ``agent.concise`` is true the harness adds two injections, both
+When ``agent.output_style == "concise"`` the harness adds two injections, both
 assembled at step time — nothing is ever persisted to the ``agent_events``
 transcript:
 

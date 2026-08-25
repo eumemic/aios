@@ -1,9 +1,11 @@
-"""Migration 0171 adds ``concise`` to agents + agent_versions.
+"""Migration 0171 adds ``output_style`` to agents + agent_versions.
 
 Covers the additive-column contract on a real Postgres: a row seeded
-BEFORE the migration comes out ``concise = false`` (existing agents keep
-current behavior), an INSERT that omits the column lands at ``false``,
-and both columns are boolean NOT NULL.
+BEFORE the migration comes out ``output_style = 'default'`` (existing
+agents keep current behavior), an INSERT that omits the column lands at
+``'default'``, and both columns are text NOT NULL (no CHECK constraint --
+the pydantic ``OutputStyle`` Literal is the single validation point,
+0139/0111 precedent).
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ async def _execute(db_url: str, sql: str) -> None:
 
 @needs_docker
 @pytest.mark.integration
-def test_concise_column_added_default_false(migration_db_url: str) -> None:
+def test_output_style_column_added_default_default(migration_db_url: str) -> None:
     db_url = migration_db_url
 
     up = run_alembic(["upgrade", "0169"], db_url)
@@ -63,25 +65,25 @@ def test_concise_column_added_default_false(migration_db_url: str) -> None:
                 """
                 SELECT data_type AS dt, is_nullable AS nullable, column_default AS dflt
                   FROM information_schema.columns
-                 WHERE table_name = $1 AND column_name = 'concise'
+                 WHERE table_name = $1 AND column_name = 'output_style'
                 """,
                 table,
             )
         )
-        assert meta is not None, f"{table}.concise column missing"
-        assert meta["dt"] == "boolean"
+        assert meta is not None, f"{table}.output_style column missing"
+        assert meta["dt"] == "text"
         assert meta["nullable"] == "NO"
-        assert meta["dflt"] == "false"
+        assert meta["dflt"] == "'default'::text"
 
-    # Pre-existing rows come out false — existing agents keep current behavior.
-    row = asyncio.run(_fetchrow(db_url, "SELECT concise FROM agents WHERE id = 'agt_old'"))
-    assert row["concise"] is False
+    # Pre-existing rows come out 'default' — existing agents keep current behavior.
+    row = asyncio.run(_fetchrow(db_url, "SELECT output_style FROM agents WHERE id = 'agt_old'"))
+    assert row["output_style"] == "default"
     row = asyncio.run(
-        _fetchrow(db_url, "SELECT concise FROM agent_versions WHERE agent_id = 'agt_old'")
+        _fetchrow(db_url, "SELECT output_style FROM agent_versions WHERE agent_id = 'agt_old'")
     )
-    assert row["concise"] is False
+    assert row["output_style"] == "default"
 
-    # An INSERT that omits the column still lands at false (default retained).
+    # An INSERT that omits the column still lands at 'default' (default retained).
     asyncio.run(
         _execute(
             db_url,
@@ -91,5 +93,5 @@ def test_concise_column_added_default_false(migration_db_url: str) -> None:
             """,
         )
     )
-    row = asyncio.run(_fetchrow(db_url, "SELECT concise FROM agents WHERE id = 'agt_new'"))
-    assert row["concise"] is False
+    row = asyncio.run(_fetchrow(db_url, "SELECT output_style FROM agents WHERE id = 'agt_new'"))
+    assert row["output_style"] == "default"

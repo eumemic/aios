@@ -1,9 +1,9 @@
-"""Round-trip of the versioned ``concise`` agent field through the DB layer.
+"""Round-trip of the versioned ``output_style`` agent field through the DB layer.
 
 Pins the preserve-when-omitted contract of ``PUT /v1/agents/{id}``'s merge
-(an update without ``concise`` keeps the prior value; passing it flips it
-and creates a new version) and that ``agent_versions`` history records the
-field per version.
+(an update without ``output_style`` keeps the prior value; passing it flips
+it and creates a new version) and that ``agent_versions`` history records
+the field per version.
 """
 
 from __future__ import annotations
@@ -52,13 +52,13 @@ async def _create(pool: asyncpg.Pool[Any], name: str, **kwargs: Any) -> Any:
     )
 
 
-async def test_concise_round_trip_and_preserve_when_omitted(pool: asyncpg.Pool[Any]) -> None:
-    agent = await _create(pool, "concise-rt", concise=True)
-    assert agent.concise is True
+async def test_output_style_round_trip_and_preserve_when_omitted(pool: asyncpg.Pool[Any]) -> None:
+    agent = await _create(pool, "concise-rt", output_style="concise")
+    assert agent.output_style == "concise"
     assert agent.version == 1
 
     fetched = await agents_service.get_agent(pool, agent.id, account_id="acc_concise")
-    assert fetched.concise is True
+    assert fetched.output_style == "concise"
 
     # Update WITHOUT the field → prior value preserved, new version created.
     v2 = await agents_service.update_agent(
@@ -69,43 +69,43 @@ async def test_concise_round_trip_and_preserve_when_omitted(pool: asyncpg.Pool[A
         system="updated",
     )
     assert v2.version == 2
-    assert v2.concise is True
+    assert v2.output_style == "concise"
 
-    # Update WITH concise=False → flips, new version.
+    # Update WITH output_style="default" → flips, new version.
     v3 = await agents_service.update_agent(
         pool,
         agent.id,
         account_id="acc_concise",
         expected_version=2,
-        concise=False,
+        output_style="default",
     )
     assert v3.version == 3
-    assert v3.concise is False
+    assert v3.output_style == "default"
 
     # agent_versions history records the field per version.
-    for version, expected in ((1, True), (2, True), (3, False)):
+    for version, expected in ((1, "concise"), (2, "concise"), (3, "default")):
         snap = await agents_service.get_agent_version(
             pool, agent.id, version, account_id="acc_concise"
         )
-        assert snap.concise is expected
+        assert snap.output_style == expected
 
 
-async def test_concise_only_update_is_versioned_and_noop_detected(
+async def test_output_style_only_update_is_versioned_and_noop_detected(
     pool: asyncpg.Pool[Any],
 ) -> None:
     agent = await _create(pool, "concise-noop")
-    assert agent.concise is False  # the field defaults off
+    assert agent.output_style == "default"  # the field defaults off
 
-    # Flipping ONLY concise creates a new version (it is a config field).
+    # Flipping ONLY output_style creates a new version (it is a config field).
     v2 = await agents_service.update_agent(
         pool,
         agent.id,
         account_id="acc_concise",
         expected_version=1,
-        concise=True,
+        output_style="concise",
     )
     assert v2.version == 2
-    assert v2.concise is True
+    assert v2.output_style == "concise"
 
     # Re-sending the current value is a no-op: no new version.
     same = await agents_service.update_agent(
@@ -113,6 +113,6 @@ async def test_concise_only_update_is_versioned_and_noop_detected(
         agent.id,
         account_id="acc_concise",
         expected_version=2,
-        concise=True,
+        output_style="concise",
     )
     assert same.version == 2

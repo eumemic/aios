@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
+from ..models.agent_update_output_style_type_0 import AgentUpdateOutputStyleType0
 from ..models.agent_update_preempt_policy_type_0 import AgentUpdatePreemptPolicyType0
 from ..types import UNSET, Unset
 
@@ -44,7 +45,7 @@ class AgentUpdate:
             window_min (int | None | Unset):
             window_max (int | None | Unset):
             preempt_policy (AgentUpdatePreemptPolicyType0 | None | Unset):
-            concise (bool | None | Unset):
+            output_style (AgentUpdateOutputStyleType0 | None | Unset):
     """
 
     version: int
@@ -61,7 +62,7 @@ class AgentUpdate:
     window_min: int | None | Unset = UNSET
     window_max: int | None | Unset = UNSET
     preempt_policy: AgentUpdatePreemptPolicyType0 | None | Unset = UNSET
-    concise: bool | None | Unset = UNSET
+    output_style: AgentUpdateOutputStyleType0 | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.agent_update_litellm_extra_type_0 import (
@@ -179,11 +180,13 @@ class AgentUpdate:
         else:
             preempt_policy = self.preempt_policy
 
-        concise: bool | None | Unset
-        if isinstance(self.concise, Unset):
-            concise = UNSET
+        output_style: None | str | Unset
+        if isinstance(self.output_style, Unset):
+            output_style = UNSET
+        elif isinstance(self.output_style, AgentUpdateOutputStyleType0):
+            output_style = self.output_style.value
         else:
-            concise = self.concise
+            output_style = self.output_style
 
         field_dict: dict[str, Any] = {}
 
@@ -218,8 +221,8 @@ class AgentUpdate:
             field_dict["window_max"] = window_max
         if preempt_policy is not UNSET:
             field_dict["preempt_policy"] = preempt_policy
-        if concise is not UNSET:
-            field_dict["concise"] = concise
+        if output_style is not UNSET:
+            field_dict["output_style"] = output_style
 
         return field_dict
 
@@ -440,14 +443,24 @@ class AgentUpdate:
 
         preempt_policy = _parse_preempt_policy(d.pop("preempt_policy", UNSET))
 
-        def _parse_concise(data: object) -> bool | None | Unset:
+        def _parse_output_style(
+            data: object,
+        ) -> AgentUpdateOutputStyleType0 | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(bool | None | Unset, data)
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                output_style_type_0 = AgentUpdateOutputStyleType0(data)
 
-        concise = _parse_concise(d.pop("concise", UNSET))
+                return output_style_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(AgentUpdateOutputStyleType0 | None | Unset, data)
+
+        output_style = _parse_output_style(d.pop("output_style", UNSET))
 
         agent_update = cls(
             version=version,
@@ -464,7 +477,7 @@ class AgentUpdate:
             window_min=window_min,
             window_max=window_max,
             preempt_policy=preempt_policy,
-            concise=concise,
+            output_style=output_style,
         )
 
         return agent_update
