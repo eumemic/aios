@@ -22,6 +22,9 @@ class FailingReadUpload:
 
 
 class FailingRewindUpload:
+    filename: str | None = "voice-3664.ogg"
+    content_type: str | None = "audio/ogg"
+
     async def read(self, size: int = -1) -> bytes:
         return b"OggS-valid-audio"
 
