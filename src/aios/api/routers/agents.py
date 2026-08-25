@@ -36,6 +36,7 @@ async def create(body: AgentCreate, pool: PoolDep, account_id: AccountIdDep) -> 
         window_min=body.window_min,
         window_max=body.window_max,
         preempt_policy=body.preempt_policy,
+        output_style=body.output_style,
         account_id=account_id,
     )
 
@@ -118,6 +119,7 @@ async def update(
         window_min=body.window_min,
         window_max=body.window_max,
         preempt_policy=body.preempt_policy,
+        output_style=body.output_style,
         account_id=account_id,
     )
 

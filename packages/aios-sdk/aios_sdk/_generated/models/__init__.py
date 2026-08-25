@@ -11,17 +11,21 @@ from .agent import Agent
 from .agent_create import AgentCreate
 from .agent_create_litellm_extra import AgentCreateLitellmExtra
 from .agent_create_metadata import AgentCreateMetadata
+from .agent_create_output_style import AgentCreateOutputStyle
 from .agent_create_preempt_policy import AgentCreatePreemptPolicy
 from .agent_litellm_extra import AgentLitellmExtra
 from .agent_metadata import AgentMetadata
+from .agent_output_style import AgentOutputStyle
 from .agent_preempt_policy import AgentPreemptPolicy
 from .agent_skill_ref import AgentSkillRef
 from .agent_update import AgentUpdate
 from .agent_update_litellm_extra_type_0 import AgentUpdateLitellmExtraType0
 from .agent_update_metadata_type_0 import AgentUpdateMetadataType0
+from .agent_update_output_style_type_0 import AgentUpdateOutputStyleType0
 from .agent_update_preempt_policy_type_0 import AgentUpdatePreemptPolicyType0
 from .agent_version import AgentVersion
 from .agent_version_litellm_extra import AgentVersionLitellmExtra
+from .agent_version_output_style import AgentVersionOutputStyle
 from .agent_version_preempt_policy import AgentVersionPreemptPolicy
 from .allow_all import AllowAll
 from .allow_list import AllowList
@@ -377,17 +381,21 @@ __all__ = (
     "AgentCreate",
     "AgentCreateLitellmExtra",
     "AgentCreateMetadata",
+    "AgentCreateOutputStyle",
     "AgentCreatePreemptPolicy",
     "AgentLitellmExtra",
     "AgentMetadata",
+    "AgentOutputStyle",
     "AgentPreemptPolicy",
     "AgentSkillRef",
     "AgentUpdate",
     "AgentUpdateLitellmExtraType0",
     "AgentUpdateMetadataType0",
+    "AgentUpdateOutputStyleType0",
     "AgentUpdatePreemptPolicyType0",
     "AgentVersion",
     "AgentVersionLitellmExtra",
+    "AgentVersionOutputStyle",
     "AgentVersionPreemptPolicy",
     "AllowAll",
     "AllowList",

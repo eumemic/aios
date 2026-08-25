@@ -21,6 +21,7 @@ from aios.models.agents import (
     GenericChildBinding,
     HttpServerSpec,
     McpServerSpec,
+    OutputStyle,
     PermissionPolicy,
     PreemptPolicy,
     StepSurface,
@@ -113,6 +114,7 @@ async def create_agent(
     window_min: int,
     window_max: int,
     preempt_policy: PreemptPolicy = "wait",
+    output_style: OutputStyle = "default",
     creator_session_id: str | None = None,
 ) -> Agent:
     """Create a new agent at version 1.
@@ -159,6 +161,7 @@ async def create_agent(
             window_min=window_min,
             window_max=window_max,
             preempt_policy=preempt_policy,
+            output_style=output_style,
             account_id=account_id,
         )
 
@@ -206,6 +209,7 @@ async def update_agent(
     window_min: int | None = None,
     window_max: int | None = None,
     preempt_policy: PreemptPolicy | None = None,
+    output_style: OutputStyle | None = None,
     editor_session_id: str | None = None,
 ) -> Agent:
     """Update an agent in place, creating a new immutable version (optimistic
@@ -255,6 +259,7 @@ async def update_agent(
             window_min=window_min,
             window_max=window_max,
             preempt_policy=preempt_policy,
+            output_style=output_style,
             account_id=account_id,
         )
 
@@ -315,6 +320,7 @@ def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> S
         window_min=agent.window_min,
         window_max=agent.window_max,
         preempt_policy=agent.preempt_policy,
+        output_style=agent.output_style,
         binding=binding,
     )
 
@@ -358,6 +364,7 @@ async def _load_for_session_conn(
                 window_min=defaults["window_min"].default,
                 window_max=defaults["window_max"].default,
                 preempt_policy=defaults["preempt_policy"].default,
+                output_style=defaults["output_style"].default,
                 binding=GenericChildBinding(session_id=session.id),
             )
         version = await queries.get_agent_version(
