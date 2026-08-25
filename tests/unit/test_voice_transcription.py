@@ -21,6 +21,14 @@ class FailingReadUpload:
         pass
 
 
+class FailingRewindUpload:
+    async def read(self, size: int = -1) -> bytes:
+        return b"OggS-valid-audio"
+
+    async def seek(self, offset: int) -> None:
+        raise OSError("rewind failed")
+
+
 class MemoryUpload:
     filename: str | None = "voice-3664.ogg"
     content_type: str | None = "audio/ogg"
@@ -125,6 +133,31 @@ async def test_stream_read_failure_is_loud(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     assert content == "[Voice transcription failed: disk read failed.]"
+
+
+@pytest.mark.asyncio
+async def test_stream_rewind_failure_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "aios.services.voice_transcription.resolve_provider_auth_or_conflict",
+        AsyncMock(
+            return_value=(ProviderAuth("proxy-secret", "http://oai-proxy/v1", "acc_1"), None)
+        ),
+    )
+    upload = InboundAttachment(FailingRewindUpload(), "voice-3664.ogg", "audio/ogg")
+
+    content = await transcribe_voice_attachments(
+        pool=MagicMock(),
+        crypto_box=MagicMock(),
+        account_id="acc_1",
+        connector="telegram",
+        content="",
+        attachments=[upload],
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"text": "unused"})
+        ),
+    )
+
+    assert content == "[Voice transcription failed: rewind failed.]"
 
 
 @pytest.mark.asyncio

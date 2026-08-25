@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -71,6 +70,7 @@ async def transcribe_voice_attachments(
     headers = {"Authorization": f"Bearer {auth.api_key}"}
     async with httpx.AsyncClient(transport=transport, timeout=60.0) as client:
         for attachment in voice_attachments:
+            notices: list[str] = []
             try:
                 data = await attachment.stream.read()
                 if not data:
@@ -90,9 +90,16 @@ async def transcribe_voice_attachments(
                 transcript = payload.get("text") if isinstance(payload, dict) else None
                 if not isinstance(transcript, str) or not transcript.strip():
                     raise ValueError("proxy returned an empty transcript")
-                result = _append_notice(result, f"[Voice note transcript: {transcript.strip()}]")
-            except (httpx.HTTPError, json.JSONDecodeError, OSError, ValueError, TypeError) as err:
-                result = _append_notice(result, f"{_FAILURE_PREFIX}{err}.]")
-            finally:
+                notices.append(f"[Voice note transcript: {transcript.strip()}]")
+            except Exception as err:
+                notices.append(f"{_FAILURE_PREFIX}{err}.]")
+
+            try:
                 await attachment.stream.seek(0)  # type: ignore[attr-defined]
+            except Exception as err:
+                # A transcript is not usable when staging cannot reread its attachment.
+                notices = [f"{_FAILURE_PREFIX}{err}.]"]
+
+            for notice in notices:
+                result = _append_notice(result, notice)
     return result
