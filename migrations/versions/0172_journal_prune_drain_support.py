@@ -1,7 +1,7 @@
 """Journal-prune drain support: feeder backlog index + journal-table autovacuum tuning.
 
 Revision ID: 0172
-Revises: 0169
+Revises: 0171
 
 Two schema-only changes for the #2245 drain (the 97 GB of terminal-run
 journals that becomes prune-eligible as runs age past the retention window):
@@ -51,7 +51,7 @@ import sqlalchemy.exc
 from alembic import op
 
 revision = "0172"
-down_revision = "0169"
+down_revision = "0171"
 branch_labels = None
 depends_on = None
 
