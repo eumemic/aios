@@ -674,8 +674,9 @@ class Settings(BaseSettings):
     reclaimable_prune_enabled: bool = Field(
         default=True,
         description="Kill-switch for the age-based prune of RECLAIMABLE instance "
-        "ephemera (T6): terminal+archived ``wf_runs`` (and their ``WfRunEvent`` "
-        "journals, which cascade) plus archived agent/skill/workflow definitions "
+        "ephemera (T6): the journals (``wf_run_events`` + ``wf_run_signals``) of "
+        "terminal+archived ``wf_runs`` — the run row itself is kept forever as "
+        "the durable summary — plus archived agent/skill/workflow definitions "
         "no live session/run still pins. When False the maintenance sweep prunes "
         "nothing (set ``AIOS_RECLAIMABLE_PRUNE_ENABLED=false``). NEVER touches the "
         "sacred set: memory content, referenced session history, any version a "
@@ -685,11 +686,13 @@ class Settings(BaseSettings):
     wf_runs_retention_days: int = Field(
         default=30,
         ge=1,
-        description="Days a TERMINAL+ARCHIVED workflow run (``wf_runs`` with "
-        "``archived_at`` set by ``archive_run``) is retained before the prune "
-        "sweep deletes it — dropping its ``wf_run_events`` journal (the unbounded-"
-        "growth driver) via ``ON DELETE CASCADE`` in the same statement. Modeled "
-        "on ``trigger_runs_retention_days``; age-keyed on ``archived_at``. "
+        description="Days a TERMINAL+ARCHIVED workflow run's journal detail "
+        "(``wf_run_events`` + ``wf_run_signals``, the unbounded-growth drivers) "
+        "is retained before the prune sweep deletes it. The ``wf_runs`` row "
+        "itself is never pruned — it survives as the durable summary "
+        "(``terminal_summary``, output, cost), with ``journal_pruned_at`` "
+        "stamped when the journal empties. Modeled on "
+        "``trigger_runs_retention_days``; age-keyed on ``archived_at``. "
         "Time-based by design — a count-cap is explicitly rejected (#1461).",
     )
     reclaimable_prune_batch_rows: int = Field(

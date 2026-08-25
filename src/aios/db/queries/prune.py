@@ -21,12 +21,16 @@ Modeled on the two prunes that already exist in aios:
 
 Prune candidates (reclaimable):
 
-- **terminal + archived runs** past ``wf_runs_retention_days`` — deleting the
-  ``wf_runs`` row drops its ``WfRunEvent`` journal (the unbounded-growth driver)
-  via the ``wf_run_events.run_id ... ON DELETE CASCADE`` FK (migration 0064). A
-  run is only a candidate once ``archive_run`` (aios#9) has stamped
-  ``archived_at`` AND its status is terminal — so a live/suspended run is never
-  reached.
+- **terminal + archived runs** past ``wf_runs_retention_days`` — the
+  ``wf_runs`` row is KEPT FOREVER as the durable summary (status, output,
+  ``terminal_summary``, cost columns); what gets deleted is the child detail:
+  the ``wf_run_events`` journal and ``wf_run_signals`` (the unbounded-growth
+  drivers), with ``journal_pruned_at`` stamped once the journal is empty.
+  (The original design deleted the row and let ``ON DELETE CASCADE`` drop the
+  journal; #2076 inverted it — parents resolve child results from the run row
+  at any later time, so the row is institutional memory, not ephemera.) A run
+  is only a candidate once ``archive_run`` (aios#9) has stamped ``archived_at``
+  AND its status is terminal — so a live/suspended run is never reached.
 - **archived definitions** (agents / skills / workflows) past
   ``archived_definition_retention_days`` with **NO live session pinning** them —
   replay-stability requires the pinned version survive, so a definition any live
