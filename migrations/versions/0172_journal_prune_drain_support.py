@@ -2,8 +2,6 @@
 
 Revision ID: 0172
 Revises: 0169
-(Numbered 0172 because 0170/0171 are claimed by in-flight PRs #2202/#2247;
-renumber at rebase if they land first — see #2212 for the fork-detection gap.)
 
 Two schema-only changes for the #2245 drain (the 97 GB of terminal-run
 journals that becomes prune-eligible as runs age past the retention window):
@@ -37,14 +35,19 @@ journals that becomes prune-eligible as runs age past the retention window):
    deletion + vacuum makes space REUSABLE — returning it to the OS is a
    separate supervised pg_repack ceremony (eumemic-ops).
 
-   The ALTERs take SHARE UPDATE EXCLUSIVE, which is online-safe but queues
-   behind any running (anti-wraparound) autovacuum on the same table — and
-   everything behind the ALTER then queues on it. ``lock_timeout`` +
-   bounded retries make that a fail-fast loop instead of a wedged deploy.
+   The ALTERs take SHARE UPDATE EXCLUSIVE — application DML and reads do
+   NOT conflict with it (verified: INSERT/UPDATE/DELETE/SELECT flow freely
+   while the ALTER waits), so the risk is not app traffic. The risk is the
+   DEPLOY hanging for hours behind an anti-wraparound autovacuum on the same
+   table, with other maintenance DDL/autovacuum queueing behind the request.
+   ``lock_timeout`` + bounded retries make that a fail-fast loop instead of
+   a wedged deploy.
 """
 
 import time
 
+import psycopg.errors
+import sqlalchemy.exc
 from alembic import op
 
 revision = "0172"
@@ -59,13 +62,11 @@ _TABLES = ("wf_run_events", "wf_run_signals")
 
 
 def _alter_with_lock_timeout(sql: str, *, attempts: int = 5) -> None:
-    """Run one ALTER with a 5s lock_timeout, retrying a few times.
-
-    A plain ALTER here can sit behind an anti-wraparound autovacuum for
-    hours while blocking every query behind it in the lock queue. Failing
-    fast and retrying lets concurrent traffic interleave between attempts;
-    if all attempts lose the race the migration fails loudly and is safe to
-    re-run.
+    """Fail-fast ALTER under a 5s lock_timeout with bounded retries — see the
+    module docstring for why. Retries ONLY the lock timeout (55P03): any other
+    failure re-raises immediately on first occurrence, so a broken statement
+    is not retried five times and an earlier, different error is never masked
+    by a later one.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -73,7 +74,9 @@ def _alter_with_lock_timeout(sql: str, *, attempts: int = 5) -> None:
             op.execute(sql)
             op.execute("SET lock_timeout = DEFAULT")
             return
-        except Exception:
+        except sqlalchemy.exc.OperationalError as exc:
+            if not isinstance(getattr(exc, "orig", None), psycopg.errors.LockNotAvailable):
+                raise
             if attempt == attempts:
                 raise
             time.sleep(2 * attempt)
