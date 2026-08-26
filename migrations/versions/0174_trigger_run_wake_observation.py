@@ -1,12 +1,12 @@
 """Record whether a trigger fire woke its owner.
 
-Revision ID: 0170
+Revision ID: 0174
 Revises: 0171
 """
 
 from alembic import op
 
-revision = "0170"
+revision = "0174"
 down_revision = "0173"
 branch_labels = None
 depends_on = None
