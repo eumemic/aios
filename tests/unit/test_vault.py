@@ -17,7 +17,12 @@ from pydantic import SecretStr
 from aios.crypto.vault import BLOB_VERSION, KEY_BYTES, NONCE_BYTES, CryptoBox, EncryptedBlob
 from aios.db import queries
 from aios.db.queries import EnvVarCredentialRow
-from aios.errors import CryptoDecryptError, OAuthRefreshError, ValidationError
+from aios.errors import (
+    CryptoDecryptError,
+    OAuthReauthRequiredError,
+    OAuthRefreshError,
+    ValidationError,
+)
 from aios.models.environments import EnvironmentConfig, UnrestrictedNetworking
 from aios.models.vaults import (
     TokenEndpointAuthBasic,
@@ -1305,6 +1310,86 @@ class TestRefreshCredential:
         assert not any(
             "UPDATE vault_credentials" in str(c.args[0]) for c in conn.execute.await_args_list
         )
+
+    @pytest.mark.asyncio
+    async def test_invalid_grant_raises_reauth_required(self, crypto_box: CryptoBox) -> None:
+        """#192: Google's real invalid_grant error body (a dead/revoked refresh
+        token) must raise the distinguishable :class:`OAuthReauthRequiredError`,
+        not the generic :class:`OAuthRefreshError` — so a caller can tell
+        "reconnect this" from "retry me"."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(
+                status=400,
+                body={
+                    "error": "invalid_grant",
+                    "error_description": "Token has been expired or revoked.",
+                },
+            )
+        )
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthReauthRequiredError) as exc_info,
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        # A distinguishable subclass — a caller that only knows OAuthRefreshError
+        # (the pre-#192 contract) still catches it (it IS one), but a caller
+        # that wants to branch on "needs reconnect" can isinstance-check the
+        # narrower type.
+        assert isinstance(exc_info.value, OAuthRefreshError)
+        assert exc_info.value.error_type == "oauth_reauth_required"
+        assert exc_info.value.status_code == 502  # severity/eviction wiring untouched
+
+    @pytest.mark.asyncio
+    async def test_non_invalid_grant_400_stays_generic_refresh_error(
+        self, crypto_box: CryptoBox
+    ) -> None:
+        """A 400 for a DIFFERENT reason (not invalid_grant) must NOT be
+        misclassified as reauth-required — only the specific RFC 6749 code
+        triggers the narrower error."""
+        account_id = "acc_test_stub"  # PR 3 scaffolding
+        payload = _expiring_oauth_payload()
+        blob = crypto_box.derive_account_subkey(account_id).encrypt(json.dumps(payload))
+        conn = _conn_with_transaction()
+        client = _async_client_returning(
+            _http_response(status=400, body={"error": "invalid_request"})
+        )
+
+        with (
+            patch.object(
+                queries,
+                "lock_oauth_credential_for_refresh",
+                AsyncMock(return_value=("vc_1", blob)),
+            ),
+            patch.object(httpx, "AsyncClient", MagicMock(return_value=client)),
+            pytest.raises(OAuthRefreshError) as exc_info,
+        ):
+            await refresh_credential(
+                crypto_box,
+                fake_pool_yielding_conn(conn),
+                vault_id="vlt_1",
+                target_url="https://mcp.example.com",
+                account_id=account_id,
+            )
+
+        assert not isinstance(exc_info.value, OAuthReauthRequiredError)
+        assert exc_info.value.error_type == "oauth_refresh_error"
 
     @pytest.mark.asyncio
     async def test_malformed_response_raises(self, crypto_box: CryptoBox) -> None:

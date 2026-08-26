@@ -51,7 +51,7 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
 from aios.db.pool import normalize_dsn
-from aios.errors import NotFoundError, OAuthRefreshError, ValidationError
+from aios.errors import NotFoundError, OAuthReauthRequiredError, OAuthRefreshError, ValidationError
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.vaults import (
@@ -78,6 +78,32 @@ _OAUTH_REFRESH_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 _REFRESH_HTTP_TIMEOUT_SECONDS = 30
 
 log = get_logger("aios.services.vaults")
+
+
+def _extract_oauth_error_code(exc: httpx.HTTPError) -> str | None:
+    """Best-effort read of the RFC 6749 §5.2 ``error`` field from a token-endpoint
+    error response, e.g. ``{"error": "invalid_grant", "error_description": "..."}``
+    (the shape Google, and most OAuth providers, return).
+
+    Only ``httpx.HTTPStatusError`` carries a ``.response`` to read; other
+    ``httpx.HTTPError`` subclasses (timeout, connect error) have no body to
+    inspect and return ``None`` here, which keeps them on the generic
+    :class:`OAuthRefreshError` path. A response body that isn't JSON, isn't an
+    object, or has no ``error`` key also returns ``None`` — never raises: this
+    is a classification aid, not a load-bearing parse, so a malformed or
+    non-standard error body degrades to "unclassified" rather than masking the
+    real failure with a parse exception.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    try:
+        body = exc.response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    code = body.get("error")
+    return code if isinstance(code, str) else None
 
 
 async def _notify_evict_vault(pool: asyncpg.Pool[Any], vault_id: str) -> None:
@@ -341,6 +367,18 @@ async def _refresh_credential_serialized(
             token_endpoint=token_endpoint,
             exc_info=True,
         )
+        oauth_error = _extract_oauth_error_code(exc)
+        if oauth_error == "invalid_grant":
+            # RFC 6749 §5.2: the authorization server rejected the refresh grant
+            # itself (revoked/expired/dead refresh token) — not a transient
+            # transport failure. Distinguishable so a caller (the model, or a
+            # supervisor polling session events) can stop retrying and prompt
+            # for reconnection instead of treating this like a network blip.
+            raise OAuthReauthRequiredError(
+                "refresh token is no longer valid — the connection needs to be "
+                "reconnected (re-authorized) before it can be used again",
+                detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
+            ) from exc
         raise OAuthRefreshError(
             f"OAuth token endpoint request failed: {exc}",
             detail={"credential_id": credential_id, "token_endpoint": token_endpoint},
