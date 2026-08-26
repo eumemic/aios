@@ -763,8 +763,14 @@ async def compose_step_context(
     # standing as its own final user message.  Why a per-step user-content
     # injection at all (exactly-once, max recency, never persisted, survives
     # LiteLLM's provider transforms): see ``aios.harness.concise``.
+    #
+    # ``has_channels`` selects the channel-attached variant (#2262): landing
+    # after the channels tail is what let "be concise" read as licence to stop
+    # posting, so for a bound session the nag carries the delivery clause at
+    # that same maximum recency.  The position is deliberately unchanged —
+    # the counter-pressure has to sit exactly where the pressure was.
     if agent.output_style == "concise":
-        ctx.messages.append(build_concise_nag_message())
+        ctx.messages.append(build_concise_nag_message(has_channels=bool(channels)))
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,
