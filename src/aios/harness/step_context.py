@@ -528,12 +528,16 @@ def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
     tail would make a status listing the literal final message and mute
     literal-minded models (claude-fable-5): a **focal user inbound** (full
     content) and a **tool result**. Keep the real stimulus last for those.
+    The synthetic trailing-stimulus notice from ``build_messages`` deliberately
+    takes the focal-user arm — the missed events it points at ARE the stimulus.
 
     Two trailing cases are NOT a direct stimulus, so keep the tail:
     * a non-focal **notification marker** (``🔔 …``) — the tail's channel
       listing is its navigation companion (how to ``switch_channel`` to it);
     * an **assistant** turn — an idle/sweep re-check where the channel-status
-      listing is the useful signal.
+      listing is the useful signal. Since the trailing-assistant guard pads
+      every gate-firing build, a sent payload no longer ends on an assistant —
+      this arm now effectively serves the read-only context preview.
     """
     if not messages:
         return False

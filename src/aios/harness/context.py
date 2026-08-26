@@ -1218,6 +1218,12 @@ _PENDING_EXTERNAL = json.dumps(
     }
 )
 
+# Synthetic user turn ending a gate-firing build that would otherwise end on
+# an assistant message (see the trailing-assistant guard in build_messages).
+# Generic on purpose: each inline blind-spot injection already opens with a
+# header naming its call, so the tail only needs to redirect attention.
+_TRAILING_STIMULUS_NOTICE = "[New events arrived during your later turns — see above.]"
+
 
 @dataclass(slots=True)
 class ContextResult:
@@ -1611,6 +1617,17 @@ def build_messages(
     # of its own malfunction markers. Excluding them is safe for every model
     # (nothing is lost) and breaks the imitation loop at the source.
     stripped = [m for m in stripped if not _is_degenerate_empty_assistant(m)]
+
+    # Trailing-assistant guard: the user-deferral window above keeps
+    # blind-spot USER messages off the tail (#1120), but a blind-spot TOOL
+    # result injected mid-list (horizon-setter ≠ last assistant) — or a
+    # pruned structural orphan — still leaves a gate-firing build ending on
+    # an assistant turn: the same rejected prefill, the same volatile-tail
+    # trade. ``max_stimulus_seq > last_asst_rt`` is the gate's own firing
+    # condition, so reacted (not-sent) builds are never padded.
+    if stripped and stripped[-1].get("role") == "assistant" and max_stimulus_seq > last_asst_rt:
+        stripped.append({"role": "user", "content": _TRAILING_STIMULUS_NOTICE})
+
     return ContextResult(messages=stripped, reacting_to=max_stimulus_seq)
 
 
