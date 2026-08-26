@@ -341,7 +341,18 @@ class TestEvictReclamation:
         registry.evict("sess_X")
         # set.add runs synchronously inside evict — the loop hasn't yielded
         # yet, so the new task is still in flight.
-        assert len(registry._evict_proxy_stop_tasks) == 1
+        #
+        # Select the git-proxy stop task BY NAME rather than counting the set.
+        # ``_evict_proxy_stop_tasks`` is shared with the egress-invalidate
+        # tombstone (and may gain further kinds), so a cardinality assertion
+        # would pin a strictly weaker property — "something was parked" — and
+        # would silently stop covering the proxy stop the moment another kind
+        # joins. What must hold is that THIS task is strongly referenced
+        # across the pre-yield GC window.
+        parked = {t.get_name() for t in registry._evict_proxy_stop_tasks}
+        assert "sandbox-evict-git_proxy-stop:sess_X" in parked, (
+            f"evict() did not park the git-proxy stop task in the strong-ref set; parked={parked}"
+        )
 
         for _ in range(3):
             await asyncio.sleep(0)

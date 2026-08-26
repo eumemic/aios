@@ -70,6 +70,15 @@ def get(ctx: typer.Context, session_id: str) -> None:
     run_or_die(_run)
 
 
+@app.command("egress", help="Inspect the live sandbox egress intercept set.")
+@covers("get_session_egress")
+def egress(ctx: typer.Context, session_id: str) -> None:
+    def _run() -> None:
+        raw_single(ctx, "GET", f"/v1/sessions/{session_id}/egress")
+
+    run_or_die(_run)
+
+
 @app.command("create", help="Create a session (SessionCreate shape).")
 @covers("create_session")
 def create(

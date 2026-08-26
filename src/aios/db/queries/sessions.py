@@ -14,6 +14,7 @@ from types import EllipsisType
 from typing import Any
 
 import asyncpg
+from pydantic import ValidationError as PydanticValidationError
 
 from aios.actors import actor_columns, actor_from_row
 from aios.db import queries
@@ -44,6 +45,7 @@ from aios.ids import (
     TRIGGER,
     make_id,
 )
+from aios.logging import get_logger
 from aios.models.accounting import UsageCounters, UsageNodeRef
 from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
 from aios.models.attenuation import Surface
@@ -52,10 +54,14 @@ from aios.models.sessions import (
     Obligation,
     Outcome,
     Session,
+    SessionEgressHost,
+    SessionEgressResponse,
     SessionStatus,
     SessionUsage,
 )
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
+
+log = get_logger("aios.db.queries.sessions")
 
 # ─── sessions ─────────────────────────────────────────────────────────────────
 
@@ -1450,6 +1456,116 @@ async def set_session_channels(
         channels,
         session_id,
         account_id,
+    )
+
+
+async def get_session_egress(
+    conn: asyncpg.Connection[Any], session_id: str, *, account_id: str
+) -> SessionEgressResponse:
+    """Read the latest worker-stamped live egress metadata for a scoped session."""
+    row = await conn.fetchrow(
+        "SELECT e.hosts, e.provisioned_at, e.sandbox_generation "
+        "FROM session_egress_states e JOIN sessions s ON s.id = e.session_id "
+        "WHERE e.session_id = $1 AND s.account_id = $2",
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        )
+    # Fail CLOSED on unreadable persisted state.
+    #
+    # ``hosts`` is ``JSONB`` and deliberately NULLABLE (migration 0173): SQL
+    # NULL is the INVALIDATION tombstone, handled just below. Do NOT "restore"
+    # a ``NOT NULL`` constraint here — that would destroy the tombstone
+    # contract. Beyond SQL NULL, the column can still hold the JSON scalar
+    # ``null``, a non-array container, or an array whose entries do not satisfy
+    # ``SessionEgressHost`` — this read cannot assume its own writer produced
+    # the row (older writer, manual repair, future schema).
+    # Unvalidated, those escape as an unhandled ``TypeError`` /
+    # pydantic ``ValidationError`` and surface as a 500, which is the absence
+    # of a contract rather than one. The stated contract: state that cannot be
+    # read as the declared shape is reported as ABSENT, exactly like a missing
+    # row, and is never partially rendered. The raw payload is deliberately
+    # kept out of the error (it is the untrusted thing) and logged instead, so
+    # corruption stays diagnosable without becoming a response-side channel.
+    raw_hosts = row["hosts"]
+    if raw_hosts is None:
+        # The INVALIDATION tombstone: a row exists (so the generation counter is
+        # preserved) but its observation was cleared because the sandbox it
+        # described is gone or its rules could not be read back. Reported as
+        # ABSENT — never as an empty, affirmative "nothing is intercepted".
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        )
+    try:
+        if not isinstance(raw_hosts, list):
+            raise TypeError(f"hosts is {type(raw_hosts).__name__}, expected list")
+        hosts = [SessionEgressHost.model_validate(host) for host in raw_hosts]
+    except (TypeError, PydanticValidationError) as exc:
+        log.error(
+            "session_egress_state_unreadable",
+            session_id=session_id,
+            error=str(exc),
+        )
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        ) from exc
+    return SessionEgressResponse(
+        hosts=hosts,
+        provisioned_at=row["provisioned_at"],
+        sandbox_generation=row["sandbox_generation"],
+    )
+
+
+async def stamp_session_egress(
+    conn: asyncpg.Connection[Any], session_id: str, hosts: list[dict[str, Any]]
+) -> None:
+    """Atomically publish metadata derived from rules read back after provisioning."""
+    await conn.execute(
+        "INSERT INTO session_egress_states "
+        "(session_id, hosts, provisioned_at, sandbox_generation) "
+        "VALUES ($1, $2::jsonb, now(), 1) "
+        "ON CONFLICT (session_id) DO UPDATE SET "
+        "hosts = EXCLUDED.hosts, provisioned_at = EXCLUDED.provisioned_at, "
+        "sandbox_generation = session_egress_states.sandbox_generation + 1",
+        session_id,
+        json.dumps(hosts),
+    )
+
+
+async def clear_session_egress(conn: asyncpg.Connection[Any], session_id: str) -> None:
+    """Invalidate a session's persisted intercept set (TOMBSTONE, not delete).
+
+    Used when the persisted set no longer describes an observable sandbox:
+    a provisioning completed but its live rules could NOT be read back (read-back
+    failed, ambiguous DNAT target, no installed DNAT, proxy alias miss), or the
+    sandbox was torn down (release / evict / idle-reap / worker shutdown). The
+    previous generation's row describes a sandbox that no longer exists, so
+    leaving it in place makes GET report obsolete hosts as the CURRENT live
+    intercept set.
+
+    Invalidation writes ``hosts = NULL`` — the "could not observe" tombstone —
+    rather than an empty array: an empty ``hosts`` array is an affirmative
+    "nothing is intercepted", which is exactly the false all-clear this endpoint
+    exists to prevent. NULL reads back through the SAME ``NotFoundError``
+    contract as a missing row ("I could not read it", not "there is nothing").
+
+    It is a tombstone rather than a DELETE so ``sandbox_generation`` stays
+    MONOTONIC. A DELETE drops the counter, and the next stamp's upsert restarts
+    it at 1 — so generation 3 → invalidation → generation 1, which makes a
+    diagnostic field on a diagnostic endpoint understate the sandbox's history.
+    Preserving the row preserves the counter; only the observation is cleared.
+
+    No-op when no row exists: there is nothing to invalidate, and inserting a
+    tombstone for a session that never published state would fabricate a
+    generation count out of nothing.
+    """
+    await conn.execute(
+        "UPDATE session_egress_states SET hosts = NULL, provisioned_at = now() "
+        "WHERE session_id = $1",
+        session_id,
     )
 
 

@@ -53,6 +53,7 @@ from aios.models.sessions import (
     Outcome,
     Session,
     SessionAwaitResponse,
+    SessionEgressResponse,
     SessionResource,
     SessionResourceEcho,
     SessionStatus,
@@ -1188,6 +1189,13 @@ async def compute_obligations(
         return await queries.get_open_obligations_batch(
             conn, [s.id for s in sessions], account_id=account_id
         )
+
+
+async def get_session_egress(
+    pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
+) -> SessionEgressResponse:
+    async with pool.acquire() as conn:
+        return await queries.get_session_egress(conn, session_id, account_id=account_id)
 
 
 async def get_session(pool: asyncpg.Pool[Any], session_id: str, *, account_id: str) -> Session:

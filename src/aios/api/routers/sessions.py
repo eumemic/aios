@@ -61,6 +61,7 @@ from aios.models.sessions import (
     SessionAwaitResponse,
     SessionCloneRequest,
     SessionCreate,
+    SessionEgressResponse,
     SessionInterruptRequest,
     SessionResource,
     SessionResourceEcho,
@@ -212,6 +213,13 @@ async def get(session_id: str, pool: PoolDep, account_id: AccountIdDep) -> Sessi
         pool, session_id, account_id=account_id
     )
     return session.model_copy(update={"total_events": total_events, "last_event_at": last_event_at})
+
+
+@router.get("/{session_id}/egress", operation_id="get_session_egress")
+async def get_egress(
+    session_id: str, pool: PoolDep, account_id: AccountIdDep
+) -> SessionEgressResponse:
+    return await service.get_session_egress(pool, session_id, account_id=account_id)
 
 
 @router.put("/{session_id}", operation_id="update_session")
