@@ -65,5 +65,5 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
 
     # Bump this when adding a migration — the count pins accidental
     # deletions/duplications, not a maximum.
-    assert len(revisions) == 159
+    assert len(revisions) == 160
     assert check_history(revisions) in revisions
