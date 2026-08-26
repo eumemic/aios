@@ -388,11 +388,18 @@ async def run_trigger_step(trigger_id: str, trigger_run_id: str | None = None) -
             log.exception("trigger.wake_observation_read_error", trigger_id=trigger.id)
 
     if observed_warning:
-        await _surface_failure(
-            trigger.owner_session_id,
-            trigger.account_id,
-            f"[Trigger '{trigger.name}' warning: {OBSERVED_WAKE_WARNING}]",
-        )
+        try:
+            await _surface_failure(
+                trigger.owner_session_id,
+                trigger.account_id,
+                f"[Trigger '{trigger.name}' warning: {OBSERVED_WAKE_WARNING}]",
+            )
+        except Exception:
+            # The trigger effect and audit are already committed. Warning
+            # delivery is optional telemetry and must not invite a retry of the
+            # completed effect, even if a replacement implementation of the
+            # best-effort surface unexpectedly raises.
+            log.exception("trigger.wake_observation_warning_error", trigger_id=trigger.id)
 
     # Surface the auto-disable AFTER the transaction commits — _surface_failure
     # re-acquires the pool, so nesting it inside the open transaction connection
