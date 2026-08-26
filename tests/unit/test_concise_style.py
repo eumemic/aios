@@ -16,6 +16,8 @@ from pydantic import ValidationError
 
 from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
+    CONCISE_NAG_CONTENT_CHANNELS,
+    CONCISE_NAG_DELIVERY_CLAUSE,
     CONCISE_NAG_UPPER_BOUND_LOCAL,
     CONCISE_STYLE_BLOCK,
     build_concise_nag_message,
@@ -123,7 +125,18 @@ def _text(msg: dict[str, Any]) -> str:
 
 
 def _nag_count(messages: list[dict[str, Any]]) -> int:
-    return sum(_text(m).count(CONCISE_NAG_CONTENT) for m in messages)
+    """Occurrences of EITHER nag variant.
+
+    The channel-attached variant (#2262) is not a superstring of the plain one
+    — the delivery clause lands inside the ``<system-reminder>`` element — so
+    counting only ``CONCISE_NAG_CONTENT`` would silently score a channel
+    session as zero nags and turn every exactly-once assertion green-for-the-
+    wrong-reason.
+    """
+    return sum(
+        _text(m).count(CONCISE_NAG_CONTENT) + _text(m).count(CONCISE_NAG_CONTENT_CHANNELS)
+        for m in messages
+    )
 
 
 # ── the nag in the composed payload ──────────────────────────────────────────
@@ -165,8 +178,37 @@ class TestConciseNag:
         assert last["role"] == "user"
         text = _text(last)
         assert "━━━ Channels ━━━" in text
-        assert text.endswith(CONCISE_NAG_CONTENT)
+        assert text.endswith(CONCISE_NAG_CONTENT_CHANNELS)
         assert _nag_count(messages) == 1
+
+    async def test_nag_carries_delivery_clause_when_channels_bound(self) -> None:
+        """#2262: for a channel-attached session the nag must also say that
+        being brief is not licence to stop posting.
+
+        The mute this guards against was a per-step pressure that survived an
+        explicit in-band correction from the user, so the counter-pressure has
+        to ride the nag — the one injection rebuilt at maximum recency every
+        step — rather than the system prompt alone.
+        """
+        events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
+        messages = await _compose(
+            _agent(output_style="concise"), events, channels=["telegram/8622/chat-a"]
+        )
+        text = _text(messages[-1])
+        assert CONCISE_NAG_DELIVERY_CLAUSE.strip() in text
+        # The clause lands INSIDE the reminder element, after the steering
+        # sentence — not as a second stray <system-reminder>.
+        assert text.count("<system-reminder>") == 1
+        assert _nag_count(messages) == 1
+
+    async def test_nag_omits_delivery_clause_without_channels(self) -> None:
+        """No bound channels -> no connector to send through, so the clause
+        would be noise; the plain variant renders verbatim."""
+        events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
+        messages = await _compose(_agent(output_style="concise"), events, channels=[])
+        text = _text(messages[-1])
+        assert text == CONCISE_NAG_CONTENT
+        assert CONCISE_NAG_DELIVERY_CLAUSE.strip() not in text
 
     async def test_nag_carries_ephemeral_tail_marker(self) -> None:
         """The nag (and any merge containing it) must never host the
@@ -209,6 +251,25 @@ class TestConciseSystemPrompt:
         prelude = await self._prelude_for(_agent(output_style="default"))
         assert CONCISE_STYLE_BLOCK not in prelude.system_prompt
 
+    async def test_override_clause_carves_out_delivery(self) -> None:
+        """#2262: the precedence clause must claim STYLE only.
+
+        ``augment_with_concise_style`` appends this block directly on top of
+        ``build_focal_paradigm_block``, whose contract ("bare assistant text is
+        NOT delivered to any channel") reads like style guidance but is the
+        rule that makes the agent audible. An unscoped "these rules win"
+        outranked it and muted a live channel-attached agent, so the carve-out
+        is load-bearing, not decorative — this asserts it cannot be quietly
+        re-broadened by a later edit.
+        """
+        assert "outranks these rules absolutely" in CONCISE_STYLE_BLOCK
+        assert "LENGTH and SHAPE" in CONCISE_STYLE_BLOCK
+        # The old unscoped sentence must not come back verbatim.
+        assert (
+            "Where these rules conflict with more general style guidance "
+            "elsewhere in your instructions, these rules win."
+        ) not in CONCISE_STYLE_BLOCK
+
 
 # ── the windowing reserve ────────────────────────────────────────────────────
 
@@ -216,8 +277,19 @@ class TestConciseSystemPrompt:
 class TestConciseNagReserve:
     def test_upper_bound_covers_real_builder_output(self) -> None:
         """The hardcoded reserve must cover the message the builder actually
-        emits -- costed on the REAL builder output, not a re-rolled inline dict."""
-        assert approx_tokens([build_concise_nag_message()]) <= CONCISE_NAG_UPPER_BOUND_LOCAL
+        emits -- costed on the REAL builder output, not a re-rolled inline dict.
+
+        BOTH variants: the reserve is computed at windowing time from the agent
+        alone, before the composer knows whether the session has channels, so
+        the bound has to hold for the longer channel-attached nag (#2262).
+        """
+        for has_channels in (False, True):
+            cost = approx_tokens([build_concise_nag_message(has_channels=has_channels)])
+            assert cost <= CONCISE_NAG_UPPER_BOUND_LOCAL, (
+                f"nag variant has_channels={has_channels} costs {cost} local tokens, "
+                f"over the {CONCISE_NAG_UPPER_BOUND_LOCAL} reserve -- raise the "
+                f"constant rather than shortening the clause"
+            )
 
     def test_reserve_summed_unconditionally(self) -> None:
         """Reserved for every agent (the omission-marker idiom) -- the prelude
