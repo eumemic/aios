@@ -944,8 +944,14 @@ class SandboxRegistry:
         # else: Unrestricted, no credentials → no network-rule work.
         if dnat_target is None:
             # A successful credential-free reprovision supersedes any persisted
-            # intercept set from the previous sandbox generation.
-            await self._publish_session_egress(handle, [])
+            # intercept set from the previous sandbox generation — but it is NOT
+            # an observation. No rules were installed and none were read back, so
+            # publishing ``[]`` here would be an affirmative "nothing is
+            # intercepted" derived purely from configuration: precisely the
+            # config-reported-as-observed error this endpoint exists to expose,
+            # and the one rule this subsystem must not break itself. Invalidate
+            # instead — the tombstone says "not observable", which is true.
+            await self._invalidate_session_egress(handle, reason="no_credentials")
         else:
             limited_hosts: set[str] = set()
             if isinstance(networking, LimitedNetworking):
@@ -1096,13 +1102,29 @@ class SandboxRegistry:
     async def _publish_session_egress(
         handle: SandboxHandle, hosts: list[dict[str, object]]
     ) -> None:
-        """Publish the observed intercept set for a successful session provision."""
+        """Publish the observed intercept set for a successful session provision.
+
+        Best-effort by construction. This call sits inside the provisioning
+        ``try`` whose ``except BaseException`` destroys the container, so an
+        exception escaping here would tear down a HEALTHY, fully provisioned
+        sandbox over a purely observational write — trading a working session
+        for a diagnostics row. The failure is logged and swallowed: a missing
+        row already reads as "not observable" (``NotFoundError``), which is the
+        honest answer, whereas a destroyed sandbox is an outage.
+        """
         if not handle.owner_id.startswith("sess_"):
             return
         from aios.harness import runtime as harness_runtime
 
-        async with harness_runtime.require_pool().acquire() as conn:
-            await queries.stamp_session_egress(conn, handle.owner_id, hosts)
+        try:
+            async with harness_runtime.require_pool().acquire() as conn:
+                await queries.stamp_session_egress(conn, handle.owner_id, hosts)
+        except Exception as err:
+            log.warning(
+                "sandbox.session_egress_publish_failed",
+                owner_id=handle.owner_id,
+                error=str(err),
+            )
 
     @staticmethod
     async def _invalidate_session_egress(handle: SandboxHandle, *, reason: str) -> None:
@@ -1118,15 +1140,41 @@ class SandboxRegistry:
         """
         if not handle.owner_id.startswith("sess_"):
             return
+        await SandboxRegistry._invalidate_session_egress_by_id(handle.owner_id, reason=reason)
+
+    @staticmethod
+    async def _invalidate_session_egress_by_id(session_id: str, *, reason: str) -> None:
+        """Tombstone a session's persisted intercept set by id.
+
+        Split from :meth:`_invalidate_session_egress` because the teardown
+        paths (``release``/``evict``/idle-reap/``stop_all``) hold no
+        ``SandboxHandle`` — they have already popped it — yet they are exactly
+        the paths that must invalidate: a destroyed sandbox's hosts are the
+        clearest case of state outliving the provisioning it describes.
+
+        Best-effort for the same reason as the publish path: this runs during
+        teardown, and a DB hiccup must not turn releasing a sandbox into a
+        raised exception on a shutdown path.
+        """
+        if not session_id.startswith("sess_"):
+            return
         from aios.harness import runtime as harness_runtime
 
         log.warning(
             "sandbox.session_egress_state_invalidated",
-            owner_id=handle.owner_id,
+            owner_id=session_id,
             reason=reason,
         )
-        async with harness_runtime.require_pool().acquire() as conn:
-            await queries.clear_session_egress(conn, handle.owner_id)
+        try:
+            async with harness_runtime.require_pool().acquire() as conn:
+                await queries.clear_session_egress(conn, session_id)
+        except Exception as err:
+            log.warning(
+                "sandbox.session_egress_invalidate_failed",
+                owner_id=session_id,
+                reason=reason,
+                error=str(err),
+            )
 
     async def _read_installed_egress_rules(
         self, handle: SandboxHandle, runtime: str | None
@@ -1388,6 +1436,29 @@ class SandboxRegistry:
             self._stop_proxy_silently(proxy, session_id, kind=kind),
             name=f"sandbox-evict-{kind}-stop:{session_id}",
         )
+        self._evict_proxy_stop_tasks.add(task)
+        task.add_done_callback(self._evict_proxy_stop_tasks.discard)
+
+    def _spawn_egress_invalidate(self, session_id: str, *, reason: str) -> None:
+        """Fire-and-forget tombstone of an evicted session's intercept set.
+
+        ``evict`` is synchronous and on a retry path, so it cannot await the DB
+        write. Mirrors :meth:`_spawn_evict_proxy_stop` exactly, including the
+        strong-ref set: asyncio only weak-refs tasks, so an un-parked task can
+        be collected before the UPDATE lands, which would silently leave a dead
+        sandbox's hosts readable as live state.
+
+        No running loop (``evict`` called from sync context in tests) is not an
+        error: there is nothing to schedule onto, and the next provision
+        republishes or invalidates the row anyway.
+        """
+        try:
+            task = asyncio.create_task(
+                self._invalidate_session_egress_by_id(session_id, reason=reason),
+                name=f"sandbox-evict-egress-invalidate:{session_id}",
+            )
+        except RuntimeError:
+            return
         self._evict_proxy_stop_tasks.add(task)
         task.add_done_callback(self._evict_proxy_stop_tasks.discard)
 
@@ -2187,6 +2258,13 @@ class SandboxRegistry:
         handle = self._handles.pop(session_id, None)
         self._last_used.pop(session_id, None)
         self._egress_states.pop(session_id, None)
+        # The sandbox this session's persisted intercept set describes is being
+        # destroyed. Without this, GET keeps serving a DEAD sandbox's hosts as
+        # the current live intercept set — the same "state outliving the
+        # provisioning it describes" defect the provision path already guards,
+        # reachable from every teardown. Tombstoned (not deleted) so the
+        # generation counter stays monotonic.
+        await self._invalidate_session_egress_by_id(session_id, reason="released")
         # NOTE: do NOT pop self._locks[session_id] here.  The two
         # release()-callers (``release_if_mounts_changed`` and the
         # idle reaper) wrap this call in ``async with
@@ -2292,6 +2370,12 @@ class SandboxRegistry:
 
         self._last_used.pop(session_id, None)
         self._egress_states.pop(session_id, None)
+        # The sandbox is dead (that is why we are evicting), so its persisted
+        # intercept set no longer describes anything live. ``evict`` is sync and
+        # on a retry path, so the tombstone is fire-and-forget like the proxy
+        # stops below — it shares the same strong-ref set so the task is not
+        # GC'd mid-flight.
+        self._spawn_egress_invalidate(session_id, reason="evicted")
         # NOTE: do NOT pop self._locks[session_id] here either — same
         # reason as ``release()``.  A concurrent ``get_or_provision``
         # that is already inside ``async with self._lock_for(sid)``
@@ -2346,6 +2430,11 @@ class SandboxRegistry:
         # the cleanup path in ``release()``/``evict()``.
         for h in handles:
             self._release_tool_broker_secret(h.owner_id)
+        # Every one of these sandboxes is being stopped, so no persisted
+        # intercept set still describes a live sandbox. Tombstone them before
+        # dropping the maps (the ids are only knowable from ``handles``).
+        for h in handles:
+            await self._invalidate_session_egress_by_id(h.owner_id, reason="worker_shutdown")
         self._handles.clear()
         self._last_used.clear()
         self._egress_states.clear()

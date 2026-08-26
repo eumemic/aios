@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from structlog.testing import capture_logs
@@ -556,11 +557,26 @@ async def test_persisted_intercepts_are_attributed_to_live_dnat_rules_only() -> 
     ]
 
 
-async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None:
+async def test_no_credentials_reprovision_invalidates_rather_than_publishing_empty() -> None:
+    """SUPERSEDES the previous round's contract, which pinned the defect.
+
+    This test previously asserted that a credential-free reprovision PUBLISHES
+    ``[]``. The 2026-08-15 re-verification identified that as the one place the
+    same commit violated the rule it had just established: no rules are
+    installed and none are read back on this path, so ``[]`` is an affirmative
+    "nothing is intercepted" derived purely from CONFIGURATION — the exact
+    config-reported-as-observed error this endpoint exists to expose. Worse, it
+    was pinned green, so correcting it had to fight the suite.
+
+    The corrected contract: invalidate (tombstone = "not observable"), which
+    still supersedes the previous generation's row without asserting a fact
+    nobody measured.
+    """
     registry = SandboxRegistry(FakeBackend())
     handle = make_handle(session_id="sess_X")
     plan = _credential_free_plan()
     stamp = AsyncMock()
+    clear = AsyncMock()
 
     with (
         patch(
@@ -568,13 +584,16 @@ async def test_no_credentials_reprovision_publishes_empty_egress_state() -> None
             return_value=SimpleNamespace(acquire=lambda: _Acquire()),
         ),
         patch("aios.sandbox.registry.queries.stamp_session_egress", stamp),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
     ):
         await registry._apply_egress_rules(handle, plan)
 
-    stamp.assert_awaited_once()
-    persisted_call = stamp.await_args
-    assert persisted_call is not None
-    assert persisted_call.args[1:] == ("sess_X", [])
+    # No affirmative observation is published ...
+    stamp.assert_not_awaited()
+    # ... but the stale row from the previous generation is still superseded.
+    clear.assert_awaited_once()
+    assert clear.await_args is not None
+    assert clear.await_args.args[1] == "sess_X"
 
 
 # --- The persisted state must never outlive the provisioning it describes ---
@@ -749,3 +768,102 @@ async def test_non_session_owner_never_touches_session_egress_table() -> None:
 
     stamp.assert_not_awaited()
     clear.assert_not_awaited()
+
+
+# ─── persisted state must never outlive the provisioning it describes ─────────
+#
+# The provision path already invalidated on unobservable readback. These pin the
+# SAME property on the inputs that fix never considered: teardown, the credential
+# -free path, the 30s sweep, and the generation counter.
+
+
+def _patch_pool() -> Any:
+    return patch(
+        "aios.harness.runtime.require_pool",
+        return_value=SimpleNamespace(acquire=lambda: _Acquire()),
+    )
+
+
+async def test_release_invalidates_persisted_egress_state() -> None:
+    """A destroyed sandbox's hosts must not remain readable as LIVE state.
+
+    ``release`` tears the sandbox down, so the persisted row now describes a
+    sandbox that is gone. Before this, ``clear_session_egress`` had exactly one
+    caller (the unobservable-provision path) and GET kept serving a dead
+    sandbox's intercept set.
+    """
+    registry = SandboxRegistry(FakeBackend())
+    registry._handles["sess_X"] = make_handle(session_id="sess_X")
+    registry._last_used["sess_X"] = 0.0
+    clear = AsyncMock()
+
+    with (
+        _patch_pool(),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+        patch.object(registry, "_snapshot_and_remove", AsyncMock()),
+    ):
+        await registry.release("sess_X")
+
+    clear.assert_awaited_once()
+    assert clear.await_args is not None
+    assert clear.await_args.args[1] == "sess_X"
+
+
+async def test_stop_all_invalidates_every_live_session_egress_state() -> None:
+    """Worker shutdown stops every container — no row still describes a live one."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    registry._handles["sess_A"] = make_handle(session_id="sess_A")
+    registry._handles["sess_B"] = make_handle(session_id="sess_B")
+    clear = AsyncMock()
+
+    with (
+        _patch_pool(),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+    ):
+        await registry.stop_all()
+
+    cleared = {call.args[1] for call in clear.await_args_list}
+    assert cleared == {"sess_A", "sess_B"}
+
+
+async def test_evict_invalidates_persisted_egress_state() -> None:
+    """``evict`` means the sandbox is already dead; its intercept set is not live."""
+    registry = SandboxRegistry(FakeBackend())
+    registry._handles["sess_X"] = make_handle(session_id="sess_X")
+    registry._last_used["sess_X"] = 0.0
+    clear = AsyncMock()
+
+    with (
+        _patch_pool(),
+        patch("aios.sandbox.registry.queries.clear_session_egress", clear),
+    ):
+        registry.evict("sess_X")
+        # evict is sync + fire-and-forget; drain the detached task.
+        for task in list(registry._evict_proxy_stop_tasks):
+            await task
+
+    clear.assert_awaited_once()
+    assert clear.await_args is not None
+    assert clear.await_args.args[1] == "sess_X"
+
+
+async def test_publish_failure_never_tears_down_a_healthy_sandbox() -> None:
+    """The diagnostics write sits inside the provision try that destroys the container.
+
+    A transient DB error on a purely OBSERVATIONAL write must not cost a
+    healthy, fully provisioned sandbox. A missing row already reads as
+    "not observable"; a destroyed sandbox is an outage.
+    """
+    registry = SandboxRegistry(FakeBackend())
+    handle = make_handle(session_id="sess_X")
+
+    with (
+        _patch_pool(),
+        patch(
+            "aios.sandbox.registry.queries.stamp_session_egress",
+            AsyncMock(side_effect=RuntimeError("pool exhausted")),
+        ),
+    ):
+        # Must not raise.
+        await registry._publish_session_egress(handle, [{"host": "a.example"}])

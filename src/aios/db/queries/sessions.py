@@ -1488,6 +1488,14 @@ async def get_session_egress(
     # kept out of the error (it is the untrusted thing) and logged instead, so
     # corruption stays diagnosable without becoming a response-side channel.
     raw_hosts = row["hosts"]
+    if raw_hosts is None:
+        # The INVALIDATION tombstone: a row exists (so the generation counter is
+        # preserved) but its observation was cleared because the sandbox it
+        # described is gone or its rules could not be read back. Reported as
+        # ABSENT — never as an empty, affirmative "nothing is intercepted".
+        raise NotFoundError(
+            f"live egress state for session {session_id} not found", detail={"id": session_id}
+        )
     try:
         if not isinstance(raw_hosts, list):
             raise TypeError(f"hosts is {type(raw_hosts).__name__}, expected list")
@@ -1525,21 +1533,37 @@ async def stamp_session_egress(
 
 
 async def clear_session_egress(conn: asyncpg.Connection[Any], session_id: str) -> None:
-    """Invalidate a session's persisted intercept set.
+    """Invalidate a session's persisted intercept set (TOMBSTONE, not delete).
 
-    Used when a provisioning completes but the live intercept set could NOT be
-    observed (rule read-back failed, the DNAT target was ambiguous, no DNAT was
-    installed, or the proxy alias would not resolve). The previous generation's
-    row describes a sandbox that no longer exists, so leaving it in place makes
-    GET report obsolete hosts as the CURRENT live intercept set.
+    Used when the persisted set no longer describes an observable sandbox:
+    a provisioning completed but its live rules could NOT be read back (read-back
+    failed, ambiguous DNAT target, no installed DNAT, proxy alias miss), or the
+    sandbox was torn down (release / evict / idle-reap / worker shutdown). The
+    previous generation's row describes a sandbox that no longer exists, so
+    leaving it in place makes GET report obsolete hosts as the CURRENT live
+    intercept set.
 
-    Deletion — not an empty stamp — is the fail-closed action: an empty ``hosts``
-    array is an affirmative "nothing is intercepted", which is exactly the false
-    all-clear this endpoint exists to prevent. An absent row renders as
-    ``NotFoundError``, the same contract :func:`get_session_egress` already
-    states for unreadable state ("I could not read it", not "there is nothing").
+    Invalidation writes ``hosts = NULL`` — the "could not observe" tombstone —
+    rather than an empty array: an empty ``hosts`` array is an affirmative
+    "nothing is intercepted", which is exactly the false all-clear this endpoint
+    exists to prevent. NULL reads back through the SAME ``NotFoundError``
+    contract as a missing row ("I could not read it", not "there is nothing").
+
+    It is a tombstone rather than a DELETE so ``sandbox_generation`` stays
+    MONOTONIC. A DELETE drops the counter, and the next stamp's upsert restarts
+    it at 1 — so generation 3 → invalidation → generation 1, which makes a
+    diagnostic field on a diagnostic endpoint understate the sandbox's history.
+    Preserving the row preserves the counter; only the observation is cleared.
+
+    No-op when no row exists: there is nothing to invalidate, and inserting a
+    tombstone for a session that never published state would fabricate a
+    generation count out of nothing.
     """
-    await conn.execute("DELETE FROM session_egress_states WHERE session_id = $1", session_id)
+    await conn.execute(
+        "UPDATE session_egress_states SET hosts = NULL, provisioned_at = now() "
+        "WHERE session_id = $1",
+        session_id,
+    )
 
 
 async def get_session_provisioning(
