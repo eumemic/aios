@@ -1452,12 +1452,18 @@ class SandboxRegistry:
         error: there is nothing to schedule onto, and the next provision
         republishes or invalidates the row anyway.
         """
+        coro = self._invalidate_session_egress_by_id(session_id, reason=reason)
         try:
             task = asyncio.create_task(
-                self._invalidate_session_egress_by_id(session_id, reason=reason),
+                coro,
                 name=f"sandbox-evict-egress-invalidate:{session_id}",
             )
         except RuntimeError:
+            # Close the never-scheduled coroutine explicitly. Otherwise it is
+            # collected un-awaited and CPython emits ``RuntimeWarning:
+            # coroutine ... was never awaited`` at an arbitrary later GC,
+            # attributed to whatever test happens to be running then.
+            coro.close()
             return
         self._evict_proxy_stop_tasks.add(task)
         task.add_done_callback(self._evict_proxy_stop_tasks.discard)

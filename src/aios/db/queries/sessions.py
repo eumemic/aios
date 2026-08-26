@@ -1476,10 +1476,13 @@ async def get_session_egress(
         )
     # Fail CLOSED on unreadable persisted state.
     #
-    # ``hosts`` is ``JSONB NOT NULL``, but ``NOT NULL`` does not exclude the
-    # JSON scalar ``null``, a non-array container, or an array whose entries
-    # do not satisfy ``SessionEgressHost`` — this read cannot assume its own
-    # writer produced the row (older writer, manual repair, future schema).
+    # ``hosts`` is ``JSONB`` and deliberately NULLABLE (migration 0173): SQL
+    # NULL is the INVALIDATION tombstone, handled just below. Do NOT "restore"
+    # a ``NOT NULL`` constraint here — that would destroy the tombstone
+    # contract. Beyond SQL NULL, the column can still hold the JSON scalar
+    # ``null``, a non-array container, or an array whose entries do not satisfy
+    # ``SessionEgressHost`` — this read cannot assume its own writer produced
+    # the row (older writer, manual repair, future schema).
     # Unvalidated, those escape as an unhandled ``TypeError`` /
     # pydantic ``ValidationError`` and surface as a 500, which is the absence
     # of a contract rather than one. The stated contract: state that cannot be
