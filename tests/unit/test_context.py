@@ -14,6 +14,7 @@ import pytest
 
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
+    _TRAILING_STIMULUS_NOTICE,
     EPHEMERAL_TAIL_KEY,
     _approx_count,
     _concat_user_messages,
@@ -332,6 +333,72 @@ class TestBuildMessages:
         # reacting_to still advances to include the surfaced stimulus, so the
         # inference gate sees it as reacted and won't re-fire for it next step.
         assert ctx.reacting_to == 4
+
+    def test_late_tool_result_injection_cannot_strand_trailing_assistant(self) -> None:
+        """A slow tool's result lands TWO assistant turns after the call was
+        issued: the blind-spot injection anchors inline after its
+        horizon-setter — an assistant that is NOT the last one — so the later
+        assistant turns leave the build ENDING on an assistant message. That
+        build is exactly the one sent (the injected result is an unreacted
+        stimulus, so the gate fires), and current reasoning models reject
+        trailing-assistant prefill with a terminal 400, wedging the session
+        until the next message."""
+        events = [
+            _evt(1, "user", content="ping the peer"),
+            _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
+            # Two more exchanges complete while the slow call is still running.
+            _evt(3, "user", content="unrelated question one"),
+            _evt(4, "assistant", content="answer one"),
+            _evt(5, "user", content="unrelated question two"),
+            _evt(6, "assistant", content="answer two"),
+            # The slow result finally lands — after TWO later assistant turns.
+            _evt(7, "tool", tool_call_id="slow", content="peer replied: ok"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 3
+        events[5].data["reacting_to"] = 5
+
+        ctx = build_messages(events, system_prompt=None)
+        msgs = ctx.messages
+
+        # The late result is an unreacted stimulus — this build fires the gate
+        # and is sent to the model as-is.
+        assert ctx.reacting_to == 7
+        # The real result is injected inline (blind-spot handling, unchanged).
+        injected = [
+            m for m in msgs if m["role"] == "user" and "peer replied: ok" in str(m.get("content"))
+        ]
+        assert len(injected) == 1
+        # THE INVARIANT: a gate-firing build must never end on an assistant
+        # turn — that is a provider-rejected prefill (terminal 400).
+        assert msgs[-1]["role"] != "assistant", (
+            "gate-firing build ends on an assistant turn — Anthropic rejects "
+            "this as unsupported prefill and the session wedges"
+        )
+
+    def test_pruned_orphan_stimulus_still_gets_trailing_notice(self) -> None:
+        """The waking stimulus can be structurally INVISIBLE: a tool result
+        whose issuing assistant was windowed out is pruned as an orphan
+        (``_prune_orphans``) yet still advances the watermark — the gate
+        fires and the build is sent. Without the guard it ends on the last
+        assistant (terminal 400); the notice must still land."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            # Issuing assistant windowed out — structurally orphan, pruned
+            # from the build, but a real stimulus the watermark must count.
+            _evt(3, "tool", tool_call_id="ghost", content="late result"),
+        ]
+        events[1].data["reacting_to"] = 1
+
+        ctx = build_messages(events, system_prompt=None)
+        msgs = ctx.messages
+
+        assert ctx.reacting_to == 3
+        # The orphan itself is pruned from the build...
+        assert not any(m.get("role") == "tool" for m in msgs)
+        # ...but the gate-firing build still must not end on an assistant.
+        assert msgs[-1] == {"role": "user", "content": _TRAILING_STIMULUS_NOTICE}
 
     def test_user_message_after_last_assistant_stays_at_tail(self) -> None:
         """The ordinary case — a user message that genuinely follows the last
@@ -902,6 +969,40 @@ class TestMonotonicity:
 
         _assert_prefix(_strip_tail(out1), _strip_tail(out2))
         _assert_prefix(_strip_tail(out2), _strip_tail(out3))
+
+    def test_trailing_guard_notice_is_volatile_tail_only(self) -> None:
+        """The trailing-assistant guard notice (late tool result injected
+        mid-list, build would end on an assistant) lives ONLY at the volatile
+        tail of the sent build. When the model's reply commits, the next build
+        drops the notice and puts the reply at that index — the committed
+        prefix before it must not shift (same trade as the #1120 user
+        deferral: a one-boundary cache miss, never a prefix rewrite)."""
+        l1 = [
+            _evt(1, "user", content="ping the peer"),
+            _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
+            _evt(3, "user", content="unrelated question one"),
+            _evt(4, "assistant", content="answer one"),
+            _evt(5, "user", content="unrelated question two"),
+            _evt(6, "assistant", content="answer two"),
+            _evt(7, "tool", tool_call_id="slow", content="peer replied: ok"),
+        ]
+        l1[1].data["reacting_to"] = 1
+        l1[3].data["reacting_to"] = 3
+        l1[5].data["reacting_to"] = 5
+
+        l2 = [*l1, _evt(8, "assistant", content="good, the peer is on it")]
+        l2[7].data["reacting_to"] = 7
+
+        ctx1 = self._build(l1)
+        ctx2 = self._build(l2)
+
+        # Sent build: guard notice at the tail.
+        assert ctx1[-1] == {"role": "user", "content": _TRAILING_STIMULUS_NOTICE}
+        # Next build: the reply reacted to the result — no notice anywhere.
+        assert ctx2[-1]["role"] == "assistant"
+        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in ctx2)
+        # Everything before the volatile tail is a stable prefix.
+        _assert_prefix(ctx1[:-1], ctx2)
 
     def test_reacting_to_includes_inline_injection_seq(self) -> None:
         """ContextResult.reacting_to must account for the seq of blind-spot
