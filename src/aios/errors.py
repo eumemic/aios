@@ -171,6 +171,30 @@ class OAuthRefreshError(AiosError):
     status_code = 502
 
 
+class OAuthReauthRequiredError(OAuthRefreshError):
+    """Raised when the OAuth token endpoint rejects a refresh as unrecoverable —
+    RFC 6749 ``invalid_grant`` (revoked, expired, or otherwise dead refresh token).
+
+    A subclass of :class:`OAuthRefreshError`, not a sibling: it keeps the same
+    ``status_code`` (502, still an upstream-credential failure, still correctly
+    non-evicting on the MCP dispatch path and still evicting via the
+    ``http_request`` built-in's oauth2_refresh path — #192 deliberately does not
+    touch that severity/eviction wiring). What distinguishes it is ``error_type``
+    and a model-actionable message: a caller (the model, or jarbot's observer
+    polling session events) can branch on ``error_type ==
+    "oauth_reauth_required"`` to mean "stop retrying, this connection needs the
+    human to reconnect it" — as opposed to a generic :class:`OAuthRefreshError`,
+    which may still be transient (network blip, momentary token-endpoint 5xx).
+
+    Every other refresh failure (missing fields, decrypt failure, network error,
+    a non-``invalid_grant`` 4xx, missing ``access_token`` in the response) stays
+    a plain :class:`OAuthRefreshError` — this subclass is raised ONLY when the
+    token endpoint's response body identifies the failure as ``invalid_grant``.
+    """
+
+    error_type = "oauth_reauth_required"
+
+
 class OAuthFlowError(AiosError):
     """Raised when an interactive OAuth "Connect" flow fails.
 

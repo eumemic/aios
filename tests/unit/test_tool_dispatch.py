@@ -23,6 +23,7 @@ from aios.errors import (
     CryptoDecryptError,
     ForbiddenError,
     NotFoundError,
+    OAuthReauthRequiredError,
     RateLimitedError,
     ValidationError,
 )
@@ -140,6 +141,18 @@ class TestClassifyToolError:
             (ConflictError("stale version"), False, "stale version", {}),
             (RateLimitedError("slow down"), False, "slow down", {}),
             (ValidationError("bad field"), False, "bad field", {}),
+            # #192: OAuthReauthRequiredError is a 502 (server-class) AiosError like its
+            # OAuthRefreshError parent — deliberately NOT reclassified as client-class.
+            # It stays non-evicting here only because the MCP dispatch path passes no
+            # on_exception (see TestToolLifecycleEviction below) — the classifier itself
+            # still calls this a "genuine failure" (evict=True), consistent with the
+            # http_request built-in path, where a dead credential DOES evict.
+            (
+                OAuthReauthRequiredError("refresh token is no longer valid"),
+                True,
+                "refresh token is no longer valid",
+                {},
+            ),
             # Genuine failures — also evict the sandbox.
             (_InternalAiosError("internal boom"), True, "internal boom", {}),
             # A 5xx WITH detail still gets the json-suffixed message (the detail-format

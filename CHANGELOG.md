@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Distinguish a dead OAuth refresh token (RFC 6749 `invalid_grant` — revoked,
+  expired, or otherwise unrecoverable) from a generic/transient
+  `OAuthRefreshError` via a new `OAuthReauthRequiredError` subclass
+  (`error_type: "oauth_reauth_required"`), so a caller can branch on "this
+  connection needs to be reconnected" instead of retrying. Severity/eviction
+  wiring (status_code 502, non-evicting on the MCP dispatch path, evicting via
+  the `http_request` built-in's oauth2_refresh path) is unchanged (#192).
 - Extend the #1975 diagnostic harness with timeout-scoped slow HTTP and
   streaming call graphs inside open transactions, a pre-saturated 16-slot pool,
   13 queued waiters, and per-storm client/server recovery checks.
