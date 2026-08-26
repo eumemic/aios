@@ -1218,11 +1218,57 @@ _PENDING_EXTERNAL = json.dumps(
     }
 )
 
+EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
+"""Out-of-band marker key tagging a per-step-ephemeral tail message.
+
+Set to ``True`` at construction on any per-step-assembled tail message —
+a render-only block appended after ``build_messages`` rather than sourced
+from the event log.  Producers tag their own dicts; nothing enumerates
+them here.  What makes a message ephemeral is that its content OR its
+position varies per step (unread counts mutate; a constant reminder is
+re-appended at the moving tail), so caching a prefix through it can never
+hit.
+
+The cache-breakpoint recognizer in ``completion.py`` reads this marker —
+never the rendered prose — to decide which message must NOT host the
+conversation prefix ``cache_control`` breakpoint.  It is a *property*
+("this message is per-step-ephemeral"), not a discriminated kind, so a
+boolean is the honest shape.
+
+The marker is non-standard (Anthropic rejects unknown message fields) and
+is stripped from every message by ``inject_cache_breakpoints`` before any
+provider call — on every route, including non-Anthropic early returns.
+``_concat_user_messages`` propagates it under OR so a merge of any
+ephemeral message with anything stays ephemeral.
+"""
+
+
 # Synthetic user turn ending a gate-firing build that would otherwise end on
 # an assistant message (see the trailing-assistant guard in build_messages).
+#
 # Generic on purpose: each inline blind-spot injection already opens with a
-# header naming its call, so the tail only needs to redirect attention.
-_TRAILING_STIMULUS_NOTICE = "[New events arrived during your later turns — see above.]"
+# ``[Tool result: … completed]`` header naming its call, so the tail only needs
+# to redirect attention — it must not restate what those headers already say.
+#
+# The wording must be true in BOTH arms the guard serves, which differ in
+# whether the stimulus is actually RENDERED:
+#
+# * inline injection — the result is present earlier in the build;
+# * pruned structural orphan — ``_prune_orphans`` drops the tool result whose
+#   issuing assistant was windowed out, while the watermark still advances, so
+#   the stimulus is present in NO message of this build.
+#
+# So the notice reports only that events arrived; it never asserts they are
+# visible ("see above" would be false in the orphan arm). For literal-minded
+# models a false pointer invites inventing the missed content, so the notice
+# redirects to ``search_events`` instead — the same contract the head-omission
+# marker offers ("Nothing is lost: the full transcript remains queryable").
+_TRAILING_STIMULUS_NOTICE = (
+    "[New events arrived while you were working. Some may not be rendered above. "
+    "Nothing is lost: the full transcript remains queryable with search_events — "
+    "if something is referred to that you cannot see, search for it rather than "
+    "assuming what it was.]"
+)
 
 
 @dataclass(slots=True)
@@ -1621,12 +1667,52 @@ def build_messages(
     # Trailing-assistant guard: the user-deferral window above keeps
     # blind-spot USER messages off the tail (#1120), but a blind-spot TOOL
     # result injected mid-list (horizon-setter ≠ last assistant) — or a
-    # pruned structural orphan — still leaves a gate-firing build ending on
-    # an assistant turn: the same rejected prefill, the same volatile-tail
-    # trade. ``max_stimulus_seq > last_asst_rt`` is the gate's own firing
-    # condition, so reacted (not-sent) builds are never padded.
+    # pruned structural orphan — still leaves a build ending on an assistant
+    # turn: the same rejected prefill, the same volatile-tail trade.
+    #
+    # ``max_stimulus_seq > last_asst_rt`` is NOT the inference gate. The gate
+    # is ``session_active_predicate`` (``db/queries/sessions.py``):
+    #
+    #     ((last_stimulus_seq > last_reacted_seq OR open_tool_call_count > 0)
+    #      AND NOT errored)
+    #
+    # This condition models the FIRST DISJUNCT only, and does so with
+    # window-local operands (the max stimulus seq actually rendered into THIS
+    # build; the last rendered assistant's ``reacting_to``) rather than the
+    # gate's session-wide committed scalars. Two consequences:
+    #
+    # * Over-approximation is impossible in the direction that matters: a
+    #   reacted (not-sent) build has ``max_stimulus_seq <= last_asst_rt``, so
+    #   it is never padded with a spurious notice.
+    # * The SECOND DISJUNCT is uncovered. An open tool call fires the gate
+    #   with no unreacted stimulus, and if such a build ends on an assistant
+    #   turn it is sent WITHOUT a notice — the 400 this guard exists to
+    #   prevent. That residual is believed empty in practice, not by
+    #   construction: the sweep's dispatch-narrowing branch
+    #   (``_filter_incomplete_batches``, #1710) admits only calls actually
+    #   dispatched, and ghost repair converts a dispatched-but-resultless call
+    #   into a synthesized tool result — an unreacted stimulus that re-enters
+    #   the covered first-disjunct arm and lands a ``tool``-role message at
+    #   the tail. "Believed empty" is the honest strength of that claim.
+    #
+    # The divergence is therefore FAIL-OPEN: where the two conditions
+    # disagree, this guard stays silent and the build is emitted exactly as
+    # master would have emitted it. It never fabricates a stimulus, never
+    # rewrites a committed prefix, and never makes an existing build worse —
+    # the uncovered residual is the pre-existing behaviour, not a regression
+    # introduced here.
+    #
+    # The notice is tagged ``EPHEMERAL_TAIL_KEY`` like every other per-step
+    # tail producer (``channels.py``, ``obligations.py``, ``concise.py``): it
+    # is render-only and position-volatile, so the Anthropic cache breakpoint
+    # must skip it and land on the last COMMITTED message. Untagged, on a
+    # build with no other tail — the exact population this guard serves — the
+    # breakpoint would land on the notice itself and the conversation prefix
+    # would be re-cache-created every step (see ``inject_cache_breakpoints``).
     if stripped and stripped[-1].get("role") == "assistant" and max_stimulus_seq > last_asst_rt:
-        stripped.append({"role": "user", "content": _TRAILING_STIMULUS_NOTICE})
+        stripped.append(
+            {"role": "user", "content": _TRAILING_STIMULUS_NOTICE, EPHEMERAL_TAIL_KEY: True}
+        )
 
     return ContextResult(messages=stripped, reacting_to=max_stimulus_seq)
 
@@ -1762,31 +1848,6 @@ def stub_missing_reasoning_content(
         if msg.get("role") == "assistant" and "reasoning_content" not in msg:
             msg["reasoning_content"] = ""
     return messages
-
-
-EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
-"""Out-of-band marker key tagging a per-step-ephemeral tail message.
-
-Set to ``True`` at construction on any per-step-assembled tail message —
-a render-only block appended after ``build_messages`` rather than sourced
-from the event log.  Producers tag their own dicts; nothing enumerates
-them here.  What makes a message ephemeral is that its content OR its
-position varies per step (unread counts mutate; a constant reminder is
-re-appended at the moving tail), so caching a prefix through it can never
-hit.
-
-The cache-breakpoint recognizer in ``completion.py`` reads this marker —
-never the rendered prose — to decide which message must NOT host the
-conversation prefix ``cache_control`` breakpoint.  It is a *property*
-("this message is per-step-ephemeral"), not a discriminated kind, so a
-boolean is the honest shape.
-
-The marker is non-standard (Anthropic rejects unknown message fields) and
-is stripped from every message by ``inject_cache_breakpoints`` before any
-provider call — on every route, including non-Anthropic early returns.
-``_concat_user_messages`` propagates it under OR so a merge of any
-ephemeral message with anything stays ephemeral.
-"""
 
 
 _USER_MESSAGE_SEPARATOR_CONTENT = "."
