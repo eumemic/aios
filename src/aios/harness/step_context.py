@@ -328,8 +328,21 @@ async def compute_step_prelude(
 
     mcp_servers_block = ""
     if agent.mcp_servers:
+        # #2270's auto-allow-readonly persistence writes to the LIVE agent row
+        # and must only fire for a session actually running the live latest
+        # agent — never a frozen workflow-child overlay (attenuated tools) nor
+        # a version-pinned session (whose ``agent.tools`` are an old version's,
+        # not live). ``StepSurface``/``AgentBinding`` don't carry a dedicated
+        # bit for "is this the live latest", so it's computed here from the
+        # session fields that already distinguish the three ``AgentBinding``
+        # producers in ``services/agents.py::_load_for_session_conn``.
+        is_live_latest_agent = not session.surface_frozen and session.agent_version is None
         mcp_tools, mcp_instructions = await discover_session_mcp_tools(
-            pool, session_id, agent, account_id=account_id
+            pool,
+            session_id,
+            agent,
+            account_id=account_id,
+            persist_auto_allow=is_live_latest_agent,
         )
         tools.extend(mcp_tools)
         mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
