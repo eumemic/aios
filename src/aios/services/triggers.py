@@ -60,6 +60,7 @@ from aios.models.triggers import (
     WorkflowAction,
     compute_initial_next_fire,
 )
+from aios.services.trigger_lint import lint_unconditional_wake
 
 # Per-trigger ingest secret (external_event). Mirrors the runtime_tokens
 # precedent: `aios_evt_<32-byte url-safe>` (256 bits of CSPRNG entropy),
@@ -184,6 +185,25 @@ async def _append_transition(
     )
 
 
+async def _lint_trigger(
+    conn: asyncpg.Connection[Any],
+    source: CronSource | OneShotSource | RunCompletionSource | ExternalEventSource,
+    action: SandboxCommandAction | WakeOwnerAction | WakeSessionAction | WorkflowAction,
+    *,
+    account_id: str,
+) -> list[str]:
+    workflow_script: str | None = None
+    if isinstance(action, WorkflowAction):
+        workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
+        workflow_script = workflow.script
+    return lint_unconditional_wake(
+        source_kind=source.kind,
+        action_kind=action.kind,
+        command=action.command if isinstance(action, SandboxCommandAction) else None,
+        workflow_script=workflow_script,
+    )
+
+
 async def add_trigger(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -225,6 +245,7 @@ async def add_trigger(
         environment_id = await validate_trigger_spec(
             conn, spec.source, spec.action, session_id=session_id, account_id=account_id
         )
+        warnings = await _lint_trigger(conn, spec.source, spec.action, account_id=account_id)
         await queries.acquire_account_triggers_lock(conn, account_id)
         existing_session = await queries.count_session_triggers(
             conn, session_id=session_id, account_id=account_id
@@ -259,7 +280,7 @@ async def add_trigger(
             account_id=account_id,
         )
         await _append_transition(conn, echo, "api", account_id=account_id, session_id=session_id)
-        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext)
+        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext, warnings=warnings)
 
 
 async def remove_trigger(
@@ -350,6 +371,8 @@ async def update_trigger(
         now = datetime.now(UTC)
         new_enabled = update.enabled if update.enabled is not None else current.enabled
         merged_source = update.source if update.source is not None else current.source
+        merged_action = update.action if update.action is not None else current.action
+        warnings = await _lint_trigger(conn, merged_source, merged_action, account_id=account_id)
 
         next_fire: datetime | EllipsisType | None = ...  # ... = leave alone
         reenabled = new_enabled and not current.enabled
@@ -430,7 +453,7 @@ async def update_trigger(
             await _append_transition(
                 conn, echo, "api", account_id=account_id, session_id=session_id
             )
-        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext)
+        return TriggerCreated(**echo.model_dump(), ingest_token=ingest_plaintext, warnings=warnings)
 
 
 async def list_triggers(

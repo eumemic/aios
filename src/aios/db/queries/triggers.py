@@ -1034,6 +1034,7 @@ async def record_trigger_run(
     error_summary: str | None,
     result_id: str | None,
     started_at: datetime,
+    woke_owner: bool = False,
 ) -> str:
     """Timer-fire audit writer: one complete row at fire completion.
 
@@ -1051,8 +1052,13 @@ async def record_trigger_run(
         INSERT INTO trigger_runs
             (id, trigger_id, account_id, owner_session_id, trigger_name,
              trigger_context, status, error_summary, result_id,
-             started_at, finished_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+             started_at, finished_at, woke_owner)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(),
+            $11 OR ($6 = 'cron' AND $9::text IS NOT NULL AND EXISTS (
+                SELECT 1 FROM workflow_run_owner_wakes WHERE workflow_run_id = $9::text
+            ))
+        )
         """,
         trigger_run_id,
         trigger_id,
@@ -1064,8 +1070,67 @@ async def record_trigger_run(
         error_summary,
         result_id,
         started_at,
+        woke_owner,
     )
     return trigger_run_id
+
+
+async def mark_trigger_run_woken_by_workflow_session(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> list[tuple[str, str, str, str]]:
+    """Attribute a workflow-child ``wake_self`` to its originating cron fire.
+
+    Trigger-launched workflow runs are stored as ``trigger_runs.result_id``.  A
+    workflow's model/builtin surface executes in child sessions whose
+    ``parent_run_id`` points at that run, so this durable join covers the sibling
+    effector without relying on the sandbox-only observation HTTP header.
+    """
+    # Record the effect against the workflow run first. This row is durable even
+    # when the child executes before the trigger runner writes trigger_runs; the
+    # audit INSERT reconciles it once create_run returns the result id.
+    await conn.execute(
+        """
+        INSERT INTO workflow_run_owner_wakes (workflow_run_id)
+        SELECT parent_run_id FROM sessions
+        WHERE id = $1 AND parent_run_id IS NOT NULL
+        ON CONFLICT (workflow_run_id) DO NOTHING
+        """,
+        session_id,
+    )
+    rows = await conn.fetch(
+        """
+        UPDATE trigger_runs tr
+        SET woke_owner = true
+        FROM sessions s
+        WHERE s.id = $1
+          AND s.parent_run_id = tr.result_id
+          AND tr.trigger_context = 'cron'
+          AND tr.status = 'ok'
+          AND NOT tr.woke_owner
+        RETURNING tr.trigger_id, tr.account_id, tr.owner_session_id, tr.trigger_name
+        """,
+        session_id,
+    )
+    return [
+        (r["trigger_id"], r["account_id"], r["owner_session_id"], r["trigger_name"]) for r in rows
+    ]
+
+
+async def list_recent_trigger_wake_outcomes(
+    conn: asyncpg.Connection[Any], trigger_id: str
+) -> list[bool]:
+    """Newest-first observed wake outcomes over the preceding 24 hours."""
+    rows = await conn.fetch(
+        """
+        SELECT woke_owner FROM trigger_runs
+        WHERE trigger_id = $1
+          AND trigger_context = 'cron'
+          AND finished_at >= now() - interval '24 hours'
+        ORDER BY finished_at DESC
+        """,
+        trigger_id,
+    )
+    return [r["woke_owner"] for r in rows]
 
 
 async def list_trigger_runs(

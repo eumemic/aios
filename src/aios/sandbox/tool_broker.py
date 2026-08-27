@@ -205,6 +205,10 @@ class ToolBroker:
 
     def __init__(self, socket_path: Path | None = None) -> None:
         self._secrets: dict[str, str] = {}
+        # Ephemeral, unguessable tokens correlate a trigger command with any
+        # wake_self call it makes. The durable outcome is written to
+        # trigger_runs by the runner; this map never crosses a fire boundary.
+        self._trigger_observations: dict[str, bool] = {}
         self._server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
         self._port: int | None = None
@@ -228,6 +232,12 @@ class ToolBroker:
         stale = [s for s, sid in self._secrets.items() if sid == session_id]
         for s in stale:
             self._secrets.pop(s, None)
+
+    def begin_trigger_observation(self, token: str) -> None:
+        self._trigger_observations[token] = False
+
+    def finish_trigger_observation(self, token: str) -> bool:
+        return self._trigger_observations.pop(token, False)
 
     def _build_app(self) -> Starlette:
         return Starlette(
@@ -536,6 +546,8 @@ class ToolBroker:
             return resolved
         session_id, name, _spec = resolved
 
+        observation_token = request.headers.get("X-Aios-Trigger-Observation")
+
         log.info("tool_broker.invoke_builtin", session_id=session_id, name=name)
         try:
             result = await invoke_builtin(session_id, name, arguments)
@@ -555,6 +567,8 @@ class ToolBroker:
             log.exception("tool_broker.invoke_failed", session_id=session_id, name=name)
             return _err(500, f"{type(exc).__name__}: {exc}", code="internal_error")
 
+        if name == "wake_self" and observation_token in self._trigger_observations:
+            self._trigger_observations[observation_token] = True
         return JSONResponse(_envelope_from_result(result))
 
     # ── MCP routes ────────────────────────────────────────────────────────
