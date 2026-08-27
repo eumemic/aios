@@ -1651,6 +1651,470 @@
         }
       }
     },
+    "/v1/browser/takeover": {
+      "post": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Open Takeover",
+        "description": "Open a takeover of the account's computer for one session's page.\n\n409 if a takeover is already in progress (the one-open-per-account\ninvariant); 503 if the computer is unavailable.",
+        "operationId": "open_takeover_v1_browser_takeover_post",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeoverOpenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeoverOpenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/takeover/{grant_id}/heartbeat": {
+      "post": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Heartbeat Takeover",
+        "description": "Bump the grant's heartbeat \u2014 the viewer calls this while it holds the\nframe stream. 404 if unknown, 409 if the grant is no longer open.",
+        "operationId": "heartbeat_takeover_v1_browser_takeover__grant_id__heartbeat_post",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/takeover/{grant_id}/input": {
+      "post": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Post Input",
+        "description": "Append one epoch-stamped input batch to the shared-filesystem spool.\n\nNo worker involvement. The check-then-append race (grant closes between\nthe epoch check and the write) is harmless \u2014 the driver drops stale-epoch\nlines, being the enforcement authority. 409 on a closed grant or stale\nepoch; 413 when the spool would exceed its byte cap.",
+        "operationId": "post_input_v1_browser_takeover__grant_id__input_post",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InputBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/takeover/{grant_id}/frames": {
+      "get": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Stream Frames",
+        "description": "Stream the takeover screencast as SSE ``frame`` events, ending on close.\n\nNovel among aios SSE routes: it tails a shared-filesystem ring, not a\nLISTEN channel (the driver has no route to Postgres). The frames dir is\nderived server-side from the scoped grant's account \u2014 the client supplies\nonly ``grant_id`` \u2014 so path containment holds by construction.",
+        "operationId": "stream_frames_v1_browser_takeover__grant_id__frames_get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-codegen": {
+          "targets": []
+        }
+      }
+    },
+    "/v1/browser/takeover/{grant_id}": {
+      "delete": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Close Takeover",
+        "description": "Close a takeover; return the handback (post-human snapshot + inlined\nscreenshot + signed-in delta). A browser-dead close still closes \u2192 null\nhandback fields.",
+        "operationId": "close_takeover_v1_browser_takeover__grant_id__delete",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeoverCloseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TakeoverCloseResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/status": {
+      "get": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Browser Status",
+        "description": "The account computer's state \u2014 never provisions it.",
+        "operationId": "browser_status_v1_browser_status_get",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/sites/{host}": {
+      "delete": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Revoke Site",
+        "description": "Delete one host's cookies + storage from the account's profile.",
+        "operationId": "revoke_site_v1_browser_sites__host__delete",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Host"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/browser/clear": {
+      "post": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Clear State",
+        "description": "Clear the account computer's state (profile, downloads, ...). 409 if a\ntakeover is open. ``session_id``, when given, receives the\n``browser_state_lost`` model notice.",
+        "operationId": "clear_state_v1_browser_clear_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions": {
       "post": {
         "tags": [
@@ -12715,6 +13179,98 @@
         "title": "BoundChat",
         "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nwhat the inbound-admission gate (``AllowList.chat_ids``) matches on.\nThis view deliberately does not surface a connector-supplied\n``display_name`` / ``sender_name``: that value is self-reported by the\nconnector and forgeable, so an operator copying an allowlist entry from\nthis view trusts the ``chat_id``, never a display name."
       },
+      "BrowserStatusResponse": {
+        "properties": {
+          "running": {
+            "type": "boolean",
+            "title": "Running"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "signed_in_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Signed In Hosts"
+          },
+          "takeover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserTakeoverStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "running"
+        ],
+        "title": "BrowserStatusResponse",
+        "description": "The account computer's state: not running, or running with its page\nand any open takeover + signed-in sites the driver reports."
+      },
+      "BrowserTakeoverStatus": {
+        "properties": {
+          "grant_id": {
+            "type": "string",
+            "title": "Grant Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "epoch": {
+            "type": "integer",
+            "title": "Epoch"
+          },
+          "boot": {
+            "type": "string",
+            "title": "Boot"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grant_id",
+          "session_id",
+          "reason",
+          "epoch",
+          "boot",
+          "created_at"
+        ],
+        "title": "BrowserTakeoverStatus",
+        "description": "The open grant on this account's computer, if any."
+      },
       "CapabilitiesUpdate": {
         "properties": {
           "capabilities": {
@@ -13746,6 +14302,53 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HandbackPayload": {
+        "properties": {
+          "snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
+          },
+          "screenshot_data_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Screenshot Data Url"
+          },
+          "signed_in_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Signed In Hosts"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "type": "object",
+        "title": "HandbackPayload",
+        "description": "What the human left behind: the post-takeover page snapshot, an inline\nscreenshot, and which sites are now signed in (the cookie-jar-derived\ndelta). ``None`` fields mean the browser died before the handback could\nbe captured \u2014 the grant still closed."
+      },
       "HttpPermissionPolicy": {
         "properties": {
           "type": {
@@ -14090,6 +14693,142 @@
         ],
         "title": "InlineScriptBody",
         "description": "The inline-script body of an anonymous run launch (T5, #1466).\n\nThe alternative to ``WfRunCreate.workflow_id``: a one-shot run launched directly\nfrom this ``{script, schemas, surface}`` body, with NO ``workflows`` row created.\nThe run snapshots ``script`` exactly as it snapshots a registered workflow's, and\nthe declared surface (``tools``/``mcp_servers``/``http_servers``) is clamped to the\nlauncher with the same create-time clamp ``create_workflow`` uses (a surface\nexceeding the launcher raises ``ForbiddenError``). The HTTP/operator path is\nunattenuated operator authority; names-only http sugar is rejected there (no acting\nagent to resolve a bare name against)."
+      },
+      "InputBatch": {
+        "properties": {
+          "epoch": {
+            "type": "integer",
+            "title": "Epoch"
+          },
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/InputEvent"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Events"
+          }
+        },
+        "type": "object",
+        "required": [
+          "epoch",
+          "seq",
+          "events"
+        ],
+        "title": "InputBatch",
+        "description": "One coalesced batch of input events, epoch-stamped.\n\nThe API pre-checks the epoch against the grant record; the DRIVER is the\nenforcement authority and drops stale-epoch spool lines regardless."
+      },
+      "InputEvent": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "pointer_move",
+              "pointer_down",
+              "pointer_up",
+              "wheel",
+              "key_down",
+              "key_up",
+              "text"
+            ],
+            "title": "Type"
+          },
+          "x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "X"
+          },
+          "y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Y"
+          },
+          "button": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "middle",
+                  "right"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Button"
+          },
+          "dx": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dx"
+          },
+          "dy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dy"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "InputEvent",
+        "description": "One raw viewer input event (\u00a75.6 vocabulary)."
       },
       "LimitedNetworking": {
         "properties": {
@@ -17938,6 +18677,88 @@
         "title": "SkillVersionCreate",
         "description": "Request body for ``POST /v1/skills/{skill_id}/versions``.\n\nSame file format as :class:`SkillCreate`. The directory, name, and\ndescription are re-extracted from the new SKILL.md."
       },
+      "TakeoverCloseRequest": {
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "done",
+              "cancelled"
+            ],
+            "title": "Outcome",
+            "default": "done"
+          }
+        },
+        "type": "object",
+        "title": "TakeoverCloseRequest"
+      },
+      "TakeoverCloseResponse": {
+        "properties": {
+          "handback": {
+            "$ref": "#/components/schemas/HandbackPayload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "handback"
+        ],
+        "title": "TakeoverCloseResponse"
+      },
+      "TakeoverOpenRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 200,
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "title": "TakeoverOpenRequest",
+        "description": "Open a takeover of the account's computer for one agent session's page."
+      },
+      "TakeoverOpenResponse": {
+        "properties": {
+          "grant_id": {
+            "type": "string",
+            "title": "Grant Id"
+          },
+          "target": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Target"
+          },
+          "boot": {
+            "type": "string",
+            "title": "Boot"
+          },
+          "epoch": {
+            "type": "integer",
+            "title": "Epoch"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "title": "Ttl Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grant_id",
+          "target",
+          "boot",
+          "epoch",
+          "ttl_seconds"
+        ],
+        "title": "TakeoverOpenResponse",
+        "description": "The opened grant. The viewer PINS ``target``/``boot``/``epoch`` and\nrefuses frames or input that do not match (the trusted-chrome binding,\njarbot#106 \u00a75.6)."
+      },
       "TaskHandle": {
         "properties": {
           "servicer_kind": {
@@ -18212,7 +19033,18 @@
                   "stop_task",
                   "list_tasks",
                   "skill_upsert",
-                  "skill_archive"
+                  "skill_archive",
+                  "browser_snapshot",
+                  "browser_navigate",
+                  "browser_click",
+                  "browser_click_xy",
+                  "browser_type",
+                  "browser_press_key",
+                  "browser_scroll",
+                  "browser_drag",
+                  "browser_hover",
+                  "browser_select_option",
+                  "browser_screenshot"
                 ]
               },
               {

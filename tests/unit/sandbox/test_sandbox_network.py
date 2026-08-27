@@ -10,8 +10,10 @@ import pytest
 
 from aios.sandbox import network as sandbox_network
 from aios.sandbox.network import (
+    BROWSER_NETWORK_NAME,
     SANDBOX_NETWORK_NAME,
     WORKER_NETWORK_ALIAS,
+    ensure_browser_network,
     ensure_sandbox_network,
 )
 
@@ -211,3 +213,66 @@ class TestEnsureConnectFailureInContainer:
         install_docker_responder(monkeypatch, responder)
         with pytest.raises(RuntimeError, match="failed to join worker"):
             await ensure_sandbox_network()
+
+
+# ── ensure_browser_network: ICC-off invariant (jarbot#106 §6.2) ──────────────
+
+
+class TestEnsureBrowserNetwork:
+    """The browser bridge must be created ICC-off, and — because create flags
+    are inert for a pre-existing network — a live network whose ICC option is
+    not ``"false"`` must hard-fail the worker rather than run browser
+    containers on an open bridge."""
+
+    async def test_creates_with_icc_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = {"created": False}
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[:3] == ["docker", "network", "inspect"] and "--format" not in argv:
+                return (0, b"[]", b"") if state["created"] else (1, b"", b"not found\n")
+            if argv[:3] == ["docker", "network", "create"]:
+                state["created"] = True
+                return 0, b"", b""
+            if argv[:3] == ["docker", "network", "inspect"] and "--format" in argv:
+                return 0, b"false\n", b""
+            pytest.fail(f"unexpected argv: {argv}")
+
+        calls = install_docker_responder(monkeypatch, responder)
+        await ensure_browser_network()
+
+        create = next(c for c in calls if c[:3] == ["docker", "network", "create"])
+        assert "-o" in create
+        assert "com.docker.network.bridge.enable_icc=false" in create
+        assert create[-1] == BROWSER_NETWORK_NAME
+
+    async def test_existing_icc_off_network_is_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[:3] == ["docker", "network", "inspect"] and "--format" in argv:
+                return 0, b"false\n", b""
+            if argv[:3] == ["docker", "network", "inspect"]:
+                return 0, b"[]", b""
+            pytest.fail(f"unexpected argv: {argv}")
+
+        calls = install_docker_responder(monkeypatch, responder)
+        await ensure_browser_network()
+        assert not any(c[:3] == ["docker", "network", "create"] for c in calls)
+
+    async def test_existing_icc_open_network_hard_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-existing ``aios-browser`` with ICC on (older deploy, hand-made
+        network) must fail the worker loudly — the create flag cannot fix it
+        and the network must never be torn down while containers run."""
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[:3] == ["docker", "network", "inspect"] and "--format" in argv:
+                return 0, b"<no value>\n", b""
+            if argv[:3] == ["docker", "network", "inspect"]:
+                return 0, b"[]", b""
+            pytest.fail(f"unexpected argv: {argv}")
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="inter-container communication enabled"):
+            await ensure_browser_network()

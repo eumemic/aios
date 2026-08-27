@@ -39,6 +39,7 @@ from aios.config import get_settings
 from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import (
+    listen_for_browser_calls,
     listen_for_github_clone_breaker_clear,
     listen_for_mcp_evict_vault,
     listen_for_session_interrupts,
@@ -69,7 +70,11 @@ from aios.retirements.boot_gate import (
 )
 from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.github_clone_breaker import GithubCloneBreaker
-from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
+from aios.sandbox.network import (
+    ensure_browser_network,
+    ensure_sandbox_network,
+    is_running_in_container,
+)
 from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
 from aios.sandbox.workspace_ownership import repair_workspace_ownership
@@ -395,6 +400,24 @@ async def worker_main() -> None:
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()
         await ensure_sandbox_network()
+        # Only touch the browser bridge when the feature is actually configured.
+        # ``ensure_browser_network`` hard-fails on a pre-existing ICC-open
+        # network (correct — never run browser containers on an open bridge),
+        # but a browser-disabled deployment (the default, ``sandbox_browser_image``
+        # unset) has no reason to create or verify it, and must not wedge every
+        # worker over a network it will never use (jarbot#106).
+        if settings.sandbox_browser_image:
+            if settings.sandbox_browser_seccomp_profile == "unconfined":
+                log.warning(
+                    "sandbox.browser_seccomp_unconfined",
+                    detail=(
+                        "browser image configured but seccomp is 'unconfined' — the "
+                        "container renders untrusted web content and holds durable "
+                        "logins; ship a restrictive browser seccomp profile before "
+                        "enabling browser_* grants (jarbot#106 Phase 2)."
+                    ),
+                )
+            await ensure_browser_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
         for broker_task in tool_broker.serve_tasks():
@@ -605,6 +628,18 @@ async def worker_main() -> None:
             name="periodic_invariant_sweep",
         )
         _supervise(invariant_sweep_task, latch=supervised_latch, fatal=supervised_failure)
+
+        browser_call_task = asyncio.create_task(
+            _run_browser_call_listener(settings.db_url, sandbox_registry, pool),
+            name="browser_call_listener",
+        )
+        _supervise(browser_call_task, latch=supervised_latch, fatal=supervised_failure)
+
+        browser_reaper_task = asyncio.create_task(
+            _browser_reaper_loop(sandbox_registry, pool),
+            name="browser_reaper",
+        )
+        _supervise(browser_reaper_task, latch=supervised_latch, fatal=supervised_failure)
 
         interrupt_task = asyncio.create_task(
             _run_interrupt_listener(settings.db_url, inflight_tool_registry, pool),
@@ -1154,6 +1189,77 @@ async def _run_interrupt_listener(
         except Exception:
             log.exception("interrupt_listener.listen_failed_will_retry")
             await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
+
+
+async def _run_browser_call_listener(
+    db_url: str,
+    sandbox_registry: SandboxRegistry,
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """Drain pg_notify on the browser control-plane channel and execute calls.
+
+    The interrupt-listener shape: per-payload isolation, termination sentinel
+    escapes to the outer reconnect loop, one backoff, re-enter LISTEN
+    indefinitely. On every successful (re)connect the durable pending rows
+    are redriven (NOTIFY is fire-and-forget; a call submitted during the
+    backoff window would otherwise wait for its expiry instead of running) —
+    safe because every browser control op is re-executable (idempotent
+    takeover_open by driver contract; conditional grant updates).
+    """
+    from aios.harness.browser_control import execute_browser_call
+
+    log = get_logger("aios.worker.browser_call_listener")
+    while True:
+        try:
+            async with listen_for_browser_calls(db_url) as queue:
+                try:
+                    async with pool.acquire() as conn:
+                        pending = await queries.list_pending_browser_calls(conn)
+                    for row in pending:
+                        await execute_browser_call(sandbox_registry, pool, str(row["id"]))
+                except Exception:
+                    log.exception("browser_call_listener.redrive_failed")
+                while True:
+                    try:
+                        call_id = await queue.get()
+                        if call_id == "":
+                            raise ConnectionError("browser call LISTEN connection terminated")
+                        await execute_browser_call(sandbox_registry, pool, call_id)
+                    except ConnectionError:
+                        raise
+                    except Exception:
+                        log.exception("browser_call_listener.dispatch_failed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("browser_call_listener.listen_failed_will_retry")
+            await asyncio.sleep(_LISTEN_RECONNECT_BACKOFF_SECONDS)
+
+
+async def _browser_reaper_loop(
+    sandbox_registry: SandboxRegistry,
+    pool: asyncpg.Pool[Any],
+) -> None:
+    """Periodic browser-plane upkeep: grant TTL expiry, container keepalive,
+    call-row retention, plane byte quotas (see ``browser_reaper_tick``).
+
+    Immediate first tick + settings kill-switch (the host-dir-reaper shape);
+    try/except nested inside ``while True`` so one bad tick never disables
+    the reaper for the worker's lifetime.
+    """
+    from aios.harness.browser_control import browser_reaper_tick
+
+    log = get_logger("aios.worker.browser_reaper")
+    while True:
+        settings = get_settings()
+        if settings.sandbox_browser_reaper_enabled:
+            try:
+                await browser_reaper_tick(sandbox_registry, pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("browser_reaper.tick_failed")
+        await asyncio.sleep(settings.sandbox_browser_reaper_interval_seconds)
 
 
 async def _run_mcp_evict_listener(db_url: str) -> None:

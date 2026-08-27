@@ -51,6 +51,7 @@ from aios.sandbox.backends.base import (
     SESSION_LABEL_KEY,
     VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
     Mount,
+    SandboxBackendError,
     SandboxSpec,
 )
 from aios.sandbox.egress_ca import TRUST_STORE_ENV
@@ -65,7 +66,11 @@ from aios.sandbox.github_clone import (
     ensure_cache_clone,
     ensure_session_working_tree,
 )
-from aios.sandbox.network import WORKER_NETWORK_ALIAS, is_running_in_container
+from aios.sandbox.network import (
+    BROWSER_NETWORK_NAME,
+    WORKER_NETWORK_ALIAS,
+    is_running_in_container,
+)
 from aios.sandbox.setup import WORKSPACE_RUNTIME_ENV
 from aios.services import sessions as sessions_service
 from aios.services.vaults import (
@@ -173,7 +178,7 @@ async def _release_provision_allocations(
     Single teardown envelope for BOTH provision paths
     (:func:`build_spec_from_session` and :func:`build_spec_from_run`), so the
     cleanup can never drift between session and run. ``owner_id`` is the
-    session-OR-run ULID (the opaque owner label). Each proxy stop is guarded so
+    session/run/account owner ULID (the opaque owner label). Each proxy stop is guarded so
     one failing teardown can't mask the primary exception or abort a sibling
     teardown; ``git_proxy`` is ``None`` for the run path (a run never allocates
     one). Idempotent against partial allocation: ``broker_registered`` gates the
@@ -882,7 +887,7 @@ async def build_spec_from_run(run_id: str) -> ProvisioningPlan:
 
     The owner label passed to ``_assemble_plan`` is ``session_id=run_id``
     (``SandboxSpec.session_id`` stays the opaque owner-label field carrying a
-    session-OR-run ULID); the backend stamps it onto the handle's ``owner_id``.
+    session/run/account owner ULID); the backend stamps it onto the handle's ``owner_id``.
     """
     from aios.db.queries import workflows as wf_queries
     from aios.sandbox.volumes import (
@@ -1242,3 +1247,77 @@ def _assemble_plan(
 # (unit tests patch it). The spec↔tools cycle itself is broken upstream:
 # ``secret_egress_proxy`` defers its ``aios.tools`` import.
 from aios.sandbox.secret_egress_proxy import SecretEgressProxy  # noqa: E402
+
+
+class BrowserImageUnconfiguredError(SandboxBackendError):
+    """No browser image is configured on this deployment.
+
+    Raised by :func:`build_spec_from_browser` BEFORE any Docker call so a
+    ``browser_*`` tool on a pre-browser deployment fails with a clean,
+    model-visible "not available" rather than a docker-pull error.
+    """
+
+
+def build_spec_from_browser(account_id: str) -> SandboxSpec:
+    """Build the spec for an account's shared browser container (jarbot#106).
+
+    Deliberately NOT via ``_assemble_plan``: the browser container gets none
+    of the session/run apparatus — no tool-broker socket, no attachments or
+    uploads mounts, no memory/github echoes, no env-var credentials, no
+    egress CA, no snapshot machinery. Its only mount is the account's plane
+    dir (profile/shots/frames/downloads/input) at ``/workspace``, its network
+    is the ICC-off browser bridge, and it has no route to the worker
+    (``host_gateway_alias=None``) — the worker reaches IT via ``docker exec``
+    only (§6.2). Durable state (the profile — real logins) lives on the plane
+    bind mount, so release is a bare destroy: nothing in the rootfs is worth
+    committing.
+    """
+    from aios.ids import ACCOUNT
+    from aios.sandbox.volumes import ensure_browser_plane_dir
+
+    # Defense-in-depth: the plane dir and the container owner are keyed on
+    # ``account_id``, so a caller passing a client-influenced value would get a
+    # cross-account plane mount / browser hijack. Every real caller passes a
+    # server-minted account id; assert the shape here so a future one can't
+    # regress the invariant silently.
+    if not account_id.startswith(f"{ACCOUNT}_"):
+        raise ValueError(f"browser owner must be an account id (acc_…), got {account_id!r}")
+
+    settings = get_settings()
+    if not settings.sandbox_browser_image:
+        raise BrowserImageUnconfiguredError(
+            "no browser image is configured (AIOS_SANDBOX_BROWSER_IMAGE)"
+        )
+    plane = ensure_browser_plane_dir(account_id)
+    return SandboxSpec(
+        # Opaque owner label (``backends/base.py``): the account id IS the
+        # owner id — one computer per account by construction.
+        session_id=account_id,
+        instance_id=settings.instance_id,
+        workspace=Mount(host_path=plane, sandbox_path="/workspace", read_only=False),
+        extra_mounts=(),
+        environment={},
+        labels={
+            MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
+            INSTANCE_LABEL_KEY: settings.instance_id,
+            SESSION_LABEL_KEY: account_id,
+        },
+        # No egress policy machinery: the container is unreachable FROM
+        # sandboxes (inter-bridge isolation + ICC-off) and runs no agent code;
+        # per-site policy is driver-level (jarbot#106 §5.2). The container's
+        # inability to drive the control plane rests on topology, NOT on egress
+        # blocking (egress is open in Phase 1): no published ports, no
+        # tool-broker socket mounted, ``host_gateway_alias=None`` (no
+        # host.docker.internal alias), and the API requires a bearer key. A
+        # future Phase adds per-site egress lockdown for the untrusted web
+        # content the browser renders.
+        network_policy=None,
+        host_gateway_alias=None,
+        image=settings.sandbox_browser_image,
+        network_name=BROWSER_NETWORK_NAME,
+        cpu_quota=settings.sandbox_browser_cpu_quota,
+        memory_bytes=settings.sandbox_browser_memory_bytes,
+        pids_limit=settings.sandbox_browser_pids_limit,
+        seccomp_profile=settings.sandbox_browser_seccomp_profile,
+        runtime=settings.sandbox_browser_runtime,
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -18,6 +19,12 @@ class _Conn:
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         self.query = query
+        # Mirror asyncpg's arg-count enforcement: the highest ``$N`` referenced
+        # in the SQL must have a bound positional. A real Postgres raises
+        # ``the server expects N arguments … M were passed`` otherwise; the fake
+        # conn used to ignore ``*args`` and hid an unbound ``$1`` (a live 500).
+        highest = max((int(n) for n in re.findall(r"\$(\d+)", query)), default=0)
+        assert len(args) >= highest, f"query references ${highest} but only {len(args)} args bound"
         return self.rows
 
 

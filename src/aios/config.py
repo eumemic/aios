@@ -153,7 +153,9 @@ class Settings(BaseSettings):
         description="uid that should own every directory under workspace_root. The "
         "worker (root) chowns newly-created shared-tree components to this uid so the "
         "api container (running as this uid) can write into them. Set via "
-        "AIOS_WORKSPACES_OWNER_UID.",
+        "AIOS_WORKSPACES_OWNER_UID. NOTE: browser images bake their driver uid to "
+        "browser_protocol.PLANE_OWNER_UID (1000) — a deployment overriding this "
+        "while running a browser image breaks plane readability (frames/shots/spool).",
     )
     workspaces_owner_gid: int = Field(
         default=1000,
@@ -343,6 +345,137 @@ class Settings(BaseSettings):
         "network-lockdown sidecars. Unset (or Docker's configured default, normally "
         "runc) preserves local/CI behavior; set AIOS_SANDBOX_RUNTIME=runsc to run "
         "containers under gVisor where the host has runsc installed.",
+    )
+    # ── Account browser containers ("the computer", jarbot#106 Phase 1) ────
+    sandbox_browser_image: str = Field(
+        default="",
+        description="Docker image ref for the per-account browser container "
+        "(Chromium + driver daemon). EMPTY (the default) means browser tools are "
+        "unavailable on this deployment: every browser_* call fails with a "
+        "model-visible 'not available' error before any Docker call. Set "
+        "AIOS_SANDBOX_BROWSER_IMAGE once the browser image ships.",
+    )
+    sandbox_browser_cpu_quota: float | None = Field(
+        default=2.0,
+        ge=0.01,
+        description="CPU quota for a browser container (docker run --cpus). "
+        "One shared Chromium serves every bot in the account, so it gets more "
+        "headroom than an agent sandbox. None = host default (unlimited).",
+    )
+    sandbox_browser_memory_bytes: int | None = Field(
+        default=2 * 1024**3,
+        ge=4 * 1024 * 1024,
+        description="Memory cap for a browser container in bytes (docker run "
+        "--memory, swap pinned to the same value). Default 2 GiB. None = unlimited.",
+    )
+    sandbox_browser_pids_limit: int | None = Field(
+        default=512,
+        ge=1,
+        description="PID cap for a browser container (docker run --pids-limit). "
+        "Chromium spawns one renderer process per page plus helpers; 512 leaves "
+        "ample slack while bounding a fork bomb. None = unlimited.",
+    )
+    sandbox_browser_seccomp_profile: str = Field(
+        default="unconfined",
+        description="Seccomp profile path for browser containers. Defaults to "
+        "'unconfined' until the browser image ships its own authored profile "
+        "(docker/seccomp-browser.json — MUST permit unprivileged user namespaces "
+        "so Chromium's internal sandbox stays ON; running --no-sandbox inside "
+        "the container that holds the credential jar is a red result, not a "
+        "workaround). The sandbox profile is NOT reused: it denies the "
+        "namespace syscalls Chromium's sandbox requires.",
+    )
+    sandbox_browser_runtime: str | None = Field(
+        default=None,
+        description="Optional Docker runtime for browser containers (e.g. runsc "
+        "for gVisor). Independent of AIOS_SANDBOX_RUNTIME so the browser lane "
+        "can adopt or drop gVisor without moving agent sandboxes.",
+    )
+    sandbox_browser_provision_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="Wall-clock budget for provisioning a browser container "
+        "(image resolve + create + start), separate from the per-action exec "
+        "deadline so a cold start or first-pull never eats an action's budget.",
+    )
+    sandbox_browser_action_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="In-container deadline for one browser driver action "
+        "(click/type/navigate/... — the drivers's own per-action budget sits "
+        "just below it). Applied via the exec timeout wrapper.",
+    )
+    sandbox_browser_exec_max_output_bytes: int = Field(
+        default=400_000,
+        ge=50_000,
+        description="Per-stream capture bound for browser driver exec output. "
+        "Deliberately NOT bash_max_output_bytes: a snapshot-bearing JSON "
+        "response is ~30 KB and a truncated response is mangled JSON, so this "
+        "keeps generous margin above the snapshot budget.",
+    )
+    sandbox_browser_takeover_open_timeout_seconds: int = Field(
+        default=45,
+        ge=1,
+        description="In-container deadline for the drain-blocking takeover_open "
+        "driver op: it waits out an in-flight agent action (the action deadline) "
+        "plus barrier margin before the first human frame can exist.",
+    )
+    sandbox_browser_grant_ttl_seconds: int = Field(
+        default=300,
+        ge=10,
+        description="Heartbeat TTL for an open takeover grant. The product layer "
+        "heartbeats while its viewer holds the frame stream; a lapse this long "
+        "means the human is gone — the reaper runs the abandonment handback.",
+    )
+    sandbox_browser_calls_retention_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        description="Resolved/expired browser control-plane call rows older than "
+        "this are deleted by the browser reaper.",
+    )
+    sandbox_browser_call_timeout_seconds: float = Field(
+        default=210.0,
+        gt=0,
+        description="How long a browser control-plane API request blocks for the "
+        "worker to resolve its call before returning 504. Must cover a COLD open: "
+        "the browser provision (sandbox_browser_provision_timeout_seconds, 120s) "
+        "PLUS the takeover-open drain (sandbox_browser_takeover_open_timeout_seconds, "
+        "45s) plus margin — otherwise every cold open 504s the caller while the "
+        "worker completes it, leaving a viewerless grant.",
+    )
+    sandbox_browser_input_spool_max_bytes: int = Field(
+        default=64 * 1024**2,
+        ge=1024**2,
+        description="Byte cap on a takeover input spool; a POST that would exceed "
+        "it returns 413. The reaper truncates the spool once no grant is open.",
+    )
+    sandbox_browser_reaper_enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the browser plane reaper (grant TTL expiry, "
+        "container keepalive, call-row retention, plane byte quotas).",
+    )
+    sandbox_browser_reaper_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Cadence of the browser plane reaper tick.",
+    )
+    sandbox_browser_shots_max_bytes: int = Field(
+        default=256 * 1024**2,
+        ge=1024**2,
+        description="Per-account byte cap on the plane's screenshots dir; "
+        "oldest files are reaped first when exceeded.",
+    )
+    sandbox_browser_frames_max_bytes: int = Field(
+        default=256 * 1024**2,
+        ge=1024**2,
+        description="Per-account byte cap on the takeover frame ring; oldest frames reaped first.",
+    )
+    sandbox_browser_downloads_max_bytes: int = Field(
+        default=1024**3,
+        ge=1024**2,
+        description="Per-account byte cap on the plane's downloads dir; oldest "
+        "files reaped first. The profile dir is NEVER quota-reaped — real "
+        "logins live there; only the explicit clear-state operation deletes it.",
     )
     bash_default_timeout_seconds: int = Field(
         default=120,

@@ -5,14 +5,15 @@ from __future__ import annotations
 import pytest
 
 from aios.ids import (
+    ACCOUNT,
     AGENT,
     CREDENTIAL,
     ENVIRONMENT,
     EVENT,
     SESSION,
     WORKFLOW_RUN,
-    is_run_owner_id,
     make_id,
+    sandbox_owner_kind,
     split_id,
 )
 
@@ -65,27 +66,6 @@ class TestMakeIdDeterministic:
             make_id(SESSION, body=b"too short")
 
 
-class TestIsRunOwnerId:
-    """The intrinsic owner-kind discriminator the sandbox registry routes teardown
-    on (issue #995): a single source of truth for "is this owner a workflow run?"
-    so a future owner prefix can't silently fall through the run-vs-session fork."""
-
-    def test_true_for_a_workflow_run_id(self) -> None:
-        assert is_run_owner_id(make_id(WORKFLOW_RUN)) is True
-
-    def test_false_for_a_session_id(self) -> None:
-        assert is_run_owner_id(make_id(SESSION)) is False
-
-    def test_false_for_other_prefixes(self) -> None:
-        # An unrelated owner-shaped id must NOT be misclassified as a run.
-        for prefix in (AGENT, ENVIRONMENT, EVENT):
-            assert is_run_owner_id(make_id(prefix)) is False
-
-    def test_requires_the_separator_not_just_the_prefix_chars(self) -> None:
-        # A literal ``wfr`` substring without the ``wfr_`` boundary is not a run id.
-        assert is_run_owner_id("wfrog_01HQR2K7VXBZ9MNPL3WYCT8F") is False
-
-
 class TestSplitId:
     def test_splits_well_formed_id(self) -> None:
         new_id = make_id(EVENT)
@@ -104,3 +84,29 @@ class TestSplitId:
     def test_rejects_short_ulid(self) -> None:
         with pytest.raises(ValueError, match="malformed prefixed id"):
             split_id("agent_TOOSHORT")
+
+
+class TestSandboxOwnerKind:
+    """The EXHAUSTIVE registry owner-kind discriminator (jarbot#106): the
+    fall-through-to-session default is dead — an unknown prefix raises rather
+    than inheriting the session teardown (which would publish a bogus snapshot
+    pointer through the rowcount-unchecked write path)."""
+
+    def test_session_owner(self) -> None:
+        assert sandbox_owner_kind(make_id(SESSION)) == "session"
+
+    def test_run_owner(self) -> None:
+        assert sandbox_owner_kind(make_id(WORKFLOW_RUN)) == "run"
+
+    def test_browser_owner_is_the_account_id(self) -> None:
+        assert sandbox_owner_kind(make_id(ACCOUNT)) == "browser"
+
+    def test_unknown_prefix_raises(self) -> None:
+        with pytest.raises(ValueError, match="not a sandbox owner id"):
+            sandbox_owner_kind(make_id(AGENT))
+
+    def test_requires_the_separator_not_just_the_prefix_chars(self) -> None:
+        with pytest.raises(ValueError, match="not a sandbox owner id"):
+            sandbox_owner_kind("accord_01HQR2K7VXBZ9MNPL3WYCT8F")
+        with pytest.raises(ValueError, match="not a sandbox owner id"):
+            sandbox_owner_kind("wfrog_01HQR2K7VXBZ9MNPL3WYCT8F")

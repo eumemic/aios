@@ -231,6 +231,64 @@ def ensure_run_workspace_dir(account_id: str, run_id: str) -> Path:
     return ensure_owned_dir(run_workspace_dir(account_id, run_id))
 
 
+_BROWSER_ROOT = "_browser"
+
+
+def _plane_subdirs_from_protocol() -> tuple[str, ...]:
+    """Derive the plane subdirectories from the wire contract.
+
+    The driver's container-side paths (``browser_protocol`` — the single
+    authority for the plane layout, COPY'd into the browser image) determine
+    which host-side subdirs must exist: ``profile`` (Chromium user data —
+    logins; non-reconstructible, never auto-reaped, deleted only by explicit
+    clear-state), ``shots``, ``frames``, ``downloads``, and ``input`` (the
+    takeover input spool). Deriving rather than restating means a renamed
+    subdir cannot ship a driver writing where the host never created a dir.
+    """
+    from pathlib import PurePosixPath
+
+    from aios.sandbox import browser_protocol as proto
+
+    paths = (
+        proto.PROFILE_DIR,
+        proto.SHOTS_DIR,
+        proto.FRAMES_DIR,
+        proto.DOWNLOADS_DIR,
+        proto.INPUT_SPOOL,
+    )
+    return tuple(PurePosixPath(p).relative_to("/workspace").parts[0] for p in paths)
+
+
+BROWSER_PLANE_SUBDIRS = _plane_subdirs_from_protocol()
+
+
+def browser_plane_root() -> Path:
+    """``<workspace_root>/_browser`` — the parent of every account plane."""
+    return (get_settings().workspace_root / _BROWSER_ROOT).resolve()
+
+
+def browser_plane_dir(account_id: str) -> Path:
+    """Per-account browser-plane host directory: ``<workspace_root>/_browser/<account_id>``.
+
+    Deliberately TOP-LEVEL — a sibling of the account workspace dirs, not a
+    child: :func:`validate_workspace_path` jails user-supplied session
+    workspaces to ``<workspace_root>/<account_id>/…``, so a plane inside the
+    account subdir could be bind-mounted read-write into an agent sandbox via
+    a session's ``workspace_path`` (cookie theft). Outside every account jail,
+    no session workspace can resolve into it by construction (jarbot#106
+    §6.2). Pure — use :func:`ensure_browser_plane_dir` to create it.
+    """
+    return browser_plane_root() / account_id
+
+
+def ensure_browser_plane_dir(account_id: str) -> Path:
+    """Return the per-account browser plane dir, creating it and its subdirs."""
+    plane = ensure_owned_dir(browser_plane_dir(account_id))
+    for sub in BROWSER_PLANE_SUBDIRS:
+        ensure_owned_dir(plane / sub)
+    return plane
+
+
 _MEMORY_STORES_ROOT = "_memory_stores"
 
 

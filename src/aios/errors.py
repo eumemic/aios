@@ -114,6 +114,18 @@ class RateLimitedError(AiosError):
     status_code = 429
 
 
+class ServiceUnavailableError(AiosError):
+    """A dependency needed to serve the request is temporarily unavailable.
+
+    Distinct from :class:`SSEPreflightFailedError` (also 503, but specifically
+    about opening a LISTEN connection): the browser routes raise this when the
+    account's computer failed to start or is not responding.
+    """
+
+    error_type = "service_unavailable"
+    status_code = 503
+
+
 class CryptoDecryptError(AiosError):
     """Raised when the CryptoBox cannot decrypt a stored ciphertext.
 
@@ -208,6 +220,17 @@ class OAuthFlowError(AiosError):
 
     error_type = "oauth_flow_error"
     status_code = 502
+
+
+class BrowserCallTimeoutError(AiosError):
+    """A browser control-plane call was not resolved by the worker in time.
+
+    The pending row is deliberately left in place — the worker listener's
+    redrive may still execute it (idempotent driver ops make that safe).
+    """
+
+    error_type = "browser_call_timeout"
+    status_code = 504
 
 
 class ManagementCallTimeoutError(AiosError):

@@ -22,7 +22,7 @@ import pytest
 
 from aios.db import queries
 from aios.db.queries.events import _MODEL_TOKEN_RATIO_SAMPLE_LIMIT
-from aios.harness.tokens import CONTENT_CLASSES
+from aios.harness.tokens import CONTENT_CLASSES, TOKEN_BASELINE_CURRENT
 from aios.services import sessions as sessions_service
 from tests.e2e.harness import Harness
 
@@ -79,7 +79,7 @@ async def _seed_valid_span(
             "cost_usd": None,
             "local_tokens": local_tokens,
             "local_tokens_by_class": _by_class(local_tokens),
-            "token_baseline_v": 2,
+            "token_baseline_v": TOKEN_BASELINE_CURRENT,
             "model": model,
         },
         account_id=account_id,

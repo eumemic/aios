@@ -168,6 +168,51 @@ async def test_corpse_pass_run_owner_dropped_without_db_lookup_or_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_corpse_pass_browser_owner_dropped_without_db_lookup_or_snapshot(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An account browser (acc_) corpse is bare-destroyed by owner kind — its
+    durable state lives on the plane bind mount, never the rootfs (jarbot#106).
+    This is also what heals ``stop_all``'s deliberate stopped corpses next boot."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    fresh = AsyncMock(return_value=[])
+    monkeypatch.setattr("aios.sandbox.registry.queries.gc_snapshot_session_states", fresh)
+    account_id = make_id("acc")
+    container = ManagedSandboxRef(sandbox_id="cid", session_id=account_id, running=False)
+
+    await registry._gc_corpse_pass(
+        [container], {}, _NOW, get_settings(), get_settings().instance_id
+    )
+
+    assert any(c[0] == "force_remove" for c in backend.calls)
+    assert not any(c[0] == "snapshot" for c in backend.calls)
+    fresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_corpse_pass_garbage_owner_label_dropped_without_raising(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed container carrying a foreign/garbage owner label must not
+    brick the GC pass (its contract: never raises) — it is dropped like an
+    unlabeled corpse, never routed through the session retain path."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    fresh = AsyncMock(return_value=[])
+    monkeypatch.setattr("aios.sandbox.registry.queries.gc_snapshot_session_states", fresh)
+    container = ManagedSandboxRef(sandbox_id="cid", session_id="not-an-owner-id", running=False)
+
+    await registry._gc_corpse_pass(
+        [container], {}, _NOW, get_settings(), get_settings().instance_id
+    )
+
+    assert any(c[0] == "force_remove" for c in backend.calls)
+    assert not any(c[0] == "snapshot" for c in backend.calls)
+    fresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_image_pass_retains_archived_removal_after_unarchive(
     fake_pool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

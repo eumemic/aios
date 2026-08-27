@@ -6,8 +6,17 @@ from unittest.mock import Mock
 import pytest
 
 from aios.harness.worker import _consume_snapshot_pressure
+from aios.sandbox.backends.base import SandboxBackendError, SandboxCapacityError
 from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from tests.helpers.sandbox import FakeBackend
+
+
+def test_capacity_error_is_a_backend_error() -> None:
+    """Load-bearing for the browser driver path: a capacity refusal must be a
+    SandboxBackendError so driver_call's existing ``except SandboxBackendError``
+    maps it to a transient ToolBail instead of letting it escape and evict the
+    calling session's sandbox (jarbot#106)."""
+    assert issubclass(SandboxCapacityError, SandboxBackendError)
 
 
 def test_account_pressure_is_scoped_and_alarm_clears(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,7 +25,7 @@ def test_account_pressure_is_scoped_and_alarm_clears(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("aios.sandbox.registry.log.error", alarm)
     registry.set_provisioning_pressure(GcPressureResult(pressured_accounts=frozenset({"acct_hot"})))
 
-    with pytest.raises(RuntimeError, match="snapshot capacity pressure"):
+    with pytest.raises(SandboxCapacityError, match="snapshot capacity pressure"):
         registry._admit_capacity_provision("sess_hot", account_id="acct_hot")
     registry._admit_capacity_provision("sess_other", account_id="acct_other")
     registry._admit_capacity_provision("wfr_run", account_id=None, durable=False)
@@ -30,9 +39,9 @@ def test_host_pool_pressure_remains_global() -> None:
     registry = SandboxRegistry(backend=FakeBackend())
     registry.set_provisioning_pressure(GcPressureResult(pool_used_bytes=11, pool_budget_bytes=10))
 
-    with pytest.raises(RuntimeError, match="snapshot capacity pressure"):
+    with pytest.raises(SandboxCapacityError, match="snapshot capacity pressure"):
         registry._admit_capacity_provision("sess_any", account_id="acct_other")
-    with pytest.raises(RuntimeError, match="snapshot capacity pressure"):
+    with pytest.raises(SandboxCapacityError, match="snapshot capacity pressure"):
         registry._admit_capacity_provision("wfr_run", account_id=None, durable=False)
 
 
@@ -49,7 +58,7 @@ def test_worker_gc_callback_drives_and_clears_admission(
     _consume_snapshot_pressure(
         registry, GcPressureResult(pressured_accounts=frozenset({"acct_hot"}))
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SandboxCapacityError):
         registry._admit_capacity_provision("sess_hot", account_id="acct_hot")
     worker_alarm.assert_called_once_with(
         "worker.sandbox_capacity_pressure_alarm",

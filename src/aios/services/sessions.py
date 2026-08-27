@@ -2156,18 +2156,13 @@ async def append_tool_result(
     in the connector-facing endpoint).  The caller is responsible for
     deferring the wake afterwards.
     """
-    from aios.sandbox.tool_result_spill import (
-        cap_tool_result_content,
-        record_spill_attachment,
-    )
+    from aios.sandbox.tool_result_spill import cap_tool_result, record_spill_attachment
 
-    spill_attachment: dict[str, Any] | None = None
-    if isinstance(content, str):
-        capped = await cap_tool_result_content(
-            session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
-        )
-        content = capped.content
-        spill_attachment = capped.attachment
+    capped = await cap_tool_result(
+        session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
+    )
+    content = capped.content
+    spill_attachment = capped.attachment
 
     # ── Pre-lock precompute (issue #991, Parts 1 + 2) ─────────────────────
     # Resolve the parent assistant's name AND ``focal_channel_at_arrival`` in a

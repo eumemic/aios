@@ -223,7 +223,11 @@ _MODEL_TOKEN_RATIO_SIGMA_PRIOR = 0.02
 # consumes only the *blended* R_eff (a composition-weighted average of the
 # coefficients) — the raw per-class coefficients are NOT individually
 # load-bearing (they are collinear; see the issue's robustness note).
-from aios.harness.tokens import CONTENT_CLASSES  # noqa: E402
+from aios.harness.tokens import (  # noqa: E402
+    CONTENT_CLASSES,
+    TOKEN_BASELINE_CURRENT,
+    message_has_image,
+)
 
 # Ridge regularization strength.  Pulls each coefficient toward a neutral
 # prior of 1.0 (the old scalar's degenerate "no correction" value).  The
@@ -446,6 +450,13 @@ async def model_token_class_ratio_fit(
     This is the uncached calibration reader shared by the hot-path cached
     wrapper and the on-demand observability surface. ``account_id`` remains
     intentionally unused because calibration is global per model.
+
+    Spans are filtered to the CURRENT token baseline: per-class coefficients
+    are scale-coupled to the baseline that priced the span's ``local_tokens``
+    (the image class especially — v2 locals are payload-scale, v3 locals are
+    provider-native), so mixing baselines in one fit would poison the
+    coefficients.  After a baseline bump the fit self-heals: it returns the
+    neutral fallback until enough current-baseline spans accumulate.
     """
     del account_id
     rows = await conn.fetch(
@@ -458,7 +469,7 @@ async def model_token_class_ratio_fit(
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND data->>'model' = $1
-          AND (data->>'token_baseline_v')::smallint = 2
+          AND (data->>'token_baseline_v')::smallint = $3
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -478,6 +489,7 @@ async def model_token_class_ratio_fit(
         """,
         model,
         _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
+        TOKEN_BASELINE_CURRENT,
     )
     return _fit_class_ratios(rows), len(rows)
 
@@ -521,7 +533,7 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
           AND data->>'event' = 'model_request_end'
           AND (data->>'is_error')::boolean = false
           AND created_at >= now() - interval '24 hours'
-          AND (data->>'token_baseline_v')::smallint = 2
+          AND (data->>'token_baseline_v')::smallint = $1
           AND data ? 'local_tokens'
           AND data ? 'local_tokens_by_class'
           AND data ? 'model'
@@ -531,7 +543,8 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
           AND (data->>'local_tokens')::bigint > 0
         GROUP BY data->>'model'
         ORDER BY data->>'model'
-        """
+        """,
+        TOKEN_BASELINE_CURRENT,
     )
     result: dict[str, dict[str, Any]] = {}
     for row in measured:
@@ -774,7 +787,7 @@ def _event_token_delta(
     orig_channel: str | None,
     focal_at_arrival: str | None,
     *,
-    image_aware: bool = True,
+    baseline: int = TOKEN_BASELINE_CURRENT,
 ) -> int:
     """Approximate per-event token contribution, computed pre-transaction.
 
@@ -803,8 +816,30 @@ def _event_token_delta(
         # bounded drift the in-lock code accepted (see ``append_event``).
         rendered = render_user_event(data, orig_channel, focal_at_arrival, datetime.now(UTC))
         separator = {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}
-        return approx_tokens([rendered, separator], image_aware=image_aware)
-    return approx_tokens([data], image_aware=image_aware)
+        return approx_tokens([rendered, separator], baseline=baseline)
+    return approx_tokens([data], baseline=baseline)
+
+
+def _event_token_deltas(
+    kind: str,
+    data: dict[str, Any],
+    orig_channel: str | None,
+    focal_at_arrival: str | None,
+) -> tuple[int, int, int]:
+    """Price one event under every baseline: ``(current, v1, v2)``.
+
+    The single construction site for :class:`_PrecomputedAppend`'s delta
+    fields — the baselines differ only on image-bearing messages, so the
+    common case is one tokenizer pass shared by all three arms.
+    """
+    delta = _event_token_delta(kind, data, orig_channel, focal_at_arrival)
+    if kind != "message" or not message_has_image(data):
+        return delta, delta, delta
+    return (
+        delta,
+        _event_token_delta(kind, data, orig_channel, focal_at_arrival, baseline=1),
+        _event_token_delta(kind, data, orig_channel, focal_at_arrival, baseline=2),
+    )
 
 
 async def find_tool_result_event(
@@ -1170,26 +1205,31 @@ class _PrecomputedAppend(NamedTuple):
 
     token_delta: int
     resolved_tool_channel: str | None
-    # The SAME event priced under the v1 (image-blind) baseline.  The two
-    # baselines differ only for messages carrying an ``image_url`` part, so
-    # this is the identical object for every other event and costs nothing
-    # extra to carry.  ``append_event`` selects between them using the
-    # session's ``token_baseline_v`` read under the row lock — the delta and
-    # the recorded marker therefore ALWAYS describe the same arithmetic, even
-    # if the backfill flips the marker between this pre-lock compute and the
-    # lock (issue #2050 review).
+    # The SAME event priced under the older baselines (v1 image-blind, v2
+    # payload-priced).  The baselines differ only for messages carrying an
+    # ``image_url`` part, so these are the identical value for every other
+    # event and cost nothing extra to carry (:func:`_event_token_deltas` is
+    # the single construction site).  ``append_event`` selects among them via
+    # :meth:`delta_for` using the session's ``token_baseline_v`` read under
+    # the row lock — the delta and the recorded marker therefore ALWAYS
+    # describe the same arithmetic, even if the backfill flips the marker
+    # between this pre-lock compute and the lock (issue #2050 review).
     token_delta_v1: int
+    token_delta_v2: int
 
+    def delta_for(self, baseline: int) -> int:
+        """The delta priced under ``baseline``.
 
-def message_has_image(data: dict[str, Any]) -> bool:
-    """Lazy re-export of :func:`aios.harness.tokens.message_has_image`.
-
-    Imported inside the function body to preserve the litellm-bootstrap
-    deferral the surrounding module relies on.
-    """
-    from aios.harness.tokens import message_has_image as _has
-
-    return _has(data)
+        ``>= TOKEN_BASELINE_CURRENT`` selects the current arm so that a
+        marker from a NEWER binary (rollback window after a future
+        baseline's backfill) prices at the newest arithmetic this binary
+        knows rather than failing the append.
+        """
+        if baseline >= TOKEN_BASELINE_CURRENT:
+            return self.token_delta
+        if baseline == 2:
+            return self.token_delta_v2
+        return self.token_delta_v1
 
 
 async def precompute_event_append(
@@ -1223,9 +1263,9 @@ async def precompute_event_append(
     """
     from aios.db.queries import sessions as _sessions_q
 
-    delta = 0
-    delta_v1 = 0
+    delta = delta_v1 = delta_v2 = 0
     if kind == "message":
+        pre_focal: str | None = None
         if data.get("role") == "user":
             # USER token count needs the focal channel to render the as-sent
             # form.  This pre-read is OUTSIDE any transaction; a concurrent
@@ -1235,19 +1275,7 @@ async def precompute_event_append(
             pre_focal = await _sessions_q.get_session_focal_channel(
                 conn, session_id, account_id=account_id
             )
-            delta = _event_token_delta(kind, data, orig_channel, pre_focal)
-            delta_v1 = (
-                _event_token_delta(kind, data, orig_channel, pre_focal, image_aware=False)
-                if message_has_image(data)
-                else delta
-            )
-        else:
-            delta = _event_token_delta(kind, data, orig_channel, None)
-            delta_v1 = (
-                _event_token_delta(kind, data, orig_channel, None, image_aware=False)
-                if message_has_image(data)
-                else delta
-            )
+        delta, delta_v1, delta_v2 = _event_token_deltas(kind, data, orig_channel, pre_focal)
 
     # Resolve the tool-parent channel pre-lock too.  The live builtin/MCP
     # dispatch path supplies it directly (default ``...`` → look it up).
@@ -1265,6 +1293,7 @@ async def precompute_event_append(
         token_delta=delta,
         resolved_tool_channel=resolved_tool_channel,
         token_delta_v1=delta_v1,
+        token_delta_v2=delta_v2,
     )
 
 
@@ -1399,7 +1428,6 @@ async def append_event(
             orig_channel=orig_channel,
             tool_parent_channel=tool_parent_channel,
         )
-    delta = precomputed.token_delta
     resolved_tool_channel = precomputed.resolved_tool_channel
 
     # ``chan_candidate`` (issue #1742): the channel address, if any, this
@@ -1517,19 +1545,21 @@ async def append_event(
             # seq, and it selects the arithmetic applied to THIS append.  A v1
             # session therefore keeps v1 (image-blind) arithmetic and a v1
             # marker; only the backfill's atomic replay-then-flip promotes a
-            # session to v2.  This is what keeps the marker LOAD-BEARING: the
-            # value stored in ``token_baseline_v`` always describes the
-            # arithmetic that produced the row's cumulative counters.
+            # session to the current baseline.  This is what keeps the marker
+            # LOAD-BEARING: the value stored in ``token_baseline_v`` always
+            # describes the arithmetic that produced the row's cumulative
+            # counters.
             #
             # Why honour the marker rather than merely birthing new sessions at
-            # v2: ``cumulative_tokens`` is a RUNNING SUM.  Switching arithmetic
-            # part-way leaves a v1-priced prefix and a v2-priced suffix inside
-            # ONE monotonic series, and the windower's drop boundary compares a
-            # v2-scale total against a v1-scale prefix — an incoherent
-            # comparison no marker can repair after the fact.  Per-append
-            # honouring keeps every session internally homogeneous.
+            # the current baseline: ``cumulative_tokens`` is a RUNNING SUM.
+            # Switching arithmetic part-way leaves differently-priced prefix
+            # and suffix inside ONE monotonic series, and the windower's drop
+            # boundary compares a current-scale total against an older-scale
+            # prefix — an incoherent comparison no marker can repair after the
+            # fact.  Per-append honouring keeps every session internally
+            # homogeneous.
             image_aware = token_baseline_v >= 2
-            effective_delta = delta if image_aware else precomputed.token_delta_v1
+            effective_delta = precomputed.delta_for(token_baseline_v)
             prev = await _latest_cumulative_state(conn, session_id)
             cum_tokens = (prev.tokens or 0) + effective_delta
             counts_as_message = role in ("user", "assistant")
@@ -1538,7 +1568,7 @@ async def append_event(
             if image_aware:
                 from aios.harness.tokens import approx_tokens_by_class
 
-                event_mass = approx_tokens_by_class([data], image_aware=True)
+                event_mass = approx_tokens_by_class([data], baseline=token_baseline_v)
                 # Reconcile rendering/envelope drift to the event's dominant
                 # class; image itself remains the exact mixed-part residual.
                 event_mass[cls] += effective_delta - sum(

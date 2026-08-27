@@ -180,18 +180,105 @@ async def test_v2_session_gets_full_image_accounting(
 
 
 @pytest.mark.integration
-async def test_calibration_fit_admits_only_v2_lineage_spans(
+async def test_v3_session_prices_image_at_provider_native(
     live_conn: asyncpg.Connection[Any],
 ) -> None:
-    """The v2 calibration fit must not train on v1-lineage spans.
+    """A v3 session prices an inlined image at the pixel rate, exactly.
 
-    The span stamp is now the SESSION's marker (``loop.py``), not a constant
-    ``2``, so this filter is tied to real lineage. Pinned at the DB level:
-    a v1-stamped span is invisible to the fit even when otherwise well-formed.
+    Uses a real decodable PNG of known dimensions so the expected image mass
+    is deterministic: litellm's ~90 per-part base constant plus
+    ``ceil(w*h/750)``.  The per-class residual attribution makes
+    ``cumulative_image_mass`` carry exactly that marginal cost.
+    """
+    from math import ceil
+
+    from tests.helpers.images import png_data_uri
+
+    account_id, session_id = await _seed(live_conn, baseline_v=3)
+
+    data_uri = png_data_uri(300, 200)
+    message: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": "tc_v3_img",
+        "name": "screenshot",
+        "content": [
+            {"type": "text", "text": "screenshot"},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ],
+    }
+
+    plain = await _append(live_conn, account_id, session_id, _PLAIN_MESSAGE)
+    baseline_total = (await _row(live_conn, plain.id))["cumulative_tokens"]
+
+    image = await _append(live_conn, account_id, session_id, message)
+    row = await _row(live_conn, image.id)
+
+    image_delta = row["cumulative_tokens"] - baseline_total
+    pixel_rate = ceil(300 * 200 / 750)
+
+    assert row["token_baseline_v"] == 3
+    # Pixel-rate scale (plus the ~90 base constant and small text framing) —
+    # NOT the multi-thousand-token payload scale v2 would store for this URI.
+    assert pixel_rate < image_delta < pixel_rate + 300, (
+        f"v3 image delta {image_delta} is not at the provider-native scale"
+    )
+    # The image-class mass carries the base constant + pixel-rate marginal.
+    assert pixel_rate <= row["cumulative_image_mass"] <= pixel_rate + 150
+
+
+@pytest.mark.integration
+async def test_fresh_sessions_are_born_at_the_current_baseline(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """``insert_session`` stamps ``TOKEN_BASELINE_CURRENT`` on fresh rows.
+
+    A fresh session has no event history, so there is no older-priced prefix
+    to stay homogeneous with — waiting for the backfill would just condemn
+    every new session to stale arithmetic until the next operational run.
+    """
+    from aios.db.queries.sessions import insert_session
+    from aios.harness.tokens import TOKEN_BASELINE_CURRENT
+
+    # Seed account/env/agent rows (the seeded session's marker is irrelevant —
+    # the assertion targets a session created through ``insert_session``).
+    account_id, _seed_session = await _seed(live_conn, baseline_v=1)
+    seed_row = await live_conn.fetchrow(
+        "SELECT agent_id, environment_id FROM sessions WHERE id = $1", _seed_session
+    )
+    assert seed_row is not None
+
+    session = await insert_session(
+        live_conn,
+        account_id=account_id,
+        agent_id=seed_row["agent_id"],
+        environment_id=seed_row["environment_id"],
+        agent_version=1,
+        title=None,
+        metadata={},
+        workspace_path=f"/tmp/{account_id}-fresh",
+    )
+    marker = await live_conn.fetchval(
+        "SELECT token_baseline_v FROM sessions WHERE id = $1", session.id
+    )
+    assert marker == TOKEN_BASELINE_CURRENT
+
+
+@pytest.mark.integration
+async def test_calibration_fit_admits_only_current_lineage_spans(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """The calibration fit must train only on current-baseline spans.
+
+    The span stamp is the SESSION's marker (``loop.py``), so this filter is
+    tied to real lineage. Per-class coefficients are scale-coupled to the
+    baseline that priced the span's locals (the image class especially: v2
+    locals are payload-scale, v3 provider-native), so v1 AND v2 spans must
+    both be invisible to the fit even when otherwise well-formed.
     """
     import json
 
     from aios.db.queries.events import model_token_class_ratio_fit
+    from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 
     account_id, session_id = await _seed(live_conn, baseline_v=1)
     model = "openrouter/lineage-test"
@@ -219,19 +306,22 @@ async def test_calibration_fit_admits_only_v2_lineage_spans(
             account_id,
         )
 
-    # 40 v1-lineage spans: well-formed in every respect EXCEPT lineage.
+    # 40 v1-lineage + 40 v2-lineage spans: well-formed in every respect
+    # EXCEPT lineage.
     for i in range(40):
         await _span(1000 + i, 1, 100, 250)
-
-    _, n_samples = await model_token_class_ratio_fit(live_conn, model, account_id=account_id)
-    assert n_samples == 0, f"v1-lineage spans leaked into the v2 fit: {n_samples} admitted"
-
-    # Genuine v2 lineage IS admitted (positive control for the filter itself).
     for i in range(40):
         await _span(2000 + i, 2, 100, 250)
 
-    _, n_samples_v2 = await model_token_class_ratio_fit(live_conn, model, account_id=account_id)
-    assert n_samples_v2 == 40, f"expected 40 v2 spans admitted, got {n_samples_v2}"
+    _, n_samples = await model_token_class_ratio_fit(live_conn, model, account_id=account_id)
+    assert n_samples == 0, f"stale-lineage spans leaked into the current fit: {n_samples} admitted"
+
+    # Genuine current lineage IS admitted (positive control for the filter).
+    for i in range(40):
+        await _span(3000 + i, TOKEN_BASELINE_CURRENT, 100, 250)
+
+    _, n_current = await model_token_class_ratio_fit(live_conn, model, account_id=account_id)
+    assert n_current == 40, f"expected 40 current-lineage spans admitted, got {n_current}"
 
 
 @pytest.mark.integration
@@ -295,3 +385,19 @@ async def test_every_non_message_kind_appends(
             "SELECT cumulative_image_mass FROM events WHERE id = $1", event.id
         )
         assert mass == 0, f"{kind} append stored {mass!r} for cumulative_image_mass"
+
+
+@pytest.mark.integration
+async def test_get_session_bare_surfaces_token_baseline_marker(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """The worker step reads its session via ``get_session_bare`` →
+    ``_row_to_session``; the stored ``token_baseline_v`` MUST survive that
+    mapping. When it doesn't, the pydantic default (1) masks the real marker, so
+    the step prices ``local_tokens`` image-blind and stamps every calibration
+    span v1 — and the v3 fit never accumulates a sample. A synthetic ``_span``
+    can't catch this; only the real read path does.
+    """
+    account_id, session_id = await _seed(live_conn, baseline_v=3)
+    session = await queries.get_session_bare(live_conn, session_id, account_id=account_id)
+    assert session.token_baseline_v == 3
