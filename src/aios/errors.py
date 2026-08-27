@@ -210,6 +210,17 @@ class OAuthFlowError(AiosError):
     status_code = 502
 
 
+class BrowserCallTimeoutError(AiosError):
+    """A browser control-plane call was not resolved by the worker in time.
+
+    The pending row is deliberately left in place — the worker listener's
+    redrive may still execute it (idempotent driver ops make that safe).
+    """
+
+    error_type = "browser_call_timeout"
+    status_code = 504
+
+
 class ManagementCallTimeoutError(AiosError):
     """Management call exceeded its per-method timeout.
 

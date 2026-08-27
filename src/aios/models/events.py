@@ -61,6 +61,13 @@ MODEL_VISIBLE_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
         # so core stays transport-agnostic.
         "connector_message_delivered",
         "connector_message_edited",
+        # Browser plane (jarbot#106): ``browser_takeover_ended`` tells the
+        # requesting agent that human control of the account computer ended
+        # (done/cancelled/expired) — it must not keep waiting for the human.
+        # ``browser_state_lost`` reports the computer's page/login state was
+        # cleared. Both non-stimulus-bearing: read at the next genuine wake.
+        "browser_takeover_ended",
+        "browser_state_lost",
     }
 )
 

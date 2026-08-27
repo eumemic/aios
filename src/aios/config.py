@@ -413,6 +413,54 @@ class Settings(BaseSettings):
         "response is ~30 KB and a truncated response is mangled JSON, so this "
         "keeps generous margin above the snapshot budget.",
     )
+    sandbox_browser_takeover_open_timeout_seconds: int = Field(
+        default=45,
+        ge=1,
+        description="In-container deadline for the drain-blocking takeover_open "
+        "driver op: it waits out an in-flight agent action (the action deadline) "
+        "plus barrier margin before the first human frame can exist.",
+    )
+    sandbox_browser_grant_ttl_seconds: int = Field(
+        default=300,
+        ge=10,
+        description="Heartbeat TTL for an open takeover grant. The product layer "
+        "heartbeats while its viewer holds the frame stream; a lapse this long "
+        "means the human is gone — the reaper runs the abandonment handback.",
+    )
+    sandbox_browser_calls_retention_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        description="Resolved/expired browser control-plane call rows older than "
+        "this are deleted by the browser reaper.",
+    )
+    sandbox_browser_reaper_enabled: bool = Field(
+        default=True,
+        description="Kill-switch for the browser plane reaper (grant TTL expiry, "
+        "container keepalive, call-row retention, plane byte quotas).",
+    )
+    sandbox_browser_reaper_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Cadence of the browser plane reaper tick.",
+    )
+    sandbox_browser_shots_max_bytes: int = Field(
+        default=256 * 1024**2,
+        ge=1024**2,
+        description="Per-account byte cap on the plane's screenshots dir; "
+        "oldest files are reaped first when exceeded.",
+    )
+    sandbox_browser_frames_max_bytes: int = Field(
+        default=256 * 1024**2,
+        ge=1024**2,
+        description="Per-account byte cap on the takeover frame ring; oldest frames reaped first.",
+    )
+    sandbox_browser_downloads_max_bytes: int = Field(
+        default=1024**3,
+        ge=1024**2,
+        description="Per-account byte cap on the plane's downloads dir; oldest "
+        "files reaped first. The profile dir is NEVER quota-reaped — real "
+        "logins live there; only the explicit clear-state operation deletes it.",
+    )
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,

@@ -554,6 +554,88 @@ def listen_for_connection_discovery(
     )
 
 
+@asynccontextmanager
+async def listen_for_browser_result(
+    db_url: str,
+    call_id: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """LISTEN ``browser_result_<call_id>``; yield the single-result queue.
+
+    The API-side wait leg of the browser control-plane RPC (jarbot#106
+    §5.7) — the browser twin of :func:`listen_for_connector_result`, and
+    like it a slot-consuming route-level listener: control ops are rare and
+    human-paced, so briefly holding one of the SSE subscriber slots for the
+    call's lifetime is acceptable (the takeover INPUT path deliberately
+    rides the shared filesystem instead of this plane).
+    """
+    release_capacity = _reserve_sse_subscriber()
+    try:
+        conn = await _connect_listener(db_url)
+        try:
+            queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
+            channel = f"browser_result_{call_id}"
+
+            def _callback(
+                _conn: asyncpg.Connection[object],
+                _pid: int,
+                _channel: str,
+                payload: str,
+            ) -> None:
+                try:
+                    queue.put_nowait(payload)
+                except asyncio.QueueFull:
+                    log.warning("listen.browser_result_queue_full", call_id=call_id)
+
+            await conn.add_listener(channel, _callback)
+            yield queue
+        finally:
+            conn.terminate()
+    finally:
+        release_capacity()
+
+
+BROWSER_CALLS_CHANNEL = "aios_browser_calls"
+
+
+@asynccontextmanager
+async def listen_for_browser_calls(
+    db_url: str,
+) -> AsyncIterator[asyncio.Queue[str]]:
+    """Yield ``call_id`` payloads from the worker's browser-call channel.
+
+    The fifth worker-infrastructure listener (interrupts / mcp-evict /
+    clone-breaker / triggers-due siblings): ``_connect_listener`` directly —
+    deliberately NOT slot-consuming, since a permanently-held slot would burn
+    1/32 of the process's route-level SSE capacity for the worker's lifetime.
+    NOTIFY is fire-and-forget; the durable ``browser_calls`` rows plus the
+    consumer's on-(re)connect redrive sweep make a drop a delay, not a loss.
+    """
+    conn = await _connect_listener(db_url)
+    try:
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
+
+        def _callback(
+            _conn: asyncpg.Connection[object],
+            _pid: int,
+            _channel: str,
+            payload: str,
+        ) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                log.warning("listen.browser_calls_queue_full")
+
+        def _termination_callback(_conn: asyncpg.Connection[object]) -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait("")
+
+        conn.add_termination_listener(_termination_callback)
+        await conn.add_listener(BROWSER_CALLS_CHANNEL, _callback)
+        yield queue
+    finally:
+        conn.terminate()
+
+
 SESSION_INTERRUPT_CHANNEL = "aios_session_interrupt"
 
 

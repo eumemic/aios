@@ -222,6 +222,38 @@ _FS_FRESH_BASE = (
 )
 
 
+def _render_browser_lifecycle_notice(data: dict[str, Any]) -> str:
+    """Render a browser-plane lifecycle event as a bracketed user-role notice.
+
+    Same totality contract as :func:`_render_fs_lifecycle_notice`: a pure
+    function of ``data`` that never raises — unknown fields fall back to
+    generic wording, since this runs inside the per-wake replay.
+    """
+    event = data.get("event")
+    if event == "browser_takeover_ended":
+        outcome = data.get("outcome")
+        url = data.get("url")
+        where = f" on {url}" if url else ""
+        if outcome == "done":
+            detail = "They finished what you asked for"
+        elif outcome == "cancelled":
+            detail = "They stopped without completing it"
+        else:
+            detail = (
+                "The session timed out, so they may or may not have finished — "
+                "if you can't tell from the page, ask"
+            )
+        return (
+            f"[The person driving the computer{where} has handed control back. "
+            f"{detail}. Take a fresh look at the page before your next action.]"
+        )
+    # browser_state_lost (or any other browser-shaped event).
+    return (
+        "[The computer's browser state was cleared: pages, cookies, and signed-in "
+        "sessions are gone. Navigate and sign in again as needed.]"
+    )
+
+
 def _render_fs_lifecycle_notice(data: dict[str, Any]) -> str:
     """Render an FS-loss lifecycle event as a bracketed user-role notice.
 
@@ -1444,6 +1476,8 @@ def build_messages(
                 # the delivery-failure arm they are NON-stimulus-bearing here;
                 # the optional wake comes from the lifecycle route, not render.
                 content = _render_ack_notice(e.data)
+            elif e.data.get("event") in ("browser_takeover_ended", "browser_state_lost"):
+                content = _render_browser_lifecycle_notice(e.data)
             else:
                 content = _render_fs_lifecycle_notice(e.data)
             messages.append({"role": "user", "content": content})

@@ -262,6 +262,11 @@ def _plane_subdirs_from_protocol() -> tuple[str, ...]:
 BROWSER_PLANE_SUBDIRS = _plane_subdirs_from_protocol()
 
 
+def browser_plane_root() -> Path:
+    """``<workspace_root>/_browser`` — the parent of every account plane."""
+    return (get_settings().workspace_root / _BROWSER_ROOT).resolve()
+
+
 def browser_plane_dir(account_id: str) -> Path:
     """Per-account browser-plane host directory: ``<workspace_root>/_browser/<account_id>``.
 
@@ -273,7 +278,7 @@ def browser_plane_dir(account_id: str) -> Path:
     no session workspace can resolve into it by construction (jarbot#106
     §6.2). Pure — use :func:`ensure_browser_plane_dir` to create it.
     """
-    return (get_settings().workspace_root / _BROWSER_ROOT / account_id).resolve()
+    return browser_plane_root() / account_id
 
 
 def ensure_browser_plane_dir(account_id: str) -> Path:
