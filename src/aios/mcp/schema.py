@@ -20,6 +20,14 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
 # name back to the MCP server + raw tool. Stripped before the provider call.
 MCP_ORIGIN_KEY = "_mcp_origin"
 
+# Envelope key (sibling of ``function``, never inside it) carrying the raw MCP
+# ``annotations`` dict (``readOnlyHint``/``destructiveHint``/etc, per the MCP
+# spec) as reported at discovery time. Internal-only, like ``MCP_ORIGIN_KEY`` —
+# stripped before the provider call since Anthropic/OpenAI don't accept it.
+# Consulted by the auto-allow-readonly composer logic (#2270) so permissioning
+# doesn't need a second raw-discovery round trip.
+MCP_ANNOTATIONS_KEY = "_mcp_annotations"
+
 
 def sanitize_mcp_schema(node: Any) -> Any:
     """Drop the ``type`` keyword next to ``anyOf``/``oneOf`` (the union carries the real shape).
@@ -109,6 +117,11 @@ def make_function_tool(
     }
     if origin_server and origin_tool:
         envelope[MCP_ORIGIN_KEY] = {"server": origin_server, "tool": origin_tool}
+    annotations = getattr(tool, "annotations", None)
+    if annotations is not None:
+        dumped = annotations.model_dump(exclude_none=True)
+        if dumped:
+            envelope[MCP_ANNOTATIONS_KEY] = dumped
     return envelope
 
 
@@ -206,7 +219,7 @@ def uniquify_advertised_tool_names(tools: list[dict[str, Any]]) -> list[dict[str
 
 
 def _tool_needs_provider_sanitize(tool: dict[str, Any]) -> bool:
-    if MCP_ORIGIN_KEY in tool:
+    if MCP_ORIGIN_KEY in tool or MCP_ANNOTATIONS_KEY in tool:
         return True
     function = tool.get("function")
     if not isinstance(function, dict):
@@ -232,6 +245,7 @@ def sanitize_tools_for_provider(tools: list[dict[str, Any]]) -> list[dict[str, A
         item = copy.deepcopy(tool) if needs_copy else tool
         if needs_copy:
             item.pop(MCP_ORIGIN_KEY, None)
+            item.pop(MCP_ANNOTATIONS_KEY, None)
             function = item.get("function")
             if isinstance(function, dict):
                 function.pop("outputSchema", None)
@@ -259,3 +273,23 @@ def mcp_origin_for(
             return server, name
         return None
     return None
+
+
+def mcp_read_only_hint_for(qualified_name: str, tools: list[dict[str, Any]] | None) -> bool:
+    """True if the discovered tool for ``qualified_name`` carries ``readOnlyHint: true``.
+
+    Reads :data:`MCP_ANNOTATIONS_KEY` off the internal tool-dict envelope
+    (populated by :func:`make_function_tool` from the MCP server's advertised
+    ``Tool.annotations``). Returns ``False`` for an unknown name, a tool with
+    no annotations, or ``readOnlyHint`` absent/false — callers never auto-loosen
+    on a missing signal.
+    """
+    for tool in tools or []:
+        function = tool.get("function") or {}
+        if function.get("name") != qualified_name:
+            continue
+        annotations = tool.get(MCP_ANNOTATIONS_KEY)
+        if not isinstance(annotations, dict):
+            return False
+        return bool(annotations.get("readOnlyHint"))
+    return False

@@ -759,6 +759,21 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
+    auto_allow_readonly_mcp_servers: list[str] = Field(
+        default_factory=lambda: ["github", "notion", "jarbot"],
+        description="Operator-curated allowlist of MCP server NAMES (the "
+        "``McpServerSpec.name``/``mcp_toolset.mcp_server_name`` join key, "
+        "never the URL) trusted enough to auto-populate a discovered tool's "
+        "``configs[]`` entry at ``always_allow`` when the tool's advertised "
+        "``annotations.readOnlyHint`` is true (#2270). Only individually "
+        "hinted read-only tools loosen this way — a server's write surface "
+        "(and any tool with no hint, a false hint, or on an unlisted server) "
+        "is untouched and still gates on ``default_config``/the operator "
+        "fallback. Mirrors jarbot's own ``PREAPPROVED_JARBOT_TOOLS`` trust "
+        "judgment, generalized past jarbot's own server. Empty disables the "
+        "feature entirely — every server behaves as before.",
+    )
+
     trusted_inference_api_bases: list[str] = Field(
         default_factory=list,
         description="Operator allowlist of trusted inference endpoints for the "

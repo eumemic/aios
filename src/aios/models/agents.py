@@ -1214,3 +1214,78 @@ def resolve_builtin_transport(name: str, agent_tools: list[ToolSpec]) -> ToolTra
         if tool_name == name:
             return spec.transport
     return None
+
+
+def auto_allow_readonly_tools(
+    agent_tools: list[ToolSpec],
+    discovered: list[dict[str, Any]],
+    *,
+    trusted_servers: Iterable[str],
+) -> tuple[list[ToolSpec], bool]:
+    """Auto-populate ``configs[]`` at ``always_allow`` for readOnlyHint tools (#2270).
+
+    For each ``mcp_toolset`` entry whose ``mcp_server_name`` is in
+    ``trusted_servers``, walks ``discovered`` (the internal tool-dict envelopes
+    from :func:`aios.mcp.schema.make_function_tool`, still carrying
+    ``_mcp_annotations``) and adds a ``configs[]`` entry at
+    ``{"type": "always_allow"}`` for any tool whose advertised name resolves to
+    this toolset's server and whose ``readOnlyHint`` is true — UNLESS the tool
+    already has a ``configs[]`` entry (never overwrites an existing entry,
+    tightened or not: union-by-NAME only, mirroring jarbot's
+    ``_merge_preapproved``). ``default_config`` is never touched, so a
+    server's write surface keeps gating on the operator default.
+
+    Returns ``(new_tools, changed)``: a fresh list (copy-on-write — the input
+    is untouched) and whether anything was actually added, so callers can
+    skip a no-op persistence round trip.
+    """
+    from aios.mcp.schema import mcp_read_only_hint_for
+
+    trusted = set(trusted_servers)
+    if not trusted or not discovered:
+        return agent_tools, False
+
+    changed = False
+    out: list[ToolSpec] = []
+    for spec in agent_tools:
+        if (
+            spec.type != "mcp_toolset"
+            or not spec.mcp_server_name
+            or spec.mcp_server_name not in trusted
+        ):
+            out.append(spec)
+            continue
+        server_name = spec.mcp_server_name
+        have = {cfg.name for cfg in (spec.configs or [])}
+        new_configs = list(spec.configs or [])
+        spec_changed = False
+        for tool in discovered:
+            qualified = (tool.get("function") or {}).get("name")
+            if not isinstance(qualified, str):
+                continue
+            # Mirrors resolve_mcp_permission's own parse of the namespaced
+            # ``mcp__<server>__<tool>`` name — the server segment is matched
+            # by value, not by prefix string, so a tool name that itself
+            # contains "__" can't be misparsed differently here than there.
+            parts = qualified.split("__", 2)
+            if len(parts) < 3 or parts[1] != server_name:
+                continue
+            tool_name = parts[2]
+            if tool_name in have:
+                continue
+            if not mcp_read_only_hint_for(qualified, discovered):
+                continue
+            new_configs.append(
+                McpToolConfig(
+                    name=tool_name,
+                    permission_policy=McpPermissionPolicy(type="always_allow"),
+                )
+            )
+            have.add(tool_name)
+            spec_changed = True
+        if spec_changed:
+            out.append(spec.model_copy(update={"configs": new_configs}))
+            changed = True
+        else:
+            out.append(spec)
+    return (out, changed) if changed else (agent_tools, False)
