@@ -80,6 +80,17 @@ BuiltinToolType = Literal[
     "list_tasks",
     "skill_upsert",
     "skill_archive",
+    "browser_snapshot",
+    "browser_navigate",
+    "browser_click",
+    "browser_click_xy",
+    "browser_type",
+    "browser_press_key",
+    "browser_scroll",
+    "browser_drag",
+    "browser_hover",
+    "browser_select_option",
+    "browser_screenshot",
 ]
 
 # Permission policy for built-in tools. Custom tools are always client-controlled

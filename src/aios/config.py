@@ -153,7 +153,9 @@ class Settings(BaseSettings):
         description="uid that should own every directory under workspace_root. The "
         "worker (root) chowns newly-created shared-tree components to this uid so the "
         "api container (running as this uid) can write into them. Set via "
-        "AIOS_WORKSPACES_OWNER_UID.",
+        "AIOS_WORKSPACES_OWNER_UID. NOTE: browser images bake their driver uid to "
+        "browser_protocol.PLANE_OWNER_UID (1000) — a deployment overriding this "
+        "while running a browser image breaks plane readability (frames/shots/spool).",
     )
     workspaces_owner_gid: int = Field(
         default=1000,
@@ -395,6 +397,21 @@ class Settings(BaseSettings):
         description="Wall-clock budget for provisioning a browser container "
         "(image resolve + create + start), separate from the per-action exec "
         "deadline so a cold start or first-pull never eats an action's budget.",
+    )
+    sandbox_browser_action_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        description="In-container deadline for one browser driver action "
+        "(click/type/navigate/... — the drivers's own per-action budget sits "
+        "just below it). Applied via the exec timeout wrapper.",
+    )
+    sandbox_browser_exec_max_output_bytes: int = Field(
+        default=400_000,
+        ge=50_000,
+        description="Per-stream capture bound for browser driver exec output. "
+        "Deliberately NOT bash_max_output_bytes: a snapshot-bearing JSON "
+        "response is ~30 KB and a truncated response is mangled JSON, so this "
+        "keeps generous margin above the snapshot budget.",
     )
     bash_default_timeout_seconds: int = Field(
         default=120,
