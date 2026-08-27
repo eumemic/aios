@@ -72,8 +72,11 @@ type is the bug; a rough count is always better than a zero.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
+import math
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -130,64 +133,127 @@ def _cache_put(cache: OrderedDict[bytes, int], key: bytes, value: int) -> None:
             cache.popitem(last=False)
 
 
-def _message_body_tokens(msg: Mapping[str, Any], *, image_aware: bool = True) -> int:
+# The token-accounting BASELINE a NEW session is born at (#2050, jarbot#106 PR1).
+#
+#   v1 — image-blind: ``litellm.token_counter`` prices an ``image_url`` part at
+#        a near-constant ~90 tokens regardless of payload size.
+#   v2 — payload-priced: the image URL is priced with the same default
+#        tokenizer, so an inlined data URI contributes its full encoded
+#        payload (~0.96 tokens per raw image byte — a 200 KB screenshot
+#        estimated at ~191k tokens, larger than the whole window band).
+#   v3 — provider-native: an inlined data URI is priced from its pixel
+#        dimensions at the provider image rate (``ceil(w*h/750)``, capped —
+#        the Anthropic formula; other providers are the same order of
+#        magnitude), so a screenshot costs ~1-2k tokens, matching what the
+#        provider actually charges.  Remote (non-data) URLs keep the small
+#        v2 URL-as-text term.
+#
+# ``append_event`` selects arithmetic from the SESSION's stored marker, and
+# ``insert_session`` stamps this constant on fresh rows, so it decides where a
+# new session STARTS.  Existing sessions are promoted to the current baseline
+# exclusively by the backfill's atomic replay-then-flip
+# (``scripts/backfill_cumulative_tokens.py``).
+TOKEN_BASELINE_CURRENT = 3
+
+# v3 image pricing: the Anthropic provider formula ``tokens ≈ (w*h)/750``.
+# Providers downscale to ~1.15 MP before tokenizing, which caps the per-image
+# cost at ~1590 tokens — mirrored by _IMAGE_TOKENS_CAP so a huge original
+# never estimates above what any provider would charge.  No separate framing
+# allowance: ``litellm.token_counter``'s base message count already charges a
+# near-constant ~85-90 per image part (the v1 term), and the baseline arms all
+# ADD their image term on top of that same base.  An undecodable payload
+# prices at the cap: a rough count is always better than a zero (module
+# invariant).
+_IMAGE_TOKENS_PER_PIXEL_DIVISOR = 750
+_IMAGE_TOKENS_CAP = 1600
+
+
+def _native_image_tokens(data_url: str) -> int:
+    """Provider-native token estimate for an inlined ``data:`` image URI.
+
+    Base64-decodes the payload and reads the pixel dimensions via a
+    Pillow header-only open (no raster decode).  Never raises: anything
+    undecodable prices at the cap.
+    """
+    try:
+        payload = data_url.split(",", 1)[1]
+        raw = base64.b64decode(payload)
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+        return min(_IMAGE_TOKENS_CAP, math.ceil(width * height / _IMAGE_TOKENS_PER_PIXEL_DIVISOR))
+    except Exception:
+        return _IMAGE_TOKENS_CAP
+
+
+def _image_part_tokens(url: str, *, baseline: int) -> int:
+    """Token cost of one ``image_url`` part under ``baseline``.
+
+    The single embodiment of baseline divergence (the baselines differ ONLY
+    on image parts): v1 prices nothing; v2 prices the URL as text (a data
+    URI contributes its full encoded payload); v3 prices a data URI at the
+    provider-native pixel rate and keeps the URL-as-text term for ordinary
+    remote URLs.
+    """
+    from litellm import token_counter
+
+    if baseline < 2:
+        return 0
+    if baseline >= 3 and url.startswith("data:"):
+        return _native_image_tokens(url)
+    return int(token_counter(text=url))
+
+
+def _message_body_tokens(msg: Mapping[str, Any], *, baseline: int = TOKEN_BASELINE_CURRENT) -> int:
     """The pure per-message body cost of ``msg`` (no payload-level framing).
 
     Memoized by content digest; digest failures bypass the cache and
     count directly (never raise).
 
-    ``image_aware`` selects the token BASELINE (see
-    :data:`TOKEN_BASELINE_CURRENT`).  Under the v2 baseline the image
-    payload is priced; under v1 it is not, reproducing the pre-#2050
-    arithmetic byte-for-byte.  The flag participates in the cache key so
-    the two baselines never share a memoized value.
+    ``baseline`` selects the token BASELINE (see
+    :data:`TOKEN_BASELINE_CURRENT`).  Under v1 the image payload is not
+    priced, reproducing the pre-#2050 arithmetic byte-for-byte; v2 and v3
+    differ only in how an image part is priced.  The baseline participates
+    in the cache key ONLY for image-bearing messages — every other message
+    prices identically under every baseline, so keying it as baseline 0
+    lets all baselines share one entry (and keeps the pre-lock precompute's
+    warm pass a cache hit for the in-lock read regardless of the session's
+    marker).
     """
     from litellm import token_counter
 
-    key = _payload_digest((msg, image_aware))
+    has_image = message_has_image(msg)
+    key = _payload_digest((msg, baseline if has_image else 0))
     if key is not None:
         cached = _cache_get(_BODY_CACHE, key)
         if cached is not None:
             return cached
 
     value = int(token_counter(messages=[msg], count_response_tokens=True))
-    # LiteLLM's model-neutral chat counter ignores image_url parts entirely.
-    # Price their URL separately with the same default tokenizer.  Data URIs
-    # therefore contribute their full encoded payload while ordinary remote
-    # URLs remain a small, stable baseline term.
-    content = msg.get("content")
-    if image_aware and isinstance(content, list):
-        for part in content:
+    # LiteLLM's model-neutral chat counter charges only a small (~85-90) fixed
+    # per-part base for each image_url — NOT a pixel-dependent estimate. That
+    # fixed base is the constant every baseline arm builds on; add the real
+    # per-baseline image term on top of it (do not re-add the base).
+    if has_image:
+        for part in msg["content"]:
             if not isinstance(part, Mapping) or part.get("type") != "image_url":
                 continue
             image_url = part.get("image_url")
             if isinstance(image_url, Mapping) and isinstance(image_url.get("url"), str):
-                value += int(token_counter(text=image_url["url"]))
+                value += _image_part_tokens(image_url["url"], baseline=baseline)
 
     if key is not None:
         _cache_put(_BODY_CACHE, key, value)
     return value
 
 
-# The token-accounting BASELINE a NEW session is born at (#2050).
-#
-#   v1 — image-blind: ``litellm.token_counter`` prices an ``image_url`` part at
-#        a near-constant ~90 tokens regardless of payload size.
-#   v2 — image-aware: the image URL is priced with the same default tokenizer,
-#        so an inlined data URI contributes its real encoded payload.
-#
-# ``append_event`` selects arithmetic from the SESSION's stored marker, so this
-# constant only decides where a fresh session STARTS.  Existing sessions are
-# promoted v1 -> v2 exclusively by the backfill's atomic replay-then-flip.
-TOKEN_BASELINE_CURRENT = 2
-
-
 def message_has_image(data: Mapping[str, Any]) -> bool:
     """Whether ``data`` carries at least one ``image_url`` content part.
 
-    The two baselines differ ONLY on such messages, so callers that must
-    price a message under both baselines can skip the second pass when
-    this is false.
+    The baselines differ ONLY on such messages, so callers that must price
+    a message under several baselines can skip the extra passes when this
+    is false.
     """
     content = data.get("content")
     if not isinstance(content, list):
@@ -231,7 +297,7 @@ def approx_tokens(
     messages: Iterable[Mapping[str, Any]],
     *,
     tools: Iterable[Mapping[str, Any]] | None = None,
-    image_aware: bool = True,
+    baseline: int = TOKEN_BASELINE_CURRENT,
 ) -> int:
     """Estimate the chat-completions token cost of ``messages``.
 
@@ -267,7 +333,7 @@ def approx_tokens(
     cache warms.
     """
     msgs = list(messages)
-    total = sum(_message_body_tokens(m, image_aware=image_aware) for m in msgs)
+    total = sum(_message_body_tokens(m, baseline=baseline) for m in msgs)
     system_present = any(m.get("role") == "system" for m in msgs)
     total += _extra_tokens(tools, system_present)
     return total
@@ -322,7 +388,10 @@ def content_class(role: str | None, data: Mapping[str, Any]) -> str:
 
 
 def _count(
-    messages: list[Mapping[str, Any]], *, tools: Any = None, image_aware: bool = True
+    messages: list[Mapping[str, Any]],
+    *,
+    tools: Any = None,
+    baseline: int = TOKEN_BASELINE_CURRENT,
 ) -> int:
     """Single-payload count, sourced from the same memoized primitives as
     :func:`approx_tokens` (issue #1744).
@@ -335,14 +404,12 @@ def _count(
     if len(messages) == 1:
         msg = messages[0]
         system_present = msg.get("role") == "system"
-        return _message_body_tokens(msg, image_aware=image_aware) + _extra_tokens(
-            tools, system_present
-        )
+        return _message_body_tokens(msg, baseline=baseline) + _extra_tokens(tools, system_present)
     if not messages:
         return _extra_tokens(tools, False)
     # General fallback (not used by the current call sites, which only ever
     # pass 0 or 1 messages here, but keep correct for any future caller).
-    total = sum(_message_body_tokens(m, image_aware=image_aware) for m in messages)
+    total = sum(_message_body_tokens(m, baseline=baseline) for m in messages)
     system_present = any(m.get("role") == "system" for m in messages)
     total += _extra_tokens(tools, system_present)
     return total
@@ -352,7 +419,7 @@ def approx_tokens_by_class(
     messages: Iterable[Mapping[str, Any]],
     *,
     tools: Iterable[Mapping[str, Any]] | None = None,
-    image_aware: bool = True,
+    baseline: int = TOKEN_BASELINE_CURRENT,
 ) -> dict[str, int]:
     """Split the local token cost of ``messages`` (+ ``tools``) by class.
 
@@ -392,43 +459,43 @@ def approx_tokens_by_class(
             # the image-free message normally and assign the exact residual of
             # the full message to image.
             #
-            # ``image_aware`` MUST reach both counts (#2050 review): under the
+            # ``baseline`` MUST reach both counts (#2050 review): under the
             # v1 baseline the image payload is not priced, so this residual is
             # the small image-blind stub cost, and the per-class sum keeps
-            # reconciling to the v1 total.  Costing the residual image-aware
-            # while the total was v1 would credit an image mass the total
-            # never contained.
+            # reconciling to the v1 total.  Costing the residual under a newer
+            # baseline while the total was v1 would credit an image mass the
+            # total never contained.
             msg = dict(msg)
             msg["content"] = [
                 part
                 for part in content
                 if not (isinstance(part, Mapping) and part.get("type") == "image_url")
             ]
-            by_class["image"] += _count([original_msg], image_aware=image_aware) - _count(
-                [msg], image_aware=image_aware
+            by_class["image"] += _count([original_msg], baseline=baseline) - _count(
+                [msg], baseline=baseline
             )
 
         role = msg.get("role")
         cls = content_class(role, msg)
         if cls == "system":
-            by_class["system"] += _count([msg], image_aware=image_aware)
+            by_class["system"] += _count([msg], baseline=baseline)
             continue
         if cls == "tool_result":
-            by_class["tool_result"] += _count([msg], image_aware=image_aware)
+            by_class["tool_result"] += _count([msg], baseline=baseline)
             continue
         if cls == "tool_use":
             # An assistant tool-call turn may also carry thinking and/or
             # leading text.  Attribute the thinking/text portions to their
             # classes and the remainder (the serialized tool_calls) to
             # tool_use, so a thinking+tool_use turn trains both coefficients.
-            _split_assistant(msg, by_class, primary="tool_use", image_aware=image_aware)
+            _split_assistant(msg, by_class, primary="tool_use", baseline=baseline)
             continue
         if cls == "thinking":
-            _split_assistant(msg, by_class, primary="thinking", image_aware=image_aware)
+            _split_assistant(msg, by_class, primary="thinking", baseline=baseline)
             continue
         # Plain text (user turns, plain assistant text, orphan tool
         # placeholders rendered as user messages, etc.).
-        by_class["text"] += _count([msg], image_aware=image_aware)
+        by_class["text"] += _count([msg], baseline=baseline)
 
     return by_class
 
@@ -438,7 +505,7 @@ def _split_assistant(
     by_class: dict[str, int],
     *,
     primary: str,
-    image_aware: bool = True,
+    baseline: int = TOKEN_BASELINE_CURRENT,
 ) -> None:
     """Attribute an assistant turn's tokens across text/thinking/tool_use.
 
@@ -448,21 +515,17 @@ def _split_assistant(
     keeps the per-class sum reconciled to the full-turn cost while still
     crediting each sub-class that is present.
     """
-    full = _count([msg], image_aware=image_aware)
+    full = _count([msg], baseline=baseline)
 
     text_content = msg.get("content")
     text_tokens = 0
     if text_content:
-        text_tokens = _count(
-            [{"role": "assistant", "content": text_content}], image_aware=image_aware
-        )
+        text_tokens = _count([{"role": "assistant", "content": text_content}], baseline=baseline)
 
     thinking_tokens = 0
     reasoning = msg.get("reasoning_content")
     if reasoning:
-        thinking_tokens = _count(
-            [{"role": "assistant", "content": reasoning}], image_aware=image_aware
-        )
+        thinking_tokens = _count([{"role": "assistant", "content": reasoning}], baseline=baseline)
 
     by_class["text"] += text_tokens
     by_class["thinking"] += thinking_tokens

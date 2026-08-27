@@ -14,7 +14,9 @@ import pytest
 
 from aios.config import get_settings
 from aios.sandbox.tool_result_spill import (
+    _MAX_TOOL_RESULT_PARTS,
     cap_tool_result_content,
+    cap_tool_result_parts,
     record_spill_attachment,
 )
 from aios.sandbox.volumes import ensure_session_attachments_dir
@@ -63,6 +65,7 @@ async def test_over_cap_returns_stub_and_writes_full_content(
 
     result = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=1_000)
 
+    assert isinstance(result.content, str)
     assert result.content.startswith("[Tool result truncated:")
     assert "/mnt/attachments/tool_results/tc_unit_1.txt" in result.content
     assert "1,500 characters" in result.content
@@ -134,3 +137,58 @@ class TestRecordSpillAttachment:
         att = {"in_sandbox_path": "/mnt/attachments/tool_results/x.txt"}
         record_spill_attachment(data, att)
         assert data["metadata"] == {"attachments": [prior, att]}
+
+
+class TestCapToolResultParts:
+    """Parts-list results are bounded too (jarbot#106 PR1): before
+    :func:`cap_tool_result_parts` existed, a multimodal tool result bypassed
+    the size cap entirely."""
+
+    @staticmethod
+    def _text(t: str) -> dict[str, object]:
+        return {"type": "text", "text": t}
+
+    @staticmethod
+    def _image() -> dict[str, object]:
+        return {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+    def test_within_bounds_passes_through_unchanged(self) -> None:
+        parts = [self._text("hello"), self._image(), self._text("world")]
+        assert cap_tool_result_parts(parts, max_chars=100) == parts
+
+    def test_combined_text_over_cap_truncates_with_marker(self) -> None:
+        parts = [self._text("a" * 80), self._image(), self._text("b" * 80)]
+        out = cap_tool_result_parts(parts, max_chars=100)
+        # First text part fits whole; the second is truncated to the residual
+        # budget with a marker; the image part survives untouched.
+        assert out[0] == self._text("a" * 80)
+        assert out[1] == self._image()
+        text_2 = out[2]["text"]
+        assert isinstance(text_2, str)
+        assert text_2.startswith("b" * 20)
+        assert "[Tool result truncated" in text_2
+        assert len(out) == 3
+
+    def test_text_after_the_truncation_point_is_dropped(self) -> None:
+        parts = [self._text("a" * 150), self._text("late"), self._image()]
+        out = cap_tool_result_parts(parts, max_chars=100)
+        # One truncated text part, then the image; the "late" text is gone.
+        assert len(out) == 2
+        text_0 = out[0]["text"]
+        assert isinstance(text_0, str)
+        assert "[Tool result truncated" in text_0
+        assert out[1] == self._image()
+
+    def test_part_count_is_bounded_with_marker(self) -> None:
+        parts = [self._text(f"p{i}") for i in range(_MAX_TOOL_RESULT_PARTS + 10)]
+        out = cap_tool_result_parts(parts, max_chars=10_000)
+        assert len(out) == _MAX_TOOL_RESULT_PARTS + 1
+        marker = out[-1]["text"]
+        assert isinstance(marker, str)
+        assert "10 additional content parts" in marker
+
+    def test_images_never_count_against_the_text_budget(self) -> None:
+        parts = [self._image() for _ in range(5)] + [self._text("tail")]
+        out = cap_tool_result_parts(parts, max_chars=4)
+        assert out[:5] == parts[:5]
+        assert out[5] == self._text("tail")

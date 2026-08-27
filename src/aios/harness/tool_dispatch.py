@@ -762,14 +762,11 @@ async def _append_tool_result_event(
     from aios.db import queries
 
     content = event_data.get("content")
-    if isinstance(content, str):
+    if isinstance(content, str | list):
         from aios.config import get_settings
-        from aios.sandbox.tool_result_spill import (
-            cap_tool_result_content,
-            record_spill_attachment,
-        )
+        from aios.sandbox.tool_result_spill import cap_tool_result, record_spill_attachment
 
-        capped = await cap_tool_result_content(
+        capped = await cap_tool_result(
             session_id, tool_call_id, content, max_chars=get_settings().tool_result_max_chars
         )
         event_data["content"] = capped.content
@@ -805,17 +802,15 @@ async def _append_tool_result_event(
                 tool_parent_channel=tool_parent_channel,
             )
     else:
-        # Hot path: concrete channel, pure ``approx_tokens`` delta — no DB.
-        token_delta = queries._event_token_delta("message", event_data, None, None)
-        token_delta_v1 = (
-            queries._event_token_delta("message", event_data, None, None, image_aware=False)
-            if queries.message_has_image(event_data)
-            else token_delta
+        # Hot path: concrete channel, pure ``approx_tokens`` deltas — no DB.
+        token_delta, token_delta_v1, token_delta_v2 = queries._event_token_deltas(
+            "message", event_data, None, None
         )
         precomputed = queries._PrecomputedAppend(
             token_delta=token_delta,
             resolved_tool_channel=tool_parent_channel,
             token_delta_v1=token_delta_v1,
+            token_delta_v2=token_delta_v2,
         )
 
     async with pool.acquire() as conn, conn.transaction():

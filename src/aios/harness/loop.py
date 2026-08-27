@@ -1543,10 +1543,17 @@ async def _run_session_step_body(
     # GIL-releasing call, and the per-message/per-payload memoization in
     # ``tokens.py`` makes the steady-state cost O(new tail) rather than
     # O(slate). Stamp order/content below is unchanged.
+    #
+    # Priced at the SESSION's baseline so the ``token_baseline_v`` stamp below
+    # is literally true — "the baseline whose arithmetic produced the counts in
+    # this span" — and the per-baseline calibration fit trains on homogeneous
+    # locals (``model_token_class_ratio_fit`` filters on the stamp).
+    session_baseline = getattr(session, "token_baseline_v", 1)
+
     def _compute_token_counts() -> tuple[int, dict[str, int]]:
         return (
-            approx_tokens(messages, tools=tools),
-            approx_tokens_by_class(messages, tools=tools),
+            approx_tokens(messages, tools=tools, baseline=session_baseline),
+            approx_tokens_by_class(messages, tools=tools, baseline=session_baseline),
         )
 
     local_tokens, by_class = await asyncio.to_thread(_compute_token_counts)
@@ -1564,12 +1571,13 @@ async def _run_session_step_body(
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
             # LINEAGE, not a constant (#2050 review).  Stamping an
-            # unconditional 2 here would admit spans from v1 / mid-backfill
-            # sessions into the v2 calibration fit, training it on
-            # mixed-baseline data.  The session's own marker is the only
-            # honest answer: it is exactly the baseline whose arithmetic
+            # unconditional current value here would admit spans from older /
+            # mid-backfill sessions into the current calibration fit, training
+            # it on mixed-baseline data.  The session's own marker is the only
+            # honest answer: ``local_tokens`` above is priced at this same
+            # baseline, so the stamp is exactly the baseline whose arithmetic
             # produced the counts in this span.
-            "token_baseline_v": getattr(session, "token_baseline_v", 1),
+            "token_baseline_v": session_baseline,
             "model": agent.model,
             **(
                 llm_response.admission_report.as_event_fields()

@@ -97,21 +97,30 @@ async def conn_two_accounts(
 
 
 @pytest.fixture
-async def live_conn(request: pytest.FixtureRequest) -> AsyncIterator[asyncpg.Connection[Any]]:
-    """Asyncpg connection to a migrated DB, TRUNCATEd before the test.
-
-    Resolves its target in two ways so the same test body runs both in CI and
-    on a workstation with no Docker:
+def _live_db_url(request: pytest.FixtureRequest) -> str:
+    """Resolve the live-DB target for :func:`live_conn`, in two ways so the
+    same test body runs both in CI and on a workstation with no Docker:
 
     * ``AIOS_TEST_LIVE_DB_URL`` — an externally provided, already-migrated
       Postgres (local dev / sandboxes where testcontainers can't run);
     * otherwise the standard session-scoped ``migrated_db_url`` testcontainer
       fixture, so these tests execute on the normal integration shard.
+
+    Deliberately SYNC: ``migrated_db_url`` calls ``asyncio.run`` internally,
+    so materializing it via ``getfixturevalue`` from inside an async fixture
+    raises ``asyncio.run() cannot be called from a running event loop`` — and
+    pytest then caches the session-scoped fixture as errored for every later
+    test on the worker.  A sync hop materializes it outside the loop.
     """
     import os
 
-    url = os.environ.get("AIOS_TEST_LIVE_DB_URL") or request.getfixturevalue("migrated_db_url")
-    conn = await asyncpg.connect(url)
+    return os.environ.get("AIOS_TEST_LIVE_DB_URL") or request.getfixturevalue("migrated_db_url")
+
+
+@pytest.fixture
+async def live_conn(_live_db_url: str) -> AsyncIterator[asyncpg.Connection[Any]]:
+    """Asyncpg connection to a migrated DB, TRUNCATEd before the test."""
+    conn = await asyncpg.connect(_live_db_url)
     await register_jsonb_codec(conn)
     rows = await conn.fetch(
         "SELECT tablename FROM pg_tables "

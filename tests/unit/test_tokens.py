@@ -6,7 +6,13 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from aios.harness.context import render_user_event
-from aios.harness.tokens import approx_tokens, tokens_to_drop
+from aios.harness.tokens import (
+    _IMAGE_TOKENS_CAP,
+    TOKEN_BASELINE_CURRENT,
+    approx_tokens,
+    tokens_to_drop,
+)
+from tests.helpers.images import png_data_uri
 
 _CREATED_AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
@@ -469,3 +475,85 @@ class TestTokensToDrop:
         assert drop == 80_000  # overshoot; remaining = 200_000 - 80_000 == window_max
         # A collapsed band that still fits takes the early return, never the divide.
         assert tokens_to_drop(120_000, window_min=120_000, window_max=120_000) == 0
+
+
+class TestImageBaselines:
+    """The three token baselines (#2050, jarbot#106 PR1) diverge only on
+    ``image_url`` parts: v1 skips them, v2 prices the URL as text (a data URI
+    contributes its full encoded payload), v3 prices a data URI at the
+    provider-native pixel rate."""
+
+    @staticmethod
+    def _image_message(url: str) -> dict[str, Any]:
+        # Tool-role: a USER message's parts are stringified by
+        # render_user_event, so only tool/assistant messages exercise the
+        # image-part pricing path (see test_image_baseline_marker_honesty).
+        return {
+            "role": "tool",
+            "tool_call_id": "tc_img",
+            "content": [
+                {"type": "text", "text": "screenshot"},
+                {"type": "image_url", "image_url": {"url": url}},
+            ],
+        }
+
+    def _image_part_cost(self, url: str, *, baseline: int) -> int:
+        """The image part's marginal cost under ``baseline``.
+
+        Includes litellm's own near-constant ~85-90 per-part base charge —
+        the whole of the v1 term — which every baseline's added image term
+        rides on top of.
+        """
+        with_image = approx_tokens([self._image_message(url)], baseline=baseline)
+        without = dict(self._image_message(url))
+        without["content"] = [p for p in without["content"] if p.get("type") == "text"]
+        return with_image - approx_tokens([without], baseline=baseline)
+
+    def test_v3_prices_data_uri_at_pixel_rate(self) -> None:
+        from math import ceil
+
+        url = png_data_uri(300, 200)
+        base_constant = self._image_part_cost(url, baseline=1)
+        expected = base_constant + ceil(300 * 200 / 750)
+        assert self._image_part_cost(url, baseline=3) == expected
+
+    def test_v3_caps_large_images_at_provider_ceiling(self) -> None:
+        url = png_data_uri(2000, 1000)  # 2 MP -> uncapped 2667, capped 1600
+        base_constant = self._image_part_cost(url, baseline=1)
+        assert self._image_part_cost(url, baseline=3) == base_constant + _IMAGE_TOKENS_CAP
+
+    def test_v3_undecodable_payload_prices_at_cap(self) -> None:
+        url = "data:image/jpeg;base64," + ("a" * 8000)
+        base_constant = self._image_part_cost(url, baseline=1)
+        assert self._image_part_cost(url, baseline=3) == base_constant + _IMAGE_TOKENS_CAP
+
+    def test_v3_remote_url_keeps_the_v2_text_term(self) -> None:
+        url = "https://example.com/some/remote/image.png"
+        assert self._image_part_cost(url, baseline=3) == self._image_part_cost(url, baseline=2)
+
+    def test_v2_prices_full_payload_v1_prices_only_the_base_constant(self) -> None:
+        url = png_data_uri(300, 200)
+        v1 = self._image_part_cost(url, baseline=1)
+        v2 = self._image_part_cost(url, baseline=2)
+        v3 = self._image_part_cost(url, baseline=3)
+        # v1 = litellm's payload-blind per-part constant (measured ~85-96).
+        assert 0 < v1 < 150
+        # A real PNG's base64 payload tokenized as text dwarfs the pixel-rate
+        # estimate; the pixel-rate estimate dwarfs image-blindness.
+        assert v2 > v3 > v1
+
+    def test_default_baseline_is_current(self) -> None:
+        url = png_data_uri(300, 200)
+        msg = self._image_message(url)
+        assert approx_tokens([msg]) == approx_tokens([msg], baseline=TOKEN_BASELINE_CURRENT)
+
+    def test_baselines_never_share_a_cached_value(self) -> None:
+        """The baseline participates in the memo cache key: pricing the same
+        message under all three baselines twice returns three stable, distinct
+        values (a shared cache entry would collapse them)."""
+        url = png_data_uri(300, 200)
+        msg = self._image_message(url)
+        first = [approx_tokens([msg], baseline=b) for b in (1, 2, 3)]
+        second = [approx_tokens([msg], baseline=b) for b in (1, 2, 3)]
+        assert first == second
+        assert len(set(first)) == 3

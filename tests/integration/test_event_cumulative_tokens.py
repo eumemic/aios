@@ -75,7 +75,7 @@ async def test_v1_builtin_tool_result_preserves_master_token_series(
         "name": "bash",
         "content": "ordinary builtin result",
     }
-    expected_delta = _event_token_delta("message", data, None, None, image_aware=False)
+    expected_delta = _event_token_delta("message", data, None, None, baseline=1)
 
     async with pool.acquire() as conn:
         await conn.execute(

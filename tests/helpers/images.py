@@ -82,3 +82,19 @@ def large_transparent_png_bytes(side: int = 4000) -> bytes:
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def png_data_uri(width: int, height: int) -> str:
+    """A decodable solid-color PNG of exact ``width x height`` as a data URI.
+
+    Shared by the token-baseline tests: v3 pricing derives deterministic
+    expectations (``ceil(w*h/750)``) from these dimensions, so every test
+    must build the URI the same way or the fixtures silently decouple.
+    """
+    import base64
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
