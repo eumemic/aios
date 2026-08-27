@@ -117,12 +117,18 @@ async def _resolve(
 
 
 async def _driver(
-    registry: SandboxRegistry, account_id: str, op: str, args: dict[str, Any], *, timeout_s: int
+    registry: SandboxRegistry,
+    account_id: str,
+    op: str,
+    args: dict[str, Any],
+    *,
+    timeout_s: int,
+    session_id: str | None = None,
 ) -> BrowserResponse:
     response = await driver_call(
         registry,
         account_id,
-        BrowserRequest(op=op, args=args, timeout_ms=timeout_s * 1000),
+        BrowserRequest(op=op, args=args, timeout_ms=timeout_s * 1000, session_id=session_id),
         timeout_s=timeout_s + EXEC_KILL_MARGIN_S,
     )
     if not response.ok:
@@ -159,6 +165,9 @@ async def _dispatch(
             {"grant_id": grant_id, "reason": reason},
             # Blocks through the drain of an in-flight action — its own budget.
             timeout_s=settings.sandbox_browser_takeover_open_timeout_seconds,
+            # The driver takes over THIS session's page (jarbot#106 §5.6);
+            # threaded via the request's session_id field, not args.
+            session_id=session_id,
         )
         async with pool.acquire() as conn:
             try:

@@ -176,6 +176,34 @@ class TestHeartbeat:
         resp = client.post("/v1/browser/takeover/bgr_1/heartbeat")
         assert resp.status_code == 204
 
+    def test_open_grant_touches_the_liveness_marker(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _stub_conn(monkeypatch, touch_browser_grant_heartbeat=True)
+        monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+        from aios.sandbox.volumes import ensure_browser_plane_dir
+
+        plane = ensure_browser_plane_dir(_ACCOUNT)
+        marker = plane / "input" / ".heartbeat"
+        assert not marker.exists()
+
+        resp = client.post("/v1/browser/takeover/bgr_1/heartbeat")
+
+        assert resp.status_code == 204
+        # A watching (heartbeating) but not-typing viewer's liveness reaches the
+        # driver's idle watchdog via this marker, not just the DB heartbeat_at.
+        assert marker.exists()
+
+    def test_marker_failure_does_not_fail_the_heartbeat(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Plane input dir absent → marker.touch() raises, but the DB heartbeat
+        # already succeeded, so the viewer still gets 204 (best-effort marker).
+        _stub_conn(monkeypatch, touch_browser_grant_heartbeat=True)
+        monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)  # no plane created
+        resp = client.post("/v1/browser/takeover/bgr_1/heartbeat")
+        assert resp.status_code == 204
+
 
 class TestControlErrorCurrency:
     def test_takeover_in_progress_is_409(

@@ -50,6 +50,7 @@ from aios.models.browser import (
     TakeoverOpenRequest,
     TakeoverOpenResponse,
 )
+from aios.sandbox.browser_protocol import TAKEOVER_HEARTBEAT_MARKER
 from aios.sandbox.volumes import browser_plane_dir
 from aios.services import sessions as sessions_service
 from aios.services.browser_calls import submit_browser_call
@@ -156,6 +157,17 @@ async def heartbeat_takeover(
         raise ConflictError(
             f"takeover grant {grant_id} is not open", detail={"status": grant["status"]}
         )
+    # Touch the plane liveness marker the driver's idle watchdog folds into its
+    # clock, so a human who is watching (heartbeating) but not typing does not
+    # trip the driver's idle auto-close. The DB heartbeat above is the reaper's
+    # authoritative signal; this marker is only the driver's watch-detection
+    # input, so a write failure degrades (the driver may idle-close a passive
+    # viewer) but must not fail the heartbeat — log it as the plane bug it is.
+    marker = browser_plane_dir(account_id) / TAKEOVER_HEARTBEAT_MARKER
+    try:
+        marker.touch()
+    except OSError as exc:
+        log.warning("browser.heartbeat_marker_touch_failed", grant_id=grant_id, error=str(exc))
     return Response(status_code=204)
 
 

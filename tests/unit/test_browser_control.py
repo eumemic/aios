@@ -11,12 +11,17 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from aios.config import get_settings
-from aios.harness.browser_control import _enforce_plane_quotas
+from aios.harness import browser_control
+from aios.harness.browser_control import _driver, _enforce_plane_quotas
 from aios.harness.context import _render_browser_lifecycle_notice
+from aios.sandbox.browser_protocol import BrowserRequest, BrowserResponse
+from aios.sandbox.registry import SandboxRegistry
 from aios.sandbox.volumes import ensure_browser_plane_dir
 
 _ACCOUNT_ID = "acc_01QUOTATEST00000000000000000"
@@ -88,3 +93,52 @@ class TestBrowserLifecycleRenderer:
 
     def test_empty_data_never_raises(self) -> None:
         assert isinstance(_render_browser_lifecycle_notice({}), str)
+
+
+class TestTakeoverTargeting:
+    """``takeover_open`` must carry the requesting session's id in the request's
+    ``session_id`` FIELD (not args) so the driver takes over that session's
+    page (jarbot#106 §5.6). The field already exists on ``BrowserRequest``."""
+
+    async def test_driver_threads_session_id_into_the_request_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, BrowserRequest] = {}
+
+        async def _fake_driver_call(
+            registry: object, account_id: str, request: BrowserRequest, *, timeout_s: float
+        ) -> BrowserResponse:
+            seen["request"] = request
+            return BrowserResponse(ok=True, boot="01BOOT", epoch=1)
+
+        monkeypatch.setattr(browser_control, "driver_call", _fake_driver_call)
+
+        await _driver(
+            cast(SandboxRegistry, MagicMock()),
+            "acc_x",
+            "takeover_open",
+            {"grant_id": "bgr_x", "reason": ""},
+            timeout_s=45,
+            session_id="sess_target",
+        )
+
+        request = seen["request"]
+        assert request.session_id == "sess_target"  # threaded via the field…
+        assert "session_id" not in request.args  # …never the args dict
+
+    async def test_control_ops_without_a_session_stay_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, BrowserRequest] = {}
+
+        async def _fake_driver_call(
+            registry: object, account_id: str, request: BrowserRequest, *, timeout_s: float
+        ) -> BrowserResponse:
+            seen["request"] = request
+            return BrowserResponse(ok=True, boot="01BOOT", epoch=0)
+
+        monkeypatch.setattr(browser_control, "driver_call", _fake_driver_call)
+
+        await _driver(cast(SandboxRegistry, MagicMock()), "acc_x", "status", {}, timeout_s=30)
+
+        assert seen["request"].session_id is None
