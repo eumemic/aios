@@ -140,6 +140,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.notify_browser_call_dispatch",
         "queries.notify_browser_call_result",
         "queries.resolve_browser_call",
+        "queries.set_browser_grant_handback",
         "queries.touch_browser_grant_heartbeat",
         "queries.get_agent_version",
         "queries.get_chat_session_row",

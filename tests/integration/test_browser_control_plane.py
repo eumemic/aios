@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
 
+from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import browser_control
@@ -30,6 +32,7 @@ from aios.ids import (
     make_id,
 )
 from aios.sandbox.browser_protocol import BrowserResponse
+from aios.sandbox.volumes import ensure_browser_plane_dir
 from aios.services.browser_calls import submit_browser_call
 
 pytestmark = pytest.mark.integration
@@ -119,9 +122,12 @@ async def plane(migrated_db_url: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     registry = MagicMock()
     registry.touch_browser = MagicMock()
     registry.release_browser = AsyncMock()
-    # Both listeners that could win the redrive race must produce identical
-    # results: status with no cached handle -> {running: False}.
-    registry.peek.return_value = None
+    # A live container is cached: _close_takeover's peek gate must find a handle
+    # to run the driver handback (peek None -> no handback, by design).
+    registry.peek.return_value = MagicMock()
+    # clear_state serializes its wipe under the owner lock; a real asyncio.Lock
+    # is a working async context manager for the stub.
+    registry.owner_lock.return_value = asyncio.Lock()
 
     listener = asyncio.create_task(_run_browser_call_listener(migrated_db_url, registry, pool))
     # Let the LISTEN connection establish before the first submit.
@@ -146,29 +152,34 @@ async def test_submit_round_trip_open_then_conflict_then_close(plane: dict[str, 
     pool, db_url = plane["pool"], plane["db_url"]
     account_id, session_id = plane["account_id"], plane["session_id"]
 
+    # The grant_id is minted by the caller (the API) and threaded through
+    # params — the executor reads it fail-hard so a redrive re-presents the
+    # SAME id (idempotent takeover_open), never a fresh one.
+    grant_id = make_id(BROWSER_GRANT)
     result, is_error = await submit_browser_call(
         db_url,
         pool,
         account_id=account_id,
         method="open",
-        params={"session_id": session_id, "reason": "auth"},
+        params={"session_id": session_id, "reason": "auth", "grant_id": grant_id},
         timeout_s=10,
     )
     assert not is_error
     assert result["epoch"] == 7
-    grant_id = result["grant_id"]
+    assert result["grant_id"] == grant_id
     async with pool.acquire() as conn:
         grant = await queries.get_browser_grant(conn, grant_id, account_id=account_id)
     assert grant is not None and grant["status"] == "open"
     assert grant["boot"] == "01BOOTTEST"
 
-    # One open grant per computer, by construction (partial unique index).
+    # One open grant per computer, by construction (partial unique index): a
+    # DIFFERENT grant_id still conflicts on the account.
     result2, is_error2 = await submit_browser_call(
         db_url,
         pool,
         account_id=account_id,
         method="open",
-        params={"session_id": session_id, "reason": "auth"},
+        params={"session_id": session_id, "reason": "auth", "grant_id": make_id(BROWSER_GRANT)},
         timeout_s=10,
     )
     assert is_error2
@@ -346,3 +357,94 @@ async def test_clear_state_refused_while_a_takeover_is_open(plane: dict[str, Any
     assert is_error
     assert result["code"] == "takeover_open"
     plane["registry"].release_browser.assert_not_awaited()
+
+
+async def test_open_without_grant_id_fails_hard(plane: dict[str, Any]) -> None:
+    """The executor reads ``params['grant_id']`` fail-hard — NO fallback mint.
+    An open missing it resolves is_error rather than silently minting a fresh id
+    that a lost-NOTIFY redrive could then double-open (the CRITICAL this fix
+    closes)."""
+    pool, db_url = plane["pool"], plane["db_url"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    result, is_error = await submit_browser_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="open",
+        params={"session_id": session_id, "reason": "auth"},  # no grant_id
+        timeout_s=10,
+    )
+    assert is_error
+    assert result["code"] == "internal"  # KeyError -> the always-resolve backstop
+
+
+async def test_close_of_a_dead_container_still_closes_with_null_handback(
+    plane: dict[str, Any],
+) -> None:
+    """A close when the container is gone (peek None) must NOT cold-provision one
+    just to hand back — the grant still reaches terminal (viewer stops) with a
+    null handback, and the driver is never touched (reaper-starvation fix)."""
+    pool, db_url = plane["pool"], plane["db_url"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    plane["registry"].peek.return_value = None  # container gone
+    grant_id = make_id(BROWSER_GRANT)
+    async with pool.acquire() as conn:
+        await queries.insert_browser_grant(
+            conn,
+            grant_id=grant_id,
+            account_id=account_id,
+            session_id=session_id,
+            reason="auth",
+            boot="01BOOTTEST",
+            epoch=3,
+            target={},
+            ttl_seconds=300,
+        )
+    plane["driver"].reset_mock()
+    result, is_error = await submit_browser_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="close",
+        params={"grant_id": grant_id, "outcome": "done"},
+        timeout_s=10,
+    )
+    assert not is_error
+    assert result["handback"] is None
+    plane["driver"].assert_not_awaited()  # never cold-provisioned to hand back
+    async with pool.acquire() as conn:
+        grant = await queries.get_browser_grant(conn, grant_id, account_id=account_id)
+    assert grant is not None and grant["status"] == "closed"
+
+
+async def test_clear_state_wipes_the_plane_and_notifies(
+    plane: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no open grant, clear_state releases the container, wipes the plane
+    subdirs (login state), recreates them empty, and posts browser_state_lost —
+    all under the owner lock, with no ignore_errors masking a partial wipe."""
+    pool, db_url = plane["pool"], plane["db_url"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    plane_dir = ensure_browser_plane_dir(account_id)
+    cookie = plane_dir / "profile" / "Cookies"
+    cookie.write_bytes(b"secret-session-token")
+
+    _result, is_error = await submit_browser_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="clear_state",
+        params={"session_id": session_id},
+        timeout_s=10,
+    )
+    assert not is_error
+    plane["registry"].release_browser.assert_awaited_with(account_id)
+    assert not cookie.exists()  # login state actually deleted
+    assert (plane_dir / "profile").is_dir()  # subdirs recreated empty
+    async with pool.acquire() as conn:
+        events = await conn.fetch(
+            "SELECT data FROM events WHERE session_id = $1 AND kind = 'lifecycle'",
+            session_id,
+        )
+    assert any(e["data"].get("event") == "browser_state_lost" for e in events)

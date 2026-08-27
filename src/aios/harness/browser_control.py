@@ -30,7 +30,6 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.db import queries
-from aios.ids import BROWSER_GRANT, make_id
 from aios.logging import get_logger
 from aios.sandbox.browser import EXEC_KILL_MARGIN_S, BrowserUnavailableError, driver_call
 from aios.sandbox.browser_protocol import BrowserRequest, BrowserResponse
@@ -144,7 +143,12 @@ async def _dispatch(
     action_timeout = settings.sandbox_browser_action_timeout_seconds
 
     if method == "open":
-        grant_id = str(params.get("grant_id") or make_id(BROWSER_GRANT))
+        # The grant_id is minted at submit time by the API (open_takeover) and
+        # threaded through params — read it fail-hard, NO fallback mint. A
+        # per-execution mint would make a lost-NOTIFY REDRIVE issue a SECOND,
+        # DISTINCT takeover_open (fresh id) that the driver's per-grant-id
+        # idempotency can't collapse — orphaning the first takeover.
+        grant_id = str(params["grant_id"])
         session_id = str(params["session_id"])
         reason = str(params.get("reason") or "")
         ttl_seconds = int(settings.sandbox_browser_grant_ttl_seconds)
@@ -192,17 +196,7 @@ async def _dispatch(
             grant = await queries.get_browser_grant(conn, grant_id, account_id=account_id)
         if grant is None:
             raise _OpError("unknown_grant", f"no takeover grant {grant_id}")
-        handback = await _close_takeover(registry, account_id, grant_id, outcome=outcome)
-        async with pool.acquire() as conn:
-            moved = await queries.close_browser_grant(
-                conn, grant_id=grant_id, status="closed", outcome=outcome, handback=handback
-            )
-        if moved:
-            # Only the close that actually moved the row notifies the model —
-            # a repeated close (or one racing the TTL reaper) must not append
-            # a duplicate notice.
-            await _append_takeover_ended(pool, grant, outcome=outcome)
-        return {"handback": handback}
+        return await _finalize_takeover(registry, pool, grant, status="closed", outcome=outcome)
 
     if method == "status":
         if registry.peek(account_id) is None:
@@ -231,13 +225,23 @@ async def _dispatch(
             open_grant = await queries.get_open_browser_grant_for_account(conn, account_id)
         if open_grant is not None:
             raise _OpError("takeover_open", "a takeover is in progress; close it first")
-        # No driver op: destroy the container, then recreate the plane
-        # subdirs empty — the one sanctioned way login state is deleted.
-        await registry.release_browser(account_id)
-        plane = browser_plane_dir(account_id)
-        for sub in BROWSER_PLANE_SUBDIRS:
-            shutil.rmtree(plane / sub, ignore_errors=True)
-        ensure_browser_plane_dir(account_id)
+        # No driver op: destroy the container, then recreate the plane subdirs
+        # empty — the one sanctioned way login state is deleted. Hold the
+        # account's owner lock across destroy + wipe + recreate so a concurrent
+        # (re)provision can't cold-mount the plane mid-wipe and have its profile
+        # deleted out from under a live container. release_browser is lock-free,
+        # so this cannot self-deadlock.
+        async with registry.owner_lock(account_id):
+            await registry.release_browser(account_id)
+            plane = browser_plane_dir(account_id)
+            for sub in BROWSER_PLANE_SUBDIRS:
+                target = plane / sub
+                if target.exists():
+                    # NO ignore_errors: a partial wipe of login state must
+                    # surface (execute_browser_call -> is_error -> API 5xx),
+                    # never a false 204-success while cookies persist on disk.
+                    shutil.rmtree(target)
+            ensure_browser_plane_dir(account_id)
         session_id_param = params.get("session_id")
         if session_id_param:
             await _append_lifecycle(
@@ -251,14 +255,63 @@ async def _dispatch(
     raise _OpError("unknown_method", f"unknown browser call method {method!r}")
 
 
+async def _finalize_takeover(
+    registry: SandboxRegistry,
+    pool: asyncpg.Pool[asyncpg.Record],
+    grant: dict[str, Any],
+    *,
+    status: str,
+    outcome: str,
+) -> dict[str, Any]:
+    """Move an open grant to its terminal state, CLAIM-FIRST.
+
+    The conditional ``open -> terminal`` UPDATE is the serialization point:
+    only the claim-winner then runs the driver handback, so an explicit close
+    racing the TTL reaper can never issue two ``takeover_close`` calls — and,
+    crucially, the losing call (which finds no active takeover and returns an
+    error-handback) can never overwrite the winner's real handback (the
+    signed-in-hosts delta). Idempotent under redrive: a re-run finds the row
+    already terminal (``moved`` False) and no-ops.
+    """
+    grant_id = str(grant["id"])
+    account_id = str(grant["account_id"])
+    async with pool.acquire() as conn:
+        moved = await queries.close_browser_grant(
+            conn, grant_id=grant_id, status=status, outcome=outcome, handback=None
+        )
+    if not moved:
+        # A concurrent close/expiry (or a redrive) already finalized it; its
+        # handback is on the row. Do NOT touch the driver or re-notify.
+        return {"handback": None}
+    handback = await _close_takeover(registry, account_id, grant_id, outcome=outcome)
+    if handback is not None:
+        async with pool.acquire() as conn:
+            await queries.set_browser_grant_handback(conn, grant_id=grant_id, handback=handback)
+    log.info(
+        "browser.grant_expired" if status == "expired" else "browser.grant_closed",
+        account_id=account_id,
+        grant_id=grant_id,
+    )
+    await _append_takeover_ended(pool, grant, outcome=outcome)
+    return {"handback": handback}
+
+
 async def _close_takeover(
     registry: SandboxRegistry, account_id: str, grant_id: str, *, outcome: str
 ) -> dict[str, Any] | None:
-    """Run the driver handback; tolerate a dead browser (handback ``None``).
+    """Capture the driver handback for a takeover being finalized.
 
-    A close must succeed even when the container died mid-takeover — the
-    grant record still moves to its terminal state so the viewer stops.
+    Returns ``None`` when there is no live container to hand back from — and
+    deliberately does NOT cold-provision one: a fresh container has no takeover
+    (so ``takeover_close`` would fail anyway), and a cold provision under
+    snapshot-pool pressure would fault, starving the reaper tick. Returns a
+    handback dict on success, or a dict carrying an explicit ``error`` when the
+    driver was REACHED but could not capture the handback — never a silent
+    empty payload reported as a clean close (the signed-in-hosts delta is the
+    whole point of an auth takeover).
     """
+    if registry.peek(account_id) is None:
+        return None
     settings = get_settings()
     try:
         response = await _driver(
@@ -268,7 +321,9 @@ async def _close_takeover(
             {"grant_id": grant_id, "outcome": outcome},
             timeout_s=settings.sandbox_browser_action_timeout_seconds,
         )
-    except (BrowserUnavailableError, BrowserImageUnconfiguredError, _OpError) as err:
+    except (BrowserUnavailableError, BrowserImageUnconfiguredError) as err:
+        # The container went away between the peek and the exec — genuinely no
+        # handback to capture.
         log.warning(
             "browser.takeover_close_handback_unavailable",
             account_id=account_id,
@@ -276,6 +331,18 @@ async def _close_takeover(
             error=str(err),
         )
         return None
+    except _OpError as err:
+        # The driver was reached and reported it could not capture the handback
+        # (snapshot / profile / signed-in extraction failed). Record the
+        # failure honestly rather than a silent empty "done".
+        log.warning(
+            "browser.takeover_close_handback_failed",
+            account_id=account_id,
+            grant_id=grant_id,
+            code=err.code,
+            message=err.message,
+        )
+        return {"error": f"handback_failed: {err.code}: {err.message}"}
     return {
         "snapshot": response.snapshot,
         "shot_path": response.shot_path,
@@ -308,9 +375,14 @@ async def _append_lifecycle(
 ) -> None:
     """Append a model-visible, structurally non-waking lifecycle notice.
 
-    Best-effort (the `_append_fs_event` discipline): a lifecycle append must
-    never fail the control op that produced it; the model reads the notice
-    at its next genuine wake.
+    Best-effort by design: a lifecycle notice is non-waking (the model reads it
+    at its next genuine wake, never sooner), so a failed append must not fail —
+    nor, in the reaper, ABORT — the control op that produced it. The bound is
+    that on the rare append failure the requesting session simply learns of the
+    handback/state-loss at its next stimulus rather than proactively; it is not
+    lost from any waking path. (Atomic co-write with the grant close was
+    considered and deferred: it would couple the lifecycle append into the
+    grant-close transaction for a non-waking notice — not worth the coupling.)
     """
     try:
         await sessions_service.append_event(
@@ -331,46 +403,62 @@ async def _append_lifecycle(
 async def browser_reaper_tick(
     registry: SandboxRegistry, pool: asyncpg.Pool[asyncpg.Record]
 ) -> None:
-    """One pass of the browser plane's periodic upkeep."""
+    """One pass of the browser plane's periodic upkeep.
+
+    Each step is isolated in its own try/except: a failure in one (a wedged
+    grant, a bad file) is logged and the remaining steps still run. The quota
+    sweep (step 4) is the backstop against unbounded plane disk growth, so it
+    must NEVER be starved by an earlier step failing — precisely the state
+    (host pressure + a dead-container grant) where the sweep matters most.
+    """
     settings = get_settings()
 
-    # 1. Expire stale open grants: driver handback (best-effort), terminal
-    #    row, model-visible notice to the requesting session.
-    async with pool.acquire() as conn:
-        stale = await queries.list_stale_open_browser_grants(conn)
-    for grant in stale:
-        account_id = str(grant["account_id"])
-        grant_id = str(grant["id"])
-        handback = await _close_takeover(registry, account_id, grant_id, outcome="expired")
+    # 1. Expire stale open grants: claim-first terminal move, driver handback,
+    #    model-visible notice to the requesting session. Per-grant isolation so
+    #    one wedged grant cannot starve the others or the later steps.
+    try:
         async with pool.acquire() as conn:
-            moved = await queries.close_browser_grant(
-                conn, grant_id=grant_id, status="expired", outcome="expired", handback=handback
-            )
-        if moved:
-            log.info("browser.grant_expired", account_id=account_id, grant_id=grant_id)
-            await _append_takeover_ended(pool, grant, outcome="expired")
+            stale = await queries.list_stale_open_browser_grants(conn)
+        for grant in stale:
+            try:
+                await _finalize_takeover(registry, pool, grant, status="expired", outcome="expired")
+            except Exception:
+                log.exception("browser.grant_expiry_failed", grant_id=str(grant["id"]))
+    except Exception:
+        log.exception("browser.reaper_step_failed", step="expire")
 
     # 2. Container keepalive: a fresh-heartbeat open grant means a human is
     #    driving — the idle reaper must not take Chromium out from under
     #    them (touch never provisions).
-    async with pool.acquire() as conn:
-        fresh_accounts = await queries.list_fresh_open_browser_grant_accounts(conn)
-    for account_id in fresh_accounts:
-        registry.touch_browser(account_id)
+    try:
+        async with pool.acquire() as conn:
+            fresh_accounts = await queries.list_fresh_open_browser_grant_accounts(conn)
+        for account_id in fresh_accounts:
+            registry.touch_browser(account_id)
+    except Exception:
+        log.exception("browser.reaper_step_failed", step="keepalive")
 
     # 3. Call-row retention (the sweep pending_management_calls never got).
-    cutoff = datetime.now(UTC) - timedelta(seconds=settings.sandbox_browser_calls_retention_seconds)
-    async with pool.acquire() as conn:
-        reaped = await queries.delete_finished_browser_calls_before(conn, cutoff)
-    if reaped:
-        log.info("browser.calls_reaped", count=reaped)
+    try:
+        cutoff = datetime.now(UTC) - timedelta(
+            seconds=settings.sandbox_browser_calls_retention_seconds
+        )
+        async with pool.acquire() as conn:
+            reaped = await queries.delete_finished_browser_calls_before(conn, cutoff)
+        if reaped:
+            log.info("browser.calls_reaped", count=reaped)
+    except Exception:
+        log.exception("browser.reaper_step_failed", step="retention")
 
     # 4. Plane byte quotas. Spool preservation keys on "an open grant exists
     #    RIGHT NOW" — not the fresh-heartbeat set (a grant mid-lapse is still
     #    open until closed, and its human's input must survive until then).
-    async with pool.acquire() as conn:
-        open_accounts = await queries.list_open_browser_grant_accounts(conn)
-    _enforce_plane_quotas(set(open_accounts))
+    try:
+        async with pool.acquire() as conn:
+            open_accounts = await queries.list_open_browser_grant_accounts(conn)
+        _enforce_plane_quotas(set(open_accounts))
+    except Exception:
+        log.exception("browser.reaper_step_failed", step="quotas")
 
 
 def _enforce_plane_quotas(accounts_with_open_grants: set[str]) -> None:

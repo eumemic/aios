@@ -282,6 +282,25 @@ async def close_browser_grant(
     return bool(result != "UPDATE 0")
 
 
+async def set_browser_grant_handback(
+    conn: asyncpg.Connection[Any], *, grant_id: str, handback: dict[str, Any]
+) -> None:
+    """Attach the driver handback to an already-terminal grant.
+
+    Second phase of a claim-first close: :func:`close_browser_grant` is the
+    serialization point (it claims the ``open -> terminal`` move), and ONLY the
+    claim-winner runs the driver handback — persisted here in a follow-up
+    UPDATE. Unconditional on status: the winner owns the row, and writing the
+    handback after the terminal move keeps a losing racer's error-handback from
+    ever overwriting the real one.
+    """
+    await conn.execute(
+        "UPDATE browser_grants SET handback = $2::jsonb WHERE id = $1",
+        grant_id,
+        json.dumps(handback),
+    )
+
+
 async def list_stale_open_browser_grants(
     conn: asyncpg.Connection[Any],
 ) -> list[dict[str, Any]]:

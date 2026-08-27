@@ -441,6 +441,7 @@ from .browser import (  # noqa: E402
     notify_browser_call_dispatch,
     notify_browser_call_result,
     resolve_browser_call,
+    set_browser_grant_handback,
     touch_browser_grant_heartbeat,
 )
 from .cancel import (  # noqa: E402
@@ -1119,6 +1120,7 @@ __all__ = [
     "revoke_runtime_token",
     "session_active_predicate",
     "session_errored_predicate",
+    "set_browser_grant_handback",
     "set_connection_change_pruned_through",
     "set_connection_inbound_policy",
     "set_connection_secrets",

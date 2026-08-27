@@ -406,6 +406,16 @@ class SandboxRegistry:
             self._locks[session_id] = lock
         return lock
 
+    def owner_lock(self, owner_id: str) -> asyncio.Lock:
+        """The per-owner provisioning lock, exposed for callers that must
+        serialize an out-of-band mutation of an owner's durable state against a
+        concurrent (re)provision — e.g. the browser control plane's
+        ``clear_state``, which destroys the container and wipes the plane and
+        must not race a cold provision that would re-mount it (jarbot#106).
+        It is the SAME lock the internal provision/release paths take, so
+        ``async with registry.owner_lock(id)`` genuinely excludes them."""
+        return self._lock_for(owner_id)
+
     async def get_or_provision(
         self,
         session_id: str,
