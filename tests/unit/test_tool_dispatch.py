@@ -921,10 +921,11 @@ class TestParentChannelThreading:
         assert "tool_parent_channel" not in captured
         precomputed = captured["precomputed"]
         assert precomputed.resolved_tool_channel == "tg:42"
-        # Ordinary tool results have identical v1/master and v2 prices.  Both
-        # must be explicit and non-zero: a missing v1 value must never silently
-        # masquerade as a zero-token append.
+        # Ordinary tool results price identically under every baseline.  All
+        # arms must be explicit and non-zero: a missing older-baseline value
+        # must never silently masquerade as a zero-token append.
         assert precomputed.token_delta_v1 == precomputed.token_delta
+        assert precomputed.token_delta_v2 == precomputed.token_delta
         assert precomputed.token_delta_v1 > 0
 
 
@@ -975,7 +976,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)
@@ -1006,7 +1007,7 @@ class TestToolResultUniqueFloor:
         monkeypatch.setattr(
             queries,
             "precompute_event_append",
-            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0)),
+            AsyncMock(return_value=queries._PrecomputedAppend(0, None, 0, 0)),
         )
         decrement = AsyncMock()
         monkeypatch.setattr(queries, "decrement_open_tool_call_count", decrement)

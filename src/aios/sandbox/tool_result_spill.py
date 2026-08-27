@@ -7,11 +7,12 @@ events, never shrink one). Capping it here at the append boundary keeps
 attachments dir (bind-mounted read-only at ``/mnt/attachments`` every
 provision), recoverable by the model with the ``read`` tool (#735).
 
-Only ``str`` content is capped (the two append sinks guard on
-``isinstance(content, str)``); structured/list tool-result content — rare and
-typically bounded — passes through uncapped, as do oversized non-tool events
-(e.g. an unbounded ``switch_channel`` recap).  Tool results are the dominant
-overflow source; the residual shapes are left for a follow-up.
+``str`` content is capped-and-spilled (:func:`cap_tool_result_content`);
+parts-list content is capped in place without a spill file
+(:func:`cap_tool_result_parts`).  Oversized non-tool events (e.g. an
+unbounded ``switch_channel`` recap) still pass through uncapped — tool
+results are the dominant overflow source; the residual shapes are left for
+a follow-up.
 
 Spill files are recorded in the tool-result event's
 ``metadata.attachments`` (#1093): the attachment GC's referenced-set query
@@ -42,20 +43,43 @@ _SPILL_SUBDIR = "tool_results"
 
 @dataclass(frozen=True)
 class CappedToolResult:
-    """Outcome of :func:`cap_tool_result_content`.
+    """Outcome of :func:`cap_tool_result`.
 
     ``content`` is the value to store on the tool-result event — the
-    original when within the cap, or the truncation stub when spilled.
-    ``attachment`` is ``None`` when no spill occurred, otherwise the
-    ``metadata.attachments`` record the caller MUST persist on the event
-    so the attachment GC's referenced-set sees the spill file as live
-    (#1093).  The record mirrors a staged-inbound record's shape — it
-    carries ``in_sandbox_path`` (the key the GC query keys on) plus
-    descriptive fields for the renderer/console.
+    original when within the bounds, the truncation stub when a string
+    result spilled, or the bounded parts list.  ``attachment`` is ``None``
+    when no spill occurred, otherwise the ``metadata.attachments`` record
+    the caller MUST persist on the event so the attachment GC's
+    referenced-set sees the spill file as live (#1093).  The record mirrors
+    a staged-inbound record's shape — it carries ``in_sandbox_path`` (the
+    key the GC query keys on) plus descriptive fields for the
+    renderer/console.
     """
 
-    content: str
+    content: str | list[dict[str, Any]]
     attachment: dict[str, Any] | None
+
+
+async def cap_tool_result(
+    session_id: str,
+    tool_call_id: str,
+    content: str | list[dict[str, Any]],
+    *,
+    max_chars: int,
+) -> CappedToolResult:
+    """Bound a tool result of either content kind — the single entry point
+    both append sinks use, so the str-vs-parts dispatch is capping policy
+    owned here rather than a guard restated (and drifting) at every sink.
+
+    ``str`` content caps-and-spills (:func:`cap_tool_result_content`);
+    a parts list caps in place with no spill file
+    (:func:`cap_tool_result_parts`).
+    """
+    if isinstance(content, str):
+        return await cap_tool_result_content(session_id, tool_call_id, content, max_chars=max_chars)
+    return CappedToolResult(
+        content=cap_tool_result_parts(content, max_chars=max_chars), attachment=None
+    )
 
 
 async def cap_tool_result_content(
@@ -87,6 +111,82 @@ async def cap_tool_result_content(
         "source": "tool_result_spill",
     }
     return CappedToolResult(content=stub, attachment=attachment)
+
+
+# Bound on the number of content parts in one parts-list tool result.  Well
+# above any legitimate producer (read/switch_channel/browser emit a handful)
+# while keeping a hostile or buggy client from appending thousands of parts
+# that each cost per-part framing in every subsequent context build.
+_MAX_TOOL_RESULT_PARTS = 24
+
+
+def cap_tool_result_parts(parts: list[dict[str, Any]], *, max_chars: int) -> list[dict[str, Any]]:
+    """Bound a parts-list tool result (jarbot#106 PR1 companion fix).
+
+    The string arm goes through :func:`cap_tool_result_content`; before this
+    function existed a parts-list result bypassed capping entirely.  Rules:
+
+    * part count is bounded at ``_MAX_TOOL_RESULT_PARTS`` — excess parts are
+      dropped with a trailing text marker;
+    * the COMBINED text across ``text`` parts is bounded at ``max_chars`` —
+      the part that crosses the budget is truncated in place with a marker
+      and any later text parts are dropped (no spill file for parts:
+      externally-posted multimodal results have no sandbox provenance, and a
+      marker the model can react to beats a silent multi-hundred-KB append);
+    * non-text parts (``image_url``) pass through untouched — they are
+      bounded downstream by the render-time clamp and priced honestly by the
+      v3 token baseline.
+
+    Pure and synchronous; returns a new list (input parts are not mutated
+    except never — truncation builds a replacement part).
+    """
+    dropped = max(0, len(parts) - _MAX_TOOL_RESULT_PARTS)
+    parts = parts[:_MAX_TOOL_RESULT_PARTS]
+
+    out: list[dict[str, Any]] = []
+    remaining = max_chars
+    text_truncated = False
+    for part in parts:
+        is_text = (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+        if not is_text:
+            out.append(part)
+            continue
+        if text_truncated:
+            continue
+        text = part["text"]
+        if len(text) <= remaining:
+            remaining -= len(text)
+            out.append(part)
+            continue
+        text_truncated = True
+        out.append(
+            {
+                "type": "text",
+                "text": text[:remaining]
+                + (
+                    f"\n\n[Tool result truncated: combined text exceeded the inline "
+                    f"result limit of {max_chars:,} characters; the rest was dropped.]"
+                ),
+            }
+        )
+    # The count-bound marker rides OUTSIDE the text budget so the two bounds
+    # stay independent — earlier text exhausting the budget must not eat the
+    # notice that parts were dropped.
+    if dropped:
+        out.append(
+            {
+                "type": "text",
+                "text": (
+                    f"[Tool result truncated: {dropped} additional content parts "
+                    f"exceeded the {_MAX_TOOL_RESULT_PARTS}-part limit and were dropped.]"
+                ),
+            }
+        )
+    return out
 
 
 def record_spill_attachment(data: dict[str, Any], attachment: dict[str, Any] | None) -> None:

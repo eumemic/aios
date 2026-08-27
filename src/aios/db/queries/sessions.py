@@ -38,6 +38,7 @@ from aios.errors import (
     NotFoundError,
     RateLimitedError,
 )
+from aios.harness.tokens import TOKEN_BASELINE_CURRENT
 from aios.ids import (
     EVENT,
     GITHUB_REPOSITORY,
@@ -271,6 +272,9 @@ async def insert_session(
     ``focal_locked=True`` to start life locked on the spawning
     chat's channel.
     """
+    # Fresh sessions are born at the CURRENT token baseline: their event log is
+    # empty, so there is no older-priced prefix to stay homogeneous with (the
+    # backfill only exists to promote sessions that already have history).
     new_id = make_id(SESSION)
     if workspace_path is None:
         workspace_path = _default_workspace_path(account_id, new_id)
@@ -283,10 +287,10 @@ async def insert_session(
                 focal_channel, focal_locked, account_id, archive_when_idle,
                 outbound_suppression, created_by_type, created_by_ref,
                 tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
-                creator_session_id
+                creator_session_id, token_baseline_v
             )
             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
-                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb, $21)
+                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb, $21, $22)
             RETURNING *
             """,
             new_id,
@@ -315,6 +319,7 @@ async def insert_session(
             frozen_surface is not None,
             json.dumps(frozen_litellm_extra or {}) if frozen_surface else None,
             creator_session_id,
+            TOKEN_BASELINE_CURRENT,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -373,11 +378,11 @@ async def insert_child_session(
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
                 tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
-                tools_vocab_epoch, creator_run_id
+                tools_vocab_epoch, creator_run_id, token_baseline_v
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
                     NULL, FALSE, $7, $8, 'background', $9,
-                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14, $8)
+                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14, $8, $15)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -395,6 +400,7 @@ async def insert_child_session(
             json.dumps([s.model_dump() for s in http_servers]),
             json.dumps(litellm_extra or {}),
             TOOLS_VOCAB_EPOCH,
+            TOKEN_BASELINE_CURRENT,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

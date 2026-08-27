@@ -95,7 +95,7 @@ class TestNoInLockCompute:
         func = tree.body[0]
         assert isinstance(func, ast.AsyncFunctionDef)
         for name in (
-            "_event_token_delta",
+            "_event_token_deltas",
             "_lookup_tool_parent_channel",
             "get_session_focal_channel",
         ):
