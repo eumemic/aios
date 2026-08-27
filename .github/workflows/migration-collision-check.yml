@@ -5,6 +5,15 @@ name: Migration collision check
 # duplicate revisions after they reach master; this check gives the later PR an
 # advisory red check before merge so it can renumber and re-point down_revision.
 #
+# Collisions are keyed by (number, filename): the same number under two
+# DIFFERENT filenames is a collision; the IDENTICAL filename in both PRs'
+# diffs is one migration seen twice through a stack — a child PR retargeted
+# to master mid-stack-merge carries its still-open ancestor's commits in its
+# cumulative diff — and is deliberately not flagged. (Two unrelated PRs
+# adding the identical filename with different content also go unflagged:
+# git blocks the second merge with an add/add conflict, and the chain
+# canary covers anything that lands anyway.)
+#
 # Security note: this workflow does not interpolate any untrusted ${{ }}
 # expression (issue/PR titles, head_ref, commit messages, bodies) into run:
 # commands. Only trusted contexts (github.repository,
@@ -41,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          migration_numbers_for_pr() {
+          migration_files_for_pr() {
             local pr_number="$1"
             local files
 
@@ -54,13 +63,12 @@ jobs:
 
             printf '%s\n' "${files}" \
               | grep '^migrations/versions/[0-9][0-9][0-9][0-9]_.*\.py$' \
-              | sed 's|migrations/versions/||; s|_.*||' \
               | sort -u \
               || true
           }
 
-          own_numbers=$(migration_numbers_for_pr "${PR_NUMBER}")
-          if [ -z "${own_numbers}" ]; then
+          own_files=$(migration_files_for_pr "${PR_NUMBER}")
+          if [ -z "${own_files}" ]; then
             exit 0
           fi
 
@@ -77,17 +85,25 @@ jobs:
               continue
             fi
 
-            other_numbers=$(migration_numbers_for_pr "${other_pr}")
-            if [ -z "${other_numbers}" ]; then
+            other_files=$(migration_files_for_pr "${other_pr}")
+            if [ -z "${other_files}" ]; then
               continue
             fi
 
-            while IFS= read -r own_number; do
-              if printf '%s\n' "${other_numbers}" | grep -Fxq "${own_number}"; then
-                echo "MIGRATION COLLISION: ${own_number} also claimed by PR #${other_pr} — whichever merges second must renumber to the next free number and re-point down_revision"
+            while IFS= read -r own_file; do
+              own_number=$(basename "${own_file}" | cut -d_ -f1)
+
+              # -Fxv: the identical filename in both diffs is stacked-PR
+              # inheritance (see header), not a collision.
+              colliding=$(printf '%s\n' "${other_files}" \
+                | grep "^migrations/versions/${own_number}_" \
+                | grep -Fxv "${own_file}" \
+                || true)
+              if [ -n "${colliding}" ]; then
+                echo "MIGRATION COLLISION: ${own_file} vs PR #${other_pr}'s ${colliding//$'\n'/ } — same number ${own_number}; whichever merges second must renumber to the next free number and re-point down_revision"
                 collision_found=1
               fi
-            done <<< "${own_numbers}"
+            done <<< "${own_files}"
           done <<< "${open_prs}"
 
           exit "${collision_found}"

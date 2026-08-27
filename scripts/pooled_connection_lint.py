@@ -657,7 +657,10 @@ def iter_exemption_refs(root: str = "src") -> list[tuple[str, int, int]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", nargs="+", type=Path)
+    # Defaulting to ``src`` keeps every call site (CI lint job,
+    # scripts/run-checks.sh) argument-free, so the target can't drift
+    # between them — same construction as check_migration_heads.py.
+    parser.add_argument("paths", nargs="*", type=Path, default=[Path("src")])
     parser.add_argument(
         "--list-exemptions",
         action="store_true",
