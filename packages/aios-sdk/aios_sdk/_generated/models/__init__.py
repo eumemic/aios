@@ -42,6 +42,8 @@ from .body_upload_session_file import BodyUploadSessionFile
 from .bootstrap_request import BootstrapRequest
 from .bootstrap_response import BootstrapResponse
 from .bound_chat import BoundChat
+from .browser_status_response import BrowserStatusResponse
+from .browser_takeover_status import BrowserTakeoverStatus
 from .capabilities_update import CapabilitiesUpdate
 from .connection import Connection
 from .connection_attach import ConnectionAttach
@@ -85,6 +87,7 @@ from .get_health_response_get_health import GetHealthResponseGetHealth
 from .github_repository_resource import GithubRepositoryResource
 from .github_repository_resource_echo import GithubRepositoryResourceEcho
 from .github_repository_update import GithubRepositoryUpdate
+from .handback_payload import HandbackPayload
 from .http_permission_policy import HttpPermissionPolicy
 from .http_permission_policy_type import HttpPermissionPolicyType
 from .http_route_spec import HttpRouteSpec
@@ -100,6 +103,10 @@ from .ingest_external_event_response_ingest_external_event import (
 from .inline_script_body import InlineScriptBody
 from .inline_script_body_input_schema_type_0 import InlineScriptBodyInputSchemaType0
 from .inline_script_body_output_schema_type_0 import InlineScriptBodyOutputSchemaType0
+from .input_batch import InputBatch
+from .input_event import InputEvent
+from .input_event_button_type_0 import InputEventButtonType0
+from .input_event_type import InputEventType
 from .limited_networking import LimitedNetworking
 from .list_connections_mode_type_0 import ListConnectionsModeType0
 from .list_response_agent import ListResponseAgent
@@ -262,6 +269,12 @@ from .skill_version_files import SkillVersionFiles
 from .stream_events_v1_sessions_session_id_stream_get_chat_type_type_0 import (
     StreamEventsV1SessionsSessionIdStreamGetChatTypeType0,
 )
+from .takeover_close_request import TakeoverCloseRequest
+from .takeover_close_request_outcome import TakeoverCloseRequestOutcome
+from .takeover_close_response import TakeoverCloseResponse
+from .takeover_open_request import TakeoverOpenRequest
+from .takeover_open_response import TakeoverOpenResponse
+from .takeover_open_response_target import TakeoverOpenResponseTarget
 from .task_handle import TaskHandle
 from .task_handle_servicer_kind import TaskHandleServicerKind
 from .task_request import TaskRequest
@@ -414,6 +427,8 @@ __all__ = (
     "BootstrapRequest",
     "BootstrapResponse",
     "BoundChat",
+    "BrowserStatusResponse",
+    "BrowserTakeoverStatus",
     "CapabilitiesUpdate",
     "Connection",
     "ConnectionAttach",
@@ -453,6 +468,7 @@ __all__ = (
     "GithubRepositoryResource",
     "GithubRepositoryResourceEcho",
     "GithubRepositoryUpdate",
+    "HandbackPayload",
     "HttpPermissionPolicy",
     "HttpPermissionPolicyType",
     "HttpRouteSpec",
@@ -466,6 +482,10 @@ __all__ = (
     "InlineScriptBody",
     "InlineScriptBodyInputSchemaType0",
     "InlineScriptBodyOutputSchemaType0",
+    "InputBatch",
+    "InputEvent",
+    "InputEventButtonType0",
+    "InputEventType",
     "LimitedNetworking",
     "ListConnectionsModeType0",
     "ListResponseAgent",
@@ -604,6 +624,12 @@ __all__ = (
     "SkillVersionCreateFiles",
     "SkillVersionFiles",
     "StreamEventsV1SessionsSessionIdStreamGetChatTypeType0",
+    "TakeoverCloseRequest",
+    "TakeoverCloseRequestOutcome",
+    "TakeoverCloseResponse",
+    "TakeoverOpenRequest",
+    "TakeoverOpenResponse",
+    "TakeoverOpenResponseTarget",
     "TaskHandle",
     "TaskHandleServicerKind",
     "TaskRequest",

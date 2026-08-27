@@ -45,7 +45,7 @@ from aios.models.workflows import TERMINAL_RUN_STATUSES
 from aios.services import connections as connections_service
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     import structlog
 
@@ -109,13 +109,18 @@ async def preflight_subscription(
 
 
 def make_sse_response(
-    subscription: ListenSubscription,
+    subscription: ListenSubscription | Callable[[], None],
     content: AsyncIterator[ServerSentEvent],
     *,
     ping: int = SSE_PING_SECONDS,
 ) -> EventSourceResponse:
-    """Build an ``EventSourceResponse`` whose ``ListenSubscription`` is
-    cleaned up even on paths that never iterate the wrapped generator.
+    """Build an ``EventSourceResponse`` whose cleanup fires even on paths
+    that never iterate the wrapped generator.
+
+    ``subscription`` is a :class:`ListenSubscription` for the LISTEN-backed
+    streams, or a bare terminate callable for streams with different
+    resources to release (the browser takeover frame stream polls the
+    shared filesystem and holds no LISTEN connection).
 
     Normal lifecycle: ``__call__`` runs, the generator iterates, its
     ``finally: subscription.terminate()`` fires on consumer disconnect
@@ -140,8 +145,9 @@ def make_sse_response(
     ``_state`` transition both tolerate repeated calls), so the second
     call is a no-op.
     """
+    terminate = subscription if callable(subscription) else subscription.terminate
     response = EventSourceResponse(content, ping=ping)
-    weakref.finalize(response, subscription.terminate)
+    weakref.finalize(response, terminate)
     return response
 
 

@@ -22,6 +22,34 @@ can tell "should never have a CLI" apart from "needs CLI, deferred."
 from __future__ import annotations
 
 NOT_CLI_OPERATIONS: dict[str, str] = {
+    # ── Browser takeover surface (jarbot#106) ────────────────────────
+    # The product layer (jarbot) drives human takeover of an account's
+    # shared computer through these routes — a live viewer with a frame
+    # stream and an input channel, not an operator CLI workflow.
+    "open_takeover_v1_browser_takeover_post": (
+        "Product-layer takeover control, driven by the app's viewer, not operators."
+    ),
+    "heartbeat_takeover_v1_browser_takeover__grant_id__heartbeat_post": (
+        "Product-layer takeover control, driven by the app's viewer, not operators."
+    ),
+    "post_input_v1_browser_takeover__grant_id__input_post": (
+        "Human input for a live takeover, posted by the app's viewer, not operators."
+    ),
+    "stream_frames_v1_browser_takeover__grant_id__frames_get": (
+        "SSE screencast consumed by the app's takeover viewer, not operators."
+    ),
+    "close_takeover_v1_browser_takeover__grant_id__delete": (
+        "Product-layer takeover control, driven by the app's viewer, not operators."
+    ),
+    "browser_status_v1_browser_status_get": (
+        "Product-layer computer-status read, surfaced in the app, not operators."
+    ),
+    "revoke_site_v1_browser_sites__host__delete": (
+        "Product-layer sign-out control, surfaced in the app, not operators."
+    ),
+    "clear_state_v1_browser_clear_post": (
+        "Product-layer clear-computer control, surfaced in the app, not operators."
+    ),
     # ── Server-sent event streams ────────────────────────────────────
     # Long-lived SSE streams. The CLI exposes session events via
     # `aios sessions stream` (which wraps the SDK's stream_session helper);
