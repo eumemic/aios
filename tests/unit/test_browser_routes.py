@@ -90,6 +90,15 @@ class TestTrustBoundary:
         resp = client.get("/v1/browser/takeover/bgr_missing/frames")
         assert resp.status_code == 404
 
+    def test_frames_on_closed_grant_is_409_not_a_stale_stream(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A screencast must not open on an already-terminal grant (it would
+        emit one stale frame before the recheck ends it) — reject at open."""
+        _stub_conn(monkeypatch, get_browser_grant={**_OTHER_GRANT, "status": "closed"})
+        resp = client.get("/v1/browser/takeover/bgr_1/frames")
+        assert resp.status_code == 409
+
 
 class TestInput:
     def test_stale_epoch_is_409(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,6 +211,23 @@ class TestControlErrorCurrency:
         resp = client.post("/v1/browser/takeover", json={"session_id": "sess_1"})
         assert resp.status_code == 503
 
+    def test_internal_error_is_500_not_409(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The executor's generic ``internal`` backstop is a worker-side bug —
+        it must surface as 500, not a 409 that reads as a caller-actionable
+        conflict."""
+        monkeypatch.setattr(
+            browser_router,
+            "submit_browser_call",
+            AsyncMock(return_value=({"code": "internal", "message": "boom"}, True)),
+        )
+        monkeypatch.setattr(
+            sessions_service, "get_session_basic", AsyncMock(return_value=MagicMock())
+        )
+        resp = client.post("/v1/browser/takeover", json={"session_id": "sess_1"})
+        assert resp.status_code == 500
+
     def test_open_success_returns_the_grant(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -237,7 +263,27 @@ class TestFrameLoading:
         frames.mkdir()
         (tmp_path / "secret.jpg").write_bytes(b"nope")
         manifest = {"seq": 1, "file": "../secret.jpg"}
-        assert browser_router._load_frame(frames, manifest, _ACCOUNT) is None
+        assert browser_router._load_frame(frames, manifest, tmp_path.resolve(), _ACCOUNT) is None
+
+    def test_symlinked_frames_dir_to_another_plane_is_refused(self, tmp_path: Path) -> None:
+        """CRITICAL: a compromised container swaps its OWN frames dir for a
+        symlink to ANOTHER account's plane. Anchoring containment on the plane
+        ROOT (not on the symlinked frames dir, which resolves self-consistently)
+        is what blocks the cross-tenant live-screen read."""
+        victim_frames = tmp_path / "acc_VICTIM" / "frames"
+        victim_frames.mkdir(parents=True)
+        (victim_frames / "0.jpg").write_bytes(b"\xff\xd8victim-screen")
+        (victim_frames / "manifest.json").write_text(json.dumps({"seq": 1, "file": "0.jpg"}))
+        attacker_plane = tmp_path / "acc_ATTACKER"
+        attacker_plane.mkdir()
+        (attacker_plane / "frames").symlink_to(victim_frames)  # escape the plane
+
+        frames_dir = attacker_plane / "frames"
+        plane_root = attacker_plane.resolve()
+        # Neither the manifest read nor the frame load may cross to the victim.
+        assert browser_router._read_manifest(frames_dir, plane_root, _ACCOUNT) is None
+        manifest = {"seq": 1, "file": "0.jpg"}
+        assert browser_router._load_frame(frames_dir, manifest, plane_root, _ACCOUNT) is None
 
     def test_valid_manifest_forwards_the_trusted_chrome_envelope(self, tmp_path: Path) -> None:
         frames = tmp_path / "frames"
@@ -254,7 +300,7 @@ class TestFrameLoading:
             "w": 1280,
             "h": 800,
         }
-        frame = browser_router._load_frame(frames, manifest, _ACCOUNT)
+        frame = browser_router._load_frame(frames, manifest, tmp_path.resolve(), _ACCOUNT)
         assert frame is not None
         assert frame["origin"] == "https://accounts.example.com"
         assert frame["security"] == "secure"
@@ -265,4 +311,14 @@ class TestFrameLoading:
         assert frame["jpeg_b64"] == base64.b64encode(b"\xff\xd8jpeg").decode()
 
     def test_absent_manifest_reads_as_none(self, tmp_path: Path) -> None:
-        assert browser_router._read_manifest(tmp_path / "frames") is None
+        assert (
+            browser_router._read_manifest(tmp_path / "frames", tmp_path.resolve(), _ACCOUNT) is None
+        )
+
+    def test_non_int_seq_reads_as_no_frame(self, tmp_path: Path) -> None:
+        """A manifest present but with a null/placeholder seq is 'no frame yet',
+        not a TypeError that tears down the SSE stream."""
+        frames = tmp_path / "frames"
+        frames.mkdir()
+        (frames / "manifest.json").write_text(json.dumps({"seq": None, "file": "0.jpg"}))
+        assert browser_router._read_manifest(frames, tmp_path.resolve(), _ACCOUNT) is None

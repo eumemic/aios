@@ -434,11 +434,14 @@ class Settings(BaseSettings):
         "this are deleted by the browser reaper.",
     )
     sandbox_browser_call_timeout_seconds: float = Field(
-        default=60.0,
+        default=210.0,
         gt=0,
         description="How long a browser control-plane API request blocks for the "
-        "worker to resolve its call before returning 504. Comfortably above the "
-        "takeover-open drain budget so a legitimately slow open still lands.",
+        "worker to resolve its call before returning 504. Must cover a COLD open: "
+        "the browser provision (sandbox_browser_provision_timeout_seconds, 120s) "
+        "PLUS the takeover-open drain (sandbox_browser_takeover_open_timeout_seconds, "
+        "45s) plus margin — otherwise every cold open 504s the caller while the "
+        "worker completes it, leaving a viewerless grant.",
     )
     sandbox_browser_input_spool_max_bytes: int = Field(
         default=64 * 1024**2,
