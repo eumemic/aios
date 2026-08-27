@@ -224,6 +224,12 @@ def _row_to_session(row: asyncpg.Record) -> Session:
         # Present only when the query derives it (list_sessions); other callers
         # (single read, INSERT ... RETURNING) leave it None.
         last_event_at=row.get("last_event_at"),
+        # Soft read: present in every ``SELECT *`` / ``RETURNING *`` feeder (the
+        # worker step's ``get_session_bare`` is one). Without this mapping the
+        # model default (1) masks the stored marker, so the step prices
+        # ``local_tokens`` image-blind and stamps every calibration span v1 —
+        # the v3 fit would never accumulate a sample.
+        token_baseline_v=row.get("token_baseline_v") or 1,
     )
 
 

@@ -385,3 +385,19 @@ async def test_every_non_message_kind_appends(
             "SELECT cumulative_image_mass FROM events WHERE id = $1", event.id
         )
         assert mass == 0, f"{kind} append stored {mass!r} for cumulative_image_mass"
+
+
+@pytest.mark.integration
+async def test_get_session_bare_surfaces_token_baseline_marker(
+    live_conn: asyncpg.Connection[Any],
+) -> None:
+    """The worker step reads its session via ``get_session_bare`` →
+    ``_row_to_session``; the stored ``token_baseline_v`` MUST survive that
+    mapping. When it doesn't, the pydantic default (1) masks the real marker, so
+    the step prices ``local_tokens`` image-blind and stamps every calibration
+    span v1 — and the v3 fit never accumulates a sample. A synthetic ``_span``
+    can't catch this; only the real read path does.
+    """
+    account_id, session_id = await _seed(live_conn, baseline_v=3)
+    session = await queries.get_session_bare(live_conn, session_id, account_id=account_id)
+    assert session.token_baseline_v == 3

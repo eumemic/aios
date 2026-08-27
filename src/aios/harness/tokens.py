@@ -231,8 +231,10 @@ def _message_body_tokens(msg: Mapping[str, Any], *, baseline: int = TOKEN_BASELI
             return cached
 
     value = int(token_counter(messages=[msg], count_response_tokens=True))
-    # LiteLLM's model-neutral chat counter ignores image_url parts entirely.
-    # Price them separately per the selected baseline.
+    # LiteLLM's model-neutral chat counter charges only a small (~85-90) fixed
+    # per-part base for each image_url — NOT a pixel-dependent estimate. That
+    # fixed base is the constant every baseline arm builds on; add the real
+    # per-baseline image term on top of it (do not re-add the base).
     if has_image:
         for part in msg["content"]:
             if not isinstance(part, Mapping) or part.get("type") != "image_url":

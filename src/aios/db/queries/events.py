@@ -543,7 +543,8 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
           AND (data->>'local_tokens')::bigint > 0
         GROUP BY data->>'model'
         ORDER BY data->>'model'
-        """
+        """,
+        TOKEN_BASELINE_CURRENT,
     )
     result: dict[str, dict[str, Any]] = {}
     for row in measured:
