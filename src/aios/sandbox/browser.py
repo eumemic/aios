@@ -29,6 +29,11 @@ from aios.sandbox.spec import BrowserImageUnconfiguredError
 if TYPE_CHECKING:
     from aios.sandbox.registry import SandboxRegistry
 
+# Margin the in-container exec kill leaves ABOVE the driver's own deadline,
+# so the driver reports its own timeout rather than being SIGKILLed
+# mid-response. Shared by every driver_call site.
+EXEC_KILL_MARGIN_S = 5
+
 
 class BrowserUnavailableError(Exception):
     """The account's browser container or driver could not be reached.

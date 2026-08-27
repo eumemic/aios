@@ -37,18 +37,13 @@ from aios.harness.vision import (
     make_image_url_part,
     supports_vision,
 )
-from aios.sandbox.browser import BrowserUnavailableError, driver_call
+from aios.sandbox.browser import EXEC_KILL_MARGIN_S, BrowserUnavailableError, driver_call
 from aios.sandbox.browser_protocol import BrowserRequest, BrowserResponse
 from aios.sandbox.spec import BrowserImageUnconfiguredError
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail
 from aios.tools.registry import ToolHandler, ToolResult, registry
-
-# Margin the in-container exec kill leaves ABOVE the driver's own deadline,
-# so the driver reports action_timeout itself rather than being SIGKILLed
-# mid-response.
-_EXEC_KILL_MARGIN_S = 5
 
 # ── shared schema fragments ───────────────────────────────────────────────
 
@@ -370,7 +365,7 @@ async def _invoke_driver(
             runtime.require_sandbox_registry(),
             account_id,
             request,
-            timeout_s=settings.sandbox_browser_action_timeout_seconds + _EXEC_KILL_MARGIN_S,
+            timeout_s=settings.sandbox_browser_action_timeout_seconds + EXEC_KILL_MARGIN_S,
         )
     except BrowserImageUnconfiguredError as err:
         raise ToolBail(_UNAVAILABLE_MESSAGE) from err
