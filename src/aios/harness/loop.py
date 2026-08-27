@@ -72,8 +72,10 @@ from aios.harness.tool_disposition import classify_tool_call
 from aios.jobs.app import defer_run_wake, defer_wake
 from aios.logging import get_logger
 from aios.models.agents import (
+    AgentBinding,
     McpServerSpec,
     StepSurface,
+    auto_allow_readonly_tools,
     is_mcp_tool_name,
 )
 from aios.models.events import (
@@ -2000,6 +2002,7 @@ async def discover_session_mcp_tools(
     agent: StepSurface,
     *,
     account_id: str,
+    persist_auto_allow: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Discover MCP tools from agent-declared servers, filtered by enabled
     ``mcp_toolset`` entries.
@@ -2153,7 +2156,51 @@ async def discover_session_mcp_tools(
             )
     from aios.mcp.schema import uniquify_advertised_tool_names
 
-    return uniquify_advertised_tool_names(tools), instructions_by_server
+    tools = uniquify_advertised_tool_names(tools)
+
+    # #2270: auto-allow readOnlyHint-annotated tools on operator-trusted
+    # servers. Persists into the agent's OWN ``tools`` config (not the
+    # in-memory ``agent.tools`` this function was handed) so the loosening
+    # survives past this one discovery and future sessions of the same
+    # agent see it immediately without waiting on their own first discovery.
+    # Gated on BOTH: ``isinstance(..., AgentBinding)`` excludes a
+    # ``generic_child`` (no agent row to update at all), and the caller-supplied
+    # ``persist_auto_allow`` excludes a frozen workflow-child overlay or a
+    # version-pinned session — both also produce an ``AgentBinding`` (#794 /
+    # ``services/agents.py::_load_for_session_conn``) but carry a possibly-old
+    # or attenuated ``agent.tools`` that must never be written back onto the
+    # LIVE agent row (would silently corrupt it for every other session of
+    # that agent). Default ``True`` matches every existing non-test caller
+    # (only ``compute_step_prelude`` calls this in production, and it always
+    # passes the computed bit explicitly); tests that construct a bare
+    # ``AgentBinding`` therefore persist by default, matching pre-#2270 behavior
+    # of "discovery just runs", with the guard applied via the explicit kwarg.
+    trusted_servers = get_settings().auto_allow_readonly_mcp_servers
+    if trusted_servers and persist_auto_allow and isinstance(agent.binding, AgentBinding):
+        new_tools, changed = auto_allow_readonly_tools(
+            agent.tools, tools, trusted_servers=trusted_servers
+        )
+        if changed:
+            try:
+                await agents_service.update_agent(
+                    pool,
+                    agent.binding.agent_id,
+                    account_id=account_id,
+                    expected_version=agent.binding.version,
+                    tools=new_tools,
+                )
+            except Exception:
+                # Best-effort: a lost race (concurrent update_agent bumping
+                # the version) or a transient DB error just means the next
+                # discovery retries the same union — idempotent, never
+                # loses the in-flight tools this step already discovered.
+                log.warning(
+                    "mcp.auto_allow_readonly_persist_failed",
+                    agent_id=agent.binding.agent_id,
+                    exc_info=True,
+                )
+
+    return tools, instructions_by_server
 
 
 async def _dispatch_confirmed_tools(

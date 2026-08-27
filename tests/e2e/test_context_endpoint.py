@@ -228,10 +228,19 @@ class TestContextEndpoint:
             with mock.patch(
                 "aios.harness.loop.discover_session_mcp_tools",
                 new=mock.AsyncMock(return_value=([], {})),
-            ):
+            ) as discover:
                 r = await http_client.get(f"/v1/sessions/{session.id}/context")
 
         assert r.status_code == 200, r.text
+        # #2270 (Vic review, PR #2272): this preview endpoint is documented as
+        # side-effect-free. Before the fix, a plain live-latest session (this
+        # one — unfrozen, unpinned) computed persist_auto_allow=True here,
+        # meaning a hit on /context could fire a real update_agent write from
+        # inside a GET. The router now forces read_only=True through to
+        # compute_step_prelude, which must force persist_auto_allow=False
+        # regardless of session liveness.
+        discover.assert_awaited_once()
+        assert discover.call_args.kwargs["persist_auto_allow"] is False
 
     async def test_workspace_image_attachment_inlines_without_sandbox(
         self, http_client: httpx.AsyncClient, pool: Any, monkeypatch: pytest.MonkeyPatch
