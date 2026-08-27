@@ -69,7 +69,11 @@ from aios.retirements.boot_gate import (
 )
 from aios.sandbox.backends import select_sandbox_backend
 from aios.sandbox.github_clone_breaker import GithubCloneBreaker
-from aios.sandbox.network import ensure_sandbox_network, is_running_in_container
+from aios.sandbox.network import (
+    ensure_browser_network,
+    ensure_sandbox_network,
+    is_running_in_container,
+)
 from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from aios.sandbox.tool_broker import ToolBroker
 from aios.sandbox.workspace_ownership import repair_workspace_ownership
@@ -395,6 +399,7 @@ async def worker_main() -> None:
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()
         await ensure_sandbox_network()
+        await ensure_browser_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
         for broker_task in tool_broker.serve_tasks():

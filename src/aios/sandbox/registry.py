@@ -38,12 +38,13 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
+from aios import ids
 from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
-from aios.ids import is_run_owner_id
+from aios.ids import sandbox_owner_kind
 from aios.logging import get_logger
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
@@ -79,6 +80,7 @@ from aios.sandbox.setup import (
 from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore, TarballStore
 from aios.sandbox.spec import (
     ProvisioningPlan,
+    build_spec_from_browser,
     build_spec_from_run,
     build_spec_from_session,
     cleanup_session_secret_file,
@@ -856,6 +858,102 @@ class SandboxRegistry:
             return
         await self._destroy_run_quietly(run_id, handle)
 
+    # ── account browser sandboxes ("the computer", jarbot#106) ──────────────
+
+    async def get_or_provision_browser(self, account_id: str) -> SandboxHandle:
+        """Return the account's shared browser container handle, provisioning cold.
+
+        The third owner kind in the SAME ``_handles``/``_last_used``/``_lock_for``
+        maps — owner-keyed on the ``acc_…`` account id itself, so "one computer
+        per account, deployment-wide" holds by construction (the worker is a
+        singleton and the map is per-worker). Leaner even than the run path:
+
+        - **Warm hit = liveness probe only** — no spec-version, no mount drift
+          (nothing in ``sessions.*`` describes the browser).
+        - **Cold path is snapshot-free and setup-free** — no salvage, no egress
+          CA, no packages, no lockdown sidecar. The container is exec-only on
+          the ICC-off browser bridge; its durable state (the Chromium profile)
+          lives on the plane bind mount, not the rootfs.
+
+        Raises :class:`~aios.sandbox.spec.BrowserImageUnconfiguredError` before
+        any Docker call when the deployment has no browser image configured.
+        """
+        handle = self._handles.get(account_id)
+        if handle is not None and await self._backend.is_alive(handle):
+            self._last_used[account_id] = time.monotonic()
+            return handle
+
+        stale = handle
+        async with self._lock_for(account_id):
+            current = self._handles.get(account_id)
+            if current is not None and current is not stale:
+                self._last_used[account_id] = time.monotonic()
+                return current
+            if current is not None:
+                # Dead container: bare-destroy and cold-reprovision. Page state
+                # is gone (the model learns via its next action's fresh boot id);
+                # the profile survives on the plane mount.
+                await self._destroy_browser_quietly(account_id, current)
+            self._admit_capacity_provision(account_id, account_id=account_id, durable=False)
+            handle = await self._provision_browser(account_id)
+            self._handles[account_id] = handle
+            self._last_used[account_id] = time.monotonic()
+            return handle
+
+    async def _provision_browser(self, account_id: str) -> SandboxHandle:
+        """Cold-start the account's browser container: build the bare spec, create.
+
+        No proxies, no broker secret, no setup steps — create-failure needs no
+        cleanup because nothing was registered.
+        """
+        spec = build_spec_from_browser(account_id)
+        handle = await self._backend.create(spec)
+        log.info(
+            "sandbox.browser_provisioned",
+            account_id=account_id,
+            container_id=handle.sandbox_id[:12],
+            backend=self._backend.name,
+        )
+        return handle
+
+    async def _destroy_browser_quietly(self, account_id: str, handle: SandboxHandle) -> None:
+        """Best-effort destroy of a browser container (warn, never raise)."""
+        try:
+            await self._backend.destroy(handle)
+        except Exception as err:
+            log.warning(
+                "sandbox.browser_destroy_failed",
+                account_id=account_id,
+                container_id=handle.sandbox_id[:12],
+                error=str(err),
+            )
+
+    async def release_browser(self, account_id: str) -> None:
+        """Tear down the account's browser container. No-op if not cached.
+
+        A bare destroy + cache eviction: no snapshot (durable state lives on
+        the plane bind mount), no pointer, no proxies, no broker secret. Pops
+        ``_handles``/``_last_used`` but (like the other release arms) NOT
+        ``_locks``.
+        """
+        handle = self._handles.pop(account_id, None)
+        self._last_used.pop(account_id, None)
+        if handle is None:
+            return
+        await self._destroy_browser_quietly(account_id, handle)
+
+    def touch_browser(self, account_id: str) -> None:
+        """Bump the browser container's idle-reaper keepalive iff cached.
+
+        The takeover grant reaper calls this for every account holding a
+        fresh-heartbeat open grant (jarbot#106 §4.4): a >30-minute human
+        session must not lose Chromium to the idle reaper. Deliberately does
+        NOT provision — a missing container stays missing until the next
+        genuine browser action.
+        """
+        if account_id in self._handles:
+            self._last_used[account_id] = time.monotonic()
+
     @staticmethod
     def _secret_dnat(plan: ProvisioningPlan) -> tuple[list[str], tuple[str, int] | None]:
         """Build the ``(dnat_hosts, dnat_target)`` pair for the secret-egress swap.
@@ -951,7 +1049,7 @@ class SandboxRegistry:
             # config-reported-as-observed error this endpoint exists to expose,
             # and the one rule this subsystem must not break itself. Invalidate
             # instead — the tombstone says "not observable", which is true.
-            await self._invalidate_session_egress(handle, reason="no_credentials")
+            await self._invalidate_session_egress_by_id(handle.owner_id, reason="no_credentials")
         else:
             limited_hosts: set[str] = set()
             if isinstance(networking, LimitedNetworking):
@@ -996,7 +1094,7 @@ class SandboxRegistry:
         never a state stamped from unverified data.
 
         Every one of those unswept returns ALSO invalidates the persisted
-        intercept set (``_invalidate_session_egress``). The published state
+        intercept set (``_invalidate_session_egress_by_id``). The published state
         must never outlive the provisioning it describes: this provision
         succeeded, so the previous generation's row now describes a sandbox
         that is gone. Leaving it would make GET answer "is this host
@@ -1016,7 +1114,9 @@ class SandboxRegistry:
                 owner_id=handle.owner_id,
                 reason="rule_readback_failed",
             )
-            await self._invalidate_session_egress(handle, reason="rule_readback_failed")
+            await self._invalidate_session_egress_by_id(
+                handle.owner_id, reason="rule_readback_failed"
+            )
             return
         dnat_ips, accept_ips, proxy_targets = installed
         if len(proxy_targets) == 1:
@@ -1031,7 +1131,9 @@ class SandboxRegistry:
                 reason="ambiguous_dnat_target",
                 targets=sorted(f"{ip}:{port}" for ip, port in proxy_targets),
             )
-            await self._invalidate_session_egress(handle, reason="ambiguous_dnat_target")
+            await self._invalidate_session_egress_by_id(
+                handle.owner_id, reason="ambiguous_dnat_target"
+            )
             return
         elif credential_hosts:
             # Credential hosts but no installed DNAT rule: the provision
@@ -1042,7 +1144,7 @@ class SandboxRegistry:
                 owner_id=handle.owner_id,
                 reason="no_installed_dnat",
             )
-            await self._invalidate_session_egress(handle, reason="no_installed_dnat")
+            await self._invalidate_session_egress_by_id(handle.owner_id, reason="no_installed_dnat")
             return
         else:
             # No credential hosts → no DNAT rules to read the proxy from (and
@@ -1055,7 +1157,9 @@ class SandboxRegistry:
                     owner_id=handle.owner_id,
                     reason="proxy_alias_resolve_miss",
                 )
-                await self._invalidate_session_egress(handle, reason="proxy_alias_resolve_miss")
+                await self._invalidate_session_egress_by_id(
+                    handle.owner_id, reason="proxy_alias_resolve_miss"
+                )
                 return
             proxy_ip = sorted(proxy_ips[WORKER_NETWORK_ALIAS])[0]
             proxy_port = fallback_proxy_port
@@ -1127,36 +1231,25 @@ class SandboxRegistry:
             )
 
     @staticmethod
-    async def _invalidate_session_egress(handle: SandboxHandle, *, reason: str) -> None:
-        """Drop the persisted intercept set when it could not be observed.
-
-        The provisioning succeeded but its live rules could not be read, so
-        there is no observation to publish. The prior row describes a sandbox
-        generation that no longer exists; keeping it would let GET present a
-        dead configuration as the current live intercept set. Deleting makes
-        the endpoint say "unknown" (``NotFoundError``) instead of asserting a
-        stale truth — and an unavailable answer is recoverable, whereas a
-        confidently wrong one is what misroutes an incident.
-        """
-        if not handle.owner_id.startswith("sess_"):
-            return
-        await SandboxRegistry._invalidate_session_egress_by_id(handle.owner_id, reason=reason)
-
-    @staticmethod
     async def _invalidate_session_egress_by_id(session_id: str, *, reason: str) -> None:
         """Tombstone a session's persisted intercept set by id.
 
-        Split from :meth:`_invalidate_session_egress` because the teardown
-        paths (``release``/``evict``/idle-reap/``stop_all``) hold no
-        ``SandboxHandle`` — they have already popped it — yet they are exactly
-        the paths that must invalidate: a destroyed sandbox's hosts are the
+        Called both when live rules could not be read back after a publish
+        (the prior row would present a dead configuration as the current
+        intercept set — "unknown" is recoverable, a confidently wrong answer
+        misroutes an incident) and on the teardown paths
+        (``release``/``evict``/idle-reap/``stop_all``), which hold no
+        ``SandboxHandle`` — they have already popped it — yet are exactly the
+        paths that must invalidate: a destroyed sandbox's hosts are the
         clearest case of state outliving the provisioning it describes.
 
         Best-effort for the same reason as the publish path: this runs during
         teardown, and a DB hiccup must not turn releasing a sandbox into a
         raised exception on a shutdown path.
         """
-        if not session_id.startswith("sess_"):
+        if not session_id.startswith(f"{ids.SESSION}_"):
+            # Only sessions persist an egress intercept set; run/browser owners
+            # (and anything else) have nothing to tombstone.
             return
         from aios.harness import runtime as harness_runtime
 
@@ -2498,23 +2591,31 @@ class SandboxRegistry:
     # ── idle-TTL reaper ──────────────────────────────────────────────────
 
     async def _release_owner(self, owner_id: str) -> None:
-        """Route an idle release to the right teardown by owner-id prefix (#988).
+        """Route an idle release to the right teardown by owner kind (#988).
 
-        The ``_handles`` map holds both session (``sess_…``) and workflow-run
-        (``wfr_…``) sandboxes; their teardowns differ (a session snapshots its
-        rootfs + stops proxies, a run is a bare ephemeral destroy). The owner-kind
-        discriminator is :func:`aios.ids.is_run_owner_id` — the single source of
-        truth for the run-vs-session fork (#995), keyed on the same id the owner
-        was provisioned under, so a future owner prefix can't silently inherit the
-        session path by an inlined prefix test going stale here. A non-run owner
-        falls through to the session path (the historical default; a malformed
-        owner id is a bug worth surfacing via that path's logging rather than
-        silently skipping the teardown).
+        The ``_handles`` map holds session (``sess_…``), workflow-run
+        (``wfr_…``), and browser (``acc_…``) sandboxes; their teardowns differ
+        (a session snapshots its rootfs + stops proxies; a run is a bare
+        ephemeral destroy + broker-secret drop; a browser is a bare destroy —
+        its durable state lives on the plane bind mount). The discriminator is
+        :func:`aios.ids.sandbox_owner_kind` — EXHAUSTIVE, raising on an unknown
+        prefix: the historical fall-through-to-session default would publish a
+        bogus snapshot pointer for a non-session owner via the
+        rowcount-unchecked pointer write (jarbot#106 §4.3), so an unknown owner
+        fails hard here instead.
         """
-        if is_run_owner_id(owner_id):
-            await self.release_run(owner_id)
-        else:
-            await self.release(owner_id)
+        match sandbox_owner_kind(owner_id):
+            case "run":
+                await self.release_run(owner_id)
+            case "browser":
+                await self.release_browser(owner_id)
+            case "session":
+                await self.release(owner_id)
+            case _ as unreachable:
+                # A fourth owner kind added to the Literal without an arm here
+                # would otherwise fall through with NO teardown (mypy does not
+                # enforce match exhaustiveness without this backstop).
+                assert_never(unreachable)
 
     async def _reap_idle_once(self, idle_timeout: float) -> None:
         """One reap pass: release every owner idle past ``idle_timeout``.
@@ -2824,11 +2925,20 @@ class SandboxRegistry:
                 cached = self._handles.get(sid)
                 if cached is not None and cached.sandbox_id == ref.sandbox_id:
                     continue  # the live, in-use container — never touch it
-                if is_run_owner_id(sid):
+                try:
+                    owner_kind = sandbox_owner_kind(sid)
+                except ValueError:
+                    # Foreign/garbage owner label on a managed container: the
+                    # GC never raises — treat like unlabeled and drop it.
+                    owner_kind = None
+                if owner_kind != "session":
                     # A workflow-run sandbox is ephemeral scratch with no durable
                     # rootfs, no pointer, no proxies — the corpse-collection analog
                     # of release_run. Never salvageable; never in `sessions`. Bare
-                    # destroy, no DB lookup.
+                    # destroy, no DB lookup. A browser corpse (``acc_…``) is the
+                    # same shape: its durable state (the profile) lives on the
+                    # plane bind mount, never the rootfs — this arm is also what
+                    # heals ``stop_all``'s deliberate stopped corpses next boot.
                     await self._backend.force_remove(ref.sandbox_id)
                     continue
                 # ── session corpse: lifecycle rule + under-lock re-verify ──

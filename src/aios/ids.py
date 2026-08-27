@@ -75,6 +75,12 @@ REQUEST: Final = "req"
 # api_base for one (account, provider) pair, resolved nearest-ancestor-wins
 # up the account tree at model-call time. See migration 0140.
 MODEL_PROVIDER: Final = "mp"
+# Browser plane (jarbot#106 Phase 1): a takeover grant (one human driving the
+# account's shared browser) and a worker-consumed browser control-plane call.
+# The browser CONTAINER itself mints no id — its registry owner id is the
+# account's own ``acc_`` id (one computer per account by construction).
+BROWSER_GRANT: Final = "bgr"
+BROWSER_CALL: Final = "bcall"
 
 _PREFIXES: Final = frozenset(
     {
@@ -107,6 +113,8 @@ _PREFIXES: Final = frozenset(
         WORKFLOW_EVENT,
         REQUEST,
         MODEL_PROVIDER,
+        BROWSER_GRANT,
+        BROWSER_CALL,
     }
 )
 
@@ -134,18 +142,28 @@ def make_id(prefix: str, *, body: bytes | None = None) -> str:
     return f"{prefix}_{ULID()}"
 
 
-def is_run_owner_id(owner_id: str) -> bool:
-    """Is ``owner_id`` a workflow-run sandbox owner (``wfr_…``)?
+def sandbox_owner_kind(owner_id: str) -> Literal["session", "run", "browser"]:
+    """The sandbox-registry owner kind of ``owner_id`` — EXHAUSTIVE.
 
-    The intrinsic owner-kind discriminator the sandbox registry routes teardown
-    on (#995): its ``_handles`` map holds both session (``sess_…``) and
-    workflow-run (``wfr_…``) owners, whose teardowns differ (a session snapshots
-    its rootfs + stops proxies; a run is a bare ephemeral destroy). Centralizing
-    the prefix test here keeps the run-vs-session fork a single source of truth —
-    so a future owner prefix added to the map can't silently inherit the session
-    path by an inlined ``startswith`` going stale at one call site.
+    The registry's ``_handles`` map holds three owner kinds whose teardowns
+    differ: a ``session`` (``sess_…``) snapshots its rootfs and publishes the
+    pointer; a ``run`` (``wfr_…``) is a bare ephemeral destroy; a ``browser``
+    (``acc_…`` — the account id itself, one shared computer per account,
+    jarbot#106) is a bare destroy whose durable state lives on the host plane
+    bind mount, never in the rootfs.
+
+    Raises ``ValueError`` on any other prefix: an unknown owner falling
+    through to the session arm would publish a bogus snapshot pointer via the
+    rowcount-unchecked write path (``unscoped_set_session_snapshot``), so the
+    fork fails hard instead of guessing.
     """
-    return owner_id.startswith(f"{WORKFLOW_RUN}_")
+    if owner_id.startswith(f"{SESSION}_"):
+        return "session"
+    if owner_id.startswith(f"{WORKFLOW_RUN}_"):
+        return "run"
+    if owner_id.startswith(f"{ACCOUNT}_"):
+        return "browser"
+    raise ValueError(f"{owner_id!r} is not a sandbox owner id (expected sess_/wfr_/acc_)")
 
 
 def split_id(value: str) -> tuple[str, str]:

@@ -231,6 +231,39 @@ def ensure_run_workspace_dir(account_id: str, run_id: str) -> Path:
     return ensure_owned_dir(run_workspace_dir(account_id, run_id))
 
 
+_BROWSER_ROOT = "_browser"
+# The five browser-plane subdirectories (jarbot#106 §4.4/§5.7), all covered by
+# the ONE plane bind mount at ``/workspace`` in the browser container:
+# ``profile`` (Chromium user data — logins; non-reconstructible, never
+# auto-reaped, deleted only by explicit clear-state), ``shots`` (screenshots
+# the tool handlers read host-side), ``frames`` (takeover screencast ring the
+# API tails), ``downloads``, and ``input`` (the takeover input spool the API
+# appends and the driver tails).
+BROWSER_PLANE_SUBDIRS = ("profile", "shots", "frames", "downloads", "input")
+
+
+def browser_plane_dir(account_id: str) -> Path:
+    """Per-account browser-plane host directory: ``<workspace_root>/_browser/<account_id>``.
+
+    Deliberately TOP-LEVEL — a sibling of the account workspace dirs, not a
+    child: :func:`validate_workspace_path` jails user-supplied session
+    workspaces to ``<workspace_root>/<account_id>/…``, so a plane inside the
+    account subdir could be bind-mounted read-write into an agent sandbox via
+    a session's ``workspace_path`` (cookie theft). Outside every account jail,
+    no session workspace can resolve into it by construction (jarbot#106
+    §6.2). Pure — use :func:`ensure_browser_plane_dir` to create it.
+    """
+    return (get_settings().workspace_root / _BROWSER_ROOT / account_id).resolve()
+
+
+def ensure_browser_plane_dir(account_id: str) -> Path:
+    """Return the per-account browser plane dir, creating it and its subdirs."""
+    plane = ensure_owned_dir(browser_plane_dir(account_id))
+    for sub in BROWSER_PLANE_SUBDIRS:
+        ensure_owned_dir(plane / sub)
+    return plane
+
+
 _MEMORY_STORES_ROOT = "_memory_stores"
 
 

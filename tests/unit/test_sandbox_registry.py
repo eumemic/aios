@@ -1419,6 +1419,140 @@ class TestRunSandboxLifecycle:
         registry.release_run.assert_not_awaited()
 
 
+class TestBrowserSandboxLifecycle:
+    """The account browser container ("the computer", jarbot#106): the third
+    registry owner kind, keyed on the ``acc_`` account id itself. Mirrors
+    :class:`TestRunSandboxLifecycle` — warm-hit reuse, dead-handle recycle,
+    bare-destroy release — plus the exhaustive owner routing that replaces the
+    old fall-through-to-session default.
+    """
+
+    @staticmethod
+    def _browser_spec_patch() -> Any:
+        spec = SandboxSpec(
+            session_id="acc_X",
+            instance_id="test-instance",
+            workspace=Mount(host_path=Path("/tmp/plane"), sandbox_path="/workspace"),
+            extra_mounts=(),
+            environment={},
+            labels={},
+            network_policy=None,
+            host_gateway_alias=None,
+            image="browser-image:test",
+            network_name="aios-browser",
+        )
+        return patch("aios.sandbox.registry.build_spec_from_browser", return_value=spec)
+
+    async def test_warm_hit_reuses_container_create_count_stays_one(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with self._browser_spec_patch():
+            h1 = await registry.get_or_provision_browser("acc_X")
+            h2 = await registry.get_or_provision_browser("acc_X")
+
+        assert h1 is h2
+        creates = [c for c in backend.calls if c[0] == "create"]
+        assert len(creates) == 1, "warm hit must NOT re-create the container"
+
+    async def test_dead_container_reprovisions_without_snapshot(self) -> None:
+        backend = FakeBackend(next_handle_id="browser_1")
+        registry = SandboxRegistry(backend=backend)
+
+        with self._browser_spec_patch():
+            await registry.get_or_provision_browser("acc_X")
+            backend.dead_sandbox_ids.add("browser_1")
+            backend.next_handle_id = "browser_2"
+            h2 = await registry.get_or_provision_browser("acc_X")
+
+        assert h2.sandbox_id == "browser_2"
+        assert len([c for c in backend.calls if c[0] == "create"]) == 2
+        assert any(c[0] == "destroy" for c in backend.calls)
+        assert not any(c[0] == "snapshot" for c in backend.calls)
+
+    async def test_release_browser_bare_destroys_no_snapshot(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with self._browser_spec_patch():
+            handle = await registry.get_or_provision_browser("acc_X")
+
+        await registry.release_browser("acc_X")
+
+        destroys = [c for c in backend.calls if c[0] == "destroy"]
+        assert len(destroys) == 1
+        assert destroys[0][1]["sandbox_id"] == handle.sandbox_id
+        assert not any(c[0] == "snapshot" for c in backend.calls)
+        assert registry.peek("acc_X") is None
+
+    async def test_release_browser_is_noop_when_not_cached(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        await registry.release_browser("acc_unknown")
+
+        assert not any(c[0] == "destroy" for c in backend.calls)
+
+    async def test_unconfigured_image_raises_before_any_docker_call(self) -> None:
+        """No browser image configured (the pre-Phase-2 deployment default) →
+        the typed error propagates out of the provision path and the backend is
+        never touched."""
+        from aios.sandbox.spec import BrowserImageUnconfiguredError
+
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_browser",
+                side_effect=BrowserImageUnconfiguredError("no browser image is configured"),
+            ),
+            pytest.raises(BrowserImageUnconfiguredError),
+        ):
+            await registry.get_or_provision_browser("acc_X")
+
+        assert not any(c[0] == "create" for c in backend.calls)
+
+    async def test_touch_browser_bumps_only_cached_owners(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        registry.touch_browser("acc_missing")
+        assert "acc_missing" not in registry._last_used
+
+        with self._browser_spec_patch():
+            await registry.get_or_provision_browser("acc_X")
+        before = registry._last_used["acc_X"]
+        registry.touch_browser("acc_X")
+        assert registry._last_used["acc_X"] >= before
+
+    async def test_release_owner_routes_account_id_to_release_browser(self) -> None:
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        registry.release_run = AsyncMock()  # type: ignore[method-assign]
+        registry.release = AsyncMock()  # type: ignore[method-assign]
+        registry.release_browser = AsyncMock()  # type: ignore[method-assign]
+
+        await registry._release_owner("acc_01TEST")
+
+        registry.release_browser.assert_awaited_once_with("acc_01TEST")
+        registry.release.assert_not_awaited()
+        registry.release_run.assert_not_awaited()
+
+    async def test_release_owner_raises_on_unknown_prefix(self) -> None:
+        """The fall-through-to-session default is dead: an unknown owner kind
+        fails hard rather than publishing a bogus snapshot pointer through the
+        session arm (jarbot#106 §4.3)."""
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+        registry.release = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError, match="not a sandbox owner id"):
+            await registry._release_owner("vlt_01TEST")
+
+        registry.release.assert_not_awaited()
+
+
 class TestSalvageBreaker:
     """The salvage circuit breaker (flatten-brick fix): consecutive salvage
     failures of one corpse suppress further retries, and the transition to
