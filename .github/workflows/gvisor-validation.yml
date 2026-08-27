@@ -15,6 +15,7 @@ on:
 jobs:
   gvisor-validation:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
       # Parse-only: ``get_settings()`` must see a valid Postgres DSN at

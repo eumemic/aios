@@ -8,7 +8,8 @@
 #   scripts/run-checks.sh --fail-on-autofix # fail if ruff auto-formats (for pre-commit)
 #   scripts/run-checks.sh --fail-fast      # stop at first failure
 #
-# Checks: ruff, mypy, tests (unit + connector suites — e2e needs Docker)
+# Checks: ruff, invariants (pooled-await lint, migration heads), mypy,
+# tests (unit + connector suites — e2e needs Docker)
 
 set -uo pipefail
 
@@ -68,6 +69,20 @@ if ! should_skip ruff; then
         uv run ruff check "${LINT_TARGETS[@]}" || fail
         uv run ruff format --check "${LINT_TARGETS[@]}" || fail
     fi
+fi
+
+# ── Static invariants ──────────────────────────────────────────────────────────
+
+# Kept in lock-step with the CI gates that have no ruff/pytest equivalent:
+# the PCA002 pooled-connection lint (code-validation.yml lint job) and the
+# alembic single-head check (migration-head-check.yml).  Both are offline
+# and sub-second.  The remaining CI-only gates (exemption-issue liveness,
+# isolated-install smoke, cross-PR migration collision) need the network
+# and stay CI-only.
+if ! should_skip invariants; then
+    echo "── invariants ──"
+    uv run python scripts/pooled_connection_lint.py || fail
+    uv run python scripts/check_migration_heads.py || fail
 fi
 
 # ── Mypy ───────────────────────────────────────────────────────────────────────

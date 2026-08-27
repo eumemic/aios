@@ -31,3 +31,13 @@ def test_integration_pytest_invocations_dump_stalled_test_stacks() -> None:
     assert all(
         "-o faulthandler_timeout=120" in invocation for invocation in integration_invocations
     )
+
+
+def test_unit_pytest_invocation_dumps_stalled_test_stacks() -> None:
+    workflow = _WORKFLOW.read_text()
+    unit_invocations = [
+        line.strip() for line in workflow.splitlines() if "uv run pytest tests/unit" in line
+    ]
+
+    assert len(unit_invocations) == 1
+    assert all("-o faulthandler_timeout=120" in invocation for invocation in unit_invocations)
