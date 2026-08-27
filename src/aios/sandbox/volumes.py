@@ -232,14 +232,34 @@ def ensure_run_workspace_dir(account_id: str, run_id: str) -> Path:
 
 
 _BROWSER_ROOT = "_browser"
-# The five browser-plane subdirectories (jarbot#106 §4.4/§5.7), all covered by
-# the ONE plane bind mount at ``/workspace`` in the browser container:
-# ``profile`` (Chromium user data — logins; non-reconstructible, never
-# auto-reaped, deleted only by explicit clear-state), ``shots`` (screenshots
-# the tool handlers read host-side), ``frames`` (takeover screencast ring the
-# API tails), ``downloads``, and ``input`` (the takeover input spool the API
-# appends and the driver tails).
-BROWSER_PLANE_SUBDIRS = ("profile", "shots", "frames", "downloads", "input")
+
+
+def _plane_subdirs_from_protocol() -> tuple[str, ...]:
+    """Derive the plane subdirectories from the wire contract.
+
+    The driver's container-side paths (``browser_protocol`` — the single
+    authority for the plane layout, COPY'd into the browser image) determine
+    which host-side subdirs must exist: ``profile`` (Chromium user data —
+    logins; non-reconstructible, never auto-reaped, deleted only by explicit
+    clear-state), ``shots``, ``frames``, ``downloads``, and ``input`` (the
+    takeover input spool). Deriving rather than restating means a renamed
+    subdir cannot ship a driver writing where the host never created a dir.
+    """
+    from pathlib import PurePosixPath
+
+    from aios.sandbox import browser_protocol as proto
+
+    paths = (
+        proto.PROFILE_DIR,
+        proto.SHOTS_DIR,
+        proto.FRAMES_DIR,
+        proto.DOWNLOADS_DIR,
+        proto.INPUT_SPOOL,
+    )
+    return tuple(PurePosixPath(p).relative_to("/workspace").parts[0] for p in paths)
+
+
+BROWSER_PLANE_SUBDIRS = _plane_subdirs_from_protocol()
 
 
 def browser_plane_dir(account_id: str) -> Path:
