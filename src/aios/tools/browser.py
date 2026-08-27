@@ -28,7 +28,7 @@ from typing import Any
 
 from aios.config import get_settings
 from aios.harness import runtime
-from aios.harness.image_resize import ImageDownsampleError, maybe_downsample
+from aios.harness.image_resize import maybe_downsample
 from aios.harness.vision import (
     INLINE_SIZE_CAP_BYTES,
     PROVIDER_INLINE_IMAGE_FORMATS,
@@ -455,7 +455,13 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
     mime = f"image/{image_format.lower()}"
     try:
         resized = await maybe_downsample(data, mime)
-    except ImageDownsampleError as err:
+    except Exception as err:
+        # A downsample/re-encode fault is a WORKER-side fault, not the calling
+        # session's sandbox being unhealthy — the browser eviction contract is
+        # stricter than read's here, so a residual raw Pillow error must NOT
+        # escape and evict. The action already succeeded (the shot was
+        # captured); degrade to text rather than bailing. (ImageDownsampleError
+        # is the expected member; the broaden covers encode edge cases.)
         return ToolResult(
             content=f"{header} captured, but could not be processed: {err}",
             metadata=metadata,

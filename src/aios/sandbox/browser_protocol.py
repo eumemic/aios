@@ -22,15 +22,25 @@ rather than an action error.
 
 Driver obligations (implemented by the browser image, pinned here)
 ------------------------------------------------------------------
-* ``takeover_open`` blocks through the drain of any in-flight agent action,
-  then rotates the epoch; it is **idempotent per** ``grant_id`` (re-invocation
-  returns the standing takeover) — this is what makes the worker's
-  lost-NOTIFY redrive safe after a restart.
+* The ``epoch`` is a BARRIER advanced on EVERY takeover transition — BOTH
+  ``takeover_open`` AND ``takeover_close`` rotate it.
+    - ``takeover_open`` blocks through the drain of any in-flight agent action,
+      then rotates the epoch; it is **idempotent per** ``grant_id``
+      (re-invocation returns the standing takeover) — this is what makes the
+      worker's lost-NOTIFY redrive safe after a restart.
+    - ``takeover_close`` rotates it again as it hands control back. This is
+      load-bearing for the close-with-no-reopen case: a human input line that
+      raced the close (passed the API's open+epoch check just before close, got
+      appended just after) carries the pre-close epoch, which is no longer
+      current — so the driver drops it and it can NEVER land in the
+      agent-controlled browser. Without the close-side rotation the epoch would
+      still match and the stale line would be applied during agent control.
 * A takeover with no input lines and no frame consumption for
   :data:`DRIVER_TAKEOVER_IDLE_TIMEOUT_S` auto-closes (orphan backstop for a
   crash between driver ack and the grant record).
 * Input-spool lines whose ``epoch`` is not current are dropped — the driver
-  is the enforcement authority; any upstream check is convenience.
+  is the enforcement authority (the API's open+epoch check is convenience, and
+  the barrier above is what makes that authority sufficient across a handback).
 * Driver processes run as uid:gid :data:`PLANE_OWNER_UID` so plane files
   (frames, shots) are readable and the input spool writable by the API.
 * The frames manifest carries the trusted-chrome fields per frame

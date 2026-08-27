@@ -186,6 +186,28 @@ class TestDriverCall:
                 registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
             )
 
+    async def test_capacity_pressure_becomes_transient_toolbail_not_eviction(self) -> None:
+        """A cold provision refused for snapshot-pool pressure raises
+        ``SandboxCapacityError`` (a ``SandboxBackendError``). driver_call's
+        transport arm must wrap it into ``BrowserUnavailableError`` so the
+        handler ToolBails "try again shortly" — NOT let it escape as a bare
+        exception the tool dispatcher would classify as evicting the CALLING
+        session's sandbox (jarbot#106). This is the exact hole the typed
+        exception closes; pinned at the driver_call layer because the handler
+        tests patch driver_call away."""
+        from aios.sandbox.backends.base import SandboxCapacityError
+        from aios.sandbox.browser import driver_call
+        from aios.sandbox.browser_protocol import BrowserRequest
+
+        registry_mock = MagicMock()
+        registry_mock.get_or_provision_browser = AsyncMock(
+            side_effect=SandboxCapacityError("snapshot capacity pressure")
+        )
+        with pytest.raises(BrowserUnavailableError):
+            await driver_call(
+                registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
+            )
+
 
 class TestGrantRecheck:
     async def test_absent_arm_is_refused_and_present_arm_admitted(
