@@ -433,6 +433,19 @@ class Settings(BaseSettings):
         description="Resolved/expired browser control-plane call rows older than "
         "this are deleted by the browser reaper.",
     )
+    sandbox_browser_call_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="How long a browser control-plane API request blocks for the "
+        "worker to resolve its call before returning 504. Comfortably above the "
+        "takeover-open drain budget so a legitimately slow open still lands.",
+    )
+    sandbox_browser_input_spool_max_bytes: int = Field(
+        default=64 * 1024**2,
+        ge=1024**2,
+        description="Byte cap on a takeover input spool; a POST that would exceed "
+        "it returns 413. The reaper truncates the spool once no grant is open.",
+    )
     sandbox_browser_reaper_enabled: bool = Field(
         default=True,
         description="Kill-switch for the browser plane reaper (grant TTL expiry, "

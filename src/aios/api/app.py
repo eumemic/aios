@@ -23,6 +23,7 @@ from aios.api.routers import (
     accounts,
     admin,
     agents,
+    browser,
     connections,
     connectors,
     environments,
@@ -197,6 +198,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(environments.router)
     app.include_router(agents.router)
+    app.include_router(browser.router)
     app.include_router(sessions.router)
     app.include_router(skills.router)
     app.include_router(vaults.router)
