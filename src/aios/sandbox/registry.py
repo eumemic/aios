@@ -58,6 +58,7 @@ from aios.sandbox.backends.base import (
     ManagedImage,
     SandboxBackend,
     SandboxBackendError,
+    SandboxCapacityError,
     SandboxHandle,
     SandboxSnapshotTimeoutError,
     SandboxSpec,
@@ -394,7 +395,7 @@ class SandboxRegistry:
             pool_budget_bytes=pressure.pool_budget_bytes,
             pressured_accounts=sorted(pressure.pressured_accounts),
         )
-        raise RuntimeError(
+        raise SandboxCapacityError(
             "sandbox provisioning temporarily unavailable: snapshot capacity pressure"
         )
 
@@ -1216,7 +1217,7 @@ class SandboxRegistry:
         row already reads as "not observable" (``NotFoundError``), which is the
         honest answer, whereas a destroyed sandbox is an outage.
         """
-        if not handle.owner_id.startswith("sess_"):
+        if not handle.owner_id.startswith(f"{ids.SESSION}_"):
             return
         from aios.harness import runtime as harness_runtime
 
@@ -2599,10 +2600,12 @@ class SandboxRegistry:
         ephemeral destroy + broker-secret drop; a browser is a bare destroy —
         its durable state lives on the plane bind mount). The discriminator is
         :func:`aios.ids.sandbox_owner_kind` — EXHAUSTIVE, raising on an unknown
-        prefix: the historical fall-through-to-session default would publish a
-        bogus snapshot pointer for a non-session owner via the
-        rowcount-unchecked pointer write (jarbot#106 §4.3), so an unknown owner
-        fails hard here instead.
+        prefix. The historical fall-through-to-session default would run the
+        session-release path for a non-session owner: the pointer write is a
+        0-row no-op (prefixes are disjoint, so no ``sessions.id`` matches an
+        ``acc_``/``wfr_`` id), but it still wastes a rootfs commit and leaks a
+        garbage snapshot image (jarbot#106 §4.3), so an unknown owner fails hard
+        here instead.
         """
         match sandbox_owner_kind(owner_id):
             case "run":

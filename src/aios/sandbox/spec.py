@@ -1272,7 +1272,16 @@ def build_spec_from_browser(account_id: str) -> SandboxSpec:
     bind mount, so release is a bare destroy: nothing in the rootfs is worth
     committing.
     """
+    from aios.ids import ACCOUNT
     from aios.sandbox.volumes import ensure_browser_plane_dir
+
+    # Defense-in-depth: the plane dir and the container owner are keyed on
+    # ``account_id``, so a caller passing a client-influenced value would get a
+    # cross-account plane mount / browser hijack. Every real caller passes a
+    # server-minted account id; assert the shape here so a future one can't
+    # regress the invariant silently.
+    if not account_id.startswith(f"{ACCOUNT}_"):
+        raise ValueError(f"browser owner must be an account id (acc_…), got {account_id!r}")
 
     settings = get_settings()
     if not settings.sandbox_browser_image:
@@ -1293,10 +1302,15 @@ def build_spec_from_browser(account_id: str) -> SandboxSpec:
             INSTANCE_LABEL_KEY: settings.instance_id,
             SESSION_LABEL_KEY: account_id,
         },
-        # No egress policy machinery: the container is unreachable from
-        # sandboxes and runs no agent code; per-site policy is driver-level
-        # (jarbot#106 §5.2). No worker alias: nothing in the container may
-        # reach the worker, the broker, or the API.
+        # No egress policy machinery: the container is unreachable FROM
+        # sandboxes (inter-bridge isolation + ICC-off) and runs no agent code;
+        # per-site policy is driver-level (jarbot#106 §5.2). The container's
+        # inability to drive the control plane rests on topology, NOT on egress
+        # blocking (egress is open in Phase 1): no published ports, no
+        # tool-broker socket mounted, ``host_gateway_alias=None`` (no
+        # host.docker.internal alias), and the API requires a bearer key. A
+        # future Phase adds per-site egress lockdown for the untrusted web
+        # content the browser renders.
         network_policy=None,
         host_gateway_alias=None,
         image=settings.sandbox_browser_image,

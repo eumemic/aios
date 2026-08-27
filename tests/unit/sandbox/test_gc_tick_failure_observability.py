@@ -21,6 +21,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from aios.sandbox.backends.base import SandboxCapacityError
 from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 from tests.helpers.sandbox import FakeBackend
 
@@ -110,7 +111,7 @@ async def test_aborted_tick_still_withholds_the_all_clear(
     assert registry._provisioning_pressure == GcPressureResult(
         pool_used_bytes=99, pool_budget_bytes=10
     )
-    with pytest.raises(RuntimeError, match="snapshot capacity pressure"):
+    with pytest.raises(SandboxCapacityError, match="snapshot capacity pressure"):
         registry._admit_capacity_provision("sess_new", account_id="acct")
 
 

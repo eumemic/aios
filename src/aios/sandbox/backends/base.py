@@ -296,6 +296,19 @@ class SandboxSnapshotTimeoutError(SandboxBackendError):
     """Size-dependent snapshot work exceeded its deadline."""
 
 
+class SandboxCapacityError(SandboxBackendError):
+    """A cold provision was refused because the host snapshot pool (or the
+    owning account) is over its capacity budget.
+
+    A :class:`SandboxBackendError` subclass so every provision caller that
+    already treats backend failure as transient handles it uniformly: the
+    browser driver path wraps it into a "try again shortly" ToolBail rather
+    than letting a bare exception escape and evict the *calling* session's
+    sandbox. The condition is transient (it clears when the pool drains), never
+    the caller's fault.
+    """
+
+
 @runtime_checkable
 class SandboxBackend(Protocol):
     """The five-verb surface every backend implements."""

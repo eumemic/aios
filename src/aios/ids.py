@@ -152,10 +152,13 @@ def sandbox_owner_kind(owner_id: str) -> Literal["session", "run", "browser"]:
     jarbot#106) is a bare destroy whose durable state lives on the host plane
     bind mount, never in the rootfs.
 
-    Raises ``ValueError`` on any other prefix: an unknown owner falling
-    through to the session arm would publish a bogus snapshot pointer via the
-    rowcount-unchecked write path (``unscoped_set_session_snapshot``), so the
-    fork fails hard instead of guessing.
+    Raises ``ValueError`` on any other prefix. An unknown owner falling through
+    to the session arm would run the full session-release path against it: since
+    an ``acc_…``/``wfr_…`` id can never equal a ``sessions.id`` (disjoint
+    prefixes), ``unscoped_set_session_snapshot`` matches 0 rows — a silent
+    no-op, not a corrupted pointer — but the release still wastes a rootfs
+    commit and leaks a garbage snapshot image tagged for a non-existent session
+    (residue the GC then chases). Failing hard avoids that entirely.
     """
     if owner_id.startswith(f"{SESSION}_"):
         return "session"

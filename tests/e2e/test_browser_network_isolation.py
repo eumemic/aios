@@ -13,9 +13,12 @@ against real Docker:
 * a container provisioned through the REAL ``build_spec_from_browser`` path
   lands on ``aios-browser`` and publishes no ports.
 
-Each unreachability assertion is paired with a self-serve positive control
-(the target curls itself) so a pass can never come from the listener simply
-not being up.
+Each unreachability assertion is double-guarded against a vacuous pass: the
+listener curls ITSELF (so the target is proven up, absorbing the bind race),
+and the prober curls its OWN loopback listener (``SELF_REACHED``, so the prober
+is proven to have run with working curl). A missing cross-network sentinel is
+therefore 'routing blocked', never 'listener down' or 'prober never started';
+the prober's container exit is also asserted 0.
 """
 
 from __future__ import annotations
@@ -55,6 +58,45 @@ async def _run(argv: list[str], *, deadline_s: float) -> subprocess.CompletedPro
         text=True,
         check=False,
         timeout=deadline_s,
+    )
+
+
+def _prober_script(name: str, ip: str) -> str:
+    """Bash for an isolation prober, with an in-container POSITIVE CONTROL.
+
+    The prober first serves and curls its OWN loopback listener (``SELF_REACHED``)
+    — loopback works regardless of the Docker network, so a present sentinel
+    proves this container ran and its curl works. Only then does it probe the
+    cross-network target by name and by IP. The caller asserts ``SELF_REACHED``
+    is present AND the container exited 0: without both, a missing
+    ``BY_*_REACHED`` could mean 'prober never started', not 'routing blocked' —
+    the vacuous pass this guards against. Trailing ``true`` keeps exit 0 so the
+    absent sentinels are the signal, not a nonzero curl.
+    """
+    return (
+        f"python3 -m http.server {SIDECAR_PORT} --bind 127.0.0.1 >/dev/null 2>&1 & "
+        f"curl -s --max-time 5 --retry 10 --retry-delay 1 --retry-connrefused "
+        f"http://127.0.0.1:{SIDECAR_PORT}/ >/dev/null && echo SELF_REACHED; "
+        # By NAME: cross-network Docker DNS must not resolve it.
+        f"curl -s --max-time 5 http://{name}:{SIDECAR_PORT}/ && echo BY_NAME_REACHED; "
+        # By IP: inter-bridge isolation must drop the packets.
+        f"curl -s --max-time 5 http://{ip}:{SIDECAR_PORT}/ && echo BY_IP_REACHED; "
+        "true"
+    )
+
+
+def _assert_isolated(result: subprocess.CompletedProcess[str], *, ip: str, hint: str) -> None:
+    """Shared assertions: the prober ran (exit 0), its positive control fired,
+    and neither cross-network sentinel appeared."""
+    assert result.returncode == 0, f"prober did not run cleanly ({hint}): {result.stderr.strip()}"
+    assert "SELF_REACHED" in result.stdout, (
+        f"positive control failed ({hint}): the prober could not curl its own loopback "
+        f"listener, so a missing cross-network sentinel is NOT proof of isolation\n"
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "BY_NAME_REACHED" not in result.stdout, f"{hint} reached target by name\n{result.stdout}"
+    assert "BY_IP_REACHED" not in result.stdout, (
+        f"{hint} reached target by IP {ip}\n{result.stdout}"
     )
 
 
@@ -154,20 +196,11 @@ async def test_sandbox_cannot_reach_browser_network_by_name_or_ip(
             IMAGE,
             "bash",
             "-c",
-            # By NAME: cross-network Docker DNS must not resolve it.
-            # By IP: inter-bridge isolation must drop the packets.
-            f"curl -s --max-time 5 http://{name}:{SIDECAR_PORT}/ && echo BY_NAME_REACHED; "
-            f"curl -s --max-time 5 http://{ip}:{SIDECAR_PORT}/ && echo BY_IP_REACHED; "
-            "true",
+            _prober_script(name, ip),
         ],
         deadline_s=60,
     )
-    assert "BY_NAME_REACHED" not in result.stdout, (
-        f"sandbox resolved+reached the browser container by name\n{result.stdout}"
-    )
-    assert "BY_IP_REACHED" not in result.stdout, (
-        f"sandbox reached the browser container by IP {ip}\n{result.stdout}"
-    )
+    _assert_isolated(result, ip=ip, hint="sandbox->browser")
 
 
 async def test_browser_containers_cannot_reach_each_other(
@@ -189,18 +222,11 @@ async def test_browser_containers_cannot_reach_each_other(
             IMAGE,
             "bash",
             "-c",
-            f"curl -s --max-time 5 http://{name}:{SIDECAR_PORT}/ && echo BY_NAME_REACHED; "
-            f"curl -s --max-time 5 http://{ip}:{SIDECAR_PORT}/ && echo BY_IP_REACHED; "
-            "true",
+            _prober_script(name, ip),
         ],
         deadline_s=60,
     )
-    assert "BY_NAME_REACHED" not in result.stdout, (
-        f"browser container reached a sibling by name (ICC not off?)\n{result.stdout}"
-    )
-    assert "BY_IP_REACHED" not in result.stdout, (
-        f"browser container reached a sibling by IP {ip} (ICC not off?)\n{result.stdout}"
-    )
+    _assert_isolated(result, ip=ip, hint="browser->sibling (ICC off?)")
 
 
 async def test_real_browser_spec_lands_on_browser_network_with_no_ports(

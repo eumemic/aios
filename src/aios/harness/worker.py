@@ -399,7 +399,24 @@ async def worker_main() -> None:
         mcp_session_pool = McpSessionPool()
         github_clone_breaker = GithubCloneBreaker()
         await ensure_sandbox_network()
-        await ensure_browser_network()
+        # Only touch the browser bridge when the feature is actually configured.
+        # ``ensure_browser_network`` hard-fails on a pre-existing ICC-open
+        # network (correct — never run browser containers on an open bridge),
+        # but a browser-disabled deployment (the default, ``sandbox_browser_image``
+        # unset) has no reason to create or verify it, and must not wedge every
+        # worker over a network it will never use (jarbot#106).
+        if settings.sandbox_browser_image:
+            if settings.sandbox_browser_seccomp_profile == "unconfined":
+                log.warning(
+                    "sandbox.browser_seccomp_unconfined",
+                    detail=(
+                        "browser image configured but seccomp is 'unconfined' — the "
+                        "container renders untrusted web content and holds durable "
+                        "logins; ship a restrictive browser seccomp profile before "
+                        "enabling browser_* grants (jarbot#106 Phase 2)."
+                    ),
+                )
+            await ensure_browser_network()
         tool_broker = ToolBroker(socket_path=settings.tool_broker_socket_path)
         await tool_broker.start()
         for broker_task in tool_broker.serve_tasks():
