@@ -455,6 +455,48 @@ class TestDiscoverSessionMcpToolsPersistsAutoAllow:
         assert tools[0]["function"]["name"] == "mcp__github__get_me"
 
 
+class _StubConn:
+    async def __aenter__(self) -> _StubConn:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _StubPool:
+    def acquire(self) -> _StubConn:
+        return _StubConn()
+
+
+async def _run_prelude_and_capture_persist_flag(session: Any, *, read_only: bool = False) -> bool:
+    from aios.harness.step_context import compute_step_prelude
+
+    agent = _agent(
+        binding=AgentBinding(agent_id="agt_1", version=3),
+        mcp_servers=[McpServerSpec(name="github", url="https://mcp.github")],
+        tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="github")],
+    )
+
+    with (
+        patch("aios.harness.loop.discover_session_mcp_tools", new_callable=AsyncMock) as discover,
+        patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])),
+    ):
+        discover.return_value = ([], {})
+        await compute_step_prelude(
+            _StubPool(),
+            "sess_x",
+            account_id="acc_test_stub",
+            session=session,
+            agent=agent,
+            channels=[],
+            memory_store_echoes=[],
+            read_only=read_only,
+        )
+
+    discover.assert_awaited_once()
+    return bool(discover.call_args.kwargs["persist_auto_allow"])
+
+
 class TestComputeStepPreludeWiresPersistAutoAllow:
     """``compute_step_prelude`` must compute ``persist_auto_allow`` from the
     SESSION (not the surface alone) — ``StepSurface``/``AgentBinding`` can't
@@ -464,131 +506,30 @@ class TestComputeStepPreludeWiresPersistAutoAllow:
     async def test_plain_live_session_persists(self) -> None:
         from unittest import mock
 
-        from aios.harness.step_context import compute_step_prelude
-
-        agent = _agent(
-            binding=AgentBinding(agent_id="agt_1", version=3),
-            mcp_servers=[McpServerSpec(name="github", url="https://mcp.github")],
-            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="github")],
-        )
         session = mock.Mock(surface_frozen=False, agent_version=None, parent_run_id=None)
-
-        with (
-            patch(
-                "aios.harness.loop.discover_session_mcp_tools", new_callable=AsyncMock
-            ) as discover,
-            patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])),
-        ):
-            discover.return_value = ([], {})
-
-            class _StubConn:
-                async def __aenter__(self) -> _StubConn:
-                    return self
-
-                async def __aexit__(self, *exc: object) -> None:
-                    return None
-
-            class _StubPool:
-                def acquire(self) -> _StubConn:
-                    return _StubConn()
-
-            await compute_step_prelude(
-                _StubPool(),
-                "sess_x",
-                account_id="acc_test_stub",
-                session=session,
-                agent=agent,
-                channels=[],
-                memory_store_echoes=[],
-            )
-
-        discover.assert_awaited_once()
-        assert discover.call_args.kwargs["persist_auto_allow"] is True
+        assert await _run_prelude_and_capture_persist_flag(session) is True
 
     async def test_frozen_session_does_not_persist(self) -> None:
         from unittest import mock
 
-        from aios.harness.step_context import compute_step_prelude
-
-        agent = _agent(
-            binding=AgentBinding(agent_id="agt_1", version=3),
-            mcp_servers=[McpServerSpec(name="github", url="https://mcp.github")],
-            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="github")],
-        )
         session = mock.Mock(surface_frozen=True, agent_version=None, parent_run_id="run_1")
-
-        with (
-            patch(
-                "aios.harness.loop.discover_session_mcp_tools", new_callable=AsyncMock
-            ) as discover,
-            patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])),
-        ):
-            discover.return_value = ([], {})
-
-            class _StubConn:
-                async def __aenter__(self) -> _StubConn:
-                    return self
-
-                async def __aexit__(self, *exc: object) -> None:
-                    return None
-
-            class _StubPool:
-                def acquire(self) -> _StubConn:
-                    return _StubConn()
-
-            await compute_step_prelude(
-                _StubPool(),
-                "sess_x",
-                account_id="acc_test_stub",
-                session=session,
-                agent=agent,
-                channels=[],
-                memory_store_echoes=[],
-            )
-
-        discover.assert_awaited_once()
-        assert discover.call_args.kwargs["persist_auto_allow"] is False
+        assert await _run_prelude_and_capture_persist_flag(session) is False
 
     async def test_version_pinned_session_does_not_persist(self) -> None:
         from unittest import mock
 
-        from aios.harness.step_context import compute_step_prelude
-
-        agent = _agent(
-            binding=AgentBinding(agent_id="agt_1", version=2),
-            mcp_servers=[McpServerSpec(name="github", url="https://mcp.github")],
-            tools=[ToolSpec(type="mcp_toolset", enabled=True, mcp_server_name="github")],
-        )
         session = mock.Mock(surface_frozen=False, agent_version=2, parent_run_id=None)
+        assert await _run_prelude_and_capture_persist_flag(session) is False
 
-        with (
-            patch(
-                "aios.harness.loop.discover_session_mcp_tools", new_callable=AsyncMock
-            ) as discover,
-            patch("aios.db.queries.get_open_obligations", new=AsyncMock(return_value=[])),
-        ):
-            discover.return_value = ([], {})
+    async def test_read_only_preview_never_persists_even_on_live_session(self) -> None:
+        """Vic's review finding on PR #2272: ``GET /v1/sessions/{id}/context``
+        is documented as side-effect-free, but before this fix it called
+        ``compute_step_prelude`` with a plain live-latest session (the common
+        case) — which computed ``persist_auto_allow=True`` and fired a real
+        ``update_agent`` write from inside a debug preview GET. The router now
+        passes ``read_only=True``, which must force ``persist_auto_allow=False``
+        regardless of session liveness."""
+        from unittest import mock
 
-            class _StubConn:
-                async def __aenter__(self) -> _StubConn:
-                    return self
-
-                async def __aexit__(self, *exc: object) -> None:
-                    return None
-
-            class _StubPool:
-                def acquire(self) -> _StubConn:
-                    return _StubConn()
-
-            await compute_step_prelude(
-                _StubPool(),
-                "sess_x",
-                account_id="acc_test_stub",
-                session=session,
-                agent=agent,
-                channels=[],
-                memory_store_echoes=[],
-            )
-
-        discover.assert_awaited_once()
-        assert discover.call_args.kwargs["persist_auto_allow"] is False
+        session = mock.Mock(surface_frozen=False, agent_version=None, parent_run_id=None)
+        assert await _run_prelude_and_capture_persist_flag(session, read_only=True) is False

@@ -946,6 +946,12 @@ async def get_context(
         agent=agent,
         channels=channels,
         memory_store_echoes=memory_echoes,
+        # #2270 (Vic review, PR #2272): this preview endpoint is documented
+        # above as side-effect-free — read_only=True forces
+        # persist_auto_allow=False in compute_step_prelude regardless of
+        # session liveness, so a debug GET can never silently bump the
+        # live agent's tools config underneath it.
+        read_only=True,
     )
     windowed = await service.read_windowed_events(
         pool,
