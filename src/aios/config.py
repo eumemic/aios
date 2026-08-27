@@ -344,6 +344,58 @@ class Settings(BaseSettings):
         "runc) preserves local/CI behavior; set AIOS_SANDBOX_RUNTIME=runsc to run "
         "containers under gVisor where the host has runsc installed.",
     )
+    # ── Account browser containers ("the computer", jarbot#106 Phase 1) ────
+    sandbox_browser_image: str = Field(
+        default="",
+        description="Docker image ref for the per-account browser container "
+        "(Chromium + driver daemon). EMPTY (the default) means browser tools are "
+        "unavailable on this deployment: every browser_* call fails with a "
+        "model-visible 'not available' error before any Docker call. Set "
+        "AIOS_SANDBOX_BROWSER_IMAGE once the browser image ships.",
+    )
+    sandbox_browser_cpu_quota: float | None = Field(
+        default=2.0,
+        ge=0.01,
+        description="CPU quota for a browser container (docker run --cpus). "
+        "One shared Chromium serves every bot in the account, so it gets more "
+        "headroom than an agent sandbox. None = host default (unlimited).",
+    )
+    sandbox_browser_memory_bytes: int | None = Field(
+        default=2 * 1024**3,
+        ge=4 * 1024 * 1024,
+        description="Memory cap for a browser container in bytes (docker run "
+        "--memory, swap pinned to the same value). Default 2 GiB. None = unlimited.",
+    )
+    sandbox_browser_pids_limit: int | None = Field(
+        default=512,
+        ge=1,
+        description="PID cap for a browser container (docker run --pids-limit). "
+        "Chromium spawns one renderer process per page plus helpers; 512 leaves "
+        "ample slack while bounding a fork bomb. None = unlimited.",
+    )
+    sandbox_browser_seccomp_profile: str = Field(
+        default="unconfined",
+        description="Seccomp profile path for browser containers. Defaults to "
+        "'unconfined' until the browser image ships its own authored profile "
+        "(docker/seccomp-browser.json — MUST permit unprivileged user namespaces "
+        "so Chromium's internal sandbox stays ON; running --no-sandbox inside "
+        "the container that holds the credential jar is a red result, not a "
+        "workaround). The sandbox profile is NOT reused: it denies the "
+        "namespace syscalls Chromium's sandbox requires.",
+    )
+    sandbox_browser_runtime: str | None = Field(
+        default=None,
+        description="Optional Docker runtime for browser containers (e.g. runsc "
+        "for gVisor). Independent of AIOS_SANDBOX_RUNTIME so the browser lane "
+        "can adopt or drop gVisor without moving agent sandboxes.",
+    )
+    sandbox_browser_provision_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        description="Wall-clock budget for provisioning a browser container "
+        "(image resolve + create + start), separate from the per-action exec "
+        "deadline so a cold start or first-pull never eats an action's budget.",
+    )
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,

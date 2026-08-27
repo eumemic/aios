@@ -131,6 +131,12 @@ class SandboxSpec:
     # default runtime in place (local/CI no-op); DockerBackend translates a value
     # such as ``runsc`` into ``docker run --runtime runsc``.
     runtime: str | None = None
+    # Docker network the container joins at create (jarbot#106). ``None`` ⇒
+    # the shared sandbox bridge (``SANDBOX_NETWORK_NAME``); the browser spec
+    # builder sets the ICC-off browser bridge so the account computer is
+    # unreachable from every agent sandbox by construction (§6.2). A network
+    # NAME, not an egress policy — that is ``network_policy``.
+    network_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +145,9 @@ class SandboxHandle:
 
     ``owner_id`` is the opaque label of whatever the sandbox belongs to — a
     session ULID (``sess_…``) for a session sandbox, a workflow-run ULID
-    (``wfr_…``) for a run sandbox (#988). The registry keys its handle map on
+    (``wfr_…``) for a run sandbox (#988), or an account ULID (``acc_…``) for
+    the account's shared browser container (jarbot#106). The registry keys
+    its handle map on
     it; the backend copies it from ``SandboxSpec.session_id`` (which stays the
     opaque owner-label field) at create time. Logs/error messages stamp it so a
     failure is attributable regardless of which owner kind it is.
@@ -286,6 +294,19 @@ class SandboxBackendError(Exception):
 
 class SandboxSnapshotTimeoutError(SandboxBackendError):
     """Size-dependent snapshot work exceeded its deadline."""
+
+
+class SandboxCapacityError(SandboxBackendError):
+    """A cold provision was refused because the host snapshot pool (or the
+    owning account) is over its capacity budget.
+
+    A :class:`SandboxBackendError` subclass so every provision caller that
+    already treats backend failure as transient handles it uniformly: the
+    browser driver path wraps it into a "try again shortly" ToolBail rather
+    than letting a bare exception escape and evict the *calling* session's
+    sandbox. The condition is transient (it clears when the pool drains), never
+    the caller's fault.
+    """
 
 
 @runtime_checkable
@@ -540,7 +561,7 @@ class SandboxBackend(Protocol):
 # The orphan reaper uses ``MANAGED_LABEL_KEY=MANAGED_LABEL_VALUE`` plus
 # ``INSTANCE_LABEL_KEY=<this instance id>`` to find the worker's own
 # sandboxes (and only those — never a sibling worker's). ``SESSION_LABEL_KEY``
-# carries the aios session id so the reaper can compare against the worker's
+# carries the opaque owner id (session/run/account) so the reaper can compare against the worker's
 # active session set.
 #
 # Backends that don't natively support labels (e.g. a host-subprocess

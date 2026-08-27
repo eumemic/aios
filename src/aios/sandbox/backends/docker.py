@@ -200,7 +200,7 @@ class DockerBackend:
         for key, value in spec.labels.items():
             argv.extend(["--label", f"{key}={value}"])
 
-        argv.extend(["--network", SANDBOX_NETWORK_NAME])
+        argv.extend(["--network", spec.network_name or SANDBOX_NETWORK_NAME])
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is

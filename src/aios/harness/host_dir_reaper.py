@@ -195,7 +195,17 @@ def _scan_run_workspaces(*, min_age_seconds: float, now: float) -> list[_Candida
 
     roots = [resolved_workspace_root / "_runs"]  # pre-account-scoping residue
     for account_dir in resolved_workspace_root.iterdir():
-        if account_dir.name == "_runs" or account_dir.is_symlink() or not account_dir.is_dir():
+        # ``_browser`` is the browser-plane root (jarbot#106 §4.4), a sibling
+        # of the account dirs, NOT an account: its per-account subtrees hold
+        # the Chromium profile — real logins, non-reconstructible — which is
+        # never auto-reaped. Only the explicit clear-state operation deletes
+        # plane state; the browser plane ships its own byte-quota reaper for
+        # shots/frames/downloads.
+        if (
+            account_dir.name in ("_runs", "_browser")
+            or account_dir.is_symlink()
+            or not account_dir.is_dir()
+        ):
             continue
         resolved_account_dir = account_dir.resolve()
         if resolved_account_dir.parent != resolved_workspace_root:
