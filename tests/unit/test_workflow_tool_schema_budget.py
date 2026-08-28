@@ -30,10 +30,11 @@ import pytest
 import aios.tools  # noqa: F401 - trigger built-in registration side effects
 from aios.harness.step_context import _inject_workflow_script_contract
 from aios.harness.tokens import approx_tokens
+from aios.harness.tool_dispatch import _shape_tool_result, _ToolCall
 from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT, WorkflowCreate
 from aios.tools.input import tool_input
 from aios.tools.invoke import ToolBail, prepare_builtin
-from aios.tools.registry import openai_tool_entry, registry
+from aios.tools.registry import ToolResult, openai_tool_entry, registry
 from aios.tools.workflow_management import (
     SCRIPT_CONTRACT_TOOL_NAME,
     WORKFLOW_AUTHORING_TOOL_NAMES,
@@ -133,7 +134,48 @@ def test_script_field_points_at_a_real_tool() -> None:
 
 async def test_contract_tool_returns_the_whole_contract() -> None:
     result = await get_workflow_script_contract_handler("sess_x", {})
-    assert result == {"contract": WORKFLOW_SCRIPT_CONTRACT}
+    assert isinstance(result, ToolResult)
+    assert result.content == WORKFLOW_SCRIPT_CONTRACT
+
+
+async def test_contract_reaches_the_model_as_real_multi_line_text() -> None:
+    """The #2291 convention: a plain-string ``ToolResult``, never a dict.
+
+    ``_shape_tool_result`` JSON-encodes every non-``ToolResult`` return, escaping
+    each newline into a literal ``\\n`` and collapsing this ~4KB document — which
+    exists to be read as formatted prose, code block included — onto one line. A
+    bare ``str`` return is wrong the same way (it hits the same arm, just
+    double-quoted), so the type is load-bearing and nothing checks it at the
+    registry boundary.
+    """
+    result = await get_workflow_script_contract_handler("sess_x", {})
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.content, str)
+
+    # Drive the real shaping layer — the bug lives in the seam between the
+    # handler's return type and this function, so neither alone would catch it.
+    tc = _ToolCall(call_id="tc_1", name=SCRIPT_CONTRACT_TOOL_NAME, raw_args={}, bound_log=None)
+    content = _shape_tool_result(tc, result)["content"]
+
+    assert content == WORKFLOW_SCRIPT_CONTRACT
+    # Real newlines, not the escaped two-character sequence json.dumps emits.
+    assert "\n" in content
+    assert content.count("\n") > 40
+    assert "\\n" not in content
+    assert not content.startswith('"')
+    assert "async def main(input)" in content
+
+
+async def test_a_dict_return_would_have_collapsed_the_contract() -> None:
+    """Negative control: proves the assertion above discriminates.
+
+    Without this, a future refactor back to ``{"contract": text}`` could pass the
+    test above if the shaping layer changed underneath it.
+    """
+    tc = _ToolCall(call_id="tc_1", name=SCRIPT_CONTRACT_TOOL_NAME, raw_args={}, bound_log=None)
+    collapsed = _shape_tool_result(tc, {"contract": WORKFLOW_SCRIPT_CONTRACT})["content"]
+    assert "\\n" in collapsed
+    assert "\n" not in collapsed
 
 
 def _offered(*names: str) -> list[dict[str, Any]]:

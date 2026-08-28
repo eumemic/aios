@@ -34,7 +34,7 @@ from aios.models.workflows import (
 )
 from aios.tools import workflow_management as wm
 from aios.tools.invoke import ToolBail, invoke_builtin
-from aios.tools.registry import registry
+from aios.tools.registry import ToolResult, registry
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 _SCRIPT_CONTRACT_TOKENS = ("async def main", "agent", "tool", "gate", "parallel", "pipeline", "log")
@@ -125,9 +125,12 @@ class TestWorkflowScriptContractDiscovery:
         assert "Injected capability API" not in json.dumps(tool.parameters_schema)
 
     async def test_contract_tool_serves_the_contract(self) -> None:
+        # Plain-string ToolResult, per the #2291 convention — a dict return would
+        # reach the model as one JSON-escaped line (see test_workflow_tool_schema_budget).
         result = await invoke_builtin("ses_1", "get_workflow_script_contract", {})
-        assert isinstance(result, dict)
-        _assert_script_contract_present(result["contract"])
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, str)
+        _assert_script_contract_present(result.content)
 
 
 class TestSchemaRejectsInjectedTrustedIds:
