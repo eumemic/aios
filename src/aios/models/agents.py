@@ -97,6 +97,14 @@ BuiltinToolType = Literal[
 # and ignore this field.
 PermissionPolicy = Literal["always_allow", "always_ask"]
 
+# Permission values for MCP toolset/tool configs — a superset of
+# ``PermissionPolicy``. ``auto_review`` (MCP-only, #2279/jarbot#229) routes the
+# call through the background checker: a cheap model grades it and the call
+# either executes (``allow``) or holds for human confirmation (``ask``).
+# Deliberately NOT valid for built-ins or HTTP routes: the checker gates MCP
+# integrations only.
+McpPermissionValue = Literal["always_allow", "always_ask", "auto_review"]
+
 # Transport classification — which callers may invoke a tool.
 #   "agent_tool": model only (the LLM's tool-call surface).
 #   "cli":        sandbox-side ``tool`` CLI only (bash inside the session).
@@ -416,11 +424,15 @@ class McpServerSpec(BaseModel):
 
 
 class McpPermissionPolicy(BaseModel):
-    """Wrapper matching Anthropic's ``{type: "always_allow"}`` shape."""
+    """Wrapper matching Anthropic's ``{type: "always_allow"}`` shape.
+
+    Accepts ``auto_review`` in addition to the two base policies — MCP
+    configs are the only place the checker can be requested.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    type: PermissionPolicy
+    type: McpPermissionValue
 
 
 class McpToolsetConfig(BaseModel):
@@ -1034,10 +1046,13 @@ class StepSurface(BaseModel):
 
     Nominal replacement for the ``Agent | AgentVersion`` structural union (the
     two wire read-models) plus the ``agent_id=""``/``version=0`` sentinel that
-    encoded "no agent at all". Carries **exactly** the eleven config fields the
+    encoded "no agent at all". Carries **exactly** the twelve config fields the
     harness consumes off the loaded surface (verified by grep over every
-    caller — nothing reads ``name``/``metadata``/``description``/``created_at``
-    off it) plus a discriminated :data:`StepBinding` identity.
+    caller — nothing reads ``name``/``metadata``/``created_at`` off it) plus a
+    discriminated :data:`StepBinding` identity. ``description`` joined for the
+    auto-review checker (jarbot#229), which reads it as the agent's implicit
+    scope ("bot title + job description"); generic workflow children carry
+    ``None``.
 
     ``binding`` is a total, two-arm discriminated kind — no ``.id``/``.agent_id``
     spelling divergence to duck-type across and no sentinel to forget, so a
@@ -1058,6 +1073,7 @@ class StepSurface(BaseModel):
     window_max: int
     preempt_policy: PreemptPolicy
     output_style: OutputStyle = "default"
+    description: str | None = None
     binding: StepBinding
 
 
@@ -1126,7 +1142,7 @@ def resolve_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPoli
     return None
 
 
-def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy | None:
+def resolve_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> McpPermissionValue | None:
     """Look up the permission policy for an MCP tool by namespaced name.
 
     Precedence (mirrors the broker's resolution so the model path and CLI

@@ -118,6 +118,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.find_tool_confirmed_event",
         "queries.find_tool_confirmed_seqs",
         "queries.find_tool_result_event",
+        "queries.has_tool_requested_marker",
         "queries.gc_snapshot_session_states",
         "queries.get_account",
         "queries.get_account_spent_microusd",

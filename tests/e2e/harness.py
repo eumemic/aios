@@ -328,6 +328,12 @@ class Harness:
         self._response_idx = 0
         self._env_id: str | None = None
         self.model_calls: list[dict[str, Any]] = []  # captured kwargs from each litellm call
+        # Separate FIFO for the auto-review checker model (jarbot#229): the
+        # agent is always ``fake/test``, so calls whose ``model`` equals
+        # ``settings.auto_review_model`` dispatch here instead of consuming
+        # the agent's scripted responses.
+        self._checker_responses: list[Any] = []
+        self.checker_calls: list[dict[str, Any]] = []
         self._last_streaming_response: dict[str, Any] | None = None
         # Tools registered via ``register_tool`` this test, so ``start`` can auto-offer
         # them (name -> {description, input_schema}). See ``start`` for the rationale.
@@ -342,6 +348,18 @@ class Harness:
         self._responses = list(responses)
         self._response_idx = 0
         self.model_calls = []
+
+    def script_checker(self, responses: list[Any]) -> None:
+        """Scripted verdicts for the auto-review checker model.
+
+        Each item is a dict (JSON-dumped as the checker's reply content — e.g.
+        ``{"verdict": "allow", "reason": "ok"}``), a raw string (returned
+        verbatim, for junk-output tests), or an ``Exception`` instance (raised
+        from the fake call, for transient/infra-failure tests). Captured
+        kwargs land on ``self.checker_calls`` for prompt-shape assertions.
+        """
+        self._checker_responses = list(responses)
+        self.checker_calls = []
 
     def register_tool(
         self,
@@ -652,7 +670,13 @@ class Harness:
 
         Also records the kwargs (including ``messages``) on
         ``self.model_calls`` for test assertions about context shape.
+        Checker-model calls (``model == settings.auto_review_model``) consume
+        the :meth:`script_checker` FIFO instead of the agent's.
         """
+        from aios.config import get_settings
+
+        if kwargs.get("model") == get_settings().auto_review_model:
+            return self._pop_checker_response(**kwargs)
         self.model_calls.append(kwargs)
         if self._response_idx >= len(self._responses):
             raise AssertionError(
@@ -665,6 +689,28 @@ class Harness:
         return {
             "choices": [{"message": _FakeMessage(msg), "finish_reason": finish_reason}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    def _pop_checker_response(self, **kwargs: Any) -> dict[str, Any]:
+        """The checker-model arm of :meth:`_pop_response` (see script_checker)."""
+        self.checker_calls.append(kwargs)
+        if not self._checker_responses:
+            raise AssertionError(
+                "checker model called but no checker responses were scripted "
+                "(use harness.script_checker([...]))"
+            )
+        resp = self._checker_responses.pop(0)
+        if isinstance(resp, Exception):
+            raise resp
+        content = resp if isinstance(resp, str) else json.dumps(resp)
+        return {
+            "choices": [
+                {
+                    "message": _FakeMessage({"role": "assistant", "content": content}),
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50},
         }
 
     def _pop_streaming_response(self, **kwargs: Any) -> _FakeStream:
