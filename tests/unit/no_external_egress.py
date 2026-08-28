@@ -16,7 +16,6 @@ class ExternalEgressBlocked(OSError):
     """
 
 
-
 def guard_external_host(host: Any) -> None:
     """Allow only loopback IPs/names, without resolving hostnames."""
     if host is None:
@@ -96,29 +95,38 @@ class GuardedSocket(socket.socket):
 def install_socket_guard(monkeypatch: Any) -> None:
     """Reject external DNS and socket connections while preserving loopback tests."""
     real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
+    real_gethostbyname_ex = socket.gethostbyname_ex
+    real_gethostbyaddr = socket.gethostbyaddr
+    real_getnameinfo = socket.getnameinfo
 
     def guarded_getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
         flags = kwargs.get("flags", args[4] if len(args) > 4 else 0)
-        # AI_NUMERICHOST is a local parser used by URLvalidation, not DNS.
+        # AI_NUMERICHOST is a local parser used by URL validation, not DNS.
         if flags & socket.AI_NUMERICHOST:
             return real_getaddrinfo(host, *args, **kwargs)
         guard_external_host(host)
         return real_getaddrinfo(host, *args, **kwargs)
 
-    real_gethostbygjg˜[YHHÛØÚÙ]™Ù]Üİ[˜[YBˆ™X[ÙÙ]Üİ[˜[YWÙ^HÛØÚÙ]™Ù]ÜİYÚ™æÖUöW€¢&VÅövWF†÷7F'–FG"Ò6ö6¶WBævWF†÷7F'–FG ¢&VÅövWFæÖV–æfòÒ6ö6¶WBævWFæÖV–æfğ ¢FVbwV&FVEövWF†÷7F'–æÖR††÷7C¢ç’’Óâç“ ¢wV&EöW‡FW&æÅö†÷7B††÷7B¢&WGW&â&VÅövWF†÷7F'–æÖR††÷7B ¢FVbwV&FVEövWF†÷7F'–v¦y…µ•}•à¡¡½ÍĞè¹ä¤€´ø¹äè(€€€€€€€Õ…É‘}•áÑ•É¹…±}¡½ÍĞ¡¡½ÍĞ¤(€€€€€€€É•ÑÕÉ¸É•…±}•Ñ¡½ÍÑ‰å©ame_ex(host)
+    def guarded_gethostbyname(host: Any) -> Any:
+        guard_external_host(host)
+        return real_gethostbyname(host)
+
+    def guarded_gethostbyname_ex(host: Any) -> Any:
+        guard_external_host(host)
+        return real_gethostbyname_ex(host)
 
     def guarded_gethostbyaddr(host: Any) -> Any:
         guard_external_host(host)
         return real_gethostbyaddr(host)
 
     def guarded_getnameinfo(sockaddr: Any, flags: int) -> Any:
-        # NI_NUMERICHOST formats an address locally rather than resolving it.
-        if not flags & socket.NI_NUMERICHOST:
-            guard_external_host(sockaddr[0])
+        guard_external_host(sockaddr[0])
         return real_getnameinfo(sockaddr, flags)
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
-    monkeypatch.setattr(socket, "gethostbygjg˜[YH‹İX\™YÙÙ]ÜİYÚ™æÖR¢Ööæ¶W—F6‚ç6WFGG"‡6ö6¶WBÂ&vWF†÷7F'–v¦y…µ•}•àˆ°Õ…É‘•‘}•Ñ¡½ÍÑ‰å©ame_ex)
+    monkeypatch.setattr(socket, "gethostbyname", guarded_gethostbyname)
+    monkeypatch.setattr(socket, "gethostbyname_ex", guarded_gethostbyname_ex)
     monkeypatch.setattr(socket, "gethostbyaddr", guarded_gethostbyaddr)
     monkeypatch.setattr(socket, "getnameinfo", guarded_getnameinfo)
     monkeypatch.setattr(socket, "socket", GuardedSocket)
