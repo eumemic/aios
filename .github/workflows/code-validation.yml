@@ -28,7 +28,6 @@ jobs:
   detect:
     timeout-minutes: 10
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     outputs:
       run_checks: ${{ steps.filter.outputs.run_checks }}
       sandbox_changed: ${{ steps.filter.outputs.sandbox_changed }}
@@ -119,7 +118,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     env:
       # ``get_settings()`` is called at module import by code that ruff/mypy
@@ -220,7 +218,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     env:
       AIOS_DB_URL: postgresql://aios:aios@localhost:5432/aios_test
@@ -256,7 +253,6 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -313,7 +309,6 @@ jobs:
     if: needs.detect.outputs.run_checks == 'true'
     runs-on: ubuntu-latest
     # Generous: covers the flake-retry path re-running the full suite.
-    timeout-minutes: 30
 
     env:
       # Parse-only: ``get_settings()`` must see a valid Postgres DSN at
@@ -376,7 +371,6 @@ jobs:
     runs-on: ubuntu-latest
     # Generous: covers the sandbox-build fallback and the non-docker
     # shard's full-suite flake retry.
-    timeout-minutes: 30
 
     strategy:
       fail-fast: false
