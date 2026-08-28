@@ -290,6 +290,15 @@ class Settings(BaseSettings):
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
     )
+    sandbox_disk_stat_path: str = Field(
+        default="/",
+        description="Filesystem the snapshot headroom gate measures free space on. Must be a "
+        "path on the DOCKER GRAPH ROOT's filesystem, which is where a commit or flatten "
+        "actually writes. Defaults to '/' because the graph root usually lives there, but "
+        "inside the worker container '/' is the worker's own overlay and need not be the same "
+        "filesystem; when they differ the gate measures a disk nothing is written to and passes "
+        "while the real target is full (#2280).",
+    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,

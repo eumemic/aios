@@ -450,4 +450,8 @@ def patch_build_spec_deps(
             "aios.sandbox.volumes.ensure_session_uploads_dir",
             return_value=Path("/tmp/u"),
         ),
+        patch(
+            "aios.sandbox.volumes.ensure_session_tmp_dir",
+            return_value=Path("/tmp/t"),
+        ),
     )

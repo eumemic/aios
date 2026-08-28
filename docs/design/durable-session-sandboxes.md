@@ -74,14 +74,38 @@ rejected at `docker run` on this daemon), so any quota story must work without i
 ## 3. The persistence contract (validated, two amendments)
 
 **Persists** (via the snapshot image): the entire writable root FS — `/root`, `/etc`,
-`/usr`, `/var`, `/opt`, `/home`, **`/tmp`** (a normal overlay dir, not tmpfs), global
-apt/pip/npm installs, and deletions of base-image files (`docker commit` captures
-overlayfs whiteouts — verified).
+`/usr`, `/var`, `/opt`, `/home`, global apt/pip/npm installs, and deletions of base-image
+files (`docker commit` captures overlayfs whiteouts — verified).
 
 **Persists** (via host bind mounts, exactly as today, *not* via the snapshot):
-`/workspace`, `/mnt/attachments`, `/mnt/uploads`, `/mnt/memory/*`, github working trees.
-`docker commit` excludes bind-mount contents (verified), so there is no duplication and no
-interaction between snapshot GC and workspace data.
+`/workspace`, `/mnt/attachments`, `/mnt/uploads`, `/mnt/memory/*`, github working trees,
+and — since #2280 — **`/tmp`**. `docker commit` excludes bind-mount contents (verified),
+so there is no duplication and no interaction between snapshot GC and workspace data.
+
+> **Amendment (#2280): `/tmp` moved from the snapshot to a bind mount.**
+> It was a normal overlay dir, which made it durable state the snapshot faithfully
+> preserved. Long-lived sessions accumulate per-task scratch there — repo clones,
+> virtualenvs, pytest trees, build caches — and every byte was paid for twice on every
+> idle reap (once as the compressed content blob, once as the unpacked snapshot). One
+> production session reached 18 GiB of which 16.4 GiB was `/tmp`, which also drove the
+> export past its timeout and into the salvage breaker.
+>
+> `/tmp` is now bound to `<workspace_root>/_tmp/<session_id>`, so ephemeral scratch is
+> *structurally* unable to enter an image — the same mechanism `/workspace` already
+> relied on, rather than a filter someone must remember to apply. It still survives
+> container recycles (strictly more continuity than a cold `/tmp` gave) and is reclaimed
+> by the host-dir reaper once the session is no longer DB-live.
+>
+> **Sessions only.** A run (`wfr_`) and a browser plane (`acc_`) are torn down with a bare
+> destroy that drops the whole writable layer, so their `/tmp` is already reclaimed at
+> teardown; binding it would make that scratch outlive the container it belongs to.
+>
+> Images snapshotted *before* this landed still carry their old `/tmp` inside them, and a
+> mount cannot remove what is already baked in. `_flatten` therefore also runs the export
+> through a streaming tar filter (`sandbox/_tar_filter.py`) that drops `tmp/`, `var/tmp/`
+> and `run/`, so each affected session sheds its historical scratch on its next flatten.
+> The filter forwards anything it cannot parse verbatim: a fat snapshot is a far better
+> failure than a corrupt one.
 
 **Does not persist**: processes, fds, locks, sockets, netns/iptables state, `/dev/shm`
 (tmpfs), the container IP. Resume = fresh process tree on the persisted disk.
