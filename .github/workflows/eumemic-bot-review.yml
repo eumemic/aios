@@ -1,0 +1,51 @@
+# eumemic-bot PR reviews — kick the live aios reviewer as the GitHub App.
+# Must never fail the PR check: aios account/agent misses are ops, not a
+# code defect. The job is named "aios-review" so it does not collide with
+# other "review" required checks.
+name: eumemic-bot review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: eumemic-bot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AIOS_URL: https://api.aios.eumemic.ai
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mint eumemic-bot installation token
+        id: app
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
+          private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
+          # Session outlives this job and POSTs ### Code review with GH_TOKEN.
+          # Default post-step revoke made sess_01M156PTBDBE7PQGXEEYVR4RRG 401.
+          skip-token-revoke: true
+
+      - name: Start aios review session
+        if: steps.app.outcome == 'success'
+        continue-on-error: true
+        env:
+          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+          AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CLONE_URL: ${{ github.event.pull_request.head.repo.clone_url }}
+        run: python3 scripts/eumemic_bot_review.py
