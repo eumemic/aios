@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Restore the context window's history floor: `window_min` again bounds
+  RETAINED HISTORY only, so the per-request prelude (system prompt + tool
+  schemas + reserves) is subtracted from `window_max` alone. Subtracting it
+  from both bounds let a fat tool prelude satisfy the floor by itself, driving
+  the effective floor to 0 so every snap emptied the window down to a single
+  event — the agent then saw only the harness's own "history has scrolled out
+  of view, search first" notice and looped on `search_events`. A floor the
+  band cannot afford is now clamped to 75% of the events budget (keeping the
+  snap chunk usable) and reported on the `read_window_end` span plus a
+  `window.floor_clamped` warning, rather than silently zeroed (#2289).
+
 - Distinguish a dead OAuth refresh token (RFC 6749 `invalid_grant` — revoked,
   expired, or otherwise unrecoverable) from a generic/transient
   `OAuthRefreshError` via a new `OAuthReauthRequiredError` subclass

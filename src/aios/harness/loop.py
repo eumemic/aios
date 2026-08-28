@@ -1053,6 +1053,31 @@ async def _run_session_step_body(
         )
         raise
     events = windowed.events
+    # The floor facts (#2289) ride the same span as ``event_count_read``: when
+    # the incident that produced them hit, the span showed the count collapsing
+    # 60 -> 1 but not WHY, so diagnosis needed provider-side request dumps.
+    floor = windowed.floor
+    floor_span: dict[str, Any] = (
+        {
+            "configured_window_min": floor.configured,
+            "effective_window_min": floor.effective,
+            "events_window_max": floor.events_window_max,
+            "overhead_effective": floor.overhead_effective,
+            "window_floor_outcome": floor.outcome,
+        }
+        if floor is not None
+        else {}
+    )
+    if floor is not None and floor.outcome == "clamped":
+        log.warning(
+            "window.floor_clamped",
+            session_id=session_id,
+            configured_window_min=floor.configured,
+            effective_window_min=floor.effective,
+            events_window_max=floor.events_window_max,
+            overhead_effective=floor.overhead_effective,
+            request_window_max=request_window_max,
+        )
     await sessions_service.append_event(
         pool,
         session_id,
@@ -1064,6 +1089,7 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "request_window_max": request_window_max,
             "configured_window_max": agent.window_max,
+            **floor_span,
         },
         account_id=account_id,
     )

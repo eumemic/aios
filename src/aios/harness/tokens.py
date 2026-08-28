@@ -551,14 +551,21 @@ def tokens_to_drop(total: int, *, window_min: int, window_max: int) -> int:
         return 0
     overshoot = total - window_max
     chunk = window_max - window_min
-    if chunk == 0:
-        # Degenerate band ``window_min == window_max``: no chunk to snap within,
-        # so drop exactly the overshoot and retain ``window_max``. This band is
-        # reachable from a VALID config — the context-overflow shrink ladder
+    if chunk <= 0:
+        # Degenerate band ``window_min >= window_max``: no chunk to snap within,
+        # so drop exactly the overshoot and retain ``window_max``. The equal case
+        # is reachable from a VALID config — the context-overflow shrink ladder
         # collapses the effective band to a point once the shrunk request ceiling
         # falls to or below ``agent.window_min`` (see the ``min()`` in ``loop.py``
         # feeding ``read_windowed_events``). Dividing by zero here would crash the
         # very step meant to shrink the prompt, wedging overflow recovery.
+        #
+        # An INVERTED band lands here too. No caller produces one today (the
+        # windower's floor clamp keeps ``min`` under ``max``, and agent config
+        # validates ``window_min < window_max``), but the ceil division below
+        # would silently return a NEGATIVE drop on one — a garbage boundary that
+        # widens the retained scan instead of narrowing it. Treating it as
+        # degenerate keeps the failure mode "retain exactly ``window_max``".
         return overshoot
     snaps = (overshoot + chunk - 1) // chunk  # ceil division
     return snaps * chunk
