@@ -216,6 +216,50 @@ class TestSessionFilesDownload:
         "declared_type",
         ["image/png", "image/jpeg", "image/gif", "image/webp"],
     )
+    async def test_inline_allowlist_serves_untrusted_bytes_with_nosniff(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The diagonal case: allowlisted declared type, dangerous bytes.
+
+        Both halves of the upload are attacker-chosen and independent, so
+        there are two attack shapes, and the allowlist only closes one of
+        them. Here the declared type is genuinely on the allowlist, so the
+        response IS served inline under that type — by design; the endpoint
+        cannot afford to sniff bytes. The only thing preventing a browser
+        from sniffing HTML out of a response labelled `image/png` and
+        running it in this origin is `X-Content-Type-Options: nosniff`.
+
+        This is the regression guard for that header. Every other test in
+        this file passes with `nosniff` removed — the adversarial ones are
+        covered by the allowlist re-typing, and the benign ones never carry
+        dangerous bytes. Drop the header during a routine cleanup and only
+        this test fails, which is the whole reason it exists.
+        """
+        session_id = await _make_session(harness)
+        payload = b"<html><body><script>alert(document.domain)</script></body></html>"
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("innocent.png", payload, declared_type)},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        # Served inline under the allowlisted type — the allowlist has no
+        # opinion here, because the declared type is legitimate.
+        assert r.headers["content-type"] == declared_type
+        assert "inline" in r.headers["content-disposition"]
+        # ...so this header is the entire defence for this shape.
+        assert r.headers["x-content-type-options"] == "nosniff"
+        # Bytes untouched: a rendering control, never a filter.
+        assert r.content == payload
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    )
     async def test_inline_allowlist_still_renders(
         self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
     ) -> None:

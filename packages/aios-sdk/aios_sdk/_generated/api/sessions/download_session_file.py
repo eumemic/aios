@@ -82,14 +82,42 @@ def sync_detailed(
 
     The *declared* content-type is not trusted on the way back out.
     ``stage_upload`` stores ``upload.content_type`` verbatim from the
-    client's multipart header — no allowlist, no sniffing — so echoing it
-    with ``inline`` would let an uploader pick the type their own bytes
-    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
-    ``image/*`` prefix check and executes script in-origin.  Only types on
-    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
-    are served with their stored type inline; everything else degrades to
-    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
-    sniffing paths this allowlist doesn't enumerate.
+    client's multipart header — no allowlist, no sniffing — so both the
+    declared type AND the bytes are attacker-chosen, independently.  That
+    is two distinct attack shapes, and **each is closed by a different
+    control here.  Neither control covers both; removing either reopens
+    one of them.**
+
+    1. *Dangerous declared type, any bytes.*  ``image/svg+xml`` passes an
+       ``image/*`` prefix test and executes script in the serving origin.
+       Closed by :data:`INLINE_RENDERABLE_CONTENT_TYPES`: only exact
+       members are served inline under their stored type, and everything
+       else is re-typed to ``application/octet-stream`` and served as an
+       attachment.  ``nosniff`` does nothing against this — the declared
+       type is honoured, not sniffed, and the attack lands anyway.
+
+    2. *Safe declared type, dangerous bytes.*  HTML with a ``<script>``
+       uploaded as ``image/png``.  That type IS allowlisted, so this is
+       served inline as ``image/png`` — by design, and correctly, because
+       the endpoint cannot afford to inspect bytes.  What stops it is
+       ``X-Content-Type-Options: nosniff``: without it a browser may sniff
+       HTML out of a response labelled ``image/png`` and render it as a
+       document in this origin.  With it the label is binding and the
+       response is an inert broken image.  **The allowlist does nothing
+       against this — the declared type is on it.**
+
+    So ``nosniff`` is not belt-and-braces; for shape 2 it is the only
+    control, which is why it is set unconditionally on both branches.
+    ``test_inline_allowlist_serves_untrusted_bytes_with_nosniff`` is the
+    regression guard: it is the test that fails if the header is dropped
+    during a cleanup, since every other test passes without it.
+
+    Scoping is unchanged from every other session-scoped read: 404s when
+    the file doesn't exist, belongs to a different session, or isn't owned
+    by the caller's account — a wrong session or a cross-account file id is
+    indistinguishable from a missing file.  No transformation or resizing;
+    ``host_path`` is streamed verbatim.  This is a rendering control, not a
+    filter: bytes are returned byte-identical on both branches.
 
     Args:
         session_id (str):
@@ -136,14 +164,42 @@ def sync(
 
     The *declared* content-type is not trusted on the way back out.
     ``stage_upload`` stores ``upload.content_type`` verbatim from the
-    client's multipart header — no allowlist, no sniffing — so echoing it
-    with ``inline`` would let an uploader pick the type their own bytes
-    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
-    ``image/*`` prefix check and executes script in-origin.  Only types on
-    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
-    are served with their stored type inline; everything else degrades to
-    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
-    sniffing paths this allowlist doesn't enumerate.
+    client's multipart header — no allowlist, no sniffing — so both the
+    declared type AND the bytes are attacker-chosen, independently.  That
+    is two distinct attack shapes, and **each is closed by a different
+    control here.  Neither control covers both; removing either reopens
+    one of them.**
+
+    1. *Dangerous declared type, any bytes.*  ``image/svg+xml`` passes an
+       ``image/*`` prefix test and executes script in the serving origin.
+       Closed by :data:`INLINE_RENDERABLE_CONTENT_TYPES`: only exact
+       members are served inline under their stored type, and everything
+       else is re-typed to ``application/octet-stream`` and served as an
+       attachment.  ``nosniff`` does nothing against this — the declared
+       type is honoured, not sniffed, and the attack lands anyway.
+
+    2. *Safe declared type, dangerous bytes.*  HTML with a ``<script>``
+       uploaded as ``image/png``.  That type IS allowlisted, so this is
+       served inline as ``image/png`` — by design, and correctly, because
+       the endpoint cannot afford to inspect bytes.  What stops it is
+       ``X-Content-Type-Options: nosniff``: without it a browser may sniff
+       HTML out of a response labelled ``image/png`` and render it as a
+       document in this origin.  With it the label is binding and the
+       response is an inert broken image.  **The allowlist does nothing
+       against this — the declared type is on it.**
+
+    So ``nosniff`` is not belt-and-braces; for shape 2 it is the only
+    control, which is why it is set unconditionally on both branches.
+    ``test_inline_allowlist_serves_untrusted_bytes_with_nosniff`` is the
+    regression guard: it is the test that fails if the header is dropped
+    during a cleanup, since every other test passes without it.
+
+    Scoping is unchanged from every other session-scoped read: 404s when
+    the file doesn't exist, belongs to a different session, or isn't owned
+    by the caller's account — a wrong session or a cross-account file id is
+    indistinguishable from a missing file.  No transformation or resizing;
+    ``host_path`` is streamed verbatim.  This is a rendering control, not a
+    filter: bytes are returned byte-identical on both branches.
 
     Args:
         session_id (str):
@@ -185,14 +241,42 @@ async def asyncio_detailed(
 
     The *declared* content-type is not trusted on the way back out.
     ``stage_upload`` stores ``upload.content_type`` verbatim from the
-    client's multipart header — no allowlist, no sniffing — so echoing it
-    with ``inline`` would let an uploader pick the type their own bytes
-    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
-    ``image/*`` prefix check and executes script in-origin.  Only types on
-    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
-    are served with their stored type inline; everything else degrades to
-    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
-    sniffing paths this allowlist doesn't enumerate.
+    client's multipart header — no allowlist, no sniffing — so both the
+    declared type AND the bytes are attacker-chosen, independently.  That
+    is two distinct attack shapes, and **each is closed by a different
+    control here.  Neither control covers both; removing either reopens
+    one of them.**
+
+    1. *Dangerous declared type, any bytes.*  ``image/svg+xml`` passes an
+       ``image/*`` prefix test and executes script in the serving origin.
+       Closed by :data:`INLINE_RENDERABLE_CONTENT_TYPES`: only exact
+       members are served inline under their stored type, and everything
+       else is re-typed to ``application/octet-stream`` and served as an
+       attachment.  ``nosniff`` does nothing against this — the declared
+       type is honoured, not sniffed, and the attack lands anyway.
+
+    2. *Safe declared type, dangerous bytes.*  HTML with a ``<script>``
+       uploaded as ``image/png``.  That type IS allowlisted, so this is
+       served inline as ``image/png`` — by design, and correctly, because
+       the endpoint cannot afford to inspect bytes.  What stops it is
+       ``X-Content-Type-Options: nosniff``: without it a browser may sniff
+       HTML out of a response labelled ``image/png`` and render it as a
+       document in this origin.  With it the label is binding and the
+       response is an inert broken image.  **The allowlist does nothing
+       against this — the declared type is on it.**
+
+    So ``nosniff`` is not belt-and-braces; for shape 2 it is the only
+    control, which is why it is set unconditionally on both branches.
+    ``test_inline_allowlist_serves_untrusted_bytes_with_nosniff`` is the
+    regression guard: it is the test that fails if the header is dropped
+    during a cleanup, since every other test passes without it.
+
+    Scoping is unchanged from every other session-scoped read: 404s when
+    the file doesn't exist, belongs to a different session, or isn't owned
+    by the caller's account — a wrong session or a cross-account file id is
+    indistinguishable from a missing file.  No transformation or resizing;
+    ``host_path`` is streamed verbatim.  This is a rendering control, not a
+    filter: bytes are returned byte-identical on both branches.
 
     Args:
         session_id (str):
@@ -237,14 +321,42 @@ async def asyncio(
 
     The *declared* content-type is not trusted on the way back out.
     ``stage_upload`` stores ``upload.content_type`` verbatim from the
-    client's multipart header — no allowlist, no sniffing — so echoing it
-    with ``inline`` would let an uploader pick the type their own bytes
-    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
-    ``image/*`` prefix check and executes script in-origin.  Only types on
-    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
-    are served with their stored type inline; everything else degrades to
-    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
-    sniffing paths this allowlist doesn't enumerate.
+    client's multipart header — no allowlist, no sniffing — so both the
+    declared type AND the bytes are attacker-chosen, independently.  That
+    is two distinct attack shapes, and **each is closed by a different
+    control here.  Neither control covers both; removing either reopens
+    one of them.**
+
+    1. *Dangerous declared type, any bytes.*  ``image/svg+xml`` passes an
+       ``image/*`` prefix test and executes script in the serving origin.
+       Closed by :data:`INLINE_RENDERABLE_CONTENT_TYPES`: only exact
+       members are served inline under their stored type, and everything
+       else is re-typed to ``application/octet-stream`` and served as an
+       attachment.  ``nosniff`` does nothing against this — the declared
+       type is honoured, not sniffed, and the attack lands anyway.
+
+    2. *Safe declared type, dangerous bytes.*  HTML with a ``<script>``
+       uploaded as ``image/png``.  That type IS allowlisted, so this is
+       served inline as ``image/png`` — by design, and correctly, because
+       the endpoint cannot afford to inspect bytes.  What stops it is
+       ``X-Content-Type-Options: nosniff``: without it a browser may sniff
+       HTML out of a response labelled ``image/png`` and render it as a
+       document in this origin.  With it the label is binding and the
+       response is an inert broken image.  **The allowlist does nothing
+       against this — the declared type is on it.**
+
+    So ``nosniff`` is not belt-and-braces; for shape 2 it is the only
+    control, which is why it is set unconditionally on both branches.
+    ``test_inline_allowlist_serves_untrusted_bytes_with_nosniff`` is the
+    regression guard: it is the test that fails if the header is dropped
+    during a cleanup, since every other test passes without it.
+
+    Scoping is unchanged from every other session-scoped read: 404s when
+    the file doesn't exist, belongs to a different session, or isn't owned
+    by the caller's account — a wrong session or a cross-account file id is
+    indistinguishable from a missing file.  No transformation or resizing;
+    ``host_path`` is streamed verbatim.  This is a rendering control, not a
+    filter: bytes are returned byte-identical on both branches.
 
     Args:
         session_id (str):
