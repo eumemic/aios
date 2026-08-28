@@ -56,11 +56,15 @@ COPY migrations ./migrations
 # worker image; the worker resolves it via ``Path(__file__).parents[3]``.
 COPY bin ./bin
 COPY src ./src
-# Authored seccomp profile for sandbox containers (#807). The worker's docker
-# CLI reads this from its OWN filesystem and ships the JSON to the daemon (the
-# daemon never reads the worker's FS). Must match the default resolved by
-# Settings.sandbox_seccomp_profile (/app/docker/seccomp-sandbox.json).
+# Authored seccomp profiles — sandbox containers (#807) and browser
+# containers (jarbot#106 Phase 2). The worker's docker CLI reads these from
+# its OWN filesystem and ships the JSON to the daemon (the daemon never reads
+# the worker's FS). Paths must match the defaults resolved by
+# Settings.sandbox_seccomp_profile / sandbox_browser_seccomp_profile
+# (/app/docker/seccomp-*.json); a missing COPY fails every container start
+# loudly, because the --security-opt flag is always emitted.
 COPY docker/seccomp-sandbox.json /app/docker/seccomp-sandbox.json
+COPY docker/seccomp-browser.json /app/docker/seccomp-browser.json
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"

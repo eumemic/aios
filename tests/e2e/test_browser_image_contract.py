@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -32,6 +31,8 @@ from tests.e2e.browser_image_common import (
     IMAGE,
     REPO_ROOT,
     SANDBOX_SECCOMP,
+    assert_chromium_sandbox_on,
+    assert_mount_ns_denied,
     invoke,
     invoke_raw,
     make_plane,
@@ -47,10 +48,6 @@ pytestmark = [
         not IMAGE, reason="AIOS_SANDBOX_BROWSER_IMAGE not set; browser-image suite is opt-in"
     ),
 ]
-
-# CLONE_NEW* flag values (linux/sched.h) for the namespace probes.
-_CLONE_NEWNS = 0x20000
-_CLONE_NEWUSER = 0x10000000
 
 
 def _docker_run(*args: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
@@ -202,60 +199,12 @@ class TestExitCodeContract:
 # -- Chromium sandbox (the load-bearing security assertions) -------------------
 
 
-def _renderer_pids(container: str) -> list[str]:
-    """PIDs of Chromium renderer processes inside the container."""
-    script = (
-        "for p in /proc/[0-9]*/cmdline; do "
-        "tr '\\0' ' ' < \"$p\" 2>/dev/null | grep -q -- --type=renderer "
-        '&& basename "$(dirname "$p")"; done; true'
-    )
-    r = run(["docker", "exec", container, "bash", "-c", script], timeout=30)
-    return [line.strip() for line in r.stdout.splitlines() if line.strip().isdigit()]
-
-
 def test_chromium_sandbox_is_on(daemon: str) -> None:
-    """PRIMARY sandbox-ON assertion (plan CI-C2), via the two /proc-observable
-    facts of Chromium's layered sandbox:
-
-    * layer 1 (namespace): the renderer's user namespace differs from the
-      container init's;
-    * layer 2 (seccomp-bpf): the renderer carries MORE seccomp filters than
-      init. ``Seccomp: 2`` alone is vacuous — docker's container-level profile
-      puts EVERY process in filter mode — so the load-bearing signal is the
-      ``Seccomp_filters`` count (kernel >= 5.9): init has only docker's, the
-      renderer has docker's plus Chromium's own.
-
-    chrome://sandbox scraping is deliberately not used (unreliable under new
-    headless)."""
-    deadline = time.monotonic() + 30
-    pids: list[str] = []
-    while time.monotonic() < deadline and not pids:
-        pids = _renderer_pids(daemon)
-        if not pids:
-            time.sleep(1.0)
-    assert pids, "no Chromium renderer process found — did the persistent context open a page?"
-
-    pid = pids[0]
-    r = run(
-        [
-            *("docker", "exec", daemon, "bash", "-c"),
-            f"grep -h '^Seccomp_filters:' /proc/{pid}/status /proc/1/status"
-            f" && readlink /proc/{pid}/ns/user /proc/1/ns/user",
-        ],
-        timeout=30,
-    )
-    assert r.returncode == 0, r.stderr
-    filters_line_r, filters_line_i, renderer_ns, init_ns = r.stdout.strip().splitlines()
-    renderer_filters = int(filters_line_r.split()[-1])
-    init_filters = int(filters_line_i.split()[-1])
-    assert renderer_filters > init_filters, (
-        f"renderer has {renderer_filters} seccomp filter(s) vs init's {init_filters} — "
-        "Chromium's own seccomp-bpf layer is NOT applied (docker's profile alone)"
-    )
-    assert renderer_ns != init_ns, (
-        "renderer shares the container's user namespace — Chromium's namespace "
-        f"sandbox is NOT active ({renderer_ns})"
-    )
+    """PRIMARY sandbox-ON assertion (plan CI-C2) — renderer namespaced AND
+    double-filtered; see :func:`assert_chromium_sandbox_on` for the /proc
+    rationale. The isolation gate re-runs the same assertion against a
+    container provisioned through the REAL ``build_spec_from_browser`` path."""
+    assert_chromium_sandbox_on(daemon)
 
 
 def test_chromium_launch_fails_under_sandbox_profile(pulled_image: str, tmp_path: Path) -> None:
@@ -286,29 +235,10 @@ def test_chromium_launch_fails_under_sandbox_profile(pulled_image: str, tmp_path
 
 
 def test_mount_namespace_denied_userns_permitted(daemon: str) -> None:
-    """The authored mask, probed live in the daemon's own container. ORDER
-    MATTERS: the probe first enters a fresh user namespace — what Chromium's
-    zygote needs, and the step that grants CAP_SYS_ADMIN *in that namespace* —
-    and only then attempts unshare(CLONE_NEWNS). The kernel would permit that
-    second call (the process holds CAP_SYS_ADMIN in its userns), so EPERM
-    there proves the seccomp mask and nothing else. Probing NEWNS from the
-    initial namespace would be vacuous: the kernel itself EPERMs unprivileged
-    mount-namespace creation with or without seccomp."""
-    probe = (
-        "import ctypes;"
-        "libc = ctypes.CDLL(None, use_errno=True);"
-        f"ruser = libc.unshare({_CLONE_NEWUSER}); euser = ctypes.get_errno();"
-        f"rns = libc.unshare({_CLONE_NEWNS}); ens = ctypes.get_errno();"
-        "print(ruser, euser, rns, ens)"
-    )
-    r = run(["docker", "exec", daemon, "python3", "-c", probe], timeout=60)
-    assert r.returncode == 0, r.stderr
-    ruser, _euser, rns, ens = (int(x) for x in r.stdout.split())
-    assert ruser == 0, f"unshare(CLONE_NEWUSER) must succeed under the browser profile: {r.stdout}"
-    assert (rns, ens) == (-1, 1), (
-        f"unshare(CLONE_NEWNS) from inside a userns must fail EPERM (the seccomp mask), "
-        f"got rc={rns} errno={ens}"
-    )
+    """The authored mask's deny half, probed live in the daemon's own
+    container — see :func:`assert_mount_ns_denied` for the userns-first
+    ordering that keeps the probe non-vacuous."""
+    assert_mount_ns_denied(daemon)
 
 
 def test_no_tcp_listeners(daemon: str) -> None:

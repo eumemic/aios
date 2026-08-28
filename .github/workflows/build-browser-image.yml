@@ -33,6 +33,10 @@ on:
       # The context filter shapes what the Dockerfile's COPYs see.
       - .dockerignore
       - packages/aios-browser-driver/**
+      # The driver's own tests are ``.dockerignore``d out of the build
+      # context — a tests-only push cannot change the image, so it must not
+      # burn the QEMU multi-arch build.
+      - "!packages/aios-browser-driver/tests/**"
       - src/aios/sandbox/browser_protocol.py
       # The gates themselves: ``:smoked`` means "passed THESE suites".
       - tests/e2e/test_browser_image_contract.py

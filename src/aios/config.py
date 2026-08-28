@@ -376,14 +376,18 @@ class Settings(BaseSettings):
         "ample slack while bounding a fork bomb. None = unlimited.",
     )
     sandbox_browser_seccomp_profile: str = Field(
-        default="unconfined",
-        description="Seccomp profile path for browser containers. Defaults to "
-        "'unconfined' until the browser image ships its own authored profile "
-        "(docker/seccomp-browser.json — MUST permit unprivileged user namespaces "
-        "so Chromium's internal sandbox stays ON; running --no-sandbox inside "
-        "the container that holds the credential jar is a red result, not a "
-        "workaround). The sandbox profile is NOT reused: it denies the "
-        "namespace syscalls Chromium's sandbox requires.",
+        default=str(Path(__file__).resolve().parents[2] / "docker" / "seccomp-browser.json"),
+        description="Seccomp profile path for browser containers (docker run "
+        "--security-opt seccomp=<path>; the docker CLI reads the file from the "
+        "WORKER's filesystem). Defaults to the baked-in authored profile "
+        "(docker/seccomp-browser.json), which re-permits the unprivileged "
+        "USER/PID/NET namespaces Chromium's internal sandbox needs while still "
+        "denying mount/cgroup/uts/ipc namespace creation. The sandbox profile "
+        "is NOT interchangeable: it denies the namespace syscalls Chromium's "
+        "sandbox requires, so Chromium cannot launch under it at all. "
+        "Emergency rollback ONLY: 'unconfined' disables filtering for the "
+        "container that renders untrusted web content and holds durable "
+        "logins. Never defaults to unconfined; the flag is always emitted.",
     )
     sandbox_browser_runtime: str | None = Field(
         default=None,

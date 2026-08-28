@@ -11,7 +11,14 @@ against real Docker:
 * two containers on ``aios-browser`` cannot reach each other (ICC off) — one
   account's computer can never reach another's;
 * a container provisioned through the REAL ``build_spec_from_browser`` path
-  lands on ``aios-browser`` and publishes no ports.
+  lands on ``aios-browser`` and publishes no ports;
+* on that same real path, with the REAL browser image
+  (``AIOS_SANDBOX_BROWSER_IMAGE``), the DEFAULT seccomp profile flows through
+  spec → backend → ``docker run``: Chromium's own sandbox engages (the
+  profile's allow half) and mount-namespace creation stays denied (its deny
+  half) — the per-environment proof that a deploy's config actually delivers
+  the authored profile, not just that the image can be sandboxed when a test
+  passes the flag by hand.
 
 Each unreachability assertion is double-guarded against a vacuous pass: the
 listener curls ITSELF (so the target is proven up, absorbing the bind race),
@@ -41,6 +48,13 @@ from aios.sandbox.network import (
 )
 from aios.sandbox.spec import build_spec_from_browser
 from tests.conftest import needs_docker
+from tests.e2e.browser_image_common import IMAGE as BROWSER_IMAGE
+from tests.e2e.browser_image_common import (
+    assert_chromium_sandbox_on,
+    assert_mount_ns_denied,
+    wait_ready,
+    world_writable,
+)
 
 pytestmark = [needs_docker, pytest.mark.docker]
 
@@ -235,14 +249,18 @@ async def test_real_browser_spec_lands_on_browser_network_with_no_ports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A container provisioned through the REAL spec builder joins the ICC-off
-    browser bridge (only), publishes no ports, and mounts the plane dir."""
+    browser bridge (only), publishes no ports, and mounts the plane dir.
+
+    Prefers the real browser image; the sandbox image stands in when it isn't
+    built (network posture is image-independent)."""
     settings = get_settings()
     monkeypatch.setattr(settings, "workspace_root", tmp_path)
-    monkeypatch.setattr(settings, "sandbox_browser_image", IMAGE)
+    monkeypatch.setattr(settings, "sandbox_browser_image", BROWSER_IMAGE or IMAGE)
     account_id = f"acc_{uuid.uuid4().hex[:8].upper()}"
 
     backend = DockerBackend()
     spec = build_spec_from_browser(account_id)
+    world_writable(spec.workspace.host_path)
     handle = await backend.create(spec)
     try:
         inspect = await _run(
@@ -263,5 +281,53 @@ async def test_real_browser_spec_lands_on_browser_network_with_no_ports(
         # No published ports of any kind.
         for blob in (ports_json, bindings_json):
             assert blob in ("{}", "null"), f"browser container publishes ports: {blob}"
+    finally:
+        await backend.destroy(handle)
+
+
+async def test_real_browser_spec_runs_chromium_sandboxed(
+    _networks_ready: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DEFAULT config delivers the authored seccomp profile end to end.
+
+    The image-contract suite proves the image CAN run Chromium sandboxed when
+    a test hand-passes ``--security-opt seccomp=…``; this test proves a
+    container provisioned exactly the way production provisions one — spec
+    defaults, no hand-passed flags — actually gets that profile. Both halves
+    are asserted, because each catches what the other cannot:
+
+    * sandbox-ON (renderer namespaced + double-filtered) proves the ALLOW
+      half — it fails when the profile is over-restrictive or missing
+      (docker's own default denies unprivileged userns, so Chromium cannot
+      even launch under it), but passes under ANY sufficiently permissive
+      profile, weakened ones included;
+    * the mount-ns probe proves the DENY half — it fails when the delivered
+      profile no longer masks CLONE_NEWNS, e.g. a deploy-side profile file
+      hand-weakened in place under the expected name.
+
+    Per-environment, this is the gate that catches a worker image lacking the
+    profile COPY or a wrong ``AIOS_SANDBOX_BROWSER_SECCOMP_PROFILE`` override:
+    the flag is always emitted, a bad path fails provisioning loudly, and
+    ``unconfined`` fails the endswith pin below."""
+    if not BROWSER_IMAGE:
+        pytest.skip("AIOS_SANDBOX_BROWSER_IMAGE not set; needs the real browser image")
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    monkeypatch.setattr(settings, "sandbox_browser_image", BROWSER_IMAGE)
+    account_id = f"acc_{uuid.uuid4().hex[:8].upper()}"
+
+    backend = DockerBackend()
+    spec = build_spec_from_browser(account_id)
+    assert spec.seccomp_profile.endswith("seccomp-browser.json"), (
+        f"spec default no longer resolves to the authored browser profile: {spec.seccomp_profile!r}"
+    )
+    world_writable(spec.workspace.host_path)
+    handle = await backend.create(spec)
+    try:
+        await asyncio.to_thread(wait_ready, handle.sandbox_id)
+        await asyncio.to_thread(assert_chromium_sandbox_on, handle.sandbox_id)
+        await asyncio.to_thread(assert_mount_ns_denied, handle.sandbox_id)
     finally:
         await backend.destroy(handle)

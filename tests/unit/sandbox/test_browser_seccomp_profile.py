@@ -8,7 +8,9 @@ design review caught in draft (a mask omitting CLONE_NEWNS would have
 re-enabled mount-namespace creation). The live-kernel counterpart runs in
 ``tests/e2e/test_browser_image_contract.py`` against a real container.
 
-Pure JSON inspection — no Docker required, runs in the normal unit lane.
+Also pins the profile's DELIVERY: the settings default resolves to this file
+and the worker image bakes it at that path (PR5 wiring — the flip and the
+COPY must never separate). No Docker required; runs in the normal unit lane.
 """
 
 from __future__ import annotations
@@ -103,6 +105,38 @@ def test_ptrace_stays_allowed_for_crashpad(profile: dict[str, Any]) -> None:
         for block in profile["syscalls"]
     )
     assert allowed, "no ptrace allow rule found in the vendored base"
+
+
+def test_settings_default_path_points_at_repo_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Settings().sandbox_browser_seccomp_profile`` defaults to the authored
+    profile ('unconfined' was only the pre-image placeholder — the container
+    renders untrusted web content and holds durable logins)."""
+    from aios.config import Settings
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
+    monkeypatch.delenv("AIOS_SANDBOX_BROWSER_SECCOMP_PROFILE", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.sandbox_browser_seccomp_profile.endswith("docker/seccomp-browser.json")
+    assert Path(s.sandbox_browser_seccomp_profile).exists()
+
+
+@pytest.mark.parametrize("profile_file", ["seccomp-sandbox.json", "seccomp-browser.json"])
+def test_worker_image_bakes_profile(profile_file: str) -> None:
+    """The worker Dockerfile COPYs each authored profile to the path its
+    settings default resolves to inside the container (/app/docker/…): the
+    docker CLI reads the file from the WORKER's filesystem at ``docker run``
+    time, and the ``--security-opt seccomp=`` flag is always emitted — so a
+    missing COPY fails every container start on deploy. This pin makes the
+    default-flip ⇄ COPY pairing mechanical instead of a release note."""
+    dockerfile = (_DOCKER_DIR.parent / "Dockerfile").read_text()
+    assert f"COPY docker/{profile_file} /app/docker/{profile_file}" in dockerfile, (
+        f"the worker Dockerfile no longer bakes docker/{profile_file} at the path the "
+        f"settings default resolves to in the worker image"
+    )
 
 
 def test_vendored_base_identical_to_sandbox_profile(profile: dict[str, Any]) -> None:
