@@ -1104,6 +1104,17 @@ def _classify_awaiting(
         return AwaitingToolCall(
             tool_call_id=tool_call_id, name=name, kind=kind, pending_since=pending_since
         )
+    if disposition is ToolDisposition.NEEDS_REVIEW:
+        # Under review, nobody is being waited on yet — the checker resolves
+        # out-of-band. The call becomes awaiting (an ordinary "mcp" hold)
+        # only once a ``tool_requested`` marker exists in the trace: the
+        # checker's ask verdict, or the stranded-review sweep's fail-closed
+        # hold. Cards stay trace-derived.
+        if tc["has_requested_lifecycle"]:
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="mcp", pending_since=pending_since
+            )
+        return None
     if disposition is ToolDisposition.CUSTOM:
         return AwaitingToolCall(
             tool_call_id=tool_call_id, name=name, kind="custom", pending_since=pending_since
@@ -2368,6 +2379,21 @@ async def find_latest_interrupt_seq(
         return await queries.find_latest_interrupt_seq(conn, session_id, account_id=account_id)
 
 
+async def has_tool_requested_marker(
+    pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str, *, account_id: str
+) -> bool:
+    """True when a ``lifecycle/tool_requested`` hold marker exists for the call.
+
+    Thin pool wrapper over :func:`queries.has_tool_requested_marker` — the
+    marker-idempotence check shared by the auto-review ask path and the
+    stranded-review sweep.
+    """
+    async with pool.acquire() as conn:
+        return await queries.has_tool_requested_marker(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+
+
 async def find_tool_confirmed_seqs(
     pool: asyncpg.Pool[Any], session_id: str, tool_call_ids: list[str], *, account_id: str
 ) -> dict[str, int]:
@@ -2823,11 +2849,17 @@ async def confirm_tool_allow(
     tool_call_id: str,
     *,
     account_id: str,
+    source: str | None = None,
 ) -> Event:
     """Record an allow confirmation for an ``always_ask`` tool call.
 
     Appends a ``lifecycle/tool_confirmed`` event. The worker's step
     function will see this and dispatch the tool call.
+
+    ``source`` distinguishes non-human confirmations in the trace (the
+    auto-review checker passes ``"auto_review"``); the HTTP endpoint never
+    sets it, so an absent key means a person confirmed. Additive: every
+    reader of this event filters on ``event``/``result`` only.
 
     Idempotent on ``(session_id, tool_call_id)``: a retried POST
     (network blip, 502, mid-flight client disconnect, double-click)
@@ -2895,11 +2927,18 @@ async def confirm_tool_allow(
                     "existing_is_error": prior_is_error,
                 },
             )
+        data: dict[str, Any] = {
+            "event": "tool_confirmed",
+            "tool_call_id": tool_call_id,
+            "result": "allow",
+        }
+        if source is not None:
+            data["source"] = source
         return await queries.append_event(
             conn,
             session_id=session_id,
             kind="lifecycle",
-            data={"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
+            data=data,
             account_id=account_id,
         )
 

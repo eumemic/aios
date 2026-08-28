@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 
 class ToolDisposition(Enum):
-    """The five authority outcomes the system cares about for a tool call.
+    """The authority outcomes the system cares about for a tool call.
 
     * :attr:`IMMEDIATE` — built-in/custom-registered tool whose effective
       permission is ``always_allow`` (or whose ``always_ask`` gate has already
@@ -59,6 +59,11 @@ class ToolDisposition(Enum):
       now via the MCP path.
     * :attr:`NEEDS_CONFIRM` — built-in or MCP tool gated on an *unresolved*
       ``always_ask`` confirmation: the harness holds it, waiting on the USER.
+    * :attr:`NEEDS_REVIEW` — known MCP tool under ``auto_review`` with no
+      resolved confirmation: the harness dispatches a background checker
+      verdict (allow → execute, ask → hold). Waiting on the CHECKER, not the
+      user — an under-review call is not ``awaiting`` until the checker (or
+      the stranded-review sweep) holds it.
     * :attr:`CUSTOM` — client-executed custom tool (name not in the registry,
       not MCP-namespaced): the harness holds it, waiting on the CLIENT.
     * :attr:`UNKNOWN_MCP` — MCP-namespaced tool whose server is not registered
@@ -72,6 +77,7 @@ class ToolDisposition(Enum):
     IMMEDIATE = "immediate"
     MCP_IMMEDIATE = "mcp_immediate"
     NEEDS_CONFIRM = "needs_confirm"
+    NEEDS_REVIEW = "needs_review"
     CUSTOM = "custom"
     UNKNOWN_MCP = "unknown_mcp"
     MCP_BLOCKED = "mcp_blocked"
@@ -142,10 +148,16 @@ def classify_tool_call(
             or resolve_mcp_transport(name, agent.tools) == "cli"
         ):
             return ToolDisposition.MCP_BLOCKED
-        if effective_mcp_permission(name, agent.tools) == "always_allow":
+        permission = effective_mcp_permission(name, agent.tools)
+        if permission == "always_allow":
             return ToolDisposition.MCP_IMMEDIATE
         if confirmation_resolved:
+            # tool_call_id-scoped: a resolved gate (human confirm OR checker
+            # allow) projects to immediate regardless of policy — the checker
+            # is never consulted twice for one call.
             return ToolDisposition.MCP_IMMEDIATE
+        if permission == "auto_review":
+            return ToolDisposition.NEEDS_REVIEW
         return ToolDisposition.NEEDS_CONFIRM
 
     if not tool_registry.has(name):

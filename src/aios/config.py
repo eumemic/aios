@@ -759,6 +759,34 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
+    auto_review_model: str = Field(
+        default="openai/responses/gpt-5.6-luna",
+        description="Checker model for ``auto_review``-policied MCP tool calls "
+        "(jarbot#229): a cheap grader that returns ``allow`` (execute) or "
+        "``ask`` (hold a confirmation card). LiteLLM model string; "
+        "operator-swappable, never a user-facing decision. Auth resolves "
+        "through the same per-account ``model_providers`` ladder as every "
+        "other inference call.",
+    )
+
+    auto_review_timeout_s: float = Field(
+        default=5.0,
+        ge=0.5,
+        description="Total wall-clock budget for one auto-review verdict, "
+        "including the single retry on transient failure. On expiry the "
+        "checker fails closed: the call holds a confirmation card with the "
+        "checker-unavailable reason, it never auto-runs.",
+    )
+
+    auto_review_stranded_after_s: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="Age after which an unresolved ``auto_review`` call with "
+        "no verdict recorded and no in-flight review task is presumed "
+        "stranded (worker crash mid-review) and failed closed by the sweep: "
+        "a confirmation card is held with the checker-unavailable reason.",
+    )
+
     auto_allow_readonly_mcp_servers: list[str] = Field(
         default_factory=lambda: ["github", "notion", "jarbot"],
         description="Operator-curated allowlist of MCP server NAMES (the "

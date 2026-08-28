@@ -20,9 +20,9 @@ from aios.models.agents import (
     AgentVersion,
     GenericChildBinding,
     HttpServerSpec,
+    McpPermissionValue,
     McpServerSpec,
     OutputStyle,
-    PermissionPolicy,
     PreemptPolicy,
     StepSurface,
     ToolSpec,
@@ -303,11 +303,17 @@ async def validate_pinned_agent_version(
 
 def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> StepSurface:
     """Project a wire read-model (``Agent``/``AgentVersion``) onto the nominal
-    :class:`StepSurface`, carrying exactly the ten harness-consumed fields.
+    :class:`StepSurface`, carrying exactly the harness-consumed fields.
 
     A missing field here is a compile-loud ``StepSurface`` construction error,
     not a silent structural-overlap drift — the projection's drift surface is
     mypy, not runtime.
+
+    ``description`` (the auto-review checker's scope input) exists only on the
+    live ``Agent`` read-model — ``agent_versions`` never snapshotted it — so a
+    version-pinned surface carries ``None`` and the checker simply omits the
+    scope line. Floating sessions (the jarbot shape) always resolve the live
+    ``Agent`` and get the current profile.
     """
     return StepSurface(
         tools=agent.tools,
@@ -321,6 +327,7 @@ def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> S
         window_max=agent.window_max,
         preempt_policy=agent.preempt_policy,
         output_style=agent.output_style,
+        description=agent.description if isinstance(agent, Agent) else None,
         binding=binding,
     )
 
@@ -450,7 +457,7 @@ async def load_for_session(
         return await _load_for_session_conn(acquired, session, account_id=account_id)
 
 
-def effective_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> PermissionPolicy:
+def effective_mcp_permission(name: str, agent_tools: list[ToolSpec]) -> McpPermissionValue:
     """Resolved MCP permission with operator-default fallback applied.
 
     Wraps :func:`aios.models.agents.resolve_mcp_permission` (which

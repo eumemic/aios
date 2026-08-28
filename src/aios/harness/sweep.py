@@ -1175,7 +1175,15 @@ def _was_dispatched(
         surface,  # type: ignore[arg-type]  # duck-typed: classifier reads only .tools/.http_servers
         confirmation_resolved=candidate.tool_call_id in confirmed_ids,
     )
-    return disposition not in (ToolDisposition.NEEDS_CONFIRM, ToolDisposition.CUSTOM)
+    # NEEDS_REVIEW is not-dispatched for the same reason as NEEDS_CONFIRM:
+    # the execution has not been launched. The in-flight review task registers
+    # under a ``review:``-prefixed key, so it would NOT protect the call from
+    # ghost error-repair here — excluding the disposition is what does.
+    return disposition not in (
+        ToolDisposition.NEEDS_CONFIRM,
+        ToolDisposition.NEEDS_REVIEW,
+        ToolDisposition.CUSTOM,
+    )
 
 
 def _is_client_result_pending(name: str, surface: _SweepAgentSurface) -> bool:
