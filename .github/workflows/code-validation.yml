@@ -271,14 +271,13 @@ jobs:
         run: uv sync --dev
 
       - name: Unit tests
-        # ``-n 4`` matches the 4 vCPUs on public-repo ubuntu-latest
-        # runners.  The suite is xdist-safe by construction: no DB, no
-        # fixed ports (broker tests bind port 0 / mkdtemp UDS paths),
-        # per-worker ``AIOS_INSTANCE_ID`` via tests/conftest.py.
-        # Measured locally: 45 s serial → 17 s at ``-n 4``.
+        # Keep worker count below runner CPU capacity so the coordinator and
+        # test subprocesses retain headroom.  Saturating all four vCPUs with
+        # xdist caused workers to be killed near the end of the full suite,
+        # leaving validation UNKNOWN instead of producing a verdict.
         # ``faulthandler_timeout``: a hung test dumps tracebacks instead of
         # sitting silent until timeout-minutes fires (mirrors integration).
-        run: uv run pytest tests/unit -q -n 4 -o faulthandler_timeout=120
+        run: uv run pytest tests/unit -q -n 2 -o faulthandler_timeout=120
 
   connectors:
     needs: detect
