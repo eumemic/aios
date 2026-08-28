@@ -33,6 +33,9 @@ jobs:
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
+          # Session outlives this job and POSTs ### Code review with GH_TOKEN.
+          # Default post-step revoke made sess_01M156PTBDBE7PQGXEEYVR4RRG 401.
+          skip-token-revoke: true
 
       - name: Start aios review session
         if: steps.app.outcome == 'success'
