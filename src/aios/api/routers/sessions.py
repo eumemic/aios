@@ -756,12 +756,8 @@ async def download_file(
     regression guard: it is the test that fails if the header is dropped
     during a cleanup, since every other test passes without it.
 
-    Scoping is unchanged from every other session-scoped read: 404s when
-    the file doesn't exist, belongs to a different session, or isn't owned
-    by the caller's account — a wrong session or a cross-account file id is
-    indistinguishable from a missing file.  No transformation or resizing;
-    ``host_path`` is streamed verbatim.  This is a rendering control, not a
-    filter: bytes are returned byte-identical on both branches.
+    Both branches are a rendering control, never a filter: the bytes are
+    returned byte-identical either way.
     """
     async with pool.acquire() as conn:
         record = await queries.get_file(conn, session_id, file_id, account_id=account_id)
