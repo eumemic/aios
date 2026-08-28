@@ -727,6 +727,85 @@ def build_secret_egress_dnat_script(dnat_hosts: Sequence[str], dnat_target: tupl
     )
 
 
+# The internal / link-local / metadata / CGNAT destination ranges a browser
+# container is denied outbound (jarbot#106). A deliberately NARROW, targeted L3
+# subset for the SSRF / credential-theft threat — NOT the full internal-IP
+# predicate in ``aios.tools.url_safety`` (which also blocks multicast, reserved,
+# and TEST-NET; those are non-SSRF and unroutable from this isolated bridge, so
+# they are intentionally omitted rather than carried as near-dead rules).
+# Link-local 169.254.0.0/16 covers the cloud-metadata endpoint (169.254.169.254);
+# the three RFC1918 blocks cover every private network INCLUDING the docker
+# bridge gateway (so "reach the host via the gateway" is already denied — no
+# separate gateway rule); 100.64.0.0/10 is CGNAT, which ``ipaddress`` does NOT
+# fold into ``is_private``, so it must be listed explicitly. 127.0.0.0/8 is
+# deliberately ABSENT: the container's embedded DNS resolver is 127.0.0.11
+# (netns-local loopback) and the browser needs it to resolve the public web.
+# This is a DESTINATION-IP filter: an internal service reachable on a PUBLIC IP
+# is not covered here and must rely on its own auth (e.g. the API bearer key).
+# IPv4-only: ``ensure_browser_network`` enforces the ``aios-browser`` network is
+# ``--ipv6=false`` (hard-failing otherwise), so a browser container gets no v6
+# address or route and v6 egress is impossible — no v6 rules needed.
+_BROWSER_DENY_INTERNAL_CIDRS = (
+    "169.254.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+)
+
+
+def build_browser_deny_internal_script() -> str:
+    """Build the L3 deny-internal egress script for a browser container.
+
+    The browser renders UNTRUSTED web content, so — unlike the session/run
+    lockdown, which is a default-DROP allow-list (:func:`build_iptables_script`)
+    — general (public) egress must stay OPEN. This is the default-ACCEPT sibling
+    of :func:`build_secret_egress_dnat_script`: it leaves the filter OUTPUT
+    policy at ``ACCEPT`` (NO ``-P OUTPUT DROP``) and only appends targeted
+    ``DROP`` rules for the ranges in :data:`_BROWSER_DENY_INTERNAL_CIDRS`. That
+    closes cloud-metadata theft (169.254.169.254) and internal-service SSRF at
+    L3 — on the resolved *destination IP*, so it holds against the DNS rebinding
+    the driver's userspace navigate guard (navigate-time, hostname-based) cannot
+    catch — while leaving the public web reachable.
+
+    Only the filter OUTPUT chain is flushed (for idempotent re-apply); the nat
+    table is untouched. No ``_RESOLV_PREAMBLE``: the rules are static CIDRs, so
+    nothing resolves a hostname.
+    """
+    lines = [
+        "set -e",
+        "",
+        _IPTABLES_BACKEND_SELECT,
+        "",
+        "# Clear filter OUTPUT (empty on the fresh container this always runs on),",
+        "# leave the policy at ACCEPT (general egress stays open), do NOT touch nat.",
+        '"$IPT" -F OUTPUT',
+        "",
+        "# Deny egress to the internal / link-local / metadata / CGNAT ranges; every",
+        "# other destination (the public web) stays allowed by the ACCEPT policy.",
+    ]
+    lines += [f'"$IPT" -A OUTPUT -d {cidr} -j DROP' for cidr in _BROWSER_DENY_INTERNAL_CIDRS]
+    return "\n".join(lines)
+
+
+def build_browser_deny_internal_verify_script() -> str:
+    """Read-back verify that every deny-internal DROP rule actually landed.
+
+    Proof the rules took effect in the shared netns, not merely that the apply
+    script exited 0 — the browser's analog of the ``-P OUTPUT DROP`` read-back
+    in :func:`build_lockdown_verify_script`. ``set -e`` makes each missing-rule
+    grep independently fatal. There is NO policy assertion: the deny-internal
+    path deliberately leaves the filter policy at ``ACCEPT``. ``grep -F`` so the
+    CIDR dots/slash are matched literally, not as a regexp.
+    """
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
+    lines += [
+        f"\"$IPT\" -S OUTPUT | grep -qF -- '-d {cidr} -j DROP'"
+        for cidr in _BROWSER_DENY_INTERNAL_CIDRS
+    ]
+    return "\n".join(lines)
+
+
 # Docker's embedded DNS, served inside every user-defined-network netns (the
 # sandbox runs on the ``aios-sandbox`` user-defined bridge). The lockdown
 # sidecar joins that netns but inherits the operator image's (typically empty)
@@ -1043,3 +1122,82 @@ async def apply_secret_egress_dnat(
         dnat_host_count=len(dnat_hosts),
     )
     return _parse_egress_provision_result(result.stdout)
+
+
+async def apply_browser_deny_internal(backend: SandboxBackend, handle: SandboxHandle) -> None:
+    """Apply + verify a browser container's L3 deny-internal egress (jarbot#106).
+
+    Called right after the browser container is created. Runs the same
+    operator-image netns sidecar as :func:`apply_network_lockdown` — the browser
+    container itself holds no ``NET_ADMIN``, so root-in-container can neither
+    flush nor poison the rules — but applies
+    :func:`build_browser_deny_internal_script` (default-ACCEPT + targeted DROP)
+    and verifies every DROP rule landed (there is no DROP *policy* to assert).
+
+    Deliberately NOT factored into a shared helper with the session/run egress
+    orchestrators (matching the :func:`apply_secret_egress_dnat` precedent): the
+    browser path carries its own ``sandbox.browser_egress_*`` log events so an
+    operator alert never mis-attributes a browser-plane egress failure to a
+    session networking-policy violation.
+
+    Takes NO ``runtime``: a browser is provisioned only under the default
+    container runtime — the registry rejects a custom runtime before create,
+    because this netns-sidecar iptables path does not initialize under runsc's
+    netstack — so the sidecar always runs under the default runtime too.
+
+    **Fails closed**: on a sidecar infra error, a nonzero apply, or a failed
+    read-back verify, :class:`SandboxBackendError` propagates and the registry
+    tears the just-created container down rather than handing back a browser
+    whose untrusted web content can reach the cloud-metadata endpoint or
+    internal services.
+    """
+    settings = get_settings()
+    try:
+        result = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_browser_deny_internal_script(),
+            timeout_seconds=30,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.browser_egress_sidecar_error", owner_id=handle.owner_id)
+        raise
+
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.browser_egress_failed",
+            owner_id=handle.owner_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
+        raise SandboxBackendError(
+            f"browser deny-internal egress failed (exit {result.exit_code}) for "
+            f"{handle.owner_id}; refusing to run a browser whose untrusted web content "
+            f"can reach internal/metadata endpoints"
+        )
+
+    try:
+        verify = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_browser_deny_internal_verify_script(),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.browser_egress_verify_error", owner_id=handle.owner_id)
+        raise
+    if verify.exit_code != 0:
+        log.warning(
+            "sandbox.browser_egress_verify_failed",
+            owner_id=handle.owner_id,
+            exit_code=verify.exit_code,
+        )
+        raise SandboxBackendError(
+            f"browser deny-internal egress verification failed for {handle.owner_id}: "
+            "an internal-range DROP rule is missing after apply; refusing to run a "
+            "browser with unverified egress isolation"
+        )
+
+    log.info("sandbox.browser_egress_applied", owner_id=handle.owner_id)

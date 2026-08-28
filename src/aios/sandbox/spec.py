@@ -1286,6 +1286,22 @@ class BrowserImageUnconfiguredError(SandboxBackendError):
     """
 
 
+class BrowserRuntimeUnsupportedError(BrowserImageUnconfiguredError):
+    """The configured browser container runtime is not supported.
+
+    A subclass of :class:`BrowserImageUnconfiguredError` so it rides the same
+    non-retryable "browser not usable on this deployment" path (``driver_call``
+    passes it through distinctly rather than wrapping it as a retryable
+    ``BrowserUnavailableError`` — a static config choice, retrying never helps).
+    Raised by the registry BEFORE create when ``sandbox_browser_runtime`` is
+    set: the browser's deny-internal egress lockdown installs iptables in the
+    container's netns, which does not initialize under runsc's netstack, so a
+    custom-runtime browser would otherwise fail closed at the egress sidecar
+    with an opaque iptables error. Rejecting up front makes the illegal
+    combination (custom runtime + always-on egress) explicit.
+    """
+
+
 def build_spec_from_browser(account_id: str) -> SandboxSpec:
     """Build the spec for an account's shared browser container (jarbot#106).
 
@@ -1330,15 +1346,17 @@ def build_spec_from_browser(account_id: str) -> SandboxSpec:
             INSTANCE_LABEL_KEY: settings.instance_id,
             SESSION_LABEL_KEY: account_id,
         },
-        # No egress policy machinery: the container is unreachable FROM
-        # sandboxes (inter-bridge isolation + ICC-off) and runs no agent code;
-        # per-site policy is driver-level (jarbot#106 §5.2). The container's
-        # inability to drive the control plane rests on topology, NOT on egress
-        # blocking (egress is open in Phase 1): no published ports, no
-        # tool-broker socket mounted, ``host_gateway_alias=None`` (no
-        # host.docker.internal alias), and the API requires a bearer key. A
-        # future Phase adds per-site egress lockdown for the untrusted web
-        # content the browser renders.
+        # No session/run egress-policy machinery here (``network_policy=None``):
+        # the container is unreachable FROM sandboxes (inter-bridge isolation +
+        # ICC-off) and runs no agent code, and its inability to drive the
+        # control plane rests on topology — no published ports, no tool-broker
+        # socket mounted, ``host_gateway_alias=None`` (no host.docker.internal
+        # alias), and the API requires a bearer key. The OUTBOUND surface of the
+        # untrusted web content it renders is locked down separately, AFTER
+        # create, by the registry's L3 deny-internal egress sidecar
+        # (``apply_browser_deny_internal``): metadata/RFC1918/CGNAT dropped,
+        # public web open. A per-*site* allowlist remains driver-level future
+        # work (jarbot#106 §5.2).
         network_policy=None,
         host_gateway_alias=None,
         image=settings.sandbox_browser_image,
@@ -1347,5 +1365,9 @@ def build_spec_from_browser(account_id: str) -> SandboxSpec:
         memory_bytes=settings.sandbox_browser_memory_bytes,
         pids_limit=settings.sandbox_browser_pids_limit,
         seccomp_profile=settings.sandbox_browser_seccomp_profile,
+        # The registry rejects a non-None sandbox_browser_runtime before this
+        # builder is ever called (its egress lockdown does not work under a
+        # custom runtime), so in production this threads None today; it re-carries
+        # a value once egress-under-a-custom-runtime is supported.
         runtime=settings.sandbox_browser_runtime,
     )
