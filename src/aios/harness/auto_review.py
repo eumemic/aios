@@ -329,13 +329,18 @@ async def _grade(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
+        # Portable params only. The checker model is operator-swappable across
+        # providers, and aios pins litellm.drop_params=False (unsupported
+        # params fail LOUD) — a provider-specific knob here turns into "every
+        # call fails closed" on providers that reject it (seen live: anthropic
+        # 400s on reasoning_effort → every verdict became the unavailable
+        # card). Latency is governed by the timeout + max_tokens instead.
         request = LlmRequest(
             messages=messages,
             tools=None,
             params={
                 "timeout": remaining,
                 "max_tokens": 300,
-                "reasoning_effort": "low",
             },
             session_id=session_id,
         )

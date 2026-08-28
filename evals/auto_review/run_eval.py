@@ -57,7 +57,7 @@ async def _run_case(case: dict[str, Any], model: str) -> tuple[str, str]:
     request = LlmRequest(
         messages=messages,
         tools=None,
-        params={"timeout": 30.0, "max_tokens": 300, "reasoning_effort": "low"},
+        params={"timeout": 30.0, "max_tokens": 300},
         session_id=None,
     )
     response = await call_litellm(request, model=model, auth=None)
