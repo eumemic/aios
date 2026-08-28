@@ -103,6 +103,36 @@ def test_transform_does_not_mutate_its_input() -> None:
     assert "$defs" in original
 
 
+def test_a_field_named_like_a_schema_keyword_survives() -> None:
+    """Inside ``properties`` the keys are FIELD names, not schema keywords.
+
+    A blind dict walk strips ``title`` wherever it appears, which would delete a
+    property literally named ``title`` while ``required`` still demands it — an
+    unsatisfiable schema that rejects every call.
+    """
+
+    class _Keywordy(BaseModel):
+        title: str
+        default: str | None = None
+        additionalProperties: bool = True
+
+    slim = slim_tool_schema(_Keywordy.model_json_schema(), opaque_arrays={}, redescribe={})
+    assert set(slim["properties"]) == {"title", "default", "additionalProperties"}
+    assert set(slim["required"]) <= set(slim["properties"])
+
+
+def test_a_non_array_property_is_never_collapsed() -> None:
+    """Name-only matching would be the one way this module could TIGHTEN."""
+
+    class _Odd(BaseModel):
+        tools: str = "not-a-list"
+
+    slim = slim_tool_schema(
+        _Odd.model_json_schema(), opaque_arrays={"tools": "Opaque."}, redescribe={}
+    )
+    assert slim["properties"]["tools"]["type"] == "string"
+
+
 def test_nested_properties_are_reached_through_a_ref() -> None:
     """A body reachable only via ``$ref`` gets the same treatment (call_workflow)."""
 

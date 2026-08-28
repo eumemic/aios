@@ -48,7 +48,8 @@ def slim_tool_schema(
     ``opaque_arrays`` maps a property name to the one-line description that
     replaces its fully-expanded subschema: the property becomes a bare
     ``{"type": "array"}`` (null-arm preserved when the original allowed null),
-    which drops the whole ``$defs`` tree it referenced.
+    which drops the whole ``$defs`` tree it referenced. A property that is not
+    actually an array is left alone — see :func:`_opaque_array`.
 
     ``redescribe`` maps a property name to a replacement ``description``, with
     the rest of the property's subschema left exactly as rendered.
@@ -92,53 +93,103 @@ def slim_tool_schema(
     return out
 
 
-def _iter_properties(node: Any) -> list[dict[str, Any]]:
-    """Every ``properties`` mapping anywhere in the schema, root first."""
+#: Keywords whose value is a NAME → schema mapping (the names are field names,
+#: never schema keywords — which is exactly why a blind ``dict`` walk is wrong).
+_SCHEMA_MAPS = ("properties", "$defs", "patternProperties", "definitions")
+#: Keywords whose value is a list of schemas.
+_SCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+#: Keywords whose value is a single schema.
+_SCHEMA_VALUES = ("items", "not", "contains", "additionalProperties", "propertyNames")
+
+
+def _walk_schemas(root: Any) -> list[dict[str, Any]]:
+    """Every genuine schema object reachable from ``root``, root first.
+
+    Structural, not a blind ``dict`` walk: it descends only through JSON Schema
+    keywords. That distinction is load-bearing — inside ``properties`` the keys
+    are FIELD names, so a field named ``title`` (or ``default``, or
+    ``additionalProperties``) would otherwise be mistaken for the keyword of the
+    same name and stripped, leaving a property that ``required`` still demands.
+    """
     found: list[dict[str, Any]] = []
-    stack: list[Any] = [node]
+    stack: list[Any] = [root]
     while stack:
         current = stack.pop()
-        if isinstance(current, dict):
-            properties = current.get("properties")
-            if isinstance(properties, dict):
-                found.append(properties)
-            stack.extend(current.values())
-        elif isinstance(current, list):
-            stack.extend(current)
+        if not isinstance(current, dict):
+            continue
+        found.append(current)
+        for keyword in _SCHEMA_MAPS:
+            group = current.get(keyword)
+            if isinstance(group, dict):
+                stack.extend(group.values())
+        for keyword in _SCHEMA_LISTS:
+            arms = current.get(keyword)
+            if isinstance(arms, list):
+                stack.extend(arms)
+        for keyword in _SCHEMA_VALUES:
+            sub = current.get(keyword)
+            if isinstance(sub, dict):
+                stack.append(sub)
     return found
 
 
-def _strip_boilerplate(node: Any) -> None:
+def _iter_properties(root: Any) -> list[dict[str, Any]]:
+    """Every ``properties`` mapping anywhere in the schema."""
+    return [
+        node["properties"]
+        for node in _walk_schemas(root)
+        if isinstance(node.get("properties"), dict)
+    ]
+
+
+def _strip_boilerplate(root: Any) -> None:
     """Remove titles, null defaults, and permissive ``additionalProperties``, in place."""
-    stack: list[Any] = [node]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            current.pop("title", None)
-            if current.get("default", ...) is None:
-                del current["default"]
-            if current.get("additionalProperties") is True:
-                del current["additionalProperties"]
-            stack.extend(current.values())
-        elif isinstance(current, list):
-            stack.extend(current)
+    for node in _walk_schemas(root):
+        node.pop("title", None)
+        if node.get("default", ...) is None:
+            del node["default"]
+        if node.get("additionalProperties") is True:
+            del node["additionalProperties"]
 
 
 def _opaque_array(prop: Any, description: str) -> dict[str, Any]:
-    """Collapse a rendered list-of-model property to a bare array."""
+    """Collapse a rendered list-of-model property to a bare array.
+
+    Wholesale replacement, so everything the rendered property carried goes —
+    including a ``default: []``, which says nothing the field's absence from
+    ``required`` doesn't already say. Returns ``prop`` unchanged if it isn't
+    actually an array: collapsing a non-array to ``{"type": "array"}`` would be
+    the one way this module could TIGHTEN the dispatch-time check, so a
+    name-only match is not enough to fire.
+    """
+    if isinstance(prop, dict) and not _is_array(prop):
+        return prop
     array: dict[str, Any] = {"type": "array"}
     if _allows_null(prop):
         return {"anyOf": [array, {"type": "null"}], "description": description}
     return {**array, "description": description}
 
 
-def _allows_null(prop: Any) -> bool:
+def _arms(prop: Any) -> list[Any]:
+    """The property's type arms — its ``anyOf`` branches, or itself."""
     if not isinstance(prop, dict):
-        return False
+        return []
     arms = prop.get("anyOf")
-    if not isinstance(arms, list):
-        return False
-    return any(isinstance(arm, dict) and arm.get("type") == "null" for arm in arms)
+    return arms if isinstance(arms, list) else [prop]
+
+
+def _is_array(prop: Any) -> bool:
+    """True iff every non-null arm of ``prop`` is an array."""
+    non_null = [
+        arm for arm in _arms(prop) if not (isinstance(arm, dict) and arm.get("type") == "null")
+    ]
+    return bool(non_null) and all(
+        isinstance(arm, dict) and arm.get("type") == "array" for arm in non_null
+    )
+
+
+def _allows_null(prop: Any) -> bool:
+    return any(isinstance(arm, dict) and arm.get("type") == "null" for arm in _arms(prop))
 
 
 def _prune_unreachable_defs(schema: dict[str, Any]) -> None:
@@ -164,14 +215,8 @@ def _prune_unreachable_defs(schema: dict[str, Any]) -> None:
 def _refs_in(node: Any) -> set[str]:
     """Every ``#/$defs/<name>`` target referenced anywhere under ``node``."""
     names: set[str] = set()
-    stack: list[Any] = [node]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, dict):
-            ref = current.get("$ref")
-            if isinstance(ref, str) and ref.startswith(_REF_PREFIX):
-                names.add(ref[len(_REF_PREFIX) :])
-            stack.extend(current.values())
-        elif isinstance(current, list):
-            stack.extend(current)
+    for schema in _walk_schemas(node):
+        ref = schema.get("$ref")
+        if isinstance(ref, str) and ref.startswith(_REF_PREFIX):
+            names.add(ref[len(_REF_PREFIX) :])
     return names
