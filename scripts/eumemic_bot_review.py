@@ -30,6 +30,11 @@ def _die(msg: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 
+def _skip(msg: str) -> None:
+    print(f"SKIP: {msg}", file=sys.stderr)
+    raise SystemExit(0)
+
+
 def _env(name: str) -> str:
     val = os.environ.get(name, "").strip()
     if not val:
@@ -75,9 +80,9 @@ def resolve_agent(base: str, api_key: str) -> str:
     if len(exact) == 1:
         return str(exact[0]["id"])
     visible = [f"{r.get('name')}:{r.get('id')}" for r in _list_agents(base, api_key)]
-    _die(
+    _skip(
         f"no live agent named {AGENT_NAME!r} on this API key's account "
-        f"(visible: {visible or 'none'}). Set AGENT_ID to a reviewer on this account."
+        f"(visible: {visible or 'none'}). Set DEV_REVIEW_AGENT_ID to a reviewer on this account."
     )
 
 
