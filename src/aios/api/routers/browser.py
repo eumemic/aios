@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import os
 import time
@@ -50,8 +49,8 @@ from aios.models.browser import (
     TakeoverOpenRequest,
     TakeoverOpenResponse,
 )
-from aios.sandbox.browser_protocol import TAKEOVER_HEARTBEAT_MARKER
-from aios.sandbox.volumes import browser_plane_dir
+from aios.sandbox.browser_protocol import FRAMES_MANIFEST, TAKEOVER_HEARTBEAT_MARKER
+from aios.sandbox.volumes import browser_plane_dir, read_plane_file
 from aios.services import sessions as sessions_service
 from aios.services.browser_calls import submit_browser_call
 
@@ -75,11 +74,12 @@ async def _call(
 ) -> dict[str, Any]:
     """Submit a control op and translate its error currency to HTTP.
 
-    ``browser_unavailable``/``browser_unconfigured`` → 503; ``internal`` (the
-    executor's generic backstop — a deterministic worker-side bug) → 500;
-    everything else the executor reported as an error → 409 (an op-level refusal
-    the caller can act on: ``takeover_in_progress``, ``unknown_grant``, a driver
-    error code, ...). A raw success result passes through.
+    ``browser_unavailable``/``browser_unconfigured``/``browser_crashed`` → 503;
+    ``internal`` (the executor's generic backstop — a deterministic worker-side
+    bug) → 500; everything else the executor reported as an error → 409 (an
+    op-level refusal the caller can act on: ``takeover_in_progress``,
+    ``unknown_grant``, a driver error code, ...). A raw success result passes
+    through.
     """
     result, is_error = await submit_browser_call(
         db_url,
@@ -92,7 +92,10 @@ async def _call(
     if is_error:
         code = (result or {}).get("code", "internal")
         message = (result or {}).get("message", "browser control op failed")
-        if code in ("browser_unavailable", "browser_unconfigured"):
+        # ``browser_crashed`` is the driver reporting its Chromium host dead —
+        # transient exactly like an unreachable container, so a retryable 503,
+        # not a 409 the caller would treat as a state conflict.
+        if code in ("browser_unavailable", "browser_unconfigured", "browser_crashed"):
             raise ServiceUnavailableError(message, detail={"code": code})
         if code == "internal":
             # A worker-side fault, not a caller-actionable refusal — 500, not a
@@ -212,22 +215,30 @@ async def post_input(
     ).encode("utf-8")
 
     cap = get_settings().sandbox_browser_input_spool_max_bytes
-    existing = spool.stat().st_size if spool.exists() else 0
-    # Soft cap: the check-then-write is per-request, so N concurrent posts can
-    # each pass here and overshoot by up to (N-1) lines. That is bounded (one
-    # viewer per grant is the norm; a line is a few hundred bytes) and the
-    # reaper truncates the spool once the grant closes — a hard atomic cap isn't
-    # worth an flock on the hot input path.
-    if existing + len(line) > cap:
-        raise PayloadTooLargeError(
-            "input spool is full", detail={"cap_bytes": cap, "size_bytes": existing}
-        )
-    # O_APPEND makes each write atomic against concurrent appenders (the kernel
-    # holds the inode offset lock), so lines never interleave — but os.write can
-    # still return a SHORT count, which would leave a truncated, unparseable
-    # JSONL line. Loop until the whole line lands, and fail hard if it can't.
-    fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    # O_NOFOLLOW: the plane is a bind mount the (potentially compromised)
+    # container writes, so it could plant a symlink at input/spool.jsonl (the
+    # reaper unlinks the spool between grants, leaving a window) pointing at
+    # another account's plane — without O_NOFOLLOW the O_CREAT would follow it
+    # and this append would land in the victim's file. A planted symlink now
+    # fails ELOOP loudly instead. O_APPEND makes each write atomic against
+    # concurrent appenders (the kernel holds the inode offset lock) so lines
+    # never interleave.
+    fd = os.open(spool, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
+        # Cap on the fstat'd size of the open fd (not a pre-open stat that would
+        # itself follow a symlink). Soft cap: the check-then-write is per
+        # request, so N concurrent posts can each pass and overshoot by up to
+        # (N-1) lines — bounded (one viewer per grant; a line is a few hundred
+        # bytes) and the reaper truncates the spool once the grant closes, so a
+        # hard atomic cap isn't worth an flock on the hot input path.
+        existing = os.fstat(fd).st_size
+        if existing + len(line) > cap:
+            raise PayloadTooLargeError(
+                "input spool is full", detail={"cap_bytes": cap, "size_bytes": existing}
+            )
+        # os.write can return a SHORT count, which would leave a truncated,
+        # unparseable JSONL line. Loop until the whole line lands, fail hard
+        # if it can't.
         view = memoryview(line)
         written = 0
         while written < len(view):
@@ -264,9 +275,8 @@ async def stream_frames(
         raise ConflictError(
             f"takeover grant {grant_id} is not open", detail={"status": grant["status"]}
         )
+    grant_epoch = grant["epoch"]
     plane = browser_plane_dir(account_id)
-    plane_root = plane.resolve()
-    frames_dir = plane / "frames"
     if not plane.exists():
         # The plane dir is created at provision; its absence while a grant is
         # open is a deployment/mount fault, not a quiet driver — surface it
@@ -280,7 +290,7 @@ async def stream_frames(
         last_boot: str | None = None
         last_grant_check = 0.0
         while True:
-            manifest = _read_manifest(frames_dir, plane_root, account_id)
+            manifest = _read_manifest(plane)
             if manifest is not None:
                 boot = manifest.get("boot")
                 if last_boot is not None and boot != last_boot:
@@ -292,8 +302,15 @@ async def stream_frames(
                         data=json.dumps({"outcome": "browser_restarted"}), event="end"
                     )
                     return
-                if manifest["seq"] > last_seq:
-                    frame = _load_frame(frames_dir, manifest, plane_root, account_id)
+                # Epoch fence: forward a frame only when its manifest epoch is
+                # THIS grant's. A manifest at a different epoch belongs to a
+                # DIFFERENT takeover of the same account (this grant closed and
+                # a new one opened; the epoch rotates on both edges) — without
+                # the guard the stream would leak the next takeover's frames
+                # for up to the grant-recheck window. The recheck below ends
+                # the stream with the real outcome.
+                if manifest.get("epoch") == grant_epoch and manifest["seq"] > last_seq:
+                    frame = _load_frame(plane, manifest)
                     if frame is not None:
                         last_seq = manifest["seq"]
                         last_boot = boot
@@ -315,27 +332,12 @@ async def stream_frames(
     return make_sse_response(lambda: None, _frames())
 
 
-def _frames_dir_in_plane(frames_dir: Path, plane_root: Path, account_id: str) -> Path | None:
-    """Resolve ``frames_dir`` and confirm it is still inside the account's plane
-    ROOT (the bind-mount SOURCE, which a compromised container cannot symlink
-    away). Anchoring on the plane root — not on ``frames_dir`` itself — is what
-    defeats a hostile ``frames`` symlink pointing at ANOTHER account's plane:
-    resolving both sides of a self-referential symlink check would pass it.
-    Returns the resolved dir, or ``None`` if it escaped (logged)."""
-    resolved = frames_dir.resolve()
-    if not resolved.is_relative_to(plane_root):
-        log.warning("browser.frames_dir_escape", account_id=account_id, resolved=str(resolved))
-        return None
-    return resolved
+_FRAMES_SUBDIR = FRAMES_MANIFEST.rsplit("/", 1)[0]  # "frames" — the manifest's own dir
 
 
-def _read_manifest(frames_dir: Path, plane_root: Path, account_id: str) -> dict[str, Any] | None:
-    if _frames_dir_in_plane(frames_dir, plane_root, account_id) is None:
-        return None
-    manifest_path = frames_dir / "manifest.json"
-    try:
-        raw = manifest_path.read_bytes()
-    except OSError:
+def _read_manifest(plane: Path) -> dict[str, Any] | None:
+    raw = read_plane_file(plane, FRAMES_MANIFEST)
+    if raw is None:
         return None
     try:
         data = json.loads(raw)
@@ -351,31 +353,21 @@ def _read_manifest(frames_dir: Path, plane_root: Path, account_id: str) -> dict[
     return data
 
 
-def _load_frame(
-    frames_dir: Path, manifest: dict[str, Any], plane_root: Path, account_id: str
-) -> dict[str, Any] | None:
+def _load_frame(plane: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
     """Build a frame SSE payload from the manifest, or ``None`` if unreadable.
 
     Forwards the §5.6 trusted-chrome envelope (minus the account, which never
-    crosses to the client) with the JPEG inlined. Containment is TWO checks,
-    both anchored so a compromised container cannot exfiltrate cross-tenant:
-    the frames dir must resolve inside the account's plane root (blocks a
-    symlinked ``frames`` -> another account's plane), and the manifest ``file``
-    must resolve inside that frames dir (blocks a ``../`` file ref).
+    crosses to the client) with the JPEG inlined. Containment rides
+    :func:`read_plane_file`'s no-follow walk — a hostile ``frames`` symlink,
+    a ``../`` file ref, or a component swapped for a symlink AFTER any check
+    (the TOCTOU the old resolve-then-read sequence left open) all fail at
+    open time instead of reading another account's plane.
     """
-    resolved_frames = _frames_dir_in_plane(frames_dir, plane_root, account_id)
-    if resolved_frames is None:
-        return None
     file_ref = manifest.get("file")
     if not isinstance(file_ref, str):
         return None
-    frame_path = (frames_dir / file_ref).resolve()
-    if not frame_path.is_relative_to(resolved_frames):
-        log.warning("browser.frame_path_escape", account_id=account_id, file=file_ref)
-        return None
-    try:
-        jpeg = frame_path.read_bytes()
-    except OSError:
+    jpeg = read_plane_file(plane, f"{_FRAMES_SUBDIR}/{file_ref}")
+    if jpeg is None:
         return None
     return {
         "seq": manifest.get("seq"),
@@ -415,13 +407,10 @@ def _handback_payload(raw: dict[str, Any] | None, account_id: str) -> HandbackPa
     screenshot_data_url = None
     shot_path = raw.get("shot_path")
     if isinstance(shot_path, str):
-        plane = browser_plane_dir(account_id)
-        resolved = (plane / shot_path).resolve()
-        if resolved.is_relative_to(plane.resolve()):
-            with contextlib.suppress(OSError):
-                screenshot_data_url = "data:image/png;base64," + base64.b64encode(
-                    resolved.read_bytes()
-                ).decode("ascii")
+        # No-follow containment — same TOCTOU surface as the frame loads.
+        png = read_plane_file(browser_plane_dir(account_id), shot_path)
+        if png is not None:
+            screenshot_data_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
     return HandbackPayload(
         snapshot=raw.get("snapshot"),
         screenshot_data_url=screenshot_data_url,

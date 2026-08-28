@@ -11,9 +11,10 @@ restart): ``takeover_open`` is idempotent per grant id BY DRIVER CONTRACT,
 ``status``/``revoke_site``/``clear_state`` are naturally re-runnable.
 
 :func:`browser_reaper_tick` is the plane's periodic upkeep, one tick per
-``sandbox_browser_reaper_interval_seconds``: grant-TTL expiry (with the
-driver handback and the model-visible lifecycle notice), the
-container-keepalive bump for fresh open grants, ``browser_calls`` row
+``sandbox_browser_reaper_interval_seconds``: grant expiry — TTL lapse, or
+an open grant whose account has no live container — (with the driver
+handback and the model-visible lifecycle notice), the container-keepalive
+bump for fresh open grants, ``browser_calls`` row
 retention, and the plane byte quotas — shots/frames/downloads oldest-first,
 NEVER the profile (real logins; only explicit clear-state deletes it), and
 the input spool truncated once no grant is open.
@@ -172,8 +173,13 @@ async def _dispatch(
         async with pool.acquire() as conn:
             try:
                 # AFTER the driver ack — the driver is the enforcement
-                # authority; the row is the control-plane record.
-                await queries.insert_browser_grant(
+                # authority; the row is the control-plane record. The insert
+                # is idempotent on its own id and converges the row to THIS
+                # ack (see insert_browser_grant): a fresh open records it, a
+                # redrive of a still-open grant re-writes it to the driver's
+                # fresh boot/epoch, and either way the returned row is the
+                # truth to hand back.
+                recorded = await queries.insert_browser_grant(
                     conn,
                     grant_id=grant_id,
                     account_id=account_id,
@@ -185,13 +191,22 @@ async def _dispatch(
                     ttl_seconds=ttl_seconds,
                 )
             except asyncpg.UniqueViolationError as err:
+                # Only the one-open-per-account partial index can raise (the
+                # id conflict is handled by ON CONFLICT): a DIFFERENT
+                # concurrent open won.
                 raise _OpError("takeover_in_progress", "a takeover is already in progress") from err
+            if recorded is None:
+                # A grant with this id already reached a terminal state (the
+                # WHERE status='open' skipped the update) — a redrive arriving
+                # after the reaper expired it. NOT a fresh open; never answer
+                # with the stale terminal-row values as success.
+                raise _OpError("takeover_in_progress", "a takeover is already in progress")
         return {
             "grant_id": grant_id,
-            "target": response.data.get("target") or {},
-            "boot": response.boot,
-            "epoch": response.epoch,
-            "ttl_seconds": ttl_seconds,
+            "target": recorded.get("target") or {},
+            "boot": recorded["boot"],
+            "epoch": recorded["epoch"],
+            "ttl_seconds": recorded["ttl_seconds"],
         }
 
     if method == "close":
@@ -213,13 +228,16 @@ async def _dispatch(
             # not running.
             return {"running": False}
         response = await _driver(registry, account_id, "status", {}, timeout_s=action_timeout)
+        # Driver data FIRST so the control-plane truth (running/url/title/
+        # boot/epoch) can never be overridden by a key the driver — which
+        # renders untrusted web content — happens to emit.
         return {
+            **response.data,
             "running": True,
             "url": response.url,
             "title": response.title,
             "boot": response.boot,
             "epoch": response.epoch,
-            **response.data,
         }
 
     if method == "revoke_site":
@@ -422,13 +440,25 @@ async def browser_reaper_tick(
     """
     settings = get_settings()
 
-    # 1. Expire stale open grants: claim-first terminal move, driver handback,
-    #    model-visible notice to the requesting session. Per-grant isolation so
-    #    one wedged grant cannot starve the others or the later steps.
+    # 1. Expire open grants that are done: claim-first terminal move, driver
+    #    handback, model-visible notice to the requesting session. Per-grant
+    #    isolation so one wedged grant cannot starve the others or the later
+    #    steps. A grant expires when EITHER its heartbeat lapsed past its TTL
+    #    (``stale``, evaluated on the DB clock) OR its account has no live
+    #    container: in the latter the takeover it names cannot exist anymore
+    #    (the driver's standing takeover died with the container; a fresh
+    #    container relaunches with a new boot and no takeover), yet a
+    #    dutifully heartbeating viewer would otherwise hold the zombie grant —
+    #    and its frames SSE — open until TTL. peek() is the conservative probe:
+    #    None means this worker owns no container for the account (crashed-but-
+    #    still-cached containers keep their grant until the TTL path or an
+    #    explicit close).
     try:
         async with pool.acquire() as conn:
-            stale = await queries.list_stale_open_browser_grants(conn)
-        for grant in stale:
+            open_grants = await queries.list_open_browser_grants(conn)
+        for grant in open_grants:
+            if not (grant["stale"] or registry.peek(str(grant["account_id"])) is None):
+                continue
             try:
                 await _finalize_takeover(registry, pool, grant, status="expired", outcome="expired")
             except Exception:
@@ -507,7 +537,13 @@ def _enforce_plane_quotas(accounts_with_open_grants: set[str]) -> None:
 
 
 def _trim_dir_to_cap(directory: Path, cap_bytes: int) -> None:
-    if not directory.is_dir():
+    # is_symlink FIRST: a compromised container can symlink its own
+    # shots/frames/downloads dir at another account's plane, and is_dir()
+    # follows it — trimming (unlinking oldest-first) would then delete a
+    # victim's files. Refuse to descend through a symlinked quota dir. (The
+    # account-level dir is symlink-guarded by the caller; this guards the
+    # per-subdir level.)
+    if directory.is_symlink() or not directory.is_dir():
         return
     entries = [(f, f.stat()) for f in directory.iterdir() if f.is_file()]
     total = sum(st.st_size for _, st in entries)

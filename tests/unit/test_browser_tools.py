@@ -129,6 +129,25 @@ class TestActionHandlers:
         assert "[ref=e1]" in excinfo.value.message  # self-correction snapshot
         assert excinfo.value.detail["code"] == "stale_snapshot"
 
+    async def test_restart_on_failed_response_is_surfaced_in_the_bail(
+        self, seams: dict[str, Any]
+    ) -> None:
+        """The driver spends its once-per-restart signal on a DELIVERED
+        response — including an ok:false one (a stale ref is often the
+        restart's first symptom). The bail must carry the page-state-lost
+        notice, or the fact is silently lost."""
+        seams["driver"].return_value = _response(
+            ok=False,
+            driver_restarted=True,
+            error=BrowserError(code="stale_snapshot", message="ref e12 is gone"),
+            snapshot='- link "Home" [ref=e1]',
+        )
+        handler = registry.get("browser_click").handler
+        with pytest.raises(ToolBail) as excinfo:
+            await handler(_SESSION_ID, {"ref": "e12", "description": "click it"})
+        assert "restarted" in excinfo.value.message
+        assert "[ref=e1]" in excinfo.value.message  # self-correction snapshot still attached
+
     async def test_unknown_error_code_is_tolerated(self, seams: dict[str, Any]) -> None:
         """Forward compatibility: an error code this build doesn't know still
         renders as a model-visible failure, never a parse error."""
@@ -284,7 +303,19 @@ class TestScreenshot:
 
     async def test_hostile_shot_path_is_refused(self, seams: dict[str, Any], plane: Path) -> None:
         seams["driver"].return_value = _response(shot_path="../../../etc/passwd")
-        with pytest.raises(ToolBail, match="invalid image path"):
+        with pytest.raises(ToolBail, match="could not read the image"):
+            await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+    async def test_symlinked_shot_is_refused(self, seams: dict[str, Any], plane: Path) -> None:
+        """The TOCTOU shape: the shot bytes go into MODEL context, so a shot
+        swapped for a symlink into another account's plane must be refused at
+        open time (no-follow walk), not by a checkable-then-swappable resolve."""
+        victim = plane.parent.parent / "acc_VICTIM" / "profile" / "Cookies"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"cookie-jar")
+        (plane / "shot.png").symlink_to(victim)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+        with pytest.raises(ToolBail, match="could not read the image"):
             await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
 
     async def test_missing_shot_raises_toolbail(self, seams: dict[str, Any], plane: Path) -> None:

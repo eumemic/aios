@@ -57,11 +57,13 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
 # Layer order is cache-bust order: the driver package and the protocol module
 # are the frequently-changing inputs, so the expensive layers below key ONLY
-# on the dependency set (this pyproject copy). A driver-code or protocol-only
-# rebuild reuses apt + Chromium — the layers the arm64/QEMU CI leg pays
-# tens of minutes for.
-COPY packages/aios-browser-driver/pyproject.toml /tmp/driver-deps/pyproject.toml
-RUN uv pip install --system --no-cache -r /tmp/driver-deps/pyproject.toml \
+# on the dependency set. Dependencies come from the committed hashed export
+# (``requirements.lock``, regenerated from the workspace ``uv.lock`` and
+# drift-guarded by the package's own tests) — NOT from pyproject ranges, so
+# the image runs the exact versions the repo's tests ran against, like the
+# uv.lock'd worker image. ``--require-hashes`` makes substitution loud.
+COPY packages/aios-browser-driver/requirements.lock /tmp/driver-deps/requirements.lock
+RUN uv pip install --system --no-cache --require-hashes -r /tmp/driver-deps/requirements.lock \
  && rm -rf /tmp/driver-deps
 
 # Chromium's OS dependencies (apt) — split from the browser download below so

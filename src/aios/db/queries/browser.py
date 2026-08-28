@@ -186,18 +186,31 @@ async def insert_browser_grant(
     epoch: int,
     target: dict[str, Any],
     ttl_seconds: int,
-) -> None:
+) -> dict[str, Any] | None:
     """Record an opened takeover — AFTER the driver acked the epoch barrier.
 
-    Raises ``UniqueViolationError`` via the one-open-per-account partial
-    index if a concurrent open won; the caller surfaces "a takeover is
-    already in progress".
+    Returns the recorded ``{boot, epoch, target, ttl_seconds}`` on a fresh
+    insert AND on the idempotent redrive of a still-OPEN grant with this id:
+    ``ON CONFLICT (id) DO UPDATE ... WHERE status='open'`` converges the row
+    to the driver's fresh ack, so a redrive whose driver re-opened at a new
+    epoch (its standing takeover had died) can never leave the row describing
+    a takeover that no longer exists. Returns ``None`` when a grant with this
+    id already reached a TERMINAL state (the ``WHERE`` skips the update, so no
+    row is returned) — a redrive arriving after the reaper expired it, which
+    the caller must NOT report as a fresh open. A DIFFERENT concurrent open
+    (new id, account already open) still raises ``UniqueViolationError`` via
+    the one-open-per-account partial index — the ``(id)`` arbiter never
+    matches it — and the caller surfaces "a takeover is already in progress".
     """
-    await conn.execute(
+    row = await conn.fetchrow(
         """
         INSERT INTO browser_grants
             (id, account_id, session_id, reason, boot, epoch, target, ttl_seconds)
         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+        ON CONFLICT (id) DO UPDATE
+            SET boot = EXCLUDED.boot, epoch = EXCLUDED.epoch, target = EXCLUDED.target
+            WHERE browser_grants.status = 'open'
+        RETURNING boot, epoch, target, ttl_seconds
         """,
         grant_id,
         account_id,
@@ -208,6 +221,7 @@ async def insert_browser_grant(
         json.dumps(target),
         ttl_seconds,
     )
+    return dict(row) if row is not None else None
 
 
 async def get_browser_grant(
@@ -301,23 +315,6 @@ async def set_browser_grant_handback(
     )
 
 
-async def list_stale_open_browser_grants(
-    conn: asyncpg.Connection[Any],
-) -> list[dict[str, Any]]:
-    """Open grants whose heartbeat lapsed past their TTL — the reaper's scan.
-
-    The partial ``(heartbeat_at) WHERE status='open'`` index backs it.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT * FROM browser_grants
-         WHERE status = 'open'
-           AND heartbeat_at < now() - make_interval(secs => ttl_seconds)
-        """
-    )
-    return [dict(row) for row in rows]
-
-
 async def list_open_browser_grant_accounts(
     conn: asyncpg.Connection[Any],
 ) -> list[str]:
@@ -329,6 +326,28 @@ async def list_open_browser_grant_accounts(
     """
     rows = await conn.fetch("SELECT account_id FROM browser_grants WHERE status = 'open'")
     return [row["account_id"] for row in rows]
+
+
+async def list_open_browser_grants(
+    conn: asyncpg.Connection[Any],
+) -> list[dict[str, Any]]:
+    """Every open grant, full rows plus a ``stale`` flag — the reaper's whole
+    expiry input in one scan.
+
+    ``stale`` is the TTL-lapse verdict evaluated against the DB clock (the same
+    clock ``touch_browser_grant_heartbeat`` writes ``heartbeat_at`` from, so no
+    worker-vs-DB skew enters TTL expiry). The reaper expires a grant when it is
+    ``stale`` OR its account has no live container; deriving both from this one
+    query replaces a second overlapping scan. The partial ``WHERE status='open'``
+    indexes back it."""
+    rows = await conn.fetch(
+        """
+        SELECT *, heartbeat_at < now() - make_interval(secs => ttl_seconds) AS stale
+          FROM browser_grants
+         WHERE status = 'open'
+        """
+    )
+    return [dict(row) for row in rows]
 
 
 async def list_fresh_open_browser_grant_accounts(

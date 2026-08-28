@@ -14,9 +14,11 @@ dirs is a Phase 6 polish item.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
+import stat
 from pathlib import Path
 
 from aios.config import get_settings
@@ -287,6 +289,84 @@ def ensure_browser_plane_dir(account_id: str) -> Path:
     for sub in BROWSER_PLANE_SUBDIRS:
         ensure_owned_dir(plane / sub)
     return plane
+
+
+# Per-read byte ceiling for plane files. The plane is written by a
+# (potentially compromised) container, so an unbounded read lets it plant one
+# oversized file and have the 5 Hz frame poll re-read it into the shared API
+# process — memory/CPU exhaustion. 64 MiB is far above any legitimate frame
+# (JPEG q70, <1 MiB) or screenshot yet caps the amplification. A fixed
+# constant, never operator-tunable to an unsafe value.
+_PLANE_READ_MAX_BYTES = 64 * 1024 * 1024
+
+
+def read_plane_file(plane: Path, rel: str) -> bytes | None:
+    """Read ``plane/rel`` following NO symlink at ANY path component.
+
+    The plane is a bind mount a (potentially compromised) browser container
+    writes, so any resolve-then-check-then-read sequence is a TOCTOU hole:
+    the container can swap a checked component for a symlink into another
+    account's plane between the check and the read (the 5 Hz frame poll
+    hands it unlimited attempts — jarbot#106 Phase 2 red-team F1). Here
+    every component is opened relative to its parent's directory fd with
+    ``O_NOFOLLOW``, so a symlink anywhere fails ``ELOOP`` instead of being
+    followed, and containment inside ``plane`` holds by construction (no
+    absolute refs, no ``..``, no empty or NUL-bearing components). The leaf
+    open adds ``O_NONBLOCK`` so a FIFO planted at the path cannot wedge the
+    reader (regular-file reads ignore the flag), ``fstat`` rejects anything
+    that is not a regular file, and the read is bounded by
+    ``_PLANE_READ_MAX_BYTES`` (checked against the running total, so a file
+    grown after the open cannot exceed it either).
+
+    Returns ``None`` for any malformed / missing / symlinked / non-regular /
+    oversized path — never raises (the screenshot sink treats a raised
+    exception as the CALLING session's sandbox being unhealthy and evicts it,
+    which a hostile ref must not be able to trigger). Malformed refs and
+    symlinks are logged — they only occur under a hostile or corrupted
+    container and operators want the signal; plain ``ENOENT`` stays quiet
+    (normal during frame rotation).
+    """
+    parts = rel.split("/")
+    # An absolute ref splits to a leading "" component, so the empty-component
+    # check subsumes the leading-slash case. NUL bytes would make os.open raise
+    # ValueError (not OSError) — refuse them here so the contract stays
+    # never-raises.
+    if any(part in ("", ".", "..") or "\x00" in part for part in parts):
+        log.warning("plane.read_ref_malformed", plane=str(plane), rel=rel)
+        return None
+    try:
+        fd = os.open(plane, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except OSError as err:
+        if err.errno != errno.ENOENT:
+            log.warning("plane.read_refused", plane=str(plane), rel=rel, error=str(err))
+        return None
+    finally:
+        os.close(fd)
+    try:
+        if not stat.S_ISREG(os.fstat(leaf).st_mode):
+            log.warning("plane.read_not_regular_file", plane=str(plane), rel=rel)
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(leaf, 1 << 20):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _PLANE_READ_MAX_BYTES:
+                log.warning("plane.read_too_large", plane=str(plane), rel=rel, bytes=total)
+                return None
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(leaf)
 
 
 _MEMORY_STORES_ROOT = "_memory_stores"

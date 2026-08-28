@@ -131,7 +131,7 @@ jobs:
           # ``e2e`` job pulls ``ghcr.io/eumemic/aios-browser:smoked``
           # (published by ``build-browser-image.yml`` after BOTH browser e2e
           # suites pass) instead of paying the local build.
-          if echo "$changed" | grep -qE '^docker/Dockerfile\.browser$|^packages/aios-browser-driver/(aios_browser_driver/|pyproject\.toml$|README\.md$)|^src/aios/sandbox/browser_protocol\.py$|^\.dockerignore$'; then
+          if echo "$changed" | grep -qE '^docker/Dockerfile\.browser$|^packages/aios-browser-driver/(aios_browser_driver/|pyproject\.toml$|README\.md$|requirements\.lock$)|^src/aios/sandbox/browser_protocol\.py$|^\.dockerignore$'; then
             echo "Browser-image inputs changed — rebuilding image."
             echo "browser_changed=true" >> "$GITHUB_OUTPUT"
           else

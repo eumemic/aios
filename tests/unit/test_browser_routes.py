@@ -155,6 +155,32 @@ class TestInput:
         )
         assert resp.status_code == 413
 
+    def test_symlinked_spool_is_not_followed(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A compromised container plants a symlink at input/spool.jsonl aimed
+        at another account's plane; O_NOFOLLOW makes the append fail rather than
+        write into the victim's file."""
+        _stub_conn(monkeypatch, get_browser_grant=_OTHER_GRANT)
+        monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+        from aios.sandbox.volumes import ensure_browser_plane_dir
+
+        plane = ensure_browser_plane_dir(_ACCOUNT)
+        victim = tmp_path / "acc_VICTIM" / "input" / "spool.jsonl"
+        victim.parent.mkdir(parents=True)
+        victim.write_text("")
+        (plane / "input" / "spool.jsonl").symlink_to(victim)
+
+        # O_NOFOLLOW fails ELOOP rather than following into the victim; the
+        # route lets it propagate (a 500 in prod, re-raised by the TestClient).
+        # The load-bearing assertion is that the victim's file is never written.
+        with pytest.raises(OSError):
+            client.post(
+                "/v1/browser/takeover/bgr_1/input",
+                json={"epoch": 5, "seq": 1, "events": [{"type": "text", "text": "attack"}]},
+            )
+        assert victim.read_text() == ""  # the victim's spool was never written
+
 
 class TestHeartbeat:
     def test_unknown_grant_404(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,6 +265,24 @@ class TestControlErrorCurrency:
         resp = client.post("/v1/browser/takeover", json={"session_id": "sess_1"})
         assert resp.status_code == 503
 
+    def test_browser_crashed_is_503(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dead Chromium host is transient exactly like an unreachable
+        container — retryable 503, never a 409 that reads as a state
+        conflict (a permanently-crashing browser must not 409-loop)."""
+        monkeypatch.setattr(
+            browser_router,
+            "submit_browser_call",
+            AsyncMock(return_value=({"code": "browser_crashed", "message": "chromium died"}, True)),
+        )
+        monkeypatch.setattr(
+            sessions_service, "get_session_basic", AsyncMock(return_value=MagicMock())
+        )
+        resp = client.post("/v1/browser/takeover", json={"session_id": "sess_1"})
+        assert resp.status_code == 503
+        assert resp.json()["error"]["detail"]["code"] == "browser_crashed"
+
     def test_internal_error_is_500_not_409(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -285,19 +329,63 @@ class TestControlErrorCurrency:
         assert resp.json()["grant_id"] == "bgr_new" and resp.json()["epoch"] == 9
 
 
+class TestHandbackShot:
+    """The close handback inlines the driver's screenshot from the plane — the
+    third no-follow read site. It must read a real shot and refuse a symlinked
+    or escaping shot_path (the bytes land in the product handback)."""
+
+    def _plane(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+        from aios.sandbox.volumes import ensure_browser_plane_dir
+
+        return ensure_browser_plane_dir(_ACCOUNT)
+
+    def test_real_shot_becomes_a_data_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plane = self._plane(tmp_path, monkeypatch)
+        (plane / "shots" / "handback.png").write_bytes(b"\x89PNGshot")
+        payload = browser_router._handback_payload({"shot_path": "shots/handback.png"}, _ACCOUNT)
+        import base64
+
+        assert payload.screenshot_data_url == (
+            "data:image/png;base64," + base64.b64encode(b"\x89PNGshot").decode()
+        )
+
+    def test_symlinked_shot_yields_no_data_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plane = self._plane(tmp_path, monkeypatch)
+        victim = tmp_path / "acc_VICTIM" / "profile" / "Cookies"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"cookie-jar")
+        (plane / "shots" / "handback.png").symlink_to(victim)
+        payload = browser_router._handback_payload({"shot_path": "shots/handback.png"}, _ACCOUNT)
+        assert payload.screenshot_data_url is None
+
+    def test_escaping_shot_path_yields_no_data_url(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._plane(tmp_path, monkeypatch)
+        (tmp_path / "secret.png").write_bytes(b"secret")
+        payload = browser_router._handback_payload({"shot_path": "../../secret.png"}, _ACCOUNT)
+        assert payload.screenshot_data_url is None
+
+
 class TestFrameLoading:
     def test_hostile_manifest_file_is_refused(self, tmp_path: Path) -> None:
         frames = tmp_path / "frames"
         frames.mkdir()
         (tmp_path / "secret.jpg").write_bytes(b"nope")
         manifest = {"seq": 1, "file": "../secret.jpg"}
-        assert browser_router._load_frame(frames, manifest, tmp_path.resolve(), _ACCOUNT) is None
+        assert browser_router._load_frame(tmp_path, manifest) is None
 
     def test_symlinked_frames_dir_to_another_plane_is_refused(self, tmp_path: Path) -> None:
         """CRITICAL: a compromised container swaps its OWN frames dir for a
-        symlink to ANOTHER account's plane. Anchoring containment on the plane
-        ROOT (not on the symlinked frames dir, which resolves self-consistently)
-        is what blocks the cross-tenant live-screen read."""
+        symlink to ANOTHER account's plane. The no-follow walk refuses the
+        symlinked component at open time — closing both the plain escape and
+        the TOCTOU variant (a component swapped AFTER any check), which the old
+        resolve-then-read sequence left open."""
         victim_frames = tmp_path / "acc_VICTIM" / "frames"
         victim_frames.mkdir(parents=True)
         (victim_frames / "0.jpg").write_bytes(b"\xff\xd8victim-screen")
@@ -306,12 +394,21 @@ class TestFrameLoading:
         attacker_plane.mkdir()
         (attacker_plane / "frames").symlink_to(victim_frames)  # escape the plane
 
-        frames_dir = attacker_plane / "frames"
-        plane_root = attacker_plane.resolve()
         # Neither the manifest read nor the frame load may cross to the victim.
-        assert browser_router._read_manifest(frames_dir, plane_root, _ACCOUNT) is None
-        manifest = {"seq": 1, "file": "0.jpg"}
-        assert browser_router._load_frame(frames_dir, manifest, plane_root, _ACCOUNT) is None
+        assert browser_router._read_manifest(attacker_plane) is None
+        assert browser_router._load_frame(attacker_plane, {"seq": 1, "file": "0.jpg"}) is None
+
+    def test_symlinked_frame_file_is_refused(self, tmp_path: Path) -> None:
+        """The leaf variant of the swap: a real frames dir whose FRAME FILE is
+        a symlink into another account's plane (the exact post-check swap the
+        TOCTOU exploited). O_NOFOLLOW on the leaf open refuses it."""
+        victim = tmp_path / "acc_VICTIM" / "profile" / "Cookies"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"cookie-jar")
+        plane = tmp_path / "acc_ATTACKER"
+        (plane / "frames").mkdir(parents=True)
+        (plane / "frames" / "0.jpg").symlink_to(victim)
+        assert browser_router._load_frame(plane, {"seq": 1, "file": "0.jpg"}) is None
 
     def test_valid_manifest_forwards_the_trusted_chrome_envelope(self, tmp_path: Path) -> None:
         frames = tmp_path / "frames"
@@ -328,7 +425,7 @@ class TestFrameLoading:
             "w": 1280,
             "h": 800,
         }
-        frame = browser_router._load_frame(frames, manifest, tmp_path.resolve(), _ACCOUNT)
+        frame = browser_router._load_frame(tmp_path, manifest)
         assert frame is not None
         assert frame["origin"] == "https://accounts.example.com"
         assert frame["security"] == "secure"
@@ -339,9 +436,7 @@ class TestFrameLoading:
         assert frame["jpeg_b64"] == base64.b64encode(b"\xff\xd8jpeg").decode()
 
     def test_absent_manifest_reads_as_none(self, tmp_path: Path) -> None:
-        assert (
-            browser_router._read_manifest(tmp_path / "frames", tmp_path.resolve(), _ACCOUNT) is None
-        )
+        assert browser_router._read_manifest(tmp_path) is None
 
     def test_non_int_seq_reads_as_no_frame(self, tmp_path: Path) -> None:
         """A manifest present but with a null/placeholder seq is 'no frame yet',
@@ -349,4 +444,56 @@ class TestFrameLoading:
         frames = tmp_path / "frames"
         frames.mkdir()
         (frames / "manifest.json").write_text(json.dumps({"seq": None, "file": "0.jpg"}))
-        assert browser_router._read_manifest(frames, tmp_path.resolve(), _ACCOUNT) is None
+        assert browser_router._read_manifest(tmp_path) is None
+
+
+class TestFramesEpochFence:
+    """The stream must never forward a frame stamped with a DIFFERENT epoch
+    than the grant it serves: after this grant closes and a new takeover opens
+    (epoch rotates on both edges), a still-attached viewer would otherwise
+    receive the NEXT takeover's frames for up to the grant-recheck window (the
+    same-account frame bleed)."""
+
+    def _plane_with_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, epoch: int
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+        from aios.sandbox.volumes import ensure_browser_plane_dir
+
+        frames = ensure_browser_plane_dir(_ACCOUNT) / "frames"
+        (frames / "frame-1.jpg").write_bytes(b"\xff\xd8jpeg")
+        (frames / "manifest.json").write_text(
+            json.dumps({"seq": 1, "file": "frame-1.jpg", "boot": "01BOOT", "epoch": epoch})
+        )
+
+    def _stream_body(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> str:
+        # Call 1 = the route's scope gate (open, epoch 5); call 2 = the first
+        # in-loop recheck (closed) — so the poll loop runs exactly one iteration
+        # and the stream ends deterministically.
+        monkeypatch.setattr(
+            queries_module,
+            "get_browser_grant",
+            AsyncMock(side_effect=[dict(_OTHER_GRANT), {**_OTHER_GRANT, "status": "closed"}]),
+            raising=False,
+        )
+        resp = client.get("/v1/browser/takeover/bgr_1/frames")
+        assert resp.status_code == 200
+        return resp.text
+
+    def test_mismatched_epoch_frame_is_never_streamed(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._plane_with_manifest(tmp_path, monkeypatch, epoch=6)  # grant epoch is 5
+        body = self._stream_body(client, monkeypatch)
+        assert "event: frame" not in body
+        assert "event: end" in body
+
+    def test_matching_epoch_frame_is_streamed(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Positive control for the fence: the identical setup with the grant's
+        OWN epoch DOES stream the frame."""
+        self._plane_with_manifest(tmp_path, monkeypatch, epoch=5)
+        body = self._stream_body(client, monkeypatch)
+        assert "event: frame" in body
+        assert "event: end" in body

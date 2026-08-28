@@ -75,6 +75,25 @@ class TestPlaneQuotas:
         _enforce_plane_quotas(accounts_with_open_grants=set())
         assert not spool.exists()
 
+    def test_symlinked_quota_dir_is_not_trimmed_through(self, plane: Path) -> None:
+        """A compromised container symlinks its own frames/ at a dir OUTSIDE the
+        plane root; the quota trim must NOT descend the symlink and delete those
+        files (is_symlink guard before is_dir, which follows). The target sits
+        outside the plane root so the reaper would never otherwise reach it."""
+        outside = plane.parent.parent / "outside_frames"  # sibling of _browser
+        outside.mkdir(parents=True)
+        for i in range(3):
+            self._write(outside / f"v{i}.jpg", 60, age_s=300 - i)
+        frames = plane / "frames"
+        frames.rmdir()  # replace the real dir with a symlink to the outside dir
+        frames.symlink_to(outside)
+
+        _enforce_plane_quotas(accounts_with_open_grants=set())  # frames cap is 100
+
+        # 180 bytes over a 100-byte cap WOULD trim two files if followed; the
+        # guard means all three survive.
+        assert sorted(f.name for f in outside.iterdir()) == ["v0.jpg", "v1.jpg", "v2.jpg"]
+
 
 class TestBrowserLifecycleRenderer:
     """Total by contract: a pure function of ``data`` that never raises."""
@@ -142,3 +161,49 @@ class TestTakeoverTargeting:
         await _driver(cast(SandboxRegistry, MagicMock()), "acc_x", "status", {}, timeout_s=30)
 
         assert seen["request"].session_id is None
+
+
+class TestStatusAssembly:
+    """Control-plane truth wins: the driver — which renders untrusted web
+    content — must not be able to override ``running``/``url``/``title``/
+    ``boot``/``epoch`` in the status result by emitting those keys in its
+    ``data`` payload."""
+
+    async def test_driver_data_cannot_override_control_plane_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hostile = BrowserResponse(
+            ok=True,
+            boot="01REALBOOT",
+            epoch=4,
+            url="https://real.example",
+            title="Real",
+            data={
+                "signed_in_hosts": ["real.example"],
+                "running": False,
+                "url": "https://spoofed.example",
+                "title": "Spoofed",
+                "boot": "01SPOOFED",
+                "epoch": 99,
+            },
+        )
+
+        async def _fake_driver_call(
+            registry: object, account_id: str, request: BrowserRequest, *, timeout_s: float
+        ) -> BrowserResponse:
+            return hostile
+
+        monkeypatch.setattr(browser_control, "driver_call", _fake_driver_call)
+        registry = MagicMock()
+        registry.peek.return_value = MagicMock()  # container live
+
+        result = await browser_control._dispatch(
+            cast(SandboxRegistry, registry), MagicMock(), "status", "acc_x", {}
+        )
+
+        assert result["running"] is True
+        assert result["url"] == "https://real.example"
+        assert result["title"] == "Real"
+        assert result["boot"] == "01REALBOOT"
+        assert result["epoch"] == 4
+        assert result["signed_in_hosts"] == ["real.example"]  # driver data still flows
