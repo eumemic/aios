@@ -1,0 +1,163 @@
+name: Build aios-browser image
+
+# Builds and publishes ``ghcr.io/eumemic/aios-browser`` — the per-account
+# browser container (Chromium + driver daemon, jarbot#106 Phase 2) — whenever
+# its inputs change.  See ``docker/Dockerfile.browser`` for what's in it.
+#
+# Triggers:
+# - Push to master that touches the browser Dockerfile, the authored seccomp
+#   profile, the driver package, or the wire-contract module the image COPYs
+#   over the package's vendored copy (a protocol-only push must rebuild, or
+#   the image-side byte-equality check goes stale)
+# - Manual ``workflow_dispatch`` for force rebuilds
+#
+# Tags published: ``latest`` (always tracks master) + ``sha-<short>`` for
+# traceable rollbacks.  The smoke job runs BOTH browser e2e suites (image
+# contract + driver behavior) against the immutable sha tag and only then
+# retags ``:smoked`` — the tag deploy targets and the PR e2e shard consume.
+#
+# Security note: this workflow does not interpolate any untrusted input
+# (issue titles, PR bodies, head_ref, etc.) into ``run:`` commands.  Only
+# trusted contexts (github.actor, secrets.GITHUB_TOKEN, outputs from
+# pinned docker/* actions) are referenced.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - docker/Dockerfile.browser
+      - docker/seccomp-browser.json
+      # The smoke's NEGATIVE control launches the image under the sandbox
+      # profile — a change there can invalidate its premise, so re-smoke.
+      - docker/seccomp-sandbox.json
+      # The context filter shapes what the Dockerfile's COPYs see.
+      - .dockerignore
+      - packages/aios-browser-driver/**
+      # The driver's own tests are ``.dockerignore``d out of the build
+      # context — a tests-only push cannot change the image, so it must not
+      # burn the QEMU multi-arch build.
+      - "!packages/aios-browser-driver/tests/**"
+      - src/aios/sandbox/browser_protocol.py
+      # The gates themselves: ``:smoked`` means "passed THESE suites".
+      - tests/e2e/test_browser_image_contract.py
+      - tests/e2e/test_browser_driver_behavior.py
+      - tests/e2e/browser_image_common.py
+      - .github/workflows/build-browser-image.yml
+  workflow_dispatch:
+
+# One build+smoke pipeline at a time per ref.  A second push while smoke
+# is running cancels the in-flight run rather than racing to update :smoked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Generous: the linux/arm64 leg is QEMU-emulated and includes
+    # ``playwright install-deps`` (apt) plus a per-arch Chromium download —
+    # far heavier than the sandbox image's apt-only build.
+    timeout-minutes: 90
+    outputs:
+      # Immutable sha-tagged reference for the smoke job so it always tests
+      # the exact image produced by this build step, regardless of concurrent
+      # master pushes that may advance :latest between build and smoke.
+      sha_tag: ${{ steps.sha_tag.outputs.tag }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU enables cross-arch emulation so we can build linux/arm64
+      # layers on the linux/amd64 GitHub runner without separate runners.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/eumemic/aios-browser
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short,prefix=sha-
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          # Build context is the repo root (not ``docker/``) so the
+          # Dockerfile can COPY the driver package and the ``src/``
+          # protocol original over its vendored copy.
+          context: .
+          file: docker/Dockerfile.browser
+          # Multi-arch so developer machines on Apple Silicon (linux/arm64
+          # under Docker Desktop) pull a native image without ``no matching
+          # manifest`` errors.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Scoped: the default shared scope lets the sandbox/signal image
+          # builds evict this cache — and a cold browser rebuild is the
+          # most expensive build in the repo (QEMU arm64 + Chromium).
+          cache-from: type=gha,scope=browser-image
+          cache-to: type=gha,mode=max,scope=browser-image
+
+      - name: Expose sha tag for smoke job
+        id: sha_tag
+        run: echo "tag=ghcr.io/eumemic/aios-browser:sha-${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - name: Install test deps
+        run: uv sync --dev --frozen
+      - name: Pull just-built image
+        # Pull by immutable sha tag (set by build job) to avoid a race
+        # where a concurrent master push advances :latest before we smoke.
+        run: docker pull "${{ needs.build.outputs.sha_tag }}"
+      - name: Run browser contract + behavior suites
+        # Both suites are gated on this env var (they self-skip without it),
+        # aios-import-free, and drive the image through the worker's exact
+        # ``docker exec browser-cli`` transport — including the
+        # Chromium-sandbox-ON probe and its seccomp negative control.
+        run: >
+          uv run pytest tests/e2e/test_browser_image_contract.py
+          tests/e2e/test_browser_driver_behavior.py -v
+        env:
+          AIOS_SANDBOX_BROWSER_IMAGE: ${{ needs.build.outputs.sha_tag }}
+      - name: Retag sha → :smoked
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/eumemic/aios-browser:smoked \
+            "${{ needs.build.outputs.sha_tag }}"

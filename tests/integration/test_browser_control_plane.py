@@ -417,6 +417,110 @@ async def test_close_of_a_dead_container_still_closes_with_null_handback(
     assert grant is not None and grant["status"] == "closed"
 
 
+async def test_open_redrive_converges_the_grant_to_the_drivers_fresh_ack(
+    plane: dict[str, Any],
+) -> None:
+    """A lost-NOTIFY redrive re-executes ``open`` with the SAME grant_id. The
+    insert conflicts on the grant's own id and DO UPDATEs the row to the
+    driver's fresh ack, so the executor answers success — never a false
+    ``takeover_in_progress`` — and the row converges to whatever epoch/boot the
+    driver reports on the redrive (not the stale original), so it can never
+    describe a takeover that no longer exists."""
+    pool, db_url = plane["pool"], plane["db_url"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    grant_id = make_id(BROWSER_GRANT)
+    params = {"session_id": session_id, "reason": "auth", "grant_id": grant_id}
+
+    first, err1 = await submit_browser_call(
+        db_url, pool, account_id=account_id, method="open", params=params, timeout_s=10
+    )
+    assert not err1 and first["grant_id"] == grant_id and first["epoch"] == 7
+
+    # The redrive's driver ack DIVERGES (its standing takeover had died, so it
+    # re-opened at a fresh epoch/boot). The executor must return — and the row
+    # must hold — the FRESH values, not the original.
+    plane["driver"].return_value = _driver_response(boot="02REBOOT", epoch=11)
+    second, err2 = await submit_browser_call(
+        db_url, pool, account_id=account_id, method="open", params=params, timeout_s=10
+    )
+    assert not err2, f"redrive of the same open must succeed, got {second}"
+    assert second["grant_id"] == grant_id
+    assert second["epoch"] == 11 and second["boot"] == "02REBOOT"
+    async with pool.acquire() as conn:
+        grant = await queries.get_browser_grant(conn, grant_id, account_id=account_id)
+    assert grant is not None and grant["epoch"] == 11 and grant["boot"] == "02REBOOT"
+
+
+async def test_open_redrive_of_an_expired_grant_is_not_a_false_success(
+    plane: dict[str, Any],
+) -> None:
+    """A redrive whose grant_id was already expired by the reaper must NOT be
+    answered with the terminal row's values as a fresh open (the WHERE
+    status='open' skips the DO UPDATE → no row → error)."""
+    pool, db_url = plane["pool"], plane["db_url"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    grant_id = make_id(BROWSER_GRANT)
+    async with pool.acquire() as conn:
+        await queries.insert_browser_grant(
+            conn,
+            grant_id=grant_id,
+            account_id=account_id,
+            session_id=session_id,
+            reason="auth",
+            boot="01BOOTTEST",
+            epoch=3,
+            target={},
+            ttl_seconds=300,
+        )
+        await conn.execute(
+            "UPDATE browser_grants SET status = 'expired', outcome = 'expired' WHERE id = $1",
+            grant_id,
+        )
+    result, is_error = await submit_browser_call(
+        db_url,
+        pool,
+        account_id=account_id,
+        method="open",
+        params={"session_id": session_id, "reason": "auth", "grant_id": grant_id},
+        timeout_s=10,
+    )
+    assert is_error
+    assert result["code"] == "takeover_in_progress"
+
+
+async def test_reaper_expires_open_grant_when_no_container_exists(
+    plane: dict[str, Any],
+) -> None:
+    """A viewer that dutifully heartbeats holds an open grant fresh forever;
+    but if the account has NO live container, the takeover it names cannot
+    exist (the driver's standing takeover died with the container). The reaper
+    expires it regardless of heartbeat freshness so the frames SSE ends within
+    one tick instead of lingering to TTL."""
+    pool = plane["pool"]
+    account_id, session_id = plane["account_id"], plane["session_id"]
+    grant_id = make_id(BROWSER_GRANT)
+    async with pool.acquire() as conn:
+        await queries.insert_browser_grant(
+            conn,
+            grant_id=grant_id,
+            account_id=account_id,
+            session_id=session_id,
+            reason="auth",
+            boot="01BOOTTEST",
+            epoch=3,
+            target={"url": "https://example.com"},
+            ttl_seconds=300,  # fresh heartbeat — NOT TTL-stale
+        )
+    # No live container for the account.
+    plane["registry"].peek.return_value = None
+
+    await browser_control.browser_reaper_tick(plane["registry"], pool)
+
+    async with pool.acquire() as conn:
+        grant = await queries.get_browser_grant(conn, grant_id, account_id=account_id)
+    assert grant is not None and grant["status"] == "expired"
+
+
 async def test_clear_state_wipes_the_plane_and_notifies(
     plane: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -46,6 +46,7 @@ LINT_TARGETS=(
     packages/aios-sdk/aios_sdk
     connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src
     packages/aios-connector-http/aios_connector_http
+    packages/aios-browser-driver/aios_browser_driver
 )
 
 # ── Ruff ───────────────────────────────────────────────────────────────────────
@@ -113,6 +114,7 @@ if ! should_skip tests; then
     uv run pytest connectors/whatsapp/tests -q || fail
     uv run pytest packages/aios-connector-http/tests -q || fail
     uv run pytest packages/aios-sdk/tests -q || fail
+    uv run pytest packages/aios-browser-driver/tests -q || fail
 fi
 
 echo ""

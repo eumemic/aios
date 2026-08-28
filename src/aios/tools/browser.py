@@ -11,8 +11,7 @@ Perception is text-first: every action returns a budgeted accessibility
 snapshot with ``[ref=eN]`` handles — the fast path for targeting — while the
 pointer arms also take viewport coordinates for surfaces the accessibility
 tree cannot express (canvas, sliders, maps, drag-and-drop). Screenshots are
-explicit (``browser_screenshot``) or attached by the driver on errors, never
-per-action.
+explicit (``browser_screenshot``), never per-action.
 
 Failure currency: driver action failures and transport faults surface as
 ``ToolBail`` — model-visible, self-correctable, and NEVER the calling
@@ -272,6 +271,15 @@ _ARMS: list[tuple[str, str, dict[str, Any]]] = [
     ),
 ]
 
+# Model-facing notice when the driver reports the browser restarted since this
+# page was last used (page state lost). Rendered on BOTH the ok:true action
+# result and the ok:false bail — the driver spends the once-per-restart flag on
+# whichever response it delivers.
+_RESTART_NOTICE = (
+    "[The computer's browser restarted since this page was last used; page "
+    "state was lost. Navigate again if needed.]"
+)
+
 _UNAVAILABLE_MESSAGE = (
     "Browser tools are not available in this deployment: no browser image is "
     "configured. This capability is not yet enabled."
@@ -324,10 +332,7 @@ def _render_result(tool_name: str, response: BrowserResponse) -> ToolResult:
         title = f" — {response.title!r}" if response.title else ""
         lines.append(f"{response.url}{title}")
     if response.driver_restarted:
-        lines.append(
-            "[The computer's browser restarted since this page was last used; "
-            "page state was lost. Navigate again if needed.]"
-        )
+        lines.append(_RESTART_NOTICE)
     if response.snapshot:
         truncated = (
             " (truncated — narrow with browser_snapshot)" if response.snapshot_truncated else ""
@@ -376,6 +381,12 @@ async def _invoke_driver(
         code = response.error.code if response.error else "internal"
         message = response.error.message if response.error else "unknown driver failure"
         text = f"{tool_name} failed: {code}: {message}"
+        if response.driver_restarted:
+            # The driver spends the once-per-restart signal only on a DELIVERED
+            # response — an ok:false delivery that swallowed it would silently
+            # lose the page-state-lost fact (the failure itself is often the
+            # restart's first symptom: stale refs, a blank page).
+            text += f"\n{_RESTART_NOTICE}"
         if response.snapshot:
             # The driver attaches a fresh snapshot on failure so the model can
             # self-correct (stale ref → re-target) without a re-observe call.
@@ -400,23 +411,22 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
     gate → downsample → data-URI part. A non-vision model gets a text
     explanation instead of pixels, exactly like ``read``.
     """
-    from aios.sandbox.volumes import browser_plane_dir
+    from aios.sandbox.volumes import browser_plane_dir, read_plane_file
 
     response, account_id = await _invoke_driver("browser_screenshot", session_id, arguments)
     if not response.shot_path:
         raise ToolBail("browser_screenshot failed: the driver returned no image")
 
-    plane = browser_plane_dir(account_id)
-    shot = (plane / response.shot_path).resolve()
-    if not shot.is_relative_to(plane):
+    # No-follow containment (read_plane_file): the shot bytes land in the MODEL
+    # context, so a symlink swapped in by a compromised container between any
+    # check and the read would exfiltrate another account's plane cross-tenant —
+    # the same TOCTOU class as the frames/handback reads.
+    data = read_plane_file(browser_plane_dir(account_id), response.shot_path)
+    if data is None:
         raise ToolBail(
-            "browser_screenshot failed: the driver returned an invalid image path",
+            "browser_screenshot failed: could not read the image the driver reported",
             detail={"shot_path": response.shot_path},
         )
-    try:
-        data = shot.read_bytes()
-    except OSError as err:
-        raise ToolBail(f"browser_screenshot failed: could not read the image: {err}") from err
 
     pool = runtime.require_pool()
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)

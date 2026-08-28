@@ -49,8 +49,15 @@ spool.sqlite*
 # Claude Code session state — not part of aios source.
 .claude
 
-# Tests don't ship in production images.
+# Tests don't ship in production images. NB: dockerignore patterns are
+# anchored at the context root and bare names / ``*`` do not cross ``/`` —
+# ``tests`` excludes only the repo-root tests dir, and ``*.md`` below strips
+# only root-level markdown. Package-relative paths must be listed explicitly;
+# package READMEs survive by anchoring, and MUST (hatchling's ``readme``
+# field fails the wheel build without them) — do not "tighten" these to
+# ``**/`` forms.
 tests
+packages/aios-browser-driver/tests
 
 # Generated SDK source — not consumed at runtime; FastAPI builds OpenAPI
 # in-memory.
