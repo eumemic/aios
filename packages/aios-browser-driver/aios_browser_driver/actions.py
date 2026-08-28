@@ -315,13 +315,30 @@ async def _select_option(
     await handle.select_option(cast(list[str], values), timeout=_remaining_ms(deadline))
 
 
-async def _screenshot(page: Page, args: dict[str, Any], *, deadline: float, workspace: Path) -> str:
-    name = f"shot-{ULID()!s}.png"
+async def capture_shot(
+    page: Page,
+    workspace: Path,
+    *,
+    prefix: str,
+    full_page: bool = False,
+    timeout_ms: float | None = None,
+) -> str:
+    """Write a PNG to the plane's shots/ dir and return its plane-relative
+    basename. The one owner of the "shots land under shots/, returned
+    plane-relative" contract — shared by browser_screenshot and the takeover
+    handback."""
+    name = f"{prefix}-{ULID()!s}.png"
     shots_dir = workspace / _SHOTS_SUBDIR
     shots_dir.mkdir(parents=True, exist_ok=True)
-    await page.screenshot(
-        path=shots_dir / name,
-        full_page=bool(args.get("full_page")),
-        timeout=_remaining_ms(deadline),
-    )
+    await page.screenshot(path=shots_dir / name, full_page=full_page, timeout=timeout_ms)
     return f"{_SHOTS_SUBDIR}/{name}"
+
+
+async def _screenshot(page: Page, args: dict[str, Any], *, deadline: float, workspace: Path) -> str:
+    return await capture_shot(
+        page,
+        workspace,
+        prefix="shot",
+        full_page=bool(args.get("full_page")),
+        timeout_ms=_remaining_ms(deadline),
+    )

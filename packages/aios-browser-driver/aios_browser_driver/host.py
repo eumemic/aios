@@ -41,7 +41,12 @@ from ulid import ULID
 from aios_browser_driver import actions
 from aios_browser_driver.browser_protocol import (
     DOWNLOADS_DIR,
+    DRIVER_TAKEOVER_IDLE_TIMEOUT_S,
+    DRIVER_TAKEOVER_UNCLAIMED_TIMEOUT_S,
+    FRAMES_DIR,
+    INPUT_SPOOL,
     PROFILE_DIR,
+    TAKEOVER_HEARTBEAT_MARKER,
     BrowserError,
     BrowserRequest,
     BrowserResponse,
@@ -50,6 +55,10 @@ from aios_browser_driver.browser_protocol import (
 from aios_browser_driver.errors import ActionError, error_response, first_line, require_str
 from aios_browser_driver.hosts import normalize_host, signed_in_hosts
 from aios_browser_driver.snapshot.snapshot import take_snapshot
+from aios_browser_driver.takeover.injector import InputInjector
+from aios_browser_driver.takeover.screencast import Screencast
+from aios_browser_driver.takeover.spool import SpoolTailer
+from aios_browser_driver.takeover.state import AdmissionGate, ReplayCache, Takeover, now
 
 if TYPE_CHECKING:
     from playwright.async_api import (
@@ -68,6 +77,20 @@ WORKSPACE = Path("/workspace")
 _LEDGER_RELPATH = Path(".aios/sessions.json")
 _PROFILE_SUBDIR = PurePosixPath(PROFILE_DIR).name
 _DOWNLOADS_SUBDIR = PurePosixPath(DOWNLOADS_DIR).name
+_FRAMES_SUBDIR = PurePosixPath(FRAMES_DIR).name
+_SPOOL_REL = PurePosixPath(INPUT_SPOOL).relative_to("/workspace")
+_HEARTBEAT_REL = PurePosixPath(TAKEOVER_HEARTBEAT_MARKER)
+
+# Takeover watchdog cadence and the absolute lifetime cap (a backstop above the
+# TTL/idle timeouts — a takeover cannot hold the browser forever).
+_WATCHDOG_TICK_S = 15.0
+_ABSOLUTE_CAP_S = 3600.0
+_INPUT_POLL_S = 0.05
+# Keep the admission drain strictly inside the exec/dispatch deadline.
+_DRAIN_MARGIN_S = 2.0
+# Cap the handback screenshot so the whole capture stays inside dispatch's
+# deadline (a hung page degrades to a partial handback, never a cancel).
+_HANDBACK_SHOT_TIMEOUT_MS = 8000.0
 # Background pages must keep rendering (a session's page is "backgrounded"
 # whenever another session's is frontmost); the disk cache is capped and
 # /dev/shm avoided for container-friendliness. NO --no-sandbox — Chromium's
@@ -135,10 +158,31 @@ class BrowserHost:
         self._closing = False
         self._failure: asyncio.Future[None] | None = None
         self._relaunch_task: asyncio.Task[None] | None = None
+        # Takeover machinery (jarbot#106 §5.6): the gate serializes agent
+        # actions against the human's control; one takeover stands at a time,
+        # serialized by the transition lock; frame seq is per-boot.
+        self._gate = AdmissionGate()
+        self._transition_lock = asyncio.Lock()
+        self._standing: Takeover | None = None
+        self._replay = ReplayCache()
+        self._frame_seq = 0
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     @property
     def _ledger_path(self) -> Path:
         return self.workspace / _LEDGER_RELPATH
+
+    @property
+    def _frames_dir(self) -> Path:
+        return self.workspace / _FRAMES_SUBDIR
+
+    @property
+    def _spool_path(self) -> Path:
+        return self.workspace / _SPOOL_REL
+
+    @property
+    def _heartbeat_marker(self) -> Path:
+        return self.workspace / _HEARTBEAT_REL
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -161,6 +205,20 @@ class BrowserHost:
         self._closing = True
         if self._relaunch_task is not None:
             self._relaunch_task.cancel()
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+        # Tear a standing takeover down FIRST — its screencast/input tasks must
+        # be joined before the context closes, or they run against a dying
+        # context and can wedge the shutdown.
+        standing = self._standing
+        if standing is not None:
+            if standing.input_task is not None:
+                standing.input_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await standing.input_task
+            with contextlib.suppress(Exception):
+                await standing.screencast.stop()
+            self._standing = None
         if self._context is not None:
             with contextlib.suppress(Exception):
                 await self._context.close()
@@ -208,6 +266,13 @@ class BrowserHost:
     async def _relaunch(self) -> None:
         log.warning("browser died (boot=%s); relaunching", self.boot)
         self.boot = str(ULID())
+        self._frame_seq = 0  # seq is per-boot
+        # A standing takeover is defunct (its page and CDP died with Chromium):
+        # force-close it so the worker's later close replays an honest
+        # browser_crashed handback rather than hanging on a dead grant.
+        async with self._transition_lock:
+            if self._standing is not None:
+                await self._finalize(self._standing, "browser_crashed")
         async with self._registry_lock:
             self._entries.clear()
         self._last_session = None
@@ -225,23 +290,41 @@ class BrowserHost:
     async def handle(self, request: BrowserRequest, *, deadline: float) -> BrowserResponse:
         from playwright._impl._errors import TargetClosedError
 
-        if request.op in ("takeover_open", "takeover_close"):
-            raise NotImplementedError(request.op)  # the takeover PR lands these
         await self._ready.wait()
         # Stamp the envelope from boot/epoch read at entry, so a relaunch
         # racing this request can't pair a new boot with old page data.
         boot, epoch = self.boot, self.epoch
         try:
+            if request.op == "takeover_open":
+                return await self._takeover_open(request, deadline, boot)
+            if request.op == "takeover_close":
+                return await self._takeover_close(request, boot, epoch)
             if request.op == "status":
                 return await self._status(boot, epoch)
             if request.op == "revoke_site":
+                if self._standing is not None:
+                    # Never clear cookies under the human — the product polls
+                    # status during takeovers, but revoke waits for handback.
+                    return error_response(
+                        boot, epoch, "takeover_active", "cannot revoke a site during a takeover"
+                    )
                 return await self._revoke_site(request.args, boot, epoch)
             if not request.session_id:
                 raise ActionError("invalid_request", f"{request.op} requires a session_id")
             async with self._session_lock(request.session_id):
-                entry, restarted = await self._ensure_entry(request.session_id)
-                self._last_session = request.session_id
-                return await self._run_action(entry, request, restarted, deadline, boot, epoch)
+                if not self._gate.admit():
+                    # A human holds the browser. Page-blind by construction
+                    # (error_response carries no snapshot/url/title/tabs) so the
+                    # human's live page never leaks into agent context.
+                    return error_response(
+                        boot, epoch, "takeover_active", "a human has taken over the computer"
+                    )
+                try:
+                    entry, restarted = await self._ensure_entry(request.session_id)
+                    self._last_session = request.session_id
+                    return await self._run_action(entry, request, restarted, deadline, boot, epoch)
+                finally:
+                    self._gate.release()
         except ActionError as exc:
             # The currency's total sink for the control path + pre-action
             # checks; an action's own ActionError is enveloped WITH the
@@ -342,6 +425,15 @@ class BrowserHost:
             oldest = open_pages.pop(0)
             task = asyncio.get_running_loop().create_task(oldest.close())
             task.add_done_callback(lambda t: t.exception())  # close is best-effort
+        # If a takeover stands for this session, the human just opened a popup —
+        # move the screencast AND injector to it together (they must always
+        # target the same page).
+        standing = self._standing
+        if standing is not None and standing.session_id == entry.session_id:
+            retarget = asyncio.get_running_loop().create_task(
+                self._retarget_takeover(entry.session_id)
+            )
+            retarget.add_done_callback(lambda t: t.exception())
 
     # ── the action envelope ───────────────────────────────────────────────
 
@@ -516,8 +608,297 @@ class BrowserHost:
             with contextlib.suppress(Exception):
                 await page.close()
 
+    # ── takeover ──────────────────────────────────────────────────────────
+
+    def _next_frame_seq(self) -> int:
+        self._frame_seq += 1
+        return self._frame_seq
+
+    async def _takeover_open(
+        self, request: BrowserRequest, deadline: float, boot: str
+    ) -> BrowserResponse:
+        grant_id = str(request.args.get("grant_id") or "")
+        session_id = request.session_id or ""
+        if not grant_id or not session_id:
+            return error_response(
+                boot, self.epoch, "invalid_request", "takeover_open needs grant_id and a session_id"
+            )
+        async with self._transition_lock:
+            standing = self._standing
+            if standing is not None:
+                if standing.grant_id == grant_id:
+                    # Idempotent redrive: a pure echo of the ORIGINAL epoch —
+                    # no drain, no rotate, no tailer re-arm. Page-blind.
+                    return self._open_result(standing.target, boot, standing.epoch)
+                return error_response(
+                    boot, self.epoch, "takeover_active", "a takeover is already in progress"
+                )
+            return await self._open_fresh(grant_id, session_id, deadline, boot)
+
+    async def _open_fresh(
+        self, grant_id: str, session_id: str, deadline: float, boot: str
+    ) -> BrowserResponse:
+        from playwright._impl._errors import TargetClosedError
+
+        assert self._transition_lock.locked(), "_open_fresh must hold the transition lock"
+        # Ensure a page exists to take over (a fresh session gets about:blank).
+        entry, _ = await self._ensure_entry(session_id)
+        _unlink_manifest(self._frames_dir)  # kill the stale-frame flash / cross-takeover leak
+        drain_s = max(1.0, (deadline - time.monotonic()) - _DRAIN_MARGIN_S)
+        # From close_and_drain onward the gate is CLOSED. Every exit that does
+        # not leave a takeover standing MUST reopen it — including a
+        # CancelledError from dispatch's deadline (a BaseException the
+        # `except Exception` below never sees). The `stood` flag + finally is
+        # the single reopen point; the reopen is synchronous so it runs during
+        # cancellation unwinding.
+        stood = False
+        screencast: Screencast | None = None
+        try:
+            if not await self._gate.close_and_drain(drain_s):
+                return error_response(
+                    boot, self.epoch, "action_timeout", "timed out draining in-flight actions"
+                )
+            # Re-read the active page AFTER the drain — it is stable now (no
+            # agent action can be mid-navigation), and a drained action may have
+            # left a popup frontmost.
+            page = entry.active_page
+            if page is None:
+                return error_response(boot, self.epoch, "browser_crashed", "no page to take over")
+            target = {"url": page.url, "title": await _safe_title(page)}
+            signed_open = await self._signed_in_hosts()
+            self.epoch += 1
+            new_epoch = self.epoch
+            screencast = Screencast(
+                self._require_context(),
+                self._frames_dir,
+                boot=boot,
+                epoch=new_epoch,
+                next_seq=self._next_frame_seq,
+            )
+            await screencast.start(page)
+            takeover = Takeover(
+                grant_id=grant_id,
+                session_id=session_id,
+                epoch=new_epoch,
+                opened_at=now(),
+                screencast=screencast,
+                injector=InputInjector(page),
+                target=target,
+                signed_in_at_open=signed_open,
+            )
+            takeover.input_task = asyncio.get_running_loop().create_task(self._input_pump(takeover))
+            self._standing = takeover
+            stood = True  # no await between here and return — the flag is exact
+            self._ensure_watchdog()
+            log.info(
+                "takeover open (grant=%s session=%s epoch=%d)", grant_id, session_id, new_epoch
+            )
+            return self._open_result(target, boot, new_epoch)
+        except Exception as exc:
+            # A non-cancellation failure: stop a partially-started screencast and
+            # rotate again to drop any raced input. The finally reopens the gate.
+            if screencast is not None:
+                with contextlib.suppress(Exception):
+                    await screencast.stop()
+            self.epoch += 1
+            if isinstance(exc, TargetClosedError):
+                self._trigger_relaunch()
+                return error_response(
+                    boot, self.epoch, "browser_crashed", "the browser went away during open"
+                )
+            log.exception("takeover open failed")
+            return error_response(boot, self.epoch, "internal", first_line(exc))
+        finally:
+            if not stood:
+                self._gate.reopen()
+
+    async def _takeover_close(
+        self, request: BrowserRequest, boot: str, epoch: int
+    ) -> BrowserResponse:
+        grant_id = str(request.args.get("grant_id") or "")
+        # outcome is OPAQUE: recorded for the log, never validated (the reaper
+        # mints "expired"; a validating driver would reject reaper handbacks).
+        outcome = str(request.args.get("outcome") or "done")
+        async with self._transition_lock:
+            standing = self._standing
+            if standing is not None and standing.grant_id == grant_id:
+                handback = await self._finalize(standing, outcome)
+                return self._close_result(handback, boot, self.epoch)
+            if standing is not None:
+                return error_response(
+                    boot, epoch, "grant_mismatch", "a different takeover is in progress"
+                )
+            cached = self._replay.get(grant_id)
+            if cached is not None:
+                return self._close_result(cached, boot, epoch)
+            return error_response(boot, epoch, "no_takeover", f"no open takeover {grant_id}")
+
+    async def _finalize(self, takeover: Takeover, outcome: str) -> dict[str, Any]:
+        """Terminal-move a takeover: stop input+screencast (both JOINED), rotate
+        the epoch, capture the handback, reopen admission, cache for replay.
+        Called only under the transition lock (close, watchdog, relaunch).
+
+        The gate reopen + standing-clear run in a finally, so a dispatch-deadline
+        cancellation mid-handback (a BaseException) cannot leave the agent locked
+        out with a takeover that no longer stands. A cancelled close caches no
+        handback (the redrive then gets no_takeover) — but the agent is freed
+        immediately rather than waiting out the idle watchdog."""
+        assert self._transition_lock.locked(), "_finalize must hold the transition lock"
+        try:
+            if takeover.input_task is not None:
+                takeover.input_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await takeover.input_task
+            await takeover.screencast.stop()  # joins the pump — no frame lands after
+            self.epoch += 1  # close-side rotation drops input that raced the close
+            handback = await self._capture_handback(takeover)
+            self._replay.put(takeover.grant_id, handback)
+            log.info(
+                "takeover closed (grant=%s outcome=%s epoch=%d)",
+                takeover.grant_id,
+                outcome,
+                self.epoch,
+            )
+            return handback
+        finally:
+            self._gate.reopen()
+            if self._standing is takeover:
+                self._standing = None
+
+    async def _capture_handback(self, takeover: Takeover) -> dict[str, Any]:
+        entry = self._entries.get(takeover.session_id)
+        page = entry.active_page if entry else None
+        if entry is None or page is None:
+            return {"snapshot": None, "shot_path": None, "signed_in_hosts": [], "url": None}
+        shot_path: str | None = None
+        with contextlib.suppress(Exception):
+            # Bounded so the whole handback capture stays well inside dispatch's
+            # deadline — a hung page yields a partial handback, not a cancel.
+            shot_path = await actions.capture_shot(
+                page, self.workspace, prefix="handback", timeout_ms=_HANDBACK_SHOT_TIMEOUT_MS
+            )
+        snapshot: str | None = None
+        with contextlib.suppress(Exception):
+            snapshot, _ = await take_snapshot(page, entry)
+        url: str | None = None
+        with contextlib.suppress(Exception):
+            url = page.url
+        signed_now = await self._signed_in_hosts()
+        delta = sorted(set(signed_now) - set(takeover.signed_in_at_open))
+        return {"snapshot": snapshot, "shot_path": shot_path, "signed_in_hosts": delta, "url": url}
+
+    async def _input_pump(self, takeover: Takeover) -> None:
+        tailer = SpoolTailer(self._spool_path)
+        tailer.arm()  # from EOF — input written before the open is never replayed
+        try:
+            while True:
+                for batch in tailer.poll():
+                    if not self._accept_batch(takeover, batch):
+                        continue
+                    at = (batch.get("ts_ms") or 0) / 1000.0 or now()
+                    for event in batch.get("events") or []:
+                        if isinstance(event, dict):
+                            with contextlib.suppress(Exception):
+                                await takeover.injector.apply(event, at=at)
+                    takeover.last_input = now()
+                    takeover.last_seq = batch["seq"]  # _accept_batch verified int
+                await asyncio.sleep(_INPUT_POLL_S)
+        finally:
+            tailer.close()
+
+    def _accept_batch(self, takeover: Takeover, batch: dict[str, Any]) -> bool:
+        # The driver is the enforcement authority — drop anything not for the
+        # standing takeover at the current epoch beyond the last-applied seq.
+        # (The isinstance guard tolerates a malformed spool line the JSON parse
+        # let through — a non-int seq would else raise on the comparison.)
+        if batch.get("grant_id") != takeover.grant_id or batch.get("epoch") != takeover.epoch:
+            return False
+        seq = batch.get("seq")
+        return isinstance(seq, int) and seq > takeover.last_seq
+
+    def _ensure_watchdog(self) -> None:
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.get_running_loop().create_task(self._watchdog())
+
+    async def _watchdog(self) -> None:
+        """Idle/unclaimed/absolute-cap auto-close. Ticks while a takeover
+        stands, then exits (a later open restarts it)."""
+        while not self._closing:
+            await asyncio.sleep(_WATCHDOG_TICK_S)
+            async with self._transition_lock:
+                standing = self._standing
+                if standing is None:
+                    return
+                marker_mtime = _mtime(self._heartbeat_marker)
+                elapsed = now() - standing.opened_at
+                idle = now() - standing.liveness(marker_mtime)
+                unclaimed = (
+                    standing.is_unclaimed(marker_mtime)
+                    and elapsed >= DRIVER_TAKEOVER_UNCLAIMED_TIMEOUT_S
+                )
+                if (
+                    unclaimed
+                    or idle >= DRIVER_TAKEOVER_IDLE_TIMEOUT_S
+                    or elapsed >= _ABSOLUTE_CAP_S
+                ):
+                    await self._finalize(standing, "expired")
+
+    async def _retarget_takeover(self, session_id: str) -> None:
+        # The input pump is not serialized against this swap, so a single human
+        # gesture straddling the popup-adoption instant can split across the old
+        # and new page. Bounded and self-correcting (the swap is one assignment;
+        # click state resets) — a cosmetic input glitch for one gesture, not
+        # worth coordinating the pump around.
+        async with self._transition_lock:
+            standing = self._standing
+            if standing is None or standing.session_id != session_id:
+                return
+            entry = self._entries.get(session_id)
+            page = entry.active_page if entry else None
+            if page is None:
+                return
+            with contextlib.suppress(Exception):
+                await standing.screencast.retarget(page)
+            standing.injector.retarget(page)
+
+    def _open_result(self, target: dict[str, Any], boot: str, epoch: int) -> BrowserResponse:
+        # Page-blind top-level; the viewer reads and pins data.target.
+        return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"target": target})
+
+    def _close_result(self, handback: dict[str, Any], boot: str, epoch: int) -> BrowserResponse:
+        # The handback IS the observation — the takeover is over, so this is not
+        # page-blind; the worker reads url/snapshot/shot_path + signed_in_hosts.
+        return BrowserResponse(
+            ok=True,
+            boot=boot,
+            epoch=epoch,
+            url=handback.get("url"),
+            snapshot=handback.get("snapshot"),
+            shot_path=handback.get("shot_path"),
+            data={"signed_in_hosts": handback.get("signed_in_hosts") or []},
+        )
+
 
 # ── the restart ledger ────────────────────────────────────────────────────
+
+
+async def _safe_title(page: Page) -> str:
+    try:
+        return await page.title()
+    except Exception:
+        return ""
+
+
+def _unlink_manifest(frames_dir: Path) -> None:
+    with contextlib.suppress(OSError):
+        (frames_dir / "manifest.json").unlink(missing_ok=True)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _load_ledger(path: Path) -> dict[str, str]:
