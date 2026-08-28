@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
+from starlette.responses import FileResponse
 
 from aios.api.deps import (
     AccountIdDep,
@@ -688,6 +689,45 @@ async def upload_file(
         size=record.size,
         content_type=record.content_type,
         sha256=record.sha256,
+    )
+
+
+@router.get(
+    "/{session_id}/files/{file_id}",
+    operation_id="download_session_file",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            },
+            "description": "Raw file bytes with the stored content-type.",
+        }
+    },
+)
+async def download_file(
+    session_id: str,
+    file_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> FileResponse:
+    """Stream back the bytes of a previously-uploaded file (#179).
+
+    Operator-authenticated, same scoping as every other session-scoped
+    read: 404s when the file doesn't exist, belongs to a different
+    session, or isn't owned by the caller's account — a wrong session or a
+    cross-account file id is indistinguishable from a missing file.  No
+    transformation or resizing — this streams ``host_path`` verbatim with
+    the stored ``content_type``, a thin authenticated read of bytes that
+    already exist on disk (not a CDN).
+    """
+    async with pool.acquire() as conn:
+        record = await queries.get_file(conn, session_id, file_id, account_id=account_id)
+    return FileResponse(
+        record.host_path,
+        media_type=record.content_type,
+        filename=record.filename,
+        content_disposition_type="inline",
     )
 
 

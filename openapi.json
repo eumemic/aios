@@ -3758,6 +3758,75 @@
         }
       }
     },
+    "/v1/sessions/{session_id}/files/{file_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Download File",
+        "description": "Stream back the bytes of a previously-uploaded file (#179).\n\nOperator-authenticated, same scoping as every other session-scoped\nread: 404s when the file doesn't exist, belongs to a different\nsession, or isn't owned by the caller's account \u2014 a wrong session or a\ncross-account file id is indistinguishable from a missing file.  No\ntransformation or resizing \u2014 this streams ``host_path`` verbatim with\nthe stored ``content_type``, a thin authenticated read of bytes that\nalready exist on disk (not a CDN).",
+        "operationId": "download_session_file",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "File Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw file bytes with the stored content-type.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/sessions/{session_id}/tool-confirmations": {
       "post": {
         "tags": [

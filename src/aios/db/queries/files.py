@@ -81,6 +81,30 @@ async def insert_file(
     return _row_to_file(row)
 
 
+async def get_file(
+    conn: asyncpg.Connection[Any], session_id: str, file_id: str, *, account_id: str
+) -> File:
+    """Scoped file read for the #179 image-serve slice.
+
+    Raises :class:`NotFoundError` when the file doesn't exist, belongs to a
+    different session, or isn't owned by ``account_id`` — same shape as
+    :func:`get_session_bare`'s 404, so a wrong session or a cross-account
+    file id are indistinguishable from a missing file.
+    """
+    row = await conn.fetchrow(
+        "SELECT * FROM files WHERE id = $1 AND session_id = $2 AND account_id = $3",
+        file_id,
+        session_id,
+        account_id,
+    )
+    if row is None:
+        raise NotFoundError(
+            f"file {file_id} not found",
+            detail={"session_id": session_id, "file_id": file_id},
+        )
+    return _row_to_file(row)
+
+
 async def list_upload_paths_for_sessions(
     conn: asyncpg.Connection[Any], session_ids: list[str]
 ) -> dict[str, set[str] | None]:

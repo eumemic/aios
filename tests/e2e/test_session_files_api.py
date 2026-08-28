@@ -124,3 +124,66 @@ class TestSessionFilesUpload:
             files={"file": ("x.bin", b"x", "application/octet-stream")},
         )
         assert r.status_code == 401, r.text
+
+
+class TestSessionFilesDownload:
+    """``GET /v1/sessions/<id>/files/<file_id>`` (#179): a thin authenticated
+    read of bytes that already exist on disk, not a CDN — no transformation,
+    same scoping contract as every other session-scoped read."""
+
+    async def test_download_roundtrips_uploaded_bytes(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        payload = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.png", payload, "image/png")},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        assert r.content == payload
+        assert r.headers["content-type"] == "image/png"
+        assert "inline" in r.headers["content-disposition"]
+
+    async def test_unknown_file_id_returns_404(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/file_does_not_exist")
+        assert r.status_code == 404, r.text
+
+    async def test_file_from_another_session_returns_404(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_a = await _make_session(harness)
+        session_b = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_a}/files",
+            files={"file": ("x.bin", b"x", "application/octet-stream")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_b}/files/{file_id}")
+
+        assert r.status_code == 404, r.text
+
+    async def test_missing_bearer_returns_401(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("x.bin", b"x", "application/octet-stream")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(
+            f"/v1/sessions/{session_id}/files/{file_id}",
+            headers={"Authorization": ""},
+        )
+        assert r.status_code == 401, r.text

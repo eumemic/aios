@@ -546,6 +546,7 @@ from .events import (  # noqa: E402
     replace_event_data,
 )
 from .files import (  # noqa: E402
+    get_file,
     insert_file,
     list_upload_paths_for_sessions,
 )
@@ -927,6 +928,7 @@ __all__ = [
     "get_environment_config_for_id",
     "get_environment_config_for_session",
     "get_event",
+    "get_file",
     "get_latest_skill_version",
     "get_management_call",
     "get_memory",
