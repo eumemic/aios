@@ -33,6 +33,7 @@ from aios.sandbox._subprocess import (
     run_docker_pipeline,
     run_subprocess_with_timeout,
 )
+from aios.sandbox._tar_filter import EPHEMERAL_PREFIXES, TarPrefixFilter
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
     ENV_KEYS_LABEL_KEY,
@@ -713,22 +714,40 @@ class DockerBackend:
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
         )
-        if parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget:
-            estimate = parent_size + rw
-            settings = get_settings()
-            free = shutil.disk_usage("/").free
+        settings = get_settings()
+        flattening = parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget
+        if flattening:
+            # A flatten writes a whole new standalone image before the old one
+            # can be released, so it needs headroom for its own output. Subtract
+            # what the tar filter will drop: sizing the request on the FAT image
+            # would refuse the very flatten that makes it thin — a fail-closed
+            # state whose only exit is the operation it just refused.
+            ephemeral = await self._ephemeral_bytes(sandbox_id)
+            estimate = max(0, parent_size + rw - ephemeral)
             required = int(estimate * 1.75) + settings.sandbox_flatten_disk_floor_bytes
-            if free < required:
-                log.warning(
-                    "sandbox.flatten_deferred_disk",
-                    container_id=sandbox_id[:12],
-                    free_disk=free,
-                    required_disk=required,
-                    tar_estimate=estimate,
-                )
-                raise SandboxBackendError(
-                    f"flatten deferred: {free} free bytes, {required} required"
-                )
+        else:
+            # A commit writes one new layer, roughly the writable layer's size.
+            # Ungated before #2280: the branch that runs when a sandbox is
+            # SMALLER could still consume the last free byte, and it was the
+            # one path to the disk with no floor under it at all.
+            estimate = rw
+            required = int(estimate * 1.25) + settings.sandbox_flatten_disk_floor_bytes
+        free = shutil.disk_usage(settings.sandbox_disk_stat_path).free
+        if free < required:
+            log.warning(
+                "sandbox.snapshot_deferred_disk",
+                container_id=sandbox_id[:12],
+                mode="flatten" if flattening else "commit",
+                free_disk=free,
+                required_disk=required,
+                tar_estimate=estimate,
+                stat_path=settings.sandbox_disk_stat_path,
+            )
+            raise SandboxBackendError(
+                f"{'flatten' if flattening else 'commit'} deferred: "
+                f"{free} free bytes, {required} required"
+            )
+        if flattening:
             operation = self._flatten(
                 sandbox_id, tag, labels, timeout_s=snapshot_timeout_s, size_rw=rw
             )
@@ -826,18 +845,31 @@ class DockerBackend:
         consumer.extend(["-", tag])
         settings = get_settings()
         started = monotonic()
+        # Drop ephemeral scratch that predates the ``/tmp`` bind mount (#2280).
+        # New sandboxes never write it into the rootfs at all; this is what
+        # lets an ALREADY-fat image shed the scratch baked into it, instead of
+        # copying it forward on every flatten, forever.
+        tar_filter = TarPrefixFilter()
         try:
             await run_docker_pipeline(
                 ["docker", "export", sandbox_id],
                 consumer,
                 stall_timeout_s=min(settings.sandbox_pipeline_stall_seconds, timeout_s),
                 max_timeout_s=timeout_s,
+                stream_filter=tar_filter,
             )
         except SandboxBackendError as err:
             if "timed out" in str(err).lower():
                 raise SandboxSnapshotTimeoutError(str(err)) from err
             raise
         elapsed = monotonic() - started
+        if tar_filter.dropped_bytes:
+            log.info(
+                "sandbox.flatten_dropped_ephemeral",
+                container_id=sandbox_id[:12],
+                dropped_bytes=tar_filter.dropped_bytes,
+                dropped_entries=tar_filter.dropped_entries,
+            )
         new = await self._inspect_image_fields(tag)
         if new is None:
             raise SandboxBackendError(f"flattened image {tag} not found after import")
@@ -1199,6 +1231,53 @@ class DockerBackend:
         labels = _parse_json_labels(parts[1]) if len(parts) > 1 else {}
         size_rw = await self._inspect_container_size_rw(sandbox_id)
         return parent_image, size_rw, labels
+
+    async def _ephemeral_bytes(self, sandbox_id: str) -> int:
+        """Bytes the tar filter will drop from this container's export.
+
+        ONLY counts prefixes that live on the container's own root
+        filesystem. ``/tmp`` is a bind mount on any sandbox provisioned after
+        #2280, and ``docker export`` omits bind-mount contents — so those
+        bytes are not in the stream and the filter will not drop them.
+        Counting them would make the gate subtract space the export never
+        needed and let a flatten start with too little disk, which is the
+        exact failure the gate exists to prevent. The device comparison is
+        what distinguishes "inside the rootfs" from "mounted over".
+
+        Used only to size the gate, so an unreadable answer degrades to ``0``
+        — the gate then demands the pre-#2280 (larger) amount, which errs in
+        the safe direction. It must never fail a snapshot: refusing to
+        snapshot is how a session gets stranded.
+        """
+        # One shell pass so the device test and the walk see the same mount
+        # table. ``du -sbx`` is bounded to the starting filesystem, which also
+        # stops a nested mount under a counted prefix from inflating the sum.
+        paths = " ".join(f"'/{prefix.rstrip('/')}'" for prefix in EPHEMERAL_PREFIXES)
+        script = (
+            "set -e; "
+            "root_dev=$(stat -c %d /); "
+            f"for p in {paths}; do "
+            '  [ -d "$p" ] || continue; '
+            '  [ "$(stat -c %d "$p")" = "$root_dev" ] || continue; '
+            '  du -sbx "$p"; '
+            "done"
+        )
+        try:
+            rc, stdout_bytes, _ = await run_docker_cli(
+                ["docker", "exec", sandbox_id, "sh", "-c", script],
+                timeout_s=get_settings().sandbox_inspect_size_timeout_seconds,
+            )
+        except SandboxBackendError:
+            log.warning("sandbox.ephemeral_size_unavailable", container_id=sandbox_id[:12])
+            return 0
+        if rc != 0:
+            log.info("sandbox.ephemeral_size_partial", container_id=sandbox_id[:12])
+        total = 0
+        for line in stdout_bytes.decode("utf-8", errors="replace").splitlines():
+            field, _, rest = line.partition("\t")
+            if rest and field.strip().isdigit():
+                total += int(field.strip())
+        return total
 
     async def _inspect_container_size_rw(self, sandbox_id: str) -> int | None:
         """Return the container's writable-layer bytes (``.SizeRw``), or ``None``

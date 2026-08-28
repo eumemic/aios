@@ -456,6 +456,75 @@ def session_repo_working_tree_dir(session_id: str, repo_id: str) -> Path:
     return session_repos_root(session_id) / repo_id
 
 
+_SESSION_TMP_ROOT = "_tmp"
+
+
+def session_tmp_root() -> Path:
+    """Return ``<workspace_root>/_tmp`` — the parent of all per-session
+    ephemeral-scratch directories."""
+    return (get_settings().workspace_root / _SESSION_TMP_ROOT).resolve()
+
+
+def session_tmp_dir(session_id: str) -> Path:
+    """Per-session host directory bind-mounted into the container at ``/tmp``.
+
+    ``/tmp`` used to be a plain overlay directory inside the sandbox, which
+    made it *durable state*: ``docker export``/``docker commit`` faithfully
+    copied every byte of it into the session's snapshot image. Long-lived
+    sessions accumulate per-task scratch there — repo clones, virtualenvs,
+    pytest temp trees, build caches — none of which is worth preserving and
+    all of which was paid for twice (once as the compressed content blob,
+    once as the unpacked snapshot) on every idle reap. One production
+    session reached 18 GiB of which 16.4 GiB was ``/tmp`` (eumemic/aios#2280).
+
+    Binding ``/tmp`` to a host directory fixes that by construction: Docker
+    excludes bind-mount contents from BOTH snapshot verbs, so ephemeral
+    scratch can never enter an image again — no filter, no allowlist, no
+    per-call opt-in to forget.
+
+    The scratch lives on the workspace volume beside the other reaped trees,
+    so it is separately provisioned, individually attributable
+    (``du -sh <workspace_root>/_tmp/<session_id>``), and reclaimed by
+    :mod:`aios.harness.host_dir_reaper` once the session is no longer live.
+    It survives container recycles, which is strictly more continuity than
+    the pre-mount behaviour gave a cold-started sandbox.
+
+    Rooted at ``<workspace_root>/_tmp/<session_id>`` rather than under the
+    session's own ``workspace_path`` for the same reason as
+    :func:`session_repos_root`: that path is user-supplied, is not unique
+    per session, and must not become a place where scratch lands inside
+    data the user manages.
+
+    Pure — does not create the directory. Use :func:`ensure_session_tmp_dir`.
+    """
+    return session_tmp_root() / session_id
+
+
+def ensure_session_tmp_dir(session_id: str) -> Path:
+    """Return the per-session ``/tmp`` backing directory, creating it if needed.
+
+    Called from the spec builder at every container start so the bind-mount
+    source always exists before Docker tries to mount it. Docker would
+    otherwise create a missing source as ``root:root``, which the api (uid
+    1000) could not write into — the #959 failure mode ``ensure_owned_dir``
+    exists to prevent.
+
+    The directory is chmod 1777 (world-writable + sticky) to match the
+    ``/tmp`` semantics every tool in the sandbox assumes: sandbox processes
+    do not all run as the owning uid, and a non-sticky world-writable dir
+    would let one of them delete another's files.
+    """
+    path = ensure_owned_dir(session_tmp_dir(session_id))
+    try:
+        path.chmod(0o1777)
+    except OSError:
+        # Best-effort: a pre-existing dir owned by another uid (worker root
+        # vs api 1000) can refuse chmod. The mount still works; only the
+        # permission hardening is skipped. Never fail a provision over it.
+        log.warning("could not chmod session tmp dir to 1777", path=str(path))
+    return path
+
+
 _ATTACHMENTS_ROOT = "_attachments"
 
 
@@ -735,6 +804,7 @@ def purge_session_directories(
         (session_uploads_dir(session_id), (session_uploads_dir(session_id),)),
         (session_attachments_dir(session_id), (session_attachments_dir(session_id),)),
         (session_repos_root(session_id), (session_repos_root(session_id),)),
+        (session_tmp_dir(session_id), (session_tmp_dir(session_id),)),
     )
     # Prove EVERY target before deleting ANY of them. A prove-as-you-go loop
     # would already have rmtree'd the earlier directories by the time a later
