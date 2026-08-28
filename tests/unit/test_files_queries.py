@@ -16,6 +16,7 @@ import pytest
 
 from aios.db.queries import files as files_queries
 from aios.errors import NotFoundError
+from aios.services import files as files_service
 
 NOW = datetime(2026, 8, 28, tzinfo=UTC)
 
@@ -86,3 +87,42 @@ async def test_get_file_wrong_session_or_account_is_indistinguishable_404() -> N
             account_id="acc_other",
         )
     assert excinfo.value.detail == {"session_id": "sess_other", "file_id": "file_abc"}
+
+
+class TestNormalizedContentType:
+    """``normalized_content_type`` feeds the inline allowlist gate (#179).
+
+    The stored value is unnormalized client input, so casing and parameter
+    variants must collapse to the same key the allowlist is checked against
+    — in both directions: a real ``image/png; charset=utf-8`` must still
+    match, and a dressed-up ``IMAGE/SVG+XML`` must not sneak onto the list.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("image/png", "image/png"),
+            ("IMAGE/PNG", "image/png"),
+            ("image/png; charset=utf-8", "image/png"),
+            ("  image/png  ", "image/png"),
+            ("image/svg+xml", "image/svg+xml"),
+            ("IMAGE/SVG+XML; charset=utf-8", "image/svg+xml"),
+            ("", ""),
+            (None, ""),
+        ],
+    )
+    def test_normalizes(self, raw: str | None, expected: str) -> None:
+        assert files_service.normalized_content_type(raw) == expected
+
+    def test_allowlist_holds_only_inert_raster_types(self) -> None:
+        """Pin the allowlist's membership, not just its behavior.
+
+        A future edit adding a script-bearing type here would silently
+        reopen the stored-XSS path, and no other test would fail.
+        """
+        assert (
+            frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+            == files_service.INLINE_RENDERABLE_CONTENT_TYPES
+        )
+        for unsafe in ("image/svg+xml", "text/html", "application/xhtml+xml"):
+            assert unsafe not in files_service.INLINE_RENDERABLE_CONTENT_TYPES

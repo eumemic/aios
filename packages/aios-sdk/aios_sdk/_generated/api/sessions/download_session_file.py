@@ -78,9 +78,18 @@ def sync_detailed(
     read: 404s when the file doesn't exist, belongs to a different
     session, or isn't owned by the caller's account — a wrong session or a
     cross-account file id is indistinguishable from a missing file.  No
-    transformation or resizing — this streams ``host_path`` verbatim with
-    the stored ``content_type``, a thin authenticated read of bytes that
-    already exist on disk (not a CDN).
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so echoing it
+    with ``inline`` would let an uploader pick the type their own bytes
+    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
+    ``image/*`` prefix check and executes script in-origin.  Only types on
+    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
+    are served with their stored type inline; everything else degrades to
+    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
+    sniffing paths this allowlist doesn't enumerate.
 
     Args:
         session_id (str):
@@ -123,9 +132,18 @@ def sync(
     read: 404s when the file doesn't exist, belongs to a different
     session, or isn't owned by the caller's account — a wrong session or a
     cross-account file id is indistinguishable from a missing file.  No
-    transformation or resizing — this streams ``host_path`` verbatim with
-    the stored ``content_type``, a thin authenticated read of bytes that
-    already exist on disk (not a CDN).
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so echoing it
+    with ``inline`` would let an uploader pick the type their own bytes
+    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
+    ``image/*`` prefix check and executes script in-origin.  Only types on
+    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
+    are served with their stored type inline; everything else degrades to
+    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
+    sniffing paths this allowlist doesn't enumerate.
 
     Args:
         session_id (str):
@@ -163,9 +181,18 @@ async def asyncio_detailed(
     read: 404s when the file doesn't exist, belongs to a different
     session, or isn't owned by the caller's account — a wrong session or a
     cross-account file id is indistinguishable from a missing file.  No
-    transformation or resizing — this streams ``host_path`` verbatim with
-    the stored ``content_type``, a thin authenticated read of bytes that
-    already exist on disk (not a CDN).
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so echoing it
+    with ``inline`` would let an uploader pick the type their own bytes
+    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
+    ``image/*`` prefix check and executes script in-origin.  Only types on
+    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
+    are served with their stored type inline; everything else degrades to
+    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
+    sniffing paths this allowlist doesn't enumerate.
 
     Args:
         session_id (str):
@@ -206,9 +233,18 @@ async def asyncio(
     read: 404s when the file doesn't exist, belongs to a different
     session, or isn't owned by the caller's account — a wrong session or a
     cross-account file id is indistinguishable from a missing file.  No
-    transformation or resizing — this streams ``host_path`` verbatim with
-    the stored ``content_type``, a thin authenticated read of bytes that
-    already exist on disk (not a CDN).
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so echoing it
+    with ``inline`` would let an uploader pick the type their own bytes
+    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
+    ``image/*`` prefix check and executes script in-origin.  Only types on
+    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
+    are served with their stored type inline; everything else degrades to
+    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
+    sniffing paths this allowlist doesn't enumerate.
 
     Args:
         session_id (str):

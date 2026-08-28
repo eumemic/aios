@@ -150,6 +150,93 @@ class TestSessionFilesDownload:
         assert r.headers["content-type"] == "image/png"
         assert "inline" in r.headers["content-disposition"]
 
+    async def test_download_pins_nosniff(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        """``nosniff`` on every response, inline or not.
+
+        Defence-in-depth only — it stops the browser *guessing* a type, and
+        does nothing about a declared-and-honoured one.  The allowlist below
+        is the actual control.
+        """
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        [
+            "image/svg+xml",
+            "text/html",
+            "application/xhtml+xml",
+            "image/svg+xml; charset=utf-8",
+            "IMAGE/SVG+XML",
+        ],
+    )
+    async def test_script_bearing_declared_type_never_renders_in_origin(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The stored content-type is attacker-chosen; never echo it inline.
+
+        ``stage_upload`` takes ``upload.content_type`` verbatim from the
+        client's multipart header, so an uploader picks the type their own
+        bytes come back as.  ``image/svg+xml`` passes any ``image/*`` prefix
+        test and executes script in the serving origin — stored XSS.  Served
+        as an octet-stream attachment instead, so the bytes still download
+        but never render.  Parameterized over casing/parameter variants
+        because the stored value is unnormalized.
+        """
+        session_id = await _make_session(harness)
+        payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("payload.svg", payload, declared_type)},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        # Bytes are preserved — this is a rendering control, not a filter.
+        assert r.content == payload
+        assert r.headers["content-type"] == "application/octet-stream"
+        assert "svg" not in r.headers["content-type"]
+        assert "attachment" in r.headers["content-disposition"]
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    )
+    async def test_inline_allowlist_still_renders(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The raster types #179 needs keep rendering inline.
+
+        Guards against the fix over-reaching into the feature it protects:
+        if this set stops being served inline, composer thumbnails break.
+        """
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.img", b"fake-raster-bytes", declared_type)},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == declared_type
+        assert "inline" in r.headers["content-disposition"]
+
     async def test_unknown_file_id_returns_404(
         self, http_client: httpx.AsyncClient, harness: Harness
     ) -> None:

@@ -32,7 +32,41 @@ from aios.models.files import File
 from aios.sandbox.volumes import ensure_session_uploads_dir, safe_filename
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
-_DEFAULT_CONTENT_TYPE = "application/octet-stream"
+DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+#: Types :func:`aios.api.routers.sessions.download_file` will serve inline
+#: with their stored content-type.  Deliberately a positive allowlist of
+#: raster image types — the set #179 (composer image thumbnails) actually
+#: needs — rather than a blocklist or an ``image/*`` prefix test.
+#:
+#: ``stage_upload`` records ``upload.content_type`` verbatim from the
+#: client, so the stored type is attacker-chosen for any uploader.  A
+#: prefix test on ``image/`` admits ``image/svg+xml``, which browsers
+#: execute as script in the serving origin — stored XSS against anyone
+#: who opens the file.  ``text/html`` and ``application/xhtml+xml`` are
+#: the same class.  A blocklist would have to enumerate every such type
+#: correctly forever; this allowlist fails closed on anything new.
+INLINE_RENDERABLE_CONTENT_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+    }
+)
+
+
+def normalized_content_type(content_type: str | None) -> str:
+    """Bare lowercase media type, parameters and whitespace stripped.
+
+    ``image/png; charset=utf-8`` and ``IMAGE/PNG `` both normalize to
+    ``image/png`` so a parameter or casing trick can't slip a renderable
+    type past :data:`INLINE_RENDERABLE_CONTENT_TYPES` — or, worse, sneak
+    one *onto* it.
+    """
+    if not content_type:
+        return ""
+    return content_type.split(";", 1)[0].strip().lower()
 
 
 class UploadStream(Protocol):
@@ -68,7 +102,7 @@ async def stage_upload(
 
     file_id = make_id(FILE)
     filename = safe_filename(upload.filename)
-    content_type = upload.content_type or _DEFAULT_CONTENT_TYPE
+    content_type = upload.content_type or DEFAULT_CONTENT_TYPE
 
     file_dir = ensure_session_uploads_dir(session_id) / file_id
     file_dir.mkdir(parents=True, exist_ok=False)

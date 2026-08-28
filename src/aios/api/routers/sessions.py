@@ -86,6 +86,11 @@ from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 from aios.services import trace as trace_service
 from aios.services import triggers as triggers_service
+from aios.services.files import (
+    DEFAULT_CONTENT_TYPE,
+    INLINE_RENDERABLE_CONTENT_TYPES,
+    normalized_content_type,
+)
 
 log = get_logger("aios.api.routers.sessions")
 
@@ -717,17 +722,28 @@ async def download_file(
     read: 404s when the file doesn't exist, belongs to a different
     session, or isn't owned by the caller's account — a wrong session or a
     cross-account file id is indistinguishable from a missing file.  No
-    transformation or resizing — this streams ``host_path`` verbatim with
-    the stored ``content_type``, a thin authenticated read of bytes that
-    already exist on disk (not a CDN).
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so echoing it
+    with ``inline`` would let an uploader pick the type their own bytes
+    are rendered as.  ``image/svg+xml`` is the sharp edge: it passes any
+    ``image/*`` prefix check and executes script in-origin.  Only types on
+    :data:`INLINE_RENDERABLE_CONTENT_TYPES` (the raster images #179 needs)
+    are served with their stored type inline; everything else degrades to
+    ``application/octet-stream`` as an attachment.  ``nosniff`` covers the
+    sniffing paths this allowlist doesn't enumerate.
     """
     async with pool.acquire() as conn:
         record = await queries.get_file(conn, session_id, file_id, account_id=account_id)
+    inline = normalized_content_type(record.content_type) in INLINE_RENDERABLE_CONTENT_TYPES
     return FileResponse(
         record.host_path,
-        media_type=record.content_type,
+        media_type=record.content_type if inline else DEFAULT_CONTENT_TYPE,
         filename=record.filename,
-        content_disposition_type="inline",
+        content_disposition_type="inline" if inline else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 
