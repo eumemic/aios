@@ -1,6 +1,7 @@
 # eumemic-bot PR reviews — kick the live aios reviewer as the GitHub App.
-# This job must not gate merge: aios agent/account misses are an ops
-# problem, not a PR defect.
+# Must never fail the PR check: aios account/agent misses are ops, not a
+# code defect. The job is named "aios-review" so it does not collide with
+# other "review" required checks.
 name: eumemic-bot review
 
 on:
@@ -18,22 +19,24 @@ env:
   AIOS_URL: https://api.aios.eumemic.ai
 
 jobs:
-  review:
+  aios-review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Mint eumemic-bot installation token
         id: app
+        continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
 
       - name: Start aios review session
+        if: steps.app.outcome == 'success'
+        continue-on-error: true
         env:
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
           AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
