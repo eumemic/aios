@@ -37,6 +37,7 @@ from aios.db.queries import (
     session_active_predicate,
     session_errored_predicate,
 )
+from aios.errors import NotFoundError
 from aios.harness.auto_review import (
     AUTO_REVIEW_SOURCE,
     AUTO_REVIEW_SPAN_EVENT,
@@ -1120,15 +1121,12 @@ async def find_and_repair_ghosts(
         tcid = c.tool_call_id
         try:
             sid_account_id = await sessions_service.load_session_account_id(pool, sid)
-            if await sessions_service.has_tool_requested_marker(
-                pool, sid, tcid, account_id=sid_account_id
-            ):
-                continue
-            await sessions_service.append_event(
+            wrote = await sessions_service.hold_stranded_tool_call(
                 pool,
                 sid,
-                "span",
-                {
+                tcid,
+                account_id=sid_account_id,
+                verdict_span={
                     "event": AUTO_REVIEW_SPAN_EVENT,
                     "tool_call_id": tcid,
                     "name": c.tool_name,
@@ -1138,13 +1136,7 @@ async def find_and_repair_ghosts(
                     "model": None,
                     "is_error": False,
                 },
-                account_id=sid_account_id,
-            )
-            await sessions_service.append_event(
-                pool,
-                sid,
-                "lifecycle",
-                {
+                requested_marker={
                     "event": "tool_requested",
                     "tool_call_id": tcid,
                     "name": c.tool_name,
@@ -1152,8 +1144,11 @@ async def find_and_repair_ghosts(
                     "reason": CHECKER_UNAVAILABLE_REASON,
                     "source": AUTO_REVIEW_SOURCE,
                 },
-                account_id=sid_account_id,
             )
+            if not wrote:
+                continue  # a marker already existed (checker got in, or a co-sweep)
+        except NotFoundError:
+            continue  # archived out from under the sweep — clean drop
         except Exception:
             log.exception(
                 "sweep.auto_review_backstop_failed",

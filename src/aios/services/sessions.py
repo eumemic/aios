@@ -2860,6 +2860,8 @@ async def confirm_tool_allow(
     *,
     account_id: str,
     source: str | None = None,
+    enforce_interrupt_floor: bool = False,
+    expected_interrupt_floor: int | None = None,
 ) -> Event:
     """Record an allow confirmation for an ``always_ask`` tool call.
 
@@ -2870,6 +2872,22 @@ async def confirm_tool_allow(
     auto-review checker passes ``"auto_review"``); the HTTP endpoint never
     sets it, so an absent key means a person confirmed. Additive: every
     reader of this event filters on ``event``/``result`` only.
+
+    ``enforce_interrupt_floor`` closes a check-then-act race for NON-human
+    confirms (the auto-review checker): the caller captured the latest
+    interrupt seq (``expected_interrupt_floor``, possibly ``None`` for a
+    never-interrupted session) before grading, but a bare re-read + append
+    leaves a window where an interrupt commits between them, yielding a confirm
+    with a HIGHER seq than the interrupt — which the #1756 cold-dispatch guard
+    reads as fresh HUMAN re-confirmation and runs the interrupted call. With the
+    flag set this re-checks the floor INSIDE this session-locked transaction:
+    interrupt appends serialize on the same row lock, so any interrupt that
+    landed first is visible here (→ :class:`ConflictError`, and the checker
+    drops the allow), and any interrupt racing after necessarily sequences past
+    the confirm (→ the existing dispatch guard cancels it). Humans never set it
+    — a person clicking Allow after an interrupt IS fresh intent. The flag is
+    separate from the value because ``None`` is a legitimate captured floor, not
+    "no check".
 
     Idempotent on ``(session_id, tool_call_id)``: a retried POST
     (network blip, 502, mid-flight client disconnect, double-click)
@@ -2889,6 +2907,26 @@ async def confirm_tool_allow(
     """
     async with pool.acquire() as conn, conn.transaction():
         await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
+        # Under the session lock, before appending: has an interrupt landed
+        # since the caller captured the floor? (auto-review only — humans pass
+        # no floor). If so, the user cancelled this turn while the checker was
+        # grading; a machine allow is not fresh intent, so reject and let the
+        # checker drop it (the call parks for the sweep backstop).
+        if enforce_interrupt_floor:
+            current_floor = await queries.find_latest_interrupt_seq(
+                conn, session_id, account_id=account_id
+            )
+            if current_floor != expected_interrupt_floor:
+                raise ConflictError(
+                    f"tool_call_id {tool_call_id!r} interrupted since review began; "
+                    f"not auto-confirming",
+                    detail={
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_id,
+                        "expected_interrupt_floor": expected_interrupt_floor,
+                        "current_interrupt_floor": current_floor,
+                    },
+                )
         existing = await queries.find_tool_confirmed_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
@@ -2951,6 +2989,45 @@ async def confirm_tool_allow(
             data=data,
             account_id=account_id,
         )
+
+
+async def hold_stranded_tool_call(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+    verdict_span: dict[str, Any],
+    requested_marker: dict[str, Any],
+) -> bool:
+    """Atomically fail-close a stranded review into a held card (jarbot#229).
+
+    The sweep backstop's check-then-append is otherwise racy: two concurrent
+    sweep passes (periodic cross-session + tool-result-scoped) can both pass
+    the marker check and double-write. Under the session row lock, re-check the
+    ``tool_requested`` marker and, if absent, append the verdict span and the
+    hold marker in ONE transaction — the second racer sees the marker and
+    returns ``False``. Takes the event ``data`` dicts verbatim (built by the
+    caller from the auto-review constants) so this stays a generic writer with
+    no reverse import into the harness. Returns whether it wrote.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
+        if await queries.has_tool_requested_marker(
+            conn, session_id, tool_call_id, account_id=account_id
+        ):
+            return False
+        await queries.append_event(
+            conn, session_id=session_id, kind="span", data=verdict_span, account_id=account_id
+        )
+        await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="lifecycle",
+            data=requested_marker,
+            account_id=account_id,
+        )
+        return True
 
 
 async def confirm_tool_deny(
