@@ -16,8 +16,21 @@ from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from procrastinate import App
-from procrastinate.testing import InMemoryConnector
+
+from tests.unit.no_external_egress import install_socket_guard
+
+# Install during conftest import, before pytest imports unit-test modules for
+# collection. A module-level registry lookup must not get a head start on the
+# per-test fixture phase.
+_EGRESS_GUARD_PATCH = pytest.MonkeyPatch()
+install_socket_guard(_EGRESS_GUARD_PATCH)
+# URL model construction is intentionally a pure write-boundary check in unit
+# tests. Give that subsystem's existing resolver seam a controlled offline
+# result; resolver-specific tests replace the seam with explicit answers.
+_EGRESS_GUARD_PATCH.setattr("aios.models.target_urls._resolve_host_ips", lambda _host: None)
+
+from procrastinate import App  # noqa: E402
+from procrastinate.testing import InMemoryConnector  # noqa: E402
 
 
 @pytest.fixture(autouse=True, scope="session")
