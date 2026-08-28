@@ -1033,7 +1033,16 @@ async def _run_session_step_body(
             # attempt. The provider rejection is the authoritative bound; a
             # zero minimum lets the windower discard exactly as much history
             # as the progressively smaller maximum requires.
-            window_min=0 if adaptive_context_retry else min(agent.window_min, request_window_max),
+            #
+            # Otherwise the agent's CONFIGURED floor goes through verbatim: the
+            # windower owns the feasibility clamp (#2289) and reports what it
+            # did on ``WindowFloor``. Pre-clamping to ``request_window_max``
+            # here would be inert — the windower's 75%-of-events-budget ceiling
+            # is below the request ceiling either way — while making
+            # ``configured_window_min`` on the span report the served ceiling
+            # instead of the agent's setting, misreading the exact diagnosis the
+            # span exists for.
+            window_min=0 if adaptive_context_retry else agent.window_min,
             window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),

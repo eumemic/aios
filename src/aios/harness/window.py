@@ -23,9 +23,9 @@ Concretely, given a per-agent ``min_tokens`` / ``max_tokens`` (defaults
   to a stable prefix, so prompt prefix caching keeps hitting until the next
   snap.
 
-Both bounds describe RETAINED CONVERSATION, but the per-request prelude
-(system prompt + tool schemas + reserves) is asymmetric between them, and
-the asymmetry is load-bearing (issue #2289):
+The per-request prelude (system prompt + tool schemas + reserves) enters
+the two bounds asymmetrically, and the asymmetry is load-bearing
+(issue #2289):
 
 * ``max_tokens`` bounds the *sent prompt*, so the prelude's cost must be
   subtracted from it — the retained slate gets whatever is left over.
