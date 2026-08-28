@@ -3,10 +3,54 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import jsonschema
 from litellm import token_counter
 from mcp.types import Tool
 
 from aios.mcp.schema import make_function_tool, sanitize_mcp_schema
+
+
+def _assert_valid_draft202012(schema: Any) -> None:
+    """The assertion that would have caught the production 400.
+
+    Anthropic validates every ``input_schema`` against JSON Schema draft
+    2020-12 and rejects the ENTIRE request when any tool's schema fails
+    (``tools.N.custom.input_schema: JSON schema is invalid``). The sanitizer
+    must therefore never emit an invalid schema — e.g. ``"type": {}``.
+    """
+    jsonschema.Draft202012Validator.check_schema(schema)
+
+
+# The real-world trap (Notion MCP ``notion-create-pages``): a property literally
+# named ``properties`` — a page's ``properties`` field — whose SCHEMA carries
+# legal non-dict keyword values (``"type": "object"``, a string ``description``)
+# plus dict-valued ``additionalProperties``/``propertyNames``. A walker that is
+# not structure-aware sees the properties MAP ``{"properties": <schema>}`` as a
+# schema node with a ``properties`` keyword and coerces the inner schema's
+# keywords to ``{}`` (``"type": {}``), which Anthropic 400s.
+_NOTION_CREATE_PAGES_SHAPE: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "pages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "properties": {
+                        "type": "object",
+                        "description": "Page properties, keyed by property name.",
+                        "propertyNames": {"type": "string"},
+                        "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "number"}]},
+                    },
+                    "content": {"type": "string"},
+                },
+                "required": ["properties"],
+            },
+        },
+    },
+    "required": ["pages"],
+}
+
 
 _MALFORMED_OPTIONAL_LIST_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -154,6 +198,84 @@ class TestSanitizer:
         assert cleaned["properties"]["foo"] == {}
         assert cleaned["properties"]["bar"] == {"type": "string"}
 
+    # --- Structural discipline: a property NAMED like a schema keyword is a
+    # parameter, and its schema's keywords must survive untouched. The mutating
+    # passes may only treat a ``properties`` dict as a name→schema map when the
+    # containing node is a schema node reached through the structural walk.
+
+    def test_notion_shape_property_named_properties_survives_byte_identical(self) -> None:
+        # Red on the pre-fix sanitizer: the blind walk coerced the inner
+        # schema's ``"type": "object"`` and string ``description`` to ``{}``.
+        cleaned = sanitize_mcp_schema(_NOTION_CREATE_PAGES_SHAPE)
+        assert cleaned == _NOTION_CREATE_PAGES_SHAPE
+        _assert_valid_draft202012(cleaned)
+
+    def test_keyword_named_properties_survive_at_depth(self) -> None:
+        # Properties named ``properties`` / ``type`` / ``items`` /
+        # ``description`` at several nesting depths (under ``items``, ``anyOf``
+        # arms, ``additionalProperties``) are parameters, not keywords.
+        node: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "description": "a kind"},
+                "items": {"type": "array", "items": {"type": "string"}},
+                "description": {"type": "string"},
+                "nested": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "properties": {
+                                    "type": "object",
+                                    "description": "inner map",
+                                    "additionalProperties": {
+                                        "type": "object",
+                                        "properties": {
+                                            "type": {"type": "string"},
+                                            "description": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            },
+        }
+        cleaned = sanitize_mcp_schema(node)
+        assert cleaned == node
+        _assert_valid_draft202012(cleaned)
+
+    def test_items_repair_does_not_inject_phantom_property_into_properties_map(self) -> None:
+        # Same trap for the ``items``-repair pass from #2308: a properties map
+        # holding a (malformed, non-dict) property named ``type`` with value
+        # "array" must not be mistaken for an array schema node — the blind
+        # walk injected a phantom property ``items: {}`` into the map.
+        node = {"type": "object", "properties": {"type": "array"}}
+        cleaned = sanitize_mcp_schema(node)
+        assert "items" not in cleaned["properties"]
+        # The malformed non-dict value itself is still coerced (real map).
+        assert cleaned["properties"]["type"] == {}
+        _assert_valid_draft202012(cleaned)
+
+    def test_every_fixture_sanitizes_to_a_valid_draft202012_schema(self) -> None:
+        fixtures: list[Any] = [
+            _NOTION_CREATE_PAGES_SHAPE,
+            _MALFORMED_OPTIONAL_LIST_SCHEMA,
+            {"type": "array"},
+            {"type": "array", "items": [{"type": "string"}]},
+            {"type": "array", "items": True},
+            {"type": "object", "properties": {"foo": True, "bar": {"type": "string"}}},
+            {"type": "object", "properties": {"type": "array"}},
+            {
+                "oneOf": [{"type": "string"}, {"type": "null"}],
+                "type": "string",
+            },
+        ]
+        for fixture in fixtures:
+            _assert_valid_draft202012(sanitize_mcp_schema(fixture))
+
     def test_returns_non_dict_unchanged(self) -> None:
         assert sanitize_mcp_schema("string") == "string"
         assert sanitize_mcp_schema(42) == 42
@@ -218,6 +340,18 @@ class TestMakeFunctionToolIntegration:
         tool = Tool(name="t", description="d", inputSchema=schema)
         envelope = make_function_tool("mcp__s__t", tool)
 
+        count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
+        assert count > 0
+
+    def test_notion_shape_survives_token_counter(self) -> None:
+        tool = Tool(
+            name="notion-create-pages",
+            description="Create pages",
+            inputSchema=_NOTION_CREATE_PAGES_SHAPE,
+        )
+        envelope = make_function_tool("mcp__notion__notion-create-pages", tool)
+
+        assert envelope["function"]["parameters"] == _NOTION_CREATE_PAGES_SHAPE
         count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
         assert count > 0
 
