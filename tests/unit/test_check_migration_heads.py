@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
-from scripts.check_migration_heads import MigrationHistoryError, check_history, load_revisions
+import yaml
+from scripts.check_migration_heads import (
+    MigrationHistoryError,
+    check_against_base,
+    check_history,
+    load_revisions,
+)
 
 
 def _migration(
@@ -57,6 +64,56 @@ def test_mutation_detects_stale_parent_then_passes_when_reparented(tmp_path: Pat
 
     _migration(stale, "0161", "0159", annotated=True)
     assert check_history(load_revisions(tmp_path), current_tip="0159") == "0161"
+
+
+def test_workflow_runs_on_every_push_and_checks_live_master() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github" / "workflows" / "migration-head-check.yml"
+    )
+    doc: dict[Any, Any] = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    triggers = doc.get("on", doc.get(True))
+    assert isinstance(triggers, dict)
+
+    assert triggers["push"] is None
+    steps = doc["jobs"]["migration-head"]["steps"]
+    live_base_checkout = next(step for step in steps if step.get("name") == "Check out live master")
+    assert live_base_checkout["with"]["ref"] == "master"
+    check_command = next(
+        step["run"] for step in steps if step.get("name", "").startswith("Detect branched")
+    )
+    assert "--base-versions-dir _base/migrations/versions" in check_command
+
+
+def test_live_base_mutation_rejects_stale_parent_then_accepts_current_tip() -> None:
+    base = {"0158": None, "0159": "0158"}
+    stale_branch = {"0158": None, "0161": "0158"}
+
+    with pytest.raises(MigrationHistoryError) as exc_info:
+        check_against_base(stale_branch, base)
+
+    assert str(exc_info.value) == (
+        "migration branch does not extend the current base head (0159): "
+        "combined heads are 0159 and 0161\n"
+        "  -> re-parent your migration onto the current base head (0159)"
+    )
+
+    current_branch = {"0158": None, "0161": "0159"}
+    assert check_against_base(current_branch, base) == "0161"
+
+
+def test_rejects_parent_available_only_on_branch_not_live_base() -> None:
+    base: dict[str, str | None] = {"0158": None}
+    single_migration = {"0158": None, "0160": "0158"}
+    stacked_migrations = {**single_migration, "0161": "0160"}
+
+    assert check_against_base(single_migration, base) == "0160"
+    with pytest.raises(MigrationHistoryError) as exc_info:
+        check_against_base(stacked_migrations, base)
+
+    assert str(exc_info.value) == (
+        'revision 0161 declares down_revision="0160", but that parent '
+        "is not present on the live base"
+    )
 
 
 def test_known_good_repository_has_expected_revision_count_and_one_head() -> None:

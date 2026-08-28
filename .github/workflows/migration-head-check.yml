@@ -1,6 +1,9 @@
 name: Migration head check
 
 on:
+  # No paths filter: once a branch contains a migration, every subsequent push
+  # must re-evaluate it against master, which may have advanced independently.
+  push:
   pull_request:
     paths:
       - migrations/**
@@ -9,7 +12,7 @@ on:
       - .github/workflows/migration-head-check.yml
 
 concurrency:
-  group: migration-head-${{ github.event.pull_request.number }}
+  group: migration-head-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,24 +23,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # On pull_request, checkout's default ref is refs/pull/<n>/merge. This is
-      # deliberately the merge result, not the stale PR head.
-      - name: Check out merge ref
+      - name: Check out pushed branch
         uses: actions/checkout@v4
 
-      - name: Check out current base
+      # Resolve master when the job starts rather than using the push/PR event's
+      # base SHA: the invariant is branch ∪ live master, including migrations
+      # merged after this branch's push event was created.
+      - name: Check out live master
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: master
           path: _base
 
       - uses: astral-sh/setup-uv@v4
 
-      - name: Detect branched Alembic history
-        run: |
-          set -euo pipefail
-          base_tip=$(uv run python scripts/check_migration_heads.py _base/migrations/versions | sed 's/^alembic history has one head: //')
-          uv run python scripts/check_migration_heads.py migrations/versions --current-tip "${base_tip}"
+      - name: Detect branched Alembic history against live master
+        run: >-
+          uv run python scripts/check_migration_heads.py migrations/versions
+          --base-versions-dir _base/migrations/versions
 
       - name: Mutation and parser self-tests
         run: uv run pytest tests/unit/test_check_migration_heads.py -q
