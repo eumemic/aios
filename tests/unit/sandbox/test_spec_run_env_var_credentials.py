@@ -100,6 +100,10 @@ def _patch_run_spec_deps(
             return_value=__import__("pathlib").Path("/tmp/run-u"),
         ),
         patch(
+            "aios.sandbox.volumes.ensure_session_tmp_dir",
+            return_value=__import__("pathlib").Path("/tmp/run-t"),
+        ),
+        patch(
             "aios.sandbox.spec._materialize_run_env_var_credentials",
             env_var_credentials or AsyncMock(return_value=()),
         ),

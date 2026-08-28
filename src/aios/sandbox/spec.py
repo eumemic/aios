@@ -1025,8 +1025,10 @@ def _assemble_plan(
     (issue #1725). The run path has no github attachments, so the
     default keeps the two sets identical there.
     """
+    from aios.ids import SESSION
     from aios.sandbox.volumes import (
         ensure_session_attachments_dir,
+        ensure_session_tmp_dir,
         ensure_session_uploads_dir,
         memory_store_host_dir,
         session_repo_working_tree_dir,
@@ -1084,11 +1086,37 @@ def _assemble_plan(
     # appears through the existing kernel namespace bind without re-mounting.
     attachments_path = ensure_session_attachments_dir(session_id)
     uploads_path = ensure_session_uploads_dir(session_id)
-
     extra_mounts: list[Mount] = [
         Mount(host_path=attachments_path, sandbox_path="/mnt/attachments", read_only=True),
         Mount(host_path=uploads_path, sandbox_path="/mnt/uploads", read_only=True),
     ]
+
+    # Bind ``/tmp`` to per-session host scratch (#2280). Docker excludes
+    # bind-mount contents from BOTH ``docker commit`` and ``docker export``,
+    # so this is what makes ephemeral scratch structurally unable to enter a
+    # snapshot image — as opposed to a stream filter, which covers only the
+    # export path and only for as long as nobody forgets to apply it.
+    #
+    # SESSIONS ONLY, deliberately. A run (``wfr_``) and a browser plane
+    # (``acc_``) are torn down with a bare destroy that drops the whole
+    # writable layer, so their ``/tmp`` is already reclaimed at teardown.
+    # Binding it to the host would make that scratch *outlive* the container
+    # it belongs to — turning a self-clearing directory into one more tree
+    # needing a reaper. Only the session path persists its rootfs, so only
+    # the session path has anything to exclude from it.
+    #
+    # A plain prefix test, NOT ``ids.sandbox_owner_kind`` — that helper is
+    # exhaustive-and-raising, so routing through it here would turn an
+    # unrecognised owner id into a failed provision. An owner we don't
+    # recognise should simply not get the mount, which is what it had before.
+    if session_id.startswith(f"{SESSION}_"):
+        extra_mounts.append(
+            Mount(
+                host_path=ensure_session_tmp_dir(session_id),
+                sandbox_path="/tmp",
+                read_only=False,
+            )
+        )
 
     # Bind-mount each attached memory store. Read-only attaches make the
     # kernel reject writes (bash + tools alike); read-write is the
