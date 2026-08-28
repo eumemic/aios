@@ -75,6 +75,12 @@ async def main() -> int:
     args = parser.parse_args()
 
     model = args.model or get_settings().auto_review_model
+    if not model:
+        print(
+            "no checker model — pass --model or set AIOS_AUTO_REVIEW_MODEL",
+            file=sys.stderr,
+        )
+        return 2
     cases = json.loads(CASES_PATH.read_text())
     if args.only:
         cases = [c for c in cases if c["name"] == args.only]

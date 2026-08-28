@@ -408,6 +408,12 @@ async def legacy_inference_env(
 
     monkeypatch.setenv("AIOS_INFERENCE_CREDENTIAL_POLICY", "legacy_env")
     aios_env["AIOS_INFERENCE_CREDENTIAL_POLICY"] = "legacy_env"
+    # The checker model has no baked-in default (#229) — scripted-model
+    # harnesses that exercise auto_review must configure one, matching the
+    # operator's required ``AIOS_AUTO_REVIEW_MODEL``. ``script_checker``
+    # dispatches on this exact value.
+    monkeypatch.setenv("AIOS_AUTO_REVIEW_MODEL", "fake/checker")
+    aios_env["AIOS_AUTO_REVIEW_MODEL"] = "fake/checker"
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

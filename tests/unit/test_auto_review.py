@@ -38,7 +38,7 @@ from aios.services import sessions as sessions_service
 
 def _settings(**overrides: Any) -> SimpleNamespace:
     base: dict[str, Any] = {
-        "auto_review_model": "openai/responses/gpt-5.6-luna",
+        "auto_review_model": "test/checker-model",
         "auto_review_timeout_s": 5.0,
         "inference_credential_policy": "legacy_env",
         "tenancy_posture": "internal",
@@ -308,7 +308,7 @@ async def test_allow_confirms_with_source_and_wakes() -> None:
     assert len(verdicts) == 1 and verdicts[0]["verdict"] == "allow"
     assert verdicts[0]["reason"] == "user asked"
     assert verdicts[0]["tool_call_id"] == "tc_1"
-    assert verdicts[0]["model"] == "openai/responses/gpt-5.6-luna"
+    assert verdicts[0]["model"] == "test/checker-model"
     assert isinstance(verdicts[0]["latency_ms"], int)
     # The real model call is metered: span pair + usage increment.
     assert len(rec.spans("model_request_end")) == 1
@@ -404,6 +404,21 @@ async def test_account_only_without_auth_fails_closed() -> None:
         auth_result=(None, None),
     )
     assert rec.markers()[0]["reason"] == CHECKER_UNAVAILABLE_REASON
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_model_fails_closed_without_any_call() -> None:
+    # No AIOS_AUTO_REVIEW_MODEL: the checker can't grade, so it holds a card
+    # without touching auth or the model — no baked-in default to fall back on.
+    rec = _Recorder()
+    await _run_review(
+        rec,
+        model_results=[],  # a model call would IndexError
+        settings=_settings(auto_review_model=None),
+        auth_result=RuntimeError("auth must not be consulted"),
+    )
+    assert rec.markers()[0]["reason"] == CHECKER_UNAVAILABLE_REASON
+    assert rec.confirms == []
 
 
 @pytest.mark.asyncio

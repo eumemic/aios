@@ -288,6 +288,13 @@ async def _grade(
             model=model_used,
         )
 
+    # No checker model configured (``AIOS_AUTO_REVIEW_MODEL`` unset): the
+    # checker cannot grade, so every ``auto_review`` call fails closed to a
+    # card. An operator who enables the policy must set the model too.
+    if not model:
+        blog.warning("auto_review.model_not_configured")
+        return _unavailable()
+
     try:
         user_lines = await _recent_user_lines(pool, session_id, account_id=account_id)
     except asyncio.CancelledError:

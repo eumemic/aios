@@ -759,14 +759,18 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
-    auto_review_model: str = Field(
-        default="openai/responses/gpt-5.6-luna",
+    auto_review_model: str | None = Field(
+        default=None,
         description="Checker model for ``auto_review``-policied MCP tool calls "
         "(jarbot#229): a cheap grader that returns ``allow`` (execute) or "
-        "``ask`` (hold a confirmation card). LiteLLM model string; "
-        "operator-swappable, never a user-facing decision. Auth resolves "
-        "through the same per-account ``model_providers`` ladder as every "
-        "other inference call.",
+        "``ask`` (hold a confirmation card). LiteLLM model string, set by the "
+        "operator via ``AIOS_AUTO_REVIEW_MODEL`` — deliberately NO baked-in "
+        "default (no model string belongs in the binary), mirroring "
+        "``workflow_default_child_model``. Auth resolves through the same "
+        "per-account ``model_providers`` ladder as every other inference call. "
+        "When unset, ``auto_review`` calls fail closed to a confirmation card "
+        "(the checker cannot grade without a configured model) — so an "
+        "operator enabling the policy must set this too.",
     )
 
     auto_review_timeout_s: float = Field(
