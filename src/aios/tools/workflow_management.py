@@ -56,6 +56,7 @@ from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.input import tool_input
 from aios.tools.registry import registry
+from aios.tools.schema_diet import slim_tool_schema
 
 # Heavy snapshot fields the model already sent (or doesn't need echoed back); trimmed
 # from the returned dicts to keep tool results lean.
@@ -140,6 +141,12 @@ class _ListRunEventsArgs(BaseModel):
     run_id: str
     after_seq: int = Field(default=0, ge=0)
     limit: int = Field(default=200, ge=1, le=500)
+
+
+class _NoArgs(BaseModel):
+    """No arguments — the schema is ``{}`` with nothing accepted."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class _ResumeGateArgs(BaseModel):
@@ -289,6 +296,19 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
     return {"events": [e.model_dump(mode="json") for e in events]}
 
 
+async def get_workflow_script_contract_handler(
+    session_id: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """The on-demand half of the #2294 progressive disclosure.
+
+    Pure constant read — no pool, no account, no session state. This is the
+    surface the trimmed ``script`` field description points at, so the authoring
+    manual stays genuinely reachable while costing nothing per request.
+    """
+    tool_input(_NoArgs, arguments)
+    return {"contract": WORKFLOW_SCRIPT_CONTRACT}
+
+
 async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
@@ -304,26 +324,78 @@ async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dic
     return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
 
 
+# ─── model-facing schema diet (#2294) ────────────────────────────────────────
+#
+# The pydantic bodies stay exactly as they are — the HTTP/SDK plane and every
+# handler still validate against the full ``WorkflowCreate``/``WorkflowUpdate``/
+# ``InlineScriptBody``, so a malformed body still gets a field-precise error.
+# What changes is only what the MODEL is shown, because a tool schema ships in
+# every request whether or not the turn touches workflows. Two things are cut:
+# the inlined authoring manual (now on demand via ``get_workflow_script_contract``)
+# and the fully-expanded declared-surface config trees.
+
+#: The tools whose schemas used to carry the inlined authoring manual. An agent
+#: holding any of them is authoring workflow scripts, so the harness injects the
+#: contract reader alongside them (:func:`script_contract_tool_spec`) — the manual
+#: stays reachable for the fleet's already-provisioned agents without a re-grant.
+WORKFLOW_AUTHORING_TOOL_NAMES = frozenset({"create_workflow", "update_workflow", "call_workflow"})
+
+SCRIPT_CONTRACT_TOOL_NAME = "get_workflow_script_contract"
+
+SCRIPT_FIELD_DESCRIPTION = (
+    "Python defining `async def main(input)`; its return value is the run's output. "
+    "Call `get_workflow_script_contract` for the authoring contract; `get_workflow` "
+    "on an existing workflow for an example."
+)
+TOOLS_FIELD_DESCRIPTION = (
+    'Declared tool surface (agent-config envelope, e.g. [{"type": "bash"}]; a subset '
+    "of your own). Usually omitted."
+)
+MCP_SERVERS_FIELD_DESCRIPTION = (
+    "Declared MCP servers (agent-config envelope; a subset of your own). Usually omitted."
+)
+HTTP_SERVERS_FIELD_DESCRIPTION = (
+    'Declared HTTP servers: grant names (["github"]) or full specs; a subset of your '
+    "own. Usually omitted."
+)
+
+_OPAQUE_SURFACE_FIELDS = {
+    "tools": TOOLS_FIELD_DESCRIPTION,
+    "mcp_servers": MCP_SERVERS_FIELD_DESCRIPTION,
+    "http_servers": HTTP_SERVERS_FIELD_DESCRIPTION,
+}
+
+
+def slim_workflow_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Apply the #2294 diet to a rendered workflow-body schema (model-facing only)."""
+    return slim_tool_schema(
+        schema,
+        opaque_arrays=_OPAQUE_SURFACE_FIELDS,
+        redescribe={"script": SCRIPT_FIELD_DESCRIPTION},
+    )
+
+
 # ─── descriptions + registration ─────────────────────────────────────────────
 
 CREATE_WORKFLOW_DESCRIPTION = (
     "Author a new workflow (a deterministic Python orchestrator) under your account. "
     "Its declared tool/server surface must be a subset of your own — you cannot grant a "
-    "workflow a tool, MCP server, or HTTP server you don't yourself have. For HTTP "
-    'servers you may pass a bare name string (e.g. http_servers: ["github"]) to '
-    "reference one of your own grants by name — its base_url and routes are resolved "
-    "from you — or a full HttpServerSpec object. Returns the created workflow (id, name, "
-    "version).\n\n"
-    f"{WORKFLOW_SCRIPT_CONTRACT}"
+    "workflow a tool, MCP server, or HTTP server you don't yourself have. Returns the "
+    "created workflow (id, name, version). Read the script contract first with "
+    "`get_workflow_script_contract`."
 )
 UPDATE_WORKFLOW_DESCRIPTION = (
     "Update one of your workflows in place, bumping its version. Pass the current "
     "'version' as an optimistic-concurrency token (a stale token is rejected — re-read "
-    "with get_workflow and retry). Omitted fields are preserved. The resulting tool/server "
-    "surface must still be a subset of your own. Archived workflows cannot be updated; "
-    "unarchive first. In-flight runs are unaffected (a run pins its workflow's script + "
-    "surface at launch).\n\n"
-    f"{WORKFLOW_SCRIPT_CONTRACT}"
+    "with get_workflow and retry). Omitted fields are preserved; the resulting surface "
+    "must still be a subset of your own. Archived workflows must be unarchived first. "
+    "In-flight runs are unaffected (a run pins script + surface at launch)."
+)
+GET_WORKFLOW_SCRIPT_CONTRACT_DESCRIPTION = (
+    "Read the full workflow script-authoring contract: the `async def main(input)` entry "
+    "point, the injected capability API (agent/tool/call_llm/gate/parallel/log/…), shell "
+    "execution, crash and idempotency semantics, and the script sandbox's limits. Call "
+    "this before writing or editing a workflow script."
 )
 ARCHIVE_WORKFLOW_DESCRIPTION = (
     "Archive one of your workflows. Archived workflows disappear from list_workflows and "
@@ -380,18 +452,25 @@ RESUME_GATE_DESCRIPTION = (
 )
 
 
+def script_contract_tool_spec() -> dict[str, Any]:
+    """The chat-completions entry for the contract reader, for harness injection."""
+    from aios.tools.registry import openai_tool_entry
+
+    return openai_tool_entry(registry.get(SCRIPT_CONTRACT_TOOL_NAME))
+
+
 def _register() -> None:
     registry.register(
         name="create_workflow",
         description=CREATE_WORKFLOW_DESCRIPTION,
-        parameters_schema=WorkflowCreate.model_json_schema(),
+        parameters_schema=slim_workflow_schema(WorkflowCreate.model_json_schema()),
         handler=create_workflow_handler,
         transport="agent_tool",
     )
     registry.register(
         name="update_workflow",
         description=UPDATE_WORKFLOW_DESCRIPTION,
-        parameters_schema=_UpdateWorkflowArgs.model_json_schema(),
+        parameters_schema=slim_workflow_schema(_UpdateWorkflowArgs.model_json_schema()),
         handler=update_workflow_handler,
         transport="agent_tool",
     )
@@ -414,6 +493,17 @@ def _register() -> None:
         description=GET_WORKFLOW_DESCRIPTION,
         parameters_schema=_GetWorkflowArgs.model_json_schema(),
         handler=get_workflow_handler,
+        transport="agent_tool",
+    )
+    registry.register(
+        name=SCRIPT_CONTRACT_TOOL_NAME,
+        description=GET_WORKFLOW_SCRIPT_CONTRACT_DESCRIPTION,
+        # Slimmed for the same reason as its siblings: the raw render carries a
+        # `title` naming the private arg class, which the model has no use for.
+        parameters_schema=slim_tool_schema(
+            _NoArgs.model_json_schema(), opaque_arrays={}, redescribe={}
+        ),
+        handler=get_workflow_script_contract_handler,
         transport="agent_tool",
     )
     registry.register(

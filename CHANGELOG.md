@@ -14,6 +14,7 @@
   `window.floor_clamped` warning, rather than silently zeroed (#2289).
 
 - `search_events` and `memory_search` now return their formatted table as plain multi-line text (`ToolResult`) instead of a `{"result": …}` JSON envelope, so an inline or spilled result stays line-oriented for `grep`/`sed`/`wc -l`/`read` (#2291).
+- Cut the model-facing `create_workflow`/`update_workflow`/`call_workflow` tool schemas from ~69KB to ~5.8KB combined by moving the script-authoring contract behind a new on-demand `get_workflow_script_contract` builtin and rendering the declared tool/MCP/HTTP surface as opaque arrays; pydantic validation and the HTTP/SDK schemas are unchanged (#2294).
 - Distinguish a dead OAuth refresh token (RFC 6749 `invalid_grant` — revoked,
   expired, or otherwise unrecoverable) from a generic/transient
   `OAuthRefreshError` via a new `OAuthReauthRequiredError` subclass

@@ -28,6 +28,7 @@ class ToolSpecTypeType0(str, Enum):
     GET_AGENT = "get_agent"
     GET_RUN = "get_run"
     GET_WORKFLOW = "get_workflow"
+    GET_WORKFLOW_SCRIPT_CONTRACT = "get_workflow_script_contract"
     GLOB = "glob"
     GREP = "grep"
     HTTP_REQUEST = "http_request"
