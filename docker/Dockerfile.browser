@@ -1,0 +1,109 @@
+# aios browser image — the per-account "computer" (jarbot#106 Phase 2).
+#
+# Chromium plus the ``aios-browser-driver`` daemon implementing the wire
+# contract in ``src/aios/sandbox/browser_protocol.py``. The worker starts one
+# container per account (``build_spec_from_browser``) with a single bind mount
+# (the account plane at ``/workspace``), no env injection, no published ports,
+# and drives it exclusively via ``docker exec browser-cli invoke '<json>'``.
+#
+# Published as ``ghcr.io/eumemic/aios-browser`` by
+# ``.github/workflows/build-browser-image.yml`` on every change to its inputs
+# (this file, the seccomp profile, the driver package, the protocol module).
+# Deploy targets pull from GHCR via ``AIOS_SANDBOX_BROWSER_IMAGE``.
+#
+# Local dev:
+#   docker build -t aios-browser:dev -f docker/Dockerfile.browser .
+# then point ``AIOS_SANDBOX_BROWSER_IMAGE`` at the tag and run the e2e suites:
+#   AIOS_SANDBOX_BROWSER_IMAGE=aios-browser:dev uv run pytest \
+#     tests/e2e/test_browser_image_contract.py tests/e2e/test_browser_driver_behavior.py
+#
+# Build context is the repo root (NOT ``docker/``): the image COPYs the driver
+# package AND the ``src/`` protocol original over the package's vendored copy,
+# so the installed contract can never fork from the worker's
+# (``test_browser_image_contract.py`` asserts byte equality against a live
+# container).
+#
+# Runtime posture (enforced by the worker's spec/backend, asserted by the
+# contract e2e):
+# - Runs as USER 1000:1000 — ``browser_protocol.PLANE_OWNER_UID`` — so plane
+#   files (frames/shots/downloads, the input spool) are readable/writable by
+#   the API process without any chown dance. The worker passes no ``--user``.
+# - CMD is the daemon (absolute path — PATH-regression defense, #925/#938);
+#   the worker passes no command override.
+# - Chromium's own namespace sandbox stays ON (no ``--no-sandbox`` anywhere).
+#   It needs unprivileged USER/PID/NET namespaces, which
+#   ``docker/seccomp-browser.json`` re-permits. NEVER run this container with
+#   ``--security-opt apparmor=unconfined``: on Ubuntu 24.04 hosts
+#   (``apparmor_restrict_unprivileged_userns=1``) the docker-default AppArmor
+#   profile is exactly what exempts the container from the userns restriction —
+#   unconfined KILLS the sandbox rather than loosening anything.
+
+FROM python:3.13-slim-bookworm
+
+# uv binary (pinned) — same provenance as the worker image's install step.
+COPY --from=ghcr.io/astral-sh/uv:0.5.18 /uv /usr/local/bin/uv
+
+# Named non-root user ``aios`` (uid:gid 1000:1000 = PLANE_OWNER_UID) with a
+# writable home. Chromium refuses to run when $HOME's owner != the running
+# uid, and writes ~/.config / ~/.cache under it.
+RUN groupadd --gid 1000 aios \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/aios aios
+
+# Browsers land in a shared root-installed path, NOT root's ~/.cache — set
+# BEFORE ``playwright install`` and persisted to runtime so the uid-1000
+# daemon resolves the same path the root build step populated (a bare install
+# would land in /root/.cache, unreadable by uid 1000).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+# Layer order is cache-bust order: the driver package and the protocol module
+# are the frequently-changing inputs, so the expensive layers below key ONLY
+# on the dependency set (this pyproject copy). A driver-code or protocol-only
+# rebuild reuses apt + Chromium — the layers the arm64/QEMU CI leg pays
+# tens of minutes for.
+COPY packages/aios-browser-driver/pyproject.toml /tmp/driver-deps/pyproject.toml
+RUN uv pip install --system --no-cache -r /tmp/driver-deps/pyproject.toml \
+ && rm -rf /tmp/driver-deps
+
+# Chromium's OS dependencies (apt) — split from the browser download below so
+# a Chromium-only bump doesn't re-run the slow apt layer.
+RUN apt-get update \
+ && playwright install-deps chromium \
+ && rm -rf /var/lib/apt/lists/*
+
+# Chromium itself, pinned by the playwright version installed above.
+# ``--no-shell`` skips the headless-shell build — the driver launches full
+# Chromium via ``channel="chromium"`` on every path. World-read the tree so
+# the uid-1000 daemon can execute what root installed.
+RUN playwright install --no-shell chromium \
+ && chmod -R a+rX /opt/ms-playwright
+
+# The driver package itself — last, so the frequent case rebuilds only this
+# cheap wheel layer. ``--no-sources`` = the exact closure its own pyproject
+# declares (playwright, pydantic, python-ulid — deliberately NO aios). The
+# ``src/`` protocol original is COPYed OVER the package's vendored copy first,
+# so the installed module is byte-identical to the worker's — the
+# single-source mechanism that keeps the wire contract from forking
+# (drift-guarded repo-side by tests/test_protocol_drift.py, image-side by the
+# contract e2e).
+COPY packages/aios-browser-driver /tmp/aios-browser-driver
+COPY src/aios/sandbox/browser_protocol.py \
+     /tmp/aios-browser-driver/aios_browser_driver/browser_protocol.py
+RUN uv pip install --system --no-cache --no-sources /tmp/aios-browser-driver \
+ && rm -rf /tmp/aios-browser-driver
+
+# The driver's AF_UNIX request socket lives at /run/aios/driver.sock
+# (aios_browser_driver.sockpath) — the daemon (uid 1000) must be able to bind
+# there.
+RUN mkdir -p /run/aios && chown 1000:1000 /run/aios
+
+ENV HOME=/home/aios
+USER 1000:1000
+
+# The account plane is bind-mounted here at container start
+# (profile/ shots/ frames/ downloads/ input/).
+WORKDIR /workspace
+
+# The daemon IS the container: binds the socket, launches Chromium, crashes
+# visibly on any startup or relaunch failure (a crash-looping container beats
+# a live one that answers nothing). Absolute path — PATH-regression defense.
+CMD ["/usr/local/bin/aios-browser-driver"]

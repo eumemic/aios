@@ -84,7 +84,10 @@ jobs:
           # SDK under ``packages/aios-sdk/aios_sdk/_generated/`` — always
           # run CI.  ``tests/unit/test_detect_filter_sync.py`` enforces that
           # this regex stays in sync with all committed generated artifacts.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$'; then
+          # ``aios-browser-driver`` is matched whole: it ships the first
+          # runtime-load-bearing non-Python source in ``packages/``
+          # (``snapshot/walker.js``), which the ``\.py$`` arm would miss.
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/aios-browser-driver/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
