@@ -1,10 +1,6 @@
-# eumemic-bot PR reviews — kick the live aios ``dev-review`` agent as the
-# GitHub App (not as the eumemic user). The workflow mints a 1-hour
-# installation token from the App private key, then scripts/eumemic_bot_review.py
-# starts a one-shot aios session that posts ``### Code review``.
-#
-# Secrets (repo): AIOS_API_KEY, EUMEMIC_BOT_PRIVATE_KEY
-# Variable (repo): EUMEMIC_BOT_APP_ID
+# eumemic-bot PR reviews — kick the live aios reviewer as the GitHub App.
+# This job must not gate merge: aios agent/account misses are an ops
+# problem, not a PR defect.
 name: eumemic-bot review
 
 on:
@@ -26,6 +22,7 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -36,9 +33,10 @@ jobs:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
 
-      - name: Start aios dev-review session
+      - name: Start aios review session
         env:
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+          AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
