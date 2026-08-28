@@ -1,0 +1,44 @@
+fix(sandbox): read managed-image inspect as JSON, not a format template
+
+Docker's `inspect --format` runs under `missingkey=error`. Naming a key an
+image does not carry aborts the template FOR THAT IMAGE and drops it from
+stdout; `list_managed_images` then cannot account for the listed id, and its
+COMPLETE-OR-RAISE contract correctly refuses. So a single such image fails
+the whole enumeration, which fails the GC tick — hourly, indefinitely.
+
+In production one image did exactly that. Every `docker import` result (i.e.
+every flattened snapshot) carries no `Parent` key at all under the containerd
+image store, and `{{.Parent}}` errors on it:
+
+    template parsing error: executing "" at <.Parent>:
+    map has no entry for key "Parent"
+
+One such image among 457 managed images stopped all reclamation while ~72 GB
+of superseded residue accumulated on a host that went on to fill. Because the
+single-id re-probe uses a different format that never touches `.Parent`, it
+succeeded — so the failure surfaced as the maximally confusing "omitted by
+the batch inspect but still exists".
+
+The codebase had already hit this class once, on `.Config.Labels` for
+label-less images, and worked around that instance by fetching the whole
+`Config` object. `.Parent` was the same bug wearing a different key.
+
+Read the JSON instead of templating it: an absent key becomes `None` rather
+than an error, which is also the honest answer, since a flattened image
+genuinely has no parent. That removes the class rather than one more
+instance of it.
+
+Verified against the real daemon: a batch containing a vanished id exits
+nonzero but still writes a well-formed array of the images it did find, so
+the existing proved-absent reconciliation is unaffected.
+
+COMPLETE-OR-RAISE is preserved, not traded away — unparseable or non-array
+output is indeterminate and still fails closed, because reading it as empty
+would report every id in the batch as absent and the GC reconciles DB
+pointers by absence (#2138).
+
+Tests pin the class, not the key: the absent-`Parent` regression, one odd
+image not poisoning its batch, degenerate records (missing/null/wrong-typed
+fields) still yielding usable entries, both fail-closed paths, and a guard
+against reintroducing `--format` on the batch call. Verified as a negative
+control: 7 of the 9 fail without the fix.

@@ -39,8 +39,24 @@ from aios.sandbox.registry import GcPressureResult, SandboxRegistry
 _NOW = datetime(2026, 6, 10, tzinfo=UTC)
 
 
-def _managed_line(iid: str) -> str:
-    return f'{iid}\t\t1\t["tag-{iid}"]\t{json.dumps({"Labels": {}})}'
+def _managed_record(iid: str) -> dict[str, object]:
+    """One entry as ``docker image inspect`` really emits it.
+
+    ``Parent`` is present-but-empty here (the ordinary layered case). The
+    absent-key case — every ``docker import``/flattened image — has its own
+    test; it is what used to abort the template and kill the whole tick.
+    """
+    return {
+        "Id": iid,
+        "Parent": "",
+        "Size": 1,
+        "RepoTags": [f"tag-{iid}"],
+        "Config": {"Labels": {}},
+    }
+
+
+def _managed_payload(iids: list[str]) -> bytes:
+    return json.dumps([_managed_record(iid) for iid in iids]).encode()
 
 
 # ─── Finding 1: the listing layer itself must prove completeness ────────────
@@ -67,8 +83,7 @@ async def test_transiently_empty_listing_is_not_reported_as_an_empty_host(
             if listings == 1:
                 return 0, b"", b""
             return 0, ("\n".join(ids) + "\n").encode(), b""
-        lines = [_managed_line(iid) for iid in argv[5:]]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, _managed_payload(list(argv[3:])), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
 
@@ -115,8 +130,7 @@ async def test_nonempty_listing_does_not_pay_for_a_second_read(
         if argv[1] == "images":
             listings += 1
             return 0, ("\n".join(ids) + "\n").encode(), b""
-        lines = [_managed_line(iid) for iid in argv[5:]]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, _managed_payload(list(argv[3:])), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
 
@@ -165,8 +179,7 @@ async def test_gc_does_not_clear_every_pointer_from_a_transiently_empty_listing(
             if listings == 1:
                 return 0, b"", b""
             return 0, b"sha256:0000\n", b""
-        lines = [_managed_line(iid) for iid in argv[5:]]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, _managed_payload(list(argv[3:])), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     registry = SandboxRegistry(DockerBackend())
