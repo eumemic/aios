@@ -14,8 +14,11 @@ T = TypeVar("T", bound="McpPermissionPolicy")
 class McpPermissionPolicy:
     """Wrapper matching Anthropic's ``{type: "always_allow"}`` shape.
 
-    Attributes:
-        type_ (McpPermissionPolicyType):
+    Accepts ``auto_review`` in addition to the two base policies — MCP
+    configs are the only place the checker can be requested.
+
+        Attributes:
+            type_ (McpPermissionPolicyType):
     """
 
     type_: McpPermissionPolicyType

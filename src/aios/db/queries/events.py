@@ -908,6 +908,38 @@ async def find_tool_confirmed_event(
     return _row_to_event(row) if row is not None else None
 
 
+async def has_tool_requested_marker(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> bool:
+    """True when a ``lifecycle/tool_requested`` hold marker exists for the call.
+
+    Same-shape sibling of :func:`find_tool_confirmed_event`. Used by the
+    auto-review ask path and the stranded-review sweep so the two hold-marker
+    writers stay marker-idempotent: for ``auto_review`` calls the marker is
+    load-bearing (``_classify_awaiting`` keys NEEDS_REVIEW awaiting on it),
+    and a duplicate would double-card stream consumers.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT 1 FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_requested'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return row is not None
+
+
 async def find_latest_interrupt_seq(
     conn: asyncpg.Connection[Any],
     session_id: str,
@@ -2013,36 +2045,44 @@ async def list_unresolved_tool_calls_batch(
     (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
     ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``,
-    ``pending_since`` (the parent assistant event's ``created_at``)
-    — the caller classifies kind / needs_confirm using ``agent`` (and
-    the tool's ``classify_permission`` for arg-aware routes like
-    ``http_request``).
+    ``has_requested_lifecycle`` (a ``tool_requested`` hold marker exists — the
+    bit that makes an ``auto_review`` call awaiting only once the checker or
+    the stranded-review sweep has actually held it), ``pending_since`` (the
+    parent assistant event's ``created_at``) — the caller classifies kind /
+    needs_confirm using ``agent`` (and the tool's ``classify_permission`` for
+    arg-aware routes like ``http_request``).
     """
     raw = await _unresolved_tool_calls(conn, session_ids, account_id=account_id)
     if not raw:
         return {}
-    allow_rows = await conn.fetch(
+    marker_rows = await conn.fetch(
         """
-        SELECT session_id, data->>'tool_call_id' AS tool_call_id
+        SELECT session_id, data->>'event' AS event, data->>'tool_call_id' AS tool_call_id
           FROM events
          WHERE session_id = ANY($1::text[])
            AND account_id = $2
            AND kind = 'lifecycle'
-           AND data->>'event' = 'tool_confirmed'
-           AND data->>'result' = 'allow'
+           AND (
+                 (data->>'event' = 'tool_confirmed' AND data->>'result' = 'allow')
+                 OR data->>'event' = 'tool_requested'
+               )
         """,
         session_ids,
         account_id,
     )
     allows_by_sid: dict[str, set[str]] = {}
-    for r in allow_rows:
+    requested_by_sid: dict[str, set[str]] = {}
+    for r in marker_rows:
         tcid = r["tool_call_id"]
-        if tcid:
-            allows_by_sid.setdefault(r["session_id"], set()).add(tcid)
+        if not tcid:
+            continue
+        target = allows_by_sid if r["event"] == "tool_confirmed" else requested_by_sid
+        target.setdefault(r["session_id"], set()).add(tcid)
 
     out: dict[str, list[dict[str, Any]]] = {}
     for sid, calls in raw.items():
         allows = allows_by_sid.get(sid, set())
+        requested = requested_by_sid.get(sid, set())
         entries: list[dict[str, Any]] = []
         for tc in calls:
             fn = tc.get("function") or {}
@@ -2055,6 +2095,7 @@ async def list_unresolved_tool_calls_batch(
                     "name": name,
                     "arguments": fn.get("arguments", "{}"),
                     "has_allow_lifecycle": tc["id"] in allows,
+                    "has_requested_lifecycle": tc["id"] in requested,
                     "pending_since": tc["_pending_since"],
                 }
             )

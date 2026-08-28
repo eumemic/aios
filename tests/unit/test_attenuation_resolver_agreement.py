@@ -52,6 +52,7 @@ import pytest
 
 from aios.models.agents import (
     McpPermissionPolicy,
+    McpPermissionValue,
     McpServerSpec,
     McpToolConfig,
     McpToolsetConfig,
@@ -81,13 +82,16 @@ TARGET = f"mcp__{SERVER}__t"
 FALLTHROUGH = f"mcp__{SERVER}__other"
 NAMES = [TARGET, FALLTHROUGH]
 
-# The ladder's per-field branch points.
+# The ladder's per-field branch points. Bare ``ToolSpec.permission`` stays
+# two-valued; the MCP config wrappers additionally admit ``auto_review`` (the
+# checker policy), so the wrapper sweeps enumerate all three.
 PERMS: list[PermissionPolicy | None] = [None, "always_allow", "always_ask"]
+MCP_PERMS: list[McpPermissionValue | None] = [None, "always_allow", "always_ask", "auto_review"]
 TRANSPORTS: list[ToolTransport | None] = [None, "cli", "agent_tool", "both"]
 ENABLEDS = [True, False]
 
 
-def _mpp(p: PermissionPolicy | None) -> McpPermissionPolicy | None:
+def _mpp(p: McpPermissionValue | None) -> McpPermissionPolicy | None:
     return McpPermissionPolicy(type=p) if p is not None else None
 
 
@@ -114,7 +118,7 @@ def _toolset_specs() -> list[ToolSpec]:
         specs.append(ToolSpec(type="mcp_toolset", mcp_server_name=SERVER, permission=sp))
 
     # 2. default_config fall-through (no configs).
-    for en, pp, tr in itertools.product(ENABLEDS, PERMS, TRANSPORTS):
+    for en, pp, tr in itertools.product(ENABLEDS, MCP_PERMS, TRANSPORTS):
         specs.append(
             ToolSpec(
                 type="mcp_toolset",
@@ -135,7 +139,7 @@ def _toolset_specs() -> list[ToolSpec]:
         permission_policy=McpPermissionPolicy(type="always_allow"),
         transport="agent_tool",
     )
-    for en, pp, tr in itertools.product(ENABLEDS, PERMS, TRANSPORTS):
+    for en, pp, tr in itertools.product(ENABLEDS, MCP_PERMS, TRANSPORTS):
         cfg = McpToolConfig(name="t", enabled=en, permission_policy=_mpp(pp), transport=tr)
         specs.append(ToolSpec(type="mcp_toolset", mcp_server_name=SERVER, configs=[cfg]))
         specs.append(
@@ -185,6 +189,13 @@ _MEET_SPECS = [
         mcp_server_name=SERVER,
         configs=[McpToolConfig(name="t", enabled=False)],  # disabled override on TARGET
     ),
+    ToolSpec(
+        type="mcp_toolset",
+        mcp_server_name=SERVER,
+        default_config=McpToolsetConfig(
+            permission_policy=McpPermissionPolicy(type="auto_review")
+        ),  # the checker policy: meets must land BETWEEN ask and allow, never widen
+    ),
 ]
 
 
@@ -198,7 +209,7 @@ def _att(d: Surface, ln: Surface, *, dmp: PermissionPolicy) -> Surface:
 
 def _resolved_permission(
     name: str, tools: list[ToolSpec], *, dmp: PermissionPolicy
-) -> PermissionPolicy:
+) -> McpPermissionValue:
     """The permission a live caller acts on: resolver verdict with ``None`` → operator default."""
     p = resolve_mcp_permission(name, tools)
     return p if p is not None else dmp
@@ -210,9 +221,12 @@ def _resolved_transport(name: str, tools: list[ToolSpec]) -> ToolTransport:
     return t if t is not None else "both"
 
 
-def _permission_meet(a: PermissionPolicy, b: PermissionPolicy) -> PermissionPolicy:
-    """The lattice meet on permission: ``always_ask`` ⊏ ``always_allow`` (ask wins)."""
-    return "always_ask" if "always_ask" in (a, b) else "always_allow"
+def _permission_meet(a: McpPermissionValue, b: McpPermissionValue) -> McpPermissionValue:
+    """The lattice meet on permission — rank-min over the permissiveness chain
+    ``always_ask`` ⊏ ``auto_review`` ⊏ ``always_allow`` (independently restated
+    oracle: a production lattice edit that desyncs goes RED here)."""
+    rank = {"always_ask": 0, "auto_review": 1, "always_allow": 2}
+    return a if rank[a] <= rank[b] else b
 
 
 def _transport_glb(a: ToolTransport, b: ToolTransport) -> ToolTransport | None:

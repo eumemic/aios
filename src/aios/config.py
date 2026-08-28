@@ -763,6 +763,38 @@ class Settings(BaseSettings):
         "for unmounted servers.",
     )
 
+    auto_review_model: str | None = Field(
+        default=None,
+        description="Checker model for ``auto_review``-policied MCP tool calls "
+        "(jarbot#229): a cheap grader that returns ``allow`` (execute) or "
+        "``ask`` (hold a confirmation card). LiteLLM model string, set by the "
+        "operator via ``AIOS_AUTO_REVIEW_MODEL`` — deliberately NO baked-in "
+        "default (no model string belongs in the binary), mirroring "
+        "``workflow_default_child_model``. Auth resolves through the same "
+        "per-account ``model_providers`` ladder as every other inference call. "
+        "When unset, ``auto_review`` calls fail closed to a confirmation card "
+        "(the checker cannot grade without a configured model) — so an "
+        "operator enabling the policy must set this too.",
+    )
+
+    auto_review_timeout_s: float = Field(
+        default=5.0,
+        ge=0.5,
+        description="Total wall-clock budget for one auto-review verdict, "
+        "including the single retry on transient failure. On expiry the "
+        "checker fails closed: the call holds a confirmation card with the "
+        "checker-unavailable reason, it never auto-runs.",
+    )
+
+    auto_review_stranded_after_s: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="Age after which an unresolved ``auto_review`` call with "
+        "no verdict recorded and no in-flight review task is presumed "
+        "stranded (worker crash mid-review) and failed closed by the sweep: "
+        "a confirmation card is held with the checker-unavailable reason.",
+    )
+
     auto_allow_readonly_mcp_servers: list[str] = Field(
         default_factory=lambda: ["github", "notion", "jarbot"],
         description="Operator-curated allowlist of MCP server NAMES (the "

@@ -15717,7 +15717,8 @@
             "type": "string",
             "enum": [
               "always_allow",
-              "always_ask"
+              "always_ask",
+              "auto_review"
             ],
             "title": "Type"
           }
@@ -15728,7 +15729,7 @@
           "type"
         ],
         "title": "McpPermissionPolicy",
-        "description": "Wrapper matching Anthropic's ``{type: \"always_allow\"}`` shape."
+        "description": "Wrapper matching Anthropic's ``{type: \"always_allow\"}`` shape.\n\nAccepts ``auto_review`` in addition to the two base policies \u2014 MCP\nconfigs are the only place the checker can be requested."
       },
       "McpServerSpec": {
         "properties": {

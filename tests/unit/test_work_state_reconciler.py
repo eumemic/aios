@@ -340,9 +340,10 @@ def test_unexpected_row_shape_alarms_rather_than_silently_dropping_rows() -> Non
     assert report.counts is None
 
 
-def test_cli_exit_code_is_2_on_alarm_and_never_0() -> None:
+def test_cli_exit_code_is_2_on_alarm_and_never_0(monkeypatch: pytest.MonkeyPatch) -> None:
     from aios.reconcilers import work_state_cli
 
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     code = work_state_cli.main(["--repo", "eumemic/aios", "--format", "json"])
     assert code == 2  # no credentials in the test env ⇒ ALARM ⇒ non-zero
 
