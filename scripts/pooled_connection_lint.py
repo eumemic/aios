@@ -154,6 +154,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.get_environment_config_for_id",
         "queries.get_environment_config_for_session",
         "queries.get_event",
+        "queries.get_file",
         "queries.get_management_call",
         "queries.get_memory",
         "queries.get_memory_by_path",
@@ -665,7 +666,7 @@ def main() -> int:
         "--list-exemptions",
         action="store_true",
         help=(
-            "print every pooled-await exemption marker as 'path:line\\teumemic/aios#N'. "
+            "print every pooled-await exemption marker as 'path:line\teumemic/aios#N'. "
             "CI uses this instead of re-implementing the parse (aios#2143)."
         ),
     )
