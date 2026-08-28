@@ -10,6 +10,8 @@ aios runtime down):
   working-tree clones of ``github_repository`` attachments.
 * ``<workspace_root>/_runs/<run_id>/`` — per-run workflow scratch
   (``/workspace`` for a run sandbox).
+* ``<workspace_root>/_tmp/<session_id>/`` — the session sandbox's ``/tmp``
+  bind (#2280).
 
 This reaper closes that missing-GC gap. It runs an immediate sweep at worker
 startup and then periodically (mirroring the snapshot GC reconciler).
@@ -35,6 +37,14 @@ The two trees are treated **asymmetrically** by *reconstructibility*:
   observed* TERMINAL run status (``completed``/``errored``/``cancelled``). A
   ``suspended`` (or ``pending``/``running``, or absent) run is KEPT. We never
   delete non-reconstructible scratch on the mere absence of confirmation.
+
+* ``_tmp`` is EPHEMERAL BY CONTRACT — it is ``/tmp``, which every process in
+  the sandbox is entitled to assume may vanish between boots. It reaps on the
+  same positive keep-set as ``_session_repos``: only session sandboxes bind
+  it (a run and a browser plane drop their ``/tmp`` with the writable layer
+  at destroy), so an id that is not a live session id is scratch nothing can
+  return to. An id that is not session-shaped at all is KEPT and counted, so
+  a future owner kind cannot silently inherit deletion.
 
 Per-tree liveness is re-derived from a fresh DB read **at sweep time**, after
 the on-disk enumeration and after the age floor — not frozen once globally —
@@ -72,8 +82,13 @@ import asyncpg
 from aios.config import get_settings
 from aios.db import queries
 from aios.db.queries import workflows as wf_queries
+from aios.ids import SESSION
 from aios.logging import get_logger
-from aios.sandbox.volumes import run_workspace_dir, session_repos_root
+from aios.sandbox.volumes import (
+    run_workspace_dir,
+    session_repos_root,
+    session_tmp_dir,
+)
 
 log = get_logger("aios.harness.host_dir_reaper")
 
@@ -252,8 +267,56 @@ async def _reap_runs(pool: asyncpg.Pool[Any], *, min_age_seconds: float, now: fl
     return removed
 
 
+async def _reap_session_tmp(pool: asyncpg.Pool[Any], *, min_age_seconds: float, now: float) -> int:
+    """Reap idle ``_tmp/<session_id>`` sandbox scratch (#2280).
+
+    ``/tmp`` is ephemeral by contract, so this reaps on the same positive
+    keep-set as ``_session_repos``: keep iff the session is DB-live, reap
+    otherwise. A wrongly-reaped ``/tmp`` costs a cold scratch directory, which
+    is the state every process there already tolerates.
+
+    Only session sandboxes bind this tree, so a non-session-shaped id is
+    unrecognised residue rather than a known owner: it is KEPT and reported
+    as ``kept_unknown_owner`` rather than reaped under a rule written for a
+    different kind of owner.
+
+    Fail-closed: a DB error reaps nothing this pass.
+    """
+    root = session_tmp_dir("_").parent
+    candidates = _scan_children(root, min_age_seconds=min_age_seconds, now=now)
+    if not candidates:
+        return 0
+    owner_ids = [c.owner_id for c in candidates if c.owner_id.startswith(f"{SESSION}_")]
+    unknown = len(candidates) - len(owner_ids)
+    if not owner_ids:
+        log.info(
+            "host_dir_reaper.tmp_swept",
+            candidates=len(candidates),
+            removed=0,
+            kept=len(candidates),
+            kept_unknown_owner=unknown,
+        )
+        return 0
+    try:
+        async with pool.acquire() as conn:
+            live = await queries.unscoped_live_session_ids(conn, owner_ids)
+    except (asyncpg.PostgresError, OSError):
+        log.exception("host_dir_reaper.tmp_liveness_failed")
+        return 0  # fail-closed: never reap on a failed liveness read
+    reap_ids = {oid for oid in owner_ids if oid not in live}
+    removed = await _reap(candidates, reap_ids)
+    log.info(
+        "host_dir_reaper.tmp_swept",
+        candidates=len(candidates),
+        removed=removed,
+        kept=len(candidates) - removed,
+        kept_unknown_owner=unknown,
+    )
+    return removed
+
+
 async def sweep_host_dirs(pool: asyncpg.Pool[Any]) -> int:
-    """One reaper sweep over ``_session_repos`` and ``_runs``.
+    """One reaper sweep over ``_session_repos``, ``_runs`` and ``_tmp``.
 
     Returns the total directories removed. Honors the kill-switch
     (``host_dir_reaper_enabled``): when disabled, deletes nothing and returns
@@ -267,4 +330,5 @@ async def sweep_host_dirs(pool: asyncpg.Pool[Any]) -> int:
     now = time.time()
     repos = await _reap_session_repos(pool, min_age_seconds=min_age, now=now)
     runs = await _reap_runs(pool, min_age_seconds=min_age, now=now)
-    return repos + runs
+    tmp = await _reap_session_tmp(pool, min_age_seconds=min_age, now=now)
+    return repos + runs + tmp

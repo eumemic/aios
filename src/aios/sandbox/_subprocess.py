@@ -15,8 +15,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from typing import Protocol
 
 from aios.sandbox.backends.base import SandboxBackendError, SandboxSnapshotTimeoutError
+
+
+class StreamFilter(Protocol):
+    """Transforms pipeline bytes in flight. See :mod:`aios.sandbox._tar_filter`."""
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Return the bytes to forward for ``chunk`` (may be empty)."""
+        ...
+
+    def flush(self) -> bytes:
+        """Return any buffered remainder at EOF."""
+        ...
+
 
 # Bound on the post-kill drain so a CLI stuck in an uninterruptible
 # state can't hold the worker indefinitely past the wait_for timeout.
@@ -108,12 +122,21 @@ async def run_docker_pipeline(
     *,
     stall_timeout_s: float,
     max_timeout_s: float,
+    stream_filter: StreamFilter | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run a Docker producer/consumer pipeline with progress-based deadlines.
 
     The relay makes stream progress observable. A lack of bytes before EOF is
     a stall; after EOF the consumer may legitimately spend substantial time
     finalizing, so only the absolute ceiling applies then.
+
+    ``stream_filter`` optionally transforms the bytes in flight (see
+    :mod:`aios.sandbox._tar_filter`). Because the relay already copies every
+    byte through this process, filtering costs a function call per chunk and
+    no extra I/O. Progress deadlines are measured on bytes READ from the
+    producer, not bytes written to the consumer, so a filter that legitimately
+    emits nothing for a while — skipping a large dropped payload — is
+    progress and does not trip the stall bound.
     """
     producer: asyncio.subprocess.Process | None = None
     consumer: asyncio.subprocess.Process | None = None
@@ -179,6 +202,17 @@ async def run_docker_pipeline(
                     # EOF: flush and close the write side under the same
                     # deadlines, so a consumer that stops reading during the
                     # final flush can't wedge here either.
+                    if stream_filter is not None:
+                        tail = stream_filter.flush()
+                        if tail:
+                            consumer_stdin.write(tail)
+                            flush_timeout = _stall_deadline()
+                            try:
+                                await asyncio.wait_for(
+                                    consumer_stdin.drain(), timeout=flush_timeout
+                                )
+                            except TimeoutError as err:
+                                raise TimeoutError("write stalled") from err
                     consumer_stdin.close()
                     close_timeout = _stall_deadline()
                     try:
@@ -188,13 +222,18 @@ async def run_docker_pipeline(
                     except TimeoutError as err:
                         raise TimeoutError("close stalled") from err
                     return moved
-                consumer_stdin.write(chunk)
+                moved += len(chunk)
+                payload = chunk if stream_filter is None else stream_filter.feed(chunk)
+                if not payload:
+                    # The filter absorbed this chunk (mid-drop). The read above
+                    # was progress, so continue without a write/drain round.
+                    continue
+                consumer_stdin.write(payload)
                 drain_timeout = _stall_deadline()
                 try:
                     await asyncio.wait_for(consumer_stdin.drain(), timeout=drain_timeout)
                 except TimeoutError as err:
                     raise TimeoutError("write stalled") from err
-                moved += len(chunk)
 
         prod_err_task = asyncio.create_task(producer.stderr.read())  # type: ignore[union-attr]
         cons_out_task = asyncio.create_task(consumer.stdout.read())  # type: ignore[union-attr]

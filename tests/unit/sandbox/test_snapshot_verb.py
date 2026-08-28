@@ -42,6 +42,8 @@ class _FakeDocker:
     def __init__(self) -> None:
         self.parent_image = "img_S1"
         self.size_rw = 1_000_000
+        self.ephemeral_bytes = 0
+        self.stream_filters: list[Any] = []
         self.container_labels: dict[str, str] = {}
         self.images: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
@@ -77,6 +79,11 @@ class _FakeDocker:
             config = json.dumps({"Labels": img.get("labels", {})})
             out = f"{img['id']}\t{img['size']}\t{img['depth']}\t{config}"
             return 0, out.encode(), b""
+        if sub == "exec" and "du" in argv:
+            # The pre-flatten ephemeral-bytes probe (#2280): ``du -sbxc`` over
+            # the dropped prefixes. Only the ``total`` line is read.
+            lines = [f"{self.ephemeral_bytes}\ttotal"]
+            return 0, ("\n".join(lines) + "\n").encode(), b""
         if sub == "commit":
             tag = argv[-1]
             self.images[tag] = {
@@ -95,9 +102,11 @@ class _FakeDocker:
         *,
         stall_timeout_s: float,
         max_timeout_s: float,
+        stream_filter: Any = None,
     ) -> tuple[int, bytes, bytes]:
         self.pipelines.append((producer, consumer))
         self.pipeline_timeouts.append((stall_timeout_s, max_timeout_s))
+        self.stream_filters.append(stream_filter)
         tag = consumer[-1]
         self.images[tag] = {
             "id": "flattened",

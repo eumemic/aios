@@ -5,6 +5,7 @@ with session/run count (the 2026-06-16 floodgates disk-fill):
 
 * ``_session_repos/<session_id>`` — RECONSTRUCTIBLE git working-tree clones.
 * ``_runs/<run_id>``             — NON-reconstructible per-run scratch.
+* ``_tmp/<session_id>``          — the session sandbox's ``/tmp`` bind (#2280).
 
 The load-bearing safety property (the bug PR #1193 shipped) is that the
 keep-set is **DB liveness, NOT container presence**: a ``suspended`` run
@@ -48,10 +49,13 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     repos_root = tmp_path / "_session_repos"
     runs_root = tmp_path / "acc_test" / "_runs"
+    tmp_root = tmp_path / "_tmp"
     repos_root.mkdir()
     runs_root.mkdir(parents=True)
+    tmp_root.mkdir()
 
     monkeypatch.setattr(host_dir_reaper, "session_repos_root", lambda sid: repos_root / sid)
+    monkeypatch.setattr(host_dir_reaper, "session_tmp_dir", lambda sid: tmp_root / sid)
     monkeypatch.setattr(
         host_dir_reaper,
         "run_workspace_dir",
@@ -63,7 +67,7 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     settings.host_dir_reaper_min_age_seconds = 0
     monkeypatch.setattr(host_dir_reaper, "get_settings", lambda: settings)
 
-    return {"repos": repos_root, "runs": runs_root, "settings": settings}
+    return {"repos": repos_root, "runs": runs_root, "tmp": tmp_root, "settings": settings}
 
 
 def test_service_workspace_builder_is_enumerated_by_reaper(
@@ -388,3 +392,96 @@ async def test_missing_root_is_a_noop(
     removed = await sweep_host_dirs(_fake_pool())
 
     assert removed == 0
+
+
+# ---------------------------------------------------------------------------
+# ``_tmp`` — the session sandbox's ``/tmp`` bind (#2280)
+# ---------------------------------------------------------------------------
+
+
+async def test_tmp_dir_reaped_for_dead_session_kept_for_live(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/tmp`` follows session liveness, exactly like ``_session_repos``.
+
+    A live session's scratch survives even though its container may be
+    idle-released — the same container-presence trap ``_runs`` guards against.
+    """
+    live = _mkdir_aged(roots["tmp"], "sess_live")
+    dead = _mkdir_aged(roots["tmp"], "sess_dead")
+
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value={"sess_live"}))
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 1
+    assert live.exists(), "a DB-live session's /tmp scratch must survive"
+    assert not dead.exists(), "a dead session's /tmp scratch must be reaped"
+
+
+async def test_tmp_dir_fail_closed_on_db_error(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed liveness read reaps nothing — never delete on the absence of
+    confirmation."""
+    scratch = _mkdir_aged(roots["tmp"], "sess_unknown")
+
+    monkeypatch.setattr(
+        queries,
+        "unscoped_live_session_ids",
+        AsyncMock(side_effect=OSError("db down")),
+    )
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 0
+    assert scratch.exists()
+
+
+async def test_tmp_dir_unknown_owner_kind_is_kept(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only sessions bind this tree. An id of any other shape is residue we
+    have no rule for, and a rule written for a different owner kind must not
+    be applied to it by default."""
+    foreign = _mkdir_aged(roots["tmp"], "wfr_run")
+    account = _mkdir_aged(roots["tmp"], "acc_browser")
+
+    live = AsyncMock(return_value=set())
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", live)
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 0
+    assert foreign.exists()
+    assert account.exists()
+    live.assert_not_awaited()
+
+
+async def test_tmp_dir_kill_switch(roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch = _mkdir_aged(roots["tmp"], "sess_dead")
+    roots["settings"].host_dir_reaper_enabled = False
+
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    assert await sweep_host_dirs(_fake_pool()) == 0
+    assert scratch.exists()
+
+
+async def test_tmp_dir_age_floor_protects_in_flight_provision(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A just-created dir may be a provision mid-flight; the age floor keeps it
+    even when the session is not yet visible as live."""
+    roots["settings"].host_dir_reaper_min_age_seconds = 3600
+    fresh = _mkdir_aged(roots["tmp"], "sess_fresh", age_s=0.0)
+
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    assert await sweep_host_dirs(_fake_pool()) == 0
+    assert fresh.exists()
