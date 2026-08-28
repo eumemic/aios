@@ -172,6 +172,36 @@ class TestSnapshotDiskGate:
         assert not fake_docker.pipelines
 
     @pytest.mark.asyncio
+    async def test_ephemeral_probe_only_counts_the_container_rootfs(self) -> None:
+        """After #2280 ``/tmp`` is a BIND MOUNT, and ``docker export`` omits
+        bind-mount contents — so those bytes are not in the stream and the
+        filter will not drop them. Counting them would make the gate subtract
+        space the export never needed and start a flatten with too little
+        disk. The probe must compare device numbers, not just run ``du``."""
+        captured: list[list[str]] = []
+
+        async def _fake_cli(argv: list[str], **_kw: object) -> tuple[int, bytes, bytes]:
+            captured.append(argv)
+            return 0, b"", b""  # every prefix is a mount ⇒ nothing to drop
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", _fake_cli):
+            assert await DockerBackend()._ephemeral_bytes("cid") == 0
+
+        script = captured[0][-1]
+        assert "stat -c %d /" in script, "must establish the rootfs device"
+        assert "du -sbx" in script
+        for prefix in ("tmp", "var/tmp", "run"):
+            assert f"'/{prefix}'" in script
+
+    @pytest.mark.asyncio
+    async def test_ephemeral_probe_sums_every_reported_prefix(self) -> None:
+        async def _fake_cli(_argv: list[str], **_kw: object) -> tuple[int, bytes, bytes]:
+            return 0, b"1000\t/tmp\n250\t/var/tmp\n30\t/run\n", b""
+
+        with patch("aios.sandbox.backends.docker.run_docker_cli", _fake_cli):
+            assert await DockerBackend()._ephemeral_bytes("cid") == 1280
+
+    @pytest.mark.asyncio
     async def test_ephemeral_probe_failure_is_swallowed(self, fake_docker: _FakeDocker) -> None:
         """``_ephemeral_bytes`` degrades to 0 rather than propagating: refusing
         to snapshot is how a session gets stranded."""

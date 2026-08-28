@@ -1235,31 +1235,48 @@ class DockerBackend:
     async def _ephemeral_bytes(self, sandbox_id: str) -> int:
         """Bytes the tar filter will drop from this container's export.
 
-        Measured inside the container so the figure reflects what ``docker
-        export`` would actually emit. Used only to size the headroom gate, so
-        an unreadable answer degrades to ``0`` — that just makes the gate
-        demand the pre-#2280 (larger) amount, which errs in the safe
-        direction. It must never fail a snapshot: refusing to snapshot is how
-        a session gets stranded.
+        ONLY counts prefixes that live on the container's own root
+        filesystem. ``/tmp`` is a bind mount on any sandbox provisioned after
+        #2280, and ``docker export`` omits bind-mount contents — so those
+        bytes are not in the stream and the filter will not drop them.
+        Counting them would make the gate subtract space the export never
+        needed and let a flatten start with too little disk, which is the
+        exact failure the gate exists to prevent. The device comparison is
+        what distinguishes "inside the rootfs" from "mounted over".
+
+        Used only to size the gate, so an unreadable answer degrades to ``0``
+        — the gate then demands the pre-#2280 (larger) amount, which errs in
+        the safe direction. It must never fail a snapshot: refusing to
+        snapshot is how a session gets stranded.
         """
-        paths = [f"/{prefix.rstrip('/')}" for prefix in EPHEMERAL_PREFIXES]
+        # One shell pass so the device test and the walk see the same mount
+        # table. ``du -sbx`` is bounded to the starting filesystem, which also
+        # stops a nested mount under a counted prefix from inflating the sum.
+        paths = " ".join(f"'/{prefix.rstrip('/')}'" for prefix in EPHEMERAL_PREFIXES)
+        script = (
+            "set -e; "
+            "root_dev=$(stat -c %d /); "
+            f"for p in {paths}; do "
+            '  [ -d "$p" ] || continue; '
+            '  [ "$(stat -c %d "$p")" = "$root_dev" ] || continue; '
+            '  du -sbx "$p"; '
+            "done"
+        )
         try:
             rc, stdout_bytes, _ = await run_docker_cli(
-                ["docker", "exec", sandbox_id, "du", "-sbxc", *paths],
+                ["docker", "exec", sandbox_id, "sh", "-c", script],
                 timeout_s=get_settings().sandbox_inspect_size_timeout_seconds,
             )
         except SandboxBackendError:
             log.warning("sandbox.ephemeral_size_unavailable", container_id=sandbox_id[:12])
             return 0
         if rc != 0:
-            # ``du`` exits nonzero for an absent path while still totalling the
-            # rest, so a partial read is usable — but only via the total line.
             log.info("sandbox.ephemeral_size_partial", container_id=sandbox_id[:12])
         total = 0
         for line in stdout_bytes.decode("utf-8", errors="replace").splitlines():
-            field, _, label = line.partition("\t")
-            if label.strip() == "total" and field.strip().isdigit():
-                total = int(field.strip())
+            field, _, rest = line.partition("\t")
+            if rest and field.strip().isdigit():
+                total += int(field.strip())
         return total
 
     async def _inspect_container_size_rw(self, sandbox_id: str) -> int | None:

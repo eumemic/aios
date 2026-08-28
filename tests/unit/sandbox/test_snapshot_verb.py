@@ -79,11 +79,14 @@ class _FakeDocker:
             config = json.dumps({"Labels": img.get("labels", {})})
             out = f"{img['id']}\t{img['size']}\t{img['depth']}\t{config}"
             return 0, out.encode(), b""
-        if sub == "exec" and "du" in argv:
-            # The pre-flatten ephemeral-bytes probe (#2280): ``du -sbxc`` over
-            # the dropped prefixes. Only the ``total`` line is read.
-            lines = [f"{self.ephemeral_bytes}\ttotal"]
-            return 0, ("\n".join(lines) + "\n").encode(), b""
+        if sub == "exec" and "du" in argv[-1]:
+            # The pre-flatten ephemeral-bytes probe (#2280): a shell pass that
+            # emits one ``<bytes>\t<path>`` line per prefix living on the
+            # container's own rootfs. Prefixes that are bind mounts emit
+            # nothing, because the export does not contain them.
+            if not self.ephemeral_bytes:
+                return 0, b"", b""
+            return 0, f"{self.ephemeral_bytes}\t/tmp\n".encode(), b""
         if sub == "commit":
             tag = argv[-1]
             self.images[tag] = {
