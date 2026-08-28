@@ -413,24 +413,26 @@ async def test_ceil_div_never_overshoots_window(
 async def test_overhead_clamp_never_drops_entire_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The windower must never drop the *entire* window.
+    """The windower must never drop the *entire* window — the load-bearing
+    invariant behind the whole snap path.
 
-    When per-step overhead exceeds ``window_min``, ``events_window_min``
-    clamps to its 0 floor (events.py) — losing the floor that normally
-    guarantees a non-empty tail (the chunked policy requires
-    ``min_tokens >= 1``). The chunked snap then drops in full-window chunks,
-    and the asymmetric ``ceil(drop_effective / ratio)`` back-conversion can
-    push ``drop`` up to ``total``. The retained scan (``cumulative_tokens >
-    drop``) then matches ZERO rows while the omission complement
-    (``<= drop``) matches every row — so ``read_windowed_events`` returns an
-    empty event list paired with a non-None omission. ``build_messages``
-    relies on the inverse invariant and reads ``events[0].created_at`` to
-    anchor the omission marker, crashing with IndexError — and since
-    ``build_messages`` is pure replay, the session wedges permanently.
+    An empty retained scan (``cumulative_tokens > drop`` matching ZERO rows)
+    paired with a non-None omission complement (``<= drop`` matching every
+    row) crashes ``build_messages``, which reads ``events[0].created_at`` to
+    anchor the omission marker and relies on the inverse invariant — and
+    since ``build_messages`` is pure replay, the session wedges permanently.
+    So the boundary must keep ``drop < total``: the most recent event always
+    survives (its ``cumulative_tokens == total``; the scan is ``> drop``).
 
-    The boundary must keep ``drop < total`` so the most recent event always
-    survives (the last event's ``cumulative_tokens == total``; the scan is
-    ``> drop``).
+    This geometry originally reached ``drop == total`` through the overhead
+    zeroing the floor (``events_window_min = max(0, 1000 - 1248) == 0``) and
+    the asymmetric ``ceil(drop_effective / ratio)`` back-conversion rounding
+    up. Issue #2289 removed that zeroing — the floor now clamps to 75% of the
+    events budget (564 here) rather than to 0 — so the geometry no longer
+    drives ``drop`` anywhere near ``total``. The invariant it defends is
+    unchanged and still needs a fence: ``window_min=0`` is a *live* caller
+    (the adaptive context-overflow retry) and restores exactly the
+    full-budget chunk that produced the crash.
     """
     account_id = "acc_test_stub"
     ratio = 1.2
@@ -438,10 +440,10 @@ async def test_overhead_clamp_never_drops_entire_window(
     window_min, window_max, overhead_local = 1_000, 2_000, 800
     # A uniform calibrated coef => R_eff=1.2; calibrated safety margin x1.3 =>
     # eff = 1.56. overhead_effective = round(800*1.56) = 1248 ->
-    # events_window_max = 752, events_window_min = max(0, 1000-1248) = 0.
-    # total_effective = round(483*1.56) = 753 > 752 -> drop_effective =
-    # tokens_to_drop(753, min=0, max=752) = 752 -> ceil(752/1.56) = 483 ==
-    # total: without the clamp the snap would drop the *entire* window.
+    # events_window_max = 752, events_window_min = min(1000, int(752*0.75))
+    # = 564 (clamped). total_effective = round(483*1.56) = 753 > 752 ->
+    # chunk = 188, overshoot = 1 -> drop_effective = 188 ->
+    # ceil(188/1.56) = 121, comfortably below total.
     monkeypatch.setattr(
         queries,
         "model_token_class_ratios",
@@ -488,3 +490,212 @@ async def test_overhead_clamp_never_drops_entire_window(
         "window, leaving an empty retained scan paired with a non-None "
         "omission — which crashes build_messages on events[0]"
     )
+
+
+# --- issue #2289: ``window_min`` floors RETAINED HISTORY, not the whole prompt
+
+
+def _uniform_ratio(monkeypatch: pytest.MonkeyPatch, coef: float = 1.5) -> float:
+    """Force a uniform calibrated coefficient and return the effective factor.
+
+    A uniform coef blends to ``R_eff == coef`` for ANY composition, and being
+    != 1.0 it counts as calibrated, so the x1.3 safety margin applies. The
+    returned value is what the windower multiplies both the overhead and the
+    session total by.
+    """
+    monkeypatch.setattr(
+        queries,
+        "model_token_class_ratios",
+        AsyncMock(
+            return_value={
+                c: coef for c in ("text", "tool_result", "thinking", "tool_use", "system", "tools")
+            }
+        ),
+    )
+    return coef * 1.3
+
+
+@pytest.mark.asyncio
+async def test_incident_geometry_retains_history_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the 2026-08-28 self-query incident (#2289).
+
+    A fat tool prelude (121 MCP schemas, ~99k effective) against the default
+    50k/150k band used to drive ``events_window_min`` to 0, so every snap took
+    a full-budget chunk and left the agent with the single event the
+    ``drop < total`` guard preserves — its own "history has scrolled out of
+    view, search first" notice, which then commanded a search loop.
+
+    With the floor no longer reduced by overhead, the retained slate must stay
+    at or above the (clamped) floor, and the snap chunk must stay large enough
+    that snaps remain rare.
+    """
+    account_id = "acc_test_stub"
+    eff = _uniform_ratio(monkeypatch)  # 1.95
+    total_local, overhead_local = 200_000, 50_000
+    window_min, window_max = 50_000, 150_000
+    # overhead_effective = round(50_000*1.95) = 97_500 -> events_window_max =
+    # 52_500; floor = min(50_000, int(52_500*0.75)) = 39_375 (clamped).
+    conn = _FakeConn(total_local=total_local, ratio_n=50, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=window_min,
+        window_max=window_max,
+        model="m",
+        overhead_local=overhead_local,
+        account_id=account_id,
+    )
+    floor = result.floor
+    assert floor is not None
+    assert floor.outcome == "clamped"
+    assert floor.events_window_max == 52_500
+    assert floor.effective == 39_375
+
+    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    retained_effective = (total_local - drop_local) * eff
+    # The heart of the bug: retained history used to collapse below the floor
+    # (to a single event). It must now land inside the band.
+    assert floor.effective <= retained_effective <= floor.events_window_max, (
+        f"retained {retained_effective} outside [{floor.effective}, {floor.events_window_max}]"
+    )
+    # And the snap chunk stays a meaningful fraction of the budget, so snaps
+    # (= full prefix-cache misses) stay rare.
+    chunk = floor.events_window_max - floor.effective
+    assert chunk >= 0.25 * floor.events_window_max
+
+
+@pytest.mark.asyncio
+async def test_comfortable_band_honors_configured_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Overhead small relative to the band: the floor passes through EXACTLY.
+
+    This is the direct fence against re-introducing ``window_min - overhead``.
+    """
+    account_id = "acc_test_stub"
+    _uniform_ratio(monkeypatch)
+    conn = _FakeConn(total_local=500_000, ratio_n=50, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=10_000,
+        window_max=200_000,
+        model="m",
+        overhead_local=1_000,  # -> 1_950 effective; budget 198_050
+        account_id=account_id,
+    )
+    floor = result.floor
+    assert floor is not None
+    assert floor.outcome == "honored"
+    assert floor.effective == 10_000  # NOT 10_000 - 1_950
+    assert floor.overhead_effective == 1_950
+
+
+@pytest.mark.asyncio
+async def test_infeasible_floor_clamps_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A floor the band cannot afford degrades, it does not raise.
+
+    Deliberate exception to the repo's fail-hard stance: the prelude grows
+    whenever an upstream MCP server adds tools, so raising here would wedge
+    every session in the fleet at wake time. The clamp is reported instead.
+    """
+    account_id = "acc_test_stub"
+    _uniform_ratio(monkeypatch)
+    conn = _FakeConn(total_local=500_000, ratio_n=50, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=140_000,
+        window_max=150_000,
+        model="m",
+        overhead_local=51_282,  # -> 100_000 effective; budget 50_000
+        account_id=account_id,
+    )
+    floor = result.floor
+    assert floor is not None
+    assert floor.outcome == "clamped"
+    assert floor.events_window_max == 50_000
+    assert floor.effective == 37_500  # 75% of the events budget
+    assert floor.configured == 140_000
+
+
+@pytest.mark.asyncio
+async def test_overhead_exceeding_window_max_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one hard failure on this path survives the floor rework: with no
+    events budget at all there is nothing to degrade to."""
+    account_id = "acc_test_stub"
+    _uniform_ratio(monkeypatch)
+    conn = _FakeConn(total_local=5_000, ratio_n=50, ratio_mean=0.0)
+    with pytest.raises(ValueError, match="no budget remains for events"):
+        await queries.read_windowed_events(
+            conn,
+            "sess_x",
+            window_min=500,
+            window_max=1_000,
+            model="m",
+            overhead_local=1_000,  # -> 1_950 effective > window_max
+            account_id=account_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_adaptive_retry_zero_floor_is_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``window_min=0`` — the adaptive context-overflow retry (``loop.py``) —
+    must stay a no-op under the clamp, and must NOT report a clamp.
+
+    Otherwise every overflow recovery would trip the operator alarm.
+    """
+    account_id = "acc_test_stub"
+    _uniform_ratio(monkeypatch)
+    conn = _FakeConn(total_local=200_000, ratio_n=50, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=0,
+        window_max=150_000,
+        model="m",
+        overhead_local=50_000,
+        account_id=account_id,
+    )
+    floor = result.floor
+    assert floor is not None
+    assert floor.effective == 0
+    assert floor.outcome == "honored"
+
+
+@pytest.mark.asyncio
+async def test_omission_always_pairs_with_non_empty_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_messages`` reads ``events[0]`` unguarded whenever an omission is
+    present, so the two can never be (empty, non-None).
+
+    Asserted here on the boundary rather than on the row list, which the fake
+    conn does not materialize: ``drop < total`` is exactly the condition that
+    keeps the retained scan (``cumulative_tokens > drop``) non-empty, since the
+    newest event's ``cumulative_tokens == total``.
+    """
+    account_id = "acc_test_stub"
+    _uniform_ratio(monkeypatch)
+    total_local = 200_000
+    conn = _FakeConn(total_local=total_local, ratio_n=50, ratio_mean=0.0)
+    result = await queries.read_windowed_events(
+        conn,
+        "sess_x",
+        window_min=50_000,
+        window_max=150_000,
+        model="m",
+        overhead_local=50_000,
+        account_id=account_id,
+    )
+    assert result.omission is not None
+    _session_id, drop_local, *_ = conn.fetch_calls[-1]
+    assert drop_local < total_local

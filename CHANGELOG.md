@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Fix the #2294 schema-diet production incident: the dieted opaque arrays
+  rendered as bare `{"type": "array"}` with no `items`, and litellm's
+  `token_counter` → `_format_type` dereferences `props['items']`
+  unconditionally, so `prelude_overhead_local` raised `KeyError: 'items'` on
+  every step of every workflow-capable agent (the fleet was rolled back).
+  Opaque arrays now render as `{"type": "array", "items": {}}` — also required
+  for OpenAI provider validity. `sanitize_mcp_schema` closes the same defect
+  class for untrusted third-party MCP schemas (missing/tuple-form/boolean
+  `items`, non-dict property values), and a registry-wide regression fence runs
+  the real `token_counter` over every registered tool's rendered schema.
+
+- Restore the context window's history floor: `window_min` again bounds
+  RETAINED HISTORY only, so the per-request prelude (system prompt + tool
+  schemas + reserves) is subtracted from `window_max` alone. Subtracting it
+  from both bounds let a fat tool prelude satisfy the floor by itself, driving
+  the effective floor to 0 so every snap emptied the window down to a single
+  event — the agent then saw only the harness's own "history has scrolled out
+  of view, search first" notice and looped on `search_events`. A floor the
+  band cannot afford is now clamped to 75% of the events budget (keeping the
+  snap chunk usable) and reported on the `read_window_end` span plus a
+  `window.floor_clamped` warning, rather than silently zeroed (#2289).
+
+- `search_events` and `memory_search` now return their formatted table as plain multi-line text (`ToolResult`) instead of a `{"result": …}` JSON envelope, so an inline or spilled result stays line-oriented for `grep`/`sed`/`wc -l`/`read` (#2291).
+- Cut the model-facing `create_workflow`/`update_workflow`/`call_workflow` tool schemas from ~69KB to ~5.8KB combined by moving the script-authoring contract behind a new on-demand `get_workflow_script_contract` builtin and rendering the declared tool/MCP/HTTP surface as opaque arrays; pydantic validation and the HTTP/SDK schemas are unchanged (#2294).
 - Distinguish a dead OAuth refresh token (RFC 6749 `invalid_grant` — revoked,
   expired, or otherwise unrecoverable) from a generic/transient
   `OAuthRefreshError` via a new `OAuthReauthRequiredError` subclass

@@ -30,24 +30,47 @@ MCP_ANNOTATIONS_KEY = "_mcp_annotations"
 
 
 def sanitize_mcp_schema(node: Any) -> Any:
-    """Drop the ``type`` keyword next to ``anyOf``/``oneOf`` (the union carries the real shape).
+    """Rewrite an untrusted schema into the subset litellm + providers tolerate.
 
-    Only the JSON Schema ``type`` **keyword** — whose value is a type name
-    (``"string"``) or a list of them (``["string", "null"]``) — is redundant beside
-    a union. A property literally **named** ``type`` (its value is a sub-schema
-    ``dict``) inside a ``properties`` map is a parameter, not a keyword, and must be
-    preserved even when a sibling property is named ``anyOf``/``oneOf``; aios
-    sanitizes untrusted third-party tool schemas, so dropping it would silently
-    corrupt a valid tool and make the model call it wrong.
+    Three repairs, applied recursively:
+
+    * Drop the ``type`` keyword next to ``anyOf``/``oneOf`` (the union carries
+      the real shape). Only the JSON Schema ``type`` **keyword** — whose value is
+      a type name (``"string"``) or a list of them (``["string", "null"]``) — is
+      redundant beside a union. A property literally **named** ``type`` (its
+      value is a sub-schema ``dict``) inside a ``properties`` map is a parameter,
+      not a keyword, and must be preserved even when a sibling property is named
+      ``anyOf``/``oneOf``; aios sanitizes untrusted third-party tool schemas, so
+      dropping it would silently corrupt a valid tool and make the model call it
+      wrong.
+
+    * On ``type == "array"``, ensure ``items`` is a dict: litellm's
+      ``token_counter`` → ``_format_type`` dereferences ``props['items']``
+      unconditionally (``KeyError: 'items'`` when missing — the #2294 incident
+      class) and recurses with ``.get`` (``AttributeError`` on draft-4 tuple-form
+      ``items: [...]`` or boolean ``items``). OpenAI also rejects arrays without
+      ``items``. ``{}`` is the "anything" schema, so the repair only loosens.
+
+    * Coerce non-dict ``properties`` values (boolean schemas like ``"foo": true``)
+      to ``{}`` — litellm's ``_format_object_parameters`` calls ``.get`` on every
+      property value.
     """
     if isinstance(node, dict):
         has_union = "anyOf" in node or "oneOf" in node
         drop_type = has_union and isinstance(node.get("type"), (str, list))
-        return {
+        cleaned = {
             key: sanitize_mcp_schema(value)
             for key, value in node.items()
             if not (drop_type and key == "type")
         }
+        if cleaned.get("type") == "array" and not isinstance(cleaned.get("items"), dict):
+            cleaned["items"] = {}
+        properties = cleaned.get("properties")
+        if isinstance(properties, dict):
+            cleaned["properties"] = {
+                name: prop if isinstance(prop, dict) else {} for name, prop in properties.items()
+            }
+        return cleaned
     if isinstance(node, list):
         return [sanitize_mcp_schema(item) for item in node]
     return node

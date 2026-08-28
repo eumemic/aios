@@ -60,6 +60,7 @@ BuiltinToolType = Literal[
     "unarchive_workflow",
     "resume_gate",
     "get_workflow",
+    "get_workflow_script_contract",
     "list_workflows",
     "get_run",
     "list_runs",

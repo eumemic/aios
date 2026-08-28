@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from aios.tools.invoke import ToolBail
+from aios.tools.registry import ToolResult
 from aios.tools.search_events import (
     MAX_ROWS,
     SEARCH_EVENTS_DESCRIPTION,
@@ -16,6 +17,12 @@ from aios.tools.search_events import (
     _validate_sql,
     search_events_handler,
 )
+
+
+def _text(result: ToolResult) -> str:
+    """The handler's table text — plain-string ``ToolResult`` content (#2291)."""
+    assert isinstance(result.content, str)
+    return result.content
 
 
 class TestSearchEventsDescription:
@@ -371,9 +378,9 @@ class TestSearchEventsHandler:
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
-        assert "result" in result
-        assert "assistant" in result["result"]
-        assert "Hello" in result["result"]
+        assert isinstance(result, ToolResult) and result.is_error is False
+        assert "assistant" in _text(result)
+        assert "Hello" in _text(result)
 
     async def test_sql_validation_error(self) -> None:
         # Post-#1680: an expected failure raises ``ToolBail`` (one typed failure
@@ -419,7 +426,7 @@ class TestSearchEventsHandler:
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
-        assert "truncat" not in result["result"].lower()
+        assert "truncat" not in _text(result).lower()
 
     async def test_row_limit_truncation(self) -> None:
         rows = [_FakeRecord({"id": f"evt_{i}"}) for i in range(MAX_ROWS)]
@@ -427,11 +434,11 @@ class TestSearchEventsHandler:
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
-        assert "truncat" in result["result"].lower()
+        assert "truncat" in _text(result).lower()
 
     async def test_no_results(self) -> None:
         with _mock_execute(return_value=([], False)), _mock_pool():
             result = await search_events_handler(
                 "sess_01TEST", {"query": "SELECT * FROM events_search"}
             )
-        assert result["result"] == "No results."
+        assert _text(result) == "No results."

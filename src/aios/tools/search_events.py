@@ -10,7 +10,9 @@ Safety:
 - A 10-second statement_timeout prevents runaway queries.
 - Results are capped at 200 rows.
 
-Return shape: {"result": "<formatted text table>"}
+Return shape: :class:`~aios.tools.registry.ToolResult` whose ``content`` is the
+formatted text table as plain multi-line text (#2291) — not a JSON envelope, so a
+spilled result stays line-oriented for ``grep``/``sed``/``wc -l``/``read``.
 On an expected failure (empty query, SQL validation, timeout, query error) raises
 :class:`~aios.tools.invoke.ToolBail` (one typed failure channel — #1680); the single
 event writer stamps ``is_error``, which is what the ``WHERE is_error`` example queries
@@ -28,7 +30,7 @@ from sqlglot import exp
 from aios.harness import runtime
 from aios.logging import get_logger
 from aios.tools.invoke import ToolBail
-from aios.tools.registry import registry
+from aios.tools.registry import ToolResult, registry
 
 log = get_logger(__name__)
 
@@ -365,7 +367,7 @@ SEARCH_EVENTS_PARAMETERS_SCHEMA: dict[str, Any] = {
 }
 
 
-async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> ToolResult:
     """Handler for the search_events tool."""
     query = arguments.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -387,8 +389,14 @@ async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> d
         log.warning("search_events.query_failed", error=str(exc))
         raise ToolBail(f"Query failed: {exc}") from exc
 
-    text = _format_results(rows, truncated)
-    return {"result": text}
+    # Plain-string ``ToolResult`` content, never ``{"result": text}`` (#2291):
+    # ``_shape_tool_result`` passes str content through verbatim ONLY for a
+    # ``ToolResult``; every other return type falls to its ``json.dumps`` arm, which
+    # escapes each newline and collapses the table into one line. That makes a bare
+    # ``str`` return silently wrong too — it is JSON-encoded into a quoted string
+    # literal: still one line, now with extra quotes. ``ToolResult`` is the only
+    # correct shape, and nothing type-checks this at the registry boundary.
+    return ToolResult(content=_format_results(rows, truncated))
 
 
 def _register() -> None:

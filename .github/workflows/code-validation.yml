@@ -31,6 +31,7 @@ jobs:
     outputs:
       run_checks: ${{ steps.filter.outputs.run_checks }}
       sandbox_changed: ${{ steps.filter.outputs.sandbox_changed }}
+      browser_changed: ${{ steps.filter.outputs.browser_changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,12 +60,13 @@ jobs:
 
           # First push to a new branch, force-push from a non-fast-forward,
           # or any case where `before` is the all-zeros SHA: be conservative
-          # and run the full pipeline AND rebuild the sandbox image (since
-          # we cannot tell whether its inputs changed).
+          # and run the full pipeline AND rebuild both images (since we
+          # cannot tell whether their inputs changed).
           if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-            echo "No usable base ref — running checks and rebuilding sandbox."
+            echo "No usable base ref — running checks and rebuilding sandbox + browser images."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
             echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
+            echo "browser_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -84,7 +86,13 @@ jobs:
           # SDK under ``packages/aios-sdk/aios_sdk/_generated/`` — always
           # run CI.  ``tests/unit/test_detect_filter_sync.py`` enforces that
           # this regex stays in sync with all committed generated artifacts.
-          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$'; then
+          # ``aios-browser-driver`` is matched whole: it ships the first
+          # runtime-load-bearing non-Python source in ``packages/``
+          # (``snapshot/walker.js``), which the ``\.py$`` arm would miss.
+          # ``.dockerignore`` shapes the browser image's package COPY, so a
+          # PR touching only it must still reach the e2e job (where
+          # ``browser_changed`` routes it into a rebuild).
+          if echo "$changed" | grep -qE '\.py$|^pyproject\.toml$|^uv\.lock$|^alembic\.ini$|^migrations/|^docker/|^connectors/[^/]+/Dockerfile$|^bin/tool$|^\.github/workflows/|^packages/aios-browser-driver/|^packages/[^/]+/(pyproject\.toml|CHANGELOG\.md)$|^Dockerfile$|^compose\.yml$|^openapi\.json$|^\.dockerignore$'; then
             echo "Build-affecting changes detected — running checks."
             echo "run_checks=true" >> "$GITHUB_OUTPUT"
           else
@@ -92,19 +100,43 @@ jobs:
             echo "run_checks=false" >> "$GITHUB_OUTPUT"
           fi
 
-          # Sandbox image inputs: anything under ``docker/`` (currently
-          # only ``Dockerfile.sandbox``, but future COPY-source files
-          # added here would also count) plus the ``bin/tool`` binary the
-          # Dockerfile COPYs in.  When none changed, the ``e2e`` job can
-          # pull ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
+          # Sandbox image inputs: exactly what ``docker/Dockerfile.sandbox``
+          # is built from — itself plus the ``bin/tool`` binary it COPYs.
+          # When none changed, the ``e2e`` job can pull
+          # ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
           # ``build-sandbox.yml`` after its smoke test passes) instead of
-          # rebuilding from scratch — saves ~29 s per run.
-          if echo "$changed" | grep -qE '^docker/|^bin/tool$'; then
+          # rebuilding from scratch — saves ~29 s per run.  Deliberately NOT
+          # ``^docker/``: the browser image's inputs and the seccomp profiles
+          # live there too, and none of them are sandbox-image inputs (the
+          # profiles are read from the checkout at ``docker run`` time, never
+          # baked into either image), so a browser-only PR must not force a
+          # sandbox rebuild.  ``tests/unit/test_detect_filter_sync.py`` pins
+          # both image filters.
+          if echo "$changed" | grep -qE '^docker/Dockerfile\.sandbox$|^bin/tool$'; then
             echo "Sandbox inputs changed — rebuilding image."
             echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "Sandbox inputs unchanged — will pull pre-built image."
             echo "sandbox_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Browser image inputs: what ``docker/Dockerfile.browser`` is built
+          # from — itself, the driver package's SHIPPED files (the package
+          # dir enumerated by top-level entry, because ``tests/`` is
+          # ``.dockerignore``d out of the build context and must not trigger
+          # the ~10 min rebuild), the protocol module COPYed over the
+          # package's vendored copy, and ``.dockerignore`` itself (it shapes
+          # the package-directory COPY; the sandbox image COPYs only single
+          # files, so it is not a sandbox input).  When none changed, the
+          # ``e2e`` job pulls ``ghcr.io/eumemic/aios-browser:smoked``
+          # (published by ``build-browser-image.yml`` after BOTH browser e2e
+          # suites pass) instead of paying the local build.
+          if echo "$changed" | grep -qE '^docker/Dockerfile\.browser$|^packages/aios-browser-driver/(aios_browser_driver/|pyproject\.toml$|README\.md$|requirements\.lock$)|^src/aios/sandbox/browser_protocol\.py$|^\.dockerignore$'; then
+            echo "Browser-image inputs changed — rebuilding image."
+            echo "browser_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Browser-image inputs unchanged — will pull pre-built image."
+            echo "browser_changed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # The four check jobs below run in parallel.  Splitting them off the
@@ -207,11 +239,11 @@ jobs:
         # workspace members whose source had never been linted/typed.  The
         # echo-http connector has no ``src/`` and is omitted.
         run: |
-          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
-          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+          uv run ruff check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
+          uv run ruff format --check src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
 
       - name: Type check (mypy)
-        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http
+        run: uv run mypy src tests packages/aios-sdk/aios_sdk connectors/signal/src connectors/slack/src connectors/sms/src connectors/telegram/src connectors/whatsapp/src packages/aios-connector-http/aios_connector_http packages/aios-browser-driver/aios_browser_driver
 
   unit:
     needs: detect
@@ -284,6 +316,19 @@ jobs:
           uv run pytest connectors/whatsapp/tests -q
           uv run pytest packages/aios-connector-http/tests -q
           uv run pytest packages/aios-sdk/tests -q
+          uv run pytest packages/aios-browser-driver/tests -q
+
+      - name: Browser driver isolated-install smoke test
+        # The browser image installs this package standalone
+        # (``uv pip install --no-sources ./packages/aios-browser-driver``), so
+        # the unified workspace env must not mask a dropped runtime dep. Install
+        # only its closure into a throwaway venv and import the daemon entry —
+        # the same by-path install ``docker/Dockerfile.browser`` will do.
+        run: |
+          uv venv /tmp/browser-driver-isolated
+          uv pip install --python /tmp/browser-driver-isolated/bin/python --no-sources \
+            ./packages/aios-browser-driver
+          /tmp/browser-driver-isolated/bin/python -c "import aios_browser_driver.daemon"
 
       - name: Slack connector isolated-install smoke test
         # ``uv sync --dev`` above resolves the *unified workspace* env, where
@@ -367,19 +412,23 @@ jobs:
   e2e:
     needs: detect
     runs-on: ubuntu-latest
-    # Generous: covers the sandbox-build fallback and the non-docker
-    # shard's full-suite flake retry.
-    timeout-minutes: 30
+    # Docker shard: covers the image fallbacks — a sandbox rebuild plus,
+    # worst case, the ~10 min local browser build when ``:smoked`` is
+    # missing or stale.  Non-docker shard keeps the original 30 (its worst
+    # case is the full-suite flake retry); a wedge there should still fail
+    # fast.
+    timeout-minutes: ${{ matrix.shard == 'docker' && 45 || 30 }}
 
     strategy:
       fail-fast: false
       matrix:
         shard: [non-docker, docker]
 
-    # Required to ``docker pull`` the sandbox image from GHCR when its
-    # inputs are unchanged.  Read-only; the ``build-sandbox.yml`` workflow
-    # is the only writer.  Only the docker shard actually uses it, but
-    # GHA does not support per-matrix-leg permissions.
+    # Required to ``docker pull`` the sandbox/browser images from GHCR when
+    # their inputs are unchanged.  Read-only; ``build-sandbox.yml`` and
+    # ``build-browser-image.yml`` are the only writers.  Only the docker
+    # shard actually uses it, but GHA does not support per-matrix-leg
+    # permissions.
     permissions:
       contents: read
       packages: read
@@ -420,9 +469,10 @@ jobs:
         run: uv sync --dev
 
       - name: Log in to GHCR
-        # Needed only for the ``docker pull`` path below.  When the sandbox
-        # is being rebuilt locally this login is unused but harmless.
-        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.sandbox_changed == 'false'
+        # Needed only for the ``docker pull`` paths below (sandbox and/or
+        # browser image).  When both are being rebuilt locally this login is
+        # unused but harmless.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && (needs.detect.outputs.sandbox_changed == 'false' || needs.detect.outputs.browser_changed == 'false')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -473,9 +523,10 @@ jobs:
         # Post-build sanity probes the daemon's image store and the
         # one binary the build added; if either is missing the step
         # fails here rather than letting a silent fallback misroute
-        # later. ``set -euo pipefail`` is the workflow default but
-        # the explicit ``|| exit 1`` after the ``docker run`` makes
-        # the failure mode obvious in the log.
+        # later. GHA's default shell is ``bash -e {0}`` (NO pipefail —
+        # that needs an explicit ``shell: bash``), so avoid pipelines in
+        # these steps; the explicit ``|| exit 1`` after the ``docker run``
+        # makes the failure mode obvious in the log.
         #
         # Fires when the Dockerfile/bin/tool inputs changed (so the pull
         # path was skipped) OR when the pull path attempted and failed.
@@ -490,6 +541,54 @@ jobs:
             echo "::error::bin/tool not found in built image — build step did not produce expected artifacts"
             exit 1
           }
+
+      - name: Pull browser image from GHCR
+        # Same shape and rationale as the sandbox pull above; ``:smoked`` is
+        # published by ``build-browser-image.yml`` only after BOTH browser
+        # e2e suites pass against the freshly built sha tag.
+        #
+        # The stale-probe mirrors the sandbox lane's ``which tool``: the
+        # image's installed ``browser_protocol.py`` must be byte-identical to
+        # the checkout's.  The contract e2e asserts the same equality later,
+        # but only THIS step's failure routes into the local-build fallback —
+        # probing here turns a stale ``:smoked`` (protocol advanced on master
+        # between this PR's base and the last publish) into a self-healing
+        # rebuild instead of a red shard.
+        id: pull_browser
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && needs.detect.outputs.browser_changed == 'false'
+        continue-on-error: true
+        run: |
+          docker pull ghcr.io/eumemic/aios-browser:smoked
+          docker tag ghcr.io/eumemic/aios-browser:smoked aios-browser:ci
+          docker image inspect aios-browser:ci --format 'image registered: {{.Id}}'
+          docker run --rm aios-browser:ci python3 -c \
+            "import aios_browser_driver.browser_protocol as m, sys; sys.stdout.buffer.write(open(m.__file__, 'rb').read())" \
+            > /tmp/installed-protocol.py
+          cmp /tmp/installed-protocol.py src/aios/sandbox/browser_protocol.py || {
+            echo "::error::installed browser_protocol.py differs from checkout — :smoked is stale relative to HEAD"
+            exit 1
+          }
+
+      - name: Build browser image
+        # Fires when the image inputs changed (the pull path was skipped) OR
+        # the pull attempted and failed — GHCR outage, ``:smoked`` not yet
+        # published (e.g. the first run after the browser lane merges, before
+        # ``build-browser-image.yml``'s first master publish), or the
+        # stale-probe above tripped.  amd64-only and QEMU-free, unlike the
+        # publishing workflow — roughly a 10-minute cold build (apt
+        # install-deps + Chromium download dominate).
+        #
+        # Deliberately no post-build protocol probe (the sandbox lane re-runs
+        # ``which tool`` here): a from-checkout build is protocol-identical
+        # by construction, and the contract e2e re-asserts byte equality in
+        # this same shard.
+        if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker' && ( needs.detect.outputs.browser_changed == 'true' || steps.pull_browser.outcome == 'failure' )
+        run: |
+          if [[ "${{ steps.pull_browser.outcome }}" == "failure" ]]; then
+            echo "::warning::GHCR pull failed; falling back to local browser build"
+          fi
+          docker build -t aios-browser:ci -f docker/Dockerfile.browser .
+          docker image inspect aios-browser:ci --format 'image registered: {{.Id}}'
 
       - name: E2E tests (non-docker shard)
         # These tests are "non-docker" only in the sandbox-image sense: most
@@ -520,6 +619,11 @@ jobs:
         if: needs.detect.outputs.run_checks == 'true' && matrix.shard == 'docker'
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
+          # Points the three browser suites (image contract, driver behavior,
+          # and the isolation gate's real-provisioning-path probes) at the
+          # CI-local image pulled/built above; those suites self-skip when
+          # this is unset.
+          AIOS_SANDBOX_BROWSER_IMAGE: aios-browser:ci
         # ``-m "docker and not perf"``: the ``perf`` mark is the ADVISORY
         # wall-clock scaling backstop (#1661) — it is deliberately EXCLUDED
         # from this gating run because shared-runner jitter can exceed its
@@ -543,5 +647,6 @@ jobs:
         continue-on-error: true
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
+          AIOS_SANDBOX_BROWSER_IMAGE: aios-browser:ci
         run: |
           uv run pytest tests/e2e -q -m "docker and perf" -n 4 --dist=loadfile
