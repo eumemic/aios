@@ -43,6 +43,31 @@ def test_ip_address_objects_are_classified_without_live_dns() -> None:
 
 
 @pytest.mark.parametrize(
+    ("resolver", "args"),
+    [
+        ("gethostbyname", ("api.vendor.example",)),
+        ("gethostbyname_ex", ("api.vendor.example",)),
+        ("gethostbyaddr", ("192.0.2.1",)),
+        ("getnameinfo", (("192.0.2.1", 443), 0)),
+    ],
+)
+def test_external_resolver_apis_are_blocked_before_os_effector(
+    monkeypatch: pytest.MonkeyPatch, resolver: str, args: tuple[object, ...]
+) -> None:
+    class OsResolverReached(AssertionError):
+        pass
+
+    def os_resolver_effector(*_args: object, **_kwargs: object) -> None:
+        raise OsResolverReached(resolver)
+
+    monkeypatch.setattr(socket, resolver, os_resolver_effector)
+    install_socket_guard(monkeypatch)
+
+    with pytest.raises(ExternalEgressBlocked):
+        getattr(socket, resolver)(*args)
+
+
+@pytest.mark.parametrize(
     ("operation", "args"),
     [
         ("sendto", (b"", ("0.0.0.0", 9))),
