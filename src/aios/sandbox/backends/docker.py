@@ -926,17 +926,32 @@ class DockerBackend:
                 )
             return []
 
-        # Whole-Config form for labels — see ``_inspect_image_fields`` on why a
-        # direct ``{{json .Config.Labels}}`` errors on label-less images under
-        # Docker inspect's ``missingkey=error``.
-        fmt = "{{.Id}}\t{{.Parent}}\t{{.Size}}\t{{json .RepoTags}}\t{{json .Config}}"
+        # Parsed as JSON, NOT via ``--format``. Docker's inspect templates run
+        # under ``missingkey=error``, so naming a key an image does not carry
+        # aborts the template FOR THAT IMAGE and drops it from stdout. The
+        # image then fails the completeness reconciliation below, which fails
+        # the whole enumeration, which kills the GC tick — hourly, forever,
+        # for as long as one such image exists.
+        #
+        # That is not hypothetical: an image built by ``docker import`` (every
+        # flattened snapshot) has NO ``Parent`` key at all under the containerd
+        # image store, and a single one of them was enough to stop all
+        # reclamation on a production host while ~72 GB of superseded residue
+        # accumulated. The previous code had already hit this class once, on
+        # ``.Config.Labels`` for label-less images, and worked around it by
+        # fetching the whole ``Config`` object; ``.Parent`` was the same bug
+        # wearing a different key.
+        #
+        # Reading the JSON removes the class rather than the instance: an
+        # absent key becomes ``None`` instead of an error, which is also the
+        # honest answer (a flattened image genuinely has no parent).
         out: list[ManagedImage] = []
         resolved: set[str] = set()
         for offset in range(0, len(image_ids), _MANAGED_INSPECT_BATCH_SIZE):
             batch = image_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
             try:
                 rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-                    ["docker", "image", "inspect", "--format", fmt, *batch]
+                    ["docker", "image", "inspect", *batch]
                 )
             except SandboxBackendError as err:
                 # Unreachable/timed-out daemon: nothing about this batch is
@@ -962,15 +977,55 @@ class DockerBackend:
                     exit_code=rc,
                     stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
                 )
-            for line in stdout_bytes.decode("utf-8").splitlines():
-                if not line.strip():
+            # A batch containing a vanished id exits nonzero but still writes a
+            # well-formed array of the images it DID find, so the payload is
+            # parsed either way; the per-id reconciliation below settles the
+            # difference. Unparseable output is indeterminate, not empty —
+            # treating it as empty would report every id in the batch as
+            # absent, and the GC reconciles DB pointers by absence.
+            raw = stdout_bytes.decode("utf-8", errors="replace").strip()
+            try:
+                records = json.loads(raw) if raw else []
+            except json.JSONDecodeError as err:
+                log.warning(
+                    "sandbox.image_enumeration_incomplete",
+                    offset=offset,
+                    size=len(batch),
+                    reason="unparseable_inspect_payload",
+                )
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: inspect batch at offset {offset} "
+                    "returned unparseable JSON"
+                ) from err
+            if not isinstance(records, list):
+                raise SandboxBackendError(
+                    f"incomplete managed image enumeration: inspect batch at offset {offset} "
+                    f"returned {type(records).__name__}, expected a list"
+                )
+            for record in records:
+                if not isinstance(record, dict):
                     continue
-                parts = line.split("\t", 4)
-                image_id = parts[0].strip()
-                parent = parts[1].strip() if len(parts) > 1 else ""
-                size = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
-                repo_tags = _parse_json_str_list(parts[3]) if len(parts) > 3 else ()
-                img_labels = _labels_from_config_json(parts[4]) if len(parts) > 4 else {}
+                image_id = str(record.get("Id") or "").strip()
+                if not image_id:
+                    continue
+                # ``Parent`` is absent (not empty) on imported/flattened
+                # images; ``Config`` can be null on some images.
+                parent = str(record.get("Parent") or "").strip()
+                raw_size = record.get("Size")
+                size = raw_size if isinstance(raw_size, int) else 0
+                raw_tags = record.get("RepoTags")
+                repo_tags = (
+                    tuple(str(tag) for tag in raw_tags if isinstance(tag, str))
+                    if isinstance(raw_tags, list)
+                    else ()
+                )
+                config = record.get("Config")
+                raw_labels = config.get("Labels") if isinstance(config, dict) else None
+                img_labels = (
+                    {str(k): str(v) for k, v in raw_labels.items()}
+                    if isinstance(raw_labels, dict)
+                    else {}
+                )
                 resolved.add(image_id)
                 out.append(
                     ManagedImage(
@@ -1266,20 +1321,6 @@ def _labels_from_config_json(raw: str) -> dict[str, str]:
     if not isinstance(labels, dict):
         return {}
     return {str(k): str(v) for k, v in labels.items()}
-
-
-def _parse_json_str_list(raw: str) -> tuple[str, ...]:
-    """Parse a ``{{json .RepoTags}}`` field into a tuple of tags (``()`` if none)."""
-    raw = raw.strip()
-    if not raw or raw in ("null", "<no value>"):
-        return ()
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return ()
-    if not isinstance(parsed, list):
-        return ()
-    return tuple(str(item) for item in parsed)
 
 
 def _is_no_such_container(stderr: str) -> bool:
