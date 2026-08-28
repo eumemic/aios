@@ -9,9 +9,15 @@ Resolution order for the reviewer agent:
   2. exact name match for AGENT_NAME (default: dev-review)
   3. fail with the names visible to this API key (account-scoped)
 
+Resolution order for the sandbox environment (required by POST /v1/sessions):
+  1. ENVIRONMENT_ID if set
+  2. exact name match for ENVIRONMENT_NAME (default: dev-pipeline-real)
+  3. fail with the names visible to this API key (account-scoped)
+
 Env:
   AIOS_URL, AIOS_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, CLONE_URL
   AGENT_NAME (default: dev-review), AGENT_ID (optional)
+  ENVIRONMENT_NAME (default: dev-pipeline-real), ENVIRONMENT_ID (optional)
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ import urllib.parse
 import urllib.request
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "dev-review")
+ENVIRONMENT_NAME = os.environ.get("ENVIRONMENT_NAME", "dev-pipeline-real")
 
 
 def _die(msg: str, code: int = 1) -> None:
@@ -72,6 +79,15 @@ def _list_agents(base: str, api_key: str, name: str | None = None) -> list[dict]
     return rows
 
 
+def _list_environments(base: str, api_key: str) -> list[dict]:
+    url = f"{base}/v1/environments?{urllib.parse.urlencode({'limit': '100'})}"
+    payload = _request("GET", url, api_key)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        _die(f"GET /v1/environments missing data: {json.dumps(payload)[:400]}")
+    return rows
+
+
 def resolve_agent(base: str, api_key: str) -> str:
     pinned = os.environ.get("AGENT_ID", "").strip()
     if pinned:
@@ -86,6 +102,20 @@ def resolve_agent(base: str, api_key: str) -> str:
     )
 
 
+def resolve_environment(base: str, api_key: str) -> str:
+    pinned = os.environ.get("ENVIRONMENT_ID", "").strip()
+    if pinned:
+        return pinned
+    exact = [r for r in _list_environments(base, api_key) if r.get("name") == ENVIRONMENT_NAME]
+    if len(exact) == 1:
+        return str(exact[0]["id"])
+    visible = [f"{r.get('name')}:{r.get('id')}" for r in _list_environments(base, api_key)]
+    _die(
+        f"no environment named {ENVIRONMENT_NAME!r} on this API key's account "
+        f"(visible: {visible or 'none'}). Set ENVIRONMENT_ID."
+    )
+
+
 def main() -> None:
     base = _env("AIOS_URL").rstrip("/")
     api_key = _env("AIOS_API_KEY")
@@ -96,6 +126,7 @@ def main() -> None:
     clone_url = _env("CLONE_URL")
 
     agent_id = resolve_agent(base, api_key)
+    environment_id = resolve_environment(base, api_key)
     prompt = (
         f"Review pull request {repo}#{pr_number} at {head_sha}. "
         f"The repository is cloned at /mnt/review. "
@@ -109,6 +140,7 @@ def main() -> None:
     )
     body = {
         "agent_id": agent_id,
+        "environment_id": environment_id,
         "title": f"eumemic-bot review {repo}#{pr_number}",
         "archive_when_idle": True,
         "initial_message": prompt,
@@ -134,7 +166,10 @@ def main() -> None:
     sid = session.get("id")
     if not sid:
         _die(f"create session returned no id: {json.dumps(session)[:400]}")
-    print(f"started session {sid} on agent {agent_id} for {repo}#{pr_number}@{head_sha}")
+    print(
+        f"started session {sid} on agent {agent_id} env {environment_id} "
+        f"for {repo}#{pr_number}@{head_sha}"
+    )
 
 
 if __name__ == "__main__":
