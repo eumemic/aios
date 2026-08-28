@@ -25,8 +25,16 @@ import asyncio
 import asyncpg
 import pytest
 
+from aios.tools.registry import ToolResult
 from tests.conftest import needs_docker
 from tests.helpers.alembic import run_alembic
+
+
+def _text(result: ToolResult) -> str:
+    """The handler's table text — plain-string ``ToolResult`` content (#2291)."""
+    assert isinstance(result.content, str)
+    return result.content
+
 
 # Two tenants, two stores, two sessions; each session is attached to exactly
 # one store. The isolation invariant: a session only ever sees memories of its
@@ -230,7 +238,7 @@ def test_memory_search_rank_and_handler(migration_db_url: str) -> None:
         )
     )
 
-    async def _run() -> dict[str, object]:
+    async def _run() -> ToolResult:
         from aios.db.pool import create_pool
         from aios.harness import runtime
         from aios.tools.memory_search import memory_search_handler
@@ -245,9 +253,8 @@ def test_memory_search_rank_and_handler(migration_db_url: str) -> None:
             await pool.close()
 
     result = asyncio.run(_run())
-    assert "result" in result, result
-    text = result["result"]
-    assert isinstance(text, str)
+    assert result.is_error is False
+    text = _text(result)
     # Both match; the keyword-dense memory ranks first.
     assert "/hi.md" in text and "/lo.md" in text
     assert text.index("/hi.md") < text.index("/lo.md")

@@ -13,6 +13,7 @@
   snap chunk usable) and reported on the `read_window_end` span plus a
   `window.floor_clamped` warning, rather than silently zeroed (#2289).
 
+- `search_events` and `memory_search` now return their formatted table as plain multi-line text (`ToolResult`) instead of a `{"result": …}` JSON envelope, so an inline or spilled result stays line-oriented for `grep`/`sed`/`wc -l`/`read` (#2291).
 - Distinguish a dead OAuth refresh token (RFC 6749 `invalid_grant` — revoked,
   expired, or otherwise unrecoverable) from a generic/transient
   `OAuthRefreshError` via a new `OAuthReauthRequiredError` subclass
