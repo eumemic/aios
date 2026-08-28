@@ -474,6 +474,7 @@ async def harness(aios_env: dict[str, str], legacy_inference_env: None) -> Async
         # (invoke / message wakes); patch them where they are looked up.
         mock.patch("aios.harness.loop.defer_wake", _noop_defer_wake),
         mock.patch("aios.services.sessions.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.auto_review.defer_wake", _noop_defer_wake),
     ):
         yield h
 
@@ -579,6 +580,7 @@ async def docker_harness(
         # ``aios.services.wake`` re-export.
         mock.patch("aios.harness.loop.defer_wake", _noop_defer_wake),
         mock.patch("aios.services.sessions.defer_wake", _noop_defer_wake),
+        mock.patch("aios.harness.auto_review.defer_wake", _noop_defer_wake),
     ):
         yield h
 

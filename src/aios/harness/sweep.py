@@ -37,6 +37,12 @@ from aios.db.queries import (
     session_active_predicate,
     session_errored_predicate,
 )
+from aios.harness.auto_review import (
+    AUTO_REVIEW_SOURCE,
+    AUTO_REVIEW_SPAN_EVENT,
+    CHECKER_UNAVAILABLE_REASON,
+    REVIEW_KEY_PREFIX,
+)
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
@@ -872,13 +878,30 @@ async def find_and_repair_ghosts(
     client_max_age = get_settings().client_tool_call_max_age_seconds
     abandoned_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=client_max_age)
 
+    # Stranded-review bound (jarbot#229): an ``auto_review`` call whose review
+    # task died with the worker has no result, no marker, and no live task —
+    # invisible to the user forever without this. Fail closed: hold the card
+    # with the checker-unavailable reason. The bound is far above the checker's
+    # own budget so a live in-flight review (also excluded via its ``review:``
+    # registry key below) is never raced.
+    review_cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(
+        seconds=get_settings().auto_review_stranded_after_s
+    )
+
     ghosts: list[_Candidate] = []
     abandoned: list[_Candidate] = []
+    stranded_reviews: list[_Candidate] = []
     for c in candidates:
         confirmed = confirmed_by_session.get(c.session_id, set())
         surface = agent_surface_by_session.get(c.session_id, _EMPTY_SURFACE)
         if _was_dispatched(c, confirmed, surface):
             ghosts.append(c)
+        elif (
+            _is_review_pending(c, confirmed, surface)
+            and c.created_at < review_cutoff
+            and f"{REVIEW_KEY_PREFIX}{c.tool_call_id}" not in in_flight.get(c.session_id, set())
+        ):
+            stranded_reviews.append(c)
         elif _is_client_result_pending(c.tool_name, surface) and c.created_at < abandoned_cutoff:
             # Not dispatched AND client-result-pending AND older than the bound:
             # the client disconnected and will never return a result. Without
@@ -1086,6 +1109,66 @@ async def find_and_repair_ghosts(
             branch=branch,
         )
 
+    # Stranded auto-reviews fail CLOSED into an ordinary hold: verdict span +
+    # the load-bearing ``tool_requested`` marker (which is what makes the call
+    # ``awaiting`` — the card appears, the user decides). No tool result is
+    # fabricated and no wake is scheduled (a hold never wakes). Marker-
+    # idempotent against a checker task that got its ask marker in before
+    # dying, and per-item isolated like the ghost loop above.
+    for c in stranded_reviews:
+        sid = c.session_id
+        tcid = c.tool_call_id
+        try:
+            sid_account_id = await sessions_service.load_session_account_id(pool, sid)
+            if await sessions_service.has_tool_requested_marker(
+                pool, sid, tcid, account_id=sid_account_id
+            ):
+                continue
+            await sessions_service.append_event(
+                pool,
+                sid,
+                "span",
+                {
+                    "event": AUTO_REVIEW_SPAN_EVENT,
+                    "tool_call_id": tcid,
+                    "name": c.tool_name,
+                    "verdict": "ask",
+                    "reason": CHECKER_UNAVAILABLE_REASON,
+                    "latency_ms": None,
+                    "model": None,
+                    "is_error": False,
+                },
+                account_id=sid_account_id,
+            )
+            await sessions_service.append_event(
+                pool,
+                sid,
+                "lifecycle",
+                {
+                    "event": "tool_requested",
+                    "tool_call_id": tcid,
+                    "name": c.tool_name,
+                    "kind": "mcp",
+                    "reason": CHECKER_UNAVAILABLE_REASON,
+                    "source": AUTO_REVIEW_SOURCE,
+                },
+                account_id=sid_account_id,
+            )
+        except Exception:
+            log.exception(
+                "sweep.auto_review_backstop_failed",
+                session_id=sid,
+                tool_call_id=tcid,
+                tool_name=c.tool_name,
+            )
+            continue
+        log.info(
+            "sweep.auto_review_backstopped",
+            session_id=sid,
+            tool_call_id=tcid,
+            tool_name=c.tool_name,
+        )
+
     return repaired
 
 
@@ -1183,6 +1266,32 @@ def _was_dispatched(
         ToolDisposition.NEEDS_CONFIRM,
         ToolDisposition.NEEDS_REVIEW,
         ToolDisposition.CUSTOM,
+    )
+
+
+def _is_review_pending(
+    candidate: _Candidate,
+    confirmed_ids: set[str],
+    surface: _SweepAgentSurface,
+) -> bool:
+    """True when the classifier says the call awaits a CHECKER verdict.
+
+    Same thin projection as :func:`_was_dispatched` (single-source
+    disposition, #1076): an ``auto_review`` call with no satisfied
+    confirmation classifies ``NEEDS_REVIEW``. The caller layers on the age
+    bound, the live ``review:`` in-flight key, and the marker-idempotence
+    check before failing it closed.
+    """
+    from aios.harness.tool_disposition import ToolDisposition, classify_tool_call
+
+    return (
+        classify_tool_call(
+            candidate.tool_name,
+            candidate.arguments,
+            surface,  # type: ignore[arg-type]  # duck-typed: classifier reads only .tools/.http_servers
+            confirmation_resolved=candidate.tool_call_id in confirmed_ids,
+        )
+        is ToolDisposition.NEEDS_REVIEW
     )
 
 

@@ -603,6 +603,10 @@ class TellExistingSession:
     session_id: str
     content: str
     cause: str = "message"
+    # Display-only provenance stamped onto the user message's ``metadata``
+    # (e.g. the trigger runner's ``{"trigger": {"id", "name"}}`` — how the
+    # auto-review checker tells a routine wake from a human ask).
+    metadata: dict[str, Any] | None = None
 
 
 # The discriminated union at the spine boundary. Illegal arms are absent by
@@ -830,7 +834,12 @@ async def _stimulate_existing_tell(
     wake/notify policy surfaces call.
     """
     await tell_existing_session(
-        pool, stim.session_id, content=stim.content, cause=stim.cause, account_id=account_id
+        pool,
+        stim.session_id,
+        content=stim.content,
+        cause=stim.cause,
+        metadata=stim.metadata,
+        account_id=account_id,
     )
     return True
 
@@ -842,6 +851,7 @@ async def tell_existing_session(
     content: str,
     cause: str,
     account_id: str,
+    metadata: dict[str, Any] | None = None,
 ) -> Event:
     """THE channel-less ``Tell(ExistingSession)`` writer: append a user-role message
     + defer a wake, opening NO request edge (no response obligation). Returns the
@@ -852,7 +862,7 @@ async def tell_existing_session(
     owns its own depth/rate caps + the non-forgeable ``wake_lineage`` span, so it stays
     a distinct writer rather than folding through here."""
 
-    event = await append_user_message(pool, session_id, content, account_id=account_id)
+    event = await append_user_message(pool, session_id, content, metadata, account_id=account_id)
     await defer_wake(pool, session_id, cause=cause, account_id=account_id)
     return event
 
