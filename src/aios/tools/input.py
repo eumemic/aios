@@ -33,6 +33,16 @@ def tool_input[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
     the JSON Schema can't encode (custom field_validators, cross-field
     rules) surface as ToolBail, so the model self-corrects through the
     session log instead of evicting the sandbox.
+
+    The one sanctioned divergence is the model-facing schema diet
+    (:mod:`aios.tools.schema_diet`, #2294): a registration may pass
+    ``slim_tool_schema(Model.model_json_schema())``, which only ever
+    *loosens* what the dispatch-time jsonschema check enforces (it drops
+    boilerplate and collapses a config subtree to a bare array) and never
+    touches ``additionalProperties: false``. This model stays the enforcing
+    source of truth, so what the diet stops catching at dispatch is caught
+    here instead — with a field-precise pydantic error rather than a
+    schema one.
     """
     try:
         return model.model_validate(arguments)

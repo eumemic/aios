@@ -90,6 +90,28 @@ _MCP_CLI_HINT = (
 )
 
 
+def _inject_workflow_script_contract(tools: list[dict[str, Any]]) -> None:
+    """Append the workflow script-contract reader when an authoring tool is offered.
+
+    The companion half of the #2294 schema diet: ``create_workflow`` /
+    ``update_workflow`` / ``call_workflow`` no longer inline the authoring manual,
+    so the reader that serves it must be offered wherever they are — otherwise the
+    trimmed ``script`` description points at a tool the agent cannot call. Injected
+    (rather than required as a grant) so the fleet's existing agents keep a
+    reachable contract with no re-provisioning. Idempotent: an agent that also
+    declares the tool gets exactly one entry.
+    """
+    from aios.tools.workflow_management import (
+        SCRIPT_CONTRACT_TOOL_NAME,
+        WORKFLOW_AUTHORING_TOOL_NAMES,
+        script_contract_tool_spec,
+    )
+
+    offered = {(entry.get("function") or {}).get("name") for entry in tools}
+    if offered & WORKFLOW_AUTHORING_TOOL_NAMES and SCRIPT_CONTRACT_TOOL_NAME not in offered:
+        tools.append(script_contract_tool_spec())
+
+
 def _has_always_allow_mcp_tool(agent_tools: list[ToolSpec]) -> bool:
     """True iff at least one enabled mcp_toolset entry resolves any tool
     to ``always_allow``.
@@ -311,6 +333,12 @@ async def compute_step_prelude(
     # focal attention; inject it whenever the session has bound channels.
     if channels:
         tools.append(_switch_channel_tool_spec())
+    # #2294: the workflow script contract is no longer inlined in the authoring
+    # tools' schemas (~69KB → ~5KB across the trio) — it is read on demand. Inject
+    # the reader whenever an authoring tool is offered, so the manual stays
+    # reachable for agents already provisioned with those tools (and so the
+    # offered-set guard admits the call). Explicitly granting it is a no-op.
+    _inject_workflow_script_contract(tools)
     # return/error are how a session ANSWERS a request it owes — a background child
     # of a run (§3.5), OR a session-caller invoke target (#1127). The gate is owning
     # an open request edge (#1123), not child-ness: a plain foreground session that
