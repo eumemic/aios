@@ -26,8 +26,12 @@ from aios.sandbox.backends.base import (
 )
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.setup import (
+    _BROWSER_DENY_INTERNAL_CIDRS,
+    apply_browser_deny_internal,
     apply_network_lockdown,
     apply_secret_egress_dnat,
+    build_browser_deny_internal_script,
+    build_browser_deny_internal_verify_script,
     build_iptables_script,
     build_lockdown_verify_script,
     build_secret_egress_dnat_script,
@@ -1461,3 +1465,149 @@ class TestCredentialHostEgressVerdict:
             )
         )
         assert not [argv for table, argv in rules if table == "filter" and "REJECT" in argv]
+
+
+# ── Browser deny-internal egress (jarbot#106) ─────────────────────────────────
+
+
+class TestBuildBrowserDenyInternalScript:
+    """The default-ACCEPT + targeted-DROP script for the untrusted-web browser:
+    public egress stays open, internal/link-local/metadata/CGNAT is dropped."""
+
+    def test_drops_each_internal_range(self) -> None:
+        script = build_browser_deny_internal_script()
+        for cidr in _BROWSER_DENY_INTERNAL_CIDRS:
+            assert f'"$IPT" -A OUTPUT -d {cidr} -j DROP' in script
+
+    def test_drops_exactly_the_internal_set_public_egress_stays_open(self) -> None:
+        # The design's whole distinguishing property vs the session lockdown:
+        # public egress stays OPEN. Pin the DROP set EXACTLY so a regression that
+        # bricks the browser — an added `0.0.0.0/0`, or a catch-all
+        # `-A OUTPUT -j DROP` — is caught, not just a removed/edited range.
+        script = build_browser_deny_internal_script()
+        assert script.count("-j DROP") == len(_BROWSER_DENY_INTERNAL_CIDRS)
+        assert "-d 0.0.0.0/0" not in script  # no all-IPs catch-all DROP
+
+    def test_no_drop_policy_general_egress_stays_open(self) -> None:
+        # The whole point vs the session lockdown: NO default-DROP, so the
+        # browser can still reach the public web.
+        assert "-P OUTPUT DROP" not in build_browser_deny_internal_script()
+
+    def test_does_not_drop_loopback(self) -> None:
+        # 127.0.0.11 (embedded DNS) is netns-local loopback the browser needs to
+        # resolve real sites — 127/8 must NOT be in the DROP set.
+        assert "127.0.0" not in build_browser_deny_internal_script()
+
+    def test_flushes_filter_output_only_not_nat(self) -> None:
+        script = build_browser_deny_internal_script()
+        assert '"$IPT" -F OUTPUT' in script
+        assert "-t nat" not in script
+
+    def test_uses_selected_backend_no_bare_iptables(self) -> None:
+        script = build_browser_deny_internal_script()
+        assert "IPT=iptables-legacy" in script
+        for line in script.splitlines():
+            assert not line.lstrip().startswith("iptables ")
+
+    def test_emits_set_e_first(self) -> None:
+        assert build_browser_deny_internal_script().splitlines()[0] == "set -e"
+
+    def test_no_dns_preamble(self) -> None:
+        # Static CIDRs resolve nothing, so the embedded-DNS preamble is absent.
+        assert "127.0.0.11" not in build_browser_deny_internal_script()
+        assert "resolve_ipv4" not in build_browser_deny_internal_script()
+
+
+class TestBuildBrowserDenyInternalVerifyScript:
+    """The read-back verify asserts every DROP rule landed — no policy check."""
+
+    def test_asserts_each_drop_rule_present(self) -> None:
+        script = build_browser_deny_internal_verify_script()
+        for cidr in _BROWSER_DENY_INTERNAL_CIDRS:
+            assert f"grep -qF -- '-d {cidr} -j DROP'" in script
+
+    def test_no_policy_assertion(self) -> None:
+        # The deny-internal path leaves the policy at ACCEPT — verifying a DROP
+        # policy would always fail.
+        assert "-P OUTPUT DROP" not in build_browser_deny_internal_verify_script()
+
+    def test_uses_selected_backend(self) -> None:
+        script = build_browser_deny_internal_verify_script()
+        assert "IPT=iptables-legacy" in script
+        assert '"$IPT" -S OUTPUT' in script
+
+    def test_emits_set_e_first(self) -> None:
+        assert build_browser_deny_internal_verify_script().splitlines()[0] == "set -e"
+
+
+class TestApplyBrowserDenyInternal:
+    """apply_browser_deny_internal applies + verifies via the operator sidecar."""
+
+    @staticmethod
+    def _sidecar_calls(backend: FakeBackend) -> list[dict[str, Any]]:
+        return [c[1] for c in backend.calls if c[0] == "run_netns_sidecar"]
+
+    @pytest.mark.asyncio
+    async def test_applies_and_verifies_via_sidecar(self) -> None:
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_browser_deny_internal(backend, handle)
+
+        calls = self._sidecar_calls(backend)
+        assert len(calls) == 2  # apply, then read-back verify
+        apply_call, verify_call = calls
+        assert '"$IPT" -A OUTPUT -d 169.254.0.0/16 -j DROP' in apply_call["script"]
+        assert "grep -qF -- '-d 169.254.0.0/16 -j DROP'" in verify_call["script"]
+        # The sidecar runs the OPERATOR image (ships iptables-legacy), joined to
+        # the browser's netns; the browser holds no NET_ADMIN itself.
+        assert apply_call["image"].endswith("aios-sandbox:latest")
+        assert apply_call["target_sandbox_id"] == handle.sandbox_id
+        # No runtime override: a browser is only ever provisioned under the
+        # default runtime (the registry rejects a custom one before create).
+        assert apply_call["runtime"] is None
+        assert verify_call["runtime"] is None
+
+
+class TestApplyBrowserDenyInternalFailsClosed:
+    """A browser whose egress lockdown didn't apply (or didn't verify) could
+    reach the cloud-metadata endpoint / internal services — so a nonzero apply,
+    a failed verify, or a sidecar infra error must raise, not log-and-continue."""
+
+    @pytest.mark.asyncio
+    async def test_nonzero_apply_raises(self) -> None:
+        backend = FakeBackend()
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=3,
+                stdout="",
+                stderr="iptables: command not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
+        with pytest.raises(SandboxBackendError, match="egress failed"):
+            await apply_browser_deny_internal(backend, make_handle())
+
+    @pytest.mark.asyncio
+    async def test_failed_verify_raises(self) -> None:
+        backend = FakeBackend()
+        ok = CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+        bad = CommandResult(exit_code=1, stdout="", stderr="", timed_out=False, truncated=False)
+        backend.sidecar_results = [ok, bad]  # apply ok, verify fails
+        with pytest.raises(SandboxBackendError, match="verification failed"):
+            await apply_browser_deny_internal(backend, make_handle())
+
+    @pytest.mark.asyncio
+    async def test_sidecar_error_propagates(self) -> None:
+        backend = FakeBackend()
+        backend.run_netns_sidecar = AsyncMock(  # type: ignore[method-assign]
+            side_effect=SandboxBackendError("daemon hiccup")
+        )
+        with pytest.raises(SandboxBackendError, match="daemon hiccup"):
+            await apply_browser_deny_internal(backend, make_handle())
+
+    @pytest.mark.asyncio
+    async def test_zero_exit_does_not_raise(self) -> None:
+        backend = FakeBackend()  # default sidecar returns exit 0 for both calls
+        await apply_browser_deny_internal(backend, make_handle())  # must not raise

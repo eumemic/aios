@@ -178,6 +178,20 @@ class TestActionHandlers:
         with pytest.raises(ToolBail, match="not available in this deployment"):
             await handler(_SESSION_ID, {})
 
+    async def test_runtime_unsupported_gives_the_runtime_message(
+        self, seams: dict[str, Any]
+    ) -> None:
+        """A ``BrowserRuntimeUnsupportedError`` is a ``BrowserImageUnconfiguredError``
+        subclass, so it must be caught by its OWN arm (before the image arm) and
+        render the accurate runtime message — not the false 'no browser image is
+        configured'."""
+        from aios.sandbox.spec import BrowserRuntimeUnsupportedError
+
+        seams["driver"].side_effect = BrowserRuntimeUnsupportedError("custom runtime")
+        handler = registry.get("browser_snapshot").handler
+        with pytest.raises(ToolBail, match="runtime that is not supported"):
+            await handler(_SESSION_ID, {})
+
     async def test_grant_recheck_refusal_propagates(self, seams: dict[str, Any]) -> None:
         seams["granted"].side_effect = ToolBail("browser_click is not enabled for this agent")
         handler = registry.get("browser_click").handler
@@ -201,6 +215,25 @@ class TestDriverCall:
             side_effect=BrowserImageUnconfiguredError("no image configured")
         )
         with pytest.raises(BrowserImageUnconfiguredError):
+            await driver_call(
+                registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
+            )
+
+    async def test_runtime_unsupported_passes_through_unlaundered(self) -> None:
+        """``BrowserRuntimeUnsupportedError`` (a ``BrowserImageUnconfiguredError``
+        subclass) must ride the same non-retryable pass-through, NOT be laundered
+        into a retryable ``BrowserUnavailableError`` — retrying never helps a
+        statically-misconfigured runtime. Reordering driver_call's except arms or
+        rebasing the exception on ``SandboxBackendError`` would flip this."""
+        from aios.sandbox.browser import driver_call
+        from aios.sandbox.browser_protocol import BrowserRequest
+        from aios.sandbox.spec import BrowserRuntimeUnsupportedError
+
+        registry_mock = MagicMock()
+        registry_mock.get_or_provision_browser = AsyncMock(
+            side_effect=BrowserRuntimeUnsupportedError("custom runtime")
+        )
+        with pytest.raises(BrowserRuntimeUnsupportedError):
             await driver_call(
                 registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
             )

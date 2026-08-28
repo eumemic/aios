@@ -38,7 +38,7 @@ from aios.harness.vision import (
 )
 from aios.sandbox.browser import EXEC_KILL_MARGIN_S, BrowserUnavailableError, driver_call
 from aios.sandbox.browser_protocol import BrowserRequest, BrowserResponse
-from aios.sandbox.spec import BrowserImageUnconfiguredError
+from aios.sandbox.spec import BrowserImageUnconfiguredError, BrowserRuntimeUnsupportedError
 from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail
@@ -284,6 +284,10 @@ _UNAVAILABLE_MESSAGE = (
     "Browser tools are not available in this deployment: no browser image is "
     "configured. This capability is not yet enabled."
 )
+_RUNTIME_UNSUPPORTED_MESSAGE = (
+    "Browser tools are not available in this deployment: it configures a browser "
+    "container runtime that is not supported. This capability is not enabled here."
+)
 _UNREACHABLE_MESSAGE = (
     "The computer is unavailable right now (its browser failed to start or is "
     "not responding). Try again shortly."
@@ -372,6 +376,11 @@ async def _invoke_driver(
             request,
             timeout_s=settings.sandbox_browser_action_timeout_seconds + EXEC_KILL_MARGIN_S,
         )
+    except BrowserRuntimeUnsupportedError as err:
+        # A BrowserImageUnconfiguredError SUBCLASS, so it must be caught FIRST —
+        # otherwise the image arm below would render the false "no browser image
+        # is configured" message for what is actually a runtime misconfiguration.
+        raise ToolBail(_RUNTIME_UNSUPPORTED_MESSAGE) from err
     except BrowserImageUnconfiguredError as err:
         raise ToolBail(_UNAVAILABLE_MESSAGE) from err
     except BrowserUnavailableError as err:

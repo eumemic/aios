@@ -113,17 +113,24 @@ async def ensure_sandbox_network() -> None:
 
 
 async def ensure_browser_network() -> None:
-    """Idempotently create the browser network with ICC disabled.
+    """Idempotently create the browser network with ICC disabled and IPv6 off.
 
     Same concurrent-startup race discipline as :func:`ensure_sandbox_network`
-    (attempt, then re-verify the desired condition), plus one hard invariant
-    check: ``docker network create`` flags are INERT for a pre-existing
-    network, and a live network must never be torn down and recreated — so a
-    pre-existing ``aios-browser`` whose ICC option is not ``"false"`` (an
-    older deploy, a hand-made network) hard-fails the worker rather than
-    silently running browser containers on an ICC-open bridge.  ICC-off is
-    load-bearing: it is what keeps one account's computer from reaching
-    another's (jarbot#106 §6.2 phase gate).
+    (attempt, then re-verify the desired condition), plus TWO hard invariant
+    checks — ``docker network create`` flags are INERT for a pre-existing
+    network, and a live network must never be torn down and recreated, so each
+    load-bearing property is re-verified on an already-existing network rather
+    than assumed:
+
+    * **ICC off** keeps one account's computer from reaching another's
+      (jarbot#106 §6.2 phase gate) — a pre-existing ``aios-browser`` whose ICC
+      option is not ``"false"`` hard-fails the worker.
+    * **IPv6 off** is what makes the browser's egress lockdown
+      (:func:`apply_browser_deny_internal`) sound: that lockdown is IPv4-only,
+      so a v6 route would let untrusted web content bypass it to v6 internal /
+      link-local / metadata. A pre-existing network with IPv6 enabled therefore
+      hard-fails too, rather than the IPv4-only ``--ipv6=false`` create flag
+      being silently trusted on a network it can no longer affect.
     """
     if not await _network_exists(BROWSER_NETWORK_NAME):
         rc, _, stderr_bytes = await run_docker_cli(
@@ -154,6 +161,14 @@ async def ensure_browser_network() -> None:
             "network while no browser containers run and let the worker recreate it."
         )
 
+    if await _network_enable_ipv6(BROWSER_NETWORK_NAME):
+        raise RuntimeError(
+            f"browser network {BROWSER_NETWORK_NAME!r} has IPv6 enabled; the "
+            "browser egress lockdown is IPv4-only, so a v6 route would bypass it. "
+            "Create flags are inert for an existing network: remove the network "
+            "while no browser containers run and let the worker recreate it."
+        )
+
 
 async def _network_exists(name: str) -> bool:
     rc, _, _ = await run_docker_cli(["docker", "network", "inspect", name])
@@ -180,6 +195,19 @@ async def _network_option(network: str, option: str) -> str | None:
     # ``<nil>``, whose map holds pointers).
     out = stdout_bytes.decode("utf-8", errors="replace").strip()
     return out or None
+
+
+async def _network_enable_ipv6(network: str) -> bool:
+    """Whether ``network`` has IPv6 enabled (``docker network inspect``).
+
+    ``EnableIPv6`` is a top-level network field (not a driver ``-o`` option), so
+    it reads via its own ``--format`` rather than :func:`_network_option`. An
+    uninspectable network reads as ``False`` — a missing network can carry no v6
+    route, and the ICC/existence checks around this one already fail loudly."""
+    rc, stdout_bytes, _ = await run_docker_cli(
+        ["docker", "network", "inspect", "--format", "{{.EnableIPv6}}", network]
+    )
+    return rc == 0 and stdout_bytes.decode("utf-8", errors="replace").strip() == "true"
 
 
 async def _container_on_network(container: str, network: str) -> bool:

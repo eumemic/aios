@@ -276,3 +276,25 @@ class TestEnsureBrowserNetwork:
         install_docker_responder(monkeypatch, responder)
         with pytest.raises(RuntimeError, match="inter-container communication enabled"):
             await ensure_browser_network()
+
+    async def test_existing_ipv6_enabled_network_hard_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-existing ``aios-browser`` with IPv6 enabled must fail the worker:
+        the browser egress lockdown is IPv4-only, so a v6 route would bypass it,
+        and ``--ipv6=false`` is inert on an already-existing network. ICC is off
+        here, so the (earlier) ICC check passes and the v6 check is what fires."""
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[:3] == ["docker", "network", "inspect"] and "--format" in argv:
+                fmt = argv[argv.index("--format") + 1]
+                if ".EnableIPv6" in fmt:
+                    return 0, b"true\n", b""
+                return 0, b"false\n", b""  # ICC option is 'false' — ICC check passes
+            if argv[:3] == ["docker", "network", "inspect"]:
+                return 0, b"[]", b""
+            pytest.fail(f"unexpected argv: {argv}")
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="IPv6 enabled"):
+            await ensure_browser_network()
