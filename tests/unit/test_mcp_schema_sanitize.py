@@ -118,6 +118,42 @@ class TestSanitizer:
         cleaned = sanitize_mcp_schema(node)
         assert "type" in cleaned["properties"]
 
+    # Arrays must always carry a dict ``items`` and properties must be dicts:
+    # litellm's ``_format_type`` does ``props['items']`` unconditionally on
+    # ``type == "array"`` (the #2294 KeyError incident class) and its
+    # ``_format_object_parameters`` calls ``.get`` on every property value;
+    # OpenAI additionally rejects array schemas without ``items``.
+
+    def test_adds_items_to_bare_array(self) -> None:
+        assert sanitize_mcp_schema({"type": "array"}) == {"type": "array", "items": {}}
+
+    def test_adds_items_to_nested_bare_array(self) -> None:
+        node = {"type": "object", "properties": {"xs": {"type": "array"}}}
+        cleaned = sanitize_mcp_schema(node)
+        assert cleaned["properties"]["xs"] == {"type": "array", "items": {}}
+
+    def test_replaces_tuple_form_items(self) -> None:
+        # Draft-4 tuple validation: ``items: [...]`` — litellm recurses with
+        # ``.get`` and crashes on the list.
+        node = {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]}
+        assert sanitize_mcp_schema(node)["items"] == {}
+
+    def test_replaces_boolean_items(self) -> None:
+        node = {"type": "array", "items": True}
+        assert sanitize_mcp_schema(node)["items"] == {}
+
+    def test_keeps_dict_items_intact(self) -> None:
+        node = {"type": "array", "items": {"type": "string"}}
+        assert sanitize_mcp_schema(node) == node
+
+    def test_coerces_non_dict_property_value(self) -> None:
+        # ``"foo": true`` is a valid boolean JSON Schema ("anything"), but
+        # litellm's ``_format_object_parameters`` calls ``.get`` on it.
+        node = {"type": "object", "properties": {"foo": True, "bar": {"type": "string"}}}
+        cleaned = sanitize_mcp_schema(node)
+        assert cleaned["properties"]["foo"] == {}
+        assert cleaned["properties"]["bar"] == {"type": "string"}
+
     def test_returns_non_dict_unchanged(self) -> None:
         assert sanitize_mcp_schema("string") == "string"
         assert sanitize_mcp_schema(42) == 42
@@ -148,6 +184,39 @@ class TestMakeFunctionToolIntegration:
         assert envelope["function"]["description"] == "Update an agent"
         assert envelope["function"]["strict"] is False
         assert "type" not in envelope["function"]["parameters"]["properties"]["tools"]
+
+        count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
+        assert count > 0
+
+    def test_bare_array_schema_survives_token_counter(self) -> None:
+        # Red on the pre-fix sanitizer: litellm's ``_format_type`` raises
+        # ``KeyError: 'items'`` on a bare array (the #2294 incident class).
+        schema = {"type": "object", "properties": {"xs": {"type": "array"}}}
+        tool = Tool(name="t", description="d", inputSchema=schema)
+        envelope = make_function_tool("mcp__s__t", tool)
+
+        assert envelope["function"]["parameters"]["properties"]["xs"]["items"] == {}
+        count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
+        assert count > 0
+
+    def test_tuple_and_bool_items_survive_token_counter(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "pairs": {"type": "array", "items": [{"type": "string"}]},
+                "anything": {"type": "array", "items": True},
+            },
+        }
+        tool = Tool(name="t", description="d", inputSchema=schema)
+        envelope = make_function_tool("mcp__s__t", tool)
+
+        count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
+        assert count > 0
+
+    def test_non_dict_property_value_survives_token_counter(self) -> None:
+        schema = {"type": "object", "properties": {"foo": True}}
+        tool = Tool(name="t", description="d", inputSchema=schema)
+        envelope = make_function_tool("mcp__s__t", tool)
 
         count = token_counter(messages=[{"role": "user", "content": "hi"}], tools=[envelope])
         assert count > 0

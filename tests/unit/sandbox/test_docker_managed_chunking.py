@@ -21,15 +21,21 @@ async def test_list_managed_images_fails_closed_when_any_inspect_batch_fails(
     async def fake_run(argv: list[str], **kwargs: object) -> tuple[int, bytes, bytes]:
         if argv[1] == "images":
             return 0, ("\n".join(ids) + "\n").encode(), b""
-        batch = argv[5:]
+        batch = argv[3:]
         inspect_batches.append(batch)
         if len(inspect_batches) == 2:
             raise SandboxBackendError("timed out")
-        lines = [
-            f'{iid}\t\t1\t["tag-{iid}"]\t{json.dumps({"Labels": {"aios.session_id": iid}})}'
+        payload = [
+            {
+                "Id": iid,
+                "Parent": "",
+                "Size": 1,
+                "RepoTags": [f"tag-{iid}"],
+                "Config": {"Labels": {"aios.session_id": iid}},
+            }
             for iid in batch
         ]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, json.dumps(payload).encode(), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     with pytest.raises(SandboxBackendError, match="incomplete managed image enumeration"):
@@ -55,7 +61,7 @@ async def test_gc_does_not_reconcile_absence_from_failed_image_inspect_batch(
         inspect_calls += 1
         if inspect_calls == 2:
             raise SandboxBackendError("timed out")
-        batch = argv[5:]
+        batch = argv[3:]
         lines = [f'{iid}\t\t1\t["tag-{iid}"]\t{{"Labels": {{}}}}' for iid in batch]
         return 0, ("\n".join(lines) + "\n").encode(), b""
 
@@ -81,13 +87,29 @@ async def test_gc_does_not_reconcile_absence_from_failed_image_inspect_batch(
     reconcile.assert_not_awaited()
 
 
-def _managed_line(iid: str) -> str:
-    return f'{iid}\t\t1\t["tag-{iid}"]\t{json.dumps({"Labels": {}})}'
+def _managed_record(iid: str) -> dict[str, object]:
+    """One entry as ``docker image inspect`` really emits it.
+
+    ``Parent`` is present-but-empty here (the ordinary layered case). The
+    absent-key case — every ``docker import``/flattened image — has its own
+    test; it is what used to abort the template and kill the whole tick.
+    """
+    return {
+        "Id": iid,
+        "Parent": "",
+        "Size": 1,
+        "RepoTags": [f"tag-{iid}"],
+        "Config": {"Labels": {}},
+    }
+
+
+def _managed_payload(iids: list[str]) -> bytes:
+    return json.dumps([_managed_record(iid) for iid in iids]).encode()
 
 
 def _is_single_probe(argv: list[str]) -> bool:
     """The verified-negative probe: ``_inspect_image_fields``'s RootFS format."""
-    return argv[1:3] == ["image", "inspect"] and "RootFS" in argv[4]
+    return argv[1:3] == ["image", "inspect"] and "--format" in argv
 
 
 @pytest.mark.asyncio
@@ -109,8 +131,7 @@ async def test_list_managed_images_fails_closed_when_a_batch_silently_omits_a_li
         if _is_single_probe(argv):
             # The omitted image is alive and well.
             return 0, f"{argv[5]}\t1\t1\t{json.dumps({'Labels': {}})}\n".encode(), b""
-        lines = [_managed_line(iid) for iid in argv[5:] if iid != dropped]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, _managed_payload([i for i in argv[3:] if i != dropped]), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     with pytest.raises(SandboxBackendError, match="incomplete managed image enumeration"):
@@ -135,8 +156,8 @@ async def test_list_managed_images_omits_only_an_image_proved_absent(
             return 0, ("\n".join(ids) + "\n").encode(), b""
         if _is_single_probe(argv):
             return 1, b"", b"Error: No such image: " + argv[5].encode()
-        lines = [_managed_line(iid) for iid in argv[5:] if iid != vanished]
-        return 1, ("\n".join(lines) + "\n").encode(), b"Error: No such image: " + vanished.encode()
+        payload = _managed_payload([i for i in argv[3:] if i != vanished])
+        return 1, payload, b"Error: No such image: " + vanished.encode()
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     images = await DockerBackend().list_managed_images(instance_id="test")
@@ -159,8 +180,7 @@ async def test_gc_does_not_reconcile_absence_from_a_silently_truncated_listing(
             return 0, ("\n".join(ids) + "\n").encode(), b""
         if _is_single_probe(argv):
             return 0, f"{argv[5]}\t1\t1\t{json.dumps({'Labels': {}})}\n".encode(), b""
-        lines = [_managed_line(iid) for iid in argv[5:] if iid != dropped]
-        return 0, ("\n".join(lines) + "\n").encode(), b""
+        return 0, _managed_payload([i for i in argv[3:] if i != dropped]), b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     registry = SandboxRegistry(DockerBackend())

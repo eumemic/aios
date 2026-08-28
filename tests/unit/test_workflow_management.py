@@ -16,6 +16,7 @@ attenuation/depth behavior is covered by the integration tests.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -110,11 +111,23 @@ class TestWorkflowScriptContractDiscovery:
         description = WorkflowUpdate.model_json_schema()["properties"]["script"].get("description")
         _assert_script_contract_present(description)
 
-    def test_registered_create_workflow_description_contains_contract(self) -> None:
-        _assert_script_contract_present(registry.get("create_workflow").description)
+    # The registered (model-facing) tools deliberately do NOT inline the contract
+    # any more (#2294) — it rode along in every request at ~4KB per tool. They
+    # point at ``get_workflow_script_contract``, which serves it on demand; the
+    # HTTP/SDK schemas above are unchanged. See test_workflow_tool_schema_budget.
 
-    def test_registered_update_workflow_description_contains_contract(self) -> None:
-        _assert_script_contract_present(registry.get("update_workflow").description)
+    @pytest.mark.parametrize("name", ["create_workflow", "update_workflow"])
+    def test_registered_tool_defers_the_contract(self, name: str) -> None:
+        tool = registry.get(name)
+        script_field = tool.parameters_schema["properties"]["script"]
+        assert "get_workflow_script_contract" in script_field["description"]
+        assert "Injected capability API" not in tool.description
+        assert "Injected capability API" not in json.dumps(tool.parameters_schema)
+
+    async def test_contract_tool_serves_the_contract(self) -> None:
+        result = await invoke_builtin("ses_1", "get_workflow_script_contract", {})
+        assert isinstance(result, dict)
+        _assert_script_contract_present(result["contract"])
 
 
 class TestSchemaRejectsInjectedTrustedIds:

@@ -14,11 +14,18 @@ import pytest
 
 from aios.harness import runtime
 from aios.tools.invoke import ToolBail
+from aios.tools.registry import ToolResult
 from aios.tools.search_events import search_events_handler
 from tests.conftest import needs_docker
 from tests.e2e.harness import Harness, assistant
 
 pytestmark = pytest.mark.docker
+
+
+def _text(result: ToolResult) -> str:
+    """The handler's table text — plain-string ``ToolResult`` content (#2291)."""
+    assert isinstance(result.content, str)
+    return result.content
 
 
 @needs_docker
@@ -51,8 +58,8 @@ class TestSearchEvents:
             },
         )
 
-        assert "result" in result
-        assert "docker" in result["result"].lower()
+        assert isinstance(result, ToolResult) and result.is_error is False
+        assert "docker" in _text(result).lower()
 
     async def test_count_by_role(self, harness: Harness) -> None:
         """Aggregate query: count events by role."""
@@ -71,8 +78,8 @@ class TestSearchEvents:
             },
         )
 
-        assert "result" in result
-        text = result["result"]
+        assert isinstance(result, ToolResult) and result.is_error is False
+        text = _text(result)
         # Should have at least user and assistant rows
         assert "user" in text
         assert "assistant" in text
@@ -96,7 +103,7 @@ class TestSearchEvents:
                 "query": ("SELECT * FROM events_search WHERE content_text ILIKE '%kubernetes%'"),
             },
         )
-        assert result_a["result"] == "No results."
+        assert _text(result_a) == "No results."
 
         # Session B should NOT see "Docker"
         result_b = await search_events_handler(
@@ -105,7 +112,7 @@ class TestSearchEvents:
                 "query": ("SELECT * FROM events_search WHERE content_text ILIKE '%docker%'"),
             },
         )
-        assert result_b["result"] == "No results."
+        assert _text(result_b) == "No results."
 
     async def test_select_star(self, harness: Harness) -> None:
         """SELECT * returns all widened-view columns (migration 0022)."""
@@ -118,7 +125,7 @@ class TestSearchEvents:
             },
         )
 
-        text = result["result"]
+        text = _text(result)
         header = text.split("\n")[0]
         for col in (
             "id",
@@ -207,7 +214,7 @@ class TestSearchEvents:
             },
         )
 
-        assert result["result"] == "No results."
+        assert _text(result) == "No results."
 
     async def test_view_excludes_non_message_events(self, harness: Harness) -> None:
         """The events_search view must only expose message events.
@@ -235,7 +242,7 @@ class TestSearchEvents:
             {"query": "SELECT count(*) AS n FROM events_search"},
         )
 
-        text = result["result"]
+        text = _text(result)
         assert str(msg_count) in text, f"expected {msg_count} rows in view, got: {text}"
 
 
@@ -303,10 +310,10 @@ class TestPromotedColumns:
                 ),
             },
         )
-        assert "slack:CHANA" in result["result"]
-        assert "alice" in result["result"]
-        assert "hello on A" in result["result"]
-        assert "CHANB" not in result["result"]
+        assert "slack:CHANA" in _text(result)
+        assert "alice" in _text(result)
+        assert "hello on A" in _text(result)
+        assert "CHANB" not in _text(result)
 
     async def test_tool_name_column_for_assistant_and_tool_rows(self, harness: Harness) -> None:
         """Assistant turns with tool_calls promote the first name;
@@ -361,7 +368,7 @@ class TestPromotedColumns:
                 ),
             },
         )
-        text = result["result"]
+        text = _text(result)
         # Both the assistant row (first tool_call was 'bash') and the tool
         # row (name='bash') should match.
         assert text.count("bash") >= 2
@@ -373,7 +380,7 @@ class TestPromotedColumns:
             session_id,
             {"query": "SELECT 1 FROM events_search WHERE tool_name = 'read'"},
         )
-        assert result2["result"] == "No results."
+        assert _text(result2) == "No results."
 
     async def test_is_error_column_nullable_true_only(self, harness: Harness) -> None:
         """is_error is TRUE on failures, NULL on success — never FALSE."""
@@ -427,4 +434,4 @@ class TestPromotedColumns:
             session_id,
             {"query": "SELECT count(*) AS n FROM events_search WHERE is_error"},
         )
-        assert "1" in result["result"]
+        assert "1" in _text(result)
