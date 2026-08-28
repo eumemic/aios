@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Start an aios dev-review session for a GitHub pull request.
 
-Used by .github/workflows/eumemic-bot-review.yml. Mints nothing itself —
-the workflow hands in a short-lived eumemic-bot installation token as
-GH_TOKEN. This script looks up the live ``dev-review`` agent by name and
-creates a one-shot session that clones the PR head and asks the agent to
-post ``### Code review`` as the App.
+Used by .github/workflows/eumemic-bot-review.yml. The workflow hands in a
+short-lived eumemic-bot installation token as GH_TOKEN.
 
-Env (all required unless noted):
+Resolution order for the reviewer agent:
+  1. AGENT_ID if set
+  2. exact name match for AGENT_NAME (default: dev-review)
+  3. fail with the names visible to this API key (account-scoped)
+
+Env:
   AIOS_URL, AIOS_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, CLONE_URL
-  AGENT_NAME (default: dev-review)
+  AGENT_NAME (default: dev-review), AGENT_ID (optional)
 """
 from __future__ import annotations
 
@@ -53,17 +55,30 @@ def _request(method: str, url: str, api_key: str, body: dict | None = None) -> d
         _die(f"{method} {url} failed: {exc}")
 
 
-def lookup_agent(base: str, api_key: str, name: str) -> str:
-    url = f"{base}/v1/agents?name={urllib.parse.quote(name)}"
+def _list_agents(base: str, api_key: str, name: str | None = None) -> list[dict]:
+    q = {"limit": "50"}
+    if name:
+        q["name"] = name
+    url = f"{base}/v1/agents?{urllib.parse.urlencode(q)}"
     payload = _request("GET", url, api_key)
     rows = payload.get("data")
     if not isinstance(rows, list):
-        _die(f"GET agents?name={name} missing data: {json.dumps(payload)[:400]}")
-    exact = [r for r in rows if r.get("name") == name]
-    if len(exact) != 1:
-        ids = [r.get("id") for r in exact]
-        _die(f"expected one live agent named {name!r}, found {len(exact)} ({ids})")
-    return str(exact[0]["id"])
+        _die(f"GET /v1/agents missing data: {json.dumps(payload)[:400]}")
+    return rows
+
+
+def resolve_agent(base: str, api_key: str) -> str:
+    pinned = os.environ.get("AGENT_ID", "").strip()
+    if pinned:
+        return pinned
+    exact = [r for r in _list_agents(base, api_key, AGENT_NAME) if r.get("name") == AGENT_NAME]
+    if len(exact) == 1:
+        return str(exact[0]["id"])
+    visible = [f"{r.get('name')}:{r.get('id')}" for r in _list_agents(base, api_key)]
+    _die(
+        f"no live agent named {AGENT_NAME!r} on this API key's account "
+        f"(visible: {visible or 'none'}). Set AGENT_ID to a reviewer on this account."
+    )
 
 
 def main() -> None:
@@ -75,7 +90,7 @@ def main() -> None:
     head_sha = _env("HEAD_SHA")
     clone_url = _env("CLONE_URL")
 
-    agent_id = lookup_agent(base, api_key, AGENT_NAME)
+    agent_id = resolve_agent(base, api_key)
     prompt = (
         f"Review pull request {repo}#{pr_number} at {head_sha}. "
         f"The repository is cloned at /mnt/review. "
