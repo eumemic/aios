@@ -14,17 +14,12 @@ import json
 import time
 from typing import Protocol, get_args
 
-from aios_browser_driver.browser_protocol import (
-    BrowserError,
-    BrowserOp,
-    BrowserRequest,
-    BrowserResponse,
-)
+from aios_browser_driver.browser_protocol import BrowserOp, BrowserRequest, BrowserResponse
+from aios_browser_driver.errors import error_response, first_line
 
 # The driver self-reports before the exec wrapper's SIGKILL: keep the handler's
 # own deadline this far below the request's ``timeout_ms``.
 _DEADLINE_MARGIN_S = 2.0
-_ERROR_MESSAGE_MAX = 200
 
 _OPS: frozenset[str] = frozenset(get_args(BrowserOp))
 
@@ -39,15 +34,8 @@ class Host(Protocol):
     async def handle(self, request: BrowserRequest, *, deadline: float) -> BrowserResponse: ...
 
 
-def _short(exc: BaseException) -> str:
-    text = str(exc)
-    return text.splitlines()[0][:_ERROR_MESSAGE_MAX] if text else type(exc).__name__
-
-
 def _error(host: Host, code: str, message: str) -> BrowserResponse:
-    return BrowserResponse(
-        ok=False, boot=host.boot, epoch=host.epoch, error=BrowserError(code=code, message=message)
-    )
+    return error_response(host.boot, host.epoch, code, message)
 
 
 async def dispatch(raw: str, host: Host) -> str:
@@ -72,7 +60,7 @@ async def _dispatch(raw: str, host: Host) -> BrowserResponse:
     try:
         request = BrowserRequest.model_validate(doc)
     except ValueError as exc:  # pydantic ValidationError is a ValueError
-        return _error(host, "invalid_request", _short(exc))
+        return _error(host, "invalid_request", first_line(exc))
 
     delay = max(0.0, request.timeout_ms / 1000.0 - _DEADLINE_MARGIN_S)
     deadline = time.monotonic() + delay
@@ -84,4 +72,4 @@ async def _dispatch(raw: str, host: Host) -> BrowserResponse:
     except NotImplementedError:
         return _error(host, "unknown_op", f"{request.op} is not implemented by this driver build")
     except Exception as exc:  # a handler fault must degrade to an envelope, never crash
-        return _error(host, "internal", _short(exc))
+        return _error(host, "internal", first_line(exc))

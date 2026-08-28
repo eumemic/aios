@@ -63,7 +63,10 @@ no_implicit_optional = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers", "--strict-config"]
+# The browser lane (real Chromium via playwright) is opt-in: run it with
+# `pytest -m browser`. Deselected by default so the unit lane needs no
+# browsers installed.
+addopts = ["-ra", "--strict-markers", "--strict-config", "-m", "not browser"]
 markers = [
-    "browser: exercises a real Chromium via playwright; skipped unless browsers are installed",
+    "browser: exercises a real Chromium via playwright; run explicitly with -m browser",
 ]

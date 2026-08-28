@@ -228,8 +228,8 @@ class BrowserResponse(BaseModel):
     snapshot: str | None = None
     snapshot_truncated: bool = False
     duration_ms: int = 0
-    # Plane-relative path (e.g. "shots/....png") for ``screenshot`` and
-    # on-error captures; the worker resolves it against the plane dir.
+    # Plane-relative path (e.g. "shots/....png") from ``screenshot``; the
+    # worker resolves it against the plane dir.
     shot_path: str | None = None
     # True when the calling session's page had to be recreated because the
     # driver (re)booted since the page last existed — the per-call

@@ -11,8 +11,7 @@ Perception is text-first: every action returns a budgeted accessibility
 snapshot with ``[ref=eN]`` handles — the fast path for targeting — while the
 pointer arms also take viewport coordinates for surfaces the accessibility
 tree cannot express (canvas, sliders, maps, drag-and-drop). Screenshots are
-explicit (``browser_screenshot``) or attached by the driver on errors, never
-per-action.
+explicit (``browser_screenshot``), never per-action.
 
 Failure currency: driver action failures and transport faults surface as
 ``ToolBail`` — model-visible, self-correctable, and NEVER the calling
