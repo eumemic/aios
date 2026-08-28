@@ -50,9 +50,17 @@ from typing import Any
 import asyncpg
 import pytest
 
+from aios.tools.registry import ToolResult
 from aios.tools.search_events import _ALLOWED_RELATIONS
 from tests.conftest import needs_docker
 from tests.helpers.alembic import run_alembic
+
+
+def _text(result: ToolResult) -> str:
+    """The handler's table text — plain-string ``ToolResult`` content (#2291)."""
+    assert isinstance(result.content, str)
+    return result.content
+
 
 # ---------------------------------------------------------------------------
 # Seed: two tenants, two sessions. Session X carries the full menagerie —
@@ -1136,7 +1144,7 @@ def test_every_documented_example_executes_and_returns_rows(db_url: str) -> None
                 except Exception as exc:
                     failures.append((query, f"raised: {exc}"))
                     continue
-                if result["result"] == "No results.":
+                if _text(result) == "No results.":
                     failures.append((query, "returned no rows against the seeded fixture"))
         finally:
             runtime.pool = prev
