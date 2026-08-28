@@ -29,6 +29,7 @@ import pytest
 
 import aios.tools  # noqa: F401 - trigger built-in registration side effects
 from aios.harness.step_context import _inject_workflow_script_contract
+from aios.harness.tokens import approx_tokens
 from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT, WorkflowCreate
 from aios.tools.input import tool_input
 from aios.tools.invoke import ToolBail, prepare_builtin
@@ -94,6 +95,28 @@ def test_trusted_id_injection_still_refused(name: str) -> None:
     assert schema["additionalProperties"] is False
     with pytest.raises(ToolBail):
         prepare_builtin(name, {"creator_session_id": "sess_evil"})
+
+
+# ── every rendered schema must be countable by the real token counter ──────
+#
+# The byte budgets above measure ``json.dumps`` length; the loop unit tests
+# patch ``prelude_overhead_local`` to 0. Neither ever runs the REAL
+# ``litellm.token_counter`` over a rendered registry schema — which is exactly
+# how #2294's bare ``{"type": "array"}`` (no ``items``) shipped: litellm's
+# ``_format_type`` does ``props['items']`` unconditionally, so every step of
+# every workflow-capable agent raised ``KeyError: 'items'`` in production and
+# the fleet was rolled back. These tests close that gap: every registered
+# tool's rendered entry must survive the counter, individually and all at once.
+
+
+@pytest.mark.parametrize("name", registry.names())
+def test_every_registered_schema_is_countable(name: str) -> None:
+    assert approx_tokens([], tools=[openai_tool_entry(registry.get(name))]) > 0
+
+
+def test_whole_registry_is_countable_at_once() -> None:
+    tools = [openai_tool_entry(registry.get(name)) for name in registry.names()]
+    assert approx_tokens([], tools=tools) > 0
 
 
 # ── the on-demand half ─────────────────────────────────────────────────────

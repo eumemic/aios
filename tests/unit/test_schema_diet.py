@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aios.tools.schema_diet import slim_tool_schema
+from aios.tools.schema_diet import _strip_boilerplate, slim_tool_schema
 
 
 class _Nested(BaseModel):
@@ -43,8 +43,18 @@ def _slim(**kwargs: Any) -> dict[str, Any]:
 
 
 def test_opaque_field_collapses_to_a_bare_array() -> None:
+    """Opaque means ``items: {}`` — NEVER a bare ``{"type": "array"}``.
+
+    litellm's ``_format_type`` dereferences ``props['items']`` unconditionally
+    on ``type == "array"`` (``KeyError: 'items'`` on every step — the #2294
+    production incident), and OpenAI rejects array schemas without ``items``.
+    """
     slim = _slim()
-    assert slim["properties"]["servers"] == {"type": "array", "description": "Opaque."}
+    assert slim["properties"]["servers"] == {
+        "type": "array",
+        "items": {},
+        "description": "Opaque.",
+    }
 
 
 def test_collapsing_the_opaque_field_prunes_its_defs() -> None:
@@ -59,7 +69,23 @@ def test_nullable_opaque_field_keeps_its_null_arm() -> None:
     slim = slim_tool_schema(
         _Nullable.model_json_schema(), opaque_arrays={"servers": "Opaque."}, redescribe={}
     )
-    assert slim["properties"]["servers"]["anyOf"] == [{"type": "array"}, {"type": "null"}]
+    assert slim["properties"]["servers"]["anyOf"] == [
+        {"type": "array", "items": {}},
+        {"type": "null"},
+    ]
+
+
+def test_opaque_items_survive_boilerplate_stripping() -> None:
+    """``_strip_boilerplate`` must never re-drop the load-bearing ``items: {}``.
+
+    It strips ``title`` / ``default: null`` / ``additionalProperties: true``
+    only; this fence pins that an empty ``items`` schema is not mistaken for
+    boilerplate — by the stripper directly, and by the full pipeline.
+    """
+    node = {"type": "array", "items": {}, "description": "Opaque."}
+    _strip_boilerplate(node)
+    assert node["items"] == {}
+    assert _slim()["properties"]["servers"]["items"] == {}
 
 
 def test_redescribe_replaces_only_the_description() -> None:
@@ -145,6 +171,6 @@ def test_nested_properties_are_reached_through_a_ref() -> None:
         redescribe={"script": "Short."},
     )
     nested = slim["$defs"]["_Body"]["properties"]
-    assert nested["servers"] == {"type": "array", "description": "Opaque."}
+    assert nested["servers"] == {"type": "array", "items": {}, "description": "Opaque."}
     assert nested["script"]["description"] == "Short."
     assert "_Nested" not in slim["$defs"]

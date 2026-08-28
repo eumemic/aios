@@ -347,9 +347,11 @@ SCRIPT_FIELD_DESCRIPTION = (
     "Call `get_workflow_script_contract` for the authoring contract; `get_workflow` "
     "on an existing workflow for an example."
 )
+# Kept terse: the #2294 per-tool byte budget counts every character of these
+# three descriptions once per authoring tool. The example shows the
+# agent-config envelope shape, so it isn't named here.
 TOOLS_FIELD_DESCRIPTION = (
-    'Declared tool surface (agent-config envelope, e.g. [{"type": "bash"}]; a subset '
-    "of your own). Usually omitted."
+    'Declared tool surface (e.g. [{"type": "bash"}]; a subset of your own). Usually omitted.'
 )
 MCP_SERVERS_FIELD_DESCRIPTION = (
     "Declared MCP servers (agent-config envelope; a subset of your own). Usually omitted."

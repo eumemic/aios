@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Fix the #2294 schema-diet production incident: the dieted opaque arrays
+  rendered as bare `{"type": "array"}` with no `items`, and litellm's
+  `token_counter` → `_format_type` dereferences `props['items']`
+  unconditionally, so `prelude_overhead_local` raised `KeyError: 'items'` on
+  every step of every workflow-capable agent (the fleet was rolled back).
+  Opaque arrays now render as `{"type": "array", "items": {}}` — also required
+  for OpenAI provider validity. `sanitize_mcp_schema` closes the same defect
+  class for untrusted third-party MCP schemas (missing/tuple-form/boolean
+  `items`, non-dict property values), and a registry-wide regression fence runs
+  the real `token_counter` over every registered tool's rendered schema.
+
 - Restore the context window's history floor: `window_min` again bounds
   RETAINED HISTORY only, so the per-request prelude (system prompt + tool
   schemas + reserves) is subtracted from `window_max` alone. Subtracting it

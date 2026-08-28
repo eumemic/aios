@@ -161,10 +161,18 @@ def _opaque_array(prop: Any, description: str) -> dict[str, Any]:
     actually an array: collapsing a non-array to ``{"type": "array"}`` would be
     the one way this module could TIGHTEN the dispatch-time check, so a
     name-only match is not enough to fire.
+
+    ``items: {}`` (the "anything" schema) is load-bearing, not boilerplate —
+    do NOT re-drop it. litellm's ``token_counter`` → ``_format_type``
+    dereferences ``props['items']`` unconditionally on ``type == "array"``
+    (litellm 1.96.2, ``litellm_core_utils/token_counter.py:808``), so a bare
+    ``{"type": "array"}`` raises ``KeyError: 'items'`` on every step of every
+    agent holding the tool — the #2294 production incident. OpenAI providers
+    also reject array schemas without ``items`` ("items is required").
     """
     if isinstance(prop, dict) and not _is_array(prop):
         return prop
-    array: dict[str, Any] = {"type": "array"}
+    array: dict[str, Any] = {"type": "array", "items": {}}
     if _allows_null(prop):
         return {"anyOf": [array, {"type": "null"}], "description": description}
     return {**array, "description": description}
