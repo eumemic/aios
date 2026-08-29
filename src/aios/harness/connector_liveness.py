@@ -50,7 +50,7 @@ class TransportHealth:
 async def read_bound_connection_activity(
     pool: Any, thresholds: Mapping[str, float]
 ) -> list[BoundConnectionActivity]:
-    """Read every active connection with at least one active bound session."""
+    """Read every active connection, including bindings awaiting their first session."""
     rows = await pool.fetch(
         """
         WITH bound_sessions AS (
@@ -65,14 +65,14 @@ async def read_bound_connection_activity(
              WHERE c.archived_at IS NULL
             UNION ALL
             SELECT c.id, c.connector, c.metadata,
-                   s.id, s.created_at, cs.created_at
+                   s.id, s.created_at, b.created_at
               FROM connections c
               JOIN bindings b ON b.connection_id = c.id
                              AND b.archived_at IS NULL
                              AND b.mode = 'per_chat'
-              JOIN chat_sessions cs ON cs.connection_id = c.id
-                                   AND cs.created_at >= b.created_at
-              JOIN sessions s ON s.id = cs.session_id AND s.archived_at IS NULL
+              LEFT JOIN chat_sessions cs ON cs.connection_id = c.id
+                                        AND cs.created_at >= b.created_at
+              LEFT JOIN sessions s ON s.id = cs.session_id AND s.archived_at IS NULL
              WHERE c.archived_at IS NULL
         )
         SELECT bs.connection_id, bs.connector, bs.metadata,

@@ -82,7 +82,13 @@ async def test_detector_uses_current_binding_activity_from_production_reader() -
         "INSERT INTO bindings VALUES (?, ?, ?, ?, ?)",
         [
             ("conn_1", "per_chat", None, (now - timedelta(days=30)).isoformat(), now.isoformat()),
-            ("conn_1", "single_session", "session_current", (now - timedelta(days=10)).isoformat(), None),
+            (
+                "conn_1",
+                "single_session",
+                "session_current",
+                (now - timedelta(days=10)).isoformat(),
+                None,
+            ),
         ],
     )
     pool.db.execute(
@@ -111,6 +117,38 @@ async def test_detector_uses_current_binding_activity_from_production_reader() -
     assert findings[0]["connection_id"] == "conn_1"
     assert findings[0]["last_activity_at"] == current_activity.isoformat()
     assert findings[0]["silence_threshold_seconds"] == 604800
+    alarm.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_per_chat_binding_without_session_remains_observable() -> None:
+    """A never-contacted per-chat binding uses binding time as its silence baseline."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    bound_at = now - timedelta(days=9)
+    pool = _SQLitePool()
+    pool.db.execute(
+        "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+        ("conn_1", "whatsapp", json.dumps({"liveness_silence_threshold_seconds": 604800})),
+    )
+    pool.db.execute(
+        "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
+        ("conn_1", "per_chat", None, bound_at.isoformat()),
+    )
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 86400},
+        health_reader=_HealthReader({"whatsapp": TransportHealth(False, "unhealthy")}),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert len(findings) == 1
+    assert findings[0]["connection_id"] == "conn_1"
+    assert findings[0]["last_activity_at"] == bound_at.isoformat()
+    assert findings[0]["session_silent_seconds"] == 9 * 86400
     alarm.assert_called_once()
 
 
