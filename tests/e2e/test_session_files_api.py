@@ -124,3 +124,197 @@ class TestSessionFilesUpload:
             files={"file": ("x.bin", b"x", "application/octet-stream")},
         )
         assert r.status_code == 401, r.text
+
+
+class TestSessionFilesDownload:
+    """``GET /v1/sessions/<id>/files/<file_id>`` (#179): a thin authenticated
+    read of bytes that already exist on disk, not a CDN — no transformation,
+    same scoping contract as every other session-scoped read."""
+
+    async def test_download_roundtrips_uploaded_bytes(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        payload = b"\x89PNG\r\n\x1a\nfake-image-bytes"
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.png", payload, "image/png")},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        assert r.content == payload
+        assert r.headers["content-type"] == "image/png"
+        assert "inline" in r.headers["content-disposition"]
+
+    async def test_download_pins_nosniff(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        """``nosniff`` on every response, inline or not.
+
+        Defence-in-depth only — it stops the browser *guessing* a type, and
+        does nothing about a declared-and-honoured one.  The allowlist below
+        is the actual control.
+        """
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        [
+            "image/svg+xml",
+            "text/html",
+            "application/xhtml+xml",
+            "image/svg+xml; charset=utf-8",
+            "IMAGE/SVG+XML",
+        ],
+    )
+    async def test_script_bearing_declared_type_never_renders_in_origin(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The stored content-type is attacker-chosen; never echo it inline.
+
+        ``stage_upload`` takes ``upload.content_type`` verbatim from the
+        client's multipart header, so an uploader picks the type their own
+        bytes come back as.  ``image/svg+xml`` passes any ``image/*`` prefix
+        test and executes script in the serving origin — stored XSS.  Served
+        as an octet-stream attachment instead, so the bytes still download
+        but never render.  Parameterized over casing/parameter variants
+        because the stored value is unnormalized.
+        """
+        session_id = await _make_session(harness)
+        payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("payload.svg", payload, declared_type)},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        # Bytes are preserved — this is a rendering control, not a filter.
+        assert r.content == payload
+        assert r.headers["content-type"] == "application/octet-stream"
+        assert "svg" not in r.headers["content-type"]
+        assert "attachment" in r.headers["content-disposition"]
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    )
+    async def test_inline_allowlist_serves_untrusted_bytes_with_nosniff(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The diagonal case: allowlisted declared type, dangerous bytes.
+
+        Both halves of the upload are attacker-chosen and independent, so
+        there are two attack shapes, and the allowlist only closes one of
+        them. Here the declared type is genuinely on the allowlist, so the
+        response IS served inline under that type — by design; the endpoint
+        cannot afford to sniff bytes. The only thing preventing a browser
+        from sniffing HTML out of a response labelled `image/png` and
+        running it in this origin is `X-Content-Type-Options: nosniff`.
+
+        This is the regression guard for that header. Every other test in
+        this file passes with `nosniff` removed — the adversarial ones are
+        covered by the allowlist re-typing, and the benign ones never carry
+        dangerous bytes. Drop the header during a routine cleanup and only
+        this test fails, which is the whole reason it exists.
+        """
+        session_id = await _make_session(harness)
+        payload = b"<html><body><script>alert(document.domain)</script></body></html>"
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("innocent.png", payload, declared_type)},
+        )
+        assert upload.status_code == 201, upload.text
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        # Served inline under the allowlisted type — the allowlist has no
+        # opinion here, because the declared type is legitimate.
+        assert r.headers["content-type"] == declared_type
+        assert "inline" in r.headers["content-disposition"]
+        # ...so this header is the entire defence for this shape.
+        assert r.headers["x-content-type-options"] == "nosniff"
+        # Bytes untouched: a rendering control, never a filter.
+        assert r.content == payload
+
+    @pytest.mark.parametrize(
+        "declared_type",
+        ["image/png", "image/jpeg", "image/gif", "image/webp"],
+    )
+    async def test_inline_allowlist_still_renders(
+        self, http_client: httpx.AsyncClient, harness: Harness, declared_type: str
+    ) -> None:
+        """The raster types #179 needs keep rendering inline.
+
+        Guards against the fix over-reaching into the feature it protects:
+        if this set stops being served inline, composer thumbnails break.
+        """
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("photo.img", b"fake-raster-bytes", declared_type)},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/{file_id}")
+
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"] == declared_type
+        assert "inline" in r.headers["content-disposition"]
+
+    async def test_unknown_file_id_returns_404(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        r = await http_client.get(f"/v1/sessions/{session_id}/files/file_does_not_exist")
+        assert r.status_code == 404, r.text
+
+    async def test_file_from_another_session_returns_404(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_a = await _make_session(harness)
+        session_b = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_a}/files",
+            files={"file": ("x.bin", b"x", "application/octet-stream")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(f"/v1/sessions/{session_b}/files/{file_id}")
+
+        assert r.status_code == 404, r.text
+
+    async def test_missing_bearer_returns_401(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        session_id = await _make_session(harness)
+        upload = await http_client.post(
+            f"/v1/sessions/{session_id}/files",
+            files={"file": ("x.bin", b"x", "application/octet-stream")},
+        )
+        file_id = upload.json()["file_id"]
+
+        r = await http_client.get(
+            f"/v1/sessions/{session_id}/files/{file_id}",
+            headers={"Authorization": ""},
+        )
+        assert r.status_code == 401, r.text

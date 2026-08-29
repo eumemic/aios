@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Query, UploadFile, status
 from sse_starlette import EventSourceResponse
+from starlette.responses import FileResponse
 
 from aios.api.deps import (
     AccountIdDep,
@@ -85,6 +86,11 @@ from aios.services import github_repositories as github_repo_service
 from aios.services import sessions as service
 from aios.services import trace as trace_service
 from aios.services import triggers as triggers_service
+from aios.services.files import (
+    DEFAULT_CONTENT_TYPE,
+    INLINE_RENDERABLE_CONTENT_TYPES,
+    normalized_content_type,
+)
 
 log = get_logger("aios.api.routers.sessions")
 
@@ -688,6 +694,80 @@ async def upload_file(
         size=record.size,
         content_type=record.content_type,
         sha256=record.sha256,
+    )
+
+
+@router.get(
+    "/{session_id}/files/{file_id}",
+    operation_id="download_session_file",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {
+                "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            },
+            "description": "Raw file bytes with the stored content-type.",
+        }
+    },
+)
+async def download_file(
+    session_id: str,
+    file_id: str,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+) -> FileResponse:
+    """Stream back the bytes of a previously-uploaded file (#179).
+
+    Operator-authenticated, same scoping as every other session-scoped
+    read: 404s when the file doesn't exist, belongs to a different
+    session, or isn't owned by the caller's account — a wrong session or a
+    cross-account file id is indistinguishable from a missing file.  No
+    transformation or resizing — this streams ``host_path`` verbatim.
+
+    The *declared* content-type is not trusted on the way back out.
+    ``stage_upload`` stores ``upload.content_type`` verbatim from the
+    client's multipart header — no allowlist, no sniffing — so both the
+    declared type AND the bytes are attacker-chosen, independently.  That
+    is two distinct attack shapes, and **each is closed by a different
+    control here.  Neither control covers both; removing either reopens
+    one of them.**
+
+    1. *Dangerous declared type, any bytes.*  ``image/svg+xml`` passes an
+       ``image/*`` prefix test and executes script in the serving origin.
+       Closed by :data:`INLINE_RENDERABLE_CONTENT_TYPES`: only exact
+       members are served inline under their stored type, and everything
+       else is re-typed to ``application/octet-stream`` and served as an
+       attachment.  ``nosniff`` does nothing against this — the declared
+       type is honoured, not sniffed, and the attack lands anyway.
+
+    2. *Safe declared type, dangerous bytes.*  HTML with a ``<script>``
+       uploaded as ``image/png``.  That type IS allowlisted, so this is
+       served inline as ``image/png`` — by design, and correctly, because
+       the endpoint cannot afford to inspect bytes.  What stops it is
+       ``X-Content-Type-Options: nosniff``: without it a browser may sniff
+       HTML out of a response labelled ``image/png`` and render it as a
+       document in this origin.  With it the label is binding and the
+       response is an inert broken image.  **The allowlist does nothing
+       against this — the declared type is on it.**
+
+    So ``nosniff`` is not belt-and-braces; for shape 2 it is the only
+    control, which is why it is set unconditionally on both branches.
+    ``test_inline_allowlist_serves_untrusted_bytes_with_nosniff`` is the
+    regression guard: it is the test that fails if the header is dropped
+    during a cleanup, since every other test passes without it.
+
+    Both branches are a rendering control, never a filter: the bytes are
+    returned byte-identical either way.
+    """
+    async with pool.acquire() as conn:
+        record = await queries.get_file(conn, session_id, file_id, account_id=account_id)
+    inline = normalized_content_type(record.content_type) in INLINE_RENDERABLE_CONTENT_TYPES
+    return FileResponse(
+        record.host_path,
+        media_type=record.content_type if inline else DEFAULT_CONTENT_TYPE,
+        filename=record.filename,
+        content_disposition_type="inline" if inline else "attachment",
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 

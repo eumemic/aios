@@ -109,6 +109,10 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     ),
     # ── Multipart / long-poll ────────────────────────────────────────
     "upload_session_file": ("Multipart upload; file as a dedicated CLI issue if/when needed."),
+    "download_session_file": (
+        "Raw byte download (#179 image-serve slice for the jarbot client); "
+        "file as a dedicated CLI issue if/when needed, same as upload_session_file."
+    ),
     "wait_for_events_v1_sessions__session_id__wait_get": (
         "Long-poll endpoint; use `aios sessions stream` / `aios tail` instead."
     ),
