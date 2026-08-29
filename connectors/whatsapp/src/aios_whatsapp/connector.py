@@ -62,9 +62,8 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
             store_dir=store_dir,
         ) as daemon:
             self.state[connection_id] = _WhatsappConnectionState(phone=phone, daemon=daemon)
-            self.mark_transport_ready(connection_id)
             log.info(
-                "whatsapp.connection.ready",
+                "whatsapp.daemon.ready",
                 connection_id=connection_id,
                 phone=phone,
                 port=port,
@@ -86,11 +85,18 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                 )
                 raise
 
+    def _mark_transport_unready(self, connection_id: str) -> None:
+        """Revoke health while whatsmeow cannot receive for this connection."""
+        state = self._connections.get(connection_id)
+        if state is not None:
+            state.serve_status = "starting"
+
     async def _dispatch_notifications(self, connection_id: str, daemon: WhatsappDaemon) -> None:
         async for method, params in daemon.listener.notifications():
             if method == "message":
                 await self._handle_inbound_message(connection_id, params)
             elif method == "loggedOut":
+                self._mark_transport_unready(connection_id)
                 # Peer-side (or server-side) device-link revocation:
                 # the bot's account credentials are no longer valid.
                 # Subsequent whatsapp_send calls will fail at the
@@ -120,13 +126,20 @@ class WhatsappConnector(WhatsappManagementMixin, HttpConnector):
                     data=lifecycle_data or None,
                 )
             elif method == "connectionState":
-                # Diagnostic: ``connected`` / ``disconnected`` from
-                # whatsmeow's stream lifecycle.  Routine reconnect
-                # blips wouldn't surface anywhere otherwise.
+                # The daemon listener being reachable says nothing about the
+                # upstream whatsmeow stream.  Only its connected notification
+                # proves that this connection can currently receive.
+                transport_state = params.get("state")
+                if transport_state == "connected":
+                    self.mark_transport_ready(connection_id)
+                else:
+                    # Fail closed for disconnected and any future/unknown
+                    # non-connected lifecycle state.
+                    self._mark_transport_unready(connection_id)
                 log.info(
                     "whatsapp.connection.state",
                     connection_id=connection_id,
-                    state=params.get("state"),
+                    state=transport_state,
                 )
             else:
                 log.warning(
