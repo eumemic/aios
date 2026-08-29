@@ -55,7 +55,7 @@ from aios.models.workflows import (
 from aios.services import sessions as sessions_service
 from aios.services import workflows as wf_service
 from aios.tools.input import tool_input
-from aios.tools.registry import registry
+from aios.tools.registry import ToolResult, registry
 from aios.tools.schema_diet import slim_tool_schema
 
 # Heavy snapshot fields the model already sent (or doesn't need echoed back); trimmed
@@ -298,15 +298,24 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
 
 async def get_workflow_script_contract_handler(
     session_id: str, arguments: dict[str, Any]
-) -> dict[str, Any]:
+) -> ToolResult:
     """The on-demand half of the #2294 progressive disclosure.
 
     Pure constant read — no pool, no account, no session state. This is the
     surface the trimmed ``script`` field description points at, so the authoring
     manual stays genuinely reachable while costing nothing per request.
+
+    Plain-string ``ToolResult`` content, never ``{"contract": text}`` (the #2291
+    convention): ``_shape_tool_result`` passes str content through verbatim ONLY
+    for a ``ToolResult``, and every other return type — a bare ``str`` included —
+    falls to its ``json.dumps`` arm, which escapes all 53 newlines and collapses
+    the contract into a single unreadable line. That would be especially perverse
+    here: this document exists to be READ as formatted prose, with a code block.
+    It also keeps the contract spillable as a real multi-line file if it ever
+    outgrows ``tool_result_max_chars`` (#2292 lowers that to 16k).
     """
     tool_input(_NoArgs, arguments)
-    return {"contract": WORKFLOW_SCRIPT_CONTRACT}
+    return ToolResult(content=WORKFLOW_SCRIPT_CONTRACT)
 
 
 async def resume_gate_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:

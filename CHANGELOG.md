@@ -13,6 +13,7 @@
   `items`, non-dict property values), and a registry-wide regression fence runs
   the real `token_counter` over every registered tool's rendered schema.
 
+- `get_workflow_script_contract` now returns the authoring contract as a plain-text `ToolResult` instead of a `{"contract": …}` dict, so the ~4KB multi-line manual reaches the model as real prose rather than a JSON-escaped single line (#2294, per the #2291 convention).
 - Restore the context window's history floor: `window_min` again bounds
   RETAINED HISTORY only, so the per-request prelude (system prompt + tool
   schemas + reserves) is subtracted from `window_max` alone. Subtracting it
