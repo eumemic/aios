@@ -271,6 +271,57 @@ class TestVaultCredentialCRUD:
         payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
         assert payload == {"secret_value": "ghp_supersecret"}
 
+    async def test_create_ssh_key(self, pool: Any, crypto_box: Any) -> None:
+        account_id = "acc_test_stub"
+        from aios.db import queries
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="ssh-key-test", metadata={}, account_id=account_id
+        )
+        body = VaultCredentialCreate(
+            auth_type="ssh_key",
+            secret_name="PROD_DEPLOY_KEY",
+            private_key=SecretStr("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n"),
+            passphrase=SecretStr("pw"),
+            display_name="prod",
+        )
+        cred = await svc.create_vault_credential(
+            pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
+        )
+        assert cred.auth_type == "ssh_key"
+        assert cred.target_url is None
+        assert cred.allowed_hosts is None
+        assert cred.secret_name == "PROD_DEPLOY_KEY"
+
+        # Write-only: the key material survives only in the encrypted blob.
+        fetched = await svc.get_vault_credential(pool, vault.id, cred.id, account_id=account_id)
+        dumped = fetched.model_dump()
+        assert "private_key" not in dumped and "passphrase" not in dumped
+        async with pool.acquire() as conn:
+            _, blob = await queries.get_vault_credential_with_blob(
+                conn, vault.id, cred.id, account_id=account_id
+            )
+        payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+        assert payload == {
+            "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
+            "passphrase": "pw",
+        }
+
+    async def test_ssh_key_requires_private_key(self, pool: Any, crypto_box: Any) -> None:
+        account_id = "acc_test_stub"
+        from aios.errors import ValidationError
+        from aios.services import vaults as svc
+
+        vault = await svc.create_vault(
+            pool, display_name="ssh-req", metadata={}, account_id=account_id
+        )
+        body = VaultCredentialCreate(auth_type="ssh_key", secret_name="PROD_KEY")
+        with pytest.raises(ValidationError):
+            await svc.create_vault_credential(
+                pool, crypto_box, vault_id=vault.id, body=body, account_id=account_id
+            )
+
     async def test_environment_variable_requires_secret_value(
         self, pool: Any, crypto_box: Any
     ) -> None:

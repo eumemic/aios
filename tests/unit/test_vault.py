@@ -270,6 +270,29 @@ class TestExtractAuthPayload:
         with pytest.raises(ValidationError):
             _extract_auth_payload(body)
 
+    def test_ssh_key_private_key_and_passphrase(self) -> None:
+        body = VaultCredentialCreate(
+            auth_type="ssh_key",
+            secret_name="PROD_KEY",
+            private_key=SecretStr("PEM"),
+            passphrase=SecretStr("pw"),
+        )
+        payload = _extract_auth_payload(body)
+        # Both key fields land in the encrypted blob; secret_name is a plaintext
+        # column, not part of the payload.
+        assert payload == {"private_key": "PEM", "passphrase": "pw"}
+
+    def test_ssh_key_passphrase_optional(self) -> None:
+        body = VaultCredentialCreate(
+            auth_type="ssh_key", secret_name="PROD_KEY", private_key=SecretStr("PEM")
+        )
+        assert _extract_auth_payload(body) == {"private_key": "PEM"}
+
+    def test_ssh_key_requires_private_key(self) -> None:
+        body = VaultCredentialCreate(auth_type="ssh_key", secret_name="PROD_KEY")
+        with pytest.raises(ValidationError):
+            _extract_auth_payload(body)
+
     def test_custom_header_requires_header_name(self) -> None:
         body = VaultCredentialCreate(
             target_url="https://api.example.com",

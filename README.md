@@ -683,6 +683,7 @@ Vaults are named, tenant-scoped credential collections. Every secret is encrypte
 
 1. **Header credentials** (`bearer_header` / `oauth2_refresh` / `basic` / `custom_header`) are decrypted in the worker and rendered into outbound auth headers for MCP/HTTP calls, with automatic OAuth refresh.
 2. **`environment_variable` credentials** never enter the sandbox: only a deterministic opaque placeholder is materialized, and the per-session TLS-MITM egress proxy substring-swaps it for the real value in headers+body (never the URL) as traffic leaves the box.
+3. **`ssh_key` credentials** are worker-consumed by the `ssh` built-in tool: the private key is decrypted in the worker, held in memory only for the call, and used to run a command on a declared `ssh_servers` host (required host-key pin, connect-IP pinning, private-dial blocked by default) — the key never enters the sandbox or the model context.
 
 - **Separately-keyed deterministic egress CA** — `AIOS_EGRESS_CA_KEY` HKDF-derives the CA keypair (zero stored state; every worker derives the same key). It is **distinct from `AIOS_VAULT_KEY`**: vault-key holders can decrypt at-rest rows but cannot mint sandbox-trusted certs.
 - **Fail-closed SNI gate** — host scoping is enforced solely at leaf-mint time; the proxy re-resolves the SNI host, blocks SSRF/internal ranges, and pins the upstream IP (defeating DNS rebinding). No leaf for an off-allowlist or absent SNI host.
