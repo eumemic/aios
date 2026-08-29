@@ -62,54 +62,54 @@ def _mcp_cfg(name: str, *, perm: PermissionPolicy | None = None, **kw: object) -
 
 class TestBuiltinMeet:
     def test_permission_meet_takes_stricter(self) -> None:
-        declared = Surface([ToolSpec(type="bash", permission="always_ask")], [], [])
-        launcher = Surface([ToolSpec(type="bash", permission="always_allow")], [], [])
+        declared = Surface([ToolSpec(type="bash", permission="always_ask")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash", permission="always_allow")], [], [], [])
         out = att(declared, launcher)
         assert [t.permission for t in out.tools] == ["always_ask"]
         # declared narrows → it is a fixpoint → predicate admits it.
         assert out == canon(declared)
 
     def test_widening_permission_is_rejected_by_predicate(self) -> None:
-        declared = Surface([ToolSpec(type="bash", permission="always_allow")], [], [])
-        launcher = Surface([ToolSpec(type="bash", permission="always_ask")], [], [])
+        declared = Surface([ToolSpec(type="bash", permission="always_allow")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash", permission="always_ask")], [], [], [])
         out = att(declared, launcher)
         assert [t.permission for t in out.tools] == ["always_ask"]  # clamped down
         assert out != canon(declared)  # not a fixpoint → ForbiddenError at the author edge
         assert surface_diff(canon(declared), out) == {"tools": ["bash"]}
 
     def test_none_permission_resolves_to_always_allow(self) -> None:
-        declared = Surface([ToolSpec(type="bash")], [], [])
-        launcher = Surface([ToolSpec(type="bash")], [], [])
+        declared = Surface([ToolSpec(type="bash")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash")], [], [], [])
         assert canon(declared).tools[0].permission == "always_allow"
         assert att(declared, launcher) == canon(declared)
 
     def test_tool_absent_from_launcher_is_dropped(self) -> None:
-        declared = Surface([ToolSpec(type="bash"), ToolSpec(type="read")], [], [])
-        launcher = Surface([ToolSpec(type="bash")], [], [])
+        declared = Surface([ToolSpec(type="bash"), ToolSpec(type="read")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash")], [], [], [])
         out = att(declared, launcher)
         assert [t.type for t in out.tools] == ["bash"]
 
     def test_transport_glb_both_narrows_to_launcher(self) -> None:
-        declared = Surface([ToolSpec(type="bash", transport="both")], [], [])
-        launcher = Surface([ToolSpec(type="bash", transport="agent_tool")], [], [])
+        declared = Surface([ToolSpec(type="bash", transport="both")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash", transport="agent_tool")], [], [], [])
         assert att(declared, launcher).tools[0].transport == "agent_tool"
 
     def test_disjoint_transport_drops_the_tool(self) -> None:
-        declared = Surface([ToolSpec(type="bash", transport="cli")], [], [])
-        launcher = Surface([ToolSpec(type="bash", transport="agent_tool")], [], [])
+        declared = Surface([ToolSpec(type="bash", transport="cli")], [], [], [])
+        launcher = Surface([ToolSpec(type="bash", transport="agent_tool")], [], [], [])
         assert att(declared, launcher).tools == []
 
     def test_disabled_tool_is_pruned_both_sides(self) -> None:
-        declared = Surface([ToolSpec(type="bash", enabled=False)], [], [])
+        declared = Surface([ToolSpec(type="bash", enabled=False)], [], [], [])
         assert canon(declared).tools == []
         # A launcher-disabled tool grants nothing — declared can't enable it.
-        out = att(Surface([ToolSpec(type="bash")], [], []), declared)
+        out = att(Surface([ToolSpec(type="bash")], [], [], []), declared)
         assert out.tools == []
 
     def test_custom_tool_keyed_by_name(self) -> None:
         spec = dict(name="foo", description="d", input_schema={"type": "object"})
-        declared = Surface([ToolSpec(type="custom", **spec)], [], [])
-        launcher = Surface([ToolSpec(type="custom", **spec)], [], [])
+        declared = Surface([ToolSpec(type="custom", **spec)], [], [], [])
+        launcher = Surface([ToolSpec(type="custom", **spec)], [], [], [])
         out = att(declared, launcher)
         assert [t.name for t in out.tools] == ["foo"]
         assert out == canon(declared)
@@ -121,8 +121,8 @@ class TestBuiltinMeet:
 class TestServerSurvival:
     def test_mcp_server_survives_on_joint_name_url(self) -> None:
         srv = McpServerSpec(name="gh", url="https://gh/mcp")
-        declared = Surface([_toolset("gh")], [srv], [])
-        launcher = Surface([_toolset("gh")], [srv], [])
+        declared = Surface([_toolset("gh")], [srv], [], [])
+        launcher = Surface([_toolset("gh")], [srv], [], [])
         out = att(declared, launcher)
         assert [(s.name, s.url) for s in out.mcp_servers] == [("gh", "https://gh/mcp")]
         assert any(t.type == "mcp_toolset" for t in out.tools)
@@ -134,8 +134,9 @@ class TestServerSurvival:
             [_toolset("gh"), _toolset("other")],
             [McpServerSpec(name="gh", url=u1), McpServerSpec(name="other", url=u2)],
             [],
+            [],
         )
-        declared = Surface([_toolset("gh")], [McpServerSpec(name="gh", url=u2)], [])
+        declared = Surface([_toolset("gh")], [McpServerSpec(name="gh", url=u2)], [], [])
         out = att(declared, launcher)
         assert out.mcp_servers == []  # (gh, U2) is not a launcher key
         assert out.tools == []  # the toolset's server didn't survive
@@ -145,9 +146,9 @@ class TestServerSurvival:
         # Launcher carries headers; child declares the same (name, url) without them.
         l_srv = McpServerSpec(name="gh", url="https://gh/mcp", headers={"X-Toolsets": "issues"})
         d_srv = McpServerSpec(name="gh", url="https://gh/mcp")
-        out = att(Surface([], [d_srv], []), Surface([], [l_srv], []))
+        out = att(Surface([], [d_srv], [], []), Surface([], [l_srv], [], []))
         assert out.mcp_servers[0].headers == {"X-Toolsets": "issues"}  # launcher wins
-        assert out != canon(Surface([], [d_srv], []))  # child must declare it identically
+        assert out != canon(Surface([], [d_srv], [], []))  # child must declare it identically
 
     def test_mcp_vault_pin_is_launcher_verbatim(self) -> None:
         """#2233: ``vault_id`` is payload, not identity — it stays OUT of the
@@ -163,7 +164,7 @@ class TestServerSurvival:
             McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_child"),
             McpServerSpec(name="gh", url="https://gh/mcp"),
         ):
-            out = att(Surface([], [declared], []), Surface([], [l_srv], []))
+            out = att(Surface([], [declared], [], []), Surface([], [l_srv], [], []))
             assert out.mcp_servers[0].vault_id == "vlt_launcher"
 
     def test_author_edge_requires_an_inherited_pin_to_be_restated(self) -> None:
@@ -182,11 +183,11 @@ class TestServerSurvival:
         model can reach through ``create_agent``/``update_agent``.
         """
         launcher = Surface(
-            [], [McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1")], []
+            [], [McpServerSpec(name="gh", url="https://gh/mcp", vault_id="vlt_1")], [], []
         )
 
         def diff_for(declared_srv: McpServerSpec) -> dict[str, list[str]]:
-            declared = Surface([], [declared_srv], [])
+            declared = Surface([], [declared_srv], [], [])
             return surface_diff(canon(declared), att(declared, launcher))
 
         # Divergent pin — refused.
@@ -201,7 +202,7 @@ class TestServerSurvival:
 
         # Control: with no pins anywhere the field is inert, so adding it to the
         # model changes nothing for every surface authored before #2233.
-        unpinned = Surface([], [McpServerSpec(name="gh", url="https://gh/mcp")], [])
+        unpinned = Surface([], [McpServerSpec(name="gh", url="https://gh/mcp")], [], [])
         assert surface_diff(canon(unpinned), att(unpinned, unpinned)) == {}
 
     def test_http_routes_path_permission_ordering_parent_wins_frozen(self) -> None:
@@ -230,7 +231,7 @@ class TestServerSurvival:
                 )
             ],
         )
-        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
         # Both routes survive in launcher order with launcher permission/path/ordering;
         # the child declared no ``methods`` so nothing is narrowed → launcher-verbatim.
         assert out.http_servers[0].routes == l_routes
@@ -247,7 +248,7 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/repos/**", methods=["POST", "DELETE", "PUT"])],
         )
-        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
         # PUT is dropped (launcher lacks it); result sorted.
         assert out.http_servers[0].routes[0].methods == ["DELETE", "POST"]
 
@@ -261,7 +262,7 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/r/**", methods=["GET"])],
         )
-        out = att(Surface([], [], [d_get]), Surface([], [], [l_open]))
+        out = att(Surface([], [], [d_get], []), Surface([], [], [l_open], []))
         assert out.http_servers[0].routes[0].methods == ["GET"]  # meet(None, [GET]) == [GET]
 
         l_get = HttpServerSpec(
@@ -272,10 +273,10 @@ class TestServerSurvival:
         d_open = HttpServerSpec(
             name="api", base_url="https://api", routes=[HttpRouteSpec(path_pattern="/r/**")]
         )
-        out2 = att(Surface([], [], [d_open]), Surface([], [], [l_get]))
+        out2 = att(Surface([], [], [d_open], []), Surface([], [], [l_get], []))
         assert out2.http_servers[0].routes[0].methods == ["GET"]  # meet([GET], None) == [GET]
 
-        out3 = att(Surface([], [], [d_open]), Surface([], [], [l_open]))
+        out3 = att(Surface([], [], [d_open], []), Surface([], [], [l_open], []))
         assert out3.http_servers[0].routes[0].methods is None  # meet(None, None) == None
 
     def test_http_route_method_meet_empty_is_deny_all_not_dropped(self) -> None:
@@ -291,7 +292,7 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST"])],
         )
-        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
         assert out.http_servers[0].routes[0].methods == []
 
     def test_http_route_child_undeclared_path_keeps_launcher_methods(self) -> None:
@@ -310,7 +311,7 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/a", methods=["GET"])],
         )
-        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
         routes = out.http_servers[0].routes
         assert [r.path_pattern for r in routes] == ["/a", "/b"]  # launcher order, both kept
         assert routes[0].methods == ["GET"]  # /a narrowed
@@ -322,7 +323,7 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST", "GET", "GET"])],
         )
-        out = canon(Surface([], [], [srv]))
+        out = canon(Surface([], [], [srv], []))
         assert out.http_servers[0].routes[0].methods == ["GET", "POST"]  # sorted, deduped
 
     def test_http_route_meet_is_canon_fixpoint(self) -> None:
@@ -337,8 +338,8 @@ class TestServerSurvival:
             base_url="https://api",
             routes=[HttpRouteSpec(path_pattern="/r/**", methods=["POST"])],
         )
-        lau = Surface([], [], [l_srv])
-        dec = Surface([], [], [d_srv])
+        lau = Surface([], [], [l_srv], [])
+        dec = Surface([], [], [d_srv], [])
         assert att(lau, lau) == canon(lau)
         once = att(dec, lau)
         assert att(once, lau) == once
@@ -359,7 +360,7 @@ class TestServerSurvival:
                 HttpRouteSpec(path_pattern="/x", methods=["POST"]),
             ],
         )
-        x = Surface([], [], [srv])
+        x = Surface([], [], [srv], [])
         out = att(x, x)
         # Each route keeps its own verb — the POST route is NOT silently denied.
         assert [r.methods for r in out.http_servers[0].routes] == [["GET"], ["POST"]]
@@ -383,12 +384,12 @@ class TestServerSurvival:
                 HttpRouteSpec(path_pattern="/x", methods=["POST"]),
             ],
         )
-        out = att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
         assert out.http_servers[0].routes[0].methods == ["GET", "POST"]
 
     def test_http_server_absent_is_dropped(self) -> None:
         d_srv = HttpServerSpec(name="api", base_url="https://api")
-        out = att(Surface([], [], [d_srv]), Surface([], [], []))
+        out = att(Surface([], [], [d_srv], []), Surface([], [], [], []))
         assert out.http_servers == []
 
 
@@ -416,25 +417,26 @@ class TestSurfaceDiffHttpIdentity:
                         ],
                     )
                 ],
+                [],
             )
         )
         # Same (name, base_url) identity, but routes diverge (here: empty).
         actual = canon(
-            Surface([], [], [HttpServerSpec(name="api", base_url="https://api", routes=[])])
+            Surface([], [], [HttpServerSpec(name="api", base_url="https://api", routes=[])], [])
         )
         assert surface_diff(expected, actual) == {}
 
     def test_surface_diff_http_flags_absent_base_url(self) -> None:
-        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")]))
-        actual = canon(Surface([], [], []))
+        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")], []))
+        actual = canon(Surface([], [], [], []))
         assert surface_diff(expected, actual) == {"http_servers": ["api"]}
 
     def test_surface_diff_http_flags_renamed_server_same_base_url(self) -> None:
         # #953 legibility nicety: a declared name that diverges from the agent's at the
         # SAME base_url reads as "name mismatch at <base_url>", not bare among absent
         # grants — distinguishing "named it wrong" from "the agent has no such grant".
-        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")]))
-        actual = canon(Surface([], [], [HttpServerSpec(name="api2", base_url="https://api")]))
+        expected = canon(Surface([], [], [HttpServerSpec(name="api", base_url="https://api")], []))
+        actual = canon(Surface([], [], [HttpServerSpec(name="api2", base_url="https://api")], []))
         assert surface_diff(expected, actual) == {"http_servers": ["name mismatch at https://api"]}
 
 
@@ -444,12 +446,12 @@ class TestSurfaceDiffHttpIdentity:
 class TestToolsetNormalForm:
     def test_dangling_toolset_is_pruned(self) -> None:
         # No matching McpServerSpec → no discovery → drop.
-        declared = Surface([_toolset("ghost")], [], [])
+        declared = Surface([_toolset("ghost")], [], [], [])
         assert canon(declared).tools == []
 
     def test_default_config_frozen_concrete(self) -> None:
         srv = McpServerSpec(name="s", url="https://s")
-        out = canon(Surface([_toolset("s")], [srv], []), dmp="always_allow")
+        out = canon(Surface([_toolset("s")], [srv], [], []), dmp="always_allow")
         ts = out.tools[0]
         assert ts.default_config is not None
         assert ts.default_config.permission_policy == McpPermissionPolicy(type="always_allow")
@@ -467,7 +469,7 @@ class TestToolsetNormalForm:
             ),
             configs=[_mcp_cfg("danger")],  # permission_policy=None
         )
-        out = canon(Surface([ts], [srv], []), dmp="always_ask")
+        out = canon(Surface([ts], [srv], [], []), dmp="always_ask")
         assert (
             resolve_mcp_permission("mcp__s__danger", out.tools) == "always_ask"
         )  # operator default
@@ -480,18 +482,18 @@ class TestToolsetNormalForm:
         # always_allow; child declares the toolset bare → the meet must PIN delete_repo.
         srv = McpServerSpec(name="s", url="https://s")
         launcher = Surface(
-            [_toolset("s", configs=[_mcp_cfg("delete_repo", perm="always_ask")])], [srv], []
+            [_toolset("s", configs=[_mcp_cfg("delete_repo", perm="always_ask")])], [srv], [], []
         )
-        declared = Surface([_toolset("s")], [srv], [])
+        declared = Surface([_toolset("s")], [srv], [], [])
         out = att(declared, launcher, dmp="always_allow")
         assert resolve_mcp_permission("mcp__s__delete_repo", out.tools) == "always_ask"
         assert resolve_mcp_permission("mcp__s__read_repo", out.tools) == "always_allow"
 
     def test_per_name_transport_conflict_disables(self) -> None:
         srv = McpServerSpec(name="s", url="https://s")
-        launcher = Surface([_toolset("s", configs=[_mcp_cfg("x", transport="cli")])], [srv], [])
+        launcher = Surface([_toolset("s", configs=[_mcp_cfg("x", transport="cli")])], [srv], [], [])
         declared = Surface(
-            [_toolset("s", configs=[_mcp_cfg("x", transport="agent_tool")])], [srv], []
+            [_toolset("s", configs=[_mcp_cfg("x", transport="agent_tool")])], [srv], [], []
         )
         out = att(declared, launcher)
         assert resolve_mcp_enabled("mcp__s__x", out.tools) is False  # disjoint transport → disabled
@@ -502,7 +504,7 @@ class TestToolsetNormalForm:
         # collapse to one bottom, so their dead fields don't fail the predicate.
         srv = McpServerSpec(name="s", url="https://s")
         launcher = Surface(
-            [_toolset("s", default_config=McpToolsetConfig(transport="cli"))], [srv], []
+            [_toolset("s", default_config=McpToolsetConfig(transport="cli"))], [srv], [], []
         )
         declared = Surface(
             [
@@ -513,6 +515,7 @@ class TestToolsetNormalForm:
                 )
             ],
             [srv],
+            [],
             [],
         )
         assert att(declared, launcher) == canon(declared)  # fixpoint → author edge admits
@@ -531,6 +534,7 @@ class TestToolsetNormalForm:
             ],
             [srv],
             [],
+            [],
         )
         declared = Surface(
             [
@@ -542,6 +546,7 @@ class TestToolsetNormalForm:
                 )
             ],
             [srv],
+            [],
             [],
         )
         out = att(declared, launcher)
@@ -575,9 +580,11 @@ def _gnarly_surfaces() -> list[Surface]:
         ],
     )
     return [
-        Surface([], [], []),
-        Surface([], [], [http_dup]),
-        Surface([ToolSpec(type="bash"), ToolSpec(type="read", permission="always_ask")], [], []),
+        Surface([], [], [], []),
+        Surface([], [], [http_dup], []),
+        Surface(
+            [ToolSpec(type="bash"), ToolSpec(type="read", permission="always_ask")], [], [], []
+        ),
         Surface(
             [
                 _toolset(
@@ -590,6 +597,7 @@ def _gnarly_surfaces() -> list[Surface]:
             ],
             [s1, s2],
             [http],
+            [],
         ),
         # Disabled entries with *divergent* dead fields — the case that broke the
         # normal-form contract before disabled triples were collapsed to one bottom.
@@ -606,6 +614,7 @@ def _gnarly_surfaces() -> list[Surface]:
                 _toolset("s2", configs=[_mcp_cfg("x", enabled=False, transport="agent_tool")]),
             ],
             [s1, s2],
+            [],
             [],
         ),
     ]
@@ -666,8 +675,8 @@ def test_declared_side_absorption_is_false_by_design() -> None:
         name="api", base_url="https://api", routes=[HttpRouteSpec(path_pattern="/only-on-launcher")]
     )
     d_srv = HttpServerSpec(name="api", base_url="https://api", routes=[])
-    ln = Surface([], [], [l_srv])
-    d = Surface([], [], [d_srv])
+    ln = Surface([], [], [l_srv], [])
+    d = Surface([], [], [d_srv], [])
     out = att(d, ln)
     assert out.http_servers[0].routes != []  # launcher-verbatim route survived
     assert att(out, d) != out  # meeting again against `d` alone drops it

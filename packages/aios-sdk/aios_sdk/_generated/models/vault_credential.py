@@ -22,8 +22,10 @@ T = TypeVar("T", bound="VaultCredential")
 class VaultCredential:
     """Read view of a vault credential. Secrets are never returned.
 
-    ``target_url`` is null for ``environment_variable`` credentials;
-    ``secret_name``/``allowed_hosts`` are null for every other kind.
+    ``target_url`` is null for ``environment_variable`` and ``ssh_key``
+    credentials, which are ``secret_name``-keyed instead. ``allowed_hosts`` is
+    populated only for ``environment_variable``; it is null for ``ssh_key`` and
+    every ``target_url``-keyed kind.
 
         Attributes:
             id (str):

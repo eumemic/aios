@@ -184,6 +184,7 @@ def mock_step_dependencies() -> Any:
         tools=[],
         mcp_servers=[],
         http_servers=[],
+        ssh_servers=[],
         skills=[],
         system="sys",
         litellm_extra={},

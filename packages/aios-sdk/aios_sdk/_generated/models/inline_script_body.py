@@ -16,6 +16,7 @@ if TYPE_CHECKING:
         InlineScriptBodyOutputSchemaType0,
     )
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
 
 
@@ -101,6 +102,7 @@ class InlineScriptBody:
             tools (list[ToolSpec] | Unset):
             mcp_servers (list[McpServerSpec] | Unset):
             http_servers (list[HttpServerSpec | str] | Unset):
+            ssh_servers (list[SshServerSpec | str] | Unset):
     """
 
     script: str
@@ -109,6 +111,7 @@ class InlineScriptBody:
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec | str] | Unset = UNSET
+    ssh_servers: list[SshServerSpec | str] | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.http_server_spec import HttpServerSpec
@@ -118,6 +121,7 @@ class InlineScriptBody:
         from ..models.inline_script_body_output_schema_type_0 import (
             InlineScriptBodyOutputSchemaType0,
         )
+        from ..models.ssh_server_spec import SshServerSpec
 
         script = self.script
 
@@ -162,6 +166,17 @@ class InlineScriptBody:
                     http_servers_item = http_servers_item_data
                 http_servers.append(http_servers_item)
 
+        ssh_servers: list[dict[str, Any] | str] | Unset = UNSET
+        if not isinstance(self.ssh_servers, Unset):
+            ssh_servers = []
+            for ssh_servers_item_data in self.ssh_servers:
+                ssh_servers_item: dict[str, Any] | str
+                if isinstance(ssh_servers_item_data, SshServerSpec):
+                    ssh_servers_item = ssh_servers_item_data.to_dict()
+                else:
+                    ssh_servers_item = ssh_servers_item_data
+                ssh_servers.append(ssh_servers_item)
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -179,6 +194,8 @@ class InlineScriptBody:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
 
         return field_dict
 
@@ -192,6 +209,7 @@ class InlineScriptBody:
             InlineScriptBodyOutputSchemaType0,
         )
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
@@ -274,6 +292,27 @@ class InlineScriptBody:
 
                 http_servers.append(http_servers_item)
 
+        _ssh_servers = d.pop("ssh_servers", UNSET)
+        ssh_servers: list[SshServerSpec | str] | Unset = UNSET
+        if _ssh_servers is not UNSET:
+            ssh_servers = []
+            for ssh_servers_item_data in _ssh_servers:
+
+                def _parse_ssh_servers_item(data: object) -> SshServerSpec | str:
+                    try:
+                        if not isinstance(data, dict):
+                            raise TypeError()
+                        ssh_servers_item_type_1 = SshServerSpec.from_dict(data)
+
+                        return ssh_servers_item_type_1
+                    except (TypeError, ValueError, AttributeError, KeyError):
+                        pass
+                    return cast(SshServerSpec | str, data)
+
+                ssh_servers_item = _parse_ssh_servers_item(ssh_servers_item_data)
+
+                ssh_servers.append(ssh_servers_item)
+
         inline_script_body = cls(
             script=script,
             input_schema=input_schema,
@@ -281,6 +320,7 @@ class InlineScriptBody:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
         )
 
         return inline_script_body

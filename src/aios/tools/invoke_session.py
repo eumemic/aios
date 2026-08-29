@@ -428,6 +428,7 @@ async def call_workflow_handler(
             tools=args.inline.tools,
             mcp_servers=args.inline.mcp_servers,
             http_servers=args.inline.http_servers,
+            ssh_servers=args.inline.ssh_servers,
         )
         if args.inline is not None
         else None

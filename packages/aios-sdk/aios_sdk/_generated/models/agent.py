@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..models.agent_skill_ref import AgentSkillRef
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
 
 
@@ -45,6 +46,7 @@ class Agent:
         updated_at (datetime.datetime):
         skills (list[AgentSkillRef] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
+        ssh_servers (list[SshServerSpec] | Unset):
         litellm_extra (AgentLitellmExtra | Unset):
         preempt_policy (AgentPreemptPolicy | Unset):  Default: AgentPreemptPolicy.WAIT.
         output_style (AgentOutputStyle | Unset):  Default: AgentOutputStyle.DEFAULT.
@@ -67,6 +69,7 @@ class Agent:
     updated_at: datetime.datetime
     skills: list[AgentSkillRef] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
+    ssh_servers: list[SshServerSpec] | Unset = UNSET
     litellm_extra: AgentLitellmExtra | Unset = UNSET
     preempt_policy: AgentPreemptPolicy | Unset = AgentPreemptPolicy.WAIT
     output_style: AgentOutputStyle | Unset = AgentOutputStyle.DEFAULT
@@ -124,6 +127,13 @@ class Agent:
                 http_servers_item = http_servers_item_data.to_dict()
                 http_servers.append(http_servers_item)
 
+        ssh_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.ssh_servers, Unset):
+            ssh_servers = []
+            for ssh_servers_item_data in self.ssh_servers:
+                ssh_servers_item = ssh_servers_item_data.to_dict()
+                ssh_servers.append(ssh_servers_item)
+
         litellm_extra: dict[str, Any] | Unset = UNSET
         if not isinstance(self.litellm_extra, Unset):
             litellm_extra = self.litellm_extra.to_dict()
@@ -175,6 +185,8 @@ class Agent:
             field_dict["skills"] = skills
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
         if litellm_extra is not UNSET:
             field_dict["litellm_extra"] = litellm_extra
         if preempt_policy is not UNSET:
@@ -196,6 +208,7 @@ class Agent:
         from ..models.agent_skill_ref import AgentSkillRef
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
@@ -257,6 +270,15 @@ class Agent:
                 http_servers_item = HttpServerSpec.from_dict(http_servers_item_data)
 
                 http_servers.append(http_servers_item)
+
+        _ssh_servers = d.pop("ssh_servers", UNSET)
+        ssh_servers: list[SshServerSpec] | Unset = UNSET
+        if _ssh_servers is not UNSET:
+            ssh_servers = []
+            for ssh_servers_item_data in _ssh_servers:
+                ssh_servers_item = SshServerSpec.from_dict(ssh_servers_item_data)
+
+                ssh_servers.append(ssh_servers_item)
 
         _litellm_extra = d.pop("litellm_extra", UNSET)
         litellm_extra: AgentLitellmExtra | Unset
@@ -329,6 +351,7 @@ class Agent:
             updated_at=updated_at,
             skills=skills,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
             litellm_extra=litellm_extra,
             preempt_policy=preempt_policy,
             output_style=output_style,

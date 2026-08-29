@@ -48,7 +48,13 @@ from aios.ids import (
 )
 from aios.logging import get_logger
 from aios.models.accounting import UsageCounters, UsageNodeRef
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
+from aios.models.agents import (
+    HttpServerSpec,
+    McpServerSpec,
+    SshServerSpec,
+    ToolSpec,
+    load_tool_specs,
+)
 from aios.models.attenuation import Surface
 from aios.models.sessions import (
     Err,
@@ -292,11 +298,11 @@ async def insert_session(
                 workspace_volume_path, env,
                 focal_channel, focal_locked, account_id, archive_when_idle,
                 outbound_suppression, created_by_type, created_by_ref,
-                tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
+                tools, mcp_servers, http_servers, ssh_servers, surface_frozen, litellm_extra,
                 creator_session_id, token_baseline_v
             )
             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15,
-                    $16::jsonb, $17::jsonb, $18::jsonb, $19, $20::jsonb, $21, $22)
+                    $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb, $20, $21::jsonb, $22, $23)
             RETURNING *
             """,
             new_id,
@@ -320,6 +326,9 @@ async def insert_session(
             if frozen_surface
             else None,
             json.dumps([item.model_dump() for item in frozen_surface.http_servers])
+            if frozen_surface
+            else None,
+            json.dumps([item.model_dump() for item in frozen_surface.ssh_servers])
             if frozen_surface
             else None,
             frozen_surface is not None,
@@ -352,6 +361,7 @@ async def insert_child_session(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
+    ssh_servers: list[SshServerSpec],
     litellm_extra: dict[str, Any] | None = None,
     workspace_path: str | None = None,
     archive_when_idle: bool = True,
@@ -383,12 +393,12 @@ async def insert_child_session(
                 id, agent_id, environment_id, agent_version, model, title, metadata,
                 workspace_volume_path, env, focal_channel, focal_locked,
                 account_id, parent_run_id, origin, archive_when_idle,
-                tools, mcp_servers, http_servers, surface_frozen, litellm_extra,
+                tools, mcp_servers, http_servers, ssh_servers, surface_frozen, litellm_extra,
                 tools_vocab_epoch, creator_run_id, token_baseline_v
             )
             VALUES ($1, $2, $3, $4, $5, NULL, '{}'::jsonb, $6, '{}'::jsonb,
                     NULL, FALSE, $7, $8, 'background', $9,
-                    $10::jsonb, $11::jsonb, $12::jsonb, TRUE, $13::jsonb, $14, $8, $15)
+                    $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, TRUE, $14::jsonb, $15, $8, $16)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -404,6 +414,7 @@ async def insert_child_session(
             json.dumps([t.model_dump() for t in tools]),
             json.dumps([s.model_dump() for s in mcp_servers]),
             json.dumps([s.model_dump() for s in http_servers]),
+            json.dumps([s.model_dump() for s in ssh_servers]),
             json.dumps(litellm_extra or {}),
             TOOLS_VOCAB_EPOCH,
             TOKEN_BASELINE_CURRENT,
@@ -440,13 +451,15 @@ async def freeze_session_surface(
     """Pin a newly spawned session's authority surface and model identity."""
     result = await conn.execute(
         "UPDATE sessions SET tools = $3::jsonb, mcp_servers = $4::jsonb, "
-        "http_servers = $5::jsonb, litellm_extra = $6::jsonb, surface_frozen = TRUE "
+        "http_servers = $5::jsonb, ssh_servers = $6::jsonb, litellm_extra = $7::jsonb, "
+        "surface_frozen = TRUE "
         "WHERE id = $1 AND account_id = $2",
         session_id,
         account_id,
         json.dumps([item.model_dump() for item in surface.tools]),
         json.dumps([item.model_dump() for item in surface.mcp_servers]),
         json.dumps([item.model_dump() for item in surface.http_servers]),
+        json.dumps([item.model_dump() for item in surface.ssh_servers]),
         json.dumps(litellm_extra or {}),
     )
     if result == "UPDATE 0":
@@ -555,7 +568,7 @@ async def get_session_frozen_surface(
     must fail closed on). Raises ``NotFoundError`` if the session is absent.
     """
     row = await conn.fetchrow(
-        "SELECT tools, mcp_servers, http_servers, surface_frozen "
+        "SELECT tools, mcp_servers, http_servers, ssh_servers, surface_frozen "
         "FROM sessions WHERE id = $1 AND account_id = $2",
         session_id,
         account_id,
@@ -568,6 +581,10 @@ async def get_session_frozen_surface(
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
+        # ``ssh_servers`` is nullable (0079 frozen-surface pattern) and NULL on
+        # rows frozen before this column existed — those children hold no ssh
+        # grant, so read NULL as the empty list (fail-closed-correct).
+        ssh_servers=[SshServerSpec.model_validate(s) for s in (row["ssh_servers"] or [])],
     )
 
 

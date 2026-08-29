@@ -5565,7 +5565,7 @@
           "vaults"
         ],
         "summary": "Create Credential",
-        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``oauth2_refresh`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``bearer_header`` requires ``token``; ``basic`` requires ``username``\nand ``password``; ``custom_header`` requires ``header_name`` and\n``header_value``. ``environment_variable`` is the sandbox-materialized\nkind: it requires ``secret_name`` (a POSIX env var name) + a non-empty\n``allowed_hosts`` egress scope and ``secret_value``, and carries no\n``target_url``. Caps at 20 active credentials per vault. ``target_url``,\n``secret_name``, and ``auth_type`` are immutable after creation \u2014 archive\nand recreate to change them.",
+        "description": "Add a credential to a vault. Secrets are encrypted at rest via the CryptoBox.\n\nValidates required fields per ``auth_type``: ``oauth2_refresh`` requires\n``access_token`` (plus the refresh fields needed for rotation);\n``bearer_header`` requires ``token``; ``basic`` requires ``username``\nand ``password``; ``custom_header`` requires ``header_name`` and\n``header_value``. ``environment_variable`` is the sandbox-materialized\nkind: it requires ``secret_name`` (a POSIX env var name) + a non-empty\n``allowed_hosts`` egress scope and ``secret_value``, and carries no\n``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the\n``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``\n(a PEM private key; optional ``passphrase``), carries no ``target_url`` or\n``allowed_hosts``, and its key is loaded only in worker memory at call time\n\u2014 never entering the sandbox. Caps at 20 active credentials per vault.\n``target_url``, ``secret_name``, and ``auth_type`` are immutable after\ncreation \u2014 archive and recreate to change them.",
         "operationId": "create_vault_credential",
         "parameters": [
           {
@@ -5929,7 +5929,7 @@
           "vaults"
         ],
         "summary": "Update Credential",
-        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing\nan environment-variable credential's ``secret_name`` or ``allowed_hosts``\natomically archives the old row and creates a replacement with a new id,\ncarrying its encrypted secret unless ``secret_value`` is supplied. The new\nid changes sandbox placeholders, so affected sandboxes recycle on their next\nprovision. To rotate an OAuth refresh token, send only the new\n``refresh_token`` (and optional ``access_token`` / ``expires_at``); other\nauth fields stay intact.",
+        "description": "Update a credential's metadata and/or rotate its auth secrets.\n\nOmitted secret fields are preserved (decrypt-merge-encrypt cycle on the\nencrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing\nan environment-variable credential's ``secret_name`` or ``allowed_hosts`` \u2014\nor an ``ssh_key`` credential's ``secret_name`` (``ssh_key`` has no\n``allowed_hosts``) \u2014 atomically archives the old row and creates a\nreplacement with a new id, carrying its encrypted secret unless a new secret\nis supplied. For an env-var credential the new id changes sandbox\nplaceholders, so affected sandboxes recycle on their next provision. To\nrotate an OAuth refresh token, send only the new ``refresh_token`` (and\noptional ``access_token`` / ``expires_at``); other auth fields stay intact.",
         "operationId": "update_vault_credential",
         "parameters": [
           {
@@ -12359,6 +12359,13 @@
             "type": "array",
             "title": "Http Servers"
           },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
+          },
           "description": {
             "anyOf": [
               {
@@ -12505,6 +12512,13 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           },
           "description": {
             "anyOf": [
@@ -12696,6 +12710,20 @@
             ],
             "title": "Http Servers"
           },
+          "ssh_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SshServerSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssh Servers"
+          },
           "description": {
             "anyOf": [
               {
@@ -12839,6 +12867,13 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           },
           "litellm_extra": {
             "additionalProperties": true,
@@ -14753,6 +14788,20 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/SshServerSpec"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           }
         },
         "additionalProperties": false,
@@ -18747,6 +18796,116 @@
         "title": "SkillVersionCreate",
         "description": "Request body for ``POST /v1/skills/{skill_id}/versions``.\n\nSame file format as :class:`SkillCreate`. The directory, name, and\ndescription are re-extracted from the new SKILL.md."
       },
+      "SshPermissionPolicy": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "always_allow",
+              "always_ask"
+            ],
+            "title": "Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "SshPermissionPolicy",
+        "description": "Wrapper matching the ``{type: \"always_allow\"}`` shape used for MCP/HTTP."
+      },
+      "SshServerSpec": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "host": {
+            "type": "string",
+            "maxLength": 253,
+            "minLength": 1,
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "default": 22
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username"
+          },
+          "host_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Host Keys"
+          },
+          "credential": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Credential"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SshPermissionPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suppress": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suppress"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "host",
+          "username",
+          "host_keys",
+          "credential"
+        ],
+        "title": "SshServerSpec",
+        "description": "One entry in an agent's ``ssh_servers`` list.\n\nDeclares a remote host the agent can run shell commands on via the ``ssh``\nbuilt-in tool. ``credential`` names the ``ssh_key`` vault credential (its\n``secret_name``) resolved at call time from the session's bound vaults \u2014 the\nprivate key is loaded only in worker memory and never enters the sandbox or\nthe model context. ``host_keys`` is a REQUIRED non-empty pin-set of public\nhost-key lines the server must present (no trust-on-first-use, no store, no\ninsecure mode): a server key outside the set aborts the connection.\n\nThere is NO command grammar: the grant is per-server whole-shell (OpenSSH\nhands the remote login shell a single command string, which it re-parses, so\nan aios-side allowlist could never equal its own effect). Restrict the blast\nradius server-side \u2014 ``authorized_keys`` forced commands / ``restrict`` /\ndedicated low-privilege users \u2014 and/or gate every command with\n``permission_policy: {type: always_ask}``."
+      },
       "TakeoverCloseRequest": {
         "properties": {
           "outcome": {
@@ -19073,6 +19232,7 @@
                   "list_related_sessions",
                   "list_vault_credentials",
                   "http_request",
+                  "ssh",
                   "trigger_create",
                   "trigger_remove",
                   "trigger_update",
@@ -20426,7 +20586,8 @@
               "oauth2_refresh",
               "basic",
               "custom_header",
-              "environment_variable"
+              "environment_variable",
+              "ssh_key"
             ],
             "title": "Auth Type"
           },
@@ -20502,7 +20663,7 @@
           "updated_at"
         ],
         "title": "VaultCredential",
-        "description": "Read view of a vault credential. Secrets are never returned.\n\n``target_url`` is null for ``environment_variable`` credentials;\n``secret_name``/``allowed_hosts`` are null for every other kind."
+        "description": "Read view of a vault credential. Secrets are never returned.\n\n``target_url`` is null for ``environment_variable`` and ``ssh_key``\ncredentials, which are ``secret_name``-keyed instead. ``allowed_hosts`` is\npopulated only for ``environment_variable``; it is null for ``ssh_key`` and\nevery ``target_url``-keyed kind."
       },
       "VaultCredentialCreate": {
         "properties": {
@@ -20693,6 +20854,32 @@
             ],
             "title": "Secret Value"
           },
+          "private_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "passphrase": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passphrase"
+          },
           "display_name": {
             "anyOf": [
               {
@@ -20712,7 +20899,8 @@
               "oauth2_refresh",
               "basic",
               "custom_header",
-              "environment_variable"
+              "environment_variable",
+              "ssh_key"
             ],
             "title": "Auth Type"
           },
@@ -20956,6 +21144,32 @@
               }
             ],
             "title": "Secret Value"
+          },
+          "private_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Private Key"
+          },
+          "passphrase": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "password",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passphrase"
           },
           "display_name": {
             "anyOf": [
@@ -21300,6 +21514,13 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           },
           "status": {
             "type": "string",
@@ -21950,6 +22171,13 @@
             "type": "array",
             "title": "Http Servers"
           },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
+          },
           "created_by": {
             "anyOf": [
               {
@@ -22199,6 +22427,20 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/SshServerSpec"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           }
         },
         "additionalProperties": false,
@@ -22336,6 +22578,27 @@
               }
             ],
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SshServerSpec"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ssh Servers"
           }
         },
         "additionalProperties": false,
@@ -22430,6 +22693,13 @@
             },
             "type": "array",
             "title": "Http Servers"
+          },
+          "ssh_servers": {
+            "items": {
+              "$ref": "#/components/schemas/SshServerSpec"
+            },
+            "type": "array",
+            "title": "Ssh Servers"
           },
           "created_at": {
             "type": "string",

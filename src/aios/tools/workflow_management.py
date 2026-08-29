@@ -61,7 +61,7 @@ from aios.tools.schema_diet import slim_tool_schema
 # Heavy snapshot fields the model already sent (or doesn't need echoed back); trimmed
 # from the returned dicts to keep tool results lean.
 _WORKFLOW_ECHO_EXCLUDE = {"script"}
-_RUN_ECHO_EXCLUDE = {"script", "script_sha", "tools", "mcp_servers", "http_servers"}
+_RUN_ECHO_EXCLUDE = {"script", "script_sha", "tools", "mcp_servers", "http_servers", "ssh_servers"}
 
 # list_workflows summaries: strip script + heavy schema/surface blobs, leaving
 # id, account_id, name, version, description, timestamps (the locked summary set;
@@ -73,6 +73,7 @@ _WORKFLOW_LIST_EXCLUDE = {
     "tools",
     "mcp_servers",
     "http_servers",
+    "ssh_servers",
 }
 
 
@@ -184,6 +185,7 @@ async def create_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
         tools=body.tools,
         mcp_servers=body.mcp_servers,
         http_servers=body.http_servers,
+        ssh_servers=body.ssh_servers,
         creator_session_id=session_id,
     )
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
@@ -206,6 +208,7 @@ async def update_workflow_handler(session_id: str, arguments: dict[str, Any]) ->
         tools=args.tools,
         mcp_servers=args.mcp_servers,
         http_servers=args.http_servers,
+        ssh_servers=args.ssh_servers,
         actor_session_id=session_id,
     )
     return wf.model_dump(mode="json", exclude=_WORKFLOW_ECHO_EXCLUDE)
@@ -359,21 +362,16 @@ SCRIPT_FIELD_DESCRIPTION = (
 # Kept terse: the #2294 per-tool byte budget counts every character of these
 # three descriptions once per authoring tool. The example shows the
 # agent-config envelope shape, so it isn't named here.
-TOOLS_FIELD_DESCRIPTION = (
-    'Declared tool surface (e.g. [{"type": "bash"}]; a subset of your own). Usually omitted.'
-)
-MCP_SERVERS_FIELD_DESCRIPTION = (
-    "Declared MCP servers (agent-config envelope; a subset of your own). Usually omitted."
-)
-HTTP_SERVERS_FIELD_DESCRIPTION = (
-    'Declared HTTP servers: grant names (["github"]) or full specs; a subset of your '
-    "own. Usually omitted."
-)
+TOOLS_FIELD_DESCRIPTION = "Declared tool surface (a subset of your own)."
+MCP_SERVERS_FIELD_DESCRIPTION = "Declared MCP servers (a subset of your own)."
+HTTP_SERVERS_FIELD_DESCRIPTION = "Declared HTTP servers (names or specs; a subset of your own)."
+SSH_SERVERS_FIELD_DESCRIPTION = "Declared SSH servers (names or specs; a subset of your own)."
 
 _OPAQUE_SURFACE_FIELDS = {
     "tools": TOOLS_FIELD_DESCRIPTION,
     "mcp_servers": MCP_SERVERS_FIELD_DESCRIPTION,
     "http_servers": HTTP_SERVERS_FIELD_DESCRIPTION,
+    "ssh_servers": SSH_SERVERS_FIELD_DESCRIPTION,
 }
 
 

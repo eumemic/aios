@@ -191,7 +191,7 @@ async def test_create_child_session_opens_exactly_one_edge_and_replay_idempotent
     pool, account_id, agent_id, env_id = pool_env
     parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
     child_id = await _child_session_id(pool, account_id)
-    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[], ssh_servers=[])
 
     created = await service.create_child_session(
         pool,
@@ -286,6 +286,7 @@ async def test_create_child_session_rollback_leaves_no_edge(
                 tools=[],
                 mcp_servers=[],
                 http_servers=[],
+                ssh_servers=[],
             )
             assert child is not None
             await queries.append_request_opened(
@@ -323,7 +324,7 @@ async def test_ask_create_child_session_writes_awaited_true(
     pool, account_id, agent_id, env_id = pool_env
     parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
     child_id = "ses_ask_child"
-    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[], ssh_servers=[])
 
     created = await service.create_child_session(
         pool,
@@ -365,7 +366,7 @@ async def test_tell_new_session_writes_unawaited_edge_with_no_obligation(
     pool, account_id, agent_id, env_id = pool_env
     parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
     child_id = "ses_tell_child"
-    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[], ssh_servers=[])
 
     created = await service.create_child_session(
         pool,
@@ -407,7 +408,7 @@ async def test_tell_new_session_rejects_output_schema(
     construction (``TypeError``), not via a service-layer ``ValidationError``."""
     pool, account_id, agent_id, env_id = pool_env
     parent_run_id = await _seed_parent_run(pool, account_id=account_id, environment_id=env_id)
-    surface = Surface(tools=[], mcp_servers=[], http_servers=[])
+    surface = Surface(tools=[], mcp_servers=[], http_servers=[], ssh_servers=[])
     with pytest.raises(TypeError):
         TellNewSession(
             session_id="ses_tell_bad",

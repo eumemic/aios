@@ -49,7 +49,7 @@ def _asst_row(tool_name: str, *, call_id: str, arguments: Any = "{}") -> dict[st
 
 
 def _agent_row(tools: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"session_id": _SID, "tools": tools, "http_servers": []}
+    return {"session_id": _SID, "tools": tools, "http_servers": [], "ssh_servers": []}
 
 
 def _pool_for(

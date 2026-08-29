@@ -71,27 +71,34 @@ from aios.models.agents import (
     McpToolConfig,
     McpToolsetConfig,
     PermissionPolicy,
+    SshServerSpec,
     ToolSpec,
     ToolTransport,
 )
 
 
 class Surface(NamedTuple):
-    """A principal's capability surface — the meet operates on this triple.
+    """A principal's capability surface — the meet operates on this quadruple.
 
     Constructed via :func:`surface_of` at the materialize edges (the author edge,
     ``create_run``, ``create_child_session``, the frozen-overlay read) from whatever
-    carries the three lists; not a persisted type. The lists are treated as immutable
+    carries the four lists; not a persisted type. The lists are treated as immutable
     by the operator — it never mutates an input, always builds fresh output.
+
+    ``ssh_servers`` deliberately has NO field default: every positional
+    construction must thread the arm, so a materialize edge that forgets it is a
+    mypy error rather than a silent ``[]`` that would let a clamped child
+    re-expand its ssh authority.
     """
 
     tools: list[ToolSpec]
     mcp_servers: list[McpServerSpec]
     http_servers: list[HttpServerSpec]
+    ssh_servers: list[SshServerSpec]
 
 
 class HasSurface(Protocol):
-    """Anything carrying the surface triple — ``Agent``/``AgentVersion``/``Workflow``/``WfRun``/``StepSurface``.
+    """Anything carrying the surface quadruple — ``Agent``/``AgentVersion``/``Workflow``/``WfRun``/``StepSurface``.
 
     The members are declared read-only (properties) so both the mutable wire
     models and the *frozen* :class:`aios.models.agents.StepSurface` satisfy the
@@ -104,11 +111,18 @@ class HasSurface(Protocol):
     def mcp_servers(self) -> list[McpServerSpec]: ...
     @property
     def http_servers(self) -> list[HttpServerSpec]: ...
+    @property
+    def ssh_servers(self) -> list[SshServerSpec]: ...
 
 
 def surface_of(principal: HasSurface) -> Surface:
-    """Project a principal's ``(tools, mcp_servers, http_servers)`` into a ``Surface``."""
-    return Surface(principal.tools, principal.mcp_servers, principal.http_servers)
+    """Project a principal's ``(tools, mcp_servers, http_servers, ssh_servers)`` into a ``Surface``."""
+    return Surface(
+        principal.tools,
+        principal.mcp_servers,
+        principal.http_servers,
+        principal.ssh_servers,
+    )
 
 
 def _tool_key(t: ToolSpec) -> tuple[str, str | None]:
@@ -490,7 +504,17 @@ def canonicalize(
             tools.append(
                 _canon_builtin(t, transport_default=builtin_transports.get(t.type, "both"))
             )
-    return Surface(tools, list(s.mcp_servers), [_canon_http_server(srv) for srv in s.http_servers])
+    return Surface(
+        tools,
+        list(s.mcp_servers),
+        [_canon_http_server(srv) for srv in s.http_servers],
+        # ssh servers are kept verbatim (like mcp_servers, and like http routes)
+        # — there is no intra-server dimension to normalize and no ``None``
+        # sentinel to resolve. ``enabled`` is launcher-verbatim under the meet
+        # and filtered at use (the tool, the prompt block, suppression), so a
+        # child narrows by OMITTING a server, never by toggling ``enabled``.
+        list(s.ssh_servers),
+    )
 
 
 def attenuate(
@@ -544,6 +568,18 @@ def attenuate(
     out_mcp = [l_mcp[(srv.name, srv.url)] for srv in d.mcp_servers if (srv.name, srv.url) in l_mcp]
     surviving_servers = {srv.name for srv in out_mcp}
 
+    # ssh_servers — ``name`` key, launcher-verbatim survival (the mcp treatment).
+    # There is no intra-server narrowing dimension (no command gate), so host,
+    # port, username, host_keys, credential pin, permission gate and suppression
+    # posture all come from the launcher; a child narrows only by dropping whole
+    # servers. Inheriting the credential ref grants nothing: resolution still
+    # requires an ssh_key of that secret_name in a vault bound to the calling
+    # session. Like mcp, the author edge COMPARES this output (surface_diff is
+    # full-equality by name), so a self-authoring child must restate an inherited
+    # grant byte-identically or be refused.
+    l_ssh = {srv.name: srv for srv in lau.ssh_servers}
+    out_ssh = [l_ssh[srv.name] for srv in d.ssh_servers if srv.name in l_ssh]
+
     # tools — _tool_key, per-dimension meet (toolsets gated on surviving server).
     l_tools = {_tool_key(t): t for t in lau.tools}
     out_tools: list[ToolSpec] = []
@@ -559,7 +595,7 @@ def attenuate(
             met = _meet_builtin(t, match)
             if met is not None:
                 out_tools.append(met)
-    return Surface(out_tools, out_mcp, out_http)
+    return Surface(out_tools, out_mcp, out_http, out_ssh)
 
 
 def admit_provider_tools(
@@ -675,6 +711,22 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
             bad_http.append(s.name)
     if bad_http:
         out["http_servers"] = bad_http
+
+    # ssh_servers — full-equality keyed by ``name`` (the mcp treatment, not http's
+    # identity-membership): the meet emits launcher-verbatim, so a declared server
+    # whose host/username/credential diverges from the agent's is refused rather
+    # than silently substituted. Names-only sugar resolves to the agent's verbatim
+    # spec, so authors who use it pass full equality for free. A present-but-diverged
+    # name reads ``mismatch at <name>``; an absent one lists bare.
+    actual_ssh = {srv.name: srv for srv in actual.ssh_servers}
+    bad_ssh: list[str] = []
+    for srv in expected.ssh_servers:
+        ssh_match = actual_ssh.get(srv.name)
+        if ssh_match is not None and ssh_match == srv:
+            continue
+        bad_ssh.append(f"mismatch at {srv.name}" if ssh_match is not None else srv.name)
+    if bad_ssh:
+        out["ssh_servers"] = bad_ssh
 
     return out
 

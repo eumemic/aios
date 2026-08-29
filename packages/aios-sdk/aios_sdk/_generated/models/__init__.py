@@ -266,6 +266,9 @@ from .skill_version import SkillVersion
 from .skill_version_create import SkillVersionCreate
 from .skill_version_create_files import SkillVersionCreateFiles
 from .skill_version_files import SkillVersionFiles
+from .ssh_permission_policy import SshPermissionPolicy
+from .ssh_permission_policy_type import SshPermissionPolicyType
+from .ssh_server_spec import SshServerSpec
 from .stream_events_v1_sessions_session_id_stream_get_chat_type_type_0 import (
     StreamEventsV1SessionsSessionIdStreamGetChatTypeType0,
 )
@@ -623,6 +626,9 @@ __all__ = (
     "SkillVersionCreate",
     "SkillVersionCreateFiles",
     "SkillVersionFiles",
+    "SshPermissionPolicy",
+    "SshPermissionPolicyType",
+    "SshServerSpec",
     "StreamEventsV1SessionsSessionIdStreamGetChatTypeType0",
     "TakeoverCloseRequest",
     "TakeoverCloseRequestOutcome",

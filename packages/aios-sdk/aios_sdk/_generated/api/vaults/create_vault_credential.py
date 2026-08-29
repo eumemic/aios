@@ -85,9 +85,13 @@ def sync_detailed(
     ``header_value``. ``environment_variable`` is the sandbox-materialized
     kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
     ``allowed_hosts`` egress scope and ``secret_value``, and carries no
-    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
-    ``secret_name``, and ``auth_type`` are immutable after creation — archive
-    and recreate to change them.
+    ``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the
+    ``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``
+    (a PEM private key; optional ``passphrase``), carries no ``target_url`` or
+    ``allowed_hosts``, and its key is loaded only in worker memory at call time
+    — never entering the sandbox. Caps at 20 active credentials per vault.
+    ``target_url``, ``secret_name``, and ``auth_type`` are immutable after
+    creation — archive and recreate to change them.
 
     Args:
         vault_id (str):
@@ -141,9 +145,13 @@ def sync(
     ``header_value``. ``environment_variable`` is the sandbox-materialized
     kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
     ``allowed_hosts`` egress scope and ``secret_value``, and carries no
-    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
-    ``secret_name``, and ``auth_type`` are immutable after creation — archive
-    and recreate to change them.
+    ``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the
+    ``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``
+    (a PEM private key; optional ``passphrase``), carries no ``target_url`` or
+    ``allowed_hosts``, and its key is loaded only in worker memory at call time
+    — never entering the sandbox. Caps at 20 active credentials per vault.
+    ``target_url``, ``secret_name``, and ``auth_type`` are immutable after
+    creation — archive and recreate to change them.
 
     Args:
         vault_id (str):
@@ -192,9 +200,13 @@ async def asyncio_detailed(
     ``header_value``. ``environment_variable`` is the sandbox-materialized
     kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
     ``allowed_hosts`` egress scope and ``secret_value``, and carries no
-    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
-    ``secret_name``, and ``auth_type`` are immutable after creation — archive
-    and recreate to change them.
+    ``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the
+    ``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``
+    (a PEM private key; optional ``passphrase``), carries no ``target_url`` or
+    ``allowed_hosts``, and its key is loaded only in worker memory at call time
+    — never entering the sandbox. Caps at 20 active credentials per vault.
+    ``target_url``, ``secret_name``, and ``auth_type`` are immutable after
+    creation — archive and recreate to change them.
 
     Args:
         vault_id (str):
@@ -246,9 +258,13 @@ async def asyncio(
     ``header_value``. ``environment_variable`` is the sandbox-materialized
     kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
     ``allowed_hosts`` egress scope and ``secret_value``, and carries no
-    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
-    ``secret_name``, and ``auth_type`` are immutable after creation — archive
-    and recreate to change them.
+    ``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the
+    ``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``
+    (a PEM private key; optional ``passphrase``), carries no ``target_url`` or
+    ``allowed_hosts``, and its key is loaded only in worker memory at call time
+    — never entering the sandbox. Caps at 20 active credentials per vault.
+    ``target_url``, ``secret_name``, and ``auth_type`` are immutable after
+    creation — archive and recreate to change them.
 
     Args:
         vault_id (str):

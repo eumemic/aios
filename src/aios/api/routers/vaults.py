@@ -163,9 +163,13 @@ async def create_credential(
     ``header_value``. ``environment_variable`` is the sandbox-materialized
     kind: it requires ``secret_name`` (a POSIX env var name) + a non-empty
     ``allowed_hosts`` egress scope and ``secret_value``, and carries no
-    ``target_url``. Caps at 20 active credentials per vault. ``target_url``,
-    ``secret_name``, and ``auth_type`` are immutable after creation — archive
-    and recreate to change them.
+    ``target_url``. ``ssh_key`` is the worker-consumed SSH identity used by the
+    ``ssh`` tool: it requires ``secret_name`` (a POSIX name) + ``private_key``
+    (a PEM private key; optional ``passphrase``), carries no ``target_url`` or
+    ``allowed_hosts``, and its key is loaded only in worker memory at call time
+    — never entering the sandbox. Caps at 20 active credentials per vault.
+    ``target_url``, ``secret_name``, and ``auth_type`` are immutable after
+    creation — archive and recreate to change them.
     """
     return await service.create_vault_credential(
         pool, crypto_box, vault_id=vault_id, body=body, account_id=account_id
@@ -270,13 +274,14 @@ async def update_credential(
 
     Omitted secret fields are preserved (decrypt-merge-encrypt cycle on the
     encrypted payload). ``target_url`` and ``auth_type`` are immutable. Changing
-    an environment-variable credential's ``secret_name`` or ``allowed_hosts``
-    atomically archives the old row and creates a replacement with a new id,
-    carrying its encrypted secret unless ``secret_value`` is supplied. The new
-    id changes sandbox placeholders, so affected sandboxes recycle on their next
-    provision. To rotate an OAuth refresh token, send only the new
-    ``refresh_token`` (and optional ``access_token`` / ``expires_at``); other
-    auth fields stay intact.
+    an environment-variable credential's ``secret_name`` or ``allowed_hosts`` —
+    or an ``ssh_key`` credential's ``secret_name`` (``ssh_key`` has no
+    ``allowed_hosts``) — atomically archives the old row and creates a
+    replacement with a new id, carrying its encrypted secret unless a new secret
+    is supplied. For an env-var credential the new id changes sandbox
+    placeholders, so affected sandboxes recycle on their next provision. To
+    rotate an OAuth refresh token, send only the new ``refresh_token`` (and
+    optional ``access_token`` / ``expires_at``); other auth fields stay intact.
     """
     return await service.update_vault_credential(
         pool,

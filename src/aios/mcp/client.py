@@ -305,6 +305,12 @@ def _auth_headers_from_payload(payload: dict[str, Any], auth_type: AuthType) -> 
         # reaching here means a resolver returned a NULL-target_url row, an
         # invariant violation rather than a model-recoverable error.
         raise ValueError("environment_variable credentials are not rendered as auth headers")
+    if auth_type == "ssh_key":
+        # ssh_key credentials are consumed by the ssh tool (in-memory key +
+        # host-key pin), never rendered as HTTP headers. Like
+        # environment_variable they carry no target_url, so a target_url-keyed
+        # resolver cannot select one — reaching here is an invariant violation.
+        raise ValueError("ssh_key credentials are not rendered as auth headers")
     assert_never(auth_type)
 
 

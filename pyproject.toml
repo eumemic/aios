@@ -42,6 +42,9 @@ dependencies = [
     # Crypto + ids
     "pynacl>=1.5",
     "cryptography>=46",         # egress-CA x509 cert + EC key (sandbox/egress_ca.py)
+    "asyncssh>=2.21",           # ssh built-in tool (tools/ssh.py): connect/exec + in-memory
+                                # key/known_hosts parse. Ships py.typed; only hard dep
+                                # (cryptography) is already direct above.
     "python-ulid>=3.0",
     # LLM client
     # >=1.96.2 includes current provider/model capability data. AIOS still treats

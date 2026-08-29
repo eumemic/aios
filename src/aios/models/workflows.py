@@ -25,9 +25,12 @@ from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
     McpServerSpec,
+    SshServerRef,
+    SshServerSpec,
     ToolSpec,
     validate_http_servers,
     validate_mcp_servers,
+    validate_ssh_servers,
     validate_tools,
 )
 
@@ -75,6 +78,7 @@ class Workflow(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     created_by: Actor | None = None
     created_at: datetime
     updated_at: datetime
@@ -103,6 +107,7 @@ class WorkflowVersion(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -209,6 +214,7 @@ class WfRun(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     status: WfRunStatus = Field(
         description=(
             "The run's lifecycle status — the ONLY lifecycle field on a run "
@@ -361,12 +367,14 @@ class WorkflowCreate(BaseModel):
     # agent at the authoring edge. The HTTP/operator path has no acting agent, so a
     # bare name there is rejected by the service (nothing to resolve against).
     http_servers: list[HttpServerRef] = Field(default_factory=list)
+    ssh_servers: list[SshServerRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> WorkflowCreate:
         # Cross-item base_url uniqueness applies to full specs only; bare names
         # carry no base_url until resolved against the agent (validated there).
         validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        validate_ssh_servers([s for s in self.ssh_servers if isinstance(s, SshServerSpec)])
         validate_mcp_servers(self.mcp_servers)
         validate_tools(self.tools)
         return self
@@ -402,11 +410,14 @@ class WorkflowUpdate(BaseModel):
     # See ``WorkflowCreate.http_servers`` — bare names (names-only sugar, #953) or
     # full ``HttpServerSpec`` (identity-match, #949); ``None`` preserves current.
     http_servers: list[HttpServerRef] | None = None
+    ssh_servers: list[SshServerRef] | None = None
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> WorkflowUpdate:
         if self.http_servers is not None:
             validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        if self.ssh_servers is not None:
+            validate_ssh_servers([s for s in self.ssh_servers if isinstance(s, SshServerSpec)])
         if self.mcp_servers is not None:
             validate_mcp_servers(self.mcp_servers)
         if self.tools is not None:
@@ -435,10 +446,12 @@ class InlineScriptBody(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerRef] = Field(default_factory=list)
+    ssh_servers: list[SshServerRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_http_servers(self) -> InlineScriptBody:
         validate_http_servers([s for s in self.http_servers if isinstance(s, HttpServerSpec)])
+        validate_ssh_servers([s for s in self.ssh_servers if isinstance(s, SshServerSpec)])
         validate_mcp_servers(self.mcp_servers)
         validate_tools(self.tools)
         return self

@@ -10,6 +10,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
     from ..models.workflow_update_input_schema_type_0 import (
         WorkflowUpdateInputSchemaType0,
@@ -106,6 +107,7 @@ class WorkflowUpdate:
             tools (list[ToolSpec] | None | Unset):
             mcp_servers (list[McpServerSpec] | None | Unset):
             http_servers (list[HttpServerSpec | str] | None | Unset):
+            ssh_servers (list[SshServerSpec | str] | None | Unset):
     """
 
     version: int
@@ -118,9 +120,11 @@ class WorkflowUpdate:
     tools: list[ToolSpec] | None | Unset = UNSET
     mcp_servers: list[McpServerSpec] | None | Unset = UNSET
     http_servers: list[HttpServerSpec | str] | None | Unset = UNSET
+    ssh_servers: list[SshServerSpec | str] | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         from ..models.http_server_spec import HttpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.workflow_update_input_schema_type_0 import (
             WorkflowUpdateInputSchemaType0,
         )
@@ -210,6 +214,22 @@ class WorkflowUpdate:
         else:
             http_servers = self.http_servers
 
+        ssh_servers: list[dict[str, Any] | str] | None | Unset
+        if isinstance(self.ssh_servers, Unset):
+            ssh_servers = UNSET
+        elif isinstance(self.ssh_servers, list):
+            ssh_servers = []
+            for ssh_servers_type_0_item_data in self.ssh_servers:
+                ssh_servers_type_0_item: dict[str, Any] | str
+                if isinstance(ssh_servers_type_0_item_data, SshServerSpec):
+                    ssh_servers_type_0_item = ssh_servers_type_0_item_data.to_dict()
+                else:
+                    ssh_servers_type_0_item = ssh_servers_type_0_item_data
+                ssh_servers.append(ssh_servers_type_0_item)
+
+        else:
+            ssh_servers = self.ssh_servers
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -235,6 +255,8 @@ class WorkflowUpdate:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
 
         return field_dict
 
@@ -242,6 +264,7 @@ class WorkflowUpdate:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
         from ..models.workflow_update_input_schema_type_0 import (
             WorkflowUpdateInputSchemaType0,
@@ -415,6 +438,48 @@ class WorkflowUpdate:
 
         http_servers = _parse_http_servers(d.pop("http_servers", UNSET))
 
+        def _parse_ssh_servers(
+            data: object,
+        ) -> list[SshServerSpec | str] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                ssh_servers_type_0 = []
+                _ssh_servers_type_0 = data
+                for ssh_servers_type_0_item_data in _ssh_servers_type_0:
+
+                    def _parse_ssh_servers_type_0_item(
+                        data: object,
+                    ) -> SshServerSpec | str:
+                        try:
+                            if not isinstance(data, dict):
+                                raise TypeError()
+                            ssh_servers_type_0_item_type_1 = SshServerSpec.from_dict(
+                                data
+                            )
+
+                            return ssh_servers_type_0_item_type_1
+                        except (TypeError, ValueError, AttributeError, KeyError):
+                            pass
+                        return cast(SshServerSpec | str, data)
+
+                    ssh_servers_type_0_item = _parse_ssh_servers_type_0_item(
+                        ssh_servers_type_0_item_data
+                    )
+
+                    ssh_servers_type_0.append(ssh_servers_type_0_item)
+
+                return ssh_servers_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[SshServerSpec | str] | None | Unset, data)
+
+        ssh_servers = _parse_ssh_servers(d.pop("ssh_servers", UNSET))
+
         workflow_update = cls(
             version=version,
             name=name,
@@ -426,6 +491,7 @@ class WorkflowUpdate:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
         )
 
         return workflow_update

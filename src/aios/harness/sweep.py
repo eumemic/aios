@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 if TYPE_CHECKING:
-    from aios.models.agents import HttpServerSpec, ToolSpec
+    from aios.models.agents import HttpServerSpec, SshServerSpec, ToolSpec
 
 from aios.config import get_settings
 from aios.db.queries import (
@@ -117,13 +117,14 @@ class _SweepAgentSurface:
 
     tools: list[ToolSpec]
     http_servers: list[HttpServerSpec]
+    ssh_servers: list[SshServerSpec]
 
 
 # The zero-tool, zero-server surface used as the fallback for a candidate whose
 # agent config could not be loaded (a race where the session/agent row is gone).
 # A call classified against it is never dispatched — consistent with leaving an
 # unresolvable call alone rather than fabricating work.
-_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
+_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[], ssh_servers=[])
 
 
 # ─── query constants ─────────────────────────────────────────────────────────
@@ -263,7 +264,8 @@ GHOST_LIFECYCLE_SQL = """
 AGENT_SURFACE_SQL = """
     SELECT s.id AS session_id,
            COALESCE(av.tools, a.tools) AS tools,
-           COALESCE(av.http_servers, a.http_servers) AS http_servers
+           COALESCE(av.http_servers, a.http_servers) AS http_servers,
+           COALESCE(av.ssh_servers, a.ssh_servers) AS ssh_servers
       FROM sessions s
       JOIN agents a ON a.id = s.agent_id
       LEFT JOIN agent_versions av
@@ -593,15 +595,17 @@ def _build_surfaces(agent_rows: list[Any]) -> dict[str, _SweepAgentSurface]:
     """Materialize ``AGENT_SURFACE_SQL`` rows into ``_SweepAgentSurface`` per
     session — the thin duck-typed ``Agent`` the disposition classifier reads.
     """
-    from aios.models.agents import HttpServerSpec, load_tool_specs
+    from aios.models.agents import HttpServerSpec, SshServerSpec, load_tool_specs
 
     surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
         tools_list = r["tools"]
         http_list = r["http_servers"]
+        ssh_list = r["ssh_servers"]
         surface_by_session[r["session_id"]] = _SweepAgentSurface(
             tools=load_tool_specs(tools_list or []),
             http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
+            ssh_servers=[SshServerSpec.model_validate(h) for h in (ssh_list or [])],
         )
     return surface_by_session
 

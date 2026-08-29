@@ -7,6 +7,7 @@ class VaultCredentialAuthType(str, Enum):
     CUSTOM_HEADER = "custom_header"
     ENVIRONMENT_VARIABLE = "environment_variable"
     OAUTH2_REFRESH = "oauth2_refresh"
+    SSH_KEY = "ssh_key"
 
     def __str__(self) -> str:
         return str(self.value)

@@ -48,6 +48,7 @@ class ToolSpecTypeType0(str, Enum):
     SEARCH_EVENTS = "search_events"
     SKILL_ARCHIVE = "skill_archive"
     SKILL_UPSERT = "skill_upsert"
+    SSH = "ssh"
     STOP_TASK = "stop_task"
     TRIGGER_CREATE = "trigger_create"
     TRIGGER_LIST = "trigger_list"

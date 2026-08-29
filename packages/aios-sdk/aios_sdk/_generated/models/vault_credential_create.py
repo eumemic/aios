@@ -48,6 +48,8 @@ class VaultCredentialCreate:
             header_name (None | str | Unset):
             header_value (None | str | Unset):
             secret_value (None | str | Unset):
+            private_key (None | str | Unset):
+            passphrase (None | str | Unset):
             display_name (None | str | Unset):
             metadata (VaultCredentialCreateMetadata | Unset):
             target_url (None | str | Unset):
@@ -76,6 +78,8 @@ class VaultCredentialCreate:
     header_name: None | str | Unset = UNSET
     header_value: None | str | Unset = UNSET
     secret_value: None | str | Unset = UNSET
+    private_key: None | str | Unset = UNSET
+    passphrase: None | str | Unset = UNSET
     display_name: None | str | Unset = UNSET
     metadata: VaultCredentialCreateMetadata | Unset = UNSET
     target_url: None | str | Unset = UNSET
@@ -181,6 +185,18 @@ class VaultCredentialCreate:
         else:
             secret_value = self.secret_value
 
+        private_key: None | str | Unset
+        if isinstance(self.private_key, Unset):
+            private_key = UNSET
+        else:
+            private_key = self.private_key
+
+        passphrase: None | str | Unset
+        if isinstance(self.passphrase, Unset):
+            passphrase = UNSET
+        else:
+            passphrase = self.passphrase
+
         display_name: None | str | Unset
         if isinstance(self.display_name, Unset):
             display_name = UNSET
@@ -247,6 +263,10 @@ class VaultCredentialCreate:
             field_dict["header_value"] = header_value
         if secret_value is not UNSET:
             field_dict["secret_value"] = secret_value
+        if private_key is not UNSET:
+            field_dict["private_key"] = private_key
+        if passphrase is not UNSET:
+            field_dict["passphrase"] = passphrase
         if display_name is not UNSET:
             field_dict["display_name"] = display_name
         if metadata is not UNSET:
@@ -453,6 +473,24 @@ class VaultCredentialCreate:
 
         secret_value = _parse_secret_value(d.pop("secret_value", UNSET))
 
+        def _parse_private_key(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        private_key = _parse_private_key(d.pop("private_key", UNSET))
+
+        def _parse_passphrase(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        passphrase = _parse_passphrase(d.pop("passphrase", UNSET))
+
         def _parse_display_name(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -520,6 +558,8 @@ class VaultCredentialCreate:
             header_name=header_name,
             header_value=header_value,
             secret_value=secret_value,
+            private_key=private_key,
+            passphrase=passphrase,
             display_name=display_name,
             metadata=metadata,
             target_url=target_url,

@@ -5,8 +5,12 @@ services (MCP servers, HTTP APIs). Most credentials are keyed by an
 immutable ``target_url`` and consumed worker-side as outbound auth headers.
 The ``environment_variable`` kind is different: it has no ``target_url`` and
 is keyed by ``secret_name`` (the env var materialized into the sandbox),
-carrying an ``allowed_hosts`` egress scope instead. Secrets are encrypted at
-rest via the CryptoBox and are write-only — never returned in API responses.
+carrying an ``allowed_hosts`` egress scope instead. The ``ssh_key`` kind is
+also ``secret_name``-keyed but worker-consumed (the ssh tool loads the private
+key in memory and pins the remote host key); it never materializes into the
+sandbox and carries neither ``target_url`` nor ``allowed_hosts``. Secrets are
+encrypted at rest via the CryptoBox and are write-only — never returned in API
+responses.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ AuthType = Literal[
     "basic",
     "custom_header",
     "environment_variable",
+    "ssh_key",
 ]
 
 # Env var names the harness injects into every sandbox. An
@@ -56,7 +61,7 @@ RESERVED_SANDBOX_ENV_KEYS = _RESERVED_SANDBOX_ENV_KEYS
 _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~!$&'()*+,;=:@-]+$")
 
 # POSIX portable env var name: a leading letter/underscore, then word chars.
-_SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SECRET_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # A final hostname label that is a pure numeric token in any base — decimal
 # ("10", "2130706433"), hex ("0x7f000001", "0xA"), or octal ("0177"). The last
@@ -246,6 +251,10 @@ class _VaultCredentialSecrets(BaseModel):
     # environment_variable
     secret_value: SecretStr | None = None
 
+    # ssh_key
+    private_key: SecretStr | None = None
+    passphrase: SecretStr | None = None
+
 
 class VaultCredentialCreate(_VaultCredentialSecrets):
     """Request body for ``POST /v1/vaults/{vault_id}/credentials``.
@@ -284,7 +293,7 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
                 raise ValueError("environment_variable credentials must not set target_url")
             if not self.secret_name:
                 raise ValueError("environment_variable credentials require secret_name")
-            if not _SECRET_NAME_RE.fullmatch(self.secret_name):
+            if not SECRET_NAME_RE.fullmatch(self.secret_name):
                 raise ValueError(
                     f"invalid secret_name {self.secret_name!r}: must be a POSIX env var name "
                     "([A-Za-z_][A-Za-z0-9_]*)"
@@ -306,6 +315,31 @@ class VaultCredentialCreate(_VaultCredentialSecrets):
                 host, prefix = parse_allowed_host_entry(entry)
                 canonical.append(host if prefix is None else host + prefix)
             self.allowed_hosts = list(dict.fromkeys(canonical))
+        elif self.auth_type == "ssh_key":
+            # ssh_key is worker-consumed (the ssh tool loads the key in memory
+            # and pins the host key); it never materializes into the sandbox
+            # and never egresses over HTTP, so it carries neither a target_url
+            # nor an allowed_hosts egress scope. It IS keyed by secret_name —
+            # the same POSIX-name namespace as environment_variable, sharing the
+            # per-vault (vault_id, secret_name) unique index. The reserved-name
+            # check is kept even though ssh_key never lands in the sandbox env:
+            # one namespace, one grammar, and it forecloses a future
+            # materializing consumer colliding with PATH et al.
+            if self.target_url is not None:
+                raise ValueError("ssh_key credentials must not set target_url")
+            if not self.secret_name:
+                raise ValueError("ssh_key credentials require secret_name")
+            if not SECRET_NAME_RE.fullmatch(self.secret_name):
+                raise ValueError(
+                    f"invalid secret_name {self.secret_name!r}: must be a POSIX name "
+                    "([A-Za-z_][A-Za-z0-9_]*)"
+                )
+            if self.secret_name in RESERVED_SANDBOX_ENV_KEYS:
+                raise ValueError(
+                    f"secret_name {self.secret_name!r} is reserved by the sandbox runtime"
+                )
+            if self.allowed_hosts is not None:
+                raise ValueError("ssh_key credentials must not set allowed_hosts")
         else:
             if not self.target_url:
                 raise ValueError(f"{self.auth_type} credentials require target_url")
@@ -333,7 +367,7 @@ class VaultCredentialUpdate(_VaultCredentialSecrets):
     @model_validator(mode="after")
     def _validate_environment_variable_scope(self) -> VaultCredentialUpdate:
         if "secret_name" in self.model_fields_set:
-            if not self.secret_name or not _SECRET_NAME_RE.fullmatch(self.secret_name):
+            if not self.secret_name or not SECRET_NAME_RE.fullmatch(self.secret_name):
                 raise ValueError(
                     f"invalid secret_name {self.secret_name!r}: must be a POSIX env var name "
                     "([A-Za-z_][A-Za-z0-9_]*)"
@@ -356,8 +390,10 @@ class VaultCredentialUpdate(_VaultCredentialSecrets):
 class VaultCredential(BaseModel):
     """Read view of a vault credential. Secrets are never returned.
 
-    ``target_url`` is null for ``environment_variable`` credentials;
-    ``secret_name``/``allowed_hosts`` are null for every other kind.
+    ``target_url`` is null for ``environment_variable`` and ``ssh_key``
+    credentials, which are ``secret_name``-keyed instead. ``allowed_hosts`` is
+    populated only for ``environment_variable``; it is null for ``ssh_key`` and
+    every ``target_url``-keyed kind.
     """
 
     id: str

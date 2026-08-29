@@ -266,11 +266,12 @@ async def insert_vault_credential(
         )
     except asyncpg.UniqueViolationError as exc:
         # By construction each insert shape can violate exactly one partial
-        # unique index: env-var rows have target_url NULL (NULLS DISTINCT, can
-        # never trip the url index) and every other kind has secret_name NULL
-        # (can never trip the secret_name index). Branch on the kind rather
-        # than introspecting the constraint name.
-        if auth_type == "environment_variable":
+        # unique index: secret_name-keyed kinds (environment_variable, ssh_key)
+        # have target_url NULL (NULLS DISTINCT, can never trip the url index)
+        # and every target_url-keyed kind has secret_name NULL (can never trip
+        # the secret_name index). Branch on which key is populated rather than
+        # introspecting the constraint name or enumerating kinds.
+        if secret_name is not None:
             raise ConflictError(
                 f"an active credential named {secret_name!r} already exists in this vault",
                 detail={"secret_name": secret_name, "vault_id": vault_id},
@@ -835,6 +836,66 @@ async def resolve_session_credential(
     return (
         EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
         cast(AuthType, str(row["auth_type"])),
+        str(row["vault_id"]),
+    )
+
+
+async def resolve_session_ssh_key_credential(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    secret_name: str,
+    *,
+    account_id: str,
+) -> tuple[EncryptedBlob, str] | None:
+    """Find the first ``ssh_key`` credential named ``secret_name`` across a
+    session's bound vaults.
+
+    The ``secret_name``-keyed sibling of :func:`resolve_session_credential`:
+    joins ``session_vaults`` (rank-ordered) with ``vault_credentials`` filtered
+    to ``auth_type = 'ssh_key'`` and the given ``secret_name``, account-scoped
+    on both sides. Returns ``(EncryptedBlob, vault_id)`` for the first match or
+    ``None`` if nothing named that is bound. Binding is proved by the join in
+    one round trip (no separate probe / TOCTOU seam), exactly as the header
+    resolver does. First-vault-wins on a cross-vault duplicate; a collision is
+    logged. This is NOT ``_ENV_VAR_CREDENTIALS_FROM_WHERE`` widened — env-var
+    resolution materializes ALL bound secrets at provision time, whereas an ssh
+    key is resolved one-at-a-time by ``credential`` name at tool-call time.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.vault_id, sv.rank
+          FROM session_vaults sv
+          JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
+         WHERE sv.session_id = $1
+           AND vc.auth_type = 'ssh_key'
+           AND vc.secret_name = $2
+           AND vc.archived_at IS NULL
+           AND sv.account_id = $3
+           AND vc.account_id = $3
+         ORDER BY sv.rank
+        """,
+        session_id,
+        secret_name,
+        account_id,
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    if len(rows) > 1:
+        log.warning(
+            "vault.credential_collision",
+            session_id=session_id,
+            secret_name=secret_name,
+            auth_type="ssh_key",
+            winning_credential_id=str(row["credential_id"]),
+            winning_rank=int(row["rank"]),
+            shadowed_credentials=[
+                {"credential_id": str(match["credential_id"]), "rank": int(match["rank"])}
+                for match in rows[1:]
+            ],
+        )
+    return (
+        EncryptedBlob(ciphertext=row["ciphertext"], nonce=row["nonce"]),
         str(row["vault_id"]),
     )
 

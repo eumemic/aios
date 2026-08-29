@@ -32,7 +32,13 @@ from aios.db.queries import (
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.accounting import UsageNodeRef
-from aios.models.agents import HttpServerSpec, McpServerSpec, ToolSpec, load_tool_specs
+from aios.models.agents import (
+    HttpServerSpec,
+    McpServerSpec,
+    SshServerSpec,
+    ToolSpec,
+    load_tool_specs,
+)
 from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
@@ -68,6 +74,7 @@ def _row_to_workflow(row: asyncpg.Record) -> Workflow:
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
+        ssh_servers=[SshServerSpec.model_validate(s) for s in row["ssh_servers"]],
         created_by=actor_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -88,6 +95,7 @@ def _row_to_workflow_version(row: asyncpg.Record) -> WorkflowVersion:
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
+        ssh_servers=[SshServerSpec.model_validate(s) for s in row["ssh_servers"]],
         created_at=row["created_at"],
     )
 
@@ -113,6 +121,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         tools=load_tool_specs(row["tools"]),
         mcp_servers=[McpServerSpec.model_validate_persisted(s) for s in row["mcp_servers"]],
         http_servers=[HttpServerSpec.model_validate(s) for s in row["http_servers"]],
+        ssh_servers=[SshServerSpec.model_validate(s) for s in row["ssh_servers"]],
         status=row["status"],
         input=row["input"],
         output=row["output"],
@@ -180,6 +189,7 @@ async def insert_workflow(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    ssh_servers: list[SshServerSpec] | None = None,
 ) -> Workflow:
     """Insert a workflow definition at version 1 **and** snapshot it into
     ``workflow_versions(v1)`` in the same transaction. Raises ``ConflictError``
@@ -197,9 +207,9 @@ async def insert_workflow(
                 INSERT INTO workflows
                     (id, account_id, name, version, script, input_schema, output_schema,
                      output_model, description, tools, mcp_servers, http_servers,
-                     tools_vocab_epoch, created_by_type, created_by_ref)
+                     tools_vocab_epoch, created_by_type, created_by_ref, ssh_servers)
                 VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6::jsonb, $7, $8,
-                        $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14)
+                        $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, $15::jsonb)
                 RETURNING *
                 """,
                 new_id,
@@ -215,6 +225,7 @@ async def insert_workflow(
                 json.dumps([s.model_dump() for s in (http_servers or [])]),
                 TOOLS_VOCAB_EPOCH,
                 *actor_columns(),
+                json.dumps([s.model_dump() for s in (ssh_servers or [])]),
             )
             assert row is not None
             await _insert_workflow_version(conn, row)
@@ -243,10 +254,10 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         INSERT INTO workflow_versions (
             workflow_id, account_id, version, name, script,
             input_schema, output_schema, output_model, description, tools, mcp_servers,
-            http_servers, tools_vocab_epoch
+            http_servers, tools_vocab_epoch, ssh_servers
         )
         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb, $11::jsonb,
-                $12::jsonb, $13)
+                $12::jsonb, $13, $14::jsonb)
         """,
         wf_row["id"],
         wf_row["account_id"],
@@ -263,6 +274,7 @@ async def _insert_workflow_version(conn: asyncpg.Connection[Any], wf_row: asyncp
         # Mirror the head's stamp: the version snapshots the same canonical
         # ``tools`` blob written in this transaction, so it is born current too.
         wf_row["tools_vocab_epoch"],
+        json.dumps(wf_row["ssh_servers"]),
     )
 
 
@@ -281,6 +293,7 @@ async def update_workflow(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    ssh_servers: list[SshServerSpec] | None = None,
 ) -> Workflow:
     """Update a workflow in place, bumping ``version`` (the ``update_agent`` shape,
     minus the version-snapshot — runs pin script + surface onto themselves at launch).
@@ -319,6 +332,7 @@ async def update_workflow(
     new_tools = tools if tools is not None else current.tools
     new_mcp = mcp_servers if mcp_servers is not None else current.mcp_servers
     new_http = http_servers if http_servers is not None else current.http_servers
+    new_ssh = ssh_servers if ssh_servers is not None else current.ssh_servers
 
     if (
         new_name == current.name
@@ -330,6 +344,7 @@ async def update_workflow(
         and new_tools == current.tools
         and new_mcp == current.mcp_servers
         and new_http == current.http_servers
+        and new_ssh == current.ssh_servers
     ):
         return current
 
@@ -348,6 +363,7 @@ async def update_workflow(
                    SET version = workflows.version + 1, name = $3, script = $4,
                        input_schema = $5::jsonb, output_schema = $6::jsonb, description = $7,
                        tools = $8::jsonb, mcp_servers = $9::jsonb, http_servers = $10::jsonb,
+                       ssh_servers = $14::jsonb,
                        tools_vocab_epoch = $12, output_model = $13, updated_at = now()
                  WHERE id = $1 AND account_id = $2 AND archived_at IS NULL AND version = $11
                 RETURNING *
@@ -368,6 +384,7 @@ async def update_workflow(
                 # snapshot it drives) to the current epoch.
                 TOOLS_VOCAB_EPOCH,
                 new_output_model,
+                json.dumps([s.model_dump() for s in new_ssh]),
             )
             if row is None:
                 # No row matched (id, account_id, version): a stale/raced
@@ -668,6 +685,7 @@ async def insert_wf_run(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    ssh_servers: list[SshServerSpec] | None = None,
     budget_usd: float | None = None,
     default_child_model: str | None = None,
     depth: int,
@@ -718,10 +736,10 @@ async def insert_wf_run(
                  workspace_mode, workspace_path,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
-                 depth, tools_vocab_epoch, creator_session_id, creator_run_id)
+                 depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
-                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25)
+                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -750,6 +768,7 @@ async def insert_wf_run(
             TOOLS_VOCAB_EPOCH,
             creator_session_id,
             creator_run_id,
+            json.dumps([s.model_dump() for s in (ssh_servers or [])]),
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(

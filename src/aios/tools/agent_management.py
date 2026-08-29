@@ -66,6 +66,7 @@ _AGENT_LIST_EXCLUDE = {
     "skills",
     "mcp_servers",
     "http_servers",
+    "ssh_servers",
     "metadata",
     "litellm_extra",
 }
@@ -178,6 +179,7 @@ async def create_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         skills=body.skills,
         mcp_servers=body.mcp_servers,
         http_servers=body.http_servers,
+        ssh_servers=body.ssh_servers,
         description=body.description,
         metadata=body.metadata,
         litellm_extra=body.litellm_extra,
@@ -206,6 +208,7 @@ async def update_agent_handler(session_id: str, arguments: dict[str, Any]) -> di
         skills=args.skills,
         mcp_servers=args.mcp_servers,
         http_servers=args.http_servers,
+        ssh_servers=args.ssh_servers,
         description=args.description,
         metadata=args.metadata,
         litellm_extra=args.litellm_extra,

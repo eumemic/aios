@@ -75,6 +75,7 @@ class TestListSessionsRunChildren:
                     tools=[],
                     mcp_servers=[],
                     http_servers=[],
+                    ssh_servers=[],
                 )
                 assert child is not None
                 # Record token spend (the per-beat cost the v0 PoC had to scrape).

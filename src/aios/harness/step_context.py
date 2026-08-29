@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from aios.models.agents import (
         HttpServerSpec,
         McpServerSpec,
+        SshServerSpec,
         StepSurface,
         ToolSpec,
     )
@@ -386,8 +387,11 @@ async def compute_step_prelude(
         tools.extend(mcp_tools)
         mcp_servers_block = _build_instructions_block(agent.mcp_servers, mcp_instructions)
     http_servers_block = _build_http_servers_block(agent.http_servers)
+    ssh_servers_block = _build_ssh_servers_block(agent.ssh_servers)
     cli_hint = _MCP_CLI_HINT if _has_always_allow_mcp_tool(agent.tools) else ""
-    instructions_block = join_blocks(cli_hint, mcp_servers_block, http_servers_block)
+    instructions_block = join_blocks(
+        cli_hint, mcp_servers_block, http_servers_block, ssh_servers_block
+    )
 
     # Custom tools declared on connections attached to this session
     # (single_session, per_chat origin, or operator-bound chat).  Each
@@ -568,6 +572,31 @@ def _build_http_servers_block(http_servers: list[HttpServerSpec]) -> str:
                 verbs = "ANY" if r.methods is None else ",".join(sorted(set(r.methods)))
                 suffix = f" — {r.description}" if r.description else ""
                 lines.append(f"- {verbs} {r.path_pattern}{suffix}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _build_ssh_servers_block(ssh_servers: list[SshServerSpec]) -> str:
+    """Render the agent's ``ssh_servers`` allowlist for the system prompt.
+
+    One section per enabled server naming the ``ssh`` tool's ``server_ref``, the
+    ``user@host:port`` it reaches, and its description. There is no per-command
+    grammar to render — the grant is whole-shell — so unlike the http block this
+    lists no routes. Iteration order is ``agent.ssh_servers`` declaration order
+    (prefix-cache-stable across steps). Host keys and the credential name are
+    deliberately omitted: they are operator config, not model-actionable.
+    """
+    enabled = [s for s in ssh_servers if s.enabled]
+    if not enabled:
+        return ""
+    sections: list[str] = []
+    for s in enabled:
+        lines = [f"## SSH server: {s.name} ({s.username}@{s.host}:{s.port})"]
+        if s.description:
+            lines.append("")
+            lines.append(s.description)
+        lines.append("")
+        lines.append(f'Run commands with the ssh tool: server_ref="{s.name}".')
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
