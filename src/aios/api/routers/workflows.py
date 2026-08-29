@@ -234,8 +234,13 @@ async def list_runs(
     parent_run_id: str | None = None,
     limit: PageLimit = None,
 ) -> ListResponse[WfRun]:
-    """List the account's runs, newest first. First page: optional ``workflow_id`` /
-    ``status`` / ``parent_run_id`` filters + ``limit``; subsequent pages:
+    """List the account's unarchived runs in ``created_at DESC, id DESC`` order.
+
+    This ordering applies before ``limit`` to both filtered and unfiltered reads,
+    so a first-page ``?workflow_id=...&limit=N`` query returns the N most recently
+    created matching runs. ``id DESC`` is the stable tiebreaker for equal creation
+    timestamps. First page: optional ``workflow_id`` / ``status`` /
+    ``parent_run_id`` filters + ``limit``; subsequent pages:
     ``?cursor=<next_cursor>``. ``parent_run_id`` scopes to a run's child runs."""
     st = page_cursor(
         cursor,
