@@ -115,6 +115,68 @@ async def test_detector_uses_current_binding_activity_from_production_reader() -
 
 
 @pytest.mark.asyncio
+async def test_rebinding_per_chat_excludes_prior_binding_sessions() -> None:
+    """A current per-chat binding uses only routing rows from its lifetime."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    current_activity = now - timedelta(days=9)
+    historical_activity = now - timedelta(hours=1)
+    current_bound_at = now - timedelta(days=10)
+    pool = _SQLitePool()
+    pool.db.execute(
+        "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+        ("conn_1", "whatsapp", json.dumps({"liveness_silence_threshold_seconds": 604800})),
+    )
+    pool.db.executemany(
+        "INSERT INTO sessions VALUES (?, ?, NULL)",
+        [
+            ("session_current", (now - timedelta(days=10)).isoformat()),
+            ("session_historical", (now - timedelta(days=30)).isoformat()),
+        ],
+    )
+    pool.db.executemany(
+        "INSERT INTO bindings VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                "conn_1",
+                "per_chat",
+                None,
+                (now - timedelta(days=30)).isoformat(),
+                current_bound_at.isoformat(),
+            ),
+            ("conn_1", "per_chat", None, current_bound_at.isoformat(), None),
+        ],
+    )
+    pool.db.executemany(
+        "INSERT INTO chat_sessions VALUES (?, ?, ?)",
+        [
+            ("conn_1", "session_historical", (now - timedelta(days=20)).isoformat()),
+            ("conn_1", "session_current", current_bound_at.isoformat()),
+        ],
+    )
+    pool.db.executemany(
+        "INSERT INTO events VALUES (?, ?)",
+        [
+            ("session_current", current_activity.isoformat()),
+            ("session_historical", historical_activity.isoformat()),
+        ],
+    )
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 86400},
+        health_reader=_HealthReader({"whatsapp": TransportHealth(False, "unhealthy")}),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert len(findings) == 1
+    assert findings[0]["last_activity_at"] == current_activity.isoformat()
+    alarm.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_unhealthy_replica_is_not_hidden_by_healthy_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
