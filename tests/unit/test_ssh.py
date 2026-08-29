@@ -40,7 +40,7 @@ def _server(
     credential: str = "PROD_KEY",
     enabled: bool = True,
     permission_policy: SshPermissionPolicy | None = None,
-    suppress: bool | None = None,
+    read_allow: bool = False,
 ) -> SshServerSpec:
     return SshServerSpec(
         name=name,
@@ -51,7 +51,7 @@ def _server(
         credential=credential,
         enabled=enabled,
         permission_policy=permission_policy,
-        suppress=suppress,
+        read_allow=read_allow,
     )
 
 
@@ -266,7 +266,7 @@ async def test_suppression_synthesizes_and_never_dials() -> None:
     on_suppress = AsyncMock(return_value={"exit_code": 0, "stdout": "", "stderr": ""})
     with _patch_ssh(connect=connect):
         result = await ssh._do_ssh(
-            servers=[_server(suppress=None)],
+            servers=[_server()],
             arguments={"server_ref": "prod", "command": "rm -rf /srv"},
             resolve_key=_resolver(_KEY),
             on_suppress=on_suppress,

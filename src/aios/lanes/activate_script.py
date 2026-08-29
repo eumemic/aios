@@ -249,7 +249,6 @@ async def ensure_workflow(lock_wf):
             "description": lock_wf.get("description"),
             "tools": lock_wf.get("tools", []),
             "http_servers": lock_wf.get("http_servers", []),
-        "ssh_servers": lock_wf.get("ssh_servers", []),
             "ssh_servers": lock_wf.get("ssh_servers", []),
         }
         resp = await aios_api("POST", "/v1/workflows", create_body)
@@ -272,9 +271,9 @@ async def ensure_workflow(lock_wf):
         changed = True
     if lock_wf.get("tools", []) != live.get("tools", []):
         changed = True
-    if lock_wf.get("http_servers", []) != live.get("http_servers", []) or lock_wf.get(
-        "ssh_servers", []
-    ) != live.get("ssh_servers", []):
+    if lock_wf.get("http_servers", []) != live.get("http_servers", []):
+        changed = True
+    if lock_wf.get("ssh_servers", []) != live.get("ssh_servers", []):
         changed = True
 
     if not changed:
@@ -316,7 +315,6 @@ async def ensure_agent(lock_agent):
             "description": lock_agent.get("description"),
             "tools": lock_agent.get("tools", []),
             "http_servers": lock_agent.get("http_servers", []),
-        "ssh_servers": lock_agent.get("ssh_servers", []),
             "ssh_servers": lock_agent.get("ssh_servers", []),
         }
         resp = await aios_api("POST", "/v1/agents", create_body)
@@ -337,9 +335,9 @@ async def ensure_agent(lock_agent):
         changed = True
     if lock_agent.get("tools", []) != live.get("tools", []):
         changed = True
-    if lock_agent.get("http_servers", []) != live.get("http_servers", []) or lock_agent.get(
-        "ssh_servers", []
-    ) != live.get("ssh_servers", []):
+    if lock_agent.get("http_servers", []) != live.get("http_servers", []):
+        changed = True
+    if lock_agent.get("ssh_servers", []) != live.get("ssh_servers", []):
         changed = True
 
     if not changed:

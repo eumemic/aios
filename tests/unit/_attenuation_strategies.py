@@ -292,7 +292,7 @@ def _ssh_server() -> st.SearchStrategy[SshServerSpec]:
         description=st.none() | st.just("d"),
         permission_policy=st.none()
         | st.builds(SshPermissionPolicy, type=st.sampled_from(["always_allow", "always_ask"])),
-        suppress=st.none() | st.booleans(),
+        read_allow=st.booleans(),
         enabled=st.booleans(),
     )
 

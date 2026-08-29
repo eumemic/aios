@@ -42,7 +42,7 @@ class SshServerSpec:
             port (int | Unset):  Default: 22.
             description (None | str | Unset):
             permission_policy (None | SshPermissionPolicy | Unset):
-            suppress (bool | None | Unset):
+            read_allow (bool | Unset):  Default: False.
             enabled (bool | Unset):  Default: True.
     """
 
@@ -54,7 +54,7 @@ class SshServerSpec:
     port: int | Unset = 22
     description: None | str | Unset = UNSET
     permission_policy: None | SshPermissionPolicy | Unset = UNSET
-    suppress: bool | None | Unset = UNSET
+    read_allow: bool | Unset = False
     enabled: bool | Unset = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -86,11 +86,7 @@ class SshServerSpec:
         else:
             permission_policy = self.permission_policy
 
-        suppress: bool | None | Unset
-        if isinstance(self.suppress, Unset):
-            suppress = UNSET
-        else:
-            suppress = self.suppress
+        read_allow = self.read_allow
 
         enabled = self.enabled
 
@@ -111,8 +107,8 @@ class SshServerSpec:
             field_dict["description"] = description
         if permission_policy is not UNSET:
             field_dict["permission_policy"] = permission_policy
-        if suppress is not UNSET:
-            field_dict["suppress"] = suppress
+        if read_allow is not UNSET:
+            field_dict["read_allow"] = read_allow
         if enabled is not UNSET:
             field_dict["enabled"] = enabled
 
@@ -163,14 +159,7 @@ class SshServerSpec:
 
         permission_policy = _parse_permission_policy(d.pop("permission_policy", UNSET))
 
-        def _parse_suppress(data: object) -> bool | None | Unset:
-            if data is None:
-                return data
-            if isinstance(data, Unset):
-                return data
-            return cast(bool | None | Unset, data)
-
-        suppress = _parse_suppress(d.pop("suppress", UNSET))
+        read_allow = d.pop("read_allow", UNSET)
 
         enabled = d.pop("enabled", UNSET)
 
@@ -183,7 +172,7 @@ class SshServerSpec:
             port=port,
             description=description,
             permission_policy=permission_policy,
-            suppress=suppress,
+            read_allow=read_allow,
             enabled=enabled,
         )
 

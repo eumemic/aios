@@ -189,10 +189,8 @@ async def _do_ssh(
     # Resolve+pin the host IP. Operator-allowlisted internal hosts skip the
     # private-range block (still resolve+pin); everyone else is public-only and
     # rebinding-pinned. The required host-key pin authenticates whatever answers.
-    allow_key = f"{server.host}:{server.port}"
-    if server.host in settings.ssh_allow_internal_host_set or (
-        allow_key in settings.ssh_allow_internal_host_set
-    ):
+    allow_set = settings.ssh_allow_internal_host_set
+    if server.host in allow_set or f"{server.host}:{server.port}" in allow_set:
         pinned_ip = await resolve_internal_ip(server.host, server.port)
     else:
         pinned_ip = await resolve_pinned_ip(server.host, server.port)

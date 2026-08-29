@@ -18877,16 +18877,10 @@
               }
             ]
           },
-          "suppress": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Suppress"
+          "read_allow": {
+            "type": "boolean",
+            "title": "Read Allow",
+            "default": false
           },
           "enabled": {
             "type": "boolean",

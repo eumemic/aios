@@ -32,7 +32,7 @@ Classification policy:
   :func:`aios.models.agents.mcp_tool_suppressed`.
 * SSH — default-deny like MCP (a shell command has no read/write verb to
   classify on); an operator marks a whole server read-only via
-  ``SshServerSpec.suppress = False``. See
+  ``SshServerSpec.read_allow = True``. See
   :func:`aios.models.agents.ssh_server_suppressed`.
 
 The agent is NOT told a call was suppressed — synthesized responses look like

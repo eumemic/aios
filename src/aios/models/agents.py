@@ -635,11 +635,13 @@ class SshServerSpec(BaseModel):
     credential: str = Field(min_length=1, max_length=128)
     description: str | None = None
     permission_policy: SshPermissionPolicy | None = None
-    # Outbound-suppression override (#710). ssh is DEFAULT-DENY under
-    # suppression: with no read/write verb to classify on, every command is
-    # suppressed unless this is explicitly ``False`` (a server the operator
-    # attests is read-only). ``None`` (default) means suppressed.
-    suppress: bool | None = None
+    # Outbound-suppression opt-in (#710). ssh is DEFAULT-DENY under suppression:
+    # with no read/write verb to classify on, every command is suppressed unless
+    # the operator attests this server is read-only by setting ``read_allow``.
+    # A plain two-valued bool, matching ssh's true semantic sibling
+    # ``McpToolConfig.read_allow`` (also default-deny) — not http's tri-state
+    # ``suppress``, whose ``None`` defers to a method classifier ssh doesn't have.
+    read_allow: bool = False
     enabled: bool = True
 
     @field_validator("host_keys")
@@ -1265,11 +1267,11 @@ def ssh_server_suppressed(server: SshServerSpec) -> bool:
 
     ssh has no read/write verb to classify on, so the policy is *default-deny*
     (the ``mcp_tool_suppressed`` model, not the method-derived HTTP one): every
-    command is suppressed unless ``server.suppress`` is explicitly ``False`` (an
-    operator attestation that the server is read-only). Only consulted when the
-    session's ``outbound_suppression`` is ``"on"`` — callers gate on that first.
+    command is suppressed unless the operator opted the server in via
+    ``read_allow`` (attesting it is read-only). Only consulted when the session's
+    ``outbound_suppression`` is ``"on"`` — callers gate on that first.
     """
-    return server.suppress if server.suppress is not None else True
+    return not server.read_allow
 
 
 def mcp_tool_suppressed(name: str, agent_tools: list[ToolSpec]) -> bool:
