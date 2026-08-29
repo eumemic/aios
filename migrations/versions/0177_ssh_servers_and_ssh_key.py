@@ -21,8 +21,8 @@ touched: 0111 dropped it (the AuthType Literal is the single source, enforced
 by the typed insert writer), and a persisted-enum-drift test asserts its
 absence — re-adding one here would regress that invariant.
 
-Revision ID: 0176
-Revises: 0175
+Revision ID: 0177
+Revises: 0176
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0176"
-down_revision: str = "0175"
+revision: str = "0177"
+down_revision: str = "0176"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

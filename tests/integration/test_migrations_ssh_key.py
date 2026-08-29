@@ -89,7 +89,7 @@ def test_clean_round_trip(migration_db_url: str) -> None:
     for table in (*_SURFACE_TABLES, "sessions"):
         assert asyncio.run(_has_ssh_servers_column(db_url, table)), f"{table} missing ssh_servers"
 
-    down = run_alembic(["downgrade", "0175"], db_url)
+    down = run_alembic(["downgrade", "0176"], db_url)
     assert down.returncode == 0, f"downgrade failed:\n{down.stderr}\n{down.stdout}"
     for table in (*_SURFACE_TABLES, "sessions"):
         assert not asyncio.run(_has_ssh_servers_column(db_url, table)), f"{table} kept ssh_servers"
@@ -112,7 +112,7 @@ def test_ssh_key_row_accepted_and_blocks_downgrade(migration_db_url: str) -> Non
     asyncio.run(_execute(db_url, _VAULT_SQL))
     asyncio.run(_execute(db_url, _SSH_KEY_CRED_SQL))
 
-    down = run_alembic(["downgrade", "0175"], db_url)
+    down = run_alembic(["downgrade", "0176"], db_url)
     assert down.returncode != 0, f"downgrade should have failed loud:\n{down.stdout}"
 
     assert asyncio.run(_row_exists(db_url, "vcr_ssh"))
