@@ -28,6 +28,7 @@ from aios.actors import Actor
 from aios.logging import get_logger
 from aios.models.skills import AgentSkillRef
 from aios.models.target_urls import OutboundTargetBlockedError, validate_outbound_target_url
+from aios.models.vaults import SECRET_NAME_RE
 from aios.retirements.registry import tolerated_rename_map
 from aios.retirements.telemetry import record_tolerance_hit
 
@@ -49,6 +50,7 @@ BuiltinToolType = Literal[
     "list_related_sessions",
     "list_vault_credentials",
     "http_request",
+    "ssh",
     "trigger_create",
     "trigger_remove",
     "trigger_update",
@@ -209,6 +211,10 @@ _RESERVED_MCP_HEADERS: frozenset[str] = frozenset(
 # RFC 7230 ``token``: the legal character set for an HTTP header field name.
 # Excludes whitespace, control chars, ``:``, and non-ASCII by construction.
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+# The base64 blob token of an SSH public-key line (``<algo> <base64> [comment]``).
+# A syntactic gate only — the cryptographic parse is asyncssh's at connect time.
+_HOST_KEY_B64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
 
 # ── MCP server declaration ────────────────────────────────────────────────────
@@ -589,6 +595,109 @@ def validate_http_servers(servers: list[HttpServerSpec]) -> None:
         seen.add(server.base_url)
 
 
+# ── SSH server declaration ────────────────────────────────────────────────────
+
+
+class SshPermissionPolicy(BaseModel):
+    """Wrapper matching the ``{type: "always_allow"}`` shape used for MCP/HTTP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: PermissionPolicy
+
+
+class SshServerSpec(BaseModel):
+    """One entry in an agent's ``ssh_servers`` list.
+
+    Declares a remote host the agent can run shell commands on via the ``ssh``
+    built-in tool. ``credential`` names the ``ssh_key`` vault credential (its
+    ``secret_name``) resolved at call time from the session's bound vaults — the
+    private key is loaded only in worker memory and never enters the sandbox or
+    the model context. ``host_keys`` is a REQUIRED non-empty pin-set of public
+    host-key lines the server must present (no trust-on-first-use, no store, no
+    insecure mode): a server key outside the set aborts the connection.
+
+    There is NO command grammar: the grant is per-server whole-shell (OpenSSH
+    hands the remote login shell a single command string, which it re-parses, so
+    an aios-side allowlist could never equal its own effect). Restrict the blast
+    radius server-side — ``authorized_keys`` forced commands / ``restrict`` /
+    dedicated low-privilege users — and/or gate every command with
+    ``permission_policy: {type: always_ask}``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=64)
+    host_keys: list[str] = Field(min_length=1)
+    credential: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    permission_policy: SshPermissionPolicy | None = None
+    # Outbound-suppression opt-in (#710). ssh is DEFAULT-DENY under suppression:
+    # with no read/write verb to classify on, every command is suppressed unless
+    # the operator attests this server is read-only by setting ``read_allow``.
+    # A plain two-valued bool, matching ssh's true semantic sibling
+    # ``McpToolConfig.read_allow`` (also default-deny) — not http's tri-state
+    # ``suppress``, whose ``None`` defers to a method classifier ssh doesn't have.
+    read_allow: bool = False
+    enabled: bool = True
+
+    @field_validator("host_keys")
+    @classmethod
+    def _validate_host_keys(cls, value: list[str]) -> list[str]:
+        """Light syntactic gate on each pinned host-key line.
+
+        A public-key line is ``<algo> <base64> [comment]``. We only check that
+        shape here (two-plus whitespace-separated tokens, no embedded newline, a
+        base64-ish second token) so an obviously malformed pin fails at
+        authoring; the cryptographic parse happens at connect time via asyncssh
+        and surfaces as a model-visible ToolBail.
+        """
+        cleaned: list[str] = []
+        for line in value:
+            stripped = line.strip()
+            if not stripped or "\n" in line or "\r" in line:
+                raise ValueError(
+                    f"invalid host_keys entry {line!r}: must be a single non-empty line"
+                )
+            parts = stripped.split()
+            if len(parts) < 2 or not _HOST_KEY_B64_RE.fullmatch(parts[1]):
+                raise ValueError(
+                    f"invalid host_keys entry {line!r}: expected '<algo> <base64> [comment]'"
+                )
+            cleaned.append(stripped)
+        return cleaned
+
+    @field_validator("credential")
+    @classmethod
+    def _validate_credential(cls, value: str) -> str:
+        """``credential`` names an ``ssh_key`` vault secret_name — same POSIX-name
+        grammar, so a typo fails at authoring rather than at first use."""
+        if not SECRET_NAME_RE.fullmatch(value):
+            raise ValueError(
+                f"invalid credential {value!r}: must be a POSIX name ([A-Za-z_][A-Za-z0-9_]*)"
+            )
+        return value
+
+
+def validate_ssh_servers(servers: list[SshServerSpec]) -> None:
+    """Cross-item invariant for ``ssh_servers`` lists: unique ``name``.
+
+    ``name`` is the tool's ``server_ref`` lookup key, and the attenuation meet
+    key — a duplicate is unreachable dead config and would make the ``{name:
+    spec}`` meet dict non-deterministic (the same rationale as
+    :func:`validate_mcp_servers`' name arm). The same host under different names
+    or usernames is legitimate and allowed.
+    """
+    seen: set[str] = set()
+    for server in servers:
+        if server.name in seen:
+            raise ValueError(f"duplicate ssh_server name {server.name!r}")
+        seen.add(server.name)
+
+
 def validate_mcp_servers(servers: list[McpServerSpec]) -> None:
     """Cross-item invariants for ingress ``mcp_servers`` lists: unique ``name``,
     and a distinct credential identity per ``url``.
@@ -723,6 +832,42 @@ def resolve_http_server_refs(
                     f"http_servers references {ref!r}, which the acting agent does not grant"
                 )
             out.append(HttpServerSpec(name=ref, base_url=agent_server.base_url, routes=[]))
+        else:
+            out.append(ref)
+    return out
+
+
+SshServerRef = str | SshServerSpec
+"""An authoring-edge ssh_server entry: a bare name (names-only sugar, resolved
+against the acting agent) or a full ``SshServerSpec`` (identity-match)."""
+
+
+def resolve_ssh_server_refs(
+    refs: list[SshServerRef], agent_servers: list[SshServerSpec]
+) -> list[SshServerSpec]:
+    """Resolve names-only entries against the acting agent's ``ssh_servers``.
+
+    Each ``str`` entry is replaced by the acting agent's full ``SshServerSpec``
+    for that name — VERBATIM (unlike ``resolve_http_server_refs``' empty-routes
+    identity stub: an ssh server has no routes-analog to hollow out, and the
+    verbatim copy is exactly what the launcher-frozen meet emits anyway, so the
+    authoring identity check passes for free). A name with no matching agent
+    server raises ``ValueError``. Full ``SshServerSpec`` entries pass through
+    verbatim. Resolution is by name; agents validate name uniqueness so the
+    ``{name: spec}`` map is unambiguous.
+    """
+    by_name: dict[str, SshServerSpec] = {}
+    for s in agent_servers:
+        by_name.setdefault(s.name, s)
+    out: list[SshServerSpec] = []
+    for ref in refs:
+        if isinstance(ref, str):
+            agent_server = by_name.get(ref)
+            if agent_server is None:
+                raise ValueError(
+                    f"ssh_servers references {ref!r}, which the acting agent does not grant"
+                )
+            out.append(agent_server)
         else:
             out.append(ref)
     return out
@@ -865,6 +1010,7 @@ class AgentCreate(BaseModel):
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec] = Field(default_factory=list)
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     litellm_extra: dict[str, Any] = Field(
@@ -914,6 +1060,7 @@ class AgentCreate(BaseModel):
     @model_validator(mode="after")
     def _validate_http_servers(self) -> AgentCreate:
         validate_http_servers(self.http_servers)
+        validate_ssh_servers(self.ssh_servers)
         validate_mcp_servers(self.mcp_servers)
         validate_tools(self.tools)
         return self
@@ -938,6 +1085,7 @@ class AgentUpdate(BaseModel):
     skills: list[AgentSkillRef] | None = None
     mcp_servers: list[McpServerSpec] | None = None
     http_servers: list[HttpServerSpec] | None = None
+    ssh_servers: list[SshServerSpec] | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
     litellm_extra: dict[str, Any] | None = None
@@ -950,6 +1098,8 @@ class AgentUpdate(BaseModel):
     def _validate_http_servers(self) -> AgentUpdate:
         if self.http_servers is not None:
             validate_http_servers(self.http_servers)
+        if self.ssh_servers is not None:
+            validate_ssh_servers(self.ssh_servers)
         if self.mcp_servers is not None:
             validate_mcp_servers(self.mcp_servers)
         if self.tools is not None:
@@ -969,6 +1119,7 @@ class Agent(BaseModel):
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec]
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     description: str | None
     metadata: dict[str, Any]
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
@@ -993,6 +1144,7 @@ class AgentVersion(BaseModel):
     skills: list[AgentSkillRef] = Field(default_factory=list)
     mcp_servers: list[McpServerSpec]
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     litellm_extra: dict[str, Any] = Field(default_factory=dict)
     window_min: int
     window_max: int
@@ -1047,8 +1199,8 @@ class StepSurface(BaseModel):
 
     Nominal replacement for the ``Agent | AgentVersion`` structural union (the
     two wire read-models) plus the ``agent_id=""``/``version=0`` sentinel that
-    encoded "no agent at all". Carries **exactly** the twelve config fields the
-    harness consumes off the loaded surface (verified by grep over every
+    encoded "no agent at all". Carries **exactly** the thirteen config fields
+    the harness consumes off the loaded surface (verified by grep over every
     caller — nothing reads ``name``/``metadata``/``created_at`` off it) plus a
     discriminated :data:`StepBinding` identity. ``description`` joined for the
     auto-review checker (jarbot#229), which reads it as the agent's implicit
@@ -1066,6 +1218,7 @@ class StepSurface(BaseModel):
     tools: list[ToolSpec]
     mcp_servers: list[McpServerSpec]
     http_servers: list[HttpServerSpec] = Field(default_factory=list)
+    ssh_servers: list[SshServerSpec] = Field(default_factory=list)
     model: str
     system: str
     skills: list[AgentSkillRef] = Field(default_factory=list)
@@ -1107,6 +1260,18 @@ def http_route_suppressed(route: HttpRouteSpec, method: str) -> bool:
     if route.suppress is not None:
         return route.suppress
     return method.upper() not in _SUPPRESSION_READ_METHODS
+
+
+def ssh_server_suppressed(server: SshServerSpec) -> bool:
+    """Decide whether an ssh command on ``server`` is suppressed.
+
+    ssh has no read/write verb to classify on, so the policy is *default-deny*
+    (the ``mcp_tool_suppressed`` model, not the method-derived HTTP one): every
+    command is suppressed unless the operator opted the server in via
+    ``read_allow`` (attesting it is read-only). Only consulted when the session's
+    ``outbound_suppression`` is ``"on"`` — callers gate on that first.
+    """
+    return not server.read_allow
 
 
 def mcp_tool_suppressed(name: str, agent_tools: list[ToolSpec]) -> bool:

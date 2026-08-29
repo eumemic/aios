@@ -71,6 +71,7 @@ async def create_workflow(
         tools=body.tools,
         mcp_servers=body.mcp_servers,
         http_servers=body.http_servers,
+        ssh_servers=body.ssh_servers,
     )
 
 
@@ -98,6 +99,7 @@ async def update_workflow(
         tools=body.tools,
         mcp_servers=body.mcp_servers,
         http_servers=body.http_servers,
+        ssh_servers=body.ssh_servers,
     )
 
 
@@ -205,6 +207,7 @@ async def create_run(body: WfRunCreate, pool: PoolDep, account_id: AccountIdDep)
             tools=body.inline.tools,
             mcp_servers=body.inline.mcp_servers,
             http_servers=body.inline.http_servers,
+            ssh_servers=body.inline.ssh_servers,
         )
         if body.inline is not None
         else None

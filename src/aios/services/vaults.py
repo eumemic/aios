@@ -139,6 +139,7 @@ _BEARER_FIELDS = ("token",)
 _BASIC_FIELDS = ("username", "password")
 _CUSTOM_HEADER_FIELDS = ("header_name", "header_value")
 _ENV_VAR_FIELDS = ("secret_value",)
+_SSH_KEY_FIELDS = ("private_key", "passphrase")
 
 # Fields required by each auth_type. Used by both create-time validation
 # (against the request body) and post-merge validation (against the merged
@@ -149,6 +150,18 @@ _AUTH_REQUIRED: dict[AuthType, tuple[str, ...]] = {
     "custom_header": _CUSTOM_HEADER_FIELDS,
     "oauth2_refresh": ("access_token",),
     "environment_variable": _ENV_VAR_FIELDS,
+    "ssh_key": ("private_key",),
+}
+
+# Structural (non-secret) fields a PUT may change per auth_type. Changing one
+# archives-and-recreates the row (the scope-bearing columns are immutable in
+# place). A kind absent here permits neither — its scope columns are fixed at
+# create. environment_variable owns both secret_name (the env var) and
+# allowed_hosts (its egress scope); ssh_key owns only secret_name (it carries
+# no allowed_hosts).
+_UPDATABLE_SCOPE_FIELDS: dict[AuthType, frozenset[str]] = {
+    "environment_variable": frozenset({"secret_name", "allowed_hosts"}),
+    "ssh_key": frozenset({"secret_name"}),
 }
 
 
@@ -163,6 +176,8 @@ def _fields_for(auth_type: AuthType) -> tuple[str, ...]:
         return _CUSTOM_HEADER_FIELDS
     if auth_type == "environment_variable":
         return _ENV_VAR_FIELDS
+    if auth_type == "ssh_key":
+        return _SSH_KEY_FIELDS
     assert_never(auth_type)
 
 
@@ -679,10 +694,11 @@ async def update_vault_credential(
         new_blob = subkey.encrypt_dict(merged)
 
         scope_fields = {"secret_name", "allowed_hosts"} & body.model_fields_set
-        if scope_fields and cred.auth_type != "environment_variable":
+        illegal_scope = scope_fields - _UPDATABLE_SCOPE_FIELDS.get(cred.auth_type, frozenset())
+        if illegal_scope:
             raise ValidationError(
-                "secret_name and allowed_hosts apply only to environment_variable credentials",
-                detail={"auth_type": cred.auth_type, "fields": sorted(scope_fields)},
+                f"fields {sorted(illegal_scope)} cannot be updated on {cred.auth_type} credentials",
+                detail={"auth_type": cred.auth_type, "fields": sorted(illegal_scope)},
             )
         secret_name = body.secret_name if "secret_name" in scope_fields else cred.secret_name
         allowed_hosts = (
@@ -878,6 +894,58 @@ async def resolve_session_env_var_credentials(
         )
         for row in rows
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSshKey:
+    """A decrypted ``ssh_key`` credential, as consumed by the ssh tool.
+
+    Held only in worker memory for the duration of one tool call — never
+    written to a log, the event stream, the spec, or the sandbox. Both secret
+    fields are excluded from ``repr`` so an accidental log of the object can't
+    print key material (an equality-assertion diff in pytest still drills in —
+    don't assert equality across differing secrets).
+    """
+
+    secret_name: str
+    vault_id: str
+    private_key: str = field(repr=False)
+    passphrase: str | None = field(repr=False, default=None)
+
+
+async def resolve_session_ssh_key(
+    pool: asyncpg.Pool[Any],
+    crypto_box: CryptoBox,
+    session_id: str,
+    secret_name: str,
+    *,
+    account_id: str,
+) -> ResolvedSshKey | None:
+    """Resolve + decrypt the ``ssh_key`` credential named ``secret_name`` from
+    the session's bound vaults, or ``None`` if none is bound.
+
+    The ssh-tool sibling of :func:`aios.mcp.client.resolve_auth_for_target_url`:
+    one round trip to prove binding and select the row, then decrypt under the
+    account subkey. A decrypt failure propagates (a corrupt blob is a loud
+    fault, not a silent miss).
+    """
+    async with pool.acquire() as conn:
+        cred = await queries.resolve_session_ssh_key_credential(
+            conn, session_id, secret_name, account_id=account_id
+        )
+    if cred is None:
+        return None
+    blob, vault_id = cred
+    payload = crypto_box.derive_account_subkey(account_id).decrypt_dict(blob)
+    # The write path stores SecretStr.get_secret_value() — always str; the cast
+    # records that contract without a masking str().
+    passphrase = payload.get("passphrase")
+    return ResolvedSshKey(
+        secret_name=secret_name,
+        vault_id=vault_id,
+        private_key=cast(str, payload["private_key"]),
+        passphrase=cast(str, passphrase) if passphrase is not None else None,
+    )
 
 
 def env_var_credential_containment_error(

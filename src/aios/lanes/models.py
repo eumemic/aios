@@ -32,6 +32,7 @@ class LockWorkflow:
     description: str | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     http_servers: list[dict[str, Any]] = field(default_factory=list)
+    ssh_servers: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class LockLauncherAgent:
     description: str | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     http_servers: list[dict[str, Any]] = field(default_factory=list)
+    ssh_servers: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,7 @@ class LaneLock:
                 description=wf.get("description"),
                 tools=wf.get("tools", []),
                 http_servers=wf.get("http_servers", []),
+                ssh_servers=wf.get("ssh_servers", []),
             ),
             cron_trigger=LockCronTrigger(
                 name=ct["name"],
@@ -138,6 +141,7 @@ class LaneLock:
                 description=la.get("description"),
                 tools=la.get("tools", []),
                 http_servers=la.get("http_servers", []),
+                ssh_servers=la.get("ssh_servers", []),
             ),
             launcher_session=LockLauncherSession(
                 agent_id=ls["agent_id"],

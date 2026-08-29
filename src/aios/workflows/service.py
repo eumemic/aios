@@ -33,8 +33,10 @@ from aios.jobs.app import defer_run_wake
 from aios.models.agents import (
     HttpServerRef,
     McpServerSpec,
+    SshServerRef,
     ToolSpec,
     resolve_http_server_refs,
+    resolve_ssh_server_refs,
 )
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import WfRun
@@ -93,6 +95,7 @@ class InlineScript:
         "mcp_servers",
         "output_schema",
         "script",
+        "ssh_servers",
         "tools",
     )
 
@@ -105,6 +108,7 @@ class InlineScript:
         tools: list[ToolSpec] | None = None,
         mcp_servers: list[McpServerSpec] | None = None,
         http_servers: list[HttpServerRef] | None = None,
+        ssh_servers: list[SshServerRef] | None = None,
     ) -> None:
         self.script = script
         self.input_schema = input_schema
@@ -112,6 +116,7 @@ class InlineScript:
         self.tools = tools or []
         self.mcp_servers = mcp_servers or []
         self.http_servers: list[HttpServerRef] = list(http_servers or [])
+        self.ssh_servers: list[SshServerRef] = list(ssh_servers or [])
 
 
 def _enforce_inline_surface(
@@ -119,6 +124,7 @@ def _enforce_inline_surface(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerRef],
+    ssh_servers: list[SshServerRef],
     launcher_agent: Any | None,
 ) -> Surface:
     """Clamp an inline run's declared surface to the launcher, the same create-time
@@ -138,16 +144,18 @@ def _enforce_inline_surface(
     """
     if launcher_agent is None:
         bare = [s for s in http_servers if isinstance(s, str)]
-        if bare:
+        bare_ssh = [s for s in ssh_servers if isinstance(s, str)]
+        if bare or bare_ssh:
             raise ForbiddenError(
-                "names-only http_servers require an acting agent to resolve against; "
-                "the operator path must declare full HttpServerSpec objects "
-                f"(got bare names {bare!r})",
+                "names-only http_servers/ssh_servers require an acting agent to resolve "
+                "against; the operator path must declare full specs "
+                f"(got bare names {bare + bare_ssh!r})",
             )
         return Surface(
             tools,
             mcp_servers,
             [s for s in http_servers if not isinstance(s, str)],
+            [s for s in ssh_servers if not isinstance(s, str)],
         )
     # Resolve names-only entries against the launching agent (#953). An unknown name —
     # a grant the agent does not hold — fails closed as ForbiddenError, the same
@@ -159,7 +167,14 @@ def _enforce_inline_surface(
             "inline run surface exceeds the launching agent's permissions",
             detail={"exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}},
         ) from exc
-    declared = Surface(tools, mcp_servers, resolved_http)
+    try:
+        resolved_ssh = resolve_ssh_server_refs(ssh_servers, launcher_agent.ssh_servers)
+    except ValueError as exc:
+        raise ForbiddenError(
+            "inline run surface exceeds the launching agent's permissions",
+            detail={"exceeds": {"ssh_servers": [r for r in ssh_servers if isinstance(r, str)]}},
+        ) from exc
+    declared = Surface(tools, mcp_servers, resolved_http, resolved_ssh)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(launcher_agent))
     surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
@@ -167,6 +182,7 @@ def _enforce_inline_surface(
         effective.tools != expected.tools
         or effective.mcp_servers != expected.mcp_servers
         or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
+        or any(s not in effective.ssh_servers for s in expected.ssh_servers)
     )
     if exceeds:
         raise ForbiddenError(
@@ -361,6 +377,7 @@ async def create_run(
                 tools=inline.tools,
                 mcp_servers=inline.mcp_servers,
                 http_servers=inline.http_servers,
+                ssh_servers=inline.ssh_servers,
                 launcher_agent=launcher_agent,
             )
         else:
@@ -511,6 +528,7 @@ async def create_run(
             tools=effective.tools,
             mcp_servers=effective.mcp_servers,
             http_servers=effective.http_servers,
+            ssh_servers=effective.ssh_servers,
             budget_usd=budget_usd,
             default_child_model=run_default_child_model,
             depth=child_depth,

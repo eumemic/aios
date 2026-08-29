@@ -40,6 +40,7 @@ class TestWorkflowCreate:
             "tools": [],
             "mcp_servers": [],
             "http_servers": [],
+            "ssh_servers": [],
         }
 
     def test_output_model_round_trips(self) -> None:

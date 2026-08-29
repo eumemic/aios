@@ -115,6 +115,7 @@ async def child_session_scaffold(
                 tools=[],
                 mcp_servers=[],
                 http_servers=[],
+                ssh_servers=[],
             )
         assert child is not None
         assert child.parent_run_id == parent_run.id

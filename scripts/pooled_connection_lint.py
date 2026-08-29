@@ -312,6 +312,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.resolve_run_credential",
         "queries.resolve_runtime_token",
         "queries.resolve_session_credential",
+        "queries.resolve_session_ssh_key_credential",
         "queries.resolve_skill_refs",
         "queries.resolve_vault_credential",
         "queries.revoke_account_key",

@@ -34,6 +34,8 @@ from aios.models.agents import (
     McpToolConfig,
     McpToolsetConfig,
     PermissionPolicy,
+    SshPermissionPolicy,
+    SshServerSpec,
     ToolSpec,
     ToolTransport,
 )
@@ -53,6 +55,10 @@ MCP_VAULT_IDS = ["vlt_a", "vlt_b"]  # per-mount credential pins (None = unpinned
 MCP_TOOL_NAMES = ["t1", "t2"]  # discovered-tool names for configs[]
 HTTP_SERVER_NAMES = ["api_a", "api_b"]
 HTTP_BASE_URLS = ["https://http-a", "https://http-b"]
+SSH_SERVER_NAMES = ["ssh_a", "ssh_b"]
+SSH_HOSTS = ["h-a.example.com", "h-b.example.com"]
+SSH_CREDENTIALS = ["CRED_A", "CRED_B"]
+_SSH_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyDataForTestsOnlyAAAA"
 PATH_PATTERNS = ["/x", "/y"]  # opaque keys — no glob semantics generated
 
 PERMS: list[PermissionPolicy] = ["always_allow", "always_ask"]
@@ -271,4 +277,30 @@ def http_servers_list() -> st.SearchStrategy[list[HttpServerSpec]]:
     """
     return st.lists(_http_server(), max_size=len(HTTP_BASE_URLS)).map(
         lambda ss: list({s.base_url: s for s in ss}.values())
+    )
+
+
+def _ssh_server() -> st.SearchStrategy[SshServerSpec]:
+    return st.builds(
+        SshServerSpec,
+        name=st.sampled_from(SSH_SERVER_NAMES),
+        host=st.sampled_from(SSH_HOSTS),
+        port=st.sampled_from([22, 2222]),
+        username=st.sampled_from(["root", "deploy"]),
+        host_keys=st.just([_SSH_HOST_KEY]),
+        credential=st.sampled_from(SSH_CREDENTIALS),
+        description=st.none() | st.just("d"),
+        permission_policy=st.none()
+        | st.builds(SshPermissionPolicy, type=st.sampled_from(["always_allow", "always_ask"])),
+        read_allow=st.booleans(),
+        enabled=st.booleans(),
+    )
+
+
+def ssh_servers_list() -> st.SearchStrategy[list[SshServerSpec]]:
+    """An ``ssh_servers`` list satisfying :func:`validate_ssh_servers` (unique
+    ``name``) — dedup by ``name`` after drawing.
+    """
+    return st.lists(_ssh_server(), max_size=len(SSH_SERVER_NAMES)).map(
+        lambda ss: list({s.name: s for s in ss}.values())
     )

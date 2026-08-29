@@ -241,7 +241,7 @@ def _transport_glb(a: ToolTransport, b: ToolTransport) -> ToolTransport | None:
 
 
 def _surface(spec: ToolSpec) -> Surface:
-    return Surface([spec], [SRV], [])
+    return Surface([spec], [SRV], [], [])
 
 
 # ── canonicalize preserves every live resolver verdict ────────────────────────

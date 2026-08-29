@@ -15,6 +15,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
     from ..models.usage_node_ref import UsageNodeRef
     from ..models.wf_run_caller_type_0 import WfRunCallerType0
@@ -70,6 +71,7 @@ class WfRun:
             tools (list[ToolSpec] | Unset):
             mcp_servers (list[McpServerSpec] | Unset):
             http_servers (list[HttpServerSpec] | Unset):
+            ssh_servers (list[SshServerSpec] | Unset):
             input_ (Any | Unset):
             output (Any | Unset):
             budget_usd (float | None | Unset):
@@ -106,6 +108,7 @@ class WfRun:
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
+    ssh_servers: list[SshServerSpec] | Unset = UNSET
     input_: Any | Unset = UNSET
     output: Any | Unset = UNSET
     budget_usd: float | None | Unset = UNSET
@@ -227,6 +230,13 @@ class WfRun:
                 http_servers_item = http_servers_item_data.to_dict()
                 http_servers.append(http_servers_item)
 
+        ssh_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.ssh_servers, Unset):
+            ssh_servers = []
+            for ssh_servers_item_data in self.ssh_servers:
+                ssh_servers_item = ssh_servers_item_data.to_dict()
+                ssh_servers.append(ssh_servers_item)
+
         input_ = self.input_
 
         output = self.output
@@ -329,6 +339,8 @@ class WfRun:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
         if input_ is not UNSET:
             field_dict["input"] = input_
         if output is not UNSET:
@@ -358,6 +370,7 @@ class WfRun:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
         from ..models.usage_node_ref import UsageNodeRef
         from ..models.wf_run_caller_type_0 import WfRunCallerType0
@@ -520,6 +533,15 @@ class WfRun:
 
                 http_servers.append(http_servers_item)
 
+        _ssh_servers = d.pop("ssh_servers", UNSET)
+        ssh_servers: list[SshServerSpec] | Unset = UNSET
+        if _ssh_servers is not UNSET:
+            ssh_servers = []
+            for ssh_servers_item_data in _ssh_servers:
+                ssh_servers_item = SshServerSpec.from_dict(ssh_servers_item_data)
+
+                ssh_servers.append(ssh_servers_item)
+
         input_ = d.pop("input", UNSET)
 
         output = d.pop("output", UNSET)
@@ -659,6 +681,7 @@ class WfRun:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
             input_=input_,
             output=output,
             budget_usd=budget_usd,

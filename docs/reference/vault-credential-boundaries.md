@@ -19,9 +19,19 @@ Vault credentials let a session use placeholder material in the sandbox while th
 
 **What's protected:** env-var credential materialization plus the egress swap covers HTTPS hosts by construction.
 
-**What isn't protected:** non-HTTP secret consumers are out of scope for this mechanism, including database passwords, SSH keys, raw-TCP protocols, and other clients that do not traverse the HTTPS egress swap.
+**What isn't protected:** non-HTTP secret consumers are out of scope for *this* mechanism (the egress swap), including database passwords, raw-TCP protocols, and other clients that do not traverse the HTTPS egress swap. SSH keys have since grown their own worker-side broker — see the SSH exec boundary below.
 
-**What to do instead:** keep those secrets on the worker side, or use a future named-consumer broker once one exists for non-HTTP consumers.
+**What to do instead:** keep those secrets on the worker side, or use a protocol-specific named-consumer broker where one exists (SSH now has one; the `git_proxy` GitHub-PAT injector is the precedent shape). A non-HTTP consumer without a broker still belongs worker-side.
+
+## SSH exec boundary (#887)
+
+The `ssh` built-in tool is the first named-consumer broker for a non-HTTP secret. An agent declares `ssh_servers` (host, user, host-key pin set, and the `ssh_key` vault credential's name); the worker resolves the private key, holds it in memory only for the call, connects, runs the command, and returns `{exit_code, stdout, stderr}`.
+
+**What's protected:** the private key never enters the sandbox or the model context (worker-memory only, never logged, never in an error message). The remote host is authenticated by a **required host-key pin** — no trust-on-first-use, no known-hosts store — so a vaulted key is never presented to an unverified host. The dial is **connect-IP-pinned** against DNS rebinding, and private/internal addresses are refused unless an operator allowlists the host via `AIOS_SSH_ALLOW_INTERNAL_HOSTS`.
+
+**What isn't protected:** the confused-deputy / command-misuse surface. The grant is per-server **whole-shell** — there is deliberately no command grammar, because OpenSSH hands the remote login shell a single command string it re-parses, so an aios-side allowlist could never equal its own effect (shell metacharacters, quoting). A prompt-injected agent can run anything the key permits on a granted host. Command output is untrusted input, like any reflected content.
+
+**What to do instead:** restrict the blast radius **server-side** — `authorized_keys` forced commands (`command="…"`), `restrict`, and dedicated low-privilege users are the real command restriction. Gate high-impact servers with `permission_policy: {type: always_ask}` (a human confirms each command), throttle with `outbound_tool_quotas["ssh"]`, and rely on outbound-suppression's default-deny for behavior-validation sessions. Scope each `ssh_key` to the least privilege the task needs.
 
 ## Request-signing API boundary (#974)
 

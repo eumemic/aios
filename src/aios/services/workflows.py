@@ -31,8 +31,11 @@ from aios.models.agents import (
     HttpServerRef,
     HttpServerSpec,
     McpServerSpec,
+    SshServerRef,
+    SshServerSpec,
     ToolSpec,
     resolve_http_server_refs,
+    resolve_ssh_server_refs,
 )
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
@@ -140,6 +143,7 @@ async def _enforce_surface_attenuation(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerRef],
+    ssh_servers: list[SshServerRef],
 ) -> Surface:
     """Raise ``ForbiddenError`` unless the declared surface is admissible against the acting
     agent's; return the effective (clamped) surface for storage.
@@ -176,7 +180,14 @@ async def _enforce_surface_attenuation(
             "workflow surface exceeds the acting agent's permissions",
             detail={"exceeds": {"http_servers": [r for r in http_servers if isinstance(r, str)]}},
         ) from exc
-    declared = Surface(tools, mcp_servers, resolved_http)
+    try:
+        resolved_ssh = resolve_ssh_server_refs(ssh_servers, agent.ssh_servers)
+    except ValueError as exc:
+        raise ForbiddenError(
+            "workflow surface exceeds the acting agent's permissions",
+            detail={"exceeds": {"ssh_servers": [r for r in ssh_servers if isinstance(r, str)]}},
+        ) from exc
+    declared = Surface(tools, mcp_servers, resolved_http, resolved_ssh)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(agent))
     surviving_http = {(s.name, s.base_url) for s in effective.http_servers}
@@ -184,6 +195,7 @@ async def _enforce_surface_attenuation(
         effective.tools != expected.tools
         or effective.mcp_servers != expected.mcp_servers
         or any((s.name, s.base_url) not in surviving_http for s in expected.http_servers)
+        or any(s not in effective.ssh_servers for s in expected.ssh_servers)
     )
     if exceeds:
         raise ForbiddenError(
@@ -213,6 +225,23 @@ def _reject_operator_path_names_only(
             f"the operator path must declare full HttpServerSpec objects (got bare names {bare!r})",
         )
     return [s for s in http_servers if isinstance(s, HttpServerSpec)]
+
+
+def _reject_operator_path_names_only_ssh(
+    ssh_servers: list[SshServerRef] | None,
+) -> list[SshServerSpec] | None:
+    """The ssh twin of :func:`_reject_operator_path_names_only`: the operator path has
+    no acting agent to resolve a bare ssh name against, so names-only sugar is rejected;
+    otherwise the input is narrowed to ``list[SshServerSpec]``."""
+    if ssh_servers is None:
+        return None
+    bare = [s for s in ssh_servers if isinstance(s, str)]
+    if bare:
+        raise ForbiddenError(
+            "names-only ssh_servers require an acting agent to resolve against; "
+            f"the operator path must declare full SshServerSpec objects (got bare names {bare!r})",
+        )
+    return [s for s in ssh_servers if isinstance(s, SshServerSpec)]
 
 
 async def _validate_script_surface(
@@ -287,6 +316,7 @@ async def create_workflow(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerRef] | None = None,
+    ssh_servers: list[SshServerRef] | None = None,
     creator_session_id: str | None = None,
 ) -> Workflow:
     """Create a workflow definition.
@@ -307,6 +337,7 @@ async def create_workflow(
     await _validate_script_surface(pool, account_id=account_id, script=script, tools=tools or [])
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
+    operator_ssh: list[SshServerSpec] | None = None
     if creator_session_id is not None:
         effective = await _enforce_surface_attenuation(
             pool,
@@ -315,12 +346,15 @@ async def create_workflow(
             tools=tools or [],
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
+            ssh_servers=ssh_servers or [],
         )
     else:
         operator_http = _reject_operator_path_names_only(http_servers)
+        operator_ssh = _reject_operator_path_names_only_ssh(ssh_servers)
     # Agent-authored: store the agent's launcher-frozen http routes (inherited by identity).
     # Operator path: store the declared http servers verbatim (bare names already rejected).
     http_to_store = effective.http_servers if effective is not None else operator_http
+    ssh_to_store = effective.ssh_servers if effective is not None else operator_ssh
     async with pool.acquire() as conn:
         return await wf_queries.insert_workflow(
             conn,
@@ -334,6 +368,7 @@ async def create_workflow(
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_to_store,
+            ssh_servers=ssh_to_store,
         )
 
 
@@ -352,6 +387,7 @@ async def update_workflow(
     tools: list[ToolSpec] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerRef] | None = None,
+    ssh_servers: list[SshServerRef] | None = None,
     actor_session_id: str | None = None,
 ) -> Workflow:
     """Update a workflow in place (optimistic concurrency on ``expected_version``).
@@ -389,8 +425,10 @@ async def update_workflow(
         )
     effective: Surface | None = None
     operator_http: list[HttpServerSpec] | None = None
+    operator_ssh: list[SshServerSpec] | None = None
     if actor_session_id is None:
         operator_http = _reject_operator_path_names_only(http_servers)
+        operator_ssh = _reject_operator_path_names_only_ssh(ssh_servers)
     if actor_session_id is not None:
         current = await get_workflow(pool, workflow_id, account_id=account_id)
         if current.version != expected_version:
@@ -413,6 +451,9 @@ async def update_workflow(
         merged_http: list[HttpServerRef] = (
             http_servers if http_servers is not None else list(current.http_servers)
         )
+        merged_ssh: list[SshServerRef] = (
+            ssh_servers if ssh_servers is not None else list(current.ssh_servers)
+        )
         effective = await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
@@ -420,6 +461,7 @@ async def update_workflow(
             tools=tools if tools is not None else current.tools,
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
             http_servers=merged_http,
+            ssh_servers=merged_ssh,
         )
     # Agent-actor touching http: store the inherited launcher-frozen routes. Operator path,
     # or an edit that didn't touch http (``http_servers is None`` → query preserves current):
@@ -428,6 +470,11 @@ async def update_workflow(
         effective.http_servers
         if (effective is not None and http_servers is not None)
         else operator_http
+    )
+    ssh_to_store = (
+        effective.ssh_servers
+        if (effective is not None and ssh_servers is not None)
+        else operator_ssh
     )
     async with pool.acquire() as conn:
         return await wf_queries.update_workflow(
@@ -444,6 +491,7 @@ async def update_workflow(
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_to_store,
+            ssh_servers=ssh_to_store,
         )
 
 

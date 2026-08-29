@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..models.actor import Actor
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
     from ..models.workflow_input_schema_type_0 import WorkflowInputSchemaType0
     from ..models.workflow_output_schema_type_0 import WorkflowOutputSchemaType0
@@ -41,6 +42,7 @@ class Workflow:
         tools (list[ToolSpec] | Unset):
         mcp_servers (list[McpServerSpec] | Unset):
         http_servers (list[HttpServerSpec] | Unset):
+        ssh_servers (list[SshServerSpec] | Unset):
         created_by (Actor | None | Unset):
         archived_at (datetime.datetime | None | Unset):
     """
@@ -59,6 +61,7 @@ class Workflow:
     tools: list[ToolSpec] | Unset = UNSET
     mcp_servers: list[McpServerSpec] | Unset = UNSET
     http_servers: list[HttpServerSpec] | Unset = UNSET
+    ssh_servers: list[SshServerSpec] | Unset = UNSET
     created_by: Actor | None | Unset = UNSET
     archived_at: datetime.datetime | None | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -131,6 +134,13 @@ class Workflow:
                 http_servers_item = http_servers_item_data.to_dict()
                 http_servers.append(http_servers_item)
 
+        ssh_servers: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.ssh_servers, Unset):
+            ssh_servers = []
+            for ssh_servers_item_data in self.ssh_servers:
+                ssh_servers_item = ssh_servers_item_data.to_dict()
+                ssh_servers.append(ssh_servers_item)
+
         created_by: dict[str, Any] | None | Unset
         if isinstance(self.created_by, Unset):
             created_by = UNSET
@@ -174,6 +184,8 @@ class Workflow:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
         if created_by is not UNSET:
             field_dict["created_by"] = created_by
         if archived_at is not UNSET:
@@ -186,6 +198,7 @@ class Workflow:
         from ..models.actor import Actor
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
         from ..models.workflow_input_schema_type_0 import WorkflowInputSchemaType0
         from ..models.workflow_output_schema_type_0 import WorkflowOutputSchemaType0
@@ -288,6 +301,15 @@ class Workflow:
 
                 http_servers.append(http_servers_item)
 
+        _ssh_servers = d.pop("ssh_servers", UNSET)
+        ssh_servers: list[SshServerSpec] | Unset = UNSET
+        if _ssh_servers is not UNSET:
+            ssh_servers = []
+            for ssh_servers_item_data in _ssh_servers:
+                ssh_servers_item = SshServerSpec.from_dict(ssh_servers_item_data)
+
+                ssh_servers.append(ssh_servers_item)
+
         def _parse_created_by(data: object) -> Actor | None | Unset:
             if data is None:
                 return data
@@ -337,6 +359,7 @@ class Workflow:
             tools=tools,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
             created_by=created_by,
             archived_at=archived_at,
         )

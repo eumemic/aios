@@ -65,6 +65,7 @@ from tests.unit._attenuation_strategies import (
     PATH_PATTERNS,
     http_servers_list,
     mcp_servers_list,
+    ssh_servers_list,
     tools_list,
 )
 
@@ -83,7 +84,9 @@ settings.load_profile("attenuation_laws")
 
 def st_builds_surface() -> st.SearchStrategy[Surface]:
     """A combined ``Surface`` strategy over all three dimensions at once."""
-    return st.builds(Surface, tools_list(), mcp_servers_list(), http_servers_list())
+    return st.builds(
+        Surface, tools_list(), mcp_servers_list(), http_servers_list(), ssh_servers_list()
+    )
 
 
 def _att(d: Surface, ln: Surface) -> Surface:
@@ -264,7 +267,7 @@ def test_duplicate_path_pattern_never_loses_a_verb_the_launcher_granted(
     if not d_http or not l_http:
         return  # no collision drawn this example — a vacuous but valid draw
     d_srv, l_srv = d_http[0], l_http[0]
-    out = _att(Surface([], [], [d_srv]), Surface([], [], [l_srv]))
+    out = _att(Surface([], [], [d_srv], []), Surface([], [], [l_srv], []))
     if not out.http_servers:
         return
     out_srv = out.http_servers[0]

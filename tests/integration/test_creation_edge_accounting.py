@@ -74,6 +74,7 @@ async def _seed_agent_workflow_agent_chain(
             tools=[],
             mcp_servers=[],
             http_servers=[],
+            ssh_servers=[],
         )
         assert child is not None
     return root.id, run.id, child.id, agent.id, environment.id

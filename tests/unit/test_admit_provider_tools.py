@@ -42,7 +42,7 @@ def _custom(
 def test_admit_provider_tools_drops_absent() -> None:
     """A provider tool whose ``_tool_key`` is absent from ``effective`` is dropped."""
     provider = [_custom("X")]
-    effective = Surface([_custom("Y")], [], [])  # X's key is not present
+    effective = Surface([_custom("Y")], [], [], [])  # X's key is not present
     assert (
         admit_provider_tools(provider, effective, default_mcp_permission=DMP, builtin_transports=BT)
         == []
@@ -54,7 +54,7 @@ def test_admit_provider_tools_empty_effective_drops_all() -> None:
     provider = [_custom("X"), _custom("Z")]
     assert (
         admit_provider_tools(
-            provider, Surface([], [], []), default_mcp_permission=DMP, builtin_transports=BT
+            provider, Surface([], [], [], []), default_mcp_permission=DMP, builtin_transports=BT
         )
         == []
     )
@@ -69,7 +69,7 @@ def test_admit_provider_tools_meets_present() -> None:
     """
     provider_x = _custom("X")  # wide: permission/transport None → always_allow/both
     eff_x = _custom("X", permission="always_ask", transport="cli")
-    effective = Surface([eff_x], [], [])
+    effective = Surface([eff_x], [], [], [])
 
     got = admit_provider_tools(
         [provider_x], effective, default_mcp_permission=DMP, builtin_transports=BT
@@ -96,7 +96,10 @@ def test_admit_provider_tools_definition_from_provider() -> None:
         permission="always_ask",
     )
     [got] = admit_provider_tools(
-        [provider_x], Surface([eff_x], [], []), default_mcp_permission=DMP, builtin_transports=BT
+        [provider_x],
+        Surface([eff_x], [], [], []),
+        default_mcp_permission=DMP,
+        builtin_transports=BT,
     )
     # ``_meet_builtin`` emits the *declared* (provider) definition with the met policy.
     assert got.name == "X"
@@ -107,7 +110,7 @@ def test_admit_provider_tools_definition_from_provider() -> None:
 def test_admit_provider_tools_subset_filter() -> None:
     """Only the provider tools present in ``effective`` survive; order follows provider."""
     provider = [_custom("A"), _custom("B"), _custom("C")]
-    effective = Surface([_custom("C"), _custom("A")], [], [])
+    effective = Surface([_custom("C"), _custom("A")], [], [], [])
     got = admit_provider_tools(
         provider, effective, default_mcp_permission=DMP, builtin_transports=BT
     )
@@ -133,7 +136,7 @@ def test_admit_provider_tools_denies_non_builtin_provider_entry() -> None:
     # The toolset survives ``canonicalize`` (its server is present), so the effective
     # side carries an ``mcp_toolset`` match with ``transport=None`` — exactly the latent
     # ``_meet_builtin`` assertion trip described in #1651.
-    effective = Surface([_toolset("srv")], [srv], [])
+    effective = Surface([_toolset("srv")], [srv], [], [])
     got = admit_provider_tools(
         [_toolset("srv")], effective, default_mcp_permission=DMP, builtin_transports=BT
     )
@@ -145,7 +148,7 @@ def test_admit_provider_tools_custom_still_admitted_alongside_denied_toolset() -
     contains an eroded-invariant toolset entry that must be denied."""
     srv = McpServerSpec(name="srv", url="http://example")
     provider = [_toolset("srv"), _custom("X")]
-    effective = Surface([_toolset("srv"), _custom("X")], [srv], [])
+    effective = Surface([_toolset("srv"), _custom("X")], [srv], [], [])
     got = admit_provider_tools(
         provider, effective, default_mcp_permission=DMP, builtin_transports=BT
     )

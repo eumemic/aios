@@ -45,7 +45,9 @@ def _http_surface(policy: str) -> _SweepAgentSurface:
         methods=None,
     )
     server = HttpServerSpec(name="hue", base_url="https://api.example.com/v1", routes=[route])
-    return _SweepAgentSurface(tools=[ToolSpec(type="http_request")], http_servers=[server])
+    return _SweepAgentSurface(
+        tools=[ToolSpec(type="http_request")], http_servers=[server], ssh_servers=[]
+    )
 
 
 _HTTP_ARGS = '{"server_ref": "hue", "path": "/lights/1", "method": "GET"}'
@@ -136,6 +138,7 @@ async def test_route_gated_always_ask_not_ghost_repaired(monkeypatch: Any) -> No
             "http_servers": [
                 {"name": "hue", "base_url": "https://api.example.com/v1", "routes": [route]}
             ],
+            "ssh_servers": [],
         }
     ]
     # Five fetches: GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL,
@@ -192,6 +195,7 @@ async def test_route_gated_always_ask_confirmed_is_ghost_repaired(monkeypatch: A
             "http_servers": [
                 {"name": "hue", "base_url": "https://api.example.com/v1", "routes": [route]}
             ],
+            "ssh_servers": [],
         }
     ]
     conn = MagicMock()

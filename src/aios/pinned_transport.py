@@ -60,7 +60,36 @@ async def resolve_pinned_ip(host: str, port: int) -> str | None:
     ips = [str(info[4][0]) for info in infos]
     if not ips or any(url_safety.is_blocked_ip(ip) for ip in ips):
         return None
+    return _prefer_ipv4(ips)
+
+
+def _prefer_ipv4(ips: list[str]) -> str:
+    """Pick one address to pin to, preferring IPv4 (the worker is IPv4-only)."""
     return next((ip for ip in ips if ":" not in ip), ips[0])
+
+
+async def resolve_internal_ip(host: str, port: int) -> str | None:
+    """Resolve ``host`` and pin to one IP WITHOUT the blocked-range check.
+
+    The deliberately-unguarded sibling of :func:`resolve_pinned_ip`, for the
+    ``ssh`` tool's operator allow-set ONLY (``settings.ssh_allow_internal_hosts``):
+    a host the operator has explicitly attested is a legitimate internal target
+    (Tailscale / VPN / private infra) whose address is RFC-1918 or CGNAT. It
+    still resolves once and pins the connection to that address, so DNS rebinding
+    cannot redirect an allowed name after the check — but it skips the
+    private/internal-range rejection that would otherwise refuse the dial. The
+    required host-key pin independently authenticates whatever answers. Returns
+    ``None`` only on a resolution failure or empty result. Callers MUST gate on
+    the allow-set before calling this — it performs no allow-listing itself.
+    """
+    try:
+        infos = await _resolve_addrinfos(host, port)
+    except OSError:
+        return None
+    ips = [str(info[4][0]) for info in infos]
+    if not ips:
+        return None
+    return _prefer_ipv4(ips)
 
 
 class PinnedTransport(httpx.AsyncBaseTransport):

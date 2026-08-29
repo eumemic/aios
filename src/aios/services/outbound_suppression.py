@@ -30,6 +30,10 @@ Classification policy:
 * MCP — default-deny (suppress everything); an operator opts known-safe reads
   in via ``McpToolConfig.read_allow``. See
   :func:`aios.models.agents.mcp_tool_suppressed`.
+* SSH — default-deny like MCP (a shell command has no read/write verb to
+  classify on); an operator marks a whole server read-only via
+  ``SshServerSpec.read_allow = True``. See
+  :func:`aios.models.agents.ssh_server_suppressed`.
 
 The agent is NOT told a call was suppressed — synthesized responses look like
 real successes, because behavior validation requires the agent to act as it
@@ -77,6 +81,18 @@ def mcp_synthesized_result() -> dict[str, Any]:
     ``content`` reads as a clean, side-effect-free success.
     """
     return {"content": ""}
+
+
+def ssh_synthesized_result() -> dict[str, Any]:
+    """The synthesized success an ssh command observes under suppression.
+
+    Mirrors the real ``ssh`` return shape (``exit_code``/``stdout``/``stderr``)
+    so the agent can't tell it apart from a real success — a zero exit with empty
+    streams reads as a clean, side-effect-free command. Type-indistinguishable
+    from a genuine success for the same anti-fingerprinting reason the HTTP
+    ``headers`` pair-list exists.
+    """
+    return {"exit_code": 0, "stdout": "", "stderr": ""}
 
 
 async def record_http_suppression(
@@ -143,6 +159,39 @@ async def record_mcp_suppression(
             "server_name": server_name,
             "tool_name": tool_name,
             "arguments": arguments,
+            "would_have_returned": None,
+        },
+    )
+
+
+async def record_ssh_suppression(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    *,
+    account_id: str,
+    server_ref: str,
+    host: str,
+    username: str,
+    command: str,
+) -> None:
+    """Append the ``tool_call_suppressed`` audit span for a suppressed ssh command.
+
+    Records the server_ref + the ``user@host`` it targets + the command the agent
+    tried to run, plus ``would_have_returned: null``. The command is the agent's
+    own input and no vault secret is ever placed there (the private key is loaded
+    worker-side and never enters the command string), so it is safe to log
+    verbatim, same as the http/mcp recorders.
+    """
+    await _append_suppressed_event(
+        pool,
+        session_id,
+        account_id=account_id,
+        data={
+            "tool": "ssh",
+            "server_ref": server_ref,
+            "host": host,
+            "username": username,
+            "command": command,
             "would_have_returned": None,
         },
     )

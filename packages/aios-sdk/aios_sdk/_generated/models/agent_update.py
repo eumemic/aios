@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..models.agent_update_metadata_type_0 import AgentUpdateMetadataType0
     from ..models.http_server_spec import HttpServerSpec
     from ..models.mcp_server_spec import McpServerSpec
+    from ..models.ssh_server_spec import SshServerSpec
     from ..models.tool_spec import ToolSpec
 
 
@@ -39,6 +40,7 @@ class AgentUpdate:
             skills (list[AgentSkillRef] | None | Unset):
             mcp_servers (list[McpServerSpec] | None | Unset):
             http_servers (list[HttpServerSpec] | None | Unset):
+            ssh_servers (list[SshServerSpec] | None | Unset):
             description (None | str | Unset):
             metadata (AgentUpdateMetadataType0 | None | Unset):
             litellm_extra (AgentUpdateLitellmExtraType0 | None | Unset):
@@ -56,6 +58,7 @@ class AgentUpdate:
     skills: list[AgentSkillRef] | None | Unset = UNSET
     mcp_servers: list[McpServerSpec] | None | Unset = UNSET
     http_servers: list[HttpServerSpec] | None | Unset = UNSET
+    ssh_servers: list[SshServerSpec] | None | Unset = UNSET
     description: None | str | Unset = UNSET
     metadata: AgentUpdateMetadataType0 | None | Unset = UNSET
     litellm_extra: AgentUpdateLitellmExtraType0 | None | Unset = UNSET
@@ -138,6 +141,18 @@ class AgentUpdate:
         else:
             http_servers = self.http_servers
 
+        ssh_servers: list[dict[str, Any]] | None | Unset
+        if isinstance(self.ssh_servers, Unset):
+            ssh_servers = UNSET
+        elif isinstance(self.ssh_servers, list):
+            ssh_servers = []
+            for ssh_servers_type_0_item_data in self.ssh_servers:
+                ssh_servers_type_0_item = ssh_servers_type_0_item_data.to_dict()
+                ssh_servers.append(ssh_servers_type_0_item)
+
+        else:
+            ssh_servers = self.ssh_servers
+
         description: None | str | Unset
         if isinstance(self.description, Unset):
             description = UNSET
@@ -209,6 +224,8 @@ class AgentUpdate:
             field_dict["mcp_servers"] = mcp_servers
         if http_servers is not UNSET:
             field_dict["http_servers"] = http_servers
+        if ssh_servers is not UNSET:
+            field_dict["ssh_servers"] = ssh_servers
         if description is not UNSET:
             field_dict["description"] = description
         if metadata is not UNSET:
@@ -235,6 +252,7 @@ class AgentUpdate:
         from ..models.agent_update_metadata_type_0 import AgentUpdateMetadataType0
         from ..models.http_server_spec import HttpServerSpec
         from ..models.mcp_server_spec import McpServerSpec
+        from ..models.ssh_server_spec import SshServerSpec
         from ..models.tool_spec import ToolSpec
 
         d = dict(src_dict)
@@ -361,6 +379,30 @@ class AgentUpdate:
 
         http_servers = _parse_http_servers(d.pop("http_servers", UNSET))
 
+        def _parse_ssh_servers(data: object) -> list[SshServerSpec] | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, list):
+                    raise TypeError()
+                ssh_servers_type_0 = []
+                _ssh_servers_type_0 = data
+                for ssh_servers_type_0_item_data in _ssh_servers_type_0:
+                    ssh_servers_type_0_item = SshServerSpec.from_dict(
+                        ssh_servers_type_0_item_data
+                    )
+
+                    ssh_servers_type_0.append(ssh_servers_type_0_item)
+
+                return ssh_servers_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(list[SshServerSpec] | None | Unset, data)
+
+        ssh_servers = _parse_ssh_servers(d.pop("ssh_servers", UNSET))
+
         def _parse_description(data: object) -> None | str | Unset:
             if data is None:
                 return data
@@ -471,6 +513,7 @@ class AgentUpdate:
             skills=skills,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra,

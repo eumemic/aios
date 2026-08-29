@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 if TYPE_CHECKING:
-    from aios.models.agents import HttpServerSpec, ToolSpec
+    from aios.models.agents import HttpServerSpec, SshServerSpec, ToolSpec
 
 from aios.config import get_settings
 from aios.db.queries import (
@@ -108,22 +108,24 @@ class _Candidate:
 class _SweepAgentSurface:
     """The minimal agent surface the disposition classifier (#1076) consumes.
 
-    The classifier reads only ``.tools`` (permission resolution) and
-    ``.http_servers`` (arg-aware route refinement for ``http_request``), so the
-    sweep builds this thin stand-in per candidate session rather than hydrating
-    a full :class:`~aios.models.agents.Agent`. Structurally a duck-typed
+    The classifier reads ``.tools`` (permission resolution), ``.http_servers``
+    (arg-aware route refinement for ``http_request``), and ``.ssh_servers``
+    (per-server ``always_ask`` for ``ssh``), so the sweep builds this thin
+    stand-in per candidate session rather than hydrating a full
+    :class:`~aios.models.agents.Agent`. Structurally a duck-typed
     ``Agent`` for the two attributes the classifier touches.
     """
 
     tools: list[ToolSpec]
     http_servers: list[HttpServerSpec]
+    ssh_servers: list[SshServerSpec]
 
 
 # The zero-tool, zero-server surface used as the fallback for a candidate whose
 # agent config could not be loaded (a race where the session/agent row is gone).
 # A call classified against it is never dispatched — consistent with leaving an
 # unresolvable call alone rather than fabricating work.
-_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[])
+_EMPTY_SURFACE = _SweepAgentSurface(tools=[], http_servers=[], ssh_servers=[])
 
 
 # ─── query constants ─────────────────────────────────────────────────────────
@@ -253,17 +255,19 @@ GHOST_LIFECYCLE_SQL = """
        AND e.seq >= s.open_tool_call_floor_seq
 """
 
-# Per-session agent surface (tools + http_servers) for the disposition
-# classifier. LEFT JOIN agent_versions to respect version pinning;
-# ``http_servers`` is fetched alongside ``tools`` so the classifier can apply
-# the arg-aware route refinement for ``http_request`` (#1076) — the same
+# Per-session agent surface (tools + http_servers + ssh_servers) for the
+# disposition classifier. LEFT JOIN agent_versions to respect version pinning;
+# ``http_servers``/``ssh_servers`` are fetched alongside ``tools`` so the
+# classifier can apply the arg-aware route refinement for ``http_request`` and
+# the per-server gate for ``ssh`` (#1076) — the same
 # refinement the dispatch and read paths apply. Shared by ghost repair
 # (:func:`find_and_repair_ghosts`) and the inference batch filter
 # (:func:`_filter_incomplete_batches`) via :func:`_load_surfaces`.
 AGENT_SURFACE_SQL = """
     SELECT s.id AS session_id,
            COALESCE(av.tools, a.tools) AS tools,
-           COALESCE(av.http_servers, a.http_servers) AS http_servers
+           COALESCE(av.http_servers, a.http_servers) AS http_servers,
+           COALESCE(av.ssh_servers, a.ssh_servers) AS ssh_servers
       FROM sessions s
       JOIN agents a ON a.id = s.agent_id
       LEFT JOIN agent_versions av
@@ -593,15 +597,17 @@ def _build_surfaces(agent_rows: list[Any]) -> dict[str, _SweepAgentSurface]:
     """Materialize ``AGENT_SURFACE_SQL`` rows into ``_SweepAgentSurface`` per
     session — the thin duck-typed ``Agent`` the disposition classifier reads.
     """
-    from aios.models.agents import HttpServerSpec, load_tool_specs
+    from aios.models.agents import HttpServerSpec, SshServerSpec, load_tool_specs
 
     surface_by_session: dict[str, _SweepAgentSurface] = {}
     for r in agent_rows:
         tools_list = r["tools"]
         http_list = r["http_servers"]
+        ssh_list = r["ssh_servers"]
         surface_by_session[r["session_id"]] = _SweepAgentSurface(
             tools=load_tool_specs(tools_list or []),
             http_servers=[HttpServerSpec.model_validate(h) for h in (http_list or [])],
+            ssh_servers=[SshServerSpec.model_validate(h) for h in (ssh_list or [])],
         )
     return surface_by_session
 

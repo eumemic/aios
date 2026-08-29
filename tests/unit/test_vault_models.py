@@ -367,6 +367,52 @@ class TestEnvironmentVariableCredential:
         assert c.auth_type == "environment_variable"
 
 
+class TestSshKeyCredential:
+    def _create(self, **overrides: object) -> VaultCredentialCreate:
+        kwargs: dict[str, object] = {
+            "auth_type": "ssh_key",
+            "secret_name": "PROD_DEPLOY_KEY",
+            "private_key": SecretStr("-----BEGIN OPENSSH PRIVATE KEY-----\n..."),
+        }
+        kwargs.update(overrides)
+        return VaultCredentialCreate(**kwargs)
+
+    def test_valid(self) -> None:
+        c = self._create(passphrase=SecretStr("pw"))
+        assert c.auth_type == "ssh_key"
+        assert c.secret_name == "PROD_DEPLOY_KEY"
+        assert c.target_url is None
+        assert c.allowed_hosts is None
+        assert c.private_key is not None
+        assert c.passphrase is not None
+
+    def test_passphrase_optional(self) -> None:
+        c = self._create()
+        assert c.passphrase is None
+
+    def test_rejects_missing_secret_name(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=None)
+
+    def test_rejects_target_url(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(target_url="https://x.com")
+
+    def test_rejects_allowed_hosts(self) -> None:
+        with pytest.raises(ValidationError):
+            self._create(allowed_hosts=["x.com"])
+
+    @pytest.mark.parametrize("name", ["1FOO", "FOO-BAR", "FOO BAR", "FOO.BAR", "", "FOO$"])
+    def test_rejects_bad_secret_name(self, name: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=name)
+
+    @pytest.mark.parametrize("name", sorted(RESERVED_SANDBOX_ENV_KEYS))
+    def test_rejects_reserved_secret_name(self, name: str) -> None:
+        with pytest.raises(ValidationError):
+            self._create(secret_name=name)
+
+
 class TestHeaderCredentialShape:
     @pytest.mark.parametrize("extra", [{"secret_name": "FOO"}, {"allowed_hosts": ["x.com"]}])
     def test_rejects_env_var_fields_on_bearer(self, extra: dict[str, object]) -> None:

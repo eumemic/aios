@@ -173,7 +173,7 @@ async def _spawn_child(
             agent_version=1,
             model=None,
             parent_run_id=run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id=ordinal,
             input="hi",
@@ -203,7 +203,7 @@ async def test_create_child_session_idempotent(
             agent_version=1,
             model=None,
             parent_run_id=run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id="sha:x#0",
             input={"q": "hi"},
@@ -221,7 +221,7 @@ async def test_create_child_session_idempotent(
             agent_version=1,
             model=None,
             parent_run_id=run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id="sha:x#0",
             input={"q": "hi"},
@@ -1063,7 +1063,9 @@ async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(
     assert child.agent_id is None
     assert child.agent_version is None
     assert child.model == "test/generic"
-    assert frozen == Surface(tools=[ToolSpec(type="web_search")], mcp_servers=[], http_servers=[])
+    assert frozen == Surface(
+        tools=[ToolSpec(type="web_search")], mcp_servers=[], http_servers=[], ssh_servers=[]
+    )
 
 
 # ── #1636: the workflow: model-binding privilege at the spawn-edge seam ──────────
@@ -2063,7 +2065,7 @@ async def test_tell_spawned_child_reaches_idle_with_zero_nudges(
             agent_version=1,
             model=None,
             parent_run_id=run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id=make_id(REQUEST),  # the natural Tell shape mints its own id
             input="fire-and-forget",
@@ -2243,6 +2245,7 @@ async def test_count_request_nudges_floors_anchor_at_request_opened_seq(
             tools=[],
             mcp_servers=[],
             http_servers=[],
+            ssh_servers=[],
         )
         assert child is not None
 
@@ -2382,7 +2385,7 @@ async def test_per_request_count_is_independent_stuck_sibling_still_no_returns(
             agent_version=1,
             model=None,
             parent_run_id=run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id="sha:a#0",
             input="hi",
@@ -5831,7 +5834,7 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
             agent_version=1,
             model=None,
             parent_run_id=parent_run_id,
-            surface=Surface([], [], []),
+            surface=Surface([], [], [], []),
             vault_ids=[],
             request_id=f"req_{suffix}",
             input="work",

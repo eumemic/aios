@@ -246,6 +246,7 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "tools": Arm.COPY,
     "mcp_servers": Arm.COPY,
     "http_servers": Arm.COPY,
+    "ssh_servers": Arm.COPY,
     "surface_frozen": Arm.COPY,
     "snapshot_ref": Arm.RESET_DEFAULT,
     "snapshot_host": Arm.RESET_DEFAULT,

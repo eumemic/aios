@@ -69,8 +69,8 @@ async def test_ghost_repair_failure_does_not_abort_batch(monkeypatch: Any) -> No
         {"session_id": "sess_b", "tool_call_id": "tc_b"},
     ]
     agent_rows = [
-        {"session_id": "sess_a", "tools": [], "http_servers": []},
-        {"session_id": "sess_b", "tools": [], "http_servers": []},
+        {"session_id": "sess_a", "tools": [], "http_servers": [], "ssh_servers": []},
+        {"session_id": "sess_b", "tools": [], "http_servers": [], "ssh_servers": []},
     ]
     # find_and_repair_ghosts issues five ``conn.fetch`` calls in order:
     # GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL, agents,
@@ -130,7 +130,7 @@ async def test_ghost_repair_branch_may_have_completed(monkeypatch: Any) -> None:
         {"session_id": "sess_a", "tool_call_id": "tc_a"},
     ]
     agent_rows = [
-        {"session_id": "sess_a", "tools": [], "http_servers": []},
+        {"session_id": "sess_a", "tools": [], "http_servers": [], "ssh_servers": []},
     ]
     # The span EXISTS for tc_a → routes the synthesis to the
     # "may have completed" branch.
@@ -184,7 +184,7 @@ async def test_ghost_repair_branch_did_not_run(monkeypatch: Any) -> None:
         {"session_id": "sess_a", "tool_call_id": "tc_a"},
     ]
     agent_rows = [
-        {"session_id": "sess_a", "tools": [], "http_servers": []},
+        {"session_id": "sess_a", "tools": [], "http_servers": [], "ssh_servers": []},
     ]
     # NO span for tc_a → routes the synthesis to the "did not run" branch.
     span_rows: list[dict[str, Any]] = []
@@ -234,7 +234,7 @@ async def test_ghost_repair_does_not_refetch_errored_set(monkeypatch: Any) -> No
             ],
         }
     ]
-    agent_rows = [{"session_id": "sess_a", "tools": [], "http_servers": []}]
+    agent_rows = [{"session_id": "sess_a", "tools": [], "http_servers": [], "ssh_servers": []}]
     conn = MagicMock()
     # 5, not 6: GHOST_ASST_SQL, GHOST_RESULT_ROWS_SQL, GHOST_LIFECYCLE_SQL,
     # agents, GHOST_SPAN_START_SQL — no ERRORED_SESSIONS_SQL slot.

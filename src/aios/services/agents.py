@@ -24,6 +24,7 @@ from aios.models.agents import (
     McpServerSpec,
     OutputStyle,
     PreemptPolicy,
+    SshServerSpec,
     StepSurface,
     ToolSpec,
     resolve_mcp_permission,
@@ -43,6 +44,7 @@ async def _enforce_surface_attenuation(
     tools: list[ToolSpec],
     mcp_servers: list[McpServerSpec],
     http_servers: list[HttpServerSpec],
+    ssh_servers: list[SshServerSpec],
     prior_surface: Surface | None = None,
 ) -> None:
     """Raise ``ForbiddenError`` unless the declared agent surface is admissible against
@@ -79,7 +81,7 @@ async def _enforce_surface_attenuation(
         pool, actor_session_id, account_id=account_id
     )
     agent = await load_for_session(pool, session, account_id=account_id)
-    declared = Surface(tools, mcp_servers, http_servers)
+    declared = Surface(tools, mcp_servers, http_servers, ssh_servers)
     expected = attenuation_service.normalize(declared)
     effective = attenuation_service.clamp(declared, surface_of(agent))
     if prior_surface is not None:
@@ -88,6 +90,7 @@ async def _enforce_surface_attenuation(
             effective.tools + preserved.tools,
             effective.mcp_servers + preserved.mcp_servers,
             effective.http_servers + preserved.http_servers,
+            effective.ssh_servers + preserved.ssh_servers,
         )
     diff = surface_diff(expected, effective)
     if diff:
@@ -108,6 +111,7 @@ async def create_agent(
     skills: list[AgentSkillRef] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    ssh_servers: list[SshServerSpec] | None = None,
     description: str | None,
     metadata: dict[str, Any],
     litellm_extra: dict[str, Any] | None = None,
@@ -141,6 +145,7 @@ async def create_agent(
             tools=tools,
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
+            ssh_servers=ssh_servers or [],
         )
     skill_refs = skills or []
     resolved = await skills_service.resolve_skill_refs(pool, skill_refs, account_id=account_id)
@@ -155,6 +160,7 @@ async def create_agent(
             skills_json=snapshot_json,
             mcp_servers=mcp_servers or [],
             http_servers=http_servers or [],
+            ssh_servers=ssh_servers or [],
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra or {},
@@ -203,6 +209,7 @@ async def update_agent(
     skills: list[AgentSkillRef] | None = None,
     mcp_servers: list[McpServerSpec] | None = None,
     http_servers: list[HttpServerSpec] | None = None,
+    ssh_servers: list[SshServerSpec] | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
     litellm_extra: dict[str, Any] | None = None,
@@ -235,6 +242,7 @@ async def update_agent(
             tools=tools if tools is not None else current.tools,
             mcp_servers=mcp_servers if mcp_servers is not None else current.mcp_servers,
             http_servers=http_servers if http_servers is not None else current.http_servers,
+            ssh_servers=ssh_servers if ssh_servers is not None else current.ssh_servers,
             prior_surface=surface_of(current),
         )
     skills_json_str: str | None = None
@@ -253,6 +261,7 @@ async def update_agent(
             skills_json=skills_json_str,
             mcp_servers=mcp_servers,
             http_servers=http_servers,
+            ssh_servers=ssh_servers,
             description=description,
             metadata=metadata,
             litellm_extra=litellm_extra,
@@ -319,6 +328,7 @@ def _surface_from_agent(agent: Agent | AgentVersion, binding: AgentBinding) -> S
         tools=agent.tools,
         mcp_servers=agent.mcp_servers,
         http_servers=agent.http_servers,
+        ssh_servers=agent.ssh_servers,
         model=agent.model,
         system=agent.system,
         skills=agent.skills,
@@ -367,6 +377,7 @@ async def _load_for_session_conn(
                 skills=[],
                 mcp_servers=frozen.mcp_servers,
                 http_servers=frozen.http_servers,
+                ssh_servers=frozen.ssh_servers,
                 litellm_extra={},
                 window_min=defaults["window_min"].default,
                 window_max=defaults["window_max"].default,
@@ -388,6 +399,7 @@ async def _load_for_session_conn(
             "tools": frozen.tools,
             "mcp_servers": frozen.mcp_servers,
             "http_servers": frozen.http_servers,
+            "ssh_servers": frozen.ssh_servers,
             "litellm_extra": frozen_litellm_extra,
         }
         if session.model is not None:

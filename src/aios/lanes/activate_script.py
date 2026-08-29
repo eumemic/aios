@@ -249,6 +249,7 @@ async def ensure_workflow(lock_wf):
             "description": lock_wf.get("description"),
             "tools": lock_wf.get("tools", []),
             "http_servers": lock_wf.get("http_servers", []),
+            "ssh_servers": lock_wf.get("ssh_servers", []),
         }
         resp = await aios_api("POST", "/v1/workflows", create_body)
         if is_error(resp):
@@ -272,6 +273,8 @@ async def ensure_workflow(lock_wf):
         changed = True
     if lock_wf.get("http_servers", []) != live.get("http_servers", []):
         changed = True
+    if lock_wf.get("ssh_servers", []) != live.get("ssh_servers", []):
+        changed = True
 
     if not changed:
         return {"object_kind": "workflow", "object_name": name, "action": "unchanged",
@@ -284,6 +287,7 @@ async def ensure_workflow(lock_wf):
         "description": lock_wf.get("description"),
         "tools": lock_wf.get("tools", []),
         "http_servers": lock_wf.get("http_servers", []),
+        "ssh_servers": lock_wf.get("ssh_servers", []),
     }
     resp = await aios_api("PUT", f"/v1/workflows/{live_id}", update_body)
     if is_error(resp):
@@ -311,6 +315,7 @@ async def ensure_agent(lock_agent):
             "description": lock_agent.get("description"),
             "tools": lock_agent.get("tools", []),
             "http_servers": lock_agent.get("http_servers", []),
+            "ssh_servers": lock_agent.get("ssh_servers", []),
         }
         resp = await aios_api("POST", "/v1/agents", create_body)
         if is_error(resp):
@@ -332,6 +337,8 @@ async def ensure_agent(lock_agent):
         changed = True
     if lock_agent.get("http_servers", []) != live.get("http_servers", []):
         changed = True
+    if lock_agent.get("ssh_servers", []) != live.get("ssh_servers", []):
+        changed = True
 
     if not changed:
         return {"object_kind": "agent", "object_name": name, "action": "unchanged",
@@ -344,6 +351,7 @@ async def ensure_agent(lock_agent):
         "description": lock_agent.get("description"),
         "tools": lock_agent.get("tools", []),
         "http_servers": lock_agent.get("http_servers", []),
+        "ssh_servers": lock_agent.get("ssh_servers", []),
     }
     resp = await aios_api("PUT", f"/v1/agents/{live_id}", update_body)
     if is_error(resp):

@@ -506,6 +506,37 @@ class Settings(BaseSettings):
         description="Maximum bytes of stdout+stderr returned from a bash tool call. "
         "Output beyond this is truncated with a [truncated] marker.",
     )
+    ssh_connect_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        description="TCP-connect + SSH-handshake ceiling for a single ssh tool call, "
+        "in seconds. Exceeded => the call fails cleanly (a ToolBail the model can "
+        "retry), never an evicting exception.",
+    )
+    ssh_command_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        description="Default AND hard ceiling for one remote command run by the ssh "
+        "tool, in seconds. The agent may pass ``timeout_seconds`` up to this maximum "
+        "(bash_default_timeout_seconds parity); the connection is closed on timeout.",
+    )
+    ssh_max_output_chars: int = Field(
+        default=100_000,
+        ge=1_000,
+        description="Per-stream (stdout and stderr each) character cap on an ssh tool "
+        "result. asyncssh returns decoded text, so this is chars, not bytes. Overflow "
+        "is truncated and flagged with ``stdout_truncated``/``stderr_truncated``.",
+    )
+    ssh_allow_internal_hosts: str = Field(
+        default="",
+        description="Operator comma-separated host[:port] allowlist exempting named ssh "
+        "targets from the private/internal-address dial block. Listed hosts are still "
+        "resolved and IP-pinned against DNS rebinding; they merely skip the "
+        "blocked-range check, so a worker can ssh to Tailscale/VPN/internal infra whose "
+        "addresses are RFC1918 or CGNAT (100.64/10). Plain comma string (not JSON), "
+        "e.g. ``prod-web,db.tailnet:22``. The required host-key pin independently "
+        "authenticates whatever answers.",
+    )
     tool_result_max_chars: int = Field(
         default=200_000,
         ge=1_000,
@@ -1227,6 +1258,11 @@ class Settings(BaseSettings):
     def oauth_allow_insecure_host_set(self) -> frozenset[str]:
         """Parsed ``oauth_allow_insecure_hosts`` as a set of host[:port] entries."""
         return frozenset(h.strip() for h in self.oauth_allow_insecure_hosts.split(",") if h.strip())
+
+    @property
+    def ssh_allow_internal_host_set(self) -> frozenset[str]:
+        """Parsed ``ssh_allow_internal_hosts`` as a set of host[:port] entries."""
+        return frozenset(h.strip() for h in self.ssh_allow_internal_hosts.split(",") if h.strip())
 
     @model_validator(mode="after")
     def _external_byok_requires_account_only(self) -> Settings:
