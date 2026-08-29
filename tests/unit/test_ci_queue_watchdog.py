@@ -13,6 +13,22 @@ import yaml
 from scripts.ci_queue_watchdog import Breach, InsufficientHistory, evaluate_runs
 
 _ROOT = Path(__file__).parents[2]
+_TIMEOUT_EXPRESSION = re.compile(
+    r"\$\{\{\s*matrix\.shard\s*==\s*(?:'docker'|\"docker\")\s*"
+    r"&&\s*(\d+)\s*\|\|\s*(\d+)\s*\}\}"
+)
+
+
+def _timeout_expression_branches(value: str) -> tuple[int, int] | None:
+    """Return both finite branches of the one expression form this contract supports.
+
+    Rejecting unrecognised forms is intentional: extracting numeric tokens from an arbitrary
+    expression cannot prove that every evaluation path returns one of those numbers.
+    """
+    match = _TIMEOUT_EXPRESSION.fullmatch(value.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def test_every_code_validation_job_has_a_finite_timeout() -> None:
@@ -32,36 +48,16 @@ def test_every_code_validation_job_has_a_finite_timeout() -> None:
         assert value is not None, f"job {name!r} has NO timeout-minutes: it can hang unbounded"
 
         if isinstance(value, str):
-            # A GitHub expression. Enumerate its BRANCHES and require every one to be a
-            # finite number. Asserting merely that some digits appear is NOT enough: an
-            # expression like `${{ cond && 45 || null }}` contains a number and still
-            # leaves one shard with NO timeout -- the exact defect this test exists to
-            # catch. That mutation survived the previous version of this assertion; it
-            # was found by uncorrelated review executing the case I failed to try.
-            expr = value.strip()
-            assert expr.startswith("${{") and expr.endswith("}}"), (
-                f"job {name!r} timeout is not a GitHub expression: {value!r}"
+            branches = _timeout_expression_branches(value)
+            assert branches is not None, (
+                f"job {name!r} has an unsupported timeout expression; every result path must "
+                f"be provably numeric: {value!r}"
             )
-            inner = expr[3:-2].strip()
-
-            # Supported shape: `<condition> && <A> || <B>`. Anything else is REFUSED
-            # rather than assumed safe -- an unparseable timeout expression is exactly
-            # where a null branch hides.
-            m = re.fullmatch(r".+?&&\s*(\S+)\s*\|\|\s*(\S+)", inner)
-            assert m, (
-                f"job {name!r} timeout expression is not a recognised `cond && A || B` "
-                f"ternary, so its branches cannot be checked for finiteness: {value!r}"
+            assert all(0 < branch <= 120 for branch in branches), (
+                f"job {name!r} timeout branches out of range: {branches}"
             )
-            for branch in (m.group(1), m.group(2)):
-                assert branch.isdigit(), (
-                    f"job {name!r} timeout branch {branch!r} is not a finite number "
-                    f"(a null/empty branch means that shard runs with NO timeout): {value!r}"
-                )
-                assert 0 < int(branch) <= 120, (
-                    f"job {name!r} timeout branch {branch} out of range: {value!r}"
-                )
         else:
-            assert isinstance(value, int) and 0 < value <= 120, (
+            assert type(value) is int and 0 < value <= 120, (
                 f"job {name!r} has an implausible timeout: {value!r}"
             )
 
