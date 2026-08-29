@@ -9,10 +9,13 @@ the cached settings so the spill file lands somewhere inspectable (mirrors the
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aios.config import get_settings
+from aios.harness.tool_dispatch import _shape_tool_result, _ToolCall
 from aios.sandbox.tool_result_spill import (
     _MAX_TOOL_RESULT_PARTS,
     cap_tool_result_content,
@@ -20,9 +23,23 @@ from aios.sandbox.tool_result_spill import (
     record_spill_attachment,
 )
 from aios.sandbox.volumes import ensure_session_attachments_dir
+from aios.tools.search_events import search_events_handler
 
 _SESSION_ID = "sess_spill_unit"
 _TOOL_CALL_ID = "tc_unit_1"
+
+
+class _FakeRecord:
+    """Minimal ``asyncpg.Record`` stand-in for ``search_events._format_results``."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def keys(self) -> Any:
+        return self._data.keys()
+
+    def values(self) -> Any:
+        return self._data.values()
 
 
 def _spill_path(session_id: str, tool_call_id: str) -> Path:
@@ -192,3 +209,47 @@ class TestCapToolResultParts:
         out = cap_tool_result_parts(parts, max_chars=4)
         assert out[:5] == parts[:5]
         assert out[5] == self._text("tail")
+
+
+async def test_spilled_search_events_result_is_line_oriented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spilled ``search_events`` result greps and pages by line (#2291).
+
+    The regression this pins: the handler used to return ``{"result": table}``,
+    which ``_shape_tool_result`` JSON-encoded — so the spill file was one
+    enormous line with every newline escaped, ``wc -l`` reported 0, and
+    ``grep -n`` / ``sed -n`` / the line-paged ``read`` tool were all useless
+    against it (the 333KB jarbot-org incident, 2026-08-28). Covering the full
+    handler → shape → spill chain is the point: the bug lived in the seam
+    between them, so neither layer alone would have caught it.
+    """
+    monkeypatch.setattr(get_settings(), "workspace_root", tmp_path)
+    rows: list[Any] = [
+        _FakeRecord({"seq": i, "role": "user", "content_text": f"line {i}"}) for i in range(200)
+    ]
+    with (
+        patch(
+            "aios.tools.search_events._execute_query",
+            new_callable=AsyncMock,
+            return_value=(rows, False),
+        ),
+        patch("aios.tools.search_events.runtime.require_pool"),
+    ):
+        result = await search_events_handler(
+            "sess_01TEST", {"query": "SELECT * FROM events_search"}
+        )
+
+    tc = _ToolCall(call_id=_TOOL_CALL_ID, name="search_events", raw_args={}, bound_log=None)
+    content = _shape_tool_result(tc, result)["content"]
+    assert isinstance(content, str)
+
+    capped = await cap_tool_result_content(_SESSION_ID, _TOOL_CALL_ID, content, max_chars=1_000)
+    assert capped.attachment is not None, "fixture must be large enough to spill"
+
+    spilled = _spill_path(_SESSION_ID, _TOOL_CALL_ID).read_text(encoding="utf-8")
+    # header + divider + one line per row — what ``wc -l`` reports.
+    assert len(spilled.splitlines()) == len(rows) + 2
+    # A known row greps on its own line, not buried in one escaped blob.
+    assert "\\n" not in spilled
+    assert [ln for ln in spilled.splitlines() if ln.startswith("42 | ")] == ["42 | user | line 42"]

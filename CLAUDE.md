@@ -241,5 +241,6 @@ All aios settings use the `AIOS_` prefix (Pydantic settings with `env_prefix="AI
 - `AIOS_DB_URL` — Postgres connection string
 - `AIOS_API_PORT` — default 8080
 - `AIOS_TAVILY_API_KEY` — for web_fetch/web_search tools
+- `AIOS_AUTO_REVIEW_MODEL` / `AIOS_AUTO_REVIEW_TIMEOUT_S` / `AIOS_AUTO_REVIEW_STRANDED_AFTER_S` — the `auto_review` MCP checker: model (LiteLLM string, **no default — unset means every `auto_review` call fails closed to a card**, so set it when enabling the policy), total verdict budget (5s, one retry inside), and the sweep's stranded-review fail-closed bound (60s).
 
 Model provider keys use standard LiteLLM env vars (no `AIOS_` prefix): `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. These are the **root-owned fallback**: per-account keys and proxy base URLs live in the `model_providers` resource (`/v1/model-providers`), resolved nearest-ancestor-wins up the account tree at model-call time and encrypted per-account via the same subkey scheme as vaults. A `model_providers` row is looked up whole (key + api_base together, never field-merged across accounts) — see `aios.services.model_providers` and the conflict guard it runs before every model call.

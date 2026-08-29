@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import patch
 
 from aios.tools.schema_errors import format_schema_violation, json_type_name
 
@@ -167,11 +168,18 @@ class TestFormatSchemaViolation:
 
     def test_stringified_json_quirk_detected_with_hint(self) -> None:
         payload = json.dumps({"answer": "hi"})
-        err = format_schema_violation(
-            payload, _OBJ_SCHEMA, root="value", intro="bad", retry_hint="retry", site="test"
-        )
+        with patch("aios.tools.schema_errors.log.info") as log_info:
+            err = format_schema_violation(
+                payload,
+                _OBJ_SCHEMA,
+                root="value",
+                intro="bad",
+                retry_hint="retry",
+                site="arguments",
+            )
         assert err is not None
         assert "pass that value directly, not wrapped in a string" in err
+        log_info.assert_called_once_with("schema_value_stringified_json", site="arguments")
 
     def test_non_json_string_no_hint(self) -> None:
         err = format_schema_violation(

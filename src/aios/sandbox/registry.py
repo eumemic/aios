@@ -69,6 +69,7 @@ from aios.sandbox.network import WORKER_NETWORK_ALIAS
 from aios.sandbox.setup import (
     PACKAGE_REGISTRY_HOSTS,
     EgressProvisionResult,
+    apply_browser_deny_internal,
     apply_network_lockdown,
     apply_secret_egress_dnat,
     build_egress_dump_script,
@@ -80,6 +81,7 @@ from aios.sandbox.setup import (
 )
 from aios.sandbox.snapshot_store import LocalDaemonStore, SnapshotStore, TarballStore
 from aios.sandbox.spec import (
+    BrowserRuntimeUnsupportedError,
     ProvisioningPlan,
     build_spec_from_browser,
     build_spec_from_run,
@@ -881,10 +883,12 @@ class SandboxRegistry:
 
         - **Warm hit = liveness probe only** — no spec-version, no mount drift
           (nothing in ``sessions.*`` describes the browser).
-        - **Cold path is snapshot-free and setup-free** — no salvage, no egress
-          CA, no packages, no lockdown sidecar. The container is exec-only on
-          the ICC-off browser bridge; its durable state (the Chromium profile)
-          lives on the plane bind mount, not the rootfs.
+        - **Cold path is snapshot-free and near-setup-free** — no salvage, no
+          egress CA, no packages. Its ONE setup step is the L3 deny-internal
+          egress sidecar (metadata/RFC1918/CGNAT dropped, public web open); the
+          container is otherwise exec-only on the ICC-off browser bridge, and
+          its durable state (the Chromium profile) lives on the plane bind
+          mount, not the rootfs.
 
         Raises :class:`~aios.sandbox.spec.BrowserImageUnconfiguredError` before
         any Docker call when the deployment has no browser image configured.
@@ -912,13 +916,52 @@ class SandboxRegistry:
             return handle
 
     async def _provision_browser(self, account_id: str) -> SandboxHandle:
-        """Cold-start the account's browser container: build the bare spec, create.
+        """Cold-start the account's browser container: create, then lock egress.
 
-        No proxies, no broker secret, no setup steps — create-failure needs no
-        cleanup because nothing was registered.
+        No proxies, no broker secret, no snapshot. The one setup step is the L3
+        deny-internal egress sidecar (:func:`apply_browser_deny_internal`): the
+        browser renders untrusted web content, so metadata/RFC1918/CGNAT egress
+        is dropped while the public web stays open. A lockdown failure fails the
+        provision — the just-created container is torn down and the error
+        propagates — rather than handing back a browser that can reach internal
+        services.
+
+        A configured custom browser runtime is rejected UP FRONT: the egress
+        sidecar installs iptables in the container's netns, which does not
+        initialize under a non-default runtime (runsc's netstack), so a
+        custom-runtime browser would fail closed mid-provision with an opaque
+        iptables error. The guard makes that a clean, model-visible refusal.
         """
+        # Reject a configured custom browser runtime up front. This checks the
+        # SETTING; the supported posture is the default runtime, which must be
+        # runc. (On a host whose Docker daemon default-runtime is itself a
+        # custom runtime, a browser with the setting unset would inherit it and
+        # fail closed at the egress sidecar below instead — never a bypass.)
+        runtime = get_settings().sandbox_browser_runtime
+        if runtime is not None:
+            log.warning(
+                "sandbox.browser_runtime_unsupported",
+                account_id=account_id,
+                runtime=runtime,
+            )
+            raise BrowserRuntimeUnsupportedError(
+                "browser egress isolation requires the default container runtime; "
+                "a custom browser runtime is not supported (its network namespace "
+                "cannot carry the egress rules)"
+            )
         spec = build_spec_from_browser(account_id)
         handle = await self._backend.create(spec)
+        try:
+            await apply_browser_deny_internal(self._backend, handle)
+        except BaseException:
+            # Fail closed: never hand back a browser whose untrusted web content
+            # can reach internal/metadata endpoints because its egress lockdown
+            # didn't land. ``BaseException`` (not ``Exception``) so a provision
+            # cancellation/timeout still tears the container down, matching the
+            # session-provision teardown. Nothing else was registered, so a bare
+            # destroy suffices.
+            await self._destroy_browser_quietly(account_id, handle)
+            raise
         log.info(
             "sandbox.browser_provisioned",
             account_id=account_id,

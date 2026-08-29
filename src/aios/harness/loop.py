@@ -34,6 +34,7 @@ from aios.config import HARNESS_STEP_TIMEOUT_S as HARNESS_STEP_TIMEOUT_S
 from aios.config import get_settings
 from aios.db.sse_lock import has_subscriber
 from aios.harness import runtime
+from aios.harness.auto_review import launch_auto_review
 from aios.harness.completion import (
     LlmRequest,
     LlmResponse,
@@ -1032,7 +1033,16 @@ async def _run_session_step_body(
             # attempt. The provider rejection is the authoritative bound; a
             # zero minimum lets the windower discard exactly as much history
             # as the progressively smaller maximum requires.
-            window_min=0 if adaptive_context_retry else min(agent.window_min, request_window_max),
+            #
+            # Otherwise the agent's CONFIGURED floor goes through verbatim: the
+            # windower owns the feasibility clamp (#2289) and reports what it
+            # did on ``WindowFloor``. Pre-clamping to ``request_window_max``
+            # here would be inert — the windower's 75%-of-events-budget ceiling
+            # is below the request ceiling either way — while making
+            # ``configured_window_min`` on the span report the served ceiling
+            # instead of the agent's setting, misreading the exact diagnosis the
+            # span exists for.
+            window_min=0 if adaptive_context_retry else agent.window_min,
             window_max=request_window_max,
             model=capability_model,
             overhead_local=prelude_overhead_local(prelude),
@@ -1052,6 +1062,31 @@ async def _run_session_step_body(
         )
         raise
     events = windowed.events
+    # The floor facts (#2289) ride the same span as ``event_count_read``: when
+    # the incident that produced them hit, the span showed the count collapsing
+    # 60 -> 1 but not WHY, so diagnosis needed provider-side request dumps.
+    floor = windowed.floor
+    floor_span: dict[str, Any] = (
+        {
+            "configured_window_min": floor.configured,
+            "effective_window_min": floor.effective,
+            "events_window_max": floor.events_window_max,
+            "overhead_effective": floor.overhead_effective,
+            "window_floor_outcome": floor.outcome,
+        }
+        if floor is not None
+        else {}
+    )
+    if floor is not None and floor.outcome == "clamped":
+        log.warning(
+            "window.floor_clamped",
+            session_id=session_id,
+            configured_window_min=floor.configured,
+            effective_window_min=floor.effective,
+            events_window_max=floor.events_window_max,
+            overhead_effective=floor.overhead_effective,
+            request_window_max=request_window_max,
+        )
     await sessions_service.append_event(
         pool,
         session_id,
@@ -1063,6 +1098,7 @@ async def _run_session_step_body(
             "event_count_read": len(events),
             "request_window_max": request_window_max,
             "configured_window_max": agent.window_max,
+            **floor_span,
         },
         account_id=account_id,
     )
@@ -1734,6 +1770,7 @@ async def _run_session_step_body(
         immediate: list[dict[str, Any]] = []
         mcp_immediate: list[dict[str, Any]] = []
         needs_confirm: list[dict[str, Any]] = []
+        needs_review: list[dict[str, Any]] = []
         custom: list[dict[str, Any]] = []
         unknown_mcp: list[dict[str, Any]] = []
         blocked_mcp: list[dict[str, Any]] = []
@@ -1746,6 +1783,8 @@ async def _run_session_step_body(
                 mcp_immediate.append(tc)
             elif kind == "needs_confirm":
                 needs_confirm.append(tc)
+            elif kind == "needs_review":
+                needs_review.append(tc)
             elif kind == "custom":
                 custom.append(tc)
             elif kind == "unknown_mcp":
@@ -1807,6 +1846,29 @@ async def _run_session_step_body(
                 count=len(immediate_mcp),
                 tool_names=[_tc_name(tc) for tc in immediate_mcp],
                 unknown_count=len(unknown_mcp),
+            )
+
+        if needs_review:
+            # ``auto_review`` calls go to the background checker: one cheap
+            # model verdict per call, parallel, out-of-band — the turn still
+            # ends now. The checker allows (→ ``tool_confirmed`` + wake, the
+            # confirmed-dispatch path executes) or asks (→ it appends the
+            # ``tool_requested`` hold marker itself, with the verdict reason).
+            # No marker is written here: an under-review call is awaiting
+            # nobody yet, and the awaiting view keys NEEDS_REVIEW on the
+            # marker's existence.
+            launch_auto_review(
+                pool,
+                session_id,
+                needs_review,
+                account_id=account_id,
+                agent=agent,
+            )
+            log.info(
+                "step.auto_review_launched",
+                session_id=session_id,
+                count=len(needs_review),
+                tool_names=[_tc_name(tc) for tc in needs_review],
             )
 
         if needs_confirm or custom:
@@ -1945,7 +2007,13 @@ def _tc_name(tc: dict[str, Any]) -> str:
 
 
 type ToolDispatchKind = Literal[
-    "immediate", "mcp_immediate", "needs_confirm", "custom", "unknown_mcp", "mcp_blocked"
+    "immediate",
+    "mcp_immediate",
+    "needs_confirm",
+    "needs_review",
+    "custom",
+    "unknown_mcp",
+    "mcp_blocked",
 ]
 
 
@@ -1964,6 +2032,8 @@ def _classify_tool_call(
     * ``"mcp_immediate"`` — known MCP tool, ``always_allow``.
     * ``"needs_confirm"`` — built-in or MCP tool gated on
       ``always_ask`` confirmation.
+    * ``"needs_review"`` — MCP tool under ``auto_review``: dispatched to
+      the background checker (allow → execute, ask → hold).
     * ``"custom"`` — client-executed custom tool (the harness holds
       the call until the client posts a tool-result).
     * ``"unknown_mcp"`` — MCP-namespaced tool whose server is not
@@ -2328,6 +2398,10 @@ def _launch_confirmed_calls(
             # "immediate" and the degenerate "custom" (unknown bare name —
             # invoke_builtin resolves it to a typed unknown-tool error, the
             # same terminal the pre-classification path produced).
+            # "needs_confirm"/"needs_review" are unreachable here by the
+            # classifier's ordering: ``confirmation_resolved=True`` projects
+            # both gates to ``mcp_immediate``/``immediate`` before the policy
+            # arms are consulted.
             pending_builtin.append(tc)
     if pending_builtin:
         confirmed_offered_names = {(tool.get("function") or {}).get("name") for tool in mcp_tools}

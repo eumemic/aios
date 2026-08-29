@@ -476,6 +476,22 @@ class TestTokensToDrop:
         # A collapsed band that still fits takes the early return, never the divide.
         assert tokens_to_drop(120_000, window_min=120_000, window_max=120_000) == 0
 
+    def test_inverted_band_returns_overshoot_not_negative_drop(self) -> None:
+        """Inverted band (``window_min > window_max``) must not yield a negative
+        drop (issue #2289).
+
+        No caller produces one today — the windower clamps its floor below the
+        events budget and agent config validates ``window_min < window_max`` —
+        but the ceil division is defined over a negative ``chunk`` and would
+        return a NEGATIVE drop rather than crashing: a boundary that WIDENS the
+        retained scan (``cumulative_tokens > drop`` matches everything) instead
+        of narrowing it, i.e. a silently oversized prompt. The degenerate branch
+        must swallow this band too.
+        """
+        drop = tokens_to_drop(200_000, window_min=150_000, window_max=120_000)
+        assert drop == 80_000  # overshoot; remaining == window_max, never negative
+        assert tokens_to_drop(100_000, window_min=150_000, window_max=120_000) == 0
+
 
 class TestImageBaselines:
     """The three token baselines (#2050, jarbot#106 PR1) diverge only on

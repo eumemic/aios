@@ -39,7 +39,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
 )
 from aios.sandbox.registry import SandboxRegistry
-from aios.sandbox.spec import ProvisioningPlan
+from aios.sandbox.spec import BrowserRuntimeUnsupportedError, ProvisioningPlan
 from aios.services.vaults import ResolvedEnvVarCredential
 from tests.helpers.sandbox import FakeBackend, FakePool, make_handle
 
@@ -1912,3 +1912,130 @@ class TestSalvageBreaker:
         with pytest.raises(SandboxBackendError, match="breaker open"):
             await registry._salvage_session_corpses("sess_B")
         assert self._snapshot_count(backend) == snaps_before
+
+
+class TestBrowserEgressProvision:
+    """``_provision_browser`` locks the browser's egress down to deny-internal
+    after create, fails the provision (tearing the container down) if it doesn't
+    land, and refuses a custom container runtime up front (its netns iptables
+    path does not initialize under runsc)."""
+
+    @staticmethod
+    def _browser_spec(account_id: str) -> SandboxSpec:
+        return SandboxSpec(
+            session_id=account_id,
+            instance_id="inst_TEST",
+            workspace=Mount(host_path=Path("/tmp/plane"), sandbox_path="/workspace"),
+            extra_mounts=(),
+            environment={},
+            labels={},
+            network_policy=None,
+            host_gateway_alias=None,
+            image="aios-browser:test",
+        )
+
+    async def test_custom_runtime_rejected_before_create(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A custom runtime is refused up front — never created and left running
+        # WITHOUT egress isolation (the sidecar iptables path fails under runsc).
+        monkeypatch.setattr(get_settings(), "sandbox_browser_runtime", "runsc")
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with pytest.raises(BrowserRuntimeUnsupportedError):
+            await registry._provision_browser("acc_X")
+
+        assert not any(c[0] == "create" for c in backend.calls)
+
+    async def test_egress_applied_after_create(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(get_settings(), "sandbox_browser_runtime", None)
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with patch(
+            "aios.sandbox.registry.build_spec_from_browser",
+            return_value=self._browser_spec("acc_X"),
+        ):
+            handle = await registry._provision_browser("acc_X")
+
+        verbs = [c[0] for c in backend.calls]
+        # create, then the apply + read-back-verify sidecars, in that order, and
+        # NO teardown on the happy path.
+        assert verbs == ["create", "run_netns_sidecar", "run_netns_sidecar"]
+        assert handle.owner_id == "acc_X"
+
+    async def test_egress_failure_destroys_and_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "sandbox_browser_runtime", None)
+        backend = FakeBackend()
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=2,
+                stdout="",
+                stderr="iptables: not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
+        registry = SandboxRegistry(backend=backend)
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_browser",
+                return_value=self._browser_spec("acc_X"),
+            ),
+            pytest.raises(SandboxBackendError, match="egress failed"),
+        ):
+            await registry._provision_browser("acc_X")
+
+        verbs = [c[0] for c in backend.calls]
+        # create, the apply sidecar (which fails so verify never runs), then the
+        # fail-closed teardown — in that exact order.
+        assert verbs == ["create", "run_netns_sidecar", "destroy"]
+
+    async def test_public_path_rejects_custom_runtime_without_caching(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Route through the PUBLIC entry point (get_or_provision_browser wraps
+        # _provision_browser with capacity admission + handle caching): the
+        # refusal must propagate unwrapped AND leave no cached handle, so a later
+        # call reprovisions cleanly rather than serving/looping on a poisoned entry.
+        monkeypatch.setattr(get_settings(), "sandbox_browser_runtime", "runsc")
+        backend = FakeBackend()
+        registry = SandboxRegistry(backend=backend)
+
+        with pytest.raises(BrowserRuntimeUnsupportedError):
+            await registry.get_or_provision_browser("acc_X")
+
+        assert "acc_X" not in registry._handles
+        assert not any(c[0] == "create" for c in backend.calls)
+
+    async def test_public_path_egress_failure_leaves_no_cached_handle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "sandbox_browser_runtime", None)
+        backend = FakeBackend()
+        backend.sidecar_results = [
+            CommandResult(
+                exit_code=2,
+                stdout="",
+                stderr="iptables: not found",
+                timed_out=False,
+                truncated=False,
+            )
+        ]
+        registry = SandboxRegistry(backend=backend)
+
+        with (
+            patch(
+                "aios.sandbox.registry.build_spec_from_browser",
+                return_value=self._browser_spec("acc_X"),
+            ),
+            pytest.raises(SandboxBackendError, match="egress failed"),
+        ):
+            await registry.get_or_provision_browser("acc_X")
+
+        assert "acc_X" not in registry._handles
+        assert [c[0] for c in backend.calls].count("destroy") == 1

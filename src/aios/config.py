@@ -290,6 +290,15 @@ class Settings(BaseSettings):
         ge=0,
         description="Free disk retained in addition to the estimated transient flatten cost.",
     )
+    sandbox_disk_stat_path: str = Field(
+        default="/",
+        description="Filesystem the snapshot headroom gate measures free space on. Must be a "
+        "path on the DOCKER GRAPH ROOT's filesystem, which is where a commit or flatten "
+        "actually writes. Defaults to '/' because the graph root usually lives there, but "
+        "inside the worker container '/' is the worker's own overlay and need not be the same "
+        "filesystem; when they differ the gate measures a disk nothing is written to and passes "
+        "while the real target is full (#2280).",
+    )
     sandbox_snapshot_ttl_seconds: int = Field(
         default=2_592_000,  # 30 days
         ge=60,
@@ -376,14 +385,18 @@ class Settings(BaseSettings):
         "ample slack while bounding a fork bomb. None = unlimited.",
     )
     sandbox_browser_seccomp_profile: str = Field(
-        default="unconfined",
-        description="Seccomp profile path for browser containers. Defaults to "
-        "'unconfined' until the browser image ships its own authored profile "
-        "(docker/seccomp-browser.json — MUST permit unprivileged user namespaces "
-        "so Chromium's internal sandbox stays ON; running --no-sandbox inside "
-        "the container that holds the credential jar is a red result, not a "
-        "workaround). The sandbox profile is NOT reused: it denies the "
-        "namespace syscalls Chromium's sandbox requires.",
+        default=str(Path(__file__).resolve().parents[2] / "docker" / "seccomp-browser.json"),
+        description="Seccomp profile path for browser containers (docker run "
+        "--security-opt seccomp=<path>; the docker CLI reads the file from the "
+        "WORKER's filesystem). Defaults to the baked-in authored profile "
+        "(docker/seccomp-browser.json), which re-permits the unprivileged "
+        "USER/PID/NET namespaces Chromium's internal sandbox needs while still "
+        "denying mount/cgroup/uts/ipc namespace creation. The sandbox profile "
+        "is NOT interchangeable: it denies the namespace syscalls Chromium's "
+        "sandbox requires, so Chromium cannot launch under it at all. "
+        "Emergency rollback ONLY: 'unconfined' disables filtering for the "
+        "container that renders untrusted web content and holds durable "
+        "logins. Never defaults to unconfined; the flag is always emitted.",
     )
     sandbox_browser_runtime: str | None = Field(
         default=None,
@@ -757,6 +770,38 @@ class Settings(BaseSettings):
         "``mcp_toolset`` declarations.  Explicit per-toolset policies on "
         "``agent.tools`` always win — this only changes the fallback "
         "for unmounted servers.",
+    )
+
+    auto_review_model: str | None = Field(
+        default=None,
+        description="Checker model for ``auto_review``-policied MCP tool calls "
+        "(jarbot#229): a cheap grader that returns ``allow`` (execute) or "
+        "``ask`` (hold a confirmation card). LiteLLM model string, set by the "
+        "operator via ``AIOS_AUTO_REVIEW_MODEL`` — deliberately NO baked-in "
+        "default (no model string belongs in the binary), mirroring "
+        "``workflow_default_child_model``. Auth resolves through the same "
+        "per-account ``model_providers`` ladder as every other inference call. "
+        "When unset, ``auto_review`` calls fail closed to a confirmation card "
+        "(the checker cannot grade without a configured model) — so an "
+        "operator enabling the policy must set this too.",
+    )
+
+    auto_review_timeout_s: float = Field(
+        default=5.0,
+        ge=0.5,
+        description="Total wall-clock budget for one auto-review verdict, "
+        "including the single retry on transient failure. On expiry the "
+        "checker fails closed: the call holds a confirmation card with the "
+        "checker-unavailable reason, it never auto-runs.",
+    )
+
+    auto_review_stranded_after_s: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="Age after which an unresolved ``auto_review`` call with "
+        "no verdict recorded and no in-flight review task is presumed "
+        "stranded (worker crash mid-review) and failed closed by the sweep: "
+        "a confirmation card is held with the checker-unavailable reason.",
     )
 
     auto_allow_readonly_mcp_servers: list[str] = Field(

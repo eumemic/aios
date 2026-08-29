@@ -32,8 +32,9 @@ from aios.models.agents import (
     StepSurface,
     ToolSpec,
 )
-from aios.sandbox.tool_broker import ToolBroker
+from aios.sandbox.tool_broker import ToolBroker, _envelope_from_result
 from aios.tools.registry import ToolDefinition, ToolResult, registry
+from aios.tools.search_events import _format_results, search_events_handler
 
 # ── shared fixtures + helpers ─────────────────────────────────────────────────
 
@@ -735,3 +736,57 @@ class TestRetiredSessionsMessages:
         # Starlette returns 404 for an unmatched path (405 only when the
         # path matches but the method doesn't). The route is gone entirely.
         assert r.status_code in (404, 405)
+
+
+# ── envelope shaping ──────────────────────────────────────────────────────────
+
+
+class _FakeRecord:
+    """Minimal ``asyncpg.Record`` stand-in for ``_format_results``."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def keys(self) -> Any:
+        return self._data.keys()
+
+    def values(self) -> Any:
+        return self._data.values()
+
+
+class TestEnvelopeFromResult:
+    """``search_events`` reaches the in-sandbox CLI as a raw table (#2291).
+
+    The point of the fix is that the multi-line table survives to the consumer
+    *unescaped* — a JSON-encoded envelope is what collapsed a 333KB spilled
+    result onto a single line and defeated ``grep``/``sed``/``wc -l``.
+    """
+
+    async def test_search_events_result_is_the_raw_table(self) -> None:
+        rows: list[Any] = [
+            _FakeRecord({"seq": 1, "role": "user", "content_text": "hello"}),
+            _FakeRecord({"seq": 2, "role": "assistant", "content_text": "hi"}),
+        ]
+        with (
+            patch(
+                "aios.tools.search_events._execute_query",
+                new_callable=AsyncMock,
+                return_value=(rows, False),
+            ),
+            patch("aios.tools.search_events.runtime.require_pool"),
+        ):
+            result = await search_events_handler(
+                "sess_01TEST", {"query": "SELECT * FROM events_search"}
+            )
+
+        envelope = _envelope_from_result(result)
+        assert envelope == {"content": _format_results(rows, False)}
+        # The load-bearing property: real newlines, not ``\n`` escapes.
+        content = envelope["content"]
+        assert "\\n" not in content
+        assert content.count("\n") == 3
+        assert content.splitlines()[0] == "seq | role | content_text"
+
+    def test_dict_result_is_still_json_encoded(self) -> None:
+        """The generic dict arm is untouched — only these two tools changed shape."""
+        assert _envelope_from_result({"result": "a\nb"}) == {"content": '{"result": "a\\nb"}'}

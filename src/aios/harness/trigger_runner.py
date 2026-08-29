@@ -650,12 +650,17 @@ async def _run_wake_owner(
         # + wake, no request edge. Route through the `stimulate` spine's
         # existing-session Tell arm (the service-level mechanism the wake/notify
         # policy surfaces share), preserving the channel-less invisibility property.
+        # ``metadata.trigger`` makes trigger provenance structural on the wake
+        # message (it is otherwise byte-identical to a hand-typed operator
+        # message): the auto-review checker labels these as routine wakes —
+        # "no user ask behind it" — and display consumers ignore unknown keys.
         await sessions_service.stimulate(
             pool,
             sessions_service.TellExistingSession(
                 session_id=trigger.owner_session_id,
                 content=action.content,
                 cause="message",
+                metadata={"trigger": {"id": trigger.id, "name": trigger.name}},
             ),
             account_id=trigger.account_id,
         )

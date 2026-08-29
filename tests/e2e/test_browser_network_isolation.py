@@ -11,7 +11,20 @@ against real Docker:
 * two containers on ``aios-browser`` cannot reach each other (ICC off) — one
   account's computer can never reach another's;
 * a container provisioned through the REAL ``build_spec_from_browser`` path
-  lands on ``aios-browser`` and publishes no ports.
+  lands on ``aios-browser`` and publishes no ports;
+* on that same real path, with the REAL browser image
+  (``AIOS_SANDBOX_BROWSER_IMAGE``), the DEFAULT seccomp profile flows through
+  spec → backend → ``docker run``: Chromium's own sandbox engages (the
+  profile's allow half) and mount-namespace creation stays denied (its deny
+  half) — the per-environment proof that a deploy's config actually delivers
+  the authored profile, not just that the image can be sandboxed when a test
+  passes the flag by hand.
+* on that same real path, the L3 deny-internal egress lockdown
+  (``apply_browser_deny_internal``) drops the browser's OUTBOUND traffic to the
+  link-local/metadata, RFC1918, and CGNAT ranges while leaving the public web
+  open — read back from the shared netns (the environment-independent proof the
+  DROP rules landed) and corroborated by a socket probe that cannot reach the
+  cloud-metadata endpoint from inside the browser.
 
 Each unreachability assertion is double-guarded against a vacuous pass: the
 listener curls ITSELF (so the target is proven up, absorbing the bind race),
@@ -39,8 +52,16 @@ from aios.sandbox.network import (
     ensure_browser_network,
     ensure_sandbox_network,
 )
+from aios.sandbox.setup import apply_browser_deny_internal
 from aios.sandbox.spec import build_spec_from_browser
 from tests.conftest import needs_docker
+from tests.e2e.browser_image_common import IMAGE as BROWSER_IMAGE
+from tests.e2e.browser_image_common import (
+    assert_chromium_sandbox_on,
+    assert_mount_ns_denied,
+    wait_ready,
+    world_writable,
+)
 
 pytestmark = [needs_docker, pytest.mark.docker]
 
@@ -235,14 +256,18 @@ async def test_real_browser_spec_lands_on_browser_network_with_no_ports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A container provisioned through the REAL spec builder joins the ICC-off
-    browser bridge (only), publishes no ports, and mounts the plane dir."""
+    browser bridge (only), publishes no ports, and mounts the plane dir.
+
+    Prefers the real browser image; the sandbox image stands in when it isn't
+    built (network posture is image-independent)."""
     settings = get_settings()
     monkeypatch.setattr(settings, "workspace_root", tmp_path)
-    monkeypatch.setattr(settings, "sandbox_browser_image", IMAGE)
+    monkeypatch.setattr(settings, "sandbox_browser_image", BROWSER_IMAGE or IMAGE)
     account_id = f"acc_{uuid.uuid4().hex[:8].upper()}"
 
     backend = DockerBackend()
     spec = build_spec_from_browser(account_id)
+    world_writable(spec.workspace.host_path)
     handle = await backend.create(spec)
     try:
         inspect = await _run(
@@ -263,5 +288,131 @@ async def test_real_browser_spec_lands_on_browser_network_with_no_ports(
         # No published ports of any kind.
         for blob in (ports_json, bindings_json):
             assert blob in ("{}", "null"), f"browser container publishes ports: {blob}"
+    finally:
+        await backend.destroy(handle)
+
+
+async def test_real_browser_spec_runs_chromium_sandboxed(
+    _networks_ready: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DEFAULT config delivers the authored seccomp profile end to end.
+
+    The image-contract suite proves the image CAN run Chromium sandboxed when
+    a test hand-passes ``--security-opt seccomp=…``; this test proves a
+    container provisioned exactly the way production provisions one — spec
+    defaults, no hand-passed flags — actually gets that profile. Both halves
+    are asserted, because each catches what the other cannot:
+
+    * sandbox-ON (renderer namespaced + double-filtered) proves the ALLOW
+      half — it fails when the profile is over-restrictive or missing
+      (docker's own default denies unprivileged userns, so Chromium cannot
+      even launch under it), but passes under ANY sufficiently permissive
+      profile, weakened ones included;
+    * the mount-ns probe proves the DENY half — it fails when the delivered
+      profile no longer masks CLONE_NEWNS, e.g. a deploy-side profile file
+      hand-weakened in place under the expected name.
+
+    Per-environment, this is the gate that catches a worker image lacking the
+    profile COPY or a wrong ``AIOS_SANDBOX_BROWSER_SECCOMP_PROFILE`` override:
+    the flag is always emitted, a bad path fails provisioning loudly, and
+    ``unconfined`` fails the endswith pin below."""
+    if not BROWSER_IMAGE:
+        pytest.skip("AIOS_SANDBOX_BROWSER_IMAGE not set; needs the real browser image")
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    monkeypatch.setattr(settings, "sandbox_browser_image", BROWSER_IMAGE)
+    account_id = f"acc_{uuid.uuid4().hex[:8].upper()}"
+
+    backend = DockerBackend()
+    spec = build_spec_from_browser(account_id)
+    assert spec.seccomp_profile.endswith("seccomp-browser.json"), (
+        f"spec default no longer resolves to the authored browser profile: {spec.seccomp_profile!r}"
+    )
+    world_writable(spec.workspace.host_path)
+    handle = await backend.create(spec)
+    try:
+        await asyncio.to_thread(wait_ready, handle.sandbox_id)
+        await asyncio.to_thread(assert_chromium_sandbox_on, handle.sandbox_id)
+        await asyncio.to_thread(assert_mount_ns_denied, handle.sandbox_id)
+    finally:
+        await backend.destroy(handle)
+
+
+# The ranges the deny-internal lockdown drops. A deliberately INDEPENDENT literal
+# (NOT imported from production) so this read-back is a true oracle: a wrong value
+# in the production tuple is caught here even though the unit test imports it.
+_DENY_INTERNAL_CIDRS = (
+    "169.254.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+)
+
+
+async def test_real_browser_egress_denies_internal(
+    _networks_ready: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deny-internal egress lockdown drops metadata/RFC1918/CGNAT outbound
+    from a real-provisioned browser while leaving the public web open.
+
+    The definitive, environment-independent proof is the read-back of the actual
+    OUTPUT chain via the operator sidecar (which owns ``iptables`` in the shared
+    netns; the browser holds no NET_ADMIN): every internal-range DROP rule must
+    be present. A socket probe from inside the browser then corroborates that
+    169.254.169.254 (cloud metadata) is unreachable — on an unrouted runner the
+    probe fails regardless, but on a routed one (e.g. GHA/Azure IMDS) it proves
+    the rule has teeth, not just that the rule text is present."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "workspace_root", tmp_path)
+    monkeypatch.setattr(settings, "sandbox_browser_image", BROWSER_IMAGE or IMAGE)
+    # The egress sidecar runs the OPERATOR image (ships iptables-legacy); point
+    # it at whichever sandbox image this environment built/pulled.
+    monkeypatch.setattr(settings, "docker_image", IMAGE)
+    account_id = f"acc_{uuid.uuid4().hex[:8].upper()}"
+
+    backend = DockerBackend()
+    spec = build_spec_from_browser(account_id)
+    world_writable(spec.workspace.host_path)
+    handle = await backend.create(spec)
+    try:
+        # Applies + internally read-back-verifies; raises (fail-closed) if a
+        # rule is missing, so a clean return already implies the rules landed.
+        await apply_browser_deny_internal(backend, handle)
+
+        # Independent read-back of the real OUTPUT chain from the shared netns.
+        dump = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=IMAGE,
+            script=(
+                "if command -v iptables-legacy >/dev/null 2>&1; then IPT=iptables-legacy; "
+                'else IPT=iptables; fi; "$IPT" -S OUTPUT'
+            ),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+        assert dump.exit_code == 0, dump.stderr
+        for cidr in _DENY_INTERNAL_CIDRS:
+            assert f"-d {cidr} -j DROP" in dump.stdout, (
+                f"deny-internal rule for {cidr} missing from OUTPUT:\n{dump.stdout}"
+            )
+        # Loopback must stay open — the browser's embedded DNS is 127.0.0.11.
+        assert "-d 127.0.0.0/8 -j DROP" not in dump.stdout
+
+        # Corroborate from inside the browser (python3 runs the driver, so it is
+        # on PATH): a DROP makes connect() time out → non-zero exit; REACHED
+        # (exit 0) would mean the metadata endpoint is live to the browser.
+        probe = await backend.exec(
+            handle,
+            'python3 -c "import socket; socket.create_connection'
+            "(('169.254.169.254', 80), timeout=3)\"",
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+        assert probe.exit_code != 0, "browser reached the cloud-metadata endpoint (169.254.169.254)"
     finally:
         await backend.destroy(handle)
