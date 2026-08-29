@@ -1,0 +1,68 @@
+name: Master CI queue watchdog
+
+on:
+  schedule:
+    # GitHub's shortest schedule interval; offset avoids top-of-hour contention.
+    - cron: "2/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: master-ci-queue-watchdog
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch recent Code Validation runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/actions/workflows/code-validation.yml/runs?branch=master&per_page=100" > runs.json
+
+      - name: Compare oldest pending run with historical p95
+        id: verdict
+        run: |
+          set +e
+          python scripts/ci_queue_watchdog.py runs.json --output breach.json
+          status=$?
+          set -e
+          if [[ $status -gt 1 ]]; then exit "$status"; fi
+          echo "breach=$([[ $status -eq 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          cat breach.json
+
+      - name: Alert on a wedged master CI queue
+        if: steps.verdict.outputs.breach == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Master Code Validation queue is abnormally delayed"
+          RUN_ID=$(jq -r .run_id breach.json)
+          RUN_URL=$(jq -r .html_url breach.json)
+          AGE=$(jq -r '.age_seconds / 60 | floor' breach.json)
+          P95=$(jq -r '.p95_seconds / 60 | floor' breach.json)
+          THRESHOLD=$(jq -r '.threshold_seconds / 60 | floor' breach.json)
+          BODY="The oldest non-terminal master Code Validation run has been pending for **${AGE} minutes**, beyond the **2× p95 (${THRESHOLD} minutes)** threshold. Recent completed-run p95 is ${P95} minutes.\n\n- Run: [${RUN_ID}](${RUN_URL})\n- Next action: inspect the run for a hung job, runner starvation, or a blocked concurrency queue.\n\nThis issue is maintained by \`.github/workflows/ci-queue-watchdog.yml\`; its body is replaced while the breach persists."
+
+          gh label create incident --color D73A4A --description "Production or delivery incident requiring attention" 2>/dev/null || true
+          EXISTING=$(gh issue list --repo "$REPO" --label incident --state open --limit 100 \
+            --json number,title --jq ".[] | select(.title == \"${TITLE}\") | .number" | head -1)
+          if [[ -n "$EXISTING" ]]; then
+            gh issue edit "$EXISTING" --repo "$REPO" --body "$BODY"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --label incident --body "$BODY"
+          fi
+          echo "::error::master Code Validation run ${RUN_ID} exceeded 2x historical p95"
+          exit 1
