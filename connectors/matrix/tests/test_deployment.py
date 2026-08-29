@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import yaml
@@ -31,3 +36,46 @@ def test_synapse_overlay_closes_federation_and_enables_retention() -> None:
     assert config["allow_profile_lookup_over_federation"] is False
     assert config["forget_rooms_on_leave"] is True
     assert config["forgotten_room_retention_period"] == "28d"
+
+
+class _HealthyAppservice(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+def test_healthcheck_requires_connection_serving_heartbeat(tmp_path: Path) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthyAppservice)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    heartbeat = tmp_path / "connector-heartbeat"
+    env = {
+        **os.environ,
+        "AIOS_CONNECTOR_HEARTBEAT_PATH": str(heartbeat),
+        "MATRIX_HS_TOKEN": "test-token",
+        "MATRIX_LISTEN_ADDR": f"127.0.0.1:{server.server_port}",
+    }
+    try:
+        # A responsive appservice does not prove that any active connection's
+        # inbound worker is established.  Missing SDK heartbeat must fail.
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "healthcheck.py")],
+            env=env,
+            check=False,
+        )
+        assert result.returncode != 0
+
+        heartbeat.touch()
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "healthcheck.py")],
+            env=env,
+            check=False,
+        )
+        assert result.returncode == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
