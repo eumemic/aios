@@ -1,0 +1,195 @@
+"""Contract tests for finite Code Validation jobs and its queue watchdog."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import yaml
+from scripts.ci_queue_watchdog import Breach, InsufficientHistory, evaluate_runs
+
+_ROOT = Path(__file__).parents[2]
+_TIMEOUT_EXPRESSION = re.compile(
+    r"\$\{\{\s*matrix\.shard\s*==\s*(?:'docker'|\"docker\")\s*"
+    r"&&\s*(\d+)\s*\|\|\s*(\d+)\s*\}\}"
+)
+
+
+def _timeout_expression_branches(value: str) -> tuple[int, int] | None:
+    """Return both finite branches of the one expression form this contract supports.
+
+    Rejecting unrecognised forms is intentional: extracting numeric tokens from an arbitrary
+    expression cannot prove that every evaluation path returns one of those numbers.
+    """
+    match = _TIMEOUT_EXPRESSION.fullmatch(value.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_every_code_validation_job_has_a_finite_timeout() -> None:
+    """Every job must carry a finite timeout -- the defect was a job with NONE.
+
+    Asserts the PROPERTY, not exact literals. The e2e timeout is a per-shard expression
+    (docker gets longer for image fallbacks; non-docker stays short so a wedge fails fast),
+    so a fixed-value assertion would re-break on every legitimate tuning while proving
+    nothing more about the hazard: a job that can hang unbounded.
+    """
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/code-validation.yml").read_text())
+    timeouts = {name: job.get("timeout-minutes") for name, job in workflow["jobs"].items()}
+
+    assert timeouts, "no jobs found -- the workflow failed to parse as expected"
+
+    for name, value in timeouts.items():
+        assert value is not None, f"job {name!r} has NO timeout-minutes: it can hang unbounded"
+
+        if isinstance(value, str):
+            branches = _timeout_expression_branches(value)
+            assert branches is not None, (
+                f"job {name!r} has an unsupported timeout expression; every result path must "
+                f"be provably numeric: {value!r}"
+            )
+            assert all(0 < branch <= 120 for branch in branches), (
+                f"job {name!r} timeout branches out of range: {branches}"
+            )
+        else:
+            assert type(value) is int and 0 < value <= 120, (
+                f"job {name!r} has an implausible timeout: {value!r}"
+            )
+
+    # The jobs themselves are a contract: losing one silently would drop its timeout check.
+    assert set(timeouts) == {"detect", "lint", "unit", "connectors", "integration", "e2e"}
+
+
+def test_watchdog_flags_oldest_nonterminal_master_run_past_twice_p95() -> None:
+    now = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    completed = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30 + n)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10 + n)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(1, 21)
+    ]
+    pending = {
+        "id": 99,
+        "status": "in_progress",
+        "created_at": (now - timedelta(minutes=41)).isoformat(),
+        "updated_at": now.isoformat(),
+        "head_branch": "master",
+        "html_url": "https://github.example/runs/99",
+    }
+
+    verdict = evaluate_runs([pending, *completed], now=now)
+
+    # Narrow to Breach: the union's other arm (InsufficientHistory) carries none of
+    # these fields, so asserting the TYPE is both what mypy needs and a stronger
+    # assertion than `is not None` -- it pins that a wedged queue yields a Breach.
+    assert isinstance(verdict, Breach)
+    assert verdict.run_id == 99
+    assert verdict.age_seconds == 41 * 60
+    assert verdict.p95_seconds == 20 * 60
+
+
+def test_watchdog_ignores_healthy_and_non_master_pending_runs() -> None:
+    now = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    completed = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(20)
+    ]
+    runs = [
+        {
+            "id": 90,
+            "status": "queued",
+            "created_at": (now - timedelta(minutes=39)).isoformat(),
+            "head_branch": "master",
+        },
+        {
+            "id": 91,
+            "status": "in_progress",
+            "created_at": (now - timedelta(hours=2)).isoformat(),
+            "head_branch": "feature",
+        },
+        *completed,
+    ]
+
+    assert evaluate_runs(runs, now=now) is None
+
+
+def test_watchdog_reports_unknown_when_pending_run_has_insufficient_history() -> None:
+    now = datetime(2026, 8, 20, 12, tzinfo=UTC)
+    completed = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30 + n)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10 + n)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(1, 20)
+    ]
+    pending = {
+        "id": 99,
+        "status": "queued",
+        "created_at": (now - timedelta(hours=24)).isoformat(),
+        "head_branch": "master",
+    }
+
+    verdict = evaluate_runs([pending, *completed], now=now)
+
+    assert verdict == InsufficientHistory(status="unknown", completed_runs=19, required_runs=20)
+
+
+def test_watchdog_cli_fails_and_writes_unknown_for_insufficient_history(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    runs = [
+        {
+            "id": n,
+            "status": "completed",
+            "created_at": (now - timedelta(minutes=30 + n)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10 + n)).isoformat(),
+            "head_branch": "master",
+        }
+        for n in range(1, 20)
+    ]
+    runs.append(
+        {
+            "id": 99,
+            "status": "queued",
+            "created_at": (now - timedelta(hours=24)).isoformat(),
+            "head_branch": "master",
+        }
+    )
+    input_path = tmp_path / "runs.json"
+    output_path = tmp_path / "result.json"
+    input_path.write_text(json.dumps({"workflow_runs": runs}))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_ROOT / "scripts/ci_queue_watchdog.py"),
+            str(input_path),
+            "--output",
+            str(output_path),
+        ],
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert json.loads(output_path.read_text()) == {
+        "status": "unknown",
+        "completed_runs": 19,
+        "required_runs": 20,
+    }
