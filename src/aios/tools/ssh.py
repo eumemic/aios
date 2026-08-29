@@ -212,16 +212,24 @@ async def _do_ssh(
             f"({type(exc).__name__})"
         ) from exc
 
-    try:
-        # ``*``-pattern known_hosts: verification is "server key ∈ pinned set",
-        # independent of the (IP-literal) name we dialed.
-        known_hosts = asyncssh.import_known_hosts(
-            "\n".join(f"* {line}" for line in server.host_keys)
-        )
-    except ValueError as exc:
-        raise ToolBail(
-            f"host_keys for {server.name!r} could not be parsed ({type(exc).__name__})"
-        ) from exc
+    # Validate each pinned host key up front. ``import_known_hosts`` SILENTLY
+    # DROPS a line whose key blob is unparseable (it never raises), which would
+    # let a corrupt/truncated pin — accepted by the light ``_validate_host_keys``
+    # syntactic gate at author time — become inert: the connect below would then
+    # fail with a misleading "server presented a key not in the pinned set", and
+    # in a multi-key rotation the corrupt pin would be silently ignored while a
+    # valid sibling still matched. ``import_public_key`` DOES raise on a bad blob,
+    # so parse each line to surface the operator's real error loudly here.
+    for line in server.host_keys:
+        try:
+            asyncssh.import_public_key(line)
+        except (asyncssh.KeyImportError, ValueError) as exc:
+            raise ToolBail(
+                f"host_keys entry for {server.name!r} could not be parsed ({type(exc).__name__})"
+            ) from exc
+    # ``*``-pattern known_hosts: verification is "server key ∈ pinned set",
+    # independent of the (IP-literal) name we dialed.
+    known_hosts = asyncssh.import_known_hosts("\n".join(f"* {line}" for line in server.host_keys))
 
     try:
         async with asyncio.timeout(settings.ssh_connect_timeout_seconds):

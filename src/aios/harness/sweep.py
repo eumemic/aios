@@ -108,10 +108,11 @@ class _Candidate:
 class _SweepAgentSurface:
     """The minimal agent surface the disposition classifier (#1076) consumes.
 
-    The classifier reads only ``.tools`` (permission resolution) and
-    ``.http_servers`` (arg-aware route refinement for ``http_request``), so the
-    sweep builds this thin stand-in per candidate session rather than hydrating
-    a full :class:`~aios.models.agents.Agent`. Structurally a duck-typed
+    The classifier reads ``.tools`` (permission resolution), ``.http_servers``
+    (arg-aware route refinement for ``http_request``), and ``.ssh_servers``
+    (per-server ``always_ask`` for ``ssh``), so the sweep builds this thin
+    stand-in per candidate session rather than hydrating a full
+    :class:`~aios.models.agents.Agent`. Structurally a duck-typed
     ``Agent`` for the two attributes the classifier touches.
     """
 
@@ -254,10 +255,11 @@ GHOST_LIFECYCLE_SQL = """
        AND e.seq >= s.open_tool_call_floor_seq
 """
 
-# Per-session agent surface (tools + http_servers) for the disposition
-# classifier. LEFT JOIN agent_versions to respect version pinning;
-# ``http_servers`` is fetched alongside ``tools`` so the classifier can apply
-# the arg-aware route refinement for ``http_request`` (#1076) — the same
+# Per-session agent surface (tools + http_servers + ssh_servers) for the
+# disposition classifier. LEFT JOIN agent_versions to respect version pinning;
+# ``http_servers``/``ssh_servers`` are fetched alongside ``tools`` so the
+# classifier can apply the arg-aware route refinement for ``http_request`` and
+# the per-server gate for ``ssh`` (#1076) — the same
 # refinement the dispatch and read paths apply. Shared by ghost repair
 # (:func:`find_and_repair_ghosts`) and the inference batch filter
 # (:func:`_filter_incomplete_batches`) via :func:`_load_surfaces`.

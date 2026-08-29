@@ -119,6 +119,7 @@ def _patch_ssh(
     with (
         patch("aios.tools.ssh.asyncssh.connect", connect_mock),
         patch("aios.tools.ssh.asyncssh.import_private_key", MagicMock(return_value=MagicMock())),
+        patch("aios.tools.ssh.asyncssh.import_public_key", MagicMock(return_value=MagicMock())),
         patch("aios.tools.ssh.asyncssh.import_known_hosts", MagicMock(return_value=MagicMock())),
         patch.object(ssh, "resolve_pinned_ip", pinned),
         patch.object(ssh, "resolve_internal_ip", internal),
@@ -274,3 +275,91 @@ async def test_suppression_synthesizes_and_never_dials() -> None:
     assert result == {"exit_code": 0, "stdout": "", "stderr": ""}
     on_suppress.assert_awaited_once()
     connect.assert_not_awaited()  # suppressed before the dial
+
+
+def test_ssh_server_suppressed_is_default_deny() -> None:
+    # The real policy: default-deny, opt-in via read_allow. Guards against an
+    # inversion of `ssh_server_suppressed` (which would let every write execute
+    # under outbound_suppression="on").
+    from aios.models.agents import ssh_server_suppressed
+
+    assert ssh_server_suppressed(_server(read_allow=False)) is True
+    assert ssh_server_suppressed(_server(read_allow=True)) is False
+
+
+@pytest.mark.asyncio
+async def test_read_allow_server_passes_through_real_policy() -> None:
+    # Handler-level: a read_allow server is NOT synthesized (the real
+    # ssh_server_suppressed policy lets it dial).
+    conn = _FakeConn(_proc(exit_status=0, stdout="live"))
+    from aios.models.agents import ssh_server_suppressed
+    from aios.services import outbound_suppression as osup
+
+    async def on_suppress(server: SshServerSpec, args: dict[str, Any]) -> dict[str, Any] | None:
+        if not ssh_server_suppressed(server):
+            return None
+        return osup.ssh_synthesized_result()
+
+    with _patch_ssh(connect=AsyncMock(return_value=conn)):
+        allowed = await ssh._do_ssh(
+            servers=[_server(read_allow=True)],
+            arguments={"server_ref": "prod", "command": "uptime"},
+            resolve_key=_resolver(_KEY),
+            on_suppress=on_suppress,
+        )
+    assert allowed["stdout"] == "live"  # real dial, not synthesized
+
+
+@pytest.mark.asyncio
+async def test_command_timeout_aborts_and_bails() -> None:
+    # conn.run exceeding the deadline raises TimeoutError (indistinguishable from
+    # asyncio.timeout firing); the handler must abort the connection and bail.
+    conn = _FakeConn(_proc(exit_status=0))
+
+    async def _slow_run(command: str, **kwargs: Any) -> Any:
+        raise TimeoutError
+
+    conn.run = _slow_run  # type: ignore[method-assign]
+    with pytest.raises(ToolBail, match="command timed out"):
+        await _run(
+            [_server()],
+            {"server_ref": "prod", "command": "sleep 999"},
+            connect=AsyncMock(return_value=conn),
+        )
+    assert conn.aborted is True  # the connection was closed
+
+
+@pytest.mark.asyncio
+async def test_corrupt_host_key_pin_bails_loud() -> None:
+    # A host_keys line that passes the light syntactic gate but whose blob is
+    # unparseable must fail LOUD here (import_known_hosts would silently drop it).
+    server = _server().model_copy(update={"host_keys": ["ssh-ed25519 QUJD"]})
+    ok_key = MagicMock(return_value=MagicMock())
+    with (
+        patch.object(ssh, "resolve_pinned_ip", AsyncMock(return_value="203.0.113.5")),
+        patch("aios.tools.ssh.asyncssh.import_private_key", ok_key),
+        pytest.raises(ToolBail, match=r"host_keys entry .* could not be parsed"),
+    ):
+        await ssh._do_ssh(
+            servers=[server],
+            arguments={"server_ref": "prod", "command": "ls"},
+            resolve_key=_resolver(_KEY),
+        )
+
+
+@pytest.mark.asyncio
+async def test_bad_key_bail_omits_secret_material() -> None:
+    # The key-parse-failure branch must not echo key material into the message.
+    exc = asyncssh.KeyImportError("the private key material xyzzy is malformed")
+    with (
+        patch.object(ssh, "resolve_pinned_ip", AsyncMock(return_value="203.0.113.5")),
+        patch("aios.tools.ssh.asyncssh.import_private_key", MagicMock(side_effect=exc)),
+        pytest.raises(ToolBail) as ei,
+    ):
+        await ssh._do_ssh(
+            servers=[_server()],
+            arguments={"server_ref": "prod", "command": "ls"},
+            resolve_key=_resolver(_KEY),
+        )
+    assert "xyzzy" not in str(ei.value)  # only type(exc).__name__ is surfaced
+    assert "KeyImportError" in str(ei.value)

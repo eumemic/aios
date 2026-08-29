@@ -135,3 +135,40 @@ class TestPinnedTransport:
         (inner_req,) = seen
         assert inner_req.url.host == "93.184.216.34"
         assert "sni_hostname" not in inner_req.extensions  # no cert to pin on http
+
+
+class TestResolveInternalIp:
+    """The ssh tool's operator-override resolver: resolve+pin WITHOUT the
+    private/internal-range block that ``resolve_pinned_ip`` enforces. This is the
+    security-critical difference between the two — asserted directly here."""
+
+    @pytest.mark.parametrize("ip", ["10.0.0.9", "127.0.0.1", "169.254.169.254", "100.64.0.1"])
+    async def test_pinned_blocks_internal_but_internal_allows(
+        self, ip: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.pinned_transport import resolve_internal_ip, resolve_pinned_ip
+
+        monkeypatch.setattr(pinned_transport, "_resolve_addrinfos", _addrinfos(ip))
+        # The guarded resolver refuses a private/internal/CGNAT address.
+        assert await resolve_pinned_ip("host.internal", 22) is None
+        # The operator-override resolver pins it (still resolve+pin, skip block).
+        assert await resolve_internal_ip("host.internal", 22) == ip
+
+    async def test_internal_prefers_ipv4(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from aios.pinned_transport import resolve_internal_ip
+
+        monkeypatch.setattr(
+            pinned_transport, "_resolve_addrinfos", _addrinfos("fd00::1", "10.0.0.9")
+        )
+        assert await resolve_internal_ip("host.internal", 22) == "10.0.0.9"
+
+    async def test_internal_returns_none_on_resolution_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.pinned_transport import resolve_internal_ip
+
+        async def _boom(host: str, port: int) -> list[tuple[object, ...]]:
+            raise OSError("nxdomain")
+
+        monkeypatch.setattr(pinned_transport, "_resolve_addrinfos", _boom)
+        assert await resolve_internal_ip("nope.internal", 22) is None

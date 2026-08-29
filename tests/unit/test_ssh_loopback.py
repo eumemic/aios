@@ -4,7 +4,7 @@ server on loopback.
 Unlike ``test_ssh.py`` (which mocks the asyncssh seam), this exercises the parts
 mocks can't: ``import_private_key`` on a real PEM, ``import_known_hosts`` with the
 ``*`` pattern actually verifying the presented host key, and ``connect``/``run``
-against a live server. The server is bound on 127.0.0.1 with an ephemeral port;
+against a live server. The server is bound on 127.0.0.1 with an ephemeral port and dialed by IP;
 the tool reaches it via the operator internal-host allowlist (which routes to
 ``resolve_internal_ip`` — loopback is otherwise blocked), so the override path is
 exercised for real. Precedent shape: ``test_git_proxy.py`` (in-process server, no
@@ -72,19 +72,19 @@ def _authorized(client_key: Any) -> Any:
     return asyncssh.import_authorized_keys(pub)
 
 
-def _allow_localhost(monkeypatch: pytest.MonkeyPatch, port: int) -> None:
+def _allow_loopback(monkeypatch: pytest.MonkeyPatch, port: int) -> None:
     monkeypatch.setattr(
         type(get_settings()),
         "ssh_allow_internal_host_set",
-        property(lambda self: frozenset({"localhost", f"localhost:{port}"})),
+        property(lambda self: frozenset({"127.0.0.1", f"127.0.0.1:{port}"})),
     )
 
 
 @pytest.mark.asyncio
 async def test_real_exec_success(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     host_pub, client_pem, port = sshd
-    _allow_localhost(monkeypatch, port)
-    server = _server(host="localhost", port=port, username="tester").model_copy(
+    _allow_loopback(monkeypatch, port)
+    server = _server(host="127.0.0.1", port=port, username="tester").model_copy(
         update={"host_keys": [host_pub]}
     )
     result = await ssh._do_ssh(
@@ -103,8 +103,8 @@ async def test_real_exec_success(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.asyncio
 async def test_real_nonzero_exit(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     host_pub, client_pem, port = sshd
-    _allow_localhost(monkeypatch, port)
-    server = _server(host="localhost", port=port, username="tester").model_copy(
+    _allow_loopback(monkeypatch, port)
+    server = _server(host="127.0.0.1", port=port, username="tester").model_copy(
         update={"host_keys": [host_pub]}
     )
     result = await ssh._do_ssh(
@@ -122,10 +122,10 @@ async def test_real_nonzero_exit(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.asyncio
 async def test_host_key_mismatch_refused(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _host_pub, client_pem, port = sshd
-    _allow_localhost(monkeypatch, port)
+    _allow_loopback(monkeypatch, port)
     # Pin a DIFFERENT host key than the server actually presents.
     wrong_pub = asyncssh.generate_private_key("ssh-ed25519").export_public_key().decode().strip()
-    server = _server(host="localhost", port=port, username="tester").model_copy(
+    server = _server(host="127.0.0.1", port=port, username="tester").model_copy(
         update={"host_keys": [wrong_pub]}
     )
     with pytest.raises(ToolBail, match="host key verification failed"):
@@ -143,10 +143,10 @@ async def test_host_key_mismatch_refused(sshd: Any, monkeypatch: pytest.MonkeyPa
 @pytest.mark.asyncio
 async def test_wrong_client_key_rejected(sshd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     host_pub, _client_pem, port = sshd
-    _allow_localhost(monkeypatch, port)
+    _allow_loopback(monkeypatch, port)
     # A client key the server does not authorize.
     other_pem = asyncssh.generate_private_key("ssh-ed25519").export_private_key().decode()
-    server = _server(host="localhost", port=port, username="tester").model_copy(
+    server = _server(host="127.0.0.1", port=port, username="tester").model_copy(
         update={"host_keys": [host_pub]}
     )
     with pytest.raises(ToolBail, match="authentication rejected"):
