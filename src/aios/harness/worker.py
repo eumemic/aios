@@ -147,6 +147,39 @@ class StartupRecoveryResult:
     woken_runs: int
 
 
+async def sweep_orphan_attachments_best_effort(pool: asyncpg.Pool[Any]) -> int | None:
+    """Startup orphan-attachment sweep that can never stop the worker booting.
+
+    Extracted from :func:`worker_main` for the same reason as
+    :func:`run_startup_recovery` — so the contract is unit-testable without
+    booting a full worker process. The contract here is one line: **this
+    never raises.**
+
+    It used to. The sweep runs before the maintenance-loop tasks are created,
+    so any failure killed the process, which meant the worker could not start
+    while Postgres was busy — exactly when its maintenance loops (journal
+    prune, sandbox GC, host-dir reapers) are most needed. Observed 2026-08-28:
+    a journal drain loaded the database enough that
+    ``list_attachment_paths_for_sessions`` hit the statement timeout, and the
+    worker crash-looped three times before happening to catch a quiet moment.
+
+    The asymmetry justifies failing open: a skipped sweep only defers orphan
+    reclamation to the next successful boot (disk hygiene, bounded by
+    ``_IN_FLIGHT_AGE_S`` staging semantics), whereas a dead worker halts every
+    session, run, trigger and reaper on the instance.
+
+    Returns the number of files reclaimed, or ``None`` when the sweep failed.
+    """
+    log = get_logger("aios.worker")
+    try:
+        return await sweep_orphan_attachments(pool)
+    except Exception:
+        # `exception`, never a bare warning: a silently skipped sweep would
+        # let orphans accumulate with nothing in the log to point at.
+        log.exception("worker.orphan_attachment_sweep_failed")
+        return None
+
+
 async def run_startup_recovery(
     pool: asyncpg.Pool[Any],
     inflight_tool_registry: InflightToolRegistry,
@@ -507,7 +540,9 @@ async def worker_main() -> None:
         # is invisible to the events table until its dedup transaction
         # commits, so commit-happens-before-sweep ordering is governed
         # by Postgres snapshot isolation rather than wall-clock.
-        deleted_attachments = await sweep_orphan_attachments(pool)
+        #
+        # Never fatal — see :func:`sweep_orphan_attachments_best_effort`.
+        deleted_attachments = await sweep_orphan_attachments_best_effort(pool)
         if deleted_attachments:
             log.info("worker.reaped_orphan_attachments", count=deleted_attachments)
 
