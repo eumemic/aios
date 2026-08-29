@@ -77,7 +77,14 @@ async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -
     assert r.status_code == 200, r.text
     assert [w["id"] for w in r.json()["data"]] == [workflow["id"]]
 
-    # Launch a run (201, pending).
+    # Seed an older matching run, then launch a new one. The immediate filtered
+    # read must return the mutation at the head of a limit-constrained page.
+    old_run = (
+        await http_client.post(
+            "/v1/runs",
+            json={"workflow_id": workflow["id"], "environment_id": env_id, "input": {"x": 0}},
+        )
+    ).json()
     r = await http_client.post(
         "/v1/runs",
         json={"workflow_id": workflow["id"], "environment_id": env_id, "input": {"x": 1}},
@@ -87,11 +94,17 @@ async def test_create_workflow_run_and_observe(http_client: httpx.AsyncClient) -
     assert run["workflow_id"] == workflow["id"] and run["status"] == "pending"
     assert run["input"] == {"x": 1}
 
+    newest = await http_client.get("/v1/runs", params={"workflow_id": workflow["id"], "limit": 1})
+    assert newest.status_code == 200, newest.text
+    assert [x["id"] for x in newest.json()["data"]] == [run["id"]]
+    assert old_run["id"] != run["id"]
+
     # Fetch + list it.
     r = await http_client.get(f"/v1/runs/{run['id']}")
     assert r.status_code == 200 and r.json()["id"] == run["id"]
     r = await http_client.get("/v1/runs", params={"workflow_id": workflow["id"]})
-    assert r.status_code == 200 and [x["id"] for x in r.json()["data"]] == [run["id"]]
+    assert r.status_code == 200
+    assert [x["id"] for x in r.json()["data"]] == [run["id"], old_run["id"]]
 
     # Its journal is readable (a fresh pending run has no events yet — the worker
     # isn't running in this ASGI test).
