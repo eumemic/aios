@@ -29,28 +29,96 @@ MCP_ORIGIN_KEY = "_mcp_origin"
 MCP_ANNOTATIONS_KEY = "_mcp_annotations"
 
 
-def sanitize_mcp_schema(node: Any) -> Any:
-    """Drop the ``type`` keyword next to ``anyOf``/``oneOf`` (the union carries the real shape).
+# Structural-walk keyword sets, mirroring ``aios.tools.schema_diet``'s
+# ``_walk_schemas`` (see its docstring for why a blind ``dict`` walk is wrong:
+# inside ``properties`` the KEYS are field names, never schema keywords).
+#: Keywords whose value is a NAME → schema mapping.
+_SCHEMA_MAPS = ("properties", "$defs", "patternProperties", "definitions")
+#: Keywords whose value is a list of schemas.
+_SCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+#: Keywords whose value is a single schema.
+_SCHEMA_VALUES = ("items", "not", "contains", "additionalProperties", "propertyNames")
 
-    Only the JSON Schema ``type`` **keyword** — whose value is a type name
-    (``"string"``) or a list of them (``["string", "null"]``) — is redundant beside
-    a union. A property literally **named** ``type`` (its value is a sub-schema
-    ``dict``) inside a ``properties`` map is a parameter, not a keyword, and must be
-    preserved even when a sibling property is named ``anyOf``/``oneOf``; aios
-    sanitizes untrusted third-party tool schemas, so dropping it would silently
-    corrupt a valid tool and make the model call it wrong.
+
+def sanitize_mcp_schema(node: Any) -> Any:
+    """Rewrite an untrusted schema into the subset litellm + providers tolerate.
+
+    Three repairs, applied along a **structural** walk that descends only
+    through known schema-composition keywords (``properties`` values,
+    ``items``, ``$defs``, ``anyOf``/``oneOf``/``allOf`` members,
+    ``additionalProperties``/``propertyNames`` when dicts, …). The distinction
+    is load-bearing: a properties MAP whose keys happen to include ``properties``
+    or ``type`` (a tool parameter literally named after a keyword — Notion's
+    ``notion-create-pages`` has a page ``properties`` field) must never be
+    mistaken for a schema node, or its legal keyword values (``"type":
+    "object"``) get mangled into ``{}`` and Anthropic 400s the whole request
+    (draft 2020-12 validation).
+
+    * Drop the ``type`` keyword next to ``anyOf``/``oneOf`` (the union carries
+      the real shape). Only the JSON Schema ``type`` **keyword** — whose value is
+      a type name (``"string"``) or a list of them (``["string", "null"]``) — is
+      redundant beside a union. A property literally **named** ``type`` (its
+      value is a sub-schema ``dict``) inside a ``properties`` map is a parameter,
+      not a keyword, and must be preserved even when a sibling property is named
+      ``anyOf``/``oneOf``; aios sanitizes untrusted third-party tool schemas, so
+      dropping it would silently corrupt a valid tool and make the model call it
+      wrong.
+
+    * On ``type == "array"``, ensure ``items`` is a dict: litellm's
+      ``token_counter`` → ``_format_type`` dereferences ``props['items']``
+      unconditionally (``KeyError: 'items'`` when missing — the #2294 incident
+      class) and recurses with ``.get`` (``AttributeError`` on draft-4 tuple-form
+      ``items: [...]`` or boolean ``items``). OpenAI also rejects arrays without
+      ``items``. ``{}`` is the "anything" schema, so the repair only loosens.
+
+    * Coerce non-dict ``properties`` values (boolean schemas like ``"foo": true``)
+      to ``{}`` — litellm's ``_format_object_parameters`` calls ``.get`` on every
+      property value. Applied only to a genuine ``properties`` map on a schema
+      node reached through the structural walk.
     """
     if isinstance(node, dict):
-        has_union = "anyOf" in node or "oneOf" in node
-        drop_type = has_union and isinstance(node.get("type"), (str, list))
-        return {
-            key: sanitize_mcp_schema(value)
-            for key, value in node.items()
-            if not (drop_type and key == "type")
-        }
+        return _sanitize_schema(node)
     if isinstance(node, list):
         return [sanitize_mcp_schema(item) for item in node]
     return node
+
+
+def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Repair one schema node and recurse structurally into its subschemas."""
+    has_union = "anyOf" in schema or "oneOf" in schema
+    drop_type = has_union and isinstance(schema.get("type"), (str, list))
+    cleaned = {
+        key: _sanitize_keyword_value(key, value)
+        for key, value in schema.items()
+        if not (drop_type and key == "type")
+    }
+    if cleaned.get("type") == "array" and not isinstance(cleaned.get("items"), dict):
+        cleaned["items"] = {}
+    return cleaned
+
+
+def _sanitize_keyword_value(key: str, value: Any) -> Any:
+    """Recurse into ``value`` only when ``key`` is a schema-composition keyword.
+
+    Anything else (``description``, ``default``, ``enum``, ``const``, unknown
+    keywords) is data, not schema — deep-copied untouched so the sanitized
+    result never aliases the caller's input.
+    """
+    if key in _SCHEMA_MAPS and isinstance(value, dict):
+        coerce = key == "properties"
+        return {
+            name: _sanitize_schema(sub)
+            if isinstance(sub, dict)
+            else ({} if coerce else copy.deepcopy(sub))
+            for name, sub in value.items()
+        }
+    if key in _SCHEMA_LISTS and isinstance(value, list):
+        return [
+            _sanitize_schema(arm) if isinstance(arm, dict) else copy.deepcopy(arm) for arm in value
+        ]
+    if key in _SCHEMA_VALUES and isinstance(value, dict):
+        return _sanitize_schema(value)
+    return copy.deepcopy(value)
 
 
 def _sanitize_name_segment(raw: str) -> str:

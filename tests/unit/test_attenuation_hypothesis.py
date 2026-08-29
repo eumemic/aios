@@ -159,7 +159,11 @@ def test_mcp_meet_agrees_with_live_resolvers(d: Surface, ln: Surface) -> None:
             if expected_enabled and actual_enabled:
                 pa = resolve_mcp_permission(name, d.tools) or DMP
                 pb = resolve_mcp_permission(name, ln.tools) or DMP
-                expected_perm = "always_ask" if "always_ask" in (pa, pb) else "always_allow"
+                # Rank-min oracle over always_ask ⊏ auto_review ⊏ always_allow —
+                # independently restated so a production lattice edit desyncing
+                # from the law goes RED here.
+                rank = {"always_ask": 0, "auto_review": 1, "always_allow": 2}
+                expected_perm = pa if rank[pa] <= rank[pb] else pb
                 assert expected_perm == resolve_mcp_permission(name, out.tools), (
                     f"permission desync for {name}: d={d!r} ln={ln!r}"
                 )

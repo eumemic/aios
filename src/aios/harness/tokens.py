@@ -551,14 +551,25 @@ def tokens_to_drop(total: int, *, window_min: int, window_max: int) -> int:
         return 0
     overshoot = total - window_max
     chunk = window_max - window_min
-    if chunk == 0:
-        # Degenerate band ``window_min == window_max``: no chunk to snap within,
-        # so drop exactly the overshoot and retain ``window_max``. This band is
-        # reachable from a VALID config — the context-overflow shrink ladder
-        # collapses the effective band to a point once the shrunk request ceiling
-        # falls to or below ``agent.window_min`` (see the ``min()`` in ``loop.py``
-        # feeding ``read_windowed_events``). Dividing by zero here would crash the
-        # very step meant to shrink the prompt, wedging overflow recovery.
+    if chunk <= 0:
+        # Degenerate band ``window_min >= window_max``: no chunk to snap within,
+        # so drop exactly the overshoot and retain ``window_max``.
+        #
+        # No live caller produces such a band. ``read_windowed_events`` clamps
+        # its floor to ``_WINDOW_FLOOR_MAX_FRACTION`` of the events budget
+        # (issue #2289), which keeps ``events_window_min`` strictly under
+        # ``events_window_max`` for every budget >= 1 — and agent config
+        # validates ``window_min < window_max``. (Before #2289 the equal case
+        # WAS reachable: the overflow shrink ladder collapsed the effective band
+        # to a point once the shrunk ceiling fell to ``agent.window_min``.)
+        #
+        # The branch stays because both failure modes are silent rather than
+        # loud: an equal band would divide by zero here, crashing the very step
+        # meant to shrink the prompt; an INVERTED band would make the ceil
+        # division below return a NEGATIVE drop — a garbage boundary that widens
+        # the retained scan (``cumulative_tokens > drop`` matches everything)
+        # instead of narrowing it. Treating both as degenerate keeps the failure
+        # mode "retain exactly ``window_max``".
         return overshoot
     snaps = (overshoot + chunk - 1) // chunk  # ceil division
     return snaps * chunk

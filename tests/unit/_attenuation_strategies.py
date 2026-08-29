@@ -29,6 +29,7 @@ from aios.models.agents import (
     HttpRouteSpec,
     HttpServerSpec,
     McpPermissionPolicy,
+    McpPermissionValue,
     McpServerSpec,
     McpToolConfig,
     McpToolsetConfig,
@@ -55,6 +56,10 @@ HTTP_BASE_URLS = ["https://http-a", "https://http-b"]
 PATH_PATTERNS = ["/x", "/y"]  # opaque keys — no glob semantics generated
 
 PERMS: list[PermissionPolicy] = ["always_allow", "always_ask"]
+# MCP wrappers additionally admit ``auto_review`` (the checker policy) — the
+# meet laws must hold over all three values there, while builtin/HTTP
+# permissions and the operator default stay two-valued.
+MCP_PERMS: list[McpPermissionValue] = ["always_allow", "always_ask", "auto_review"]
 TRANSPORTS: list[ToolTransport] = ["cli", "agent_tool", "both"]
 METHOD_POOL: list[HttpMethod] = ["GET", "POST", "DELETE"]
 
@@ -69,8 +74,12 @@ def _perm() -> st.SearchStrategy[PermissionPolicy]:
     return st.sampled_from(PERMS)
 
 
+def _mcp_perm() -> st.SearchStrategy[McpPermissionValue]:
+    return st.sampled_from(MCP_PERMS)
+
+
 def _mpp() -> st.SearchStrategy[McpPermissionPolicy | None]:
-    return st.none() | st.builds(McpPermissionPolicy, type=_perm())
+    return st.none() | st.builds(McpPermissionPolicy, type=_mcp_perm())
 
 
 def _hpp() -> st.SearchStrategy[HttpPermissionPolicy | None]:

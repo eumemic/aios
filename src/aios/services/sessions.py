@@ -603,6 +603,10 @@ class TellExistingSession:
     session_id: str
     content: str
     cause: str = "message"
+    # Display-only provenance stamped onto the user message's ``metadata``
+    # (e.g. the trigger runner's ``{"trigger": {"id", "name"}}`` — how the
+    # auto-review checker tells a routine wake from a human ask).
+    metadata: dict[str, Any] | None = None
 
 
 # The discriminated union at the spine boundary. Illegal arms are absent by
@@ -830,7 +834,12 @@ async def _stimulate_existing_tell(
     wake/notify policy surfaces call.
     """
     await tell_existing_session(
-        pool, stim.session_id, content=stim.content, cause=stim.cause, account_id=account_id
+        pool,
+        stim.session_id,
+        content=stim.content,
+        cause=stim.cause,
+        metadata=stim.metadata,
+        account_id=account_id,
     )
     return True
 
@@ -842,6 +851,7 @@ async def tell_existing_session(
     content: str,
     cause: str,
     account_id: str,
+    metadata: dict[str, Any] | None = None,
 ) -> Event:
     """THE channel-less ``Tell(ExistingSession)`` writer: append a user-role message
     + defer a wake, opening NO request edge (no response obligation). Returns the
@@ -852,7 +862,7 @@ async def tell_existing_session(
     owns its own depth/rate caps + the non-forgeable ``wake_lineage`` span, so it stays
     a distinct writer rather than folding through here."""
 
-    event = await append_user_message(pool, session_id, content, account_id=account_id)
+    event = await append_user_message(pool, session_id, content, metadata, account_id=account_id)
     await defer_wake(pool, session_id, cause=cause, account_id=account_id)
     return event
 
@@ -1104,6 +1114,17 @@ def _classify_awaiting(
         return AwaitingToolCall(
             tool_call_id=tool_call_id, name=name, kind=kind, pending_since=pending_since
         )
+    if disposition is ToolDisposition.NEEDS_REVIEW:
+        # Under review, nobody is being waited on yet — the checker resolves
+        # out-of-band. The call becomes awaiting (an ordinary "mcp" hold)
+        # only once a ``tool_requested`` marker exists in the trace: the
+        # checker's ask verdict, or the stranded-review sweep's fail-closed
+        # hold. Cards stay trace-derived.
+        if tc["has_requested_lifecycle"]:
+            return AwaitingToolCall(
+                tool_call_id=tool_call_id, name=name, kind="mcp", pending_since=pending_since
+            )
+        return None
     if disposition is ToolDisposition.CUSTOM:
         return AwaitingToolCall(
             tool_call_id=tool_call_id, name=name, kind="custom", pending_since=pending_since
@@ -2368,6 +2389,21 @@ async def find_latest_interrupt_seq(
         return await queries.find_latest_interrupt_seq(conn, session_id, account_id=account_id)
 
 
+async def has_tool_requested_marker(
+    pool: asyncpg.Pool[Any], session_id: str, tool_call_id: str, *, account_id: str
+) -> bool:
+    """True when a ``lifecycle/tool_requested`` hold marker exists for the call.
+
+    Thin pool wrapper over :func:`queries.has_tool_requested_marker` — the
+    marker-idempotence check shared by the auto-review ask path and the
+    stranded-review sweep.
+    """
+    async with pool.acquire() as conn:
+        return await queries.has_tool_requested_marker(
+            conn, session_id, tool_call_id, account_id=account_id
+        )
+
+
 async def find_tool_confirmed_seqs(
     pool: asyncpg.Pool[Any], session_id: str, tool_call_ids: list[str], *, account_id: str
 ) -> dict[str, int]:
@@ -2823,11 +2859,35 @@ async def confirm_tool_allow(
     tool_call_id: str,
     *,
     account_id: str,
+    source: str | None = None,
+    enforce_interrupt_floor: bool = False,
+    expected_interrupt_floor: int | None = None,
 ) -> Event:
     """Record an allow confirmation for an ``always_ask`` tool call.
 
     Appends a ``lifecycle/tool_confirmed`` event. The worker's step
     function will see this and dispatch the tool call.
+
+    ``source`` distinguishes non-human confirmations in the trace (the
+    auto-review checker passes ``"auto_review"``); the HTTP endpoint never
+    sets it, so an absent key means a person confirmed. Additive: every
+    reader of this event filters on ``event``/``result`` only.
+
+    ``enforce_interrupt_floor`` closes a check-then-act race for NON-human
+    confirms (the auto-review checker): the caller captured the latest
+    interrupt seq (``expected_interrupt_floor``, possibly ``None`` for a
+    never-interrupted session) before grading, but a bare re-read + append
+    leaves a window where an interrupt commits between them, yielding a confirm
+    with a HIGHER seq than the interrupt — which the #1756 cold-dispatch guard
+    reads as fresh HUMAN re-confirmation and runs the interrupted call. With the
+    flag set this re-checks the floor INSIDE this session-locked transaction:
+    interrupt appends serialize on the same row lock, so any interrupt that
+    landed first is visible here (→ :class:`ConflictError`, and the checker
+    drops the allow), and any interrupt racing after necessarily sequences past
+    the confirm (→ the existing dispatch guard cancels it). Humans never set it
+    — a person clicking Allow after an interrupt IS fresh intent. The flag is
+    separate from the value because ``None`` is a legitimate captured floor, not
+    "no check".
 
     Idempotent on ``(session_id, tool_call_id)``: a retried POST
     (network blip, 502, mid-flight client disconnect, double-click)
@@ -2847,6 +2907,26 @@ async def confirm_tool_allow(
     """
     async with pool.acquire() as conn, conn.transaction():
         await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
+        # Under the session lock, before appending: has an interrupt landed
+        # since the caller captured the floor? (auto-review only — humans pass
+        # no floor). If so, the user cancelled this turn while the checker was
+        # grading; a machine allow is not fresh intent, so reject and let the
+        # checker drop it (the call parks for the sweep backstop).
+        if enforce_interrupt_floor:
+            current_floor = await queries.find_latest_interrupt_seq(
+                conn, session_id, account_id=account_id
+            )
+            if current_floor != expected_interrupt_floor:
+                raise ConflictError(
+                    f"tool_call_id {tool_call_id!r} interrupted since review began; "
+                    f"not auto-confirming",
+                    detail={
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_id,
+                        "expected_interrupt_floor": expected_interrupt_floor,
+                        "current_interrupt_floor": current_floor,
+                    },
+                )
         existing = await queries.find_tool_confirmed_event(
             conn, session_id, tool_call_id, account_id=account_id
         )
@@ -2895,13 +2975,59 @@ async def confirm_tool_allow(
                     "existing_is_error": prior_is_error,
                 },
             )
+        data: dict[str, Any] = {
+            "event": "tool_confirmed",
+            "tool_call_id": tool_call_id,
+            "result": "allow",
+        }
+        if source is not None:
+            data["source"] = source
         return await queries.append_event(
             conn,
             session_id=session_id,
             kind="lifecycle",
-            data={"event": "tool_confirmed", "tool_call_id": tool_call_id, "result": "allow"},
+            data=data,
             account_id=account_id,
         )
+
+
+async def hold_stranded_tool_call(
+    pool: asyncpg.Pool[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+    verdict_span: dict[str, Any],
+    requested_marker: dict[str, Any],
+) -> bool:
+    """Atomically fail-close a stranded review into a held card (jarbot#229).
+
+    The sweep backstop's check-then-append is otherwise racy: two concurrent
+    sweep passes (periodic cross-session + tool-result-scoped) can both pass
+    the marker check and double-write. Under the session row lock, re-check the
+    ``tool_requested`` marker and, if absent, append the verdict span and the
+    hold marker in ONE transaction — the second racer sees the marker and
+    returns ``False``. Takes the event ``data`` dicts verbatim (built by the
+    caller from the auto-review constants) so this stays a generic writer with
+    no reverse import into the harness. Returns whether it wrote.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        await queries.lock_active_session_for_update(conn, session_id, account_id=account_id)
+        if await queries.has_tool_requested_marker(
+            conn, session_id, tool_call_id, account_id=account_id
+        ):
+            return False
+        await queries.append_event(
+            conn, session_id=session_id, kind="span", data=verdict_span, account_id=account_id
+        )
+        await queries.append_event(
+            conn,
+            session_id=session_id,
+            kind="lifecycle",
+            data=requested_marker,
+            account_id=account_id,
+        )
+        return True
 
 
 async def confirm_tool_deny(

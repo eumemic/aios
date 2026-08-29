@@ -22,7 +22,7 @@ from aios.errors import (
     NotFoundError,
 )
 from aios.harness.chat_type import ChatType, chat_type_of
-from aios.harness.window import WindowedEvents, WindowOmission
+from aios.harness.window import WindowedEvents, WindowFloor, WindowOmission
 from aios.ids import (
     EVENT,
     make_id,
@@ -256,6 +256,20 @@ _MODEL_TOKEN_CLASS_MAX = 8.0
 # this factor before the snap math, so the *real* sent prompt sits at least
 # this far under ``window_max``.
 _WINDOW_SAFETY_MARGIN = 0.30
+
+# Ceiling on the retained-history floor, as a fraction of the events budget
+# (``window_max`` minus the prelude's effective cost) — issue #2289.
+# ``window_min`` floors RETAINED HISTORY, so the prelude is NOT subtracted
+# from it; but a floor that eats the whole events budget leaves
+# ``chunk = max - min`` near zero, which means a snap (and a full prefix-cache
+# miss) every few hundred tokens — worse than the bug it replaces.  Capping the
+# floor at 75% keeps the snap chunk at >= 25% of the events budget, so an
+# unaffordable band degrades to "less history than configured" with the snap
+# cadence intact.  Deliberately NOT a hard failure: the prelude grows whenever
+# an upstream MCP server adds tools, and raising here would wedge every session
+# in the fleet at wake time.  The clamp is reported instead — see
+# :class:`~aios.harness.window.WindowFloor`.
+_WINDOW_FLOOR_MAX_FRACTION = 0.75
 
 _model_token_ratio_cache: dict[tuple[str, float], tuple[float, dict[str, float]]] = {}
 
@@ -906,6 +920,38 @@ async def find_tool_confirmed_event(
         tool_call_id,
     )
     return _row_to_event(row) if row is not None else None
+
+
+async def has_tool_requested_marker(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    tool_call_id: str,
+    *,
+    account_id: str,
+) -> bool:
+    """True when a ``lifecycle/tool_requested`` hold marker exists for the call.
+
+    Same-shape sibling of :func:`find_tool_confirmed_event`. Used by the
+    auto-review ask path and the stranded-review sweep so the two hold-marker
+    writers stay marker-idempotent: for ``auto_review`` calls the marker is
+    load-bearing (``_classify_awaiting`` keys NEEDS_REVIEW awaiting on it),
+    and a duplicate would double-card stream consumers.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT 1 FROM events
+         WHERE session_id = $1
+           AND account_id = $2
+           AND kind = 'lifecycle'
+           AND data->>'event' = 'tool_requested'
+           AND data->>'tool_call_id' = $3
+         LIMIT 1
+        """,
+        session_id,
+        account_id,
+        tool_call_id,
+    )
+    return row is not None
 
 
 async def find_latest_interrupt_seq(
@@ -2013,36 +2059,44 @@ async def list_unresolved_tool_calls_batch(
     (#741).  Used by :func:`services.sessions.compute_awaiting` to build the
     ``Session.awaiting`` derived view. Returned dicts have keys
     ``tool_call_id``, ``name``, ``arguments``, ``has_allow_lifecycle``,
-    ``pending_since`` (the parent assistant event's ``created_at``)
-    — the caller classifies kind / needs_confirm using ``agent`` (and
-    the tool's ``classify_permission`` for arg-aware routes like
-    ``http_request``).
+    ``has_requested_lifecycle`` (a ``tool_requested`` hold marker exists — the
+    bit that makes an ``auto_review`` call awaiting only once the checker or
+    the stranded-review sweep has actually held it), ``pending_since`` (the
+    parent assistant event's ``created_at``) — the caller classifies kind /
+    needs_confirm using ``agent`` (and the tool's ``classify_permission`` for
+    arg-aware routes like ``http_request``).
     """
     raw = await _unresolved_tool_calls(conn, session_ids, account_id=account_id)
     if not raw:
         return {}
-    allow_rows = await conn.fetch(
+    marker_rows = await conn.fetch(
         """
-        SELECT session_id, data->>'tool_call_id' AS tool_call_id
+        SELECT session_id, data->>'event' AS event, data->>'tool_call_id' AS tool_call_id
           FROM events
          WHERE session_id = ANY($1::text[])
            AND account_id = $2
            AND kind = 'lifecycle'
-           AND data->>'event' = 'tool_confirmed'
-           AND data->>'result' = 'allow'
+           AND (
+                 (data->>'event' = 'tool_confirmed' AND data->>'result' = 'allow')
+                 OR data->>'event' = 'tool_requested'
+               )
         """,
         session_ids,
         account_id,
     )
     allows_by_sid: dict[str, set[str]] = {}
-    for r in allow_rows:
+    requested_by_sid: dict[str, set[str]] = {}
+    for r in marker_rows:
         tcid = r["tool_call_id"]
-        if tcid:
-            allows_by_sid.setdefault(r["session_id"], set()).add(tcid)
+        if not tcid:
+            continue
+        target = allows_by_sid if r["event"] == "tool_confirmed" else requested_by_sid
+        target.setdefault(r["session_id"], set()).add(tcid)
 
     out: dict[str, list[dict[str, Any]]] = {}
     for sid, calls in raw.items():
         allows = allows_by_sid.get(sid, set())
+        requested = requested_by_sid.get(sid, set())
         entries: list[dict[str, Any]] = []
         for tc in calls:
             fn = tc.get("function") or {}
@@ -2055,6 +2109,7 @@ async def list_unresolved_tool_calls_batch(
                     "name": name,
                     "arguments": fn.get("arguments", "{}"),
                     "has_allow_lifecycle": tc["id"] in allows,
+                    "has_requested_lifecycle": tc["id"] in requested,
                     "pending_since": tc["_pending_since"],
                 }
             )
@@ -2533,9 +2588,16 @@ async def read_windowed_events(
     the returned events — system prompt plus tool schemas — in local
     (``approx_tokens``) units.  It is NOT included in
     ``cumulative_tokens``, so the windower has to subtract it from the
-    effective budget up-front or the sent prompt will exceed
-    ``window_max`` by the overhead amount.  Callers that don't have any
-    such overhead (preview tooling, test scaffolds) pass ``0``.
+    **maximum** up-front or the sent prompt will exceed ``window_max`` by
+    the overhead amount.  Callers that don't have any such overhead
+    (preview tooling, test scaffolds) pass ``0``.
+
+    It is NOT subtracted from ``window_min``, which floors RETAINED
+    HISTORY rather than the whole prompt (issue #2289).  The floor is
+    instead clamped to ``_WINDOW_FLOOR_MAX_FRACTION`` of the remaining
+    events budget so the snap chunk stays usable; the result reports
+    which of the two happened via
+    :class:`~aios.harness.window.WindowFloor`.
 
     ``model`` must be the session's currently-active model string —
     ``agent.model`` on the session's pinned agent/version.  The same
@@ -2619,12 +2681,25 @@ async def read_windowed_events(
     # happens in the same effective space tokens_to_drop operates in.
     overhead_effective = round(overhead.total * effective_ratio)
     events_window_max = window_max - overhead_effective
-    events_window_min = max(0, window_min - overhead_effective)
     if events_window_max <= 0:
         raise ValueError(
             f"system+tools overhead ({overhead_effective} provider tokens) "
             f"exceeds window_max ({window_max}); no budget remains for events"
         )
+
+    # ``window_min`` floors RETAINED HISTORY, so the overhead subtracts from
+    # the max leg ONLY (issue #2289 — subtracting it here too turned the floor
+    # into a floor on the whole prompt, which a fat tool prelude satisfies by
+    # itself with zero history).  Clamp instead, so the snap chunk
+    # (``max - min``) stays usable; see ``_WINDOW_FLOOR_MAX_FRACTION``.
+    events_window_min = min(window_min, int(events_window_max * _WINDOW_FLOOR_MAX_FRACTION))
+    floor = WindowFloor(
+        configured=window_min,
+        effective=events_window_min,
+        events_window_max=events_window_max,
+        overhead_effective=overhead_effective,
+        outcome="honored" if events_window_min == window_min else "clamped",
+    )
 
     total_effective = round(total * effective_ratio)
     if total_effective <= events_window_max:
@@ -2633,6 +2708,7 @@ async def read_windowed_events(
                 conn, session_id, account_id=account_id
             ),
             omission=None,
+            floor=floor,
         )
 
     from aios.harness.tokens import tokens_to_drop
@@ -2651,19 +2727,22 @@ async def read_windowed_events(
                 conn, session_id, account_id=account_id
             ),
             omission=None,
+            floor=floor,
         )
 
     drop = math.ceil(drop_effective / effective_ratio)
 
     # Never drop the entire window: the window must keep a non-empty tail.
-    # Here ``events_window_min`` can clamp to 0 when overhead exceeds
-    # ``window_min`` (above), and the asymmetric ceil back-conversion can then
-    # push ``drop`` up to ``total`` — the retained scan (``cumulative_tokens >
-    # drop``) would match zero rows while the omission complement still matches
-    # every row. That pairing (empty events + a non-None omission) crashes
-    # ``build_messages``, which reads ``events[0].created_at`` to anchor the
-    # omission marker and relies on the inverse invariant. Clamp so the most
-    # recent event always survives (its ``cumulative_tokens == total``) — the
+    # The floor clamp above bounds how much a snap can take, but it does not
+    # by itself prove ``drop < total``: a caller-supplied ``window_min == 0``
+    # (the adaptive context-overflow retry) leaves a full-budget chunk, and the
+    # asymmetric ceil back-conversion can round ``drop`` up to ``total``. The
+    # retained scan (``cumulative_tokens > drop``) would then match zero rows
+    # while the omission complement still matches every row. That pairing
+    # (empty events + a non-None omission) crashes ``build_messages``, which
+    # reads ``events[0].created_at`` to anchor the omission marker and relies
+    # on the inverse invariant. Clamp so the most recent event always survives
+    # (its ``cumulative_tokens == total``) — the
     # retain-the-tail-even-when-oversized guarantee.
     drop = min(drop, total - 1)
 
@@ -2697,7 +2776,7 @@ async def read_windowed_events(
     )
     if boundary_row is None:
         # Nothing omitted.
-        return WindowedEvents(events=events, omission=None)
+        return WindowedEvents(events=events, omission=None, floor=floor)
 
     omitted_messages = boundary_row["cumulative_messages"]
     if omitted_messages is None:
@@ -2728,7 +2807,7 @@ async def read_windowed_events(
         account_id,
     )
     omission = WindowOmission(began_at=began_at, omitted_messages=omitted_messages)
-    return WindowedEvents(events=events, omission=omission)
+    return WindowedEvents(events=events, omission=omission, floor=floor)
 
 
 async def find_latest_model_workflow_park(

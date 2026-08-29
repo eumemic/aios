@@ -66,6 +66,7 @@ from aios.models.agents import (
     HttpRouteSpec,
     HttpServerSpec,
     McpPermissionPolicy,
+    McpPermissionValue,
     McpServerSpec,
     McpToolConfig,
     McpToolsetConfig,
@@ -130,7 +131,7 @@ class _Triple(NamedTuple):
     """The resolved authority of one (discovered) MCP tool name: the meet's atom."""
 
     enabled: bool
-    permission: PermissionPolicy
+    permission: McpPermissionValue
     transport: ToolTransport
 
 
@@ -167,9 +168,21 @@ def _transport_glb(a: ToolTransport, b: ToolTransport) -> ToolTransport | None:
     return None  # {cli} ⊓ {agent_tool} = ∅
 
 
-def _permission_meet(a: PermissionPolicy, b: PermissionPolicy) -> PermissionPolicy:
-    """``always_ask`` ⊏ ``always_allow``: the meet is the stricter (ask wins)."""
-    return "always_ask" if "always_ask" in (a, b) else "always_allow"
+# Permissiveness chain: ``always_ask`` ⊏ ``auto_review`` ⊏ ``always_allow``.
+# ``auto_review`` sits strictly between the two — it can execute without a human
+# (unlike ``always_ask``) but only after a checker verdict (unlike
+# ``always_allow``) — so the meet of any pair is the lower rank. Rank-min (not a
+# membership trick) keeps the meet idempotent and non-widening with three values.
+_PERMISSION_RANK: dict[McpPermissionValue, int] = {
+    "always_ask": 0,
+    "auto_review": 1,
+    "always_allow": 2,
+}
+
+
+def _permission_meet(a: McpPermissionValue, b: McpPermissionValue) -> McpPermissionValue:
+    """The stricter of the two policies (rank-min over the permissiveness chain)."""
+    return a if _PERMISSION_RANK[a] <= _PERMISSION_RANK[b] else b
 
 
 def _triple_meet(a: _Triple, b: _Triple) -> _Triple:

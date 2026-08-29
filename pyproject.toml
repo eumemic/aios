@@ -99,6 +99,10 @@ dev = [
     "aios-sms",
     "aios-telegram",
     "aios-whatsapp",
+    # The per-account browser driver (jarbot#106 Phase 2). A workspace member,
+    # not an aios dependency (the runtime must never import it); dev-installed
+    # so its unit suite runs in the normal PR lane with playwright available.
+    "aios-browser-driver",
     "types-pyyaml>=6",
 ]
 
@@ -122,6 +126,7 @@ members = [
     "connectors/sms",
     "connectors/telegram",
     "connectors/whatsapp",
+    "packages/aios-browser-driver",
     "packages/aios-connector-http",
     "packages/aios-sdk",
 ]
@@ -130,6 +135,7 @@ members = [
 # for development and tests; production deploys each connector as its
 # own container.
 [tool.uv.sources]
+aios-browser-driver = { workspace = true }
 aios-connector-http = { workspace = true }
 aios-echo-http = { workspace = true }
 aios-matrix = { workspace = true }

@@ -69,6 +69,7 @@ from aios.tools.schema_errors import (
     format_schema_violation,
     normalize_and_format_schema_violation,
 )
+from aios.tools.workflow_management import slim_workflow_schema
 
 # Per-park await budget. The tool task is fire-and-forget (implicit-async), so a
 # long park never blocks the caller's other turns; we re-poll in a loop so a
@@ -157,28 +158,26 @@ class _CallAgentArgs(BaseModel):
 class _CallWorkflowArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Field prose is deliberately terse (#2294): the "exactly one source arm" rule
+    # lives once, in CALL_WORKFLOW_DESCRIPTION, rather than being restated on both
+    # arms. The safety-bearing facts (shared workspace = live write access; vault
+    # subset semantics) are kept — those are guidance, not manual.
     workflow_id: str | None = Field(
-        default=None,
-        description=(
-            "The id of the same-account workflow to run and await. Supply EITHER this or "
-            "`inline` (exactly one). Omit to launch an inline one-shot run."
-        ),
+        default=None, description="The same-account workflow to run and await."
     )
     inline: InlineScriptBody | None = Field(
         default=None,
         description=(
-            "Inline-script body for an anonymous one-shot run (T5): `{script, schemas, "
-            "surface}`. NO workflow is registered; the run snapshots the script and clamps "
-            "the declared surface to your own. Supply EITHER this or `workflow_id`."
+            "Inline one-shot script body; no workflow row is created and the declared "
+            "surface is clamped to your own."
         ),
     )
     input: Any = Field(default=None, description="The run input (JSON or a string).")
     workspace: Literal["shared", "fresh"] = Field(
         default="fresh",
         description=(
-            "Workspace for the run. Defaults to `fresh` (an empty run workspace): sharing "
-            "hands the run LIVE WRITE ACCESS to this session's workspace, so it is opt-in. "
-            "Pass `shared` explicitly to hand the run this session's workspace."
+            "`fresh` (default) = an empty run workspace. `shared` hands the run LIVE "
+            "WRITE ACCESS to this session's workspace, so it is opt-in."
         ),
     )
     output_schema: dict[str, Any] | None = Field(
@@ -188,9 +187,7 @@ class _CallWorkflowArgs(BaseModel):
     vault_ids: list[str] | None = Field(
         default=None,
         description=(
-            "Vault ids to bind to the run. Omit or pass null to inherit all vaults "
-            "currently bound to this session; pass [] to bind none; a nonempty list "
-            "must be a subset of the session's vaults."
+            "Vaults to bind (a subset of your own). Omit to inherit this session's; [] binds none."
         ),
     )
     budget_usd: float | None = Field(
@@ -478,14 +475,11 @@ CALL_AGENT_DESCRIPTION = (
     "responsive while waiting."
 )
 CALL_WORKFLOW_DESCRIPTION = (
-    "Launch a run and wait for its result ({ok: output} on completion, an error if it "
-    "errored/was cancelled). Run EITHER a registered workflow (`workflow_id`) OR an "
-    "inline one-shot script (`inline`: {script, schemas, surface}) with no workflow "
-    "registered — supply exactly one; inline is the ergonomic default for one-shot work. "
-    "An inline run's declared surface is clamped to your own. The run uses your own "
-    "environment. Optionally attach `vault_ids` (a subset of your own vaults), set a "
-    "shared `budget_usd` spend ceiling, and constrain the output with `output_schema` (a "
-    "non-conforming output is reported as an error). Single-shot per call."
+    "Launch a run and wait for its result ({ok: output}, or an error if it errored or "
+    "was cancelled). Supply EXACTLY ONE of `workflow_id` (a registered workflow) or "
+    "`inline` (a one-shot script; the default for one-off work). The run uses your own "
+    "environment. Single-shot per call. Read `get_workflow_script_contract` before "
+    "writing an inline script."
 )
 
 
@@ -513,7 +507,10 @@ def _register() -> None:
     registry.register(
         name="call_workflow",
         description=CALL_WORKFLOW_DESCRIPTION,
-        parameters_schema=_CallWorkflowArgs.model_json_schema(),
+        # Model-facing diet (#2294): the nested inline body's script description and
+        # declared-surface trees are collapsed; _CallWorkflowArgs itself (and so
+        # InlineScriptBody validation) is untouched — see tools/schema_diet.py.
+        parameters_schema=slim_workflow_schema(_CallWorkflowArgs.model_json_schema()),
         handler=call_workflow_handler,
         transport="agent_tool",
         resumable=True,

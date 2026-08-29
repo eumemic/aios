@@ -34,6 +34,17 @@ def test_stale_capability_map_is_reported_at_config_save(monkeypatch: Any) -> No
     ]
 
 
+def test_supported_param_in_pinned_capability_map_is_not_reported(monkeypatch: Any) -> None:
+    """The pin discriminates map contents rather than merely silencing the lookup."""
+    monkeypatch.setattr(
+        litellm,
+        "get_supported_openai_params",
+        lambda _model: ["reasoning_effort", "temperature"],
+    )
+
+    assert unsupported_openai_params("xai/grok-4.6", {"reasoning_effort": "high"}) == []
+
+
 def test_provider_specific_kwargs_are_not_mislabeled() -> None:
     assert unsupported_openai_params("xai/grok-4.6", {"vendor_bogus": True}) == []
 

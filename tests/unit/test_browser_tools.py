@@ -129,6 +129,25 @@ class TestActionHandlers:
         assert "[ref=e1]" in excinfo.value.message  # self-correction snapshot
         assert excinfo.value.detail["code"] == "stale_snapshot"
 
+    async def test_restart_on_failed_response_is_surfaced_in_the_bail(
+        self, seams: dict[str, Any]
+    ) -> None:
+        """The driver spends its once-per-restart signal on a DELIVERED
+        response — including an ok:false one (a stale ref is often the
+        restart's first symptom). The bail must carry the page-state-lost
+        notice, or the fact is silently lost."""
+        seams["driver"].return_value = _response(
+            ok=False,
+            driver_restarted=True,
+            error=BrowserError(code="stale_snapshot", message="ref e12 is gone"),
+            snapshot='- link "Home" [ref=e1]',
+        )
+        handler = registry.get("browser_click").handler
+        with pytest.raises(ToolBail) as excinfo:
+            await handler(_SESSION_ID, {"ref": "e12", "description": "click it"})
+        assert "restarted" in excinfo.value.message
+        assert "[ref=e1]" in excinfo.value.message  # self-correction snapshot still attached
+
     async def test_unknown_error_code_is_tolerated(self, seams: dict[str, Any]) -> None:
         """Forward compatibility: an error code this build doesn't know still
         renders as a model-visible failure, never a parse error."""
@@ -159,6 +178,20 @@ class TestActionHandlers:
         with pytest.raises(ToolBail, match="not available in this deployment"):
             await handler(_SESSION_ID, {})
 
+    async def test_runtime_unsupported_gives_the_runtime_message(
+        self, seams: dict[str, Any]
+    ) -> None:
+        """A ``BrowserRuntimeUnsupportedError`` is a ``BrowserImageUnconfiguredError``
+        subclass, so it must be caught by its OWN arm (before the image arm) and
+        render the accurate runtime message — not the false 'no browser image is
+        configured'."""
+        from aios.sandbox.spec import BrowserRuntimeUnsupportedError
+
+        seams["driver"].side_effect = BrowserRuntimeUnsupportedError("custom runtime")
+        handler = registry.get("browser_snapshot").handler
+        with pytest.raises(ToolBail, match="runtime that is not supported"):
+            await handler(_SESSION_ID, {})
+
     async def test_grant_recheck_refusal_propagates(self, seams: dict[str, Any]) -> None:
         seams["granted"].side_effect = ToolBail("browser_click is not enabled for this agent")
         handler = registry.get("browser_click").handler
@@ -182,6 +215,25 @@ class TestDriverCall:
             side_effect=BrowserImageUnconfiguredError("no image configured")
         )
         with pytest.raises(BrowserImageUnconfiguredError):
+            await driver_call(
+                registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
+            )
+
+    async def test_runtime_unsupported_passes_through_unlaundered(self) -> None:
+        """``BrowserRuntimeUnsupportedError`` (a ``BrowserImageUnconfiguredError``
+        subclass) must ride the same non-retryable pass-through, NOT be laundered
+        into a retryable ``BrowserUnavailableError`` — retrying never helps a
+        statically-misconfigured runtime. Reordering driver_call's except arms or
+        rebasing the exception on ``SandboxBackendError`` would flip this."""
+        from aios.sandbox.browser import driver_call
+        from aios.sandbox.browser_protocol import BrowserRequest
+        from aios.sandbox.spec import BrowserRuntimeUnsupportedError
+
+        registry_mock = MagicMock()
+        registry_mock.get_or_provision_browser = AsyncMock(
+            side_effect=BrowserRuntimeUnsupportedError("custom runtime")
+        )
+        with pytest.raises(BrowserRuntimeUnsupportedError):
             await driver_call(
                 registry_mock, _ACCOUNT_ID, BrowserRequest(op="snapshot"), timeout_s=5
             )
@@ -284,7 +336,19 @@ class TestScreenshot:
 
     async def test_hostile_shot_path_is_refused(self, seams: dict[str, Any], plane: Path) -> None:
         seams["driver"].return_value = _response(shot_path="../../../etc/passwd")
-        with pytest.raises(ToolBail, match="invalid image path"):
+        with pytest.raises(ToolBail, match="could not read the image"):
+            await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+    async def test_symlinked_shot_is_refused(self, seams: dict[str, Any], plane: Path) -> None:
+        """The TOCTOU shape: the shot bytes go into MODEL context, so a shot
+        swapped for a symlink into another account's plane must be refused at
+        open time (no-follow walk), not by a checkable-then-swappable resolve."""
+        victim = plane.parent.parent / "acc_VICTIM" / "profile" / "Cookies"
+        victim.parent.mkdir(parents=True)
+        victim.write_bytes(b"cookie-jar")
+        (plane / "shot.png").symlink_to(victim)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+        with pytest.raises(ToolBail, match="could not read the image"):
             await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
 
     async def test_missing_shot_raises_toolbail(self, seams: dict[str, Any], plane: Path) -> None:
