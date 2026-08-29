@@ -1181,7 +1181,7 @@ class TestIsolatedServeConnection:
         ]
         assert [record["attempt"] for record in reconnects] == [1, 2]
         state = c._connections["conn_1"]
-        assert state.serve_status == "serving"
+        assert state.serve_status == "stopped"
         assert state.serve_restart_count == 2
         assert state.last_serve_error == "RuntimeError: failure 2"
 

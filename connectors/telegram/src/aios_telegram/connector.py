@@ -211,6 +211,12 @@ class TelegramConnector(HttpConnector):
         # reactions never reach the bot regardless of which handlers we
         # register locally.
         await state.application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
+        connection_id = next(
+            connection_id
+            for connection_id, connection_state in self.state.items()
+            if connection_state is state
+        )
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _TelegramConnectionState) -> None:

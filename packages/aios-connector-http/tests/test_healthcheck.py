@@ -126,7 +126,6 @@ async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> No
     assert connector._heartbeat_identity is None
 
 
-
 @pytest.mark.asyncio
 async def test_heartbeat_does_not_claim_path_replaced_after_create(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -167,7 +166,7 @@ async def test_heartbeat_stops_while_a_connection_is_restarting(tmp_path: Path) 
     heartbeat = tmp_path / "alive"
     connector.HEARTBEAT_INTERVAL = 0.01
     connector._discovery_cursor = 0  # authoritative empty snapshot completed
-    connector._connections["conn_1"] = _ConnectionState("conn_1", "account")
+    connector._connections["conn_1"] = _ConnectionState("conn_1", "account", serve_status="serving")
 
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
@@ -185,6 +184,47 @@ async def test_heartbeat_stops_while_a_connection_is_restarting(tmp_path: Path) 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("serve_returns", [False, True])
+async def test_heartbeat_requires_established_receiving_transport(
+    tmp_path: Path, serve_returns: bool
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _TransportConnector(_Connector):
+        async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+            del connection_id, secrets
+            entered.set()
+            if not serve_returns:
+                await release.wait()
+
+    connector = _TransportConnector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    connector.HEARTBEAT_INTERVAL = 0.01
+    connector._discovery_cursor = 0
+    connector._connections["conn_1"] = _ConnectionState("conn_1", "account")
+
+    serve_task = asyncio.create_task(connector._isolated_serve_connection("conn_1", {}))
+    heartbeat_task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await entered.wait()
+        if serve_returns:
+            await serve_task
+        await asyncio.sleep(0.03)
+        assert not heartbeat.exists()
+        assert connector._connections["conn_1"].serve_status in {"starting", "stopped"}
+    finally:
+        release.set()
+        if not serve_task.done():
+            serve_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await serve_task
+        heartbeat_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await heartbeat_task
 
 
 def test_every_connector_image_defines_a_healthcheck() -> None:

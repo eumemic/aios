@@ -252,6 +252,12 @@ class SlackConnector(HttpConnector):
         into ``serve_connection``'s ``finally`` which closes the client.
         """
         await state.socket_client.connect()
+        connection_id = next(
+            connection_id
+            for connection_id, connection_state in self.state.items()
+            if connection_state is state
+        )
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _SlackConnectionState) -> None:

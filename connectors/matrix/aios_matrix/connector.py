@@ -225,6 +225,7 @@ class MatrixConnector(HttpConnector):
         intent = self.az.intent.user(self._mxid(localpart))
         await intent.ensure_registered()
         await self._reconcile_intent(intent)
+        self.mark_transport_ready(connection_id)
         try:
             await asyncio.Event().wait()
         finally:

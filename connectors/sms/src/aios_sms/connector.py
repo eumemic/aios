@@ -126,6 +126,7 @@ class SmsConnector(HttpConnector):
                 queue=state.inbound_queue,
             ),
         )
+        self.mark_transport_ready(connection_id)
         log.info(
             "sms.connection.ready",
             connection_id=connection_id,

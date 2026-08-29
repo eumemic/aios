@@ -206,6 +206,7 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         )
         self.state[connection_id] = state
         queue = self._queue_for(phone)
+        self.mark_transport_ready(connection_id)
         log.info(
             "signal.connection.ready",
             connection_id=connection_id,

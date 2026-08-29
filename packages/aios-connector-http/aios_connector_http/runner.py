@@ -223,7 +223,7 @@ class _ConnectionState:
     external_account_id: str
     secrets: dict[str, str] = field(default_factory=dict)
     worker: asyncio.Task[None] | None = None
-    serve_status: Literal["serving", "restarting"] = "serving"
+    serve_status: Literal["starting", "serving", "restarting", "stopped"] = "starting"
     last_serve_error: str | None = None
     serve_restart_count: int = 0
 
@@ -350,12 +350,28 @@ class HttpConnector:
         is a no-op block — connectors that only respond to outbound
         tool calls (no inbound platform feed) leave it as-is.
 
+        Implementations with an inbound transport must call
+        :meth:`mark_transport_ready` only after that transport can receive.
+        Until then the container heartbeat is withheld.  The default has no
+        inbound transport, so it becomes ready immediately.
+
         ``secrets`` is the per-connection decrypted credentials dict.
         Cached at spawn time — if operators rotate secrets, the
         operator restarts the runtime container to pick them up.
         """
-        del connection_id, secrets
+        del secrets
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()  # block forever
+
+    def mark_transport_ready(self, connection_id: str) -> None:
+        """Confirm that a discovered connection's inbound transport can receive."""
+        # Production always registers the discovery state before spawning the
+        # serve task.  Keeping direct ``serve_connection`` calls harmless is
+        # useful for connector-level tests and embedding without manufacturing
+        # a health claim for an undiscovered connection.
+        state = self._connections.get(connection_id)
+        if state is not None:
+            state.serve_status = "serving"
 
     async def teardown(self) -> None:
         """Override: cleanup before the runner exits."""
@@ -1377,7 +1393,11 @@ class HttpConnector:
                     # their per-connection state before handling tool calls.
                     await self.serve_connection(connection_id, secrets)
                     if state is not None:
-                        state.serve_status = "serving"
+                        state.serve_status = "starting"
+                    await self.serve_connection(connection_id, secrets)
+                    state = self._connections.get(connection_id)
+                    if state is not None:
+                        state.serve_status = "stopped"
                     break
                 except asyncio.CancelledError:
                     raise
