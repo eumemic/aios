@@ -32,16 +32,34 @@ def test_every_code_validation_job_has_a_finite_timeout() -> None:
         assert value is not None, f"job {name!r} has NO timeout-minutes: it can hang unbounded"
 
         if isinstance(value, str):
-            # A GitHub expression. Require it to be an expression that resolves to numbers,
-            # so it cannot silently evaluate to empty (which GitHub treats as no timeout).
-            assert value.strip().startswith("${{"), (
-                f"job {name!r} timeout is a bare string: {value!r}"
+            # A GitHub expression. Enumerate its BRANCHES and require every one to be a
+            # finite number. Asserting merely that some digits appear is NOT enough: an
+            # expression like `${{ cond && 45 || null }}` contains a number and still
+            # leaves one shard with NO timeout -- the exact defect this test exists to
+            # catch. That mutation survived the previous version of this assertion; it
+            # was found by uncorrelated review executing the case I failed to try.
+            expr = value.strip()
+            assert expr.startswith("${{") and expr.endswith("}}"), (
+                f"job {name!r} timeout is not a GitHub expression: {value!r}"
             )
-            numbers = [int(n) for n in re.findall(r"\b\d+\b", value)]
-            assert numbers, f"job {name!r} timeout expression has no numeric branches: {value!r}"
-            assert all(0 < n <= 120 for n in numbers), (
-                f"job {name!r} timeout branches out of range: {numbers}"
+            inner = expr[3:-2].strip()
+
+            # Supported shape: `<condition> && <A> || <B>`. Anything else is REFUSED
+            # rather than assumed safe -- an unparseable timeout expression is exactly
+            # where a null branch hides.
+            m = re.fullmatch(r".+?&&\s*(\S+)\s*\|\|\s*(\S+)", inner)
+            assert m, (
+                f"job {name!r} timeout expression is not a recognised `cond && A || B` "
+                f"ternary, so its branches cannot be checked for finiteness: {value!r}"
             )
+            for branch in (m.group(1), m.group(2)):
+                assert branch.isdigit(), (
+                    f"job {name!r} timeout branch {branch!r} is not a finite number "
+                    f"(a null/empty branch means that shard runs with NO timeout): {value!r}"
+                )
+                assert 0 < int(branch) <= 120, (
+                    f"job {name!r} timeout branch {branch} out of range: {value!r}"
+                )
         else:
             assert isinstance(value, int) and 0 < value <= 120, (
                 f"job {name!r} has an implausible timeout: {value!r}"
