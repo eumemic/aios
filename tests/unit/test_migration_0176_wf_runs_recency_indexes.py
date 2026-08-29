@@ -36,18 +36,23 @@ def _capture(operation: str) -> tuple[list[str], Mock]:
 def test_upgrade_builds_both_indexes_concurrently_outside_transaction() -> None:
     statements, context = _capture("upgrade")
 
-    creates = [statement for statement in statements if statement.startswith("CREATE INDEX")]
-    drops = [statement for statement in statements if statement.startswith("DROP INDEX")]
-    assert len(creates) == 2
-    assert all(statement.startswith("CREATE INDEX CONCURRENTLY ") for statement in creates)
-    assert len(drops) == 2
-    assert all(statement.startswith("DROP INDEX CONCURRENTLY IF EXISTS ") for statement in drops)
+    assert statements == [
+        "DROP INDEX CONCURRENTLY IF EXISTS wf_runs_account_recency_idx",
+        "CREATE INDEX CONCURRENTLY wf_runs_account_recency_idx "
+        "ON wf_runs (account_id, created_at DESC, id DESC) WHERE archived_at IS NULL",
+        "DROP INDEX CONCURRENTLY IF EXISTS wf_runs_account_workflow_recency_idx",
+        "CREATE INDEX CONCURRENTLY wf_runs_account_workflow_recency_idx "
+        "ON wf_runs (account_id, workflow_id, created_at DESC, id DESC) "
+        "WHERE archived_at IS NULL",
+    ]
     context.autocommit_block.assert_called_once_with()
 
 
 def test_downgrade_removes_both_indexes_concurrently_outside_transaction() -> None:
     statements, context = _capture("downgrade")
 
-    assert len(statements) == 2
-    assert all(statement.startswith("DROP INDEX CONCURRENTLY IF EXISTS ") for statement in statements)
+    assert statements == [
+        "DROP INDEX CONCURRENTLY IF EXISTS wf_runs_account_workflow_recency_idx",
+        "DROP INDEX CONCURRENTLY IF EXISTS wf_runs_account_recency_idx",
+    ]
     context.autocommit_block.assert_called_once_with()
