@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -15,15 +16,39 @@ _ROOT = Path(__file__).parents[2]
 
 
 def test_every_code_validation_job_has_a_finite_timeout() -> None:
+    """Every job must carry a finite timeout -- the defect was a job with NONE.
+
+    Asserts the PROPERTY, not exact literals. The e2e timeout is a per-shard expression
+    (docker gets longer for image fallbacks; non-docker stays short so a wedge fails fast),
+    so a fixed-value assertion would re-break on every legitimate tuning while proving
+    nothing more about the hazard: a job that can hang unbounded.
+    """
     workflow = yaml.safe_load((_ROOT / ".github/workflows/code-validation.yml").read_text())
-    assert {name: job.get("timeout-minutes") for name, job in workflow["jobs"].items()} == {
-        "detect": 10,
-        "lint": 20,
-        "unit": 40,
-        "connectors": 30,
-        "integration": 40,
-        "e2e": 40,
-    }
+    timeouts = {name: job.get("timeout-minutes") for name, job in workflow["jobs"].items()}
+
+    assert timeouts, "no jobs found -- the workflow failed to parse as expected"
+
+    for name, value in timeouts.items():
+        assert value is not None, f"job {name!r} has NO timeout-minutes: it can hang unbounded"
+
+        if isinstance(value, str):
+            # A GitHub expression. Require it to be an expression that resolves to numbers,
+            # so it cannot silently evaluate to empty (which GitHub treats as no timeout).
+            assert value.strip().startswith("${{"), (
+                f"job {name!r} timeout is a bare string: {value!r}"
+            )
+            numbers = [int(n) for n in re.findall(r"\b\d+\b", value)]
+            assert numbers, f"job {name!r} timeout expression has no numeric branches: {value!r}"
+            assert all(0 < n <= 120 for n in numbers), (
+                f"job {name!r} timeout branches out of range: {numbers}"
+            )
+        else:
+            assert isinstance(value, int) and 0 < value <= 120, (
+                f"job {name!r} has an implausible timeout: {value!r}"
+            )
+
+    # The jobs themselves are a contract: losing one silently would drop its timeout check.
+    assert set(timeouts) == {"detect", "lint", "unit", "connectors", "integration", "e2e"}
 
 
 def test_watchdog_flags_oldest_nonterminal_master_run_past_twice_p95() -> None:
