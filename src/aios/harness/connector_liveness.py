@@ -67,6 +67,9 @@ async def read_bound_connection_activity(
             SELECT c.id, c.connector, c.metadata,
                    s.id, s.created_at, cs.created_at
               FROM connections c
+              JOIN bindings b ON b.connection_id = c.id
+                             AND b.archived_at IS NULL
+                             AND b.mode = 'per_chat'
               JOIN chat_sessions cs ON cs.connection_id = c.id
               JOIN sessions s ON s.id = cs.session_id AND s.archived_at IS NULL
              WHERE c.archived_at IS NULL

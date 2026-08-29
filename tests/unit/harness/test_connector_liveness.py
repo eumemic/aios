@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +21,97 @@ class _HealthReader:
 
     async def read(self) -> dict[str, TransportHealth]:
         return self.health
+
+
+class _SQLitePool:
+    """Relational fixture adapter that executes the production reader SQL."""
+
+    def __init__(self) -> None:
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript(
+            """
+            CREATE TABLE connections (
+                id TEXT PRIMARY KEY, connector TEXT, metadata TEXT, archived_at TEXT
+            );
+            CREATE TABLE bindings (
+                connection_id TEXT, mode TEXT, session_id TEXT,
+                created_at TEXT, archived_at TEXT
+            );
+            CREATE TABLE chat_sessions (
+                connection_id TEXT, session_id TEXT, created_at TEXT
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, created_at TEXT, archived_at TEXT
+            );
+            CREATE TABLE events (session_id TEXT, created_at TEXT);
+            """
+        )
+
+    async def fetch(self, query: str) -> list[dict[str, object]]:
+        rows = self.db.execute(query).fetchall()
+        return [
+            {
+                **dict(row),
+                "metadata": json.loads(row["metadata"]),
+                "last_activity_at": datetime.fromisoformat(row["last_activity_at"]),
+            }
+            for row in rows
+        ]
+
+
+@pytest.mark.asyncio
+async def test_detector_uses_current_binding_activity_from_production_reader() -> None:
+    """Historical per-chat traffic cannot hide a silent current binding."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    current_activity = now - timedelta(days=9)
+    historical_activity = now - timedelta(hours=1)
+    pool = _SQLitePool()
+    pool.db.execute(
+        "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+        ("conn_1", "whatsapp", json.dumps({"liveness_silence_threshold_seconds": 604800})),
+    )
+    pool.db.executemany(
+        "INSERT INTO sessions VALUES (?, ?, NULL)",
+        [
+            ("session_current", (now - timedelta(days=10)).isoformat()),
+            ("session_historical", (now - timedelta(days=30)).isoformat()),
+        ],
+    )
+    pool.db.executemany(
+        "INSERT INTO bindings VALUES (?, ?, ?, ?, ?)",
+        [
+            ("conn_1", "per_chat", None, (now - timedelta(days=30)).isoformat(), now.isoformat()),
+            ("conn_1", "single_session", "session_current", (now - timedelta(days=10)).isoformat(), None),
+        ],
+    )
+    pool.db.execute(
+        "INSERT INTO chat_sessions VALUES (?, ?, ?)",
+        ("conn_1", "session_historical", (now - timedelta(days=30)).isoformat()),
+    )
+    pool.db.executemany(
+        "INSERT INTO events VALUES (?, ?)",
+        [
+            ("session_current", current_activity.isoformat()),
+            ("session_historical", historical_activity.isoformat()),
+        ],
+    )
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 86400},
+        health_reader=_HealthReader({"whatsapp": TransportHealth(False, "unhealthy")}),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert len(findings) == 1
+    assert findings[0]["connection_id"] == "conn_1"
+    assert findings[0]["last_activity_at"] == current_activity.isoformat()
+    assert findings[0]["silence_threshold_seconds"] == 604800
+    alarm.assert_called_once()
 
 
 @pytest.mark.asyncio
