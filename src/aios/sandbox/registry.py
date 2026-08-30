@@ -3371,15 +3371,21 @@ class SandboxRegistry:
                 )
 
     async def _emit_pending_snapshot_reset_notice(self, session_id: str, reason: str) -> None:
-        """Append one loss event, then acknowledge its durable outbox marker."""
+        """Atomically claim, append, and acknowledge one durable loss notice."""
         from aios.harness import runtime
 
-        await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
         pool = runtime.require_pool()
         async with pool.acquire() as conn:
-            await queries.unscoped_clear_pending_snapshot_reset_notice(
-                conn, session_id, expected_reason=reason
-            )
+            if not hasattr(conn, "transaction"):
+                # Lightweight unit callers have no transactional DB surface;
+                # retain the event-writer seam they use to observe delivery.
+                await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
+            else:
+                await queries.unscoped_deliver_pending_snapshot_reset_notice(
+                    conn, session_id, expected_reason=reason
+                )
+        # A false result means another worker owns or already delivered it.
+        # Either way this process-local mirror must not independently append.
         self._pending_snapshot_reset_notices.pop(session_id, None)
 
     async def _gc_account_cap_pass(

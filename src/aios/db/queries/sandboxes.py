@@ -290,6 +290,46 @@ async def unscoped_clear_pending_snapshot_reset_notice(
     return status != "UPDATE 0"
 
 
+async def unscoped_deliver_pending_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_reason: str
+) -> bool:
+    """Atomically claim, append, and acknowledge one snapshot-reset notice.
+
+    The row lock with ``SKIP LOCKED`` makes concurrent GC workers race for a
+    single claim.  Appending the event and clearing its marker share the outer
+    transaction, so either both become visible or neither does.
+    """
+    # Local import avoids the query-package re-export cycle during startup.
+    from aios.db.queries.events import append_event
+
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """SELECT account_id
+                 FROM sessions
+                WHERE id = $1 AND snapshot_reset_pending_reason = $2
+                  FOR UPDATE SKIP LOCKED""",
+            session_id,
+            expected_reason,
+        )
+        if row is None:
+            return False
+        await append_event(
+            conn,
+            account_id=row["account_id"],
+            session_id=session_id,
+            kind="lifecycle",
+            data={"event": "sandbox_fs_reset", "reason": expected_reason},
+        )
+        await conn.execute(
+            """UPDATE sessions
+                  SET snapshot_reset_pending_reason = NULL
+                WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
+            session_id,
+            expected_reason,
+        )
+        return True
+
+
 async def unscoped_lock_session_snapshot_state(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> asyncpg.Record | None:
