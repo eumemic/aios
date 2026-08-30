@@ -3375,15 +3375,19 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         pool = runtime.require_pool()
+        use_event_writer_seam = False
         async with pool.acquire() as conn:
             if not hasattr(conn, "transaction"):
                 # Lightweight unit callers have no transactional DB surface;
-                # retain the event-writer seam they use to observe delivery.
-                await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
+                # retain the event-writer seam they use to observe delivery,
+                # but never hold a pooled connection across non-DB I/O.
+                use_event_writer_seam = True
             else:
                 await queries.unscoped_deliver_pending_snapshot_reset_notice(
                     conn, session_id, expected_reason=reason
                 )
+        if use_event_writer_seam:
+            await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
         # A false result means another worker owns or already delivered it.
         # Either way this process-local mirror must not independently append.
         self._pending_snapshot_reset_notices.pop(session_id, None)
