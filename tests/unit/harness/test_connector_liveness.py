@@ -349,3 +349,33 @@ async def test_stopped_container_is_observed_by_docker_reader_after_silence(
     docker.close.assert_awaited_once_with()
     alarm.assert_called_once()
     assert "transport unhealthy (exited)" in alarm.call_args.args[1]["finding"]
+
+@pytest.mark.asyncio
+async def test_review_does_not_attribute_one_connections_failure_to_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    monkeypatch.setattr(
+        "aios.harness.connector_liveness.read_bound_connection_activity",
+        AsyncMock(
+            return_value=[
+                BoundConnectionActivity(
+                    "healthy_silent", "whatsapp", now - timedelta(days=9), 7 * 86400
+                ),
+                BoundConnectionActivity(
+                    "unhealthy_recent", "whatsapp", now - timedelta(hours=1), 7 * 86400
+                ),
+            ]
+        ),
+    )
+    detector = ConnectorLivenessDetector(
+        MagicMock(),
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=_HealthReader(
+            {"whatsapp": TransportHealth(False, "unhealthy")}
+        ),
+        alarm=MagicMock(),
+        rate_limit_seconds=3600,
+    )
+
+    assert await detector.check_once(now=now, monotonic_now=10000) == []

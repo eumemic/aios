@@ -198,12 +198,32 @@ class ConnectorLivenessDetector:
             read_bound_connection_activity(self.pool, self.thresholds), self.health_reader.read()
         )
         alarms: list[dict[str, Any]] = []
+        connection_counts: dict[str, int] = {}
         for activity in activities:
-            transport = health.get(activity.connector, TransportHealth(False, "container absent"))
+            connection_counts[activity.connector] = connection_counts.get(activity.connector, 0) + 1
+        for activity in activities:
+            connection_transport = health.get(activity.connection_id)
+            transport = connection_transport or health.get(
+                activity.connector, TransportHealth(False, "container absent")
+            )
             silent_seconds = max(0.0, (wall_now - activity.last_activity_at).total_seconds())
-            # The conjunction is load-bearing: neither an ordinary restart nor a
-            # healthy quiet channel emits anything.
-            if transport.healthy or silent_seconds <= activity.threshold_seconds:
+            # Connector-wide Docker health cannot identify which connection is
+            # unhealthy.  Applying it to every row would manufacture a false
+            # conjunction for a healthy-but-quiet sibling.  A type-level signal
+            # remains actionable when there is exactly one bound connection;
+            # readers may provide a connection-id key for precise multi-account
+            # attribution.
+            uncorrelated_multi_connection = (
+                connection_transport is None
+                and connection_counts[activity.connector] > 1
+            )
+            # The conjunction is load-bearing: neither an ordinary restart, a
+            # healthy quiet channel, nor an uncorrelated sibling failure emits.
+            if (
+                transport.healthy
+                or uncorrelated_multi_connection
+                or silent_seconds <= activity.threshold_seconds
+            ):
                 continue
             if (
                 stamp - self._last_alarm.get(activity.connection_id, float("-inf"))
