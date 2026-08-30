@@ -25,8 +25,7 @@ _INDEXES = (
     ),
     (
         "wf_runs_account_workflow_recency_idx",
-        "ON wf_runs (account_id, workflow_id, created_at DESC, id DESC) "
-        "WHERE archived_at IS NULL",
+        "ON wf_runs (account_id, workflow_id, created_at DESC, id DESC) WHERE archived_at IS NULL",
     ),
 )
 
