@@ -10,7 +10,6 @@ upgrade.
 from __future__ import annotations
 
 import os
-import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -23,17 +22,19 @@ if TYPE_CHECKING:
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _MIGRATION_LOCK_ID = 0x41494F534D494752  # "AIOSMIGR" as a signed-bigint-safe key
-_REVISION_RE = re.compile(r"^revision:\s*(?:str\s*=\s*)?[\"']([^\"']+)[\"']", re.MULTILINE)
 
 
 def _known_revisions() -> set[str]:
-    """Return revisions understood by this image without importing migration modules."""
-    revisions: set[str] = set()
-    for path in (_REPO_ROOT / "migrations" / "versions").glob("*.py"):
-        match = _REVISION_RE.search(path.read_text())
-        if match is not None:
-            revisions.add(match.group(1))
-    return revisions
+    """Return every revision understood by this image's Alembic graph.
+
+    Let Alembic parse the migration modules rather than maintaining a partial
+    parser for its Python declarations.  In particular, repository migrations
+    legitimately use both ``revision = ...`` and ``revision: str = ...``.
+    """
+    from alembic.script import ScriptDirectory
+
+    scripts = ScriptDirectory.from_config(alembic_config())
+    return {revision.revision for revision in scripts.walk_revisions()}
 
 
 def _sync_db_url(db_url: str) -> str:

@@ -19,6 +19,23 @@ def _current_revision(db_url: str) -> str:
     return str(row[0])
 
 
+def test_candidate_admits_real_previous_in_image_revision(migrated_db_url: str) -> None:
+    """A database one revision behind this image proceeds to migration."""
+    current = _current_revision(migrated_db_url)
+    previous = str(int(current) - 1).zfill(len(current))
+    assert previous in migrations._known_revisions()
+
+    sync_url = migrations._sync_db_url(migrated_db_url)
+    with psycopg.connect(sync_url, autocommit=True) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = %s", (previous,))
+    try:
+        with migrations._migration_admission(migrated_db_url) as should_migrate:
+            assert should_migrate is True
+    finally:
+        with psycopg.connect(sync_url, autocommit=True) as conn:
+            conn.execute("UPDATE alembic_version SET version_num = %s", (current,))
+
+
 def test_rollback_image_admitted_after_forward_revision(
     migrated_db_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
