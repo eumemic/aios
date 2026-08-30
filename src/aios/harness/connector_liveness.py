@@ -191,11 +191,7 @@ class DockerConnectorHealthReader:
             else:
                 result[connector] = TransportHealth(
                     healthy=previous.healthy and observation.healthy,
-                    detail=(
-                        previous.detail
-                        if not previous.healthy
-                        else observation.detail
-                    ),
+                    detail=(previous.detail if not previous.healthy else observation.detail),
                     definitive_connector_outage=(
                         bool(previous.definitive_connector_outage)
                         and bool(observation.definitive_connector_outage)

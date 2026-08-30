@@ -350,6 +350,7 @@ async def test_stopped_container_is_observed_by_docker_reader_after_silence(
     alarm.assert_called_once()
     assert "transport unhealthy (exited)" in alarm.call_args.args[1]["finding"]
 
+
 @pytest.mark.asyncio
 async def test_review_two_silent_connections_stopped_container_alarm() -> None:
     now = datetime(2026, 8, 29, tzinfo=UTC)
@@ -376,9 +377,7 @@ async def test_review_two_silent_connections_stopped_container_alarm() -> None:
     detector = ConnectorLivenessDetector(
         pool,
         thresholds={"whatsapp": 7 * 86400},
-        health_reader=_HealthReader(
-            {"whatsapp": TransportHealth(False, "container exited")}
-        ),
+        health_reader=_HealthReader({"whatsapp": TransportHealth(False, "container exited")}),
         alarm=MagicMock(),
         rate_limit_seconds=3600,
     )
@@ -386,6 +385,37 @@ async def test_review_two_silent_connections_stopped_container_alarm() -> None:
     findings = await detector.check_once(now=now, monotonic_now=10000)
 
     assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
+
+
+@pytest.mark.asyncio
+async def test_two_silent_connections_without_container_both_alarm() -> None:
+    """Container absence is connector-wide, not an ambiguous sibling failure."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    pool = _SQLitePool()
+    for connection_id in ("conn_1", "conn_2"):
+        bound_at = now - timedelta(days=9)
+        pool.db.execute(
+            "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+            (connection_id, "whatsapp", "{}"),
+        )
+        pool.db.execute(
+            "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
+            (connection_id, "per_chat", None, bound_at.isoformat()),
+        )
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=_HealthReader({}),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
+    assert {finding["transport_detail"] for finding in findings} == {"container absent"}
+    assert alarm.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -409,9 +439,7 @@ async def test_review_does_not_attribute_one_connections_failure_to_sibling(
     detector = ConnectorLivenessDetector(
         MagicMock(),
         thresholds={"whatsapp": 7 * 86400},
-        health_reader=_HealthReader(
-            {"whatsapp": TransportHealth(False, "unhealthy")}
-        ),
+        health_reader=_HealthReader({"whatsapp": TransportHealth(False, "unhealthy")}),
         alarm=MagicMock(),
         rate_limit_seconds=3600,
     )
