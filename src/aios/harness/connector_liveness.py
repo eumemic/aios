@@ -45,6 +45,23 @@ class BoundConnectionActivity:
 class TransportHealth:
     healthy: bool
     detail: str
+    # True only when the observation proves that no runtime for this connector
+    # type can receive. Ordinary heartbeat failures may belong to just one of
+    # several connections and therefore default to unscoped.
+    definitive_connector_outage: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.definitive_connector_outage is not None:
+            return
+        detail = self.detail.lower()
+        definitive = detail in {
+            "container absent",
+            "container exited",
+            "dead",
+            "exited",
+            "removing",
+        }
+        object.__setattr__(self, "definitive_connector_outage", definitive)
 
 
 async def read_bound_connection_activity(
@@ -158,13 +175,32 @@ class DockerConnectorHealthReader:
                 detail = status or "health status unavailable"
             if healthy:
                 detail = "healthy"
+            stopped = state in {"dead", "exited", "removing"}
+            observation = TransportHealth(
+                healthy=healthy,
+                detail=detail,
+                definitive_connector_outage=stopped,
+            )
             # A connector type is healthy only when every observed container is
-            # healthy. Containers cannot be correlated to individual connection
-            # rows, so allowing one replica to overwrite an unhealthy one could
-            # hide the failure of the replica serving a bound connection.
+            # healthy. It is definitively unavailable only when every observed
+            # runtime is stopped; a stopped stale replica beside a running one is
+            # still an uncorrelated type-level failure.
             previous = result.get(connector)
-            if previous is None or (previous.healthy and not healthy):
-                result[connector] = TransportHealth(healthy=healthy, detail=detail)
+            if previous is None:
+                result[connector] = observation
+            else:
+                result[connector] = TransportHealth(
+                    healthy=previous.healthy and observation.healthy,
+                    detail=(
+                        previous.detail
+                        if not previous.healthy
+                        else observation.detail
+                    ),
+                    definitive_connector_outage=(
+                        bool(previous.definitive_connector_outage)
+                        and bool(observation.definitive_connector_outage)
+                    ),
+                )
         return result
 
 
@@ -216,6 +252,7 @@ class ConnectorLivenessDetector:
             uncorrelated_multi_connection = (
                 connection_transport is None
                 and connection_counts[activity.connector] > 1
+                and not transport.definitive_connector_outage
             )
             # The conjunction is load-bearing: neither an ordinary restart, a
             # healthy quiet channel, nor an uncorrelated sibling failure emits.

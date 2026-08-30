@@ -351,6 +351,44 @@ async def test_stopped_container_is_observed_by_docker_reader_after_silence(
     assert "transport unhealthy (exited)" in alarm.call_args.args[1]["finding"]
 
 @pytest.mark.asyncio
+async def test_review_two_silent_connections_stopped_container_alarm() -> None:
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    pool = _SQLitePool()
+    for connection_id in ("conn_1", "conn_2"):
+        session_id = f"session_{connection_id}"
+        bound_at = now - timedelta(days=10)
+        pool.db.execute(
+            "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+            (connection_id, "whatsapp", "{}"),
+        )
+        pool.db.execute(
+            "INSERT INTO sessions VALUES (?, ?, NULL)",
+            (session_id, bound_at.isoformat()),
+        )
+        pool.db.execute(
+            "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
+            (connection_id, "single_session", session_id, bound_at.isoformat()),
+        )
+        pool.db.execute(
+            "INSERT INTO events VALUES (?, ?)",
+            (session_id, (now - timedelta(days=9)).isoformat()),
+        )
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=_HealthReader(
+            {"whatsapp": TransportHealth(False, "container exited")}
+        ),
+        alarm=MagicMock(),
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
+
+
+@pytest.mark.asyncio
 async def test_review_does_not_attribute_one_connections_failure_to_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
