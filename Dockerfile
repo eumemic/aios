@@ -55,6 +55,11 @@ COPY migrations ./migrations
 # sandbox container at provision time. Source path must exist in the
 # worker image; the worker resolves it via ``Path(__file__).parents[3]``.
 COPY bin ./bin
+# Candidate-start gate: migration failure must kill the candidate before its
+# service starts or can become healthy. This is deliberately in the image
+# rather than a Coolify post-deployment hook, whose exit status is not a
+# promotion boundary.
+COPY --chmod=755 docker/deploy-entrypoint.sh /usr/local/bin/aios-deploy-entrypoint
 COPY src ./src
 # Authored seccomp profiles — sandbox containers (#807) and browser
 # containers (jarbot#106 Phase 2). The worker's docker CLI reads these from
@@ -68,6 +73,11 @@ COPY docker/seccomp-browser.json /app/docker/seccomp-browser.json
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+# The API target opts into candidate admission below.  The entrypoint otherwise
+# passes commands through unchanged so workers never own migrations and an
+# application-image rollback can start against a forward-migrated database.
+ENTRYPOINT ["aios-deploy-entrypoint"]
 
 # Build-time source SHA, baked into the image env so it travels with the
 # running container. Coolify passes the deployed commit as this build-arg; we
@@ -91,7 +101,10 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
 
-CMD ["aios", "api"]
+# Candidate-only admission is explicit in this image's API startup.  A rollback
+# image retains its own older CMD/entrypoint and therefore does not rerun that
+# older migrator against revisions it cannot know.
+CMD ["--candidate", "aios", "api"]
 
 # ── Stage 3: worker ─────────────────────────────────────────────────────
 # Adds the docker CLI so the SandboxBackend can run/exec/rm sibling

@@ -104,28 +104,28 @@ when you've touched API-layer code.
 
 ## Database migrations
 
-- **Migrations run post-deploy.** Coolify executes `aios migrate` as the
-  **post-deployment** command on aios-api. It runs in the **new** container,
-  which has the new migration scripts baked in. (A pre-deploy command always
-  runs in the OLD container by design, so it would migrate against the previous
-  deployment's code and never see the new migration files — the
-  alembic-0055-phantom symptom on 2026-05-23.)
+- **Migration failure fails API candidate admission.** The API image starts its
+  candidate through `aios-deploy-entrypoint --candidate aios api`, using the new
+  container's baked-in migration scripts. `aios migrate` retries bounded lock
+  contention and exits non-zero when attempts are exhausted; the entrypoint
+  propagates that status without starting the API, so the candidate cannot
+  become healthy or be promoted. Ordinary `aios api` startup does not migrate:
+  this keeps application-image rollback startable against a forward-migrated
+  database. Automated rollback must never run migration downgrades.
 
-- **The new-code/old-schema window.** Between "new container starts serving
-  traffic" and "post-deploy migrate completes," the new code is briefly running
-  against the **old** schema. For **purely-additive** migrations (`add column`,
-  `add table`, `add index`) this is safe: the new code's reads/writes against
-  the old schema keep working, and the migration is invisible to the running
-  container until it completes.
+- **There is no new-code/old-schema serving window.** The candidate API does not
+  start until its migrations complete. Migrations must nevertheless remain
+  compatible with the old application image because that image can continue
+  serving during admission and can be selected for application rollback.
 
 - **Destructive migrations need expand/contract.** For `drop column`,
-  `drop table`, `change type`, etc., the new code might query a soon-to-be-removed
-  column during the window. A PR that introduces a destructive migration **MUST**
-  either:
+  `drop table`, `change type`, etc., the old image may still query a removed
+  shape while the candidate is being admitted or after application rollback.
+  A PR that introduces a destructive migration **MUST** either:
   - **Split into three deploys:** deploy A (code handles both old and new
-    schema) → deploy B (run the migration via post-deploy as usual) → deploy C
-    (code requires the new schema), **OR**
-  - **Ship together with code that handles both schemas** across the window:
+    schema) → deploy B (apply the migration through candidate admission) →
+    deploy C (code requires the new schema), **OR**
+  - **Ship together with code that handles both schemas** across the rollout:
     read-tolerant of either form, write-tolerant of either form.
 
 - **Only aios-api owns migrations.** aios-worker, aios-signal, aios-telegram,

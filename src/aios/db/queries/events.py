@@ -1343,6 +1343,64 @@ async def precompute_event_append(
     )
 
 
+async def readiness_append_probe(conn: asyncpg.Connection[Any]) -> None:
+    """Prove the live append path, including on an installation with no sessions.
+
+    Synthetic dependencies use freshly minted IDs as both identifiers and names,
+    making collisions with legitimate tenant resources negligible.  Every write
+    is enclosed in an explicitly rolled-back transaction.
+    """
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        probe_session = await conn.fetchrow(
+            "SELECT account_id, id AS session_id FROM sessions "
+            "WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+        )
+        if probe_session is None:
+            account_id = await conn.fetchval(
+                "SELECT id FROM accounts WHERE archived_at IS NULL ORDER BY created_at LIMIT 1"
+            )
+            if account_id is None:
+                account_id = make_id("acc")
+                await conn.execute(
+                    "INSERT INTO accounts (id, display_name) VALUES ($1, $1)", account_id
+                )
+            agent_id = make_id("agent")
+            environment_id = make_id("env")
+            session_id = make_id("sess")
+            await conn.execute(
+                "INSERT INTO agents (id, name, model, account_id) "
+                "VALUES ($1, $1, 'readiness/probe', $2)",
+                agent_id,
+                account_id,
+            )
+            await conn.execute(
+                "INSERT INTO environments (id, name, account_id) VALUES ($1, $1, $2)",
+                environment_id,
+                account_id,
+            )
+            await conn.execute(
+                "INSERT INTO sessions "
+                "(id, agent_id, environment_id, workspace_volume_path, account_id) "
+                "VALUES ($1, $2, $3, $1, $4)",
+                session_id,
+                agent_id,
+                environment_id,
+                account_id,
+            )
+            probe_session = {"account_id": account_id, "session_id": session_id}
+        await append_event(
+            conn,
+            account_id=probe_session["account_id"],
+            session_id=probe_session["session_id"],
+            kind="lifecycle",
+            data={"type": "readiness_probe"},
+        )
+    finally:
+        await tx.rollback()
+
+
 async def append_event(
     conn: asyncpg.Connection[Any],
     *,
