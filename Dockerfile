@@ -74,9 +74,9 @@ RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-# This is the deployment boundary: a candidate cannot start either long-lived
-# process until its migration command succeeds. An exhausted lock retry exits
-# the container non-zero, so it never reaches health/readiness or promotion.
+# The API target opts into candidate admission below.  The entrypoint otherwise
+# passes commands through unchanged so workers never own migrations and an
+# application-image rollback can start against a forward-migrated database.
 ENTRYPOINT ["aios-deploy-entrypoint"]
 
 # Build-time source SHA, baked into the image env so it travels with the
@@ -101,7 +101,10 @@ EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
 
-CMD ["aios", "api"]
+# Candidate-only admission is explicit in this image's API startup.  A rollback
+# image retains its own older CMD/entrypoint and therefore does not rerun that
+# older migrator against revisions it cannot know.
+CMD ["--candidate", "aios", "api"]
 
 # ── Stage 3: worker ─────────────────────────────────────────────────────
 # Adds the docker CLI so the SandboxBackend can run/exec/rm sibling

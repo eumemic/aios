@@ -1,22 +1,21 @@
 #!/bin/sh
-# Repository-owned deployment gate.
+# Repository-owned API candidate admission gate.
 #
-# Coolify's post-deployment command is not an ordering boundary: the candidate
-# can already have been selected by the time that command runs, and some
-# versions report the deployment successful even when it exits non-zero.  Put
-# the migration in the candidate process instead.  `set -e` makes a failed
-# migration (including exhausted lock retries) terminate the candidate before
-# either service can start or become healthy; the old healthy image remains the
-# only promotable one.  Migrations are forward-only: this gate never rolls them
-# back when an image is rolled back.
+# The image's API CMD opts into this gate with ``--candidate``.  Keeping the
+# opt-in out of the ordinary ``aios api`` command is important: an older image
+# selected for application rollback must remain able to start after a newer
+# image has advanced the database.  The worker never owns or races migrations.
 set -eu
 
-if [ "${1:-}" = "aios" ]; then
-    case "${2:-}" in
-        api|worker)
-            aios migrate
-            ;;
-    esac
+if [ "${1:-}" = "--candidate" ]; then
+    shift
+    if [ "${1:-}" != "aios" ] || [ "${2:-}" != "api" ]; then
+        echo "--candidate is only valid for 'aios api'" >&2
+        exit 64
+    fi
+    # A failed migration (including exhausted lock retries) exits this
+    # candidate before the API can become healthy or be promoted.
+    aios migrate
 fi
 
 exec "$@"
