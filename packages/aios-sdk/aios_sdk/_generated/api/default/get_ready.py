@@ -50,8 +50,9 @@ def sync_detailed(
      Readiness probe. Unauthenticated; exercises ``append_event`` under rollback.
 
     Returns 200 ``{\"status\": \"ready\"}`` when Postgres answers, a synthetic
-    append succeeds (when any session exists), AND the fail-closed boot-admission
-    gate (#1575) has admitted this process; 503 ``{\"status\": \"unavailable\"}``
+    append succeeds (using a rollback-only target on an empty installation), AND
+    the fail-closed boot-admission gate (#1575) has admitted this process; 503
+    ``{\"status\": \"unavailable\"}``
     when the pool can't be acquired, the read/write path raises, it exceeds the
     2 s budget, OR the boot-gate has not yet admitted.
     This is the signal the Docker/compose healthcheck watches, so a silent
@@ -92,8 +93,9 @@ async def asyncio_detailed(
      Readiness probe. Unauthenticated; exercises ``append_event`` under rollback.
 
     Returns 200 ``{\"status\": \"ready\"}`` when Postgres answers, a synthetic
-    append succeeds (when any session exists), AND the fail-closed boot-admission
-    gate (#1575) has admitted this process; 503 ``{\"status\": \"unavailable\"}``
+    append succeeds (using a rollback-only target on an empty installation), AND
+    the fail-closed boot-admission gate (#1575) has admitted this process; 503
+    ``{\"status\": \"unavailable\"}``
     when the pool can't be acquired, the read/write path raises, it exceeds the
     2 s budget, OR the boot-gate has not yet admitted.
     This is the signal the Docker/compose healthcheck watches, so a silent

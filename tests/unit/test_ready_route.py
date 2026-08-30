@@ -90,7 +90,7 @@ def test_ready_200_when_select_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         return 1
 
     append = AsyncMock()
-    monkeypatch.setattr(health, "append_event", append)
+    monkeypatch.setattr(health, "readiness_append_probe", append)
     conn = _FakeConn(_ok)
 
     async def _probe_session(_query: str) -> dict[str, str]:
@@ -106,13 +106,7 @@ def test_ready_200_when_select_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 200
     assert resp.json() == {"status": "ready"}
     append.assert_awaited_once()
-    assert append.await_args is not None
-    assert append.await_args.kwargs == {
-        "account_id": "acc_probe",
-        "session_id": "ses_probe",
-        "kind": "lifecycle",
-        "data": {"type": "readiness_probe"},
-    }
+    append.assert_awaited_once_with(conn)
 
 
 def test_ready_503_when_empty_install_append_is_incompatible(
@@ -124,7 +118,7 @@ def test_ready_503_when_empty_install_append_is_incompatible(
         return "acc_probe"
 
     append = AsyncMock(side_effect=RuntimeError("undefined column"))
-    monkeypatch.setattr(health, "append_event", append)
+    monkeypatch.setattr(health, "readiness_append_probe", append)
     conn = _FakeConn(_fetchval)
     conn.execute = AsyncMock()  # type: ignore[method-assign]
     tx = _FakeTransaction()
@@ -136,10 +130,7 @@ def test_ready_503_when_empty_install_append_is_incompatible(
     resp = TestClient(app).get("/ready")
 
     assert resp.status_code == 503
-    assert append.await_args is not None
-    assert append.await_args.kwargs["session_id"] == "sess_readiness_probe"
-    assert conn.execute.await_count == 3
-    tx.rollback.assert_awaited_once()
+    append.assert_awaited_once_with(conn)
 
 
 def test_ready_503_when_synthetic_append_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,7 +138,7 @@ def test_ready_503_when_synthetic_append_raises(monkeypatch: pytest.MonkeyPatch)
         return 1
 
     append = AsyncMock(side_effect=RuntimeError("undefined column"))
-    monkeypatch.setattr(health, "append_event", append)
+    monkeypatch.setattr(health, "readiness_append_probe", append)
     conn = _FakeConn(_ok)
 
     async def _probe_session(_query: str) -> dict[str, str]:
@@ -165,7 +156,6 @@ def test_ready_503_when_synthetic_append_raises(monkeypatch: pytest.MonkeyPatch)
 
     assert resp.status_code == 503
     assert resp.json() == {"status": "unavailable"}
-    tx.rollback.assert_awaited_once()
 
 
 def test_ready_503_when_fetchval_raises() -> None:

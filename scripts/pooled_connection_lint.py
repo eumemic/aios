@@ -468,6 +468,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "memory_service.set_session_resources",
         "prune",
         "read_request_response",
+        "readiness_append_probe",
         "resolve_effective_spend_limit_usd_on",
         "resolve_effective_timezone_on",
         "resolve_run_env_var_credentials",

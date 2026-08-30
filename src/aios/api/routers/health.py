@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from aios import __version__
-from aios.db.queries.events import append_event, calibration_telemetry
+from aios.db.queries.events import calibration_telemetry, readiness_append_probe
 
 router = APIRouter()
 
@@ -85,61 +85,7 @@ async def ready(request: Request) -> Response:
         async with asyncio.timeout(2.0):
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
-                # Use a real live session when possible. On a new installation
-                # there may be none yet, so create a complete synthetic append
-                # target inside the rollback-only transaction. Silently skipping
-                # append in that state would let an incompatible events/sessions
-                # schema report ready forever.
-                probe_tx = conn.transaction()
-                await probe_tx.start()
-                try:
-                    probe_session = await conn.fetchrow(
-                        "SELECT account_id, id AS session_id FROM sessions "
-                        "WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT 1"
-                    )
-                    if probe_session is None:
-                        probe_account_id = await conn.fetchval(
-                            "SELECT id FROM accounts WHERE archived_at IS NULL "
-                            "ORDER BY created_at LIMIT 1"
-                        )
-                        if probe_account_id is None:
-                            probe_account_id = "acc_readiness_probe"
-                            await conn.execute(
-                                "INSERT INTO accounts (id, display_name) "
-                                "VALUES ($1, 'readiness_probe')",
-                                probe_account_id,
-                            )
-                        probe_session = {
-                            "account_id": probe_account_id,
-                            "session_id": "sess_readiness_probe",
-                        }
-                        await conn.execute(
-                            "INSERT INTO agents (id, name, model, account_id) "
-                            "VALUES ('agent_readiness_probe', 'readiness_probe', "
-                            "'readiness/probe', $1)",
-                            probe_account_id,
-                        )
-                        await conn.execute(
-                            "INSERT INTO environments (id, name, account_id) "
-                            "VALUES ('env_readiness_probe', 'readiness_probe', $1)",
-                            probe_account_id,
-                        )
-                        await conn.execute(
-                            "INSERT INTO sessions "
-                            "(id, agent_id, environment_id, workspace_volume_path, account_id) "
-                            "VALUES ('sess_readiness_probe', 'agent_readiness_probe', "
-                            "'env_readiness_probe', '/tmp/readiness_probe', $1)",
-                            probe_account_id,
-                        )
-                    await append_event(
-                        conn,
-                        account_id=probe_session["account_id"],
-                        session_id=probe_session["session_id"],
-                        kind="lifecycle",
-                        data={"type": "readiness_probe"},
-                    )
-                finally:
-                    await probe_tx.rollback()
+                await readiness_append_probe(conn)
     except Exception:
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     return JSONResponse(status_code=200, content={"status": "ready"})
