@@ -37,6 +37,9 @@ class _FakeConn:
     async def fetchrow(self, _query: str) -> Any:
         return None
 
+    async def execute(self, _query: str, *_args: Any) -> None:
+        return None
+
     def transaction(self) -> _FakeTransaction:
         return _FakeTransaction()
 
@@ -110,6 +113,33 @@ def test_ready_200_when_select_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "kind": "lifecycle",
         "data": {"type": "readiness_probe"},
     }
+
+
+def test_ready_503_when_empty_install_append_is_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fetchval(query: str) -> Any:
+        if query == "SELECT 1":
+            return 1
+        return "acc_probe"
+
+    append = AsyncMock(side_effect=RuntimeError("undefined column"))
+    monkeypatch.setattr(health, "append_event", append)
+    conn = _FakeConn(_fetchval)
+    conn.execute = AsyncMock()  # type: ignore[method-assign]
+    tx = _FakeTransaction()
+    tx.rollback = AsyncMock()  # type: ignore[method-assign]
+    conn.transaction = lambda: tx  # type: ignore[method-assign]
+    app = _app_with_pool(_FakePool())
+    app.state.pool.acquire = lambda: _FakeAcquireCM(conn)
+
+    resp = TestClient(app).get("/ready")
+
+    assert resp.status_code == 503
+    assert append.await_args is not None
+    assert append.await_args.kwargs["session_id"] == "sess_readiness_probe"
+    assert conn.execute.await_count == 3
+    tx.rollback.assert_awaited_once()
 
 
 def test_ready_503_when_synthetic_append_raises(monkeypatch: pytest.MonkeyPatch) -> None:
