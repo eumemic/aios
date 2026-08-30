@@ -13,7 +13,9 @@ from aios.db import migrations
 
 
 def _current_revision(db_url: str) -> str:
-    with psycopg.connect(migrations._sync_db_url(db_url)) as conn:
+    # psycopg consumes a libpq URL, not SQLAlchemy's ``postgresql+psycopg``
+    # dialect URL.  The shared fixture supplies the former directly.
+    with psycopg.connect(db_url) as conn:
         row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     assert row is not None
     return str(row[0])
@@ -22,17 +24,20 @@ def _current_revision(db_url: str) -> str:
 def test_candidate_admits_real_previous_in_image_revision(migrated_db_url: str) -> None:
     """A database one revision behind this image proceeds to migration."""
     current = _current_revision(migrated_db_url)
-    previous = str(int(current) - 1).zfill(len(current))
-    assert previous in migrations._known_revisions()
+    script = migrations.alembic_config()
+    from alembic.script import ScriptDirectory
 
-    sync_url = migrations._sync_db_url(migrated_db_url)
-    with psycopg.connect(sync_url, autocommit=True) as conn:
-        conn.execute("UPDATE alembic_version SET version_num = %s", (previous,))
+    down_revision = ScriptDirectory.from_config(script).get_revision(current).down_revision
+    assert isinstance(down_revision, str)
+    assert down_revision in migrations._known_revisions()
+
+    with psycopg.connect(migrated_db_url, autocommit=True) as conn:
+        conn.execute("UPDATE alembic_version SET version_num = %s", (down_revision,))
     try:
         with migrations._migration_admission(migrated_db_url) as should_migrate:
             assert should_migrate is True
     finally:
-        with psycopg.connect(sync_url, autocommit=True) as conn:
+        with psycopg.connect(migrated_db_url, autocommit=True) as conn:
             conn.execute("UPDATE alembic_version SET version_num = %s", (current,))
 
 
@@ -42,8 +47,7 @@ def test_rollback_image_admitted_after_forward_revision(
     """An adjacent older image does not ask Alembic to resolve the new stamp."""
     current = _current_revision(migrated_db_url)
     known = migrations._known_revisions()
-    previous = str(int(current) - 1).zfill(len(current))
-    assert previous in known
+    assert current in known
     monkeypatch.setattr(migrations, "_known_revisions", lambda: known - {current})
 
     with migrations._migration_admission(migrated_db_url) as should_migrate:
