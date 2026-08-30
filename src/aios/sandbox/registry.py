@@ -3526,8 +3526,11 @@ class SandboxRegistry:
                 ):
                     return False
             elif verdict.reason == "protected_live":
+                candidate = states.get(session_id)
                 if (
                     row is None
+                    or candidate is None
+                    or row["last_event_at"] != candidate.last_event_at
                     or row["archived_at"] is not None
                     or row["snapshot_ref"] != verdict.removal_ref
                     or row["snapshot_host"] != instance_id
