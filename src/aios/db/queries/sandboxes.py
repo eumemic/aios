@@ -226,7 +226,11 @@ async def unscoped_compare_and_clear_session_snapshot(
         UPDATE sessions
            SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
                snapshot_updated_at = now(),
-               snapshot_reset_pending_reason = COALESCE($3, snapshot_reset_pending_reason)
+               snapshot_reset_pending_reason = COALESCE($3, snapshot_reset_pending_reason),
+               snapshot_reset_pending_ready = CASE
+                   WHEN COALESCE($3, snapshot_reset_pending_reason) IS NOT NULL THEN TRUE
+                   ELSE snapshot_reset_pending_ready
+               END
          WHERE id = $1 AND snapshot_ref = $2
         """,
         session_id,
@@ -245,9 +249,9 @@ async def unscoped_prepare_snapshot_reset_notice(
 ) -> bool:
     """Durably record deletion intent before removing an external artifact.
 
-    The pointer remains intact until removal succeeds.  Pending-notice readers
-    only publish rows whose pointer is NULL, so a crash before removal neither
-    emits a false reset nor loses the intent needed by a later retry.
+    The pointer remains intact until removal succeeds.  The marker is initially
+    unready; the exact-ref pointer clear makes it deliverable, so a failed
+    physical removal cannot emit a false reset.
     """
     status: str = await conn.execute(
         """UPDATE sessions
@@ -268,7 +272,7 @@ async def unscoped_list_pending_snapshot_reset_notices(
         """SELECT id, snapshot_reset_pending_reason
              FROM sessions
             WHERE snapshot_reset_pending_reason IS NOT NULL
-              AND snapshot_ref IS NULL
+              AND snapshot_reset_pending_ready
             ORDER BY id
             LIMIT $1""",
         limit,
@@ -282,7 +286,8 @@ async def unscoped_clear_pending_snapshot_reset_notice(
     """Acknowledge an outbox entry only after its lifecycle event committed."""
     status: str = await conn.execute(
         """UPDATE sessions
-              SET snapshot_reset_pending_reason = NULL
+              SET snapshot_reset_pending_reason = NULL,
+                  snapshot_reset_pending_ready = FALSE
             WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
         session_id,
         expected_reason,
@@ -307,6 +312,7 @@ async def unscoped_deliver_pending_snapshot_reset_notice(
             """SELECT account_id
                  FROM sessions
                 WHERE id = $1 AND snapshot_reset_pending_reason = $2
+                  AND snapshot_reset_pending_ready
                   FOR UPDATE SKIP LOCKED""",
             session_id,
             expected_reason,
@@ -322,7 +328,8 @@ async def unscoped_deliver_pending_snapshot_reset_notice(
         )
         await conn.execute(
             """UPDATE sessions
-                  SET snapshot_reset_pending_reason = NULL
+                  SET snapshot_reset_pending_reason = NULL,
+                      snapshot_reset_pending_ready = FALSE
                 WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
             session_id,
             expected_reason,

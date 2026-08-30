@@ -20,7 +20,17 @@ def upgrade() -> None:
         "sessions",
         sa.Column("snapshot_reset_pending_reason", sa.Text(), nullable=True),
     )
+    op.add_column(
+        "sessions",
+        sa.Column(
+            "snapshot_reset_pending_ready",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.false(),
+        ),
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("sessions", "snapshot_reset_pending_ready")
     op.drop_column("sessions", "snapshot_reset_pending_reason")
