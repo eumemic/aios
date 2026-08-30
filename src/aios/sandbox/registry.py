@@ -3212,9 +3212,7 @@ class SandboxRegistry:
         reclaimable_refs: list[str] = []
         reclaimable_bytes = 0
         pending = [
-            (v, size)
-            for v, size in sized
-            if v.session_id is not None and v.session_id in states
+            (v, size) for v, size in sized if v.session_id is not None and v.session_id in states
         ]
         while pending and planned_after > pool_bytes:
             # Tick-start ordering is only a hint. Re-read every remaining
@@ -3228,8 +3226,7 @@ class SandboxRegistry:
             if not refreshed:
                 break
             refreshed.sort(
-                key=lambda item: item[2].last_event_at
-                or datetime.min.replace(tzinfo=UTC)
+                key=lambda item: item[2].last_event_at or datetime.min.replace(tzinfo=UTC)
             )
             verdict, size, selected_state = refreshed[0]
             reclaimable_refs.append(verdict.removal_ref)

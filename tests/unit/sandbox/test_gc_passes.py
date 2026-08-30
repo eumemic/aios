@@ -505,9 +505,9 @@ async def test_pool_budget_reclaims_orphan_but_never_in_use_snapshot() -> None:
     }
     registry._handles["sess_live"] = cast(Any, object())
     registry._fresh_pool_candidate_state = AsyncMock(  # type: ignore[method-assign]
-        side_effect=lambda verdict, _instance: states[verdict.session_id]
-        if verdict.session_id != "sess_live"
-        else None
+        side_effect=lambda verdict, _instance: (
+            states[verdict.session_id] if verdict.session_id != "sess_live" else None
+        )
     )
     registry._reclaim_pool_candidate = AsyncMock(return_value=True)  # type: ignore[method-assign]
 
@@ -626,6 +626,7 @@ async def test_pool_budget_dry_run_logs_bounded_lru_plan(
 @pytest.mark.asyncio
 async def test_pool_budget_uses_under_lock_fresh_lru_order(fake_pool: None) -> None:
     registry = SandboxRegistry(backend=FakeBackend())
+
     def owned(name: str) -> GcImageVerdict:
         verdict = _canonical_verdict(name, size_bytes=2_000_000)
         return replace(
