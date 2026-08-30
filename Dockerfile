@@ -55,6 +55,11 @@ COPY migrations ./migrations
 # sandbox container at provision time. Source path must exist in the
 # worker image; the worker resolves it via ``Path(__file__).parents[3]``.
 COPY bin ./bin
+# Candidate-start gate: migration failure must kill the candidate before its
+# service starts or can become healthy. This is deliberately in the image
+# rather than a Coolify post-deployment hook, whose exit status is not a
+# promotion boundary.
+COPY --chmod=755 docker/deploy-entrypoint.sh /usr/local/bin/aios-deploy-entrypoint
 COPY src ./src
 # Authored seccomp profiles — sandbox containers (#807) and browser
 # containers (jarbot#106 Phase 2). The worker's docker CLI reads these from
@@ -68,6 +73,11 @@ COPY docker/seccomp-browser.json /app/docker/seccomp-browser.json
 RUN uv sync --frozen --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+# This is the deployment boundary: a candidate cannot start either long-lived
+# process until its migration command succeeds. An exhausted lock retry exits
+# the container non-zero, so it never reaches health/readiness or promotion.
+ENTRYPOINT ["aios-deploy-entrypoint"]
 
 # Build-time source SHA, baked into the image env so it travels with the
 # running container. Coolify passes the deployed commit as this build-arg; we
