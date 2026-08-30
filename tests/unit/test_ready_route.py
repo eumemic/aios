@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -18,12 +19,26 @@ from fastapi.testclient import TestClient
 from aios.api.routers import health
 
 
+class _FakeTransaction:
+    async def start(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
 class _FakeConn:
     def __init__(self, fetchval_impl: Any) -> None:
         self._fetchval_impl = fetchval_impl
 
     async def fetchval(self, query: str) -> Any:
         return await self._fetchval_impl(query)
+
+    async def fetchrow(self, _query: str) -> Any:
+        return None
+
+    def transaction(self) -> _FakeTransaction:
+        return _FakeTransaction()
 
 
 class _FakeAcquireCM:
@@ -67,14 +82,60 @@ def _app_with_pool(pool: Any, *, retirements_ok: bool = True) -> FastAPI:
     return app
 
 
-def test_ready_200_when_select_ok() -> None:
+def test_ready_200_when_select_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok(_query: str) -> int:
         return 1
 
-    client = TestClient(_app_with_pool(_FakePool(_ok)))
+    append = AsyncMock()
+    monkeypatch.setattr(health, "append_event", append)
+    conn = _FakeConn(_ok)
+
+    async def _probe_session(_query: str) -> dict[str, str]:
+        return {"account_id": "acc_probe", "session_id": "ses_probe"}
+
+    conn.fetchrow = _probe_session  # type: ignore[method-assign]
+    app = _app_with_pool(_FakePool())
+    app.state.pool.acquire = lambda: _FakeAcquireCM(conn)
+    client = TestClient(app)
+
     resp = client.get("/ready")
+
     assert resp.status_code == 200
     assert resp.json() == {"status": "ready"}
+    append.assert_awaited_once()
+    assert append.await_args is not None
+    assert append.await_args.kwargs == {
+        "account_id": "acc_probe",
+        "session_id": "ses_probe",
+        "kind": "lifecycle",
+        "data": {"type": "readiness_probe"},
+    }
+
+
+def test_ready_503_when_synthetic_append_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _ok(_query: str) -> int:
+        return 1
+
+    append = AsyncMock(side_effect=RuntimeError("undefined column"))
+    monkeypatch.setattr(health, "append_event", append)
+    conn = _FakeConn(_ok)
+
+    async def _probe_session(_query: str) -> dict[str, str]:
+        return {"account_id": "acc_probe", "session_id": "ses_probe"}
+
+    conn.fetchrow = _probe_session  # type: ignore[method-assign]
+    tx = _FakeTransaction()
+    tx.rollback = AsyncMock()  # type: ignore[method-assign]
+    conn.transaction = lambda: tx  # type: ignore[method-assign]
+    app = _app_with_pool(_FakePool())
+    app.state.pool.acquire = lambda: _FakeAcquireCM(conn)
+    client = TestClient(app)
+
+    resp = client.get("/ready")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "unavailable"}
+    tx.rollback.assert_awaited_once()
 
 
 def test_ready_503_when_fetchval_raises() -> None:

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from aios import __version__
-from aios.db.queries.events import calibration_telemetry
+from aios.db.queries.events import append_event, calibration_telemetry
 
 router = APIRouter()
 
@@ -53,12 +53,13 @@ async def calibration(request: Request) -> dict[str, object]:
 
 @router.get("/ready", operation_id="get_ready")
 async def ready(request: Request) -> Response:
-    """Readiness probe. Unauthenticated; ``SELECT 1`` under a short timeout.
+    """Readiness probe. Unauthenticated; exercises ``append_event`` under rollback.
 
-    Returns 200 ``{"status": "ready"}`` when Postgres answers AND the
-    fail-closed boot-admission gate (#1575) has admitted this process; 503
-    ``{"status": "unavailable"}`` when the pool can't be acquired, the query
-    raises, it exceeds the 2 s budget, OR the boot-gate has not yet admitted.
+    Returns 200 ``{"status": "ready"}`` when Postgres answers, a synthetic
+    append succeeds (when any session exists), AND the fail-closed boot-admission
+    gate (#1575) has admitted this process; 503 ``{"status": "unavailable"}``
+    when the pool can't be acquired, the read/write path raises, it exceeds the
+    2 s budget, OR the boot-gate has not yet admitted.
     This is the signal the Docker/compose healthcheck watches, so a silent
     post-startup DB outage becomes a visibly unhealthy container instead of a
     200-returning black hole.
@@ -83,6 +84,28 @@ async def ready(request: Request) -> Response:
         async with asyncio.timeout(2.0):
             async with pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
+                probe_session = await conn.fetchrow(
+                    "SELECT account_id, id AS session_id FROM sessions "
+                    "WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT 1"
+                )
+                if probe_session is not None:
+                    # Exercise the real write path without leaving probe noise in
+                    # the event log. append_event's transaction nests under this
+                    # one; rollback restores the event and session counters. A
+                    # fresh, empty installation has no append target yet, so its
+                    # first real session creation remains possible.
+                    probe_tx = conn.transaction()
+                    await probe_tx.start()
+                    try:
+                        await append_event(
+                            conn,
+                            account_id=probe_session["account_id"],
+                            session_id=probe_session["session_id"],
+                            kind="lifecycle",
+                            data={"type": "readiness_probe"},
+                        )
+                    finally:
+                        await probe_tx.rollback()
     except Exception:
         return JSONResponse(status_code=503, content={"status": "unavailable"})
     return JSONResponse(status_code=200, content={"status": "ready"})

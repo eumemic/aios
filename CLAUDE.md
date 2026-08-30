@@ -104,12 +104,12 @@ when you've touched API-layer code.
 
 ## Database migrations
 
-- **Migrations run post-deploy.** Coolify executes `aios migrate` as the
-  **post-deployment** command on aios-api. It runs in the **new** container,
-  which has the new migration scripts baked in. (A pre-deploy command always
-  runs in the OLD container by design, so it would migrate against the previous
-  deployment's code and never see the new migration files — the
-  alembic-0055-phantom symptom on 2026-05-23.)
+- **Migration failure fails deployment.** Coolify executes `aios migrate` as
+  the **post-deployment** command on aios-api, from the new container that has
+  the candidate migration scripts baked in. `aios migrate` retries bounded lock
+  contention and exits non-zero when attempts are exhausted; that status must
+  halt promotion. Automated rollback restores application images only and must
+  never run migration downgrades.
 
 - **The new-code/old-schema window.** Between "new container starts serving
   traffic" and "post-deploy migrate completes," the new code is briefly running

@@ -152,6 +152,17 @@ def test_migrate_does_not_retry_non_lock_error():
     sleep.assert_not_called()
 
 
+def test_migrate_command_exits_nonzero_when_lock_retries_exhausted():
+    upgrade_to_head = Mock(side_effect=LockNotAvailable("lock timeout"))
+    patches = _migrate_patches(upgrade_to_head)
+
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        result = runner.invoke(app, ["migrate"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, LockNotAvailable)
+
+
 def test_migrate_propagates_last_lock_error_after_attempts_exhausted():
     lock_errors = [LockNotAvailable(f"lock timeout {attempt}") for attempt in range(10)]
     upgrade_to_head = Mock(side_effect=lock_errors)
