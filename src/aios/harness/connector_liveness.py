@@ -7,6 +7,7 @@ connector cannot also stop the observer that reports it.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -175,6 +176,25 @@ class DockerConnectorHealthReader:
                 detail = status or "health status unavailable"
             if healthy:
                 detail = "healthy"
+
+            # SDK probes print connection-correlated state into Docker's health
+            # log. Consume the newest valid record so one failed account does
+            # not make a healthy sibling look failed (or hide the real failure).
+            if isinstance(state_payload, dict):
+                health_payload = state_payload.get("Health") or {}
+                for entry in reversed(health_payload.get("Log") or []):
+                    try:
+                        correlated = json.loads(entry.get("Output") or "")
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                    for connection_id in correlated.get("healthy_connection_ids", []):
+                        result[str(connection_id)] = TransportHealth(True, "healthy")
+                    for connection_id in correlated.get("unhealthy_connection_ids", []):
+                        result[str(connection_id)] = TransportHealth(
+                            False, "transport not serving", definitive_connector_outage=False
+                        )
+                    break
+
             stopped = state in {"dead", "exited", "removing"}
             observation = TransportHealth(
                 healthy=healthy,

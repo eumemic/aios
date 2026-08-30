@@ -445,3 +445,50 @@ async def test_review_does_not_attribute_one_connections_failure_to_sibling(
     )
 
     assert await detector.check_once(now=now, monotonic_now=10000) == []
+
+@pytest.mark.asyncio
+async def test_connection_correlated_health_alarms_only_unhealthy_silent_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    activities = [
+        BoundConnectionActivity("silent_unhealthy", "whatsapp", now - timedelta(days=9), 7 * 86400),
+        BoundConnectionActivity("silent_healthy", "whatsapp", now - timedelta(days=9), 7 * 86400),
+    ]
+    monkeypatch.setattr(
+        "aios.harness.connector_liveness.read_bound_connection_activity",
+        AsyncMock(return_value=activities),
+    )
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "running",
+                "Health": {
+                    "Status": "unhealthy",
+                    "Log": [{
+                        "Output": json.dumps({
+                            "healthy_connection_ids": ["silent_healthy"],
+                            "unhealthy_connection_ids": ["silent_unhealthy"],
+                        })
+                    }],
+                },
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+    detector = ConnectorLivenessDetector(
+        object(),
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=DockerConnectorHealthReader(),
+        alarm=MagicMock(),
+        rate_limit_seconds=3600,
+    )
+
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+
+    assert {finding["connection_id"] for finding in findings} == {"silent_unhealthy"}

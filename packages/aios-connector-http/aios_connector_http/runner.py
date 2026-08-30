@@ -1074,7 +1074,9 @@ class HttpConnector:
             os.close(fd)
 
     @staticmethod
-    def _refresh_heartbeat(path: Path, identity: tuple[int, int]) -> bool:
+    def _refresh_heartbeat(
+        path: Path, identity: tuple[int, int], payload: bytes = b""
+    ) -> bool:
         """Refresh only the inode previously claimed by this process."""
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -1085,6 +1087,10 @@ class HttpConnector:
             stat = os.fstat(fd)
             if (stat.st_dev, stat.st_ino) != identity:
                 return False
+            os.ftruncate(fd, 0)
+            if payload:
+                os.write(fd, payload)
+            os.fsync(fd)
             os.utime(fd, None)
             return True
         finally:
@@ -1112,12 +1118,29 @@ class HttpConnector:
         while True:
             # Empty is healthy only after discovery's authoritative fresh
             # snapshot completed. Before that, absence means unknown.
-            if self._discovery_cursor is not None and all(
-                state.serve_status == "serving" for state in self._connections.values()
-            ):
+            if self._discovery_cursor is not None:
+                healthy_ids = sorted(
+                    connection_id
+                    for connection_id, state in self._connections.items()
+                    if state.serve_status == "serving"
+                )
+                unhealthy_ids = sorted(set(self._connections) - set(healthy_ids))
+                payload = json.dumps(
+                    {
+                        "healthy_connection_ids": healthy_ids,
+                        "unhealthy_connection_ids": unhealthy_ids,
+                    },
+                    sort_keys=True,
+                ).encode()
+                # Preserve the established fail-closed behavior when every
+                # active transport is down. A mixed state must still publish
+                # the correlated IDs so Docker can expose which sibling failed.
+                if unhealthy_ids and not healthy_ids:
+                    await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                    continue
                 if self._heartbeat_owned and self._heartbeat_identity is not None:
                     if not await asyncio.to_thread(
-                        self._refresh_heartbeat, path, self._heartbeat_identity
+                        self._refresh_heartbeat, path, self._heartbeat_identity, payload
                     ):
                         # The path was replaced after our claim. Relinquish it;
                         # never mutate or later unlink the replacement.

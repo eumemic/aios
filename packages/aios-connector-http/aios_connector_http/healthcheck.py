@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -37,10 +38,39 @@ def heartbeat_is_fresh(path: Path, *, max_age_seconds: float) -> bool:
     return age <= max_age_seconds
 
 
+def read_connection_health(path: Path) -> tuple[list[str], list[str]]:
+    """Read connection-correlated transport state from a heartbeat."""
+    try:
+        payload = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return [], []
+    if not isinstance(payload, dict):
+        return [], []
+
+    def ids(key: str) -> list[str]:
+        values = payload.get(key, [])
+        return [str(value) for value in values] if isinstance(values, list) else []
+
+    return ids("healthy_connection_ids"), ids("unhealthy_connection_ids")
+
+
 def main() -> None:
     path = resolve_heartbeat_path()
     max_age = heartbeat_max_age_seconds()
-    if not heartbeat_is_fresh(path, max_age_seconds=max_age):
+    healthy, unhealthy = read_connection_health(path)
+    # Docker retains probe output in State.Health.Log.  The external reader
+    # consumes this machine-readable line to attribute container health to the
+    # affected connection rather than its healthy siblings.
+    print(
+        json.dumps(
+            {
+                "healthy_connection_ids": healthy,
+                "unhealthy_connection_ids": unhealthy,
+            },
+            sort_keys=True,
+        )
+    )
+    if unhealthy or not heartbeat_is_fresh(path, max_age_seconds=max_age):
         raise SystemExit(1)
 
 
