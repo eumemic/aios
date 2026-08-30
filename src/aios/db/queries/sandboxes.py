@@ -236,6 +236,30 @@ async def unscoped_compare_and_clear_session_snapshot(
     return status != "UPDATE 0"
 
 
+async def unscoped_prepare_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    expected_ref: str,
+    reason: str,
+) -> bool:
+    """Durably record deletion intent before removing an external artifact.
+
+    The pointer remains intact until removal succeeds.  Pending-notice readers
+    only publish rows whose pointer is NULL, so a crash before removal neither
+    emits a false reset nor loses the intent needed by a later retry.
+    """
+    status: str = await conn.execute(
+        """UPDATE sessions
+              SET snapshot_reset_pending_reason = $3
+            WHERE id = $1 AND snapshot_ref = $2""",
+        session_id,
+        expected_ref,
+        reason,
+    )
+    return status != "UPDATE 0"
+
+
 async def unscoped_list_pending_snapshot_reset_notices(
     conn: asyncpg.Connection[Any], *, limit: int = 1000
 ) -> list[tuple[str, str]]:
@@ -244,6 +268,7 @@ async def unscoped_list_pending_snapshot_reset_notices(
         """SELECT id, snapshot_reset_pending_reason
              FROM sessions
             WHERE snapshot_reset_pending_reason IS NOT NULL
+              AND snapshot_ref IS NULL
             ORDER BY id
             LIMIT $1""",
         limit,
@@ -277,7 +302,7 @@ async def unscoped_lock_session_snapshot_state(
     return await conn.fetchrow(
         """
         SELECT id, account_id, archived_at, snapshot_ref, snapshot_host,
-               snapshot_bytes,
+               snapshot_bytes, snapshot_reset_pending_reason,
                (SELECT e.created_at FROM events e
                  WHERE e.session_id = sessions.id AND e.seq = sessions.last_event_seq)
                    AS last_event_at

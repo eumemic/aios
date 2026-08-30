@@ -3557,6 +3557,32 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         pool = runtime.require_pool()
+
+        # Docker removal cannot participate in a database rollback. Commit the
+        # reset-notice intent first while final ordering and ownership are row-
+        # locked. If the later pointer-clear write fails, this marker survives.
+        if verdict.reason == "protected_live":
+            async with pool.acquire() as conn, conn.transaction():
+                row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
+                candidate = states.get(session_id)
+                if (
+                    row is None
+                    or candidate is None
+                    or row["last_event_at"] != candidate.last_event_at
+                    or row["archived_at"] is not None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                ):
+                    return False
+                prepared = await queries.unscoped_prepare_snapshot_reset_notice(
+                    conn,
+                    session_id,
+                    expected_ref=verdict.removal_ref,
+                    reason="snapshot_pool_pressure",
+                )
+                if not prepared:
+                    return False
+
         async with pool.acquire() as conn, conn.transaction():
             row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
             if verdict.reason == "archived":
@@ -3579,6 +3605,7 @@ class SandboxRegistry:
                     or row["archived_at"] is not None
                     or row["snapshot_ref"] != verdict.removal_ref
                     or row["snapshot_host"] != instance_id
+                    or row["snapshot_reset_pending_reason"] != "snapshot_pool_pressure"
                 ):
                     return False
             elif (
