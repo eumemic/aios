@@ -183,7 +183,7 @@ def _is_lock_not_available(exc: BaseException) -> bool:
 
 def _run_migrate() -> int:
     from aios.config import get_settings
-    from aios.db.migrations import apply_procrastinate_schema, upgrade_to_head
+    from aios.db.migrations import _migration_admission, apply_procrastinate_schema, upgrade_to_head
     from aios.logging import configure_logging, get_logger
 
     settings = get_settings()
@@ -197,22 +197,26 @@ def _run_migrate() -> int:
     configure_logging(settings.log_level)
     logger = get_logger("aios.migrate")
     db_url = settings.db_url
-    for attempt in range(1, _MIGRATE_MAX_ATTEMPTS + 1):
-        try:
-            upgrade_to_head(db_url)
-            break
-        except (LockNotAvailable, OperationalError) as exc:
-            if not _is_lock_not_available(exc) or attempt == _MIGRATE_MAX_ATTEMPTS:
-                raise
-            logger.warning(
-                "migration.lock_retry",
-                attempt=attempt,
-                max_attempts=_MIGRATE_MAX_ATTEMPTS,
-                retry_in_seconds=_MIGRATE_RETRY_SLEEP_SECONDS,
-            )
-            time.sleep(_MIGRATE_RETRY_SLEEP_SECONDS)
-    asyncio.run(apply_procrastinate_schema(db_url, verbose=True))
-    return 0
+    with _migration_admission(db_url) as should_migrate:
+        if not should_migrate:
+            logger.info("migration.rollback_image_admitted")
+            return 0
+        for attempt in range(1, _MIGRATE_MAX_ATTEMPTS + 1):
+            try:
+                upgrade_to_head(db_url)
+                break
+            except (LockNotAvailable, OperationalError) as exc:
+                if not _is_lock_not_available(exc) or attempt == _MIGRATE_MAX_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "migration.lock_retry",
+                    attempt=attempt,
+                    max_attempts=_MIGRATE_MAX_ATTEMPTS,
+                    retry_in_seconds=_MIGRATE_RETRY_SLEEP_SECONDS,
+                )
+                time.sleep(_MIGRATE_RETRY_SLEEP_SECONDS)
+        asyncio.run(apply_procrastinate_schema(db_url, verbose=True))
+        return 0
 
 
 async def _run_validate_workspace_roots_async() -> int:

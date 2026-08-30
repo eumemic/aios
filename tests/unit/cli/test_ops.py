@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -92,6 +93,7 @@ def test_migrate_configures_logging_before_running_migrations(monkeypatch):
         patch("aios.logging.configure_logging", parent.configure_logging),
         patch("aios.db.migrations.upgrade_to_head", parent.upgrade_to_head),
         patch("aios.db.migrations.apply_procrastinate_schema", parent.apply_procrastinate_schema),
+        patch("aios.db.migrations._migration_admission", return_value=nullcontext(True)),
     ):
         result = runner.invoke(app, ["migrate"])
 
@@ -113,8 +115,34 @@ def _migrate_patches(upgrade_to_head: Mock) -> tuple[Any, ...]:
         patch("aios.logging.get_logger"),
         patch("aios.db.migrations.upgrade_to_head", upgrade_to_head),
         patch("aios.db.migrations.apply_procrastinate_schema", new_callable=AsyncMock),
+        patch("aios.db.migrations._migration_admission", return_value=nullcontext(True)),
         patch("time.sleep"),
     )
+
+
+def test_migrate_skips_alembic_for_rollback_image() -> None:
+    upgrade_to_head = Mock()
+    patches = _migrate_patches(upgrade_to_head)
+    patches = (
+        *patches[:5],
+        patch("aios.db.migrations._migration_admission", return_value=nullcontext(False)),
+        patches[6],
+    )
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2] as logger,
+        patches[3],
+        patches[4] as procrastinate,
+        patches[5],
+        patches[6],
+    ):
+        assert _run_migrate() == 0
+
+    upgrade_to_head.assert_not_called()
+    procrastinate.assert_not_awaited()
+    logger.return_value.info.assert_called_once_with("migration.rollback_image_admitted")
 
 
 def test_migrate_retries_lock_errors_then_succeeds():
@@ -123,7 +151,15 @@ def test_migrate_retries_lock_errors_then_succeeds():
     upgrade_to_head = Mock(side_effect=[lock_error, wrapped_lock_error, None])
 
     patches = _migrate_patches(upgrade_to_head)
-    with patches[0], patches[1], patches[2] as logger, patches[3], patches[4], patches[5] as sleep:
+    with (
+        patches[0],
+        patches[1],
+        patches[2] as logger,
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6] as sleep,
+    ):
         assert _run_migrate() == 0
 
     assert upgrade_to_head.call_count == 3
@@ -142,7 +178,8 @@ def test_migrate_does_not_retry_non_lock_error():
         patches[2],
         patches[3],
         patches[4],
-        patches[5] as sleep,
+        patches[5],
+        patches[6] as sleep,
         pytest.raises(RuntimeError, match="broken migration") as raised,
     ):
         _run_migrate()
@@ -156,7 +193,7 @@ def test_migrate_command_exits_nonzero_when_lock_retries_exhausted():
     upgrade_to_head = Mock(side_effect=LockNotAvailable("lock timeout"))
     patches = _migrate_patches(upgrade_to_head)
 
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
         result = runner.invoke(app, ["migrate"])
 
     assert result.exit_code != 0
@@ -174,7 +211,8 @@ def test_migrate_propagates_last_lock_error_after_attempts_exhausted():
         patches[2],
         patches[3],
         patches[4],
-        patches[5] as sleep,
+        patches[5],
+        patches[6] as sleep,
         pytest.raises(LockNotAvailable) as raised,
     ):
         _run_migrate()

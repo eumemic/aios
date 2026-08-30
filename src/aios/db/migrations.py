@@ -10,7 +10,10 @@ upgrade.
 from __future__ import annotations
 
 import os
+import re
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 from unittest import mock
@@ -19,6 +22,74 @@ if TYPE_CHECKING:
     from alembic.config import Config
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+_MIGRATION_LOCK_ID = 0x41494F534D494752  # "AIOSMIGR" as a signed-bigint-safe key
+_REVISION_RE = re.compile(r"^revision:\s*(?:str\s*=\s*)?[\"']([^\"']+)[\"']", re.MULTILINE)
+
+
+def _known_revisions() -> set[str]:
+    """Return revisions understood by this image without importing migration modules."""
+    revisions: set[str] = set()
+    for path in (_REPO_ROOT / "migrations" / "versions").glob("*.py"):
+        match = _REVISION_RE.search(path.read_text())
+        if match is not None:
+            revisions.add(match.group(1))
+    return revisions
+
+
+def _sync_db_url(db_url: str) -> str:
+    if db_url.startswith("postgresql+asyncpg://"):
+        return db_url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+    if db_url.startswith("postgresql://"):
+        return db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return db_url
+
+
+@contextmanager
+def _migration_admission(db_url: str) -> Iterator[bool]:
+    """Serialize sibling migrators and admit rollback images without migrating.
+
+    An older, otherwise compatible image cannot ask Alembic to interpret a
+    candidate-only revision: Alembic rejects that revision before the service
+    gets a chance to prove runtime compatibility.  Once serialized, a revision
+    unknown to this image therefore means "database is newer" and migration is
+    skipped.  Normal startup/readiness remains responsible for compatibility.
+    """
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(_sync_db_url(db_url), pool_pre_ping=True)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _MIGRATION_LOCK_ID})
+            try:
+                table = conn.execute(text("SELECT to_regclass('alembic_version')")).scalar()
+                current = (
+                    {
+                        row[0]
+                        for row in conn.execute(text("SELECT version_num FROM alembic_version"))
+                    }
+                    if table is not None
+                    else set()
+                )
+                known = _known_revisions()
+                unknown = current - known
+                if unknown:
+                    # Revisions are monotonically numbered in this repository.
+                    # Only a strictly newer revision can represent a rollback
+                    # image observing a successful forward migration.  An
+                    # unparseable or divergent stamp remains fail-closed.
+                    newest_known = max(int(revision) for revision in known)
+                    if not all(
+                        revision.isdigit() and int(revision) > newest_known for revision in unknown
+                    ):
+                        raise RuntimeError(
+                            "database has an unknown non-forward migration revision: "
+                            + ", ".join(sorted(unknown))
+                        )
+                yield not unknown
+            finally:
+                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _MIGRATION_LOCK_ID})
+    finally:
+        engine.dispose()
 
 
 def alembic_config(*, stdout: TextIO | None = None) -> Config:
