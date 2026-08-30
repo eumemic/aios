@@ -3231,18 +3231,34 @@ class SandboxRegistry:
                 key=lambda item: item[2].last_event_at
                 or datetime.min.replace(tzinfo=UTC)
             )
-            verdict, size, _fresh = refreshed[0]
-            pending.remove((verdict, size))
+            verdict, size, selected_state = refreshed[0]
             reclaimable_refs.append(verdict.removal_ref)
             reclaimable_bytes += size
             if dry_run:
+                pending.remove((verdict, size))
                 planned_after -= size
                 continue
+
+            # Make the ordering state a deletion precondition. The candidate is
+            # read again while its session lock is held; activity between this
+            # selection and lock acquisition must force a fresh LRU choice.
+            session_id = verdict.session_id
+            assert session_id is not None
+            states[session_id] = selected_state
             if await self._reclaim_pool_candidate(verdict, states, instance_id):
+                pending.remove((verdict, size))
                 deleted_refs.append(verdict.removal_ref)
                 retained.remove(verdict)
                 after -= size
                 planned_after = after
+                continue
+
+            latest = await self._fresh_pool_candidate_state(verdict, instance_id)
+            if latest is not None and latest.last_event_at != selected_state.last_event_at:
+                # Its ordering key changed before the destructive decision.
+                # Re-read all candidates rather than deleting the stale choice.
+                continue
+            pending.remove((verdict, size))
         log_method = log.error if after > pool_bytes else log.info
         log_method(
             "sandbox.snapshot_pool_reclaim",
@@ -3304,6 +3320,7 @@ class SandboxRegistry:
             if (
                 fresh is None
                 or candidate is None
+                or fresh.last_event_at != candidate.last_event_at
                 or fresh.archived_at is not None
                 or fresh.snapshot_ref != verdict.removal_ref
                 or fresh.snapshot_host != instance_id
