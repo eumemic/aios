@@ -209,18 +209,58 @@ async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session
 
 
 async def unscoped_compare_and_clear_session_snapshot(
-    conn: asyncpg.Connection[Any], session_id: str, *, expected_ref: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    expected_ref: str,
+    pending_reset_reason: str | None = None,
 ) -> bool:
-    """Clear only the exact artifact pointer the caller removed/proved missing."""
+    """Clear only the exact artifact pointer the caller removed/proved missing.
+
+    ``pending_reset_reason`` is committed in the same row update as pointer
+    loss.  Pressure reclamation uses it as a durable outbox marker, so a
+    transient lifecycle-event failure cannot make the loss undiscoverable.
+    """
     status: str = await conn.execute(
         """
         UPDATE sessions
            SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
-               snapshot_updated_at = now()
+               snapshot_updated_at = now(),
+               snapshot_reset_pending_reason = COALESCE($3, snapshot_reset_pending_reason)
          WHERE id = $1 AND snapshot_ref = $2
         """,
         session_id,
         expected_ref,
+        pending_reset_reason,
+    )
+    return status != "UPDATE 0"
+
+
+async def unscoped_list_pending_snapshot_reset_notices(
+    conn: asyncpg.Connection[Any], *, limit: int = 1000
+) -> list[tuple[str, str]]:
+    """Return durable filesystem-loss outbox entries for retry."""
+    rows = await conn.fetch(
+        """SELECT id, snapshot_reset_pending_reason
+             FROM sessions
+            WHERE snapshot_reset_pending_reason IS NOT NULL
+            ORDER BY id
+            LIMIT $1""",
+        limit,
+    )
+    return [(row["id"], row["snapshot_reset_pending_reason"]) for row in rows]
+
+
+async def unscoped_clear_pending_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_reason: str
+) -> bool:
+    """Acknowledge an outbox entry only after its lifecycle event committed."""
+    status: str = await conn.execute(
+        """UPDATE sessions
+              SET snapshot_reset_pending_reason = NULL
+            WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
+        session_id,
+        expected_reason,
     )
     return status != "UPDATE 0"
 

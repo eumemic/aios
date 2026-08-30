@@ -357,6 +357,10 @@ class SandboxRegistry:
         self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
         self._snapshot_timeout_failures: dict[str, int] = {}
         self._snapshot_timeout_alarmed: set[str] = set()
+        # Process-local mirror of the DB outbox. The DB marker provides restart
+        # recovery; this mirror also retries immediately when a test seam or a
+        # transient writer failure keeps this registry alive between ticks.
+        self._pending_snapshot_reset_notices: dict[str, str] = {}
         # Exact failure text and its consecutive repetition count. Once one
         # cause alone reaches the breaker threshold, cooldown cannot make the
         # identical operation transient; it remains escalated until recovery.
@@ -3195,6 +3199,9 @@ class SandboxRegistry:
         dry_run: bool | None = None,
     ) -> GcPressureResult:
         """Reclaim inactive snapshots least-recently-used until the host bound holds."""
+        # Retry durable loss notices independently of image enumeration. Once
+        # deletion succeeds, the absent image/pointer cannot rediscover this work.
+        await self._flush_pending_snapshot_reset_notices()
         if pool_bytes is None:
             return GcPressureResult()
         if dry_run is None:
@@ -3310,6 +3317,9 @@ class SandboxRegistry:
         session_id = verdict.session_id
         assert session_id is not None
         async with self._lock_for(session_id):
+            pending_reason = self._pending_snapshot_reset_notices.get(session_id)
+            if pending_reason is not None:
+                await self._emit_pending_snapshot_reset_notice(session_id, pending_reason)
             if self._handles.get(session_id) is not None:
                 return False
             fresh = await self._fresh_session_state(session_id)
@@ -3332,10 +3342,45 @@ class SandboxRegistry:
                 pressure_verdict, instance_id, states
             )
             if removed:
-                await self._append_fs_event(
-                    session_id, SANDBOX_FS_RESET_EVENT, {"reason": "snapshot_pool_pressure"}
-                )
+                self._pending_snapshot_reset_notices[session_id] = "snapshot_pool_pressure"
+                await self._emit_pending_snapshot_reset_notice(session_id, "snapshot_pool_pressure")
             return removed
+
+    async def _flush_pending_snapshot_reset_notices(self) -> None:
+        """Retry filesystem-loss events recorded by the transactional outbox."""
+        from aios.harness import runtime
+
+        # Unit-level planning callers may exercise this method without a worker
+        # runtime. Production GC always has the pool that owns the outbox.
+        if runtime.pool is None:
+            return
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            pending = await queries.unscoped_list_pending_snapshot_reset_notices(conn)
+        for session_id, reason in pending:
+            self._pending_snapshot_reset_notices[session_id] = reason
+            try:
+                await self._emit_pending_snapshot_reset_notice(session_id, reason)
+            except Exception:
+                # One unavailable session/event writer must not prevent retries
+                # for other durable outbox entries. Leave this marker intact.
+                log.exception(
+                    "sandbox.snapshot_reset_notice_retry_failed",
+                    session_id=session_id,
+                    reason=reason,
+                )
+
+    async def _emit_pending_snapshot_reset_notice(self, session_id: str, reason: str) -> None:
+        """Append one loss event, then acknowledge its durable outbox marker."""
+        from aios.harness import runtime
+
+        await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            await queries.unscoped_clear_pending_snapshot_reset_notice(
+                conn, session_id, expected_reason=reason
+            )
+        self._pending_snapshot_reset_notices.pop(session_id, None)
 
     async def _gc_account_cap_pass(
         self,
@@ -3547,7 +3592,15 @@ class SandboxRegistry:
                 verdict.removal_ref
             ):
                 return False
-            await queries.unscoped_compare_and_clear_session_snapshot(
-                conn, session_id, expected_ref=verdict.removal_ref
-            )
+            if verdict.reason == "protected_live":
+                await queries.unscoped_compare_and_clear_session_snapshot(
+                    conn,
+                    session_id,
+                    expected_ref=verdict.removal_ref,
+                    pending_reset_reason="snapshot_pool_pressure",
+                )
+            else:
+                await queries.unscoped_compare_and_clear_session_snapshot(
+                    conn, session_id, expected_ref=verdict.removal_ref
+                )
             return True
