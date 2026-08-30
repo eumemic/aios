@@ -215,6 +215,28 @@ async def test_rebinding_per_chat_excludes_prior_binding_sessions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_running_container_without_health_result_is_not_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {"Status": "running"},
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+
+    assert health["whatsapp"].healthy is False
+    assert health["whatsapp"].detail == "health status unavailable"
+
+
+@pytest.mark.asyncio
 async def test_unhealthy_replica_is_not_hidden_by_healthy_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

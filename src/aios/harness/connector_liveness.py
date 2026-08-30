@@ -149,13 +149,13 @@ class DockerConnectorHealthReader:
             if isinstance(state_payload, dict):
                 state = str(state_payload.get("Status") or "unknown")
                 health = str((state_payload.get("Health") or {}).get("Status") or "")
-                detail = health or state
-                healthy = state == "running" and health in {"", "healthy"}
+                detail = health or ("health status unavailable" if state == "running" else state)
+                healthy = state == "running" and health == "healthy"
             else:  # list() payloads used by lightweight Docker-compatible APIs
                 state = str(state_payload)
                 status = str(data.get("Status") or "").lower()
-                healthy = state == "running" and "(unhealthy)" not in status
-                detail = status or state
+                healthy = state == "running" and "(healthy)" in status
+                detail = status or "health status unavailable"
             if healthy:
                 detail = "healthy"
             # A connector type is healthy only when every observed container is
