@@ -3207,36 +3207,49 @@ class SandboxRegistry:
         ]
         before = sum(size for _, size in sized)
         after = before
+        planned_after = before
         deleted_refs: list[str] = []
         reclaimable_refs: list[str] = []
-        candidates = sorted(
-            (
-                (v, size)
-                for v, size in sized
-                if v.session_id is not None
-                and v.session_id not in self._handles
-                and v.session_id in states
-            ),
-            key=lambda item: (
-                states[item[0].session_id or ""].last_event_at or datetime.min.replace(tzinfo=UTC)
-            ),
-        )
-        for verdict, size in candidates:
-            if after <= pool_bytes:
+        reclaimable_bytes = 0
+        pending = [
+            (v, size)
+            for v, size in sized
+            if v.session_id is not None and v.session_id in states
+        ]
+        while pending and planned_after > pool_bytes:
+            # Tick-start ordering is only a hint. Re-read every remaining
+            # candidate while its session is locked before choosing the next
+            # LRU, so a session that just became active is not selected first.
+            refreshed: list[tuple[GcImageVerdict, int, SessionSnapshotState]] = []
+            for verdict, size in pending:
+                fresh = await self._fresh_pool_candidate_state(verdict, instance_id)
+                if fresh is not None:
+                    refreshed.append((verdict, size, fresh))
+            if not refreshed:
                 break
+            refreshed.sort(
+                key=lambda item: item[2].last_event_at
+                or datetime.min.replace(tzinfo=UTC)
+            )
+            verdict, size, _fresh = refreshed[0]
+            pending.remove((verdict, size))
             reclaimable_refs.append(verdict.removal_ref)
+            reclaimable_bytes += size
             if dry_run:
+                planned_after -= size
                 continue
             if await self._reclaim_pool_candidate(verdict, states, instance_id):
                 deleted_refs.append(verdict.removal_ref)
                 retained.remove(verdict)
                 after -= size
+                planned_after = after
         log_method = log.error if after > pool_bytes else log.info
         log_method(
             "sandbox.snapshot_pool_reclaim",
             before_bytes=before,
             after_bytes=after,
             reclaimed_bytes=before - after,
+            reclaimable_bytes=reclaimable_bytes,
             budget_bytes=pool_bytes,
             deleted_refs=deleted_refs,
             reclaimable_refs=reclaimable_refs,
@@ -3250,6 +3263,29 @@ class SandboxRegistry:
             ),
         )
         return GcPressureResult(pool_used_bytes=after, pool_budget_bytes=pool_bytes)
+
+    async def _fresh_pool_candidate_state(
+        self, verdict: GcImageVerdict, instance_id: str
+    ) -> SessionSnapshotState | None:
+        """Return current ordering state only while the candidate remains safe."""
+        session_id = verdict.session_id
+        assert session_id is not None
+        async with self._lock_for(session_id):
+            if self._handles.get(session_id) is not None:
+                return None
+            fresh = await self._fresh_session_state(session_id)
+            if (
+                fresh is None
+                or fresh.archived_at is not None
+                or fresh.snapshot_ref != verdict.removal_ref
+                or fresh.snapshot_host != instance_id
+                or verdict.removal_ref != snapshot_tag(instance_id, session_id)
+                or verdict.image.labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE
+                or verdict.image.labels.get(INSTANCE_LABEL_KEY) != instance_id
+                or verdict.image.labels.get(SESSION_LABEL_KEY) != session_id
+            ):
+                return None
+            return fresh
 
     async def _reclaim_pool_candidate(
         self,
