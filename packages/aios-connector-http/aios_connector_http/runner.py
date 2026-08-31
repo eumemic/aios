@@ -1074,9 +1074,7 @@ class HttpConnector:
             os.close(fd)
 
     @staticmethod
-    def _refresh_heartbeat(
-        path: Path, identity: tuple[int, int], payload: bytes = b""
-    ) -> bool:
+    def _refresh_heartbeat(path: Path, identity: tuple[int, int], payload: bytes = b"") -> bool:
         """Refresh only the inode previously claimed by this process."""
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         try:

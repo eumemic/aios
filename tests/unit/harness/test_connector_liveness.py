@@ -446,6 +446,7 @@ async def test_review_does_not_attribute_one_connections_failure_to_sibling(
 
     assert await detector.check_once(now=now, monotonic_now=10000) == []
 
+
 @pytest.mark.asyncio
 async def test_connection_correlated_health_alarms_only_unhealthy_silent_sibling(
     monkeypatch: pytest.MonkeyPatch,
@@ -467,12 +468,16 @@ async def test_connection_correlated_health_alarms_only_unhealthy_silent_sibling
                 "Status": "running",
                 "Health": {
                     "Status": "unhealthy",
-                    "Log": [{
-                        "Output": json.dumps({
-                            "healthy_connection_ids": ["silent_healthy"],
-                            "unhealthy_connection_ids": ["silent_unhealthy"],
-                        })
-                    }],
+                    "Log": [
+                        {
+                            "Output": json.dumps(
+                                {
+                                    "healthy_connection_ids": ["silent_healthy"],
+                                    "unhealthy_connection_ids": ["silent_unhealthy"],
+                                }
+                            )
+                        }
+                    ],
                 },
             },
         }
