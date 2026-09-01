@@ -682,7 +682,7 @@ class BrowserHost:
                 epoch=new_epoch,
                 opened_at=now(),
                 screencast=screencast,
-                injector=InputInjector(page),
+                injector=InputInjector(page, allow_private=self.allow_private_nav),
                 target=target,
                 signed_in_at_open=signed_open,
             )
