@@ -55,10 +55,27 @@ class TakeoverCloseResponse(BaseModel):
 
 
 class InputEvent(BaseModel):
-    """One raw viewer input event (§5.6 vocabulary)."""
+    """One raw viewer input event (§5.6 vocabulary).
+
+    The nav quartet (``navigate``/``back``/``forward``/``reload``) is the
+    viewer's browser chrome — URL bar and nav buttons — riding the same spool
+    as raw input so a typed URL stays off the event log exactly like a typed
+    password. The driver guards ``navigate`` (public http(s) only) and treats
+    the rest as history moves needing no URL.
+    """
 
     type: Literal[
-        "pointer_move", "pointer_down", "pointer_up", "wheel", "key_down", "key_up", "text"
+        "pointer_move",
+        "pointer_down",
+        "pointer_up",
+        "wheel",
+        "key_down",
+        "key_up",
+        "text",
+        "navigate",
+        "back",
+        "forward",
+        "reload",
     ]
     x: float | None = None
     y: float | None = None
@@ -67,6 +84,7 @@ class InputEvent(BaseModel):
     dy: float | None = None
     key: str | None = Field(default=None, max_length=64)
     text: str | None = Field(default=None, max_length=2000)
+    url: str | None = Field(default=None, max_length=2048)
 
 
 class InputBatch(BaseModel):

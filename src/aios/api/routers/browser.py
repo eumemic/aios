@@ -376,6 +376,7 @@ def _load_frame(plane: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
         "boot": manifest.get("boot"),
         "origin": manifest.get("origin"),
         "security": manifest.get("security"),
+        "url": manifest.get("url"),
         "w": manifest.get("w"),
         "h": manifest.get("h"),
         "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),

@@ -97,3 +97,14 @@ def test_chrome_derives_security_from_the_url_scheme() -> None:
     assert _chrome_of("http://shop.example/") == ("http://shop.example", "insecure")
     assert _chrome_of("about:blank") == (None, None)
     assert _chrome_of("data:text/html,x") == (None, None)
+
+
+def test_manifest_carries_the_committed_url(tmp_path: Path) -> None:
+    """The viewer's URL bar renders this — same provenance as origin/security
+    (the driver's committed navigation, never pixels)."""
+    frames = tmp_path / "frames"
+    sc = _screencast(frames)
+    sc._url = "https://github.com/login?return_to=%2Fsettings"
+    sc._persist(_JPEG, {})
+    manifest = json.loads((frames / "manifest.json").read_text())
+    assert manifest["url"] == "https://github.com/login?return_to=%2Fsettings"

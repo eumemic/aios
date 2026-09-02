@@ -209,25 +209,33 @@ def assert_chromium_sandbox_on(container: str) -> None:
     headless). Shared between the image-contract suite (hand-built ``docker
     run``) and the isolation gate (the REAL ``build_spec_from_browser``
     provisioning path) so the two probes cannot drift apart."""
+    # A renderer can exit between the listing and the /proc read: Chromium
+    # discards the initial blank-page renderer on the first navigation, and
+    # the two ``docker exec`` round trips leave a window wide enough for it
+    # (seen twice in a row on CI, 2026-09-02: ``/proc/<pid>/status: No such
+    # file``). So no pid is trusted until its status has actually been read
+    # — try each listed renderer, re-list, and only give up at the deadline.
     deadline = time.monotonic() + 30
-    pids: list[str] = []
-    while time.monotonic() < deadline and not pids:
-        pids = renderer_pids(container)
-        if not pids:
+    probe: subprocess.CompletedProcess[str] | None = None
+    while probe is None and time.monotonic() < deadline:
+        for pid in renderer_pids(container):
+            r = run(
+                [
+                    *("docker", "exec", container, "bash", "-c"),
+                    f"grep -h '^Seccomp_filters:' /proc/{pid}/status /proc/1/status"
+                    f" && readlink /proc/{pid}/ns/user /proc/1/ns/user",
+                ],
+                timeout=30,
+            )
+            if r.returncode == 0:
+                probe = r
+                break
+        if probe is None:
             time.sleep(1.0)
-    assert pids, "no Chromium renderer process found — did the persistent context open a page?"
-
-    pid = pids[0]
-    r = run(
-        [
-            *("docker", "exec", container, "bash", "-c"),
-            f"grep -h '^Seccomp_filters:' /proc/{pid}/status /proc/1/status"
-            f" && readlink /proc/{pid}/ns/user /proc/1/ns/user",
-        ],
-        timeout=30,
+    assert probe is not None, (
+        "no readable Chromium renderer process found — did the persistent context open a page?"
     )
-    assert r.returncode == 0, r.stderr
-    filters_line_r, filters_line_i, renderer_ns, init_ns = r.stdout.strip().splitlines()
+    filters_line_r, filters_line_i, renderer_ns, init_ns = probe.stdout.strip().splitlines()
     renderer_filters = int(filters_line_r.split()[-1])
     init_filters = int(filters_line_i.split()[-1])
     assert renderer_filters > init_filters, (

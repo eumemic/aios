@@ -17,15 +17,22 @@ T = TypeVar("T", bound="InputEvent")
 class InputEvent:
     """One raw viewer input event (§5.6 vocabulary).
 
-    Attributes:
-        type_ (InputEventType):
-        x (float | None | Unset):
-        y (float | None | Unset):
-        button (InputEventButtonType0 | None | Unset):
-        dx (float | None | Unset):
-        dy (float | None | Unset):
-        key (None | str | Unset):
-        text (None | str | Unset):
+    The nav quartet (``navigate``/``back``/``forward``/``reload``) is the
+    viewer's browser chrome — URL bar and nav buttons — riding the same spool
+    as raw input so a typed URL stays off the event log exactly like a typed
+    password. The driver guards ``navigate`` (public http(s) only) and treats
+    the rest as history moves needing no URL.
+
+        Attributes:
+            type_ (InputEventType):
+            x (float | None | Unset):
+            y (float | None | Unset):
+            button (InputEventButtonType0 | None | Unset):
+            dx (float | None | Unset):
+            dy (float | None | Unset):
+            key (None | str | Unset):
+            text (None | str | Unset):
+            url (None | str | Unset):
     """
 
     type_: InputEventType
@@ -36,6 +43,7 @@ class InputEvent:
     dy: float | None | Unset = UNSET
     key: None | str | Unset = UNSET
     text: None | str | Unset = UNSET
+    url: None | str | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +93,12 @@ class InputEvent:
         else:
             text = self.text
 
+        url: None | str | Unset
+        if isinstance(self.url, Unset):
+            url = UNSET
+        else:
+            url = self.url
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -106,6 +120,8 @@ class InputEvent:
             field_dict["key"] = key
         if text is not UNSET:
             field_dict["text"] = text
+        if url is not UNSET:
+            field_dict["url"] = url
 
         return field_dict
 
@@ -185,6 +201,15 @@ class InputEvent:
 
         text = _parse_text(d.pop("text", UNSET))
 
+        def _parse_url(data: object) -> None | str | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(None | str | Unset, data)
+
+        url = _parse_url(d.pop("url", UNSET))
+
         input_event = cls(
             type_=type_,
             x=x,
@@ -194,6 +219,7 @@ class InputEvent:
             dy=dy,
             key=key,
             text=text,
+            url=url,
         )
 
         input_event.additional_properties = d
