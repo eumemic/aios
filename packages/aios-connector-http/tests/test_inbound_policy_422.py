@@ -14,12 +14,6 @@ from __future__ import annotations
 
 from aios_connector_http.runner import _is_fatal_inbound_status
 
-# Mirror the server-side enum value without importing the aios server package
-# (this is the connector-http package's own test suite). If the server renames
-# the reason, the server-side unit test (test_inbound_admission) catches it;
-# this test pins only the *status* contract the runner depends on.
-_DENIED_BY_POLICY = "denied_by_policy"
-
 
 def test_denied_by_policy_maps_to_non_fatal_422() -> None:
     # The denial status the server returns for ``denied_by_policy``.
@@ -32,8 +26,3 @@ def test_denied_by_policy_maps_to_non_fatal_422() -> None:
     # the affected message without killing the connection feed.
     assert _is_fatal_inbound_status(403) is True
     assert _is_fatal_inbound_status(500) is False
-
-
-def test_denied_by_policy_reason_constant_is_stable() -> None:
-    # Tripwire: the reason string the server emits for a policy denial.
-    assert _DENIED_BY_POLICY == "denied_by_policy"
