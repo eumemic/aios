@@ -119,3 +119,25 @@ class BrowserStatusResponse(BaseModel):
     title: str | None = None
     signed_in_hosts: list[str] = Field(default_factory=list)
     takeover: BrowserTakeoverStatus | None = None
+
+
+class BrowserPeekPage(BaseModel):
+    """One JPEG of a page's viewport plus its trusted chrome. ``origin`` and
+    ``security`` come from the driver's committed URL, never the pixels."""
+
+    jpeg_b64: str
+    w: int
+    h: int
+    origin: str | None = None
+    security: Literal["secure", "insecure"] | None = None
+
+
+class BrowserPeekResponse(BaseModel):
+    """A read-only look at the computer: not running, running with no page
+    to show, or running with the page. Never provisions, never creates a
+    page, and is refused while a human holds the computer."""
+
+    running: bool
+    url: str | None = None
+    title: str | None = None
+    page: BrowserPeekPage | None = None

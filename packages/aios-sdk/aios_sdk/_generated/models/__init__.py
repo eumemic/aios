@@ -42,6 +42,9 @@ from .body_upload_session_file import BodyUploadSessionFile
 from .bootstrap_request import BootstrapRequest
 from .bootstrap_response import BootstrapResponse
 from .bound_chat import BoundChat
+from .browser_peek_page import BrowserPeekPage
+from .browser_peek_page_security_type_0 import BrowserPeekPageSecurityType0
+from .browser_peek_response import BrowserPeekResponse
 from .browser_status_response import BrowserStatusResponse
 from .browser_takeover_status import BrowserTakeoverStatus
 from .capabilities_update import CapabilitiesUpdate
@@ -430,6 +433,9 @@ __all__ = (
     "BootstrapRequest",
     "BootstrapResponse",
     "BoundChat",
+    "BrowserPeekPage",
+    "BrowserPeekPageSecurityType0",
+    "BrowserPeekResponse",
     "BrowserStatusResponse",
     "BrowserTakeoverStatus",
     "CapabilitiesUpdate",
