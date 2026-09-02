@@ -14852,7 +14852,11 @@
               "wheel",
               "key_down",
               "key_up",
-              "text"
+              "text",
+              "navigate",
+              "back",
+              "forward",
+              "reload"
             ],
             "title": "Type"
           },
@@ -14939,6 +14943,18 @@
               }
             ],
             "title": "Text"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
         "type": "object",
@@ -14946,7 +14962,7 @@
           "type"
         ],
         "title": "InputEvent",
-        "description": "One raw viewer input event (\u00a75.6 vocabulary)."
+        "description": "One raw viewer input event (\u00a75.6 vocabulary).\n\nThe nav quartet (``navigate``/``back``/``forward``/``reload``) is the\nviewer's browser chrome \u2014 URL bar and nav buttons \u2014 riding the same spool\nas raw input so a typed URL stays off the event log exactly like a typed\npassword. The driver guards ``navigate`` (public http(s) only) and treats\nthe rest as history moves needing no URL."
       },
       "LimitedNetworking": {
         "properties": {
