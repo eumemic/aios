@@ -7,7 +7,7 @@ a page) to the dispatcher and the API but not to the constraint, so every
 a 500 the mocked route/dispatch tests could not see. Found the first time
 the route hit a real database (the jarbot local devstack, 2026-09-02).
 
-Revision ID: 0178
+Revision ID: 0179
 Revises: 0177
 """
 
@@ -17,7 +17,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0178"
+revision: str = "0179"
 down_revision: str = "0177"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
