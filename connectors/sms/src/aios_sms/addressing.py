@@ -21,7 +21,7 @@ rather than silently cross-routing (design §3.2 step 2).
 
 from __future__ import annotations
 
-__all__ = ["digits_only", "focal_channel", "normalize_e164", "same_number"]
+__all__ = ["normalize_e164"]
 
 
 def normalize_e164(phone: str) -> str:
@@ -41,32 +41,3 @@ def normalize_e164(phone: str) -> str:
     if s and not s.startswith("+"):
         s = "+" + s
     return s
-
-
-def digits_only(phone: str) -> str:
-    """Return just the digits of a phone number.
-
-    The demux map keys on :func:`normalize_e164`, but a **digits-only**
-    compare is the last-resort equality used when comparing two numbers
-    that may differ only by a leading ``+`` or stray punctuation. Keeping
-    this distinct from the routing key documents that the routing key is
-    the normalized form, while equality is digits-only (design §3.3).
-    """
-    return "".join(ch for ch in phone if ch.isdigit())
-
-
-def same_number(a: str, b: str) -> bool:
-    """Digits-only equality of two phone numbers."""
-    return digits_only(a) == digits_only(b)
-
-
-def focal_channel(connector: str, external_account_id: str, chat_id: str) -> str:
-    """``<connector>/<external_account_id>/<chat_id>`` — e.g.
-    ``sms/+18005551234/+14155550000``.
-
-    ``external_account_id`` is the AIOS-owned Twilio number; ``chat_id``
-    is the peer. Both are stored slash-free normalized E.164 so they
-    satisfy ``ConnectionCreate._no_slash`` and re-parse cleanly into the
-    runtime's injected kwargs.
-    """
-    return f"{connector}/{external_account_id}/{chat_id}"
