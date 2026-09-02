@@ -80,7 +80,7 @@ class Screencast:
         # persists a stale old-page frame under the new page's origin.
         self._queue = asyncio.Queue()
         self._last_persist = 0.0
-        self._origin, self._security = _chrome_of(page.url)
+        self._origin, self._security = chrome_of(page.url)
         self._url = page.url or None
         cdp = await self._context.new_cdp_session(page)
         self._cdp = cdp
@@ -126,7 +126,7 @@ class Screencast:
     def _on_nav(self, params: dict[str, Any]) -> None:
         frame = params.get("frame") or {}
         if not frame.get("parentId"):  # main frame only
-            self._origin, self._security = _chrome_of(frame.get("url") or "")
+            self._origin, self._security = chrome_of(frame.get("url") or "")
             self._url = frame.get("url") or None
 
     # ── the pump ──────────────────────────────────────────────────────────
@@ -178,7 +178,7 @@ class Screencast:
         self._last_frame = name
 
 
-def _chrome_of(url: str) -> tuple[str | None, str | None]:
+def chrome_of(url: str) -> tuple[str | None, str | None]:
     """The trusted-chrome (origin, security) for a URL, both from the committed
     URL alone — origin is scheme+host, security is ``secure`` for https,
     ``insecure`` for http, ``None`` for anything else (about:blank, data:)."""

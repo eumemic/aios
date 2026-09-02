@@ -44,6 +44,9 @@ NOT_CLI_OPERATIONS: dict[str, str] = {
     "browser_status_v1_browser_status_get": (
         "Product-layer computer-status read, surfaced in the app, not operators."
     ),
+    "browser_peek_v1_browser_peek_get": (
+        "Product-layer live view of a page (a JPEG polled by the app's Bot sidebar), not operators."
+    ),
     "revoke_site_v1_browser_sites__host__delete": (
         "Product-layer sign-out control, surfaced in the app, not operators."
     ),

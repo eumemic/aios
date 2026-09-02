@@ -240,6 +240,31 @@ async def _dispatch(
             "epoch": response.epoch,
         }
 
+    if method == "peek":
+        # The product's live view: one JPEG of a page plus its trusted
+        # chrome. Same no-provision rule as status — a cold computer has
+        # nothing to look at — and the driver refuses it during a takeover.
+        if registry.peek(account_id) is None:
+            return {"running": False, "page": None}
+        peek_session = params.get("session_id")
+        response = await _driver(
+            registry,
+            account_id,
+            "peek",
+            {},
+            timeout_s=action_timeout,
+            session_id=str(peek_session) if peek_session else None,
+        )
+        page = response.data.get("page")
+        return {
+            "running": True,
+            "url": response.url,
+            "title": response.title,
+            "boot": response.boot,
+            "epoch": response.epoch,
+            "page": page if isinstance(page, dict) else None,
+        }
+
     if method == "revoke_site":
         host = str(params["host"])
         response = await _driver(
