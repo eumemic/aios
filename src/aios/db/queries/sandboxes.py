@@ -513,12 +513,28 @@ async def unscoped_reconcile_absent_host_snapshots(
 
     The first is a race guard; the second and third are the never-delete
     protections the pointer clear previously lacked entirely.
+
+    Pending-notice recovery: a pressure reclamation records its reset intent
+    (``snapshot_reset_pending_reason``) *before* removing the image and only
+    marks it deliverable (``snapshot_reset_pending_ready``) in the same
+    statement that clears the pointer. If the process crashes after the image
+    is physically gone but before that exact-ref clear, the intent is stranded
+    unready and the pointer is still set. This reconcile is precisely the code
+    that proves such an image absent, so when it clears a pointer that still
+    carries a pending reset intent it must ATOMICALLY make that notice
+    deliverable — otherwise the durable filesystem-reset event is lost forever.
+    We only flip ``ready`` to TRUE for rows that already hold an intent; a
+    pointer cleared with no pending reason must never fabricate a reset notice.
     """
     status: str = await conn.execute(
         """
         UPDATE sessions
            SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
-               snapshot_updated_at = now()
+               snapshot_updated_at = now(),
+               snapshot_reset_pending_ready = CASE
+                   WHEN snapshot_reset_pending_reason IS NOT NULL THEN TRUE
+                   ELSE snapshot_reset_pending_ready
+               END
          WHERE snapshot_host = $1
            AND snapshot_ref IS NOT NULL
            AND snapshot_ref <> ALL($2::text[])
