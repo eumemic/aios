@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from datetime import datetime
 from types import EllipsisType
 from typing import Any
 
@@ -1637,6 +1638,8 @@ async def list_sessions(
     limit: int = 50,
     after: str | None = None,
     ids: list[str] | None = None,
+    stop_reason: str | None = None,
+    since: datetime | None = None,
 ) -> list[Session]:
     """Keyset-paginated session list with derived ``status`` ({active, idle}).
 
@@ -1675,7 +1678,9 @@ async def list_sessions(
             ("agent_id", agent_id),
             (f"({_SESSION_STATUS_EXPR})", status),
             ("parent_run_id", parent_run_id),
+            ("stop_reason->>'type'", stop_reason),
         ],
+        minimums=[("updated_at", since)],
         # last_event_at: timestamp of the session's newest event. ``ORDER BY
         # seq DESC LIMIT 1`` rides the (session_id, seq) index — O(log n) even
         # for huge sessions (unlike MAX(created_at), which has no index).

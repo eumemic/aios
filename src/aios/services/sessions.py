@@ -1355,6 +1355,8 @@ async def list_sessions(
     after: str | None = None,
     ids: list[str] | None = None,
     view: Literal["full", "lite"] = "full",
+    stop_reason: str | None = None,
+    since: datetime | None = None,
 ) -> list[Session]:
     # See ``get_session`` for the rationale on the snapshot wrap.
     # ``view=lite`` is the roster/status path: same rows + derived status /
@@ -1372,6 +1374,8 @@ async def list_sessions(
             after=after,
             account_id=account_id,
             ids=ids,
+            stop_reason=stop_reason,
+            since=since,
         )
         if not sessions:
             return sessions

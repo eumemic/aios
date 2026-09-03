@@ -12,6 +12,7 @@ Postgres ``LISTEN``/``NOTIFY``.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Query, UploadFile, status
@@ -144,6 +145,8 @@ async def list_(
     parent_run_id: str | None = None,
     limit: PageLimit = None,
     ids: Annotated[list[str] | None, Query()] = None,
+    stop_reason: Literal["error"] | None = None,
+    since: datetime | None = None,
     view: Literal["full", "lite"] | None = None,
 ) -> ListResponse[Session]:
     """List sessions, newest first, keyset-paginated.
@@ -175,6 +178,8 @@ async def list_(
             "parent_run_id": parent_run_id,
             "limit": limit,
             "ids": ids,
+            "stop_reason": stop_reason,
+            "since": since.isoformat() if since is not None else None,
             "view": view,
         },
     )
@@ -185,6 +190,9 @@ async def list_(
         status_filter = st.filters.get("status")
         parent_run_id = st.filters.get("parent_run_id")
         ids = st.filters.get("ids")
+        stop_reason = st.filters.get("stop_reason")
+        raw_since = st.filters.get("since")
+        since = datetime.fromisoformat(raw_since) if raw_since is not None else None
         view = st.filters.get("view")
     effective_view: Literal["full", "lite"] = view if view in ("full", "lite") else "full"
     items = await service.list_sessions(
@@ -197,6 +205,8 @@ async def list_(
         account_id=account_id,
         ids=ids,
         view=effective_view,
+        stop_reason=stop_reason,
+        since=since,
     )
     return ListResponse[Session].paginate(
         items,
@@ -207,6 +217,8 @@ async def list_(
             "status": status_filter,
             "parent_run_id": parent_run_id,
             "ids": ids,
+            "stop_reason": stop_reason,
+            "since": since.isoformat() if since is not None else None,
             "view": effective_view if effective_view != "full" else None,
         },
     )

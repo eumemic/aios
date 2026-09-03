@@ -1,5 +1,6 @@
+import datetime
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -20,6 +21,8 @@ def _get_kwargs(
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     ids: list[str] | None | Unset = UNSET,
+    stop_reason: Literal["error"] | None | Unset = UNSET,
+    since: datetime.datetime | None | Unset = UNSET,
     view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> dict[str, Any]:
@@ -75,6 +78,22 @@ def _get_kwargs(
     else:
         json_ids = ids
     params["ids"] = json_ids
+
+    json_stop_reason: Literal["error"] | None | Unset
+    if isinstance(stop_reason, Unset):
+        json_stop_reason = UNSET
+    else:
+        json_stop_reason = stop_reason
+    params["stop_reason"] = json_stop_reason
+
+    json_since: None | str | Unset
+    if isinstance(since, Unset):
+        json_since = UNSET
+    elif isinstance(since, datetime.datetime):
+        json_since = since.isoformat()
+    else:
+        json_since = since
+    params["since"] = json_since
 
     json_view: None | str | Unset
     if isinstance(view, Unset):
@@ -136,6 +155,8 @@ def sync_detailed(
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     ids: list[str] | None | Unset = UNSET,
+    stop_reason: Literal["error"] | None | Unset = UNSET,
+    since: datetime.datetime | None | Unset = UNSET,
     view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -162,6 +183,8 @@ def sync_detailed(
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         ids (list[str] | None | Unset):
+        stop_reason (Literal['error'] | None | Unset):
+        since (datetime.datetime | None | Unset):
         view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
@@ -180,6 +203,8 @@ def sync_detailed(
         parent_run_id=parent_run_id,
         limit=limit,
         ids=ids,
+        stop_reason=stop_reason,
+        since=since,
         view=view,
         authorization=authorization,
     )
@@ -200,6 +225,8 @@ def sync(
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     ids: list[str] | None | Unset = UNSET,
+    stop_reason: Literal["error"] | None | Unset = UNSET,
+    since: datetime.datetime | None | Unset = UNSET,
     view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -226,6 +253,8 @@ def sync(
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         ids (list[str] | None | Unset):
+        stop_reason (Literal['error'] | None | Unset):
+        since (datetime.datetime | None | Unset):
         view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
@@ -245,6 +274,8 @@ def sync(
         parent_run_id=parent_run_id,
         limit=limit,
         ids=ids,
+        stop_reason=stop_reason,
+        since=since,
         view=view,
         authorization=authorization,
     ).parsed
@@ -259,6 +290,8 @@ async def asyncio_detailed(
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     ids: list[str] | None | Unset = UNSET,
+    stop_reason: Literal["error"] | None | Unset = UNSET,
+    since: datetime.datetime | None | Unset = UNSET,
     view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> Response[HTTPValidationError | ListResponseSession]:
@@ -285,6 +318,8 @@ async def asyncio_detailed(
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         ids (list[str] | None | Unset):
+        stop_reason (Literal['error'] | None | Unset):
+        since (datetime.datetime | None | Unset):
         view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
@@ -303,6 +338,8 @@ async def asyncio_detailed(
         parent_run_id=parent_run_id,
         limit=limit,
         ids=ids,
+        stop_reason=stop_reason,
+        since=since,
         view=view,
         authorization=authorization,
     )
@@ -321,6 +358,8 @@ async def asyncio(
     parent_run_id: None | str | Unset = UNSET,
     limit: int | None | Unset = UNSET,
     ids: list[str] | None | Unset = UNSET,
+    stop_reason: Literal["error"] | None | Unset = UNSET,
+    since: datetime.datetime | None | Unset = UNSET,
     view: ListSessionsViewType0 | None | Unset = UNSET,
     authorization: None | str | Unset = UNSET,
 ) -> HTTPValidationError | ListResponseSession | None:
@@ -347,6 +386,8 @@ async def asyncio(
         parent_run_id (None | str | Unset):
         limit (int | None | Unset):
         ids (list[str] | None | Unset):
+        stop_reason (Literal['error'] | None | Unset):
+        since (datetime.datetime | None | Unset):
         view (ListSessionsViewType0 | None | Unset):
         authorization (None | str | Unset):
 
@@ -367,6 +408,8 @@ async def asyncio(
             parent_run_id=parent_run_id,
             limit=limit,
             ids=ids,
+            stop_reason=stop_reason,
+            since=since,
             view=view,
             authorization=authorization,
         )
