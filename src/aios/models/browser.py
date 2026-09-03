@@ -55,10 +55,27 @@ class TakeoverCloseResponse(BaseModel):
 
 
 class InputEvent(BaseModel):
-    """One raw viewer input event (§5.6 vocabulary)."""
+    """One raw viewer input event (§5.6 vocabulary).
+
+    The nav quartet (``navigate``/``back``/``forward``/``reload``) is the
+    viewer's browser chrome — URL bar and nav buttons — riding the same spool
+    as raw input so a typed URL stays off the event log exactly like a typed
+    password. The driver guards ``navigate`` (public http(s) only) and treats
+    the rest as history moves needing no URL.
+    """
 
     type: Literal[
-        "pointer_move", "pointer_down", "pointer_up", "wheel", "key_down", "key_up", "text"
+        "pointer_move",
+        "pointer_down",
+        "pointer_up",
+        "wheel",
+        "key_down",
+        "key_up",
+        "text",
+        "navigate",
+        "back",
+        "forward",
+        "reload",
     ]
     x: float | None = None
     y: float | None = None
@@ -67,6 +84,7 @@ class InputEvent(BaseModel):
     dy: float | None = None
     key: str | None = Field(default=None, max_length=64)
     text: str | None = Field(default=None, max_length=2000)
+    url: str | None = Field(default=None, max_length=2048)
 
 
 class InputBatch(BaseModel):
@@ -101,3 +119,25 @@ class BrowserStatusResponse(BaseModel):
     title: str | None = None
     signed_in_hosts: list[str] = Field(default_factory=list)
     takeover: BrowserTakeoverStatus | None = None
+
+
+class BrowserPeekPage(BaseModel):
+    """One JPEG of a page's viewport plus its trusted chrome. ``origin`` and
+    ``security`` come from the driver's committed URL, never the pixels."""
+
+    jpeg_b64: str
+    w: int
+    h: int
+    origin: str | None = None
+    security: Literal["secure", "insecure"] | None = None
+
+
+class BrowserPeekResponse(BaseModel):
+    """A read-only look at the computer: not running, running with no page
+    to show, or running with the page. Never provisions, never creates a
+    page, and is refused while a human holds the computer."""
+
+    running: bool
+    url: str | None = None
+    title: str | None = None
+    page: BrowserPeekPage | None = None

@@ -17,17 +17,24 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from aios_browser_driver import guards
+
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
 _Button = Literal["left", "middle", "right"]
 _MULTICLICK_WINDOW_S = 0.5
 _MULTICLICK_RADIUS_PX = 4.0
+# Nav waits for COMMIT only — the screencast shows the load in progress, like
+# a real browser. The pump applies events serially, so a full-load wait would
+# freeze the human's pointer for the whole page load.
+_NAV_TIMEOUT_MS = 10_000
 
 
 class InputInjector:
-    def __init__(self, page: Page) -> None:
+    def __init__(self, page: Page, *, allow_private: bool = False) -> None:
         self._page = page
+        self._allow_private = allow_private
         self._x = 0.0
         self._y = 0.0
         self._last_down_at = 0.0
@@ -65,6 +72,25 @@ class InputInjector:
             await self._page.keyboard.up(_str(event, "key"))
         elif etype == "text":
             await self._page.keyboard.insert_text(_str(event, "text"))
+        elif etype == "navigate":
+            # The viewer's URL bar. Same public-http(s) guard as agent
+            # navigation: the human types their own destinations, but this
+            # browser lives inside the account's network position, and a
+            # takeover must not become the way to reach what the agent
+            # cannot. Guard/timeout failures raise, and the pump's
+            # per-event suppress drops them — the unchanged frame stream is
+            # the feedback, as in a browser whose page refused to load.
+            url = _str(event, "url")
+            await guards.check_url(url, allow_private=self._allow_private)
+            await self._page.goto(url, timeout=_NAV_TIMEOUT_MS, wait_until="commit")
+        elif etype == "back":
+            # History moves need no guard: every entry was committed under
+            # the guard (agent nav) or by the human's own driving.
+            await self._page.go_back(timeout=_NAV_TIMEOUT_MS, wait_until="commit")
+        elif etype == "forward":
+            await self._page.go_forward(timeout=_NAV_TIMEOUT_MS, wait_until="commit")
+        elif etype == "reload":
+            await self._page.reload(timeout=_NAV_TIMEOUT_MS, wait_until="commit")
         # An unknown type is ignored — the vocabulary is pinned, and a human's
         # live driving must not stall on one odd line.
 

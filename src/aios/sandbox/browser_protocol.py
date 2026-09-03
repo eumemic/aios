@@ -133,6 +133,7 @@ BrowserOp = Literal[
     "takeover_open",
     "takeover_close",
     "status",
+    "peek",
     "revoke_site",
 ]
 
