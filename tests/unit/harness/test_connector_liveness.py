@@ -14,6 +14,7 @@ from aios.harness.connector_liveness import (
     ConnectorLivenessDetector,
     DockerConnectorHealthReader,
     TransportHealth,
+    read_bound_connection_activity,
 )
 
 
@@ -46,7 +47,10 @@ class _SQLitePool:
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, created_at TEXT, archived_at TEXT
             );
-            CREATE TABLE events (session_id TEXT, created_at TEXT);
+            CREATE TABLE events (
+                session_id TEXT, created_at TEXT, kind TEXT,
+                role TEXT, orig_channel TEXT
+            );
             """
         )
 
@@ -98,7 +102,8 @@ async def test_detector_uses_current_binding_activity_from_production_reader() -
         ("conn_1", "session_historical", (now - timedelta(days=30)).isoformat()),
     )
     pool.db.executemany(
-        "INSERT INTO events VALUES (?, ?)",
+        "INSERT INTO events (session_id, created_at, kind, role, orig_channel) "
+        "VALUES (?, ?, 'message', 'user', 'whatsapp/account/chat')",
         [
             ("session_current", current_activity.isoformat()),
             ("session_historical", historical_activity.isoformat()),
@@ -120,6 +125,58 @@ async def test_detector_uses_current_binding_activity_from_production_reader() -
     assert findings[0]["last_activity_at"] == current_activity.isoformat()
     assert findings[0]["silence_threshold_seconds"] == 604800
     alarm.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_connector_diagnostics_do_not_reset_receiving_activity() -> None:
+    """A connector crashloop cannot hide silence with fresh diagnostic events."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    receiving_activity = now - timedelta(days=9)
+    pool = _SQLitePool()
+    pool.db.execute(
+        "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+        ("conn_1", "whatsapp", json.dumps({"liveness_silence_threshold_seconds": 604800})),
+    )
+    pool.db.execute(
+        "INSERT INTO sessions VALUES (?, ?, NULL)",
+        ("session_1", (now - timedelta(days=10)).isoformat()),
+    )
+    pool.db.execute(
+        "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
+        ("conn_1", "single_session", "session_1", (now - timedelta(days=10)).isoformat()),
+    )
+    pool.db.executemany(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                "session_1",
+                receiving_activity.isoformat(),
+                "message",
+                "user",
+                "whatsapp/account/chat",
+            ),
+            (
+                "session_1",
+                (now - timedelta(minutes=1)).isoformat(),
+                "lifecycle",
+                None,
+                None,
+            ),
+        ],
+    )
+
+    activity = await read_bound_connection_activity(pool, {"whatsapp": 604800})
+    assert activity[0].last_activity_at == receiving_activity
+
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 604800},
+        health_reader=_HealthReader({"conn_1": TransportHealth(False, "transport not serving")}),
+        alarm=MagicMock(),
+        rate_limit_seconds=3600,
+    )
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+    assert [finding["connection_id"] for finding in findings] == ["conn_1"]
 
 
 @pytest.mark.asyncio
@@ -194,7 +251,8 @@ async def test_rebinding_per_chat_excludes_prior_binding_sessions() -> None:
         ],
     )
     pool.db.executemany(
-        "INSERT INTO events VALUES (?, ?)",
+        "INSERT INTO events (session_id, created_at, kind, role, orig_channel) "
+        "VALUES (?, ?, 'message', 'user', 'whatsapp/account/chat')",
         [
             ("session_current", current_activity.isoformat()),
             ("session_historical", historical_activity.isoformat()),
@@ -373,7 +431,8 @@ async def test_review_two_silent_connections_stopped_container_alarm() -> None:
             (connection_id, "single_session", session_id, bound_at.isoformat()),
         )
         pool.db.execute(
-            "INSERT INTO events VALUES (?, ?)",
+            "INSERT INTO events (session_id, created_at, kind, role, orig_channel) "
+            "VALUES (?, ?, 'message', 'user', 'whatsapp/account/chat')",
             (session_id, (now - timedelta(days=9)).isoformat()),
         )
     detector = ConnectorLivenessDetector(
@@ -461,13 +520,17 @@ async def test_all_unhealthy_from_startup_two_connections_both_alarm(tmp_path: P
         pool.db.execute(
             "INSERT INTO connections VALUES (?, ?, ?, NULL)", (connection_id, "whatsapp", "{}")
         )
-        pool.db.execute("INSERT INTO sessions VALUES (?, ?, NULL)", (session_id, bound_at.isoformat()))
+        pool.db.execute(
+            "INSERT INTO sessions VALUES (?, ?, NULL)", (session_id, bound_at.isoformat())
+        )
         pool.db.execute(
             "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
             (connection_id, "single_session", session_id, bound_at.isoformat()),
         )
         pool.db.execute(
-            "INSERT INTO events VALUES (?, ?)", (session_id, (now - timedelta(days=9)).isoformat())
+            "INSERT INTO events (session_id, created_at, kind, role, orig_channel) "
+            "VALUES (?, ?, 'message', 'user', 'whatsapp/account/chat')",
+            (session_id, (now - timedelta(days=9)).isoformat()),
         )
 
     alarm = MagicMock()

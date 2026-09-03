@@ -98,6 +98,9 @@ async def read_bound_connection_activity(
                    AS last_activity_at
           FROM bound_sessions bs
           LEFT JOIN events e ON e.session_id = bs.session_id
+                            AND e.kind = 'message'
+                            AND e.role = 'user'
+                            AND e.orig_channel IS NOT NULL
          GROUP BY bs.connection_id, bs.connector, bs.metadata
          ORDER BY bs.connection_id
         """
