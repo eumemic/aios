@@ -107,6 +107,25 @@ _LAUNCH_ARGS = [
 ]
 _MAX_PAGES_PER_SESSION = 4
 
+# Chromium's process-singleton residue in a persistent profile. The registry
+# keys browser containers one-per-account, so this daemon's Chromium is the
+# ONLY legitimate holder of this profile — a lock present before launch is
+# always the residue of an unclean death (idle-reap SIGKILL, OOM, host
+# reboot), never a live peer. Chromium itself cannot tell: the lock names the
+# dead container's hostname, so it refuses the profile as "in use by another
+# computer" and every future container for the account crash-loops (wedged
+# prod, 2026-09-01: takeover open → "no reply from driver" forever).
+_SINGLETON_RESIDUE = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def clear_stale_singleton_locks(profile_dir: Path) -> None:
+    """Remove Chromium's singleton lock residue before launch."""
+    for name in _SINGLETON_RESIDUE:
+        path = profile_dir / name
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            log.warning("removed stale profile lock %s", name)
+
 
 @dataclass
 class PageEntry:
@@ -230,6 +249,7 @@ class BrowserHost:
     async def _launch(self) -> None:
         from playwright.async_api import async_playwright
 
+        clear_stale_singleton_locks(self.workspace / _PROFILE_SUBDIR)
         if self._pw is None:
             self._pw = await async_playwright().start()
         context = await self._pw.chromium.launch_persistent_context(
