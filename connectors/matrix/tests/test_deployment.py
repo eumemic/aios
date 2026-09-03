@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -68,7 +69,25 @@ def test_healthcheck_requires_connection_serving_heartbeat(tmp_path: Path) -> No
         )
         assert result.returncode != 0
 
-        heartbeat.touch()
+        heartbeat.write_text("{malformed")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "healthcheck.py")],
+            env=env,
+            check=False,
+        )
+        assert result.returncode != 0
+
+        # Match the structurally valid payload emitted by the SDK heartbeat
+        # publisher once discovery has completed and no transport is unhealthy.
+        heartbeat.write_text(
+            json.dumps(
+                {
+                    "healthy_connection_ids": ["matrix-test-connection"],
+                    "unhealthy_connection_ids": [],
+                },
+                sort_keys=True,
+            )
+        )
         result = subprocess.run(
             [sys.executable, str(ROOT / "healthcheck.py")],
             env=env,
