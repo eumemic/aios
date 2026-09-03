@@ -73,6 +73,7 @@ async def read_bound_connection_activity(
         """
         WITH bound_sessions AS (
             SELECT c.id AS connection_id, c.connector, c.metadata,
+                   c.connector || '/' || c.external_account_id || '/' AS channel_prefix,
                    s.id AS session_id, s.created_at AS session_created_at,
                    b.created_at AS bound_at
               FROM connections c
@@ -83,6 +84,7 @@ async def read_bound_connection_activity(
              WHERE c.archived_at IS NULL
             UNION ALL
             SELECT c.id, c.connector, c.metadata,
+                   c.connector || '/' || c.external_account_id || '/',
                    s.id, s.created_at, b.created_at
               FROM connections c
               JOIN bindings b ON b.connection_id = c.id
@@ -100,7 +102,8 @@ async def read_bound_connection_activity(
           LEFT JOIN events e ON e.session_id = bs.session_id
                             AND e.kind = 'message'
                             AND e.role = 'user'
-                            AND e.orig_channel IS NOT NULL
+                            AND substr(e.orig_channel, 1, length(bs.channel_prefix))
+                                = bs.channel_prefix
          GROUP BY bs.connection_id, bs.connector, bs.metadata
          ORDER BY bs.connection_id
         """
@@ -143,6 +146,7 @@ class DockerConnectorHealthReader:
         finally:
             await docker.close()
         result: dict[str, TransportHealth] = {}
+        correlated_observations: dict[str, list[TransportHealth]] = {}
         for data in payloads:
             config = data.get("Config") or {}
             labels = data.get("Labels") or config.get("Labels") or {}
@@ -202,17 +206,21 @@ class DockerConnectorHealthReader:
                     except (AttributeError, TypeError, ValueError):
                         continue
                     for connection_id in correlated.get("healthy_connection_ids", []):
-                        if runtime_down:
-                            result[str(connection_id)] = TransportHealth(
-                                False, detail, definitive_connector_outage=True
-                            )
-                        else:
-                            result[str(connection_id)] = TransportHealth(True, "healthy")
+                        observation = (
+                            TransportHealth(False, detail, definitive_connector_outage=True)
+                            if runtime_down
+                            else TransportHealth(True, "healthy")
+                        )
+                        correlated_observations.setdefault(str(connection_id), []).append(
+                            observation
+                        )
                     for connection_id in correlated.get("unhealthy_connection_ids", []):
-                        result[str(connection_id)] = TransportHealth(
-                            False,
-                            detail if runtime_down else "transport not serving",
-                            definitive_connector_outage=runtime_down,
+                        correlated_observations.setdefault(str(connection_id), []).append(
+                            TransportHealth(
+                                False,
+                                detail if runtime_down else "transport not serving",
+                                definitive_connector_outage=runtime_down,
+                            )
                         )
                     break
 
@@ -238,6 +246,20 @@ class DockerConnectorHealthReader:
                         and bool(observation.definitive_connector_outage)
                     ),
                 )
+        for connection_id, observations in correlated_observations.items():
+            available = next((item for item in observations if item.healthy), None)
+            if available is not None:
+                # Any currently receiving runtime proves availability; historical
+                # observations retained by stopped replicas cannot override it.
+                result[connection_id] = available
+                continue
+            result[connection_id] = TransportHealth(
+                False,
+                observations[0].detail,
+                definitive_connector_outage=all(
+                    bool(item.definitive_connector_outage) for item in observations
+                ),
+            )
         return result
 
 

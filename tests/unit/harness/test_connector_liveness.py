@@ -35,7 +35,8 @@ class _SQLitePool:
         self.db.executescript(
             """
             CREATE TABLE connections (
-                id TEXT PRIMARY KEY, connector TEXT, metadata TEXT, archived_at TEXT
+                id TEXT PRIMARY KEY, connector TEXT, metadata TEXT, archived_at TEXT,
+                external_account_id TEXT GENERATED ALWAYS AS ('account') VIRTUAL
             );
             CREATE TABLE bindings (
                 connection_id TEXT, mode TEXT, session_id TEXT,
@@ -449,7 +450,9 @@ async def test_review_two_silent_connections_stopped_container_alarm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_unhealthy_from_startup_two_connections_both_alarm(tmp_path: Path) -> None:
+async def test_all_unhealthy_from_startup_two_connections_both_alarm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Finding #1 end-to-end: two connections that are unhealthy from process
     startup (never became ready) must both alarm.
 
@@ -534,21 +537,15 @@ async def test_all_unhealthy_from_startup_two_connections_both_alarm(tmp_path: P
         )
 
     alarm = MagicMock()
-    import aios.harness.connector_liveness as liveness_mod
-
-    original_docker = liveness_mod.aiodocker.Docker
-    liveness_mod.aiodocker.Docker = lambda: docker
-    try:
-        detector = ConnectorLivenessDetector(
-            pool,
-            thresholds={"whatsapp": 7 * 86400},
-            health_reader=DockerConnectorHealthReader(),
-            alarm=alarm,
-            rate_limit_seconds=3600,
-        )
-        findings = await detector.check_once(now=now, monotonic_now=10000)
-    finally:
-        liveness_mod.aiodocker.Docker = original_docker
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=DockerConnectorHealthReader(),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+    findings = await detector.check_once(now=now, monotonic_now=10000)
 
     assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
     assert alarm.call_count == 2
