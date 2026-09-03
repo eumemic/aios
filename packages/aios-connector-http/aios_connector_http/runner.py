@@ -1250,9 +1250,13 @@ class HttpConnector:
                             # off. Never pin a failed worker to its original snapshot.
                             secrets = await self._fetch_runtime_secrets(connection_id)
                             state.secrets = secrets
+                    # A reconnect attempt is not evidence that the connector is
+                    # ready to serve this connection.  Keep the degraded status
+                    # until the serve exits cleanly; long-running serves restore
+                    # their per-connection state before handling tool calls.
+                    await self.serve_connection(connection_id, secrets)
                     if state is not None:
                         state.serve_status = "serving"
-                    await self.serve_connection(connection_id, secrets)
                     break
                 except asyncio.CancelledError:
                     raise
