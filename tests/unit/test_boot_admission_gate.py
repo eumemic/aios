@@ -25,9 +25,11 @@ import structlog
 from aios.retirements import Retirement, Surface, boot_gate
 from aios.retirements.boot_gate import (
     DatabaseBehindContract,
+    DatabaseNotAtHead,
     DatabaseUnavailable,
     LiveResidueDetected,
     RetirementsNotAdmissible,
+    assert_at_head,
     assert_retirements_admissible,
 )
 
@@ -137,6 +139,32 @@ def patch_registry(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(boot_gate, "REGISTRY", registry)
 
     return _set
+
+
+@pytest.mark.parametrize("version", ["0169", "0170"])
+async def test_at_or_ahead_of_code_head_is_admitted(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    """The current head and a forward-migrated DB both admit rolling deploys."""
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0169")
+    await assert_at_head(_FakePool(_FakeConn(version=version)))
+
+
+async def test_db_behind_code_head_refuses_even_past_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB past retirement contracts still refuses when behind this image."""
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0169")
+    with pytest.raises(DatabaseNotAtHead) as exc:
+        await assert_at_head(_FakePool(_FakeConn(version="0166")))
+    assert isinstance(exc.value, RetirementsNotAdmissible)
+
+
+async def test_at_head_fails_closed_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(boot_gate, "_code_alembic_head", lambda: "0169")
+    pool = _FakePool(acquire_error=ConnectionError("no route to db"))
+    with pytest.raises(DatabaseUnavailable):
+        await assert_at_head(pool)
 
 
 async def test_behind_db_refuses_readiness(patch_registry: Any) -> None:

@@ -51,6 +51,7 @@ from aios.jobs.app import app as procrastinate_app
 from aios.logging import configure_logging, get_logger
 from aios.retirements.boot_gate import (
     RetirementsNotAdmissible,
+    assert_at_head,
     assert_retirements_admissible,
 )
 from aios.sandbox.volumes import attachments_root, memory_stores_root, uploads_root
@@ -73,6 +74,7 @@ async def _await_retirements_admissible(pool: Any, log: Any) -> None:
     logged_wait = False
     while True:
         try:
+            await assert_at_head(pool)
             await assert_retirements_admissible(pool)
             return
         except RetirementsNotAdmissible as exc:
