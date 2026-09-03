@@ -8,14 +8,15 @@ eumemic-ops audit FAILS the build if it is configured pre-deploy) — and ONTO t
 code itself, at startup, *before* readiness flips green.
 
 :func:`assert_retirements_admissible` is called from BOTH the api and the worker
-startup path, gating readiness. For every contracted descriptor (one whose
-``contract_rev`` is set, i.e. whose data migration has been written) it proves:
+startup path, gating readiness. The startup paths first call :func:`assert_at_head`, proving that the live
+``alembic_version`` is at least the migration head required by this image. A DB
+behind the image FAILS admission; a DB ahead remains admissible for rollback.
+They then call :func:`assert_retirements_admissible`, which proves for every
+contracted descriptor (one whose ``contract_rev`` is set):
 
-1. **alembic head**: the live ``alembic_version`` is ``>= contract_rev``. If the
-   DB is behind — the post-deploy migrate has not run yet, OR a restore pointed
-   new code at an old DB — the proof FAILS. This is the startup alembic-head
-   assertion that did not exist before (the only prior startup version check was
-   the unrelated wf-version drift check at ``workflows/service.py``).
+1. **contract revision reached**: the live ``alembic_version`` is
+   ``>= contract_rev``. If the DB is behind the retirement's rewrite migration,
+   the proof FAILS.
 2. **live residue == 0**: once the rev is satisfied, the per-surface residue
    aggregate ``SUM over descriptor.surfaces of count(rows WHERE predicate(token))``
    must be zero. If any surface still carries a retired token the proof FAILS and
@@ -42,7 +43,9 @@ from __future__ import annotations
 from typing import Any
 
 import asyncpg
+from alembic.script import ScriptDirectory
 
+from aios.db.migrations import alembic_config
 from aios.logging import get_logger
 from aios.retirements import Retirement
 from aios.retirements.registry import REGISTRY
@@ -60,6 +63,10 @@ class RetirementsNotAdmissible(RuntimeError):
     loop tick. The distinct subclasses exist only to make the *reason* legible
     in logs and tests; callers should catch the base class.
     """
+
+
+class DatabaseNotAtHead(RetirementsNotAdmissible):
+    """The database is behind the migration head required by this image."""
 
 
 class DatabaseBehindContract(RetirementsNotAdmissible):
@@ -120,6 +127,38 @@ async def _current_alembic_version(conn: asyncpg.Connection[Any]) -> str | None:
         return None
     version: str | None = await conn.fetchval("SELECT version_num FROM alembic_version LIMIT 1")
     return version
+
+
+def _code_alembic_head() -> str:
+    """Return the migration head required by this application image."""
+
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    if head is None:
+        raise RuntimeError("application image has no Alembic head")
+    return head
+
+
+async def assert_at_head(pool: asyncpg.Pool[Any]) -> None:
+    """Refuse boot when the database is behind this image's migration head.
+
+    A database ahead of this image is admitted to preserve rollback during an
+    expand-then-contract rolling deploy. Database access failures fail closed.
+    """
+
+    head = _code_alembic_head()
+    try:
+        async with pool.acquire() as conn:
+            version = await _current_alembic_version(conn)
+    except (asyncpg.PostgresError, OSError, ConnectionError, TimeoutError) as exc:
+        log.warning("boot_gate.db_unavailable", error=str(exc))
+        raise DatabaseUnavailable(f"cannot assert database migration head: {exc}") from exc
+
+    if version is None or version < head:
+        log.info("boot_gate.database_behind_head", alembic_version=version, code_head=head)
+        raise DatabaseNotAtHead(
+            f"DB at alembic_version={version!r} is behind code head={head!r}; "
+            "refusing readiness until migrations complete"
+        )
 
 
 async def assert_retirements_admissible(pool: asyncpg.Pool[Any]) -> None:
