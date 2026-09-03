@@ -265,6 +265,12 @@ class DockerConnectorHealthReader:
                     # strict static checking.
                     healthy_ids: list[str] = list(raw_healthy_ids)
                     unhealthy_ids: list[str] = list(raw_unhealthy_ids)
+                    if not healthy and not healthy_ids and not unhealthy_ids:
+                        # A failed probe's empty fallback says nothing about which
+                        # bindings this container served. Keep searching history
+                        # for identities, but downgrade any older green verdict.
+                        newest_probe_malformed = True
+                        continue
                     failed_all_healthy_probe = not healthy and not unhealthy_ids
                     for connection_id in healthy_ids:
                         if runtime_down:
