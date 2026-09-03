@@ -57,6 +57,10 @@ def _call_assemble(
             "aios.sandbox.volumes.ensure_session_tmp_dir",
             return_value=Path("/tmp/t"),
         ),
+        patch(
+            "aios.sandbox.volumes.ensure_session_cache_dir",
+            return_value=Path("/tmp/c"),
+        ),
     ):
         return _assemble_plan(
             session_id="sess_01TEST",
