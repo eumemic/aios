@@ -1074,9 +1074,33 @@ class HttpConnector:
             os.close(fd)
 
     @staticmethod
-    def _refresh_heartbeat(path: Path, identity: tuple[int, int], payload: bytes = b"") -> bool:
-        """Refresh only the inode previously claimed by this process."""
-        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    def _refresh_heartbeat(
+        path: Path,
+        identity: tuple[int, int],
+        payload: bytes = b"",
+        touch_mtime: bool = True,
+    ) -> bool:
+        """Refresh only the inode previously claimed by this process.
+
+        ``touch_mtime`` separates the two signals the heartbeat carries: the
+        file CONTENT (which connections are healthy) and its FRESHNESS (mtime,
+        which the container probe ages out). During a whole-runtime outage the
+        current content must still be written — so the out-of-container
+        connector-liveness detector reads the true all-unhealthy state instead
+        of a frozen all-healthy payload — while the mtime is deliberately left
+        stale so Docker's own HEALTHCHECK ages the file out and marks the
+        runtime unhealthy.
+
+        When ``touch_mtime`` is False the content is written at most once per
+        change: if the on-disk bytes already equal ``payload`` the file is left
+        entirely untouched, so repeated fail-closed iterations neither rewrite
+        nor perturb the frozen mtime. When a write is required the prior
+        timestamps are restored so the freshness signal keeps aging.
+        """
+        # Reading the current bytes (fail-closed idempotency check) needs read
+        # access; the ordinary refresh path only writes.
+        base_flag = os.O_RDWR if not touch_mtime else os.O_WRONLY
+        flags = base_flag | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(path, flags)
         except FileNotFoundError:
@@ -1085,11 +1109,26 @@ class HttpConnector:
             stat = os.fstat(fd)
             if (stat.st_dev, stat.st_ino) != identity:
                 return False
+            if not touch_mtime:
+                # Idempotent content correction: only write (and only disturb
+                # the file at all) when the current bytes differ. This keeps the
+                # mtime genuinely frozen across repeated fail-closed iterations
+                # instead of rewriting-and-restoring on every pass.
+                current = os.read(fd, len(payload) + 1)
+                if current == payload:
+                    return True
+            prior = (stat.st_atime_ns, stat.st_mtime_ns)
+            os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
             if payload:
                 os.write(fd, payload)
             os.fsync(fd)
-            os.utime(fd, None)
+            if touch_mtime:
+                os.utime(fd, None)
+            else:
+                # Writing advanced mtime to now; restore the prior timestamps so
+                # the freshness signal keeps aging toward stale.
+                os.utime(fd, ns=prior)
             return True
         finally:
             os.close(fd)
@@ -1130,20 +1169,35 @@ class HttpConnector:
                     },
                     sort_keys=True,
                 ).encode()
-                # Preserve the established fail-closed behavior when every
-                # active transport is down. A mixed state must still publish
-                # the correlated IDs so Docker can expose which sibling failed.
-                if unhealthy_ids and not healthy_ids:
-                    await asyncio.sleep(self.HEARTBEAT_INTERVAL)
-                    continue
+                # Fail-closed when every active transport is down: the
+                # container probe must go stale so Docker turns the runtime
+                # unhealthy. But withholding the write also leaves the file's
+                # CONTENT frozen at the last (all-healthy) payload, which the
+                # out-of-container connector-liveness detector reads and trusts
+                # — green-washing a whole-runtime outage. So we still write the
+                # current correlated content (neither ID healthy) and only
+                # withhold the freshness signal (mtime) via touch_mtime=False.
+                # A mixed state publishes normally so the healthy sibling stays
+                # visible and the heartbeat stays fresh.
+                fail_closed = bool(unhealthy_ids) and not healthy_ids
                 if self._heartbeat_owned and self._heartbeat_identity is not None:
                     if not await asyncio.to_thread(
-                        self._refresh_heartbeat, path, self._heartbeat_identity, payload
+                        self._refresh_heartbeat,
+                        path,
+                        self._heartbeat_identity,
+                        payload,
+                        not fail_closed,
                     ):
                         # The path was replaced after our claim. Relinquish it;
                         # never mutate or later unlink the replacement.
                         self._heartbeat_owned = False
                         self._heartbeat_identity = None
+                elif fail_closed:
+                    # No claim yet and the runtime is fully down: publishing a
+                    # fresh claim here would manufacture a heartbeat for a dead
+                    # transport. Withhold the claim; write the current unhealthy
+                    # content only if we already own a stale inode above.
+                    pass
                 else:
                     try:
                         identity = await asyncio.to_thread(self._claim_heartbeat, path)

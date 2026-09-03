@@ -180,6 +180,17 @@ class DockerConnectorHealthReader:
             # SDK probes print connection-correlated state into Docker's health
             # log. Consume the newest valid record so one failed account does
             # not make a healthy sibling look failed (or hide the real failure).
+            #
+            # The health log is HISTORICAL: it survives process exit and retains
+            # the last successful probe output. When the runtime is definitively
+            # unavailable (stopped/dead/exiting/absent), that retained "healthy"
+            # verdict is no longer true for any connection this runtime served,
+            # so we must not let it classify a connection transport-healthy. We
+            # still consume the record to attribute WHICH connections the dead
+            # runtime was serving — every one of them is now unhealthy with a
+            # definitive connector outage — but a correlated "unhealthy" verdict
+            # is likewise upgraded to a definitive outage.
+            runtime_down = state in {"dead", "exited", "removing"}
             if isinstance(state_payload, dict):
                 health_payload = state_payload.get("Health") or {}
                 for entry in reversed(health_payload.get("Log") or []):
@@ -188,10 +199,17 @@ class DockerConnectorHealthReader:
                     except (AttributeError, TypeError, ValueError):
                         continue
                     for connection_id in correlated.get("healthy_connection_ids", []):
-                        result[str(connection_id)] = TransportHealth(True, "healthy")
+                        if runtime_down:
+                            result[str(connection_id)] = TransportHealth(
+                                False, detail, definitive_connector_outage=True
+                            )
+                        else:
+                            result[str(connection_id)] = TransportHealth(True, "healthy")
                     for connection_id in correlated.get("unhealthy_connection_ids", []):
                         result[str(connection_id)] = TransportHealth(
-                            False, "transport not serving", definitive_connector_outage=False
+                            False,
+                            detail if runtime_down else "transport not serving",
+                            definitive_connector_outage=runtime_down,
                         )
                     break
 

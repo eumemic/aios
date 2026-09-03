@@ -497,3 +497,120 @@ async def test_connection_correlated_health_alarms_only_unhealthy_silent_sibling
     findings = await detector.check_once(now=now, monotonic_now=10000)
 
     assert {finding["connection_id"] for finding in findings} == {"silent_unhealthy"}
+
+
+@pytest.mark.asyncio
+async def test_exited_container_retained_healthy_log_does_not_suppress_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding #1: a stopped runtime's retained probe log must not mark a
+    connection transport-healthy. The last successful probe named conn_1 in
+    healthy_connection_ids, but the container has since exited."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    monkeypatch.setattr(
+        "aios.harness.connector_liveness.read_bound_connection_activity",
+        AsyncMock(
+            return_value=[
+                BoundConnectionActivity("conn_1", "whatsapp", now - timedelta(days=9), 7 * 86400)
+            ]
+        ),
+    )
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "exited",
+                "Health": {
+                    "Status": "unhealthy",
+                    "Log": [
+                        {
+                            "Output": json.dumps(
+                                {
+                                    "healthy_connection_ids": ["conn_1"],
+                                    "unhealthy_connection_ids": [],
+                                }
+                            )
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+    assert health["conn_1"].healthy is False
+    assert health["conn_1"].definitive_connector_outage is True
+
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        object(),
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=DockerConnectorHealthReader(),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+    assert {finding["connection_id"] for finding in findings} == {"conn_1"}
+
+
+@pytest.mark.asyncio
+async def test_running_container_correlated_healthy_log_still_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over-correction guard for finding #1: a RUNNING container's retained
+    healthy log must still classify conn_ok healthy (do not degrade into
+    'ignore the log entirely')."""
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+    monkeypatch.setattr(
+        "aios.harness.connector_liveness.read_bound_connection_activity",
+        AsyncMock(
+            return_value=[
+                BoundConnectionActivity("conn_ok", "whatsapp", now - timedelta(days=9), 7 * 86400)
+            ]
+        ),
+    )
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "running",
+                "Health": {
+                    "Status": "unhealthy",
+                    "Log": [
+                        {
+                            "Output": json.dumps(
+                                {
+                                    "healthy_connection_ids": ["conn_ok"],
+                                    "unhealthy_connection_ids": [],
+                                }
+                            )
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+    assert health["conn_ok"].healthy is True
+
+    alarm = MagicMock()
+    detector = ConnectorLivenessDetector(
+        object(),
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=DockerConnectorHealthReader(),
+        alarm=alarm,
+        rate_limit_seconds=3600,
+    )
+    findings = await detector.check_once(now=now, monotonic_now=10000)
+    assert findings == []

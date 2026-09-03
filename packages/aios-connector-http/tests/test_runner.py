@@ -2030,3 +2030,101 @@ class TestDeliveryAcks:
                 session_id="sess_1",
                 platform_message_id="SM123",
             )
+
+
+class TestHeartbeatWholeOutage:
+    """Finding #2: connection-correlated health must reflect current state even
+    when every active connection is unhealthy; a previously-healthy connection
+    must not remain classified healthy because freshness is withheld."""
+
+    async def _drive(self, connector: HttpConnector, path: Any, iterations: int) -> None:
+        """Run exactly ``iterations`` heartbeat-loop iterations, then stop.
+
+        The heartbeat is a two-phase publisher: it claims the inode on one
+        iteration and writes the payload on the next, so a fresh publish needs
+        two iterations before the file carries content."""
+        import asyncio as _asyncio
+
+        done = _asyncio.Event()
+        count = 0
+
+        async def _counting_sleep(_interval: float) -> None:
+            nonlocal count
+            count += 1
+            if count >= iterations:
+                done.set()
+                await _asyncio.Event().wait()  # park until cancelled
+            # otherwise return immediately to run the next iteration
+
+        with (
+            patch.object(connector, "HEARTBEAT_INTERVAL", 0.0),
+            patch("aios_connector_http.runner.asyncio.sleep", _counting_sleep),
+        ):
+            loop = _asyncio.create_task(connector._heartbeat_loop(path))
+            await done.wait()
+            loop.cancel()
+            with contextlib.suppress(_asyncio.CancelledError):
+                await loop
+
+    async def _drive_once(self, connector: HttpConnector, path: Any) -> None:
+        """Run two loop iterations so the two-phase claim+write completes."""
+        await self._drive(connector, path, iterations=2)
+
+    async def test_all_unhealthy_transition_is_published_not_stale(self, tmp_path: Any) -> None:
+        from aios_connector_http.healthcheck import read_connection_health
+        from aios_connector_http.runner import _ConnectionState
+
+        class _C(HttpConnector):
+            connector = "echo"
+            HEARTBEAT_INTERVAL = 0.0
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        path = tmp_path / "hb"
+        c._discovery_cursor = 1
+        # Two serving connections; publish both healthy.
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="a1", serve_status="serving"
+        )
+        c._connections["conn_2"] = _ConnectionState(
+            connection_id="conn_2", external_account_id="a2", serve_status="serving"
+        )
+        await self._drive_once(c, path)
+        healthy, unhealthy = read_connection_health(path)
+        assert healthy == ["conn_1", "conn_2"], (healthy, unhealthy)
+
+        # Both transition to restarting: every active connection is unhealthy.
+        c._connections["conn_1"].serve_status = "restarting"
+        c._connections["conn_2"].serve_status = "restarting"
+        await self._drive_once(c, path)
+
+        healthy, unhealthy = read_connection_health(path)
+        # The file must now describe the CURRENT state: neither healthy, both
+        # unhealthy. On the current head it retains the stale all-healthy
+        # payload, so this fails.
+        assert healthy == [], f"stale healthy payload retained: {healthy}"
+        assert set(unhealthy) == {"conn_1", "conn_2"}, unhealthy
+
+    async def test_mixed_state_still_publishes_healthy_sibling(self, tmp_path: Any) -> None:
+        """Over-correction guard: a mixed healthy/unhealthy state must still
+        publish the healthy sibling — the fix must not degrade into 'never
+        publish while any connection is unhealthy'."""
+        from aios_connector_http.healthcheck import read_connection_health
+        from aios_connector_http.runner import _ConnectionState
+
+        class _C(HttpConnector):
+            connector = "echo"
+            HEARTBEAT_INTERVAL = 0.0
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        path = tmp_path / "hb"
+        c._discovery_cursor = 1
+        c._connections["conn_ok"] = _ConnectionState(
+            connection_id="conn_ok", external_account_id="a1", serve_status="serving"
+        )
+        c._connections["conn_bad"] = _ConnectionState(
+            connection_id="conn_bad", external_account_id="a2", serve_status="restarting"
+        )
+        await self._drive_once(c, path)
+        healthy, unhealthy = read_connection_health(path)
+        assert healthy == ["conn_ok"], healthy
+        assert unhealthy == ["conn_bad"], unhealthy
