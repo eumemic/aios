@@ -253,7 +253,7 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "snapshot_bytes": Arm.RESET_DEFAULT,
     "snapshot_updated_at": Arm.RESET_DEFAULT,
     # snapshot_reset_pending_reason / snapshot_reset_pending_ready (migration
-    # 0178): the durable pending-reset OUTBOX for a pressure-reclaimed image.
+    # 0180): the durable pending-reset OUTBOX for a pressure-reclaimed image.
     # RESET_DEFAULT for the same reason the snapshot pointer above resets — the
     # marker names the PARENT's workspace image, which the clone never owns
     # (the clone gets a fresh workspace path and no snapshot). Copying a pending
