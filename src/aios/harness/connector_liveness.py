@@ -96,10 +96,20 @@ async def read_bound_connection_activity(
              WHERE c.archived_at IS NULL
         )
         SELECT bs.connection_id, bs.connector, bs.metadata,
-               COALESCE(MAX(e.created_at), MAX(bs.session_created_at), MAX(bs.bound_at))
-                   AS last_activity_at
+               COALESCE(
+                   MAX(e.created_at),
+                   MAX(
+                       CASE
+                           WHEN bs.session_created_at IS NOT NULL
+                                AND bs.session_created_at > bs.bound_at
+                           THEN bs.session_created_at
+                           ELSE bs.bound_at
+                       END
+                   )
+               ) AS last_activity_at
           FROM bound_sessions bs
           LEFT JOIN events e ON e.session_id = bs.session_id
+                            AND e.created_at >= bs.bound_at
                             AND e.kind = 'message'
                             AND e.role = 'user'
                             AND substr(e.orig_channel, 1, length(bs.channel_prefix))

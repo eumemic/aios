@@ -10,6 +10,7 @@ import pytest
 from aios_connector_http.healthcheck import (
     DEFAULT_HEARTBEAT_PATH,
     heartbeat_is_fresh,
+    main,
     read_connection_health,
     resolve_heartbeat_path,
 )
@@ -26,6 +27,41 @@ def test_configured_heartbeat_path_takes_precedence(
     configured = tmp_path / "configured-alive"
     monkeypatch.setenv("AIOS_CONNECTOR_HEARTBEAT_PATH", str(configured))
     assert resolve_heartbeat_path() == configured
+
+
+def test_malformed_fresh_heartbeat_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_text("{bad json")
+    monkeypatch.setenv("AIOS_CONNECTOR_HEARTBEAT_PATH", str(heartbeat))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]",
+        "{}",
+        '{"healthy_connection_ids": [], "unhealthy_connection_ids": "conn_1"}',
+        '{"healthy_connection_ids": [null], "unhealthy_connection_ids": []}',
+    ],
+)
+def test_structurally_invalid_fresh_heartbeat_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str
+) -> None:
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_text(content)
+    monkeypatch.setenv("AIOS_CONNECTOR_HEARTBEAT_PATH", str(heartbeat))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 1
 
 
 def test_heartbeat_path_is_writable_outside_container(

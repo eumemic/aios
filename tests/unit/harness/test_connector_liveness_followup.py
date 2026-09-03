@@ -49,6 +49,40 @@ async def test_shared_session_activity_is_correlated_to_connection_channel() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_pre_binding_event", [False, True])
+async def test_current_binding_starts_silence_baseline(
+    include_pre_binding_event: bool,
+) -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    pool = _SQLitePool()
+    pool.db.execute(
+        "INSERT INTO connections VALUES (?, ?, ?, NULL)",
+        ("wa", "whatsapp", "{}"),
+    )
+    pool.db.execute(
+        "INSERT INTO sessions VALUES (?, ?, NULL)",
+        ("existing", (now - timedelta(days=30)).isoformat()),
+    )
+    pool.db.execute(
+        "INSERT INTO bindings VALUES (?, 'single_session', 'existing', ?, NULL)",
+        ("wa", now.isoformat()),
+    )
+    if include_pre_binding_event:
+        pool.db.execute(
+            "INSERT INTO events VALUES (?, ?, 'message', 'user', ?)",
+            (
+                "existing",
+                (now - timedelta(minutes=1)).isoformat(),
+                "whatsapp/account/chat",
+            ),
+        )
+
+    activities = await read_bound_connection_activity(pool, {"whatsapp": 1})
+
+    assert activities[0].last_activity_at == now
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reverse", [False, True])
 async def test_running_correlated_runtime_wins_over_stopped_replica(
     monkeypatch: pytest.MonkeyPatch, reverse: bool

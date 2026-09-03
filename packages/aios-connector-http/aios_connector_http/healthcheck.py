@@ -38,26 +38,41 @@ def heartbeat_is_fresh(path: Path, *, max_age_seconds: float) -> bool:
     return age <= max_age_seconds
 
 
-def read_connection_health(path: Path) -> tuple[list[str], list[str]]:
-    """Read connection-correlated transport state from a heartbeat."""
+def _parse_connection_health(path: Path) -> tuple[list[str], list[str]] | None:
+    """Return validated connection state, or ``None`` for unreadable content."""
     try:
         payload = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return [], []
+    except (FileNotFoundError, UnicodeError, json.JSONDecodeError, OSError):
+        return None
     if not isinstance(payload, dict):
-        return [], []
+        return None
 
-    def ids(key: str) -> list[str]:
-        values = payload.get(key, [])
-        return [str(value) for value in values] if isinstance(values, list) else []
+    healthy = payload.get("healthy_connection_ids")
+    unhealthy = payload.get("unhealthy_connection_ids")
+    if not all(
+        isinstance(values, list) and all(isinstance(value, str) for value in values)
+        for values in (healthy, unhealthy)
+    ):
+        return None
+    return healthy, unhealthy
 
-    return ids("healthy_connection_ids"), ids("unhealthy_connection_ids")
+
+def read_connection_health(path: Path) -> tuple[list[str], list[str]]:
+    """Read connection-correlated transport state from a heartbeat.
+
+    Invalid content remains represented as empty state for callers which only
+    consume attribution.  The health probe uses the validity-aware parser and
+    fails closed instead of confusing invalid content with valid empty state.
+    """
+    return _parse_connection_health(path) or ([], [])
 
 
 def main() -> None:
     path = resolve_heartbeat_path()
     max_age = heartbeat_max_age_seconds()
-    healthy, unhealthy = read_connection_health(path)
+    parsed = _parse_connection_health(path)
+    valid = parsed is not None
+    healthy, unhealthy = parsed or ([], [])
     # Docker retains probe output in State.Health.Log.  The external reader
     # consumes this machine-readable line to attribute container health to the
     # affected connection rather than its healthy siblings.
@@ -70,7 +85,7 @@ def main() -> None:
             sort_keys=True,
         )
     )
-    if unhealthy or not heartbeat_is_fresh(path, max_age_seconds=max_age):
+    if not valid or unhealthy or not heartbeat_is_fresh(path, max_age_seconds=max_age):
         raise SystemExit(1)
 
 
