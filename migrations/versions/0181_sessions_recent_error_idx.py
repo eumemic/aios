@@ -18,8 +18,11 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        # An interrupted concurrent build can leave an invalid same-named index.
+        # Remove any remnant so retries always perform a usable rebuild.
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS sessions_recent_error_idx")
         op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS sessions_recent_error_idx "
+            "CREATE INDEX CONCURRENTLY sessions_recent_error_idx "
             "ON sessions (account_id, updated_at DESC) "
             "WHERE archived_at IS NULL AND stop_reason->>'type' = 'error'"
         )
