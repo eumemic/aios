@@ -277,3 +277,43 @@ def _settings_with(**overrides: object) -> object:
     for key, value in overrides.items():
         setattr(stub, key, value)
     return stub
+
+
+# ── bind-source containment (aios#2348 review) ───────────────────────────────
+
+
+class TestPerSessionBindSourceContainment:
+    """A session id is normally a server-minted ULID, but it arrives as a
+    string and ``ensure_owned_dir`` honours out-of-root paths. Both per-session
+    bind helpers must refuse anything that is not one plain path component."""
+
+    @pytest.mark.parametrize("helper_name", ["session_tmp_dir", "session_cache_dir"])
+    @pytest.mark.parametrize(
+        "bad",
+        ["sess_ok/../../escape", "../escape", "/absolute/escape", "sess_a/b", "..", ".", ""],
+    )
+    def test_hostile_id_is_refused(
+        self, helper_name: str, bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.sandbox import volumes
+
+        settings = MagicMock()
+        settings.workspace_root = tmp_path
+        monkeypatch.setattr(volumes, "get_settings", lambda: settings)
+        with pytest.raises(ValueError):
+            getattr(volumes, helper_name)(bad)
+
+    @pytest.mark.parametrize(
+        "helper_name,root", [("session_tmp_dir", "_tmp"), ("session_cache_dir", "_cache")]
+    )
+    def test_plain_id_is_contained(
+        self, helper_name: str, root: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from aios.sandbox import volumes
+
+        settings = MagicMock()
+        settings.workspace_root = tmp_path
+        monkeypatch.setattr(volumes, "get_settings", lambda: settings)
+        got = getattr(volumes, helper_name)("sess_01TEST")
+        assert got == (tmp_path / root / "sess_01TEST").resolve()
+        assert got.resolve().is_relative_to((tmp_path / root).resolve())

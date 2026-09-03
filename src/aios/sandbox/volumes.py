@@ -456,6 +456,35 @@ def session_repo_working_tree_dir(session_id: str, repo_id: str) -> Path:
     return session_repos_root(session_id) / repo_id
 
 
+def _per_session_child(root: Path, session_id: str) -> Path:
+    """``root / session_id`` with the id constrained to ONE path component.
+
+    These helpers build bind-mount SOURCES and reaper targets from a session
+    id that is normally a server-minted ULID — but the id arrives as a
+    string, and ``ensure_owned_dir`` deliberately honours paths outside
+    ``workspace_root`` (it only declines to chown them). A corrupt/imported
+    row or an unsafe internal caller with ``sess_x/../../etc`` would
+    otherwise make the root worker create and bind an arbitrary host
+    directory into a root sandbox (aios#2348 review). Refuse anything that
+    is not a single, non-dotted path component; refuse again if the
+    resolved result somehow escapes ``root``.
+    """
+    if (
+        not session_id
+        or session_id in (".", "..")
+        or "/" in session_id
+        or "\\" in session_id
+        or "\x00" in session_id
+    ):
+        raise ValueError(f"session id is not a single path component: {session_id!r}")
+    candidate = root / session_id
+    resolved = candidate.resolve(strict=False)
+    root_resolved = root.resolve(strict=False)
+    if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
+        raise ValueError(f"session directory escapes its root: {candidate}")
+    return candidate
+
+
 _SESSION_TMP_ROOT = "_tmp"
 
 
@@ -497,7 +526,7 @@ def session_tmp_dir(session_id: str) -> Path:
 
     Pure — does not create the directory. Use :func:`ensure_session_tmp_dir`.
     """
-    return session_tmp_root() / session_id
+    return _per_session_child(session_tmp_root(), session_id)
 
 
 def ensure_session_tmp_dir(session_id: str) -> Path:
@@ -560,7 +589,7 @@ def session_cache_dir(session_id: str) -> Path:
     as :func:`session_tmp_dir`. Pure — does not create the directory. Use
     :func:`ensure_session_cache_dir`.
     """
-    return session_cache_root() / session_id
+    return _per_session_child(session_cache_root(), session_id)
 
 
 def ensure_session_cache_dir(session_id: str) -> Path:
