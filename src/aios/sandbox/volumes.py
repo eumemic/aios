@@ -525,6 +525,51 @@ def ensure_session_tmp_dir(session_id: str) -> Path:
     return path
 
 
+_SESSION_CACHE_ROOT = "_cache"
+
+
+def session_cache_root() -> Path:
+    """Return ``<workspace_root>/_cache`` — the parent of all per-session
+    package-cache directories."""
+    return (get_settings().workspace_root / _SESSION_CACHE_ROOT).resolve()
+
+
+def session_cache_dir(session_id: str) -> Path:
+    """Per-session host directory bind-mounted into the container at
+    ``/root/.cache`` (eumemic/aios#2347).
+
+    ``/root/.cache`` is where ``uv``, ``pip``, Playwright and friends keep
+    their download/build caches. Inside the overlay it is *durable state*:
+    every idle-exit ``docker commit`` copies it into the session's snapshot
+    chain. On 2026-09-03 each single-use pipeline child wrote ~520 MB of
+    ``uv`` cache during a cold ``uv sync`` and committed it as a 624 MB
+    layer on exit — a dozen children an hour, ~10 GB/day of reconstructible
+    cache snapshotted for sessions that never resume — and that was the
+    whole of the host's post-incident regrowth.
+
+    Binding it to a host directory fixes that by construction, exactly as
+    :func:`session_tmp_dir` does for ``/tmp`` (#2280): Docker omits
+    bind-mount contents from BOTH snapshot verbs. Unlike ``/tmp`` the cache
+    is worth keeping across container recycles for a LIVE session (a warm
+    ``uv`` cache saves a minute per resume), which the host directory gives
+    for free; it is reclaimed by :mod:`aios.harness.host_dir_reaper` once
+    the session is no longer live, on the same positive keep-set as
+    ``_tmp``.
+
+    Rooted at ``<workspace_root>/_cache/<session_id>`` for the same reason
+    as :func:`session_tmp_dir`. Pure — does not create the directory. Use
+    :func:`ensure_session_cache_dir`.
+    """
+    return session_cache_root() / session_id
+
+
+def ensure_session_cache_dir(session_id: str) -> Path:
+    """Return the per-session ``/root/.cache`` backing directory, creating it
+    if needed (see :func:`ensure_session_tmp_dir` for why the spec builder
+    creates the source rather than letting Docker do it)."""
+    return ensure_owned_dir(session_cache_dir(session_id))
+
+
 _ATTACHMENTS_ROOT = "_attachments"
 
 
