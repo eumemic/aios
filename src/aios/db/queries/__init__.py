@@ -66,6 +66,7 @@ async def _list_scoped[T](
     limit: int = 50,
     after: str | None = None,
     filters: list[tuple[str, Any]] | None = None,
+    minimums: list[tuple[str, Any]] | None = None,
     extra_select: str | None = None,
     include_archived: bool = False,
     ids: list[str] | None = None,
@@ -74,9 +75,10 @@ async def _list_scoped[T](
     unless ``include_archived``).
 
     ``filters`` is a list of ``(column, value)`` equality predicates;
-    entries whose ``value`` is ``None`` are skipped (mirrors the per-arg
-    ``if x is not None`` guards in the originals).  ``column`` names are
-    static literals from this module — never user input.
+    ``minimums`` applies inclusive lower bounds. Entries whose ``value`` is
+    ``None`` are skipped (mirrors the per-arg ``if x is not None`` guards in
+    the originals). Column/expression names are static literals from query
+    modules — never user input.
 
     ``extra_select`` is an optional SQL expression (a static literal from
     this module, never user input) appended to the projection — e.g. a
@@ -109,6 +111,11 @@ async def _list_scoped[T](
             continue
         args.append(value)
         where.append(f"{column} = ${len(args)}")
+    for column, value in minimums or []:
+        if value is None:
+            continue
+        args.append(value)
+        where.append(f"{column} >= ${len(args)}")
     if after is not None:
         args.append(after)
         where.append(f"id < ${len(args)}")

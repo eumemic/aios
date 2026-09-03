@@ -129,5 +129,5 @@ def test_known_good_repository_has_expected_revision_count_and_one_head() -> Non
     # branch was cut. A count pin resolved by PICKING A SIDE re-asserts a number
     # nobody re-measured -- which is how a pin meant to catch accidental
     # deletions becomes the thing that fails CI.
-    assert len(revisions) == 166
+    assert len(revisions) == 167
     assert check_history(revisions) in revisions
