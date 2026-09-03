@@ -764,12 +764,10 @@ async def test_exited_container_retained_healthy_log_does_not_suppress_alarm(
 
 
 @pytest.mark.asyncio
-async def test_running_container_correlated_healthy_log_still_trusted(
+async def test_failed_probe_all_healthy_payload_is_treated_as_stale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Over-correction guard for finding #1: a RUNNING container's retained
-    healthy log must still classify conn_ok healthy (do not degrade into
-    'ignore the log entirely')."""
+    """A failed freshness probe must override an all-green historical payload."""
     now = datetime(2026, 8, 29, tzinfo=UTC)
     monkeypatch.setattr(
         "aios.harness.connector_liveness.read_bound_connection_activity",
@@ -807,7 +805,7 @@ async def test_running_container_correlated_healthy_log_still_trusted(
     monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
 
     health = await DockerConnectorHealthReader().read()
-    assert health["conn_ok"].healthy is True
+    assert health["conn_ok"].healthy is False
 
     alarm = MagicMock()
     detector = ConnectorLivenessDetector(
@@ -818,4 +816,4 @@ async def test_running_container_correlated_healthy_log_still_trusted(
         rate_limit_seconds=3600,
     )
     findings = await detector.check_once(now=now, monotonic_now=10000)
-    assert findings == []
+    assert {finding["connection_id"] for finding in findings} == {"conn_ok"}

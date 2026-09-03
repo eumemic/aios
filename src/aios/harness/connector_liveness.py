@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -121,10 +122,29 @@ async def read_bound_connection_activity(
     result: list[BoundConnectionActivity] = []
     for row in rows:
         metadata = row["metadata"] or {}
-        configured = metadata.get("liveness_silence_threshold_seconds")
-        threshold = (
-            float(configured) if configured is not None else thresholds.get(row["connector"])
+        configured = (
+            metadata.get("liveness_silence_threshold_seconds")
+            if isinstance(metadata, Mapping)
+            else None
         )
+        if configured is None:
+            threshold = thresholds.get(row["connector"])
+        else:
+            try:
+                threshold = float(configured)
+            except (TypeError, ValueError):
+                threshold = None
+            if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+                # A bad override is a policy alarm for this connection, not a
+                # reason to suppress liveness evaluation for every later row.
+                log.error(
+                    "connector.liveness_threshold_invalid_alarm",
+                    alarm_event=True,
+                    connector=row["connector"],
+                    connection_id=row["connection_id"],
+                    configured_value=configured,
+                )
+                continue
         if threshold is None:
             # Missing policy is unknown, never silently interpreted as healthy.
             log.error(
@@ -230,14 +250,22 @@ class DockerConnectorHealthReader:
                     if not isinstance(correlated, dict):
                         newest_probe_malformed = True
                         continue
-                    healthy_ids = correlated.get("healthy_connection_ids")
-                    unhealthy_ids = correlated.get("unhealthy_connection_ids")
-                    if not all(
-                        isinstance(values, list) and all(isinstance(value, str) for value in values)
-                        for values in (healthy_ids, unhealthy_ids)
+                    raw_healthy_ids = correlated.get("healthy_connection_ids")
+                    raw_unhealthy_ids = correlated.get("unhealthy_connection_ids")
+                    if not (
+                        isinstance(raw_healthy_ids, list)
+                        and all(isinstance(value, str) for value in raw_healthy_ids)
+                        and isinstance(raw_unhealthy_ids, list)
+                        and all(isinstance(value, str) for value in raw_unhealthy_ids)
                     ):
                         newest_probe_malformed = True
                         continue
+                    # Materializing concrete lists after validation both keeps
+                    # malformed schemas fail-closed and proves their type to
+                    # strict static checking.
+                    healthy_ids: list[str] = list(raw_healthy_ids)
+                    unhealthy_ids: list[str] = list(raw_unhealthy_ids)
+                    failed_all_healthy_probe = not healthy and not unhealthy_ids
                     for connection_id in healthy_ids:
                         if runtime_down:
                             observation = TransportHealth(
@@ -249,6 +277,15 @@ class DockerConnectorHealthReader:
                             observation = TransportHealth(
                                 False,
                                 "probe read failed",
+                                definitive_connector_outage=False,
+                            )
+                        elif failed_all_healthy_probe:
+                            # An all-green payload can be stale: Docker's failed
+                            # probe result is the current observation. Mixed
+                            # payloads still identify genuinely healthy siblings.
+                            observation = TransportHealth(
+                                False,
+                                detail,
                                 definitive_connector_outage=False,
                             )
                         else:

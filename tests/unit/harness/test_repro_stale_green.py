@@ -1,4 +1,5 @@
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,14 +7,14 @@ import pytest
 from aios.harness.connector_liveness import DockerConnectorHealthReader
 
 
-def _reader(container):
+def _reader(container: MagicMock) -> MagicMock:
     docker = MagicMock()
     docker.containers.list = AsyncMock(return_value=[container])
     docker.close = AsyncMock()
     return docker
 
 
-def _container(status, health, log):
+def _container(status: str, health: str, log: list[dict[str, Any]]) -> MagicMock:
     container = MagicMock()
     container.show = AsyncMock(
         return_value={

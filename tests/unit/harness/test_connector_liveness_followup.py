@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,6 +12,39 @@ from aios.harness.connector_liveness import (
     DockerConnectorHealthReader,
     read_bound_connection_activity,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", ["not-a-number", "NaN", 0, -1])
+async def test_invalid_threshold_override_does_not_abort_other_rows(
+    monkeypatch: pytest.MonkeyPatch, configured: Any
+) -> None:
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    pool = MagicMock()
+    pool.fetch = AsyncMock(
+        return_value=[
+            {
+                "connection_id": "bad",
+                "connector": "whatsapp",
+                "metadata": {"liveness_silence_threshold_seconds": configured},
+                "last_activity_at": now,
+            },
+            {
+                "connection_id": "good",
+                "connector": "whatsapp",
+                "metadata": {},
+                "last_activity_at": now,
+            },
+        ]
+    )
+    policy_alarm = MagicMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.log.error", policy_alarm)
+
+    activities = await read_bound_connection_activity(pool, {"whatsapp": 60})
+
+    assert [activity.connection_id for activity in activities] == ["good"]
+    policy_alarm.assert_called_once()
+    assert policy_alarm.call_args.args[0] == "connector.liveness_threshold_invalid_alarm"
 
 
 @pytest.mark.asyncio
