@@ -118,6 +118,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         # first — there's a natural race between an inbound arriving
         # and the connection's serve loop coming online).
         self._inbound_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # The daemon's shared listener is the inbound transport for every
+        # Signal connection.  Account metadata being available is not enough
+        # to claim health while that listener is reconnecting or has ended.
+        self._listener_receiving = False
         # Self-echo correlation for group sends: signal-cli 0.14.x's
         # ``send`` JSON-RPC returns a top-level ``timestamp`` for DM
         # sends but a bare ``null`` for groups.  The send timestamp
@@ -160,15 +164,28 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
             host=self._cfg.daemon_host,
             port=self._cfg.daemon_port,
         ).__aenter__()
+        # SignalDaemon.__aenter__ does not return until listener.connect()
+        # succeeds, so the shared inbound stream is now able to receive.
+        self._set_listener_receiving(True)
         tg.create_task(self._inbound_dispatcher(), name="signal-inbound-dispatcher")
 
     async def teardown(self) -> None:
         # The dispatcher task lives in the runner's TaskGroup and is
         # cancelled by it on exit; only the daemon subprocess is
         # ours to close here.
+        self._set_listener_receiving(False)
         if self._daemon is not None:
             await self._daemon.__aexit__(None, None, None)
             self._daemon = None
+
+    def _set_listener_receiving(self, receiving: bool) -> None:
+        """Update health for every connection sharing the listener."""
+        self._listener_receiving = receiving
+        for connection_id, connection in self._connections.items():
+            if receiving and connection_id in self.state:
+                self.mark_transport_ready(connection_id)
+            elif not receiving and connection.serve_status == "serving":
+                connection.serve_status = "starting"
 
     async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
         """Verify the phone, load roster, drain its inbound queue.
@@ -206,7 +223,8 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
         )
         self.state[connection_id] = state
         queue = self._queue_for(phone)
-        self.mark_transport_ready(connection_id)
+        if self._listener_receiving:
+            self.mark_transport_ready(connection_id)
         log.info(
             "signal.connection.ready",
             connection_id=connection_id,
@@ -273,13 +291,16 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                 async for account, envelope in self._daemon.listener.messages():
                     backoff = _RECONNECT_BACKOFF_INITIAL_S
                     self._route_envelope(account, envelope)
-                # ``messages()`` completing WITHOUT raising means the stream
-                # ended cleanly — the real listener always raises
-                # ``ListenerClosedError`` on a drop, so a normal exit is a
-                # clean shutdown with nothing left to dispatch.  Return
-                # rather than re-entering the loop and re-iterating.
+                # A normally exhausted stream is no longer capable of
+                # receiving either.  Fail health closed before this task
+                # returns and the runner's other tasks continue.
+                self._set_listener_receiving(False)
                 return
             except ListenerClosedError:
+                # Revoke every shared connection before daemon inspection,
+                # logging, sleep, or reconnect work can yield control.  A
+                # living subprocess does not imply a working listener.
+                self._set_listener_receiving(False)
                 if not self._daemon.subprocess_alive():
                     raise  # daemon dead → fatal, propagate to TaskGroup
                 # Drive the reconnect attempts here so a single logical TCP
@@ -304,6 +325,10 @@ class SignalConnector(SignalManagementMixin, HttpConnector):
                         if not self._daemon.subprocess_alive():
                             raise  # daemon died mid-retry → fatal
                         continue  # this attempt failed; try the next
+                    # reconnect() returns only after a new TCP reader is
+                    # installed.  Restore shared readiness now; never restore
+                    # it merely because an attempt was started.
+                    self._set_listener_receiving(True)
                     break  # reconnected → resume iterating ``messages()``
                 else:
                     # Exhausted every attempt without a successful reconnect.

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -334,6 +335,63 @@ class _ScriptedListener:
         self._idx += 1
         if self._idx >= len(self._batches):
             raise ListenerClosedError("no more batches")
+
+
+async def test_dropped_listener_revokes_health_until_reconnect(
+    connector: SignalConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live daemon cannot keep health green while its listener is down."""
+    reconnect_started = asyncio.Event()
+    allow_reconnect = asyncio.Event()
+
+    class _BlockingReconnectListener:
+        def __init__(self) -> None:
+            self.reconnected = False
+
+        async def messages(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            if self.reconnected:
+                await asyncio.Event().wait()
+            if False:  # force async-generator typing without yielding a message
+                yield ACCOUNT, {}
+            raise ListenerClosedError("listener connection closed")
+
+        async def reconnect(self) -> None:
+            reconnect_started.set()
+            await allow_reconnect.wait()
+            self.reconnected = True
+
+    connector._daemon.listener = _BlockingReconnectListener()  # type: ignore[union-attr]
+    monkeypatch.setattr(connector._daemon, "subprocess_alive", lambda: True)
+    monkeypatch.setattr(connector_module, "_RECONNECT_BACKOFF_INITIAL_S", 0)
+    connector._connections[CONNECTION_ID] = SimpleNamespace(serve_status="serving")
+
+    task = asyncio.create_task(connector._inbound_dispatcher())
+    await asyncio.wait_for(reconnect_started.wait(), timeout=1)
+    assert connector._connections[CONNECTION_ID].serve_status != "serving"
+
+    allow_reconnect.set()
+    for _ in range(20):
+        if connector._connections[CONNECTION_ID].serve_status == "serving":
+            break
+        await asyncio.sleep(0)
+    assert connector._connections[CONNECTION_ID].serve_status == "serving"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_normally_exhausted_listener_revokes_health(connector: SignalConnector) -> None:
+    class _ExhaustedListener:
+        async def messages(self) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            if False:
+                yield ACCOUNT, {}
+
+    connector._daemon.listener = _ExhaustedListener()  # type: ignore[union-attr]
+    connector._connections[CONNECTION_ID] = SimpleNamespace(serve_status="serving")
+
+    await connector._inbound_dispatcher()
+
+    assert connector._connections[CONNECTION_ID].serve_status != "serving"
 
 
 async def test_dispatcher_reconnects_on_transient_listener_drop(
