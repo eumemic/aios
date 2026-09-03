@@ -49,10 +49,9 @@ def _parse_connection_health(path: Path) -> tuple[list[str], list[str]] | None:
 
     healthy = payload.get("healthy_connection_ids")
     unhealthy = payload.get("unhealthy_connection_ids")
-    if not all(
-        isinstance(values, list) and all(isinstance(value, str) for value in values)
-        for values in (healthy, unhealthy)
-    ):
+    if not isinstance(healthy, list) or not all(isinstance(value, str) for value in healthy):
+        return None
+    if not isinstance(unhealthy, list) or not all(isinstance(value, str) for value in unhealthy):
         return None
     return healthy, unhealthy
 
