@@ -497,3 +497,66 @@ class TestFramesEpochFence:
         body = self._stream_body(client, monkeypatch)
         assert "event: frame" in body
         assert "event: end" in body
+
+
+class TestPeek:
+    """``GET /v1/browser/peek``: the product's read-only look at a page."""
+
+    def test_threads_the_session_and_returns_the_page(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        submit = AsyncMock(
+            return_value=(
+                {
+                    "running": True,
+                    "url": "https://bank.example/accounts",
+                    "title": "Accounts",
+                    "boot": "01B",
+                    "epoch": 3,
+                    "page": {
+                        "jpeg_b64": "AAAA",
+                        "w": 1280,
+                        "h": 800,
+                        "origin": "https://bank.example",
+                        "security": "secure",
+                    },
+                },
+                False,
+            )
+        )
+        monkeypatch.setattr(browser_router, "submit_browser_call", submit)
+        resp = client.get("/v1/browser/peek", params={"session_id": "sess_1"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["running"] is True
+        assert body["url"] == "https://bank.example/accounts"
+        assert body["page"]["origin"] == "https://bank.example"
+        assert body["page"]["security"] == "secure"
+        # boot/epoch are takeover-plane tokens and never leave the plane here.
+        assert "boot" not in body and "epoch" not in body
+        assert submit.call_args.kwargs["method"] == "peek"
+        assert submit.call_args.kwargs["params"] == {"session_id": "sess_1"}
+
+    def test_cold_computer_is_not_running_and_has_no_page(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            browser_router,
+            "submit_browser_call",
+            AsyncMock(return_value=({"running": False, "page": None}, False)),
+        )
+        resp = client.get("/v1/browser/peek")
+        assert resp.status_code == 200
+        assert resp.json() == {"running": False, "url": None, "title": None, "page": None}
+
+    def test_a_human_holding_the_computer_is_409(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            browser_router,
+            "submit_browser_call",
+            AsyncMock(return_value=({"code": "takeover_active", "message": "held"}, True)),
+        )
+        resp = client.get("/v1/browser/peek")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["detail"]["code"] == "takeover_active"

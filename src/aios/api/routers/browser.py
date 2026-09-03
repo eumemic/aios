@@ -40,6 +40,8 @@ from aios.errors import (
 from aios.ids import BROWSER_GRANT, make_id
 from aios.logging import get_logger
 from aios.models.browser import (
+    BrowserPeekPage,
+    BrowserPeekResponse,
     BrowserStatusResponse,
     BrowserTakeoverStatus,
     HandbackPayload,
@@ -376,6 +378,7 @@ def _load_frame(plane: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
         "boot": manifest.get("boot"),
         "origin": manifest.get("origin"),
         "security": manifest.get("security"),
+        "url": manifest.get("url"),
         "w": manifest.get("w"),
         "h": manifest.get("h"),
         "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
@@ -445,6 +448,30 @@ async def browser_status(
         title=result.get("title"),
         signed_in_hosts=result.get("signed_in_hosts") or [],
         takeover=takeover,
+    )
+
+
+@router.get("/peek")
+async def browser_peek(
+    db_url: DbUrlDep,
+    pool: PoolDep,
+    account_id: AccountIdDep,
+    session_id: str | None = None,
+) -> BrowserPeekResponse:
+    """A read-only look at a page: one JPEG of the viewport plus the trusted
+    chrome, from ``session_id``'s page when given, else the last-active one.
+    Never provisions and never creates a page; refused (409) while a human
+    holds the computer."""
+    result = await _call(
+        db_url, pool, account_id, "peek", {"session_id": session_id} if session_id else {}
+    )
+    raw = result.get("page")
+    page = BrowserPeekPage.model_validate(raw) if isinstance(raw, dict) else None
+    return BrowserPeekResponse(
+        running=bool(result.get("running")),
+        url=result.get("url"),
+        title=result.get("title"),
+        page=page,
     )
 
 

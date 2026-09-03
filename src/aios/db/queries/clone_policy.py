@@ -252,6 +252,18 @@ SESSIONS_POLICY: dict[str, Arm] = {
     "snapshot_host": Arm.RESET_DEFAULT,
     "snapshot_bytes": Arm.RESET_DEFAULT,
     "snapshot_updated_at": Arm.RESET_DEFAULT,
+    # snapshot_reset_pending_reason / snapshot_reset_pending_ready (migration
+    # 0180): the durable pending-reset OUTBOX for a pressure-reclaimed image.
+    # RESET_DEFAULT for the same reason the snapshot pointer above resets — the
+    # marker names the PARENT's workspace image, which the clone never owns
+    # (the clone gets a fresh workspace path and no snapshot). Copying a pending
+    # reason (with ready already flipped, or flipped by a later absence
+    # reconcile) would make unscoped_list_pending_snapshot_reset_notices emit a
+    # filesystem-reset lifecycle event for a clone that never had a reclamation
+    # — the exact "never fabricate a reset notice" property. RESET (→ NULL /
+    # FALSE default) keeps the clone's outbox empty and truthful.
+    "snapshot_reset_pending_reason": Arm.RESET_DEFAULT,
+    "snapshot_reset_pending_ready": Arm.RESET_DEFAULT,
     "cost_microusd": Arm.RESET_DEFAULT,
     "model": Arm.COPY,
     "litellm_extra": Arm.COPY,

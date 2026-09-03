@@ -27,6 +27,7 @@ crash-looping container beats a live one that answers nothing.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -56,7 +57,7 @@ from aios_browser_driver.errors import ActionError, error_response, first_line, 
 from aios_browser_driver.hosts import normalize_host, signed_in_hosts
 from aios_browser_driver.snapshot.snapshot import take_snapshot
 from aios_browser_driver.takeover.injector import InputInjector
-from aios_browser_driver.takeover.screencast import Screencast
+from aios_browser_driver.takeover.screencast import Screencast, chrome_of
 from aios_browser_driver.takeover.spool import SpoolTailer
 from aios_browser_driver.takeover.state import AdmissionGate, ReplayCache, Takeover, now
 
@@ -321,6 +322,8 @@ class BrowserHost:
                 return await self._takeover_close(request, boot, epoch)
             if request.op == "status":
                 return await self._status(boot, epoch)
+            if request.op == "peek":
+                return await self._peek(request, boot, epoch)
             if request.op == "revoke_site":
                 if self._standing is not None:
                     # Never clear cookies under the human — the product polls
@@ -591,6 +594,44 @@ class BrowserHost:
             data={"signed_in_hosts": await self._signed_in_hosts()},
         )
 
+    async def _peek(self, request: BrowserRequest, boot: str, epoch: int) -> BrowserResponse:
+        """A read-only look at a page for the product's live view: one JPEG
+        of the current viewport plus the trusted chrome, taken from the
+        session's page when ``session_id`` is given, else the last-active
+        page. Never creates a page (``data.page`` is ``None`` when there is
+        nothing to look at) and never admits through the gate — it neither
+        moves the page nor competes with an action. Refused during a
+        takeover: the human's live page is theirs alone."""
+        if self._standing is not None:
+            return error_response(
+                boot, epoch, "takeover_active", "a human has taken over the computer"
+            )
+        session_id = request.session_id or self._last_session
+        entry = self._entries.get(session_id) if session_id else None
+        page = entry.active_page if entry else None
+        if page is None:
+            return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"page": None})
+        url = page.url
+        origin, security = chrome_of(url)
+        jpeg = await page.screenshot(type="jpeg", quality=55, scale="css")
+        viewport = page.viewport_size or {"width": 0, "height": 0}
+        return BrowserResponse(
+            ok=True,
+            boot=boot,
+            epoch=epoch,
+            url=url,
+            title=await page.title(),
+            data={
+                "page": {
+                    "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
+                    "w": viewport["width"],
+                    "h": viewport["height"],
+                    "origin": origin,
+                    "security": security,
+                }
+            },
+        )
+
     async def _revoke_site(self, args: dict[str, Any], boot: str, epoch: int) -> BrowserResponse:
         host = normalize_host(require_str(args, "host"))
         context = self._require_context()
@@ -702,7 +743,7 @@ class BrowserHost:
                 epoch=new_epoch,
                 opened_at=now(),
                 screencast=screencast,
-                injector=InputInjector(page),
+                injector=InputInjector(page, allow_private=self.allow_private_nav),
                 target=target,
                 signed_in_at_open=signed_open,
             )

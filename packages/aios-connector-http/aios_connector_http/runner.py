@@ -295,6 +295,9 @@ class HttpConnector:
     # subsequent delay up to ``RECONNECT_BACKOFF_MAX``.
     RECONNECT_BACKOFF_INITIAL: float = 1.0
     RECONNECT_BACKOFF_MAX: float = 60.0
+    # After this many consecutive failures, tool calls report the connector as
+    # down instead of presenting the missing subclass state as a startup race.
+    RECONNECT_FAILURE_THRESHOLD: int = 3
     # Appservice-style connectors receive credentials via container env.
     uses_connection_secrets: bool = True
 
@@ -1235,14 +1238,25 @@ class HttpConnector:
             while True:
                 try:
                     state = self._connections.get(connection_id)
-                    if retrying and state is not None:
-                        # Credentials can be corrected while this worker is backing
-                        # off. Never pin a failed worker to its original snapshot.
-                        secrets = await self._fetch_runtime_secrets(connection_id)
-                        state.secrets = secrets
+                    if retrying:
+                        log.info(
+                            "connector.connection.reconnect_attempt",
+                            connector=self.connector,
+                            connection_id=connection_id,
+                            attempt=state.serve_restart_count if state is not None else None,
+                        )
+                        if state is not None:
+                            # Credentials can be corrected while this worker is backing
+                            # off. Never pin a failed worker to its original snapshot.
+                            secrets = await self._fetch_runtime_secrets(connection_id)
+                            state.secrets = secrets
+                    # A reconnect attempt is not evidence that the connector is
+                    # ready to serve this connection.  Keep the degraded status
+                    # until the serve exits cleanly; long-running serves restore
+                    # their per-connection state before handling tool calls.
+                    await self.serve_connection(connection_id, secrets)
                     if state is not None:
                         state.serve_status = "serving"
-                    await self.serve_connection(connection_id, secrets)
                     break
                 except asyncio.CancelledError:
                     raise
@@ -1516,11 +1530,25 @@ class HttpConnector:
                 and isinstance(exc.args[0], str)
                 and exc.args[0] == connection_id
             ):
-                error_payload = {
-                    "error": "connection not yet active; retry shortly",
-                    "connection_id": connection_id,
-                }
-                reason = "connection_state_race"
+                connection = self._connections.get(connection_id)
+                if (
+                    connection is not None
+                    and connection.serve_status == "restarting"
+                    and connection.serve_restart_count >= self.RECONNECT_FAILURE_THRESHOLD
+                ):
+                    error_payload = {
+                        "error": "connector is down; operator intervention required",
+                        "code": "connector_down",
+                        "connection_id": connection_id,
+                        "reconnect_attempts": connection.serve_restart_count,
+                    }
+                    reason = "connector_down"
+                else:
+                    error_payload = {
+                        "error": "connection not yet active; retry shortly",
+                        "connection_id": connection_id,
+                    }
+                    reason = "connection_state_race"
             elif meta.delivery:
                 # #1722: a delivery tool (a send/react — the turn is
                 # "over" once it runs) that raises mid-dispatch is a connector-side

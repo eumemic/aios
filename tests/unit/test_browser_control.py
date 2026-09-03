@@ -207,3 +207,78 @@ class TestStatusAssembly:
         assert result["boot"] == "01REALBOOT"
         assert result["epoch"] == 4
         assert result["signed_in_hosts"] == ["real.example"]  # driver data still flows
+
+
+class TestPeek:
+    """The product's live view: a read-only JPEG of a page. Same no-provision
+    rule as status, threads the session so a Bot's sidebar sees that Bot's
+    page, and the control-plane fields come from the envelope, never from
+    ``data``."""
+
+    async def test_cold_computer_is_not_provisioned_for_a_look(self) -> None:
+        registry = MagicMock()
+        registry.peek.return_value = None
+        result = await browser_control._dispatch(
+            cast(SandboxRegistry, registry), MagicMock(), "peek", "acc_x", {"session_id": "s1"}
+        )
+        assert result == {"running": False, "page": None}
+        registry.get_or_provision_browser.assert_not_called()
+
+    async def test_live_peek_threads_the_session_and_returns_the_page(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[BrowserRequest] = []
+
+        async def _fake_driver_call(
+            registry: object, account_id: str, request: BrowserRequest, *, timeout_s: float
+        ) -> BrowserResponse:
+            seen.append(request)
+            return BrowserResponse(
+                ok=True,
+                boot="01B",
+                epoch=3,
+                url="https://bank.example/accounts",
+                title="Accounts",
+                data={
+                    "page": {
+                        "jpeg_b64": "AAAA",
+                        "w": 1280,
+                        "h": 800,
+                        "origin": "https://bank.example",
+                        "security": "secure",
+                    },
+                    "running": False,  # a hostile driver key must not win
+                },
+            )
+
+        monkeypatch.setattr(browser_control, "driver_call", _fake_driver_call)
+        registry = MagicMock()
+        registry.peek.return_value = MagicMock()
+
+        result = await browser_control._dispatch(
+            cast(SandboxRegistry, registry), MagicMock(), "peek", "acc_x", {"session_id": "s1"}
+        )
+
+        assert seen[0].op == "peek" and seen[0].session_id == "s1"
+        assert result["running"] is True
+        assert result["url"] == "https://bank.example/accounts"
+        assert result["boot"] == "01B" and result["epoch"] == 3
+        assert result["page"]["jpeg_b64"] == "AAAA"
+        assert result["page"]["origin"] == "https://bank.example"
+
+    async def test_no_page_is_a_running_computer_with_nothing_to_show(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _fake_driver_call(
+            registry: object, account_id: str, request: BrowserRequest, *, timeout_s: float
+        ) -> BrowserResponse:
+            return BrowserResponse(ok=True, boot="01B", epoch=3, data={"page": None})
+
+        monkeypatch.setattr(browser_control, "driver_call", _fake_driver_call)
+        registry = MagicMock()
+        registry.peek.return_value = MagicMock()
+        result = await browser_control._dispatch(
+            cast(SandboxRegistry, registry), MagicMock(), "peek", "acc_x", {}
+        )
+        assert result["running"] is True
+        assert result["page"] is None

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from aios_browser_driver.takeover.screencast import Screencast, _chrome_of
+from aios_browser_driver.takeover.screencast import Screencast, chrome_of
 
 _JPEG = base64.b64encode(b"\xff\xd8\xff\xe0jpegbytes\xff\xd9").decode("ascii")
 
@@ -93,7 +93,18 @@ def test_on_frame_enqueues_int_session_ids(tmp_path: Path) -> None:
 def test_chrome_derives_security_from_the_url_scheme() -> None:
     # Chromium stopped emitting Security.securityStateChanged, so security is
     # derived from the committed URL's scheme, not a dead CDP event.
-    assert _chrome_of("https://bank.example/login") == ("https://bank.example", "secure")
-    assert _chrome_of("http://shop.example/") == ("http://shop.example", "insecure")
-    assert _chrome_of("about:blank") == (None, None)
-    assert _chrome_of("data:text/html,x") == (None, None)
+    assert chrome_of("https://bank.example/login") == ("https://bank.example", "secure")
+    assert chrome_of("http://shop.example/") == ("http://shop.example", "insecure")
+    assert chrome_of("about:blank") == (None, None)
+    assert chrome_of("data:text/html,x") == (None, None)
+
+
+def test_manifest_carries_the_committed_url(tmp_path: Path) -> None:
+    """The viewer's URL bar renders this — same provenance as origin/security
+    (the driver's committed navigation, never pixels)."""
+    frames = tmp_path / "frames"
+    sc = _screencast(frames)
+    sc._url = "https://github.com/login?return_to=%2Fsettings"
+    sc._persist(_JPEG, {})
+    manifest = json.loads((frames / "manifest.json").read_text())
+    assert manifest["url"] == "https://github.com/login?return_to=%2Fsettings"

@@ -215,9 +215,8 @@ class SignalDaemon:
     def _read_accounts_index(self) -> dict[str, str]:
         """Parse signal-cli's on-disk ``accounts.json`` into ``{phone: uuid}``.
 
-        Used by both :meth:`verify_phone` (single-phone lookup) and
-        :meth:`discover_bot_uuids` (bulk lookup over ``self.phones``).
-        Raises :class:`BotAccountNotFoundError` if the file is missing
+        Used by :meth:`verify_phone` for per-phone lookup.  Raises
+        :class:`BotAccountNotFoundError` if the file is missing
         or malformed.
         """
         import json as _json
@@ -246,8 +245,7 @@ class SignalDaemon:
     async def verify_phone(self, phone: str) -> str:
         """Return the bot UUID for ``phone``, or raise.
 
-        Per-phone counterpart to :meth:`discover_bot_uuids`. The
-        multi-connection :class:`SignalConnector` calls this once per
+        The multi-connection :class:`SignalConnector` calls this once per
         connection at ``serve_connection`` time; if the operator
         forgot to register the phone via
         ``signal-cli -a <phone> register``, the resulting
@@ -265,38 +263,6 @@ class SignalDaemon:
                 f"Run `signal-cli -a {target} register` first."
             )
         return uuid
-
-    async def discover_bot_uuids(self) -> dict[str, str]:
-        """Return a ``{phone: uuid}`` map for every phone in ``self.phones``.
-
-        Reads signal-cli's on-disk account index rather than RPCing —
-        ``listAccounts`` works in multi-account daemon mode but
-        accounts.json is the same source of truth and avoids a network
-        round-trip during startup.
-
-        Raises :class:`BotAccountNotFoundError` if any configured phone
-        lacks a registered account.  Operators must register every
-        phone in ``self.phones`` (via ``signal-cli -a <phone> register``)
-        before launching the connector — surfacing the missing entry at
-        startup beats discovering it on first inbound.
-        """
-        registered = self._read_accounts_index()
-        out: dict[str, str] = {}
-        missing: list[str] = []
-        for phone in self.phones:
-            target = phone.strip()
-            uuid = registered.get(target)
-            if uuid is None:
-                missing.append(target)
-            else:
-                out[target] = uuid
-        if missing:
-            accounts_json = self.config_dir / "data" / "accounts.json"
-            raise BotAccountNotFoundError(
-                f"signal-cli has no account for {missing!r} in {accounts_json}. "
-                f"Run `signal-cli -a <phone> register` for each missing number first."
-            )
-        return out
 
     async def list_groups(self, *, account: str) -> list[GroupInfo]:
         """Return the bot's group memberships via signal-cli ``listGroups``.

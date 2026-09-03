@@ -6,6 +6,7 @@ fixture page."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import http.server
 import json
@@ -222,3 +223,31 @@ async def test_status_answers_during_a_takeover(host: BrowserHost, server: str) 
     # revoke_site, by contrast, refuses during a takeover.
     revoke = await _handle(host, "revoke_site", host="example.com")
     assert revoke.error.code == "takeover_active"
+
+
+async def test_peek_shows_a_session_page_without_touching_it(
+    host: BrowserHost, server: str
+) -> None:
+    # Nothing open yet: a running computer with no page is not a page.
+    empty = await _handle(host, "peek", session_id="s1")
+    assert empty.ok and empty.data == {"page": None}
+    assert "s1" not in host._entries  # a look never creates a page
+
+    await _land_on_fixture(host, server, "s1")
+    peek = await _handle(host, "peek", session_id="s1")
+    assert peek.ok and peek.url == server
+    page = peek.data["page"]
+    assert page["w"] > 0 and page["h"] > 0
+    assert base64.b64decode(page["jpeg_b64"])[:3] == b"\xff\xd8\xff"  # a JPEG
+    # Trusted chrome is derived from the committed URL, not the pixels.
+    assert page["origin"] == server.rstrip("/")
+    assert page["security"] == "insecure"
+
+    # Without a session it falls back to the last-active page.
+    last = await _handle(host, "peek")
+    assert last.ok and last.url == server
+
+    # A human holding the computer is theirs alone.
+    await _handle(host, "takeover_open", session_id="s1", grant_id="g1")
+    held = await _handle(host, "peek", session_id="s1")
+    assert held.error.code == "takeover_active"

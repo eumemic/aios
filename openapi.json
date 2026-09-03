@@ -2004,6 +2004,72 @@
         }
       }
     },
+    "/v1/browser/peek": {
+      "get": {
+        "tags": [
+          "browser"
+        ],
+        "summary": "Browser Peek",
+        "description": "A read-only look at a page: one JPEG of the viewport plus the trusted\nchrome, from ``session_id``'s page when given, else the last-active one.\nNever provisions and never creates a page; refused (409) while a human\nholds the computer.",
+        "operationId": "browser_peek_v1_browser_peek_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserPeekResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/browser/sites/{host}": {
       "delete": {
         "tags": [
@@ -13283,6 +13349,102 @@
         "title": "BoundChat",
         "description": "Read view of one ``chat_sessions`` row.\n\nReturned by ``GET /v1/connections/{id}/bound-chats``.  Operator-bound\nrows and per-chat-spawned rows are returned together \u2014 the table\ndoesn't tag the writer.\n\n``chat_id`` is the **authoritative, gate-relevant identifier** \u2014 it is\nwhat the inbound-admission gate (``AllowList.chat_ids``) matches on.\nThis view deliberately does not surface a connector-supplied\n``display_name`` / ``sender_name``: that value is self-reported by the\nconnector and forgeable, so an operator copying an allowlist entry from\nthis view trusts the ``chat_id``, never a display name."
       },
+      "BrowserPeekPage": {
+        "properties": {
+          "jpeg_b64": {
+            "type": "string",
+            "title": "Jpeg B64"
+          },
+          "w": {
+            "type": "integer",
+            "title": "W"
+          },
+          "h": {
+            "type": "integer",
+            "title": "H"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin"
+          },
+          "security": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "secure",
+                  "insecure"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security"
+          }
+        },
+        "type": "object",
+        "required": [
+          "jpeg_b64",
+          "w",
+          "h"
+        ],
+        "title": "BrowserPeekPage",
+        "description": "One JPEG of a page's viewport plus its trusted chrome. ``origin`` and\n``security`` come from the driver's committed URL, never the pixels."
+      },
+      "BrowserPeekResponse": {
+        "properties": {
+          "running": {
+            "type": "boolean",
+            "title": "Running"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserPeekPage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "running"
+        ],
+        "title": "BrowserPeekResponse",
+        "description": "A read-only look at the computer: not running, running with no page\nto show, or running with the page. Never provisions, never creates a\npage, and is refused while a human holds the computer."
+      },
       "BrowserStatusResponse": {
         "properties": {
           "running": {
@@ -14852,7 +15014,11 @@
               "wheel",
               "key_down",
               "key_up",
-              "text"
+              "text",
+              "navigate",
+              "back",
+              "forward",
+              "reload"
             ],
             "title": "Type"
           },
@@ -14939,6 +15105,18 @@
               }
             ],
             "title": "Text"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
         "type": "object",
@@ -14946,7 +15124,7 @@
           "type"
         ],
         "title": "InputEvent",
-        "description": "One raw viewer input event (\u00a75.6 vocabulary)."
+        "description": "One raw viewer input event (\u00a75.6 vocabulary).\n\nThe nav quartet (``navigate``/``back``/``forward``/``reload``) is the\nviewer's browser chrome \u2014 URL bar and nav buttons \u2014 riding the same spool\nas raw input so a typed URL stays off the event log exactly like a typed\npassword. The driver guards ``navigate`` (public http(s) only) and treats\nthe rest as history moves needing no URL."
       },
       "LimitedNetworking": {
         "properties": {

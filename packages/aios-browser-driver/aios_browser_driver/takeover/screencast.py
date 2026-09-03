@@ -68,6 +68,10 @@ class Screencast:
         self._pump_task: asyncio.Task[None] | None = None
         self._origin: str | None = None
         self._security: str | None = None
+        # Full committed main-frame URL, for the viewer's URL bar. Same
+        # provenance as origin/security: the driver's view of the committed
+        # navigation, never the pixels.
+        self._url: str | None = None
         self._last_persist = 0.0
         self._last_frame: str | None = None
 
@@ -76,7 +80,8 @@ class Screencast:
         # persists a stale old-page frame under the new page's origin.
         self._queue = asyncio.Queue()
         self._last_persist = 0.0
-        self._origin, self._security = _chrome_of(page.url)
+        self._origin, self._security = chrome_of(page.url)
+        self._url = page.url or None
         cdp = await self._context.new_cdp_session(page)
         self._cdp = cdp
         await cdp.send("Page.enable")
@@ -121,7 +126,8 @@ class Screencast:
     def _on_nav(self, params: dict[str, Any]) -> None:
         frame = params.get("frame") or {}
         if not frame.get("parentId"):  # main frame only
-            self._origin, self._security = _chrome_of(frame.get("url") or "")
+            self._origin, self._security = chrome_of(frame.get("url") or "")
+            self._url = frame.get("url") or None
 
     # ── the pump ──────────────────────────────────────────────────────────
 
@@ -157,6 +163,7 @@ class Screencast:
             "boot": self._boot,
             "origin": self._origin,
             "security": self._security,
+            "url": self._url,
             "w": int(metadata.get("deviceWidth") or _MAX_W),
             "h": int(metadata.get("deviceHeight") or _MAX_H),
         }
@@ -171,7 +178,7 @@ class Screencast:
         self._last_frame = name
 
 
-def _chrome_of(url: str) -> tuple[str | None, str | None]:
+def chrome_of(url: str) -> tuple[str | None, str | None]:
     """The trusted-chrome (origin, security) for a URL, both from the committed
     URL alone — origin is scheme+host, security is ``secure`` for https,
     ``insecure`` for http, ``None`` for anything else (about:blank, data:)."""
