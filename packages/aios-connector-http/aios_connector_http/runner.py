@@ -298,6 +298,9 @@ class HttpConnector:
         # never remove an operator-selected file that predated startup.
         self._heartbeat_owned = False
         self._heartbeat_identity: tuple[int, int] | None = None
+        # Optional test-only synchronization: an async callable invoked after
+        # each heartbeat-loop iteration finishes publishing. None in production.
+        self._heartbeat_iteration_hook: Callable[[], Awaitable[None]] | None = None
 
     # ── serve-restart tunables (overridable on subclasses) ────────────
 
@@ -1040,11 +1043,24 @@ class HttpConnector:
                 await self.teardown()
 
     @staticmethod
-    def _claim_heartbeat(path: Path) -> tuple[int, int] | None:
+    def _claim_heartbeat(
+        path: Path, payload: bytes = b"", touch_mtime: bool = True
+    ) -> tuple[int, int] | None:
         """Create a heartbeat, or recover one old enough to be crash debris.
 
         Fresh pre-existing paths are left alone.  File-descriptor based updates
         ensure a pathname replacement race cannot make us touch the replacement.
+
+        ``touch_mtime`` separates the two heartbeat signals exactly as
+        :meth:`_refresh_heartbeat` does. A fail-closed claim (all transports
+        unhealthy from startup, no prior heartbeat inode) must still WRITE the
+        current all-unhealthy content so the out-of-container connector-liveness
+        detector can correlate WHICH connections are down — otherwise the probe
+        emits empty ID lists and a multi-connection connector's alarm is
+        suppressed as an uncorrelated sibling failure. But the FRESHNESS signal
+        (mtime) must be born stale so Docker's own HEALTHCHECK still ages the
+        file out and marks the runtime unhealthy. When ``touch_mtime`` is False
+        the newly created inode's mtime is backdated past the max heartbeat age.
         """
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         created = False
@@ -1068,7 +1084,18 @@ class HttpConnector:
                     return None
                 if (path_stat.st_dev, path_stat.st_ino) != identity:
                     return None
-            os.utime(fd, None)
+            if payload:
+                os.ftruncate(fd, 0)
+                os.write(fd, payload)
+                os.fsync(fd)
+            if touch_mtime:
+                os.utime(fd, None)
+            else:
+                # Fail-closed birth: publish content but keep the file stale so
+                # Docker's freshness probe still fails. Backdate a full max-age
+                # beyond the threshold so a single interval cannot appear fresh.
+                stale = time.time() - heartbeat_max_age_seconds() - 1
+                os.utime(fd, (stale, stale))
             return identity
         finally:
             os.close(fd)
@@ -1193,11 +1220,26 @@ class HttpConnector:
                         self._heartbeat_owned = False
                         self._heartbeat_identity = None
                 elif fail_closed:
-                    # No claim yet and the runtime is fully down: publishing a
-                    # fresh claim here would manufacture a heartbeat for a dead
-                    # transport. Withhold the claim; write the current unhealthy
-                    # content only if we already own a stale inode above.
-                    pass
+                    # No claim yet and every transport is down (e.g. all
+                    # connections still `starting` after process launch). We must
+                    # NOT manufacture a FRESH heartbeat -- that would tell Docker
+                    # the runtime is alive. But withholding the file entirely
+                    # leaves the external connector-liveness detector unable to
+                    # correlate WHICH connections are unhealthy, so it suppresses
+                    # a multi-connection connector's alarm as an ambiguous
+                    # sibling failure. So we claim the inode, write the current
+                    # all-unhealthy content, and BACKDATE its mtime so Docker's
+                    # freshness probe still fails (touch_mtime=False). Freshness
+                    # stays stale; attribution is published.
+                    try:
+                        identity = await asyncio.to_thread(
+                            self._claim_heartbeat, path, payload, False
+                        )
+                    except FileNotFoundError:
+                        identity = None
+                    if identity is not None:
+                        self._heartbeat_owned = True
+                        self._heartbeat_identity = identity
                 else:
                     try:
                         identity = await asyncio.to_thread(self._claim_heartbeat, path)
@@ -1208,6 +1250,14 @@ class HttpConnector:
                     if identity is not None:
                         self._heartbeat_owned = True
                         self._heartbeat_identity = identity
+            # Optional deterministic synchronization for tests: a hook invoked
+            # AFTER each iteration has published (or withheld) the heartbeat and
+            # BEFORE the next sleep. Tests set state, await one iteration's
+            # completion, then sample -- eliminating the wall-clock race where a
+            # scheduled healthy iteration refreshes mtime between a pre-sampled
+            # value and the state transition. Production leaves it None.
+            if self._heartbeat_iteration_hook is not None:
+                await self._heartbeat_iteration_hook()
             await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:

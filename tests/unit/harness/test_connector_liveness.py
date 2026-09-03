@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -385,6 +387,149 @@ async def test_review_two_silent_connections_stopped_container_alarm() -> None:
     findings = await detector.check_once(now=now, monotonic_now=10000)
 
     assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
+
+
+@pytest.mark.asyncio
+async def test_all_unhealthy_from_startup_two_connections_both_alarm(tmp_path: Path) -> None:
+    """Finding #1 end-to-end: two connections that are unhealthy from process
+    startup (never became ready) must both alarm.
+
+    This drives the REAL heartbeat loop with an authoritative all-unhealthy
+    snapshot, feeds its published file content through the same probe format the
+    container HEALTHCHECK emits into Docker's health log, reads it with the
+    production ``DockerConnectorHealthReader``, and asserts the detector alarms
+    both IDs. Before the fix the loop's unowned ``fail_closed`` branch created no
+    file at all, so the probe emitted empty ID lists and the multi-connection
+    connector's alarm was suppressed as an ambiguous sibling failure.
+    """
+    from aios_connector_http.healthcheck import read_connection_health
+    from aios_connector_http.runner import HttpConnector, _ConnectionState
+
+    class _Connector(HttpConnector):
+        connector = "whatsapp"
+
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    connector.HEARTBEAT_INTERVAL = 0.0
+    connector._discovery_cursor = 0  # authoritative snapshot completed
+    connector._connections["conn_1"] = _ConnectionState("conn_1", "acct1", serve_status="starting")
+    connector._connections["conn_2"] = _ConnectionState("conn_2", "acct2", serve_status="starting")
+
+    # Run exactly one iteration deterministically via the synchronization hook.
+    iterated = asyncio.Event()
+
+    async def hook() -> None:
+        iterated.set()
+
+    connector._heartbeat_iteration_hook = hook
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await iterated.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    healthy_ids, unhealthy_ids = read_connection_health(heartbeat)
+    assert healthy_ids == []
+    assert unhealthy_ids == ["conn_1", "conn_2"]
+    probe_output = json.dumps(
+        {"healthy_connection_ids": healthy_ids, "unhealthy_connection_ids": unhealthy_ids},
+        sort_keys=True,
+    )
+
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Config": {"Labels": {"aios.connector": "whatsapp"}},
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "running",
+                "Health": {"Status": "unhealthy", "Log": [{"Output": probe_output}]},
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    pool = _SQLitePool()
+    for connection_id in ("conn_1", "conn_2"):
+        session_id = f"session_{connection_id}"
+        bound_at = now - timedelta(days=10)
+        pool.db.execute(
+            "INSERT INTO connections VALUES (?, ?, ?, NULL)", (connection_id, "whatsapp", "{}")
+        )
+        pool.db.execute("INSERT INTO sessions VALUES (?, ?, NULL)", (session_id, bound_at.isoformat()))
+        pool.db.execute(
+            "INSERT INTO bindings VALUES (?, ?, ?, ?, NULL)",
+            (connection_id, "single_session", session_id, bound_at.isoformat()),
+        )
+        pool.db.execute(
+            "INSERT INTO events VALUES (?, ?)", (session_id, (now - timedelta(days=9)).isoformat())
+        )
+
+    alarm = MagicMock()
+    import aios.harness.connector_liveness as liveness_mod
+
+    original_docker = liveness_mod.aiodocker.Docker
+    liveness_mod.aiodocker.Docker = lambda: docker
+    try:
+        detector = ConnectorLivenessDetector(
+            pool,
+            thresholds={"whatsapp": 7 * 86400},
+            health_reader=DockerConnectorHealthReader(),
+            alarm=alarm,
+            rate_limit_seconds=3600,
+        )
+        findings = await detector.check_once(now=now, monotonic_now=10000)
+    finally:
+        liveness_mod.aiodocker.Docker = original_docker
+
+    assert {finding["connection_id"] for finding in findings} == {"conn_1", "conn_2"}
+    assert alarm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_all_unhealthy_from_startup_keeps_docker_freshness_failing(tmp_path: Path) -> None:
+    """Over-correction guard for finding #1: the fail-closed birth publishes the
+    all-unhealthy CONTENT for correlation, but must NOT make Docker's freshness
+    probe pass. If we simply always created a fresh heartbeat we would tell
+    Docker the runtime is alive during a whole-runtime outage. Assert the newly
+    created file is born stale.
+    """
+    from aios_connector_http.healthcheck import heartbeat_is_fresh
+    from aios_connector_http.runner import HttpConnector, _ConnectionState
+
+    class _Connector(HttpConnector):
+        connector = "whatsapp"
+
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    connector.HEARTBEAT_INTERVAL = 0.0
+    connector._discovery_cursor = 0
+    connector._connections["conn_1"] = _ConnectionState("conn_1", "acct1", serve_status="starting")
+    connector._connections["conn_2"] = _ConnectionState("conn_2", "acct2", serve_status="starting")
+
+    iterated = asyncio.Event()
+
+    async def hook() -> None:
+        iterated.set()
+
+    connector._heartbeat_iteration_hook = hook
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await iterated.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert heartbeat.exists()  # content is published for correlation ...
+    assert connector._heartbeat_owned
+    # ... but freshness is deliberately withheld so Docker still ages it out.
+    assert heartbeat_is_fresh(heartbeat, max_age_seconds=30) is False
 
 
 @pytest.mark.asyncio

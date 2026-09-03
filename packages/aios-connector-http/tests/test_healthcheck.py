@@ -10,6 +10,7 @@ import pytest
 from aios_connector_http.healthcheck import (
     DEFAULT_HEARTBEAT_PATH,
     heartbeat_is_fresh,
+    read_connection_health,
     resolve_heartbeat_path,
 )
 from aios_connector_http.runner import HttpConnector, _ConnectionState
@@ -164,23 +165,52 @@ async def test_heartbeat_does_not_claim_path_replaced_after_create(
 async def test_heartbeat_stops_while_a_connection_is_restarting(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
-    connector.HEARTBEAT_INTERVAL = 0.01
+    connector.HEARTBEAT_INTERVAL = 0.0
     connector._discovery_cursor = 0  # authoritative empty snapshot completed
     connector._connections["conn_1"] = _ConnectionState("conn_1", "account", serve_status="serving")
 
+    # Drive the loop one iteration at a time instead of racing wall-clock
+    # sleeps: the previous version sampled the mtime BEFORE the state
+    # transition, so a healthy iteration scheduled between the sample and the
+    # transition refreshed the mtime and the assertion compared against a stale
+    # sample. Here every sample is taken only after the iteration that observed
+    # the intended state has completed, so no unobserved iteration can move the
+    # mtime out from under us.
+    resume = asyncio.Event()
+    iterated = asyncio.Event()
+
+    async def hook() -> None:
+        iterated.set()
+        await resume.wait()
+        resume.clear()
+
+    connector._heartbeat_iteration_hook = hook
+
+    async def step() -> None:
+        """Advance exactly one heartbeat-loop iteration and wait for it to finish."""
+        iterated.clear()
+        resume.set()
+        await iterated.wait()
+
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
-        await asyncio.sleep(0.03)
+        # First iteration: serving -> heartbeat established fresh.
+        await iterated.wait()
         first_mtime = heartbeat.stat().st_mtime_ns
 
+        # An unhealthy transition must FREEZE freshness: the mtime does not
+        # advance across a fail-closed iteration.
         connector._connections["conn_1"].serve_status = "restarting"
-        await asyncio.sleep(0.03)
+        await step()
+        await step()  # a second fail-closed iteration must still not advance it
         assert heartbeat.stat().st_mtime_ns == first_mtime
 
+        # Recovery must resume freshness: the mtime advances again.
         connector._connections["conn_1"].serve_status = "serving"
-        await asyncio.sleep(0.03)
+        await step()
         assert heartbeat.stat().st_mtime_ns > first_mtime
     finally:
+        resume.set()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -214,7 +244,19 @@ async def test_heartbeat_requires_established_receiving_transport(
         if serve_returns:
             await serve_task
         await asyncio.sleep(0.03)
-        assert not heartbeat.exists()
+        # A transport that never became ready must NOT signal the container alive:
+        # Docker's freshness probe must fail. Before finding #1 this was enforced
+        # by refusing to create the file at all — but that also suppressed the
+        # external liveness detector's ability to correlate WHICH connection is
+        # down (empty ID lists), so a multi-connection connector produced no
+        # alarm. The invariant is really about FRESHNESS, not existence: the file
+        # may exist to publish all-unhealthy CONTENT, but it must be born stale
+        # (freshness withheld) and must report no healthy connection.
+        assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+        if heartbeat.exists():
+            healthy_ids, unhealthy_ids = read_connection_health(heartbeat)
+            assert healthy_ids == []
+            assert unhealthy_ids == ["conn_1"]
         assert connector._connections["conn_1"].serve_status in {"starting", "stopped"}
     finally:
         release.set()
