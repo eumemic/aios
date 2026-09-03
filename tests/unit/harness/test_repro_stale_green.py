@@ -39,7 +39,11 @@ async def test_newest_malformed_does_not_resurrect_older_healthy(
         "unhealthy",
         [
             # OLDER record (index 0) — stale healthy attribution
-            {"Output": json.dumps({"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []})},
+            {
+                "Output": json.dumps(
+                    {"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []}
+                )
+            },
             # NEWEST record (last) — malformed / current probe failed
             {"Output": "not-json"},
         ],
@@ -66,7 +70,11 @@ async def test_clean_newest_healthy_record_stays_healthy(
         "healthy",
         [
             {"Output": json.dumps({"healthy_connection_ids": [], "unhealthy_connection_ids": []})},
-            {"Output": json.dumps({"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []})},
+            {
+                "Output": json.dumps(
+                    {"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []}
+                )
+            },
         ],
     )
     monkeypatch.setattr(
@@ -90,7 +98,11 @@ async def test_newest_malformed_still_attributes_which_connection(
         "running",
         "unhealthy",
         [
-            {"Output": json.dumps({"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []})},
+            {
+                "Output": json.dumps(
+                    {"healthy_connection_ids": ["conn_1"], "unhealthy_connection_ids": []}
+                )
+            },
             {"Output": "not-json"},
         ],
     )

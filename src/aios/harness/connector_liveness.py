@@ -233,8 +233,7 @@ class DockerConnectorHealthReader:
                     healthy_ids = correlated.get("healthy_connection_ids")
                     unhealthy_ids = correlated.get("unhealthy_connection_ids")
                     if not all(
-                        isinstance(values, list)
-                        and all(isinstance(value, str) for value in values)
+                        isinstance(values, list) and all(isinstance(value, str) for value in values)
                         for values in (healthy_ids, unhealthy_ids)
                     ):
                         newest_probe_malformed = True
