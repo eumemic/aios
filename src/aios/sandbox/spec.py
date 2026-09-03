@@ -1028,6 +1028,7 @@ def _assemble_plan(
     from aios.ids import SESSION
     from aios.sandbox.volumes import (
         ensure_session_attachments_dir,
+        ensure_session_cache_dir,
         ensure_session_tmp_dir,
         ensure_session_uploads_dir,
         memory_store_host_dir,
@@ -1114,6 +1115,17 @@ def _assemble_plan(
             Mount(
                 host_path=ensure_session_tmp_dir(session_id),
                 sandbox_path="/tmp",
+                read_only=False,
+            )
+        )
+        # ``/root/.cache`` (uv / pip / Playwright caches) gets the same
+        # treatment (#2347): reconstructible, large, and otherwise committed
+        # into the snapshot chain on every idle exit. Sessions only, for the
+        # same bare-destroy reason as ``/tmp``.
+        extra_mounts.append(
+            Mount(
+                host_path=ensure_session_cache_dir(session_id),
+                sandbox_path="/root/.cache",
                 read_only=False,
             )
         )

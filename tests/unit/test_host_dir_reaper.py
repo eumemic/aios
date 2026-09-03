@@ -50,12 +50,15 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     repos_root = tmp_path / "_session_repos"
     runs_root = tmp_path / "acc_test" / "_runs"
     tmp_root = tmp_path / "_tmp"
+    cache_root = tmp_path / "_cache"
     repos_root.mkdir()
     runs_root.mkdir(parents=True)
     tmp_root.mkdir()
+    cache_root.mkdir()
 
     monkeypatch.setattr(host_dir_reaper, "session_repos_root", lambda sid: repos_root / sid)
     monkeypatch.setattr(host_dir_reaper, "session_tmp_dir", lambda sid: tmp_root / sid)
+    monkeypatch.setattr(host_dir_reaper, "session_cache_dir", lambda sid: cache_root / sid)
     monkeypatch.setattr(
         host_dir_reaper,
         "run_workspace_dir",
@@ -67,7 +70,13 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     settings.host_dir_reaper_min_age_seconds = 0
     monkeypatch.setattr(host_dir_reaper, "get_settings", lambda: settings)
 
-    return {"repos": repos_root, "runs": runs_root, "tmp": tmp_root, "settings": settings}
+    return {
+        "repos": repos_root,
+        "runs": runs_root,
+        "tmp": tmp_root,
+        "cache": cache_root,
+        "settings": settings,
+    }
 
 
 def test_service_workspace_builder_is_enumerated_by_reaper(
@@ -485,3 +494,49 @@ async def test_tmp_dir_age_floor_protects_in_flight_provision(
 
     assert await sweep_host_dirs(_fake_pool()) == 0
     assert fresh.exists()
+
+
+# ---------------------------------------------------------------------------
+# ``_cache`` — the session sandbox's ``/root/.cache`` bind (#2347)
+# ---------------------------------------------------------------------------
+
+
+async def test_cache_dir_reaped_for_dead_session_kept_for_live(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/root/.cache`` follows session liveness exactly like ``/tmp``: a live
+    session keeps its warm ``uv`` cache across container recycles; a dead
+    session's cache is reclaimed."""
+    live = _mkdir_aged(roots["cache"], "sess_live")
+    dead = _mkdir_aged(roots["cache"], "sess_dead")
+
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value={"sess_live"}))
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+
+    removed = await sweep_host_dirs(_fake_pool())
+
+    assert removed == 1
+    assert live.exists(), "a DB-live session's package cache must survive"
+    assert not dead.exists(), "a dead session's package cache must be reaped"
+
+
+async def test_cache_dir_fail_closed_on_db_error(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = _mkdir_aged(roots["cache"], "sess_unknown")
+    monkeypatch.setattr(
+        queries, "unscoped_live_session_ids", AsyncMock(side_effect=OSError("db down"))
+    )
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+    assert await sweep_host_dirs(_fake_pool()) == 0
+    assert cache.exists()
+
+
+async def test_cache_dir_unknown_owner_kind_is_kept(
+    roots: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stray = _mkdir_aged(roots["cache"], "wfr_01NOTASESSION")
+    monkeypatch.setattr(queries, "unscoped_live_session_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(wf_queries, "unscoped_terminal_run_ids", AsyncMock(return_value=set()))
+    assert await sweep_host_dirs(_fake_pool()) == 0
+    assert stray.exists()
