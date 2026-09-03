@@ -828,6 +828,39 @@ class TestLogging:
         assert len(failed) == 1
         assert failed[0]["reason"] == "connection_state_race"
 
+    async def test_dispatch_call_reports_down_after_repeated_serve_failures(
+        self, probe: _ProbeConnector
+    ) -> None:
+        probe._connections["conn_X"] = _ConnectionState(
+            connection_id="conn_X",
+            external_account_id="acct_X",
+            serve_status="restarting",
+            last_serve_error="RuntimeError: polling failed",
+            serve_restart_count=probe.RECONNECT_FAILURE_THRESHOLD,
+        )
+
+        with structlog.testing.capture_logs() as records:
+            await probe.dispatch_call(
+                {
+                    "connection_id": "conn_X",
+                    "tool_call_id": "call_down",
+                    "session_id": "sess_down",
+                    "name": "race",
+                    "arguments": "{}",
+                }
+            )
+
+        result = probe.results[0]
+        assert result.kwargs["is_error"] is True
+        assert json.loads(result.kwargs["content"]) == {
+            "error": "connector is down; operator intervention required",
+            "code": "connector_down",
+            "connection_id": "conn_X",
+            "reconnect_attempts": probe.RECONNECT_FAILURE_THRESHOLD,
+        }
+        failed = [r for r in records if r["event"] == "connector.tool_call.failed"]
+        assert failed[0]["reason"] == "connector_down"
+
     async def test_dispatch_call_keyerror_unrelated_to_connection_id_passes_through(
         self, probe: _ProbeConnector
     ) -> None:
@@ -1137,13 +1170,55 @@ class TestIsolatedServeConnection:
         )
         c._fetch_runtime_secrets = AsyncMock(return_value={})  # type: ignore[method-assign]
 
-        await c._isolated_serve_connection("conn_1", {})
+        with structlog.testing.capture_logs() as records:
+            await c._isolated_serve_connection("conn_1", {})
 
         assert attempts == 3
+        reconnects = [
+            record
+            for record in records
+            if record["event"] == "connector.connection.reconnect_attempt"
+        ]
+        assert [record["attempt"] for record in reconnects] == [1, 2]
         state = c._connections["conn_1"]
         assert state.serve_status == "serving"
         assert state.serve_restart_count == 2
         assert state.last_serve_error == "RuntimeError: failure 2"
+
+    async def test_reconnect_stays_degraded_until_serve_is_ready(self) -> None:
+        attempts = 0
+        fourth_attempt_started = asyncio.Event()
+
+        class _DegradedConnector(HttpConnector):
+            connector = "degraded"
+            RECONNECT_BACKOFF_INITIAL = 0.0
+            RECONNECT_BACKOFF_MAX = 0.0
+
+            async def serve_connection(self, connection_id: str, secrets: dict[str, str]) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts <= self.RECONNECT_FAILURE_THRESHOLD:
+                    raise RuntimeError(f"failure {attempts}")
+                fourth_attempt_started.set()
+                # Simulate a reconnect paused before per-connection state is installed.
+                await asyncio.Event().wait()
+
+        c = _DegradedConnector(base_url="http://x", token="aios_runtime_x")
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="acct_1"
+        )
+        c._fetch_runtime_secrets = AsyncMock(return_value={})  # type: ignore[method-assign]
+        c.emit_lifecycle = AsyncMock()  # type: ignore[method-assign]
+
+        task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
+        await asyncio.wait_for(fourth_attempt_started.wait(), timeout=1)
+        state = c._connections["conn_1"]
+        assert state.serve_restart_count == c.RECONNECT_FAILURE_THRESHOLD
+        assert state.serve_status == "restarting"
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def test_pops_state_on_cancel(self) -> None:
         class _Connector(HttpConnector):
