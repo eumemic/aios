@@ -51,6 +51,9 @@ from aios.sandbox.backends.base import (
     ENV_KEYS_LABEL_KEY,
     FLATTENED_LABEL_KEY,
     FLATTENED_LABEL_VALUE,
+    INSTANCE_LABEL_KEY,
+    MANAGED_LABEL_KEY,
+    MANAGED_LABEL_VALUE,
     PREWARM_LABEL_KEY,
     SESSION_LABEL_KEY,
     VAULT_PLACEHOLDER_KEYS_LABEL_KEY,
@@ -354,6 +357,10 @@ class SandboxRegistry:
         self._salvage_failures: dict[str, tuple[str, int, bool]] = {}
         self._snapshot_timeout_failures: dict[str, int] = {}
         self._snapshot_timeout_alarmed: set[str] = set()
+        # Process-local mirror of the DB outbox. The DB marker provides restart
+        # recovery; this mirror also retries immediately when a test seam or a
+        # transient writer failure keeps this registry alive between ticks.
+        self._pending_snapshot_reset_notices: dict[str, str] = {}
         # Exact failure text and its consecutive repetition count. Once one
         # cause alone reaches the breaker threshold, cooldown cannot make the
         # identical operation transient; it remains escalated until recovery.
@@ -2879,9 +2886,17 @@ class SandboxRegistry:
         await self._gc_canonical_store_pass(now)
 
         # Docker cache and canonical store have independent budgets/verdicts.
-        docker_budget = settings.sandbox_docker_cache_high_watermark_bytes
+        docker_budget = (
+            settings.sandbox_docker_cache_high_watermark_bytes
+            if isinstance(self._store, TarballStore)
+            else settings.sandbox_snapshot_pool_bytes
+        )
         pool_pressure = await self._gc_pool_budget_pass(
-            retained, image_states, docker_budget, instance_id
+            retained,
+            image_states,
+            docker_budget,
+            instance_id,
+            dry_run=settings.sandbox_snapshot_pool_reclaim_mode == "dry_run",
         )
         if isinstance(self._store, TarballStore):
             used = self._store.used_bytes()
@@ -3180,21 +3195,202 @@ class SandboxRegistry:
         states: dict[str, SessionSnapshotState],
         pool_bytes: int | None,
         instance_id: str,
+        *,
+        dry_run: bool | None = None,
     ) -> GcPressureResult:
-        """Return host pressure; lifecycle eligibility is never widened by it."""
+        """Reclaim inactive snapshots least-recently-used until the host bound holds."""
+        # Retry durable loss notices independently of image enumeration. Once
+        # deletion succeeds, the absent image/pointer cannot rediscover this work.
+        await self._flush_pending_snapshot_reset_notices()
         if pool_bytes is None:
             return GcPressureResult()
+        if dry_run is None:
+            dry_run = get_settings().sandbox_snapshot_pool_reclaim_mode == "dry_run"
         base_sizes: dict[str, int] = {}
-        total = sum(
-            [
-                await self._unique_bytes_for_image(v.image, base_sizes)
-                for v in retained
-                if v.is_canonical
-            ]
+        sized = [
+            (v, await self._unique_bytes_for_image(v.image, base_sizes))
+            for v in retained
+            if v.is_canonical
+        ]
+        before = sum(size for _, size in sized)
+        after = before
+        planned_after = before
+        deleted_refs: list[str] = []
+        reclaimable_refs: list[str] = []
+        reclaimable_bytes = 0
+        pending = [
+            (v, size) for v, size in sized if v.session_id is not None and v.session_id in states
+        ]
+        while pending and planned_after > pool_bytes:
+            # Tick-start ordering is only a hint. Re-read every remaining
+            # candidate while its session is locked before choosing the next
+            # LRU, so a session that just became active is not selected first.
+            refreshed: list[tuple[GcImageVerdict, int, SessionSnapshotState]] = []
+            for verdict, size in pending:
+                fresh = await self._fresh_pool_candidate_state(verdict, instance_id)
+                if fresh is not None:
+                    refreshed.append((verdict, size, fresh))
+            if not refreshed:
+                break
+            refreshed.sort(
+                key=lambda item: item[2].last_event_at or datetime.min.replace(tzinfo=UTC)
+            )
+            verdict, size, selected_state = refreshed[0]
+            reclaimable_refs.append(verdict.removal_ref)
+            reclaimable_bytes += size
+            if dry_run:
+                pending.remove((verdict, size))
+                planned_after -= size
+                continue
+
+            # Make the ordering state a deletion precondition. The candidate is
+            # read again while its session lock is held; activity between this
+            # selection and lock acquisition must force a fresh LRU choice.
+            session_id = verdict.session_id
+            assert session_id is not None
+            states[session_id] = selected_state
+            if await self._reclaim_pool_candidate(verdict, states, instance_id):
+                pending.remove((verdict, size))
+                deleted_refs.append(verdict.removal_ref)
+                retained.remove(verdict)
+                after -= size
+                planned_after = after
+                continue
+
+            latest = await self._fresh_pool_candidate_state(verdict, instance_id)
+            if latest is not None and latest.last_event_at != selected_state.last_event_at:
+                # Its ordering key changed before the destructive decision.
+                # Re-read all candidates rather than deleting the stale choice.
+                continue
+            pending.remove((verdict, size))
+        log_method = log.error if after > pool_bytes else log.info
+        log_method(
+            "sandbox.snapshot_pool_reclaim",
+            before_bytes=before,
+            after_bytes=after,
+            reclaimed_bytes=before - after,
+            reclaimable_bytes=reclaimable_bytes,
+            budget_bytes=pool_bytes,
+            deleted_refs=deleted_refs,
+            reclaimable_refs=reclaimable_refs,
+            dry_run=dry_run,
+            blocked_reason=(
+                "dry_run"
+                if dry_run and before > pool_bytes
+                else "all_remaining_images_in_use_or_removal_refused"
+                if after > pool_bytes
+                else None
+            ),
         )
-        if total > pool_bytes:
-            log.error("sandbox.snapshot_pool_pressure", used_bytes=total, budget_bytes=pool_bytes)
-        return GcPressureResult(pool_used_bytes=total, pool_budget_bytes=pool_bytes)
+        return GcPressureResult(pool_used_bytes=after, pool_budget_bytes=pool_bytes)
+
+    async def _fresh_pool_candidate_state(
+        self, verdict: GcImageVerdict, instance_id: str
+    ) -> SessionSnapshotState | None:
+        """Return current ordering state only while the candidate remains safe."""
+        session_id = verdict.session_id
+        assert session_id is not None
+        async with self._lock_for(session_id):
+            if self._handles.get(session_id) is not None:
+                return None
+            fresh = await self._fresh_session_state(session_id)
+            if (
+                fresh is None
+                or fresh.archived_at is not None
+                or fresh.snapshot_ref != verdict.removal_ref
+                or fresh.snapshot_host != instance_id
+                or verdict.removal_ref != snapshot_tag(instance_id, session_id)
+                or verdict.image.labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE
+                or verdict.image.labels.get(INSTANCE_LABEL_KEY) != instance_id
+                or verdict.image.labels.get(SESSION_LABEL_KEY) != session_id
+            ):
+                return None
+            return fresh
+
+    async def _reclaim_pool_candidate(
+        self,
+        verdict: GcImageVerdict,
+        states: dict[str, SessionSnapshotState],
+        instance_id: str,
+    ) -> bool:
+        """Revalidate identity, containment, ownership, and liveness before deletion."""
+        session_id = verdict.session_id
+        assert session_id is not None
+        async with self._lock_for(session_id):
+            pending_reason = self._pending_snapshot_reset_notices.get(session_id)
+            if pending_reason is not None:
+                await self._emit_pending_snapshot_reset_notice(session_id, pending_reason)
+            if self._handles.get(session_id) is not None:
+                return False
+            fresh = await self._fresh_session_state(session_id)
+            candidate = states.get(session_id)
+            if (
+                fresh is None
+                or candidate is None
+                or fresh.last_event_at != candidate.last_event_at
+                or fresh.archived_at is not None
+                or fresh.snapshot_ref != verdict.removal_ref
+                or fresh.snapshot_host != instance_id
+                or verdict.removal_ref != snapshot_tag(instance_id, session_id)
+                or verdict.image.labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE
+                or verdict.image.labels.get(INSTANCE_LABEL_KEY) != instance_id
+                or verdict.image.labels.get(SESSION_LABEL_KEY) != session_id
+            ):
+                return False
+            pressure_verdict = dataclasses.replace(verdict, reason="protected_live")
+            removed = await self._remove_canonical_image_and_clear_pointer(
+                pressure_verdict, instance_id, states
+            )
+            if removed:
+                self._pending_snapshot_reset_notices[session_id] = "snapshot_pool_pressure"
+                await self._emit_pending_snapshot_reset_notice(session_id, "snapshot_pool_pressure")
+            return removed
+
+    async def _flush_pending_snapshot_reset_notices(self) -> None:
+        """Retry filesystem-loss events recorded by the transactional outbox."""
+        from aios.harness import runtime
+
+        # Unit-level planning callers may exercise this method without a worker
+        # runtime. Production GC always has the pool that owns the outbox.
+        if runtime.pool is None:
+            return
+        pool = runtime.require_pool()
+        async with pool.acquire() as conn:
+            pending = await queries.unscoped_list_pending_snapshot_reset_notices(conn)
+        for session_id, reason in pending:
+            self._pending_snapshot_reset_notices[session_id] = reason
+            try:
+                await self._emit_pending_snapshot_reset_notice(session_id, reason)
+            except Exception:
+                # One unavailable session/event writer must not prevent retries
+                # for other durable outbox entries. Leave this marker intact.
+                log.exception(
+                    "sandbox.snapshot_reset_notice_retry_failed",
+                    session_id=session_id,
+                    reason=reason,
+                )
+
+    async def _emit_pending_snapshot_reset_notice(self, session_id: str, reason: str) -> None:
+        """Atomically claim, append, and acknowledge one durable loss notice."""
+        from aios.harness import runtime
+
+        pool = runtime.require_pool()
+        use_event_writer_seam = False
+        async with pool.acquire() as conn:
+            if not hasattr(conn, "transaction"):
+                # Lightweight unit callers have no transactional DB surface;
+                # retain the event-writer seam they use to observe delivery,
+                # but never hold a pooled connection across non-DB I/O.
+                use_event_writer_seam = True
+            else:
+                await queries.unscoped_deliver_pending_snapshot_reset_notice(
+                    conn, session_id, expected_reason=reason
+                )
+        if use_event_writer_seam:
+            await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
+        # A false result means another worker owns or already delivered it.
+        # Either way this process-local mirror must not independently append.
+        self._pending_snapshot_reset_notices.pop(session_id, None)
 
     async def _gc_account_cap_pass(
         self,
@@ -3371,6 +3567,32 @@ class SandboxRegistry:
         from aios.harness import runtime
 
         pool = runtime.require_pool()
+
+        # Docker removal cannot participate in a database rollback. Commit the
+        # reset-notice intent first while final ordering and ownership are row-
+        # locked. If the later pointer-clear write fails, this marker survives.
+        if verdict.reason == "protected_live":
+            async with pool.acquire() as conn, conn.transaction():
+                row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
+                candidate = states.get(session_id)
+                if (
+                    row is None
+                    or candidate is None
+                    or row["last_event_at"] != candidate.last_event_at
+                    or row["archived_at"] is not None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                ):
+                    return False
+                prepared = await queries.unscoped_prepare_snapshot_reset_notice(
+                    conn,
+                    session_id,
+                    expected_ref=verdict.removal_ref,
+                    reason="snapshot_pool_pressure",
+                )
+                if not prepared:
+                    return False
+
         async with pool.acquire() as conn, conn.transaction():
             row = await queries.unscoped_lock_session_snapshot_state(conn, session_id)
             if verdict.reason == "archived":
@@ -3384,6 +3606,18 @@ class SandboxRegistry:
                     or row["snapshot_host"] != instance_id
                 ):
                     return False
+            elif verdict.reason == "protected_live":
+                candidate = states.get(session_id)
+                if (
+                    row is None
+                    or candidate is None
+                    or row["last_event_at"] != candidate.last_event_at
+                    or row["archived_at"] is not None
+                    or row["snapshot_ref"] != verdict.removal_ref
+                    or row["snapshot_host"] != instance_id
+                    or row["snapshot_reset_pending_reason"] != "snapshot_pool_pressure"
+                ):
+                    return False
             elif (
                 verdict.reason == "residue"
                 and row is not None
@@ -3395,7 +3629,15 @@ class SandboxRegistry:
                 verdict.removal_ref
             ):
                 return False
-            await queries.unscoped_compare_and_clear_session_snapshot(
-                conn, session_id, expected_ref=verdict.removal_ref
-            )
+            if verdict.reason == "protected_live":
+                await queries.unscoped_compare_and_clear_session_snapshot(
+                    conn,
+                    session_id,
+                    expected_ref=verdict.removal_ref,
+                    pending_reset_reason="snapshot_pool_pressure",
+                )
+            else:
+                await queries.unscoped_compare_and_clear_session_snapshot(
+                    conn, session_id, expected_ref=verdict.removal_ref
+                )
             return True

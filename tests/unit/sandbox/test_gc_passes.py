@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -473,15 +473,200 @@ async def test_reconcile_skips_snapshot_evicted_this_tick(
     set_pointer.assert_awaited_once()
     set_pointer.reset_mock()
 
-    # Pass 3 reports disk pressure (2 MB snapshot vs 1 MB pool budget) without removal.
-    pressure = await registry._gc_pool_budget_pass([verdict], states, 1_000_000, instance_id)
-    assert pressure.pressured
-    assert pressure.pool_used_bytes == 2_000_000
-    assert verdict.removal_ref not in backend.removed_image_refs
+    # Pass 3 reclaims the inactive snapshot and reports measured post-reclaim usage.
+    registry._fresh_pool_candidate_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=replace(states["sess_x"], snapshot_ref=verdict.removal_ref)
+    )
+    registry._reclaim_pool_candidate = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 1_000_000, instance_id, dry_run=False
+    )
+    assert not pressure.pressured
+    assert pressure.pool_used_bytes == 0
+    registry._reclaim_pool_candidate.assert_awaited_once_with(verdict, states, instance_id)
 
-    # Pressure reports capacity state without deleting or suppressing reconciliation.
-    await registry._gc_reconcile_pointers([verdict], states, instance_id)
-    assert set_pointer.await_count == 1
+    # Reconciliation must not resurrect a pointer removed by pressure reclamation.
+    await registry._gc_reconcile_pointers(
+        [verdict], states, instance_id, already_evicted={"sess_x"}
+    )
+    assert set_pointer.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_reclaims_orphan_but_never_in_use_snapshot() -> None:
+    """Mutation: an excess inactive image is selected while a live handle is untouched."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    old = _canonical_verdict("sess_old", size_bytes=2_000_000)
+    live = _canonical_verdict("sess_live", size_bytes=2_000_000)
+    states = {
+        "sess_old": _acct_state("sess_old", account_id="acct", days_dormant=30),
+        "sess_live": _acct_state("sess_live", account_id="acct", days_dormant=1),
+    }
+    registry._handles["sess_live"] = cast(Any, object())
+    registry._fresh_pool_candidate_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda verdict, _instance: (
+            states[verdict.session_id] if verdict.session_id != "sess_live" else None
+        )
+    )
+    registry._reclaim_pool_candidate = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    pressure = await registry._gc_pool_budget_pass(
+        [live, old], states, 2_000_000, get_settings().instance_id, dry_run=False
+    )
+
+    assert pressure.pool_used_bytes == 2_000_000
+    registry._reclaim_pool_candidate.assert_awaited_once_with(
+        old, states, get_settings().instance_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_candidate_physically_deletes_only_contained_owned_image(
+    fake_pool: None,
+) -> None:
+    instance_id = get_settings().instance_id
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    verdict = _canonical_verdict("sess_old", size_bytes=2_000_000)
+    verdict = replace(
+        verdict,
+        image=replace(
+            verdict.image,
+            labels={
+                "aios.managed": "true",
+                "aios.instance_id": instance_id,
+                "aios.session_id": "sess_old",
+            },
+        ),
+    )
+    state = _acct_state("sess_old", account_id="acct", days_dormant=30)
+    registry._fresh_session_state = AsyncMock(return_value=state)  # type: ignore[method-assign]
+
+    async def remove_candidate(candidate: GcImageVerdict, *_args: Any) -> bool:
+        return await backend.remove_image(candidate.removal_ref)
+
+    registry._remove_canonical_image_and_clear_pointer = AsyncMock(  # type: ignore[method-assign]
+        side_effect=remove_candidate
+    )
+    registry._append_fs_event = AsyncMock()  # type: ignore[method-assign]
+
+    removed = await registry._reclaim_pool_candidate(verdict, {"sess_old": state}, instance_id)
+
+    assert removed
+    assert backend.removed_image_refs == [verdict.removal_ref]
+    registry._append_fs_event.assert_awaited_once_with(
+        "sess_old", "sandbox_fs_reset", {"reason": "snapshot_pool_pressure"}
+    )
+
+    wrong_host = replace(
+        verdict,
+        image=replace(verdict.image, labels={**verdict.image.labels, "aios.instance_id": "other"}),
+    )
+    assert not await registry._reclaim_pool_candidate(wrong_host, {"sess_old": state}, instance_id)
+    assert backend.removed_image_refs == [verdict.removal_ref]
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_dry_run_reports_without_deleting(fake_pool: None) -> None:
+    registry = SandboxRegistry(backend=FakeBackend())
+    verdict = _canonical_verdict("sess_old", size_bytes=2_000_000)
+    states = {"sess_old": _acct_state("sess_old", account_id="acct", days_dormant=30)}
+    registry._reclaim_pool_candidate = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 1_000_000, get_settings().instance_id, dry_run=True
+    )
+
+    assert pressure.pool_used_bytes == 2_000_000
+    assert pressure.pressured
+    registry._reclaim_pool_candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_dry_run_logs_bounded_lru_plan(
+    fake_pool: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = SandboxRegistry(backend=FakeBackend())
+    verdicts = [
+        replace(
+            _canonical_verdict(name, size_bytes=2_000_000),
+            image=replace(
+                _canonical_verdict(name, size_bytes=2_000_000).image,
+                labels={
+                    "aios.managed": "true",
+                    "aios.instance_id": get_settings().instance_id,
+                    "aios.session_id": name,
+                },
+            ),
+        )
+        for name in ("old", "mid", "new")
+    ]
+    states = {
+        name: _acct_state(name, account_id="acct", days_dormant=days)
+        for name, days in (("old", 30), ("mid", 20), ("new", 10))
+    }
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda session_id: states[session_id]
+    )
+    logged = Mock()
+    monkeypatch.setattr("aios.sandbox.registry.log.error", logged)
+
+    pressure = await registry._gc_pool_budget_pass(
+        verdicts, states, 3_000_000, get_settings().instance_id, dry_run=True
+    )
+
+    assert pressure.pool_used_bytes == 6_000_000
+    fields = logged.call_args.kwargs
+    assert fields["reclaimable_refs"] == [verdicts[0].removal_ref, verdicts[1].removal_ref]
+    assert fields["reclaimable_bytes"] == 4_000_000
+    assert fields["reclaimed_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_uses_under_lock_fresh_lru_order(fake_pool: None) -> None:
+    registry = SandboxRegistry(backend=FakeBackend())
+
+    def owned(name: str) -> GcImageVerdict:
+        verdict = _canonical_verdict(name, size_bytes=2_000_000)
+        return replace(
+            verdict,
+            image=replace(
+                verdict.image,
+                labels={
+                    "aios.managed": "true",
+                    "aios.instance_id": get_settings().instance_id,
+                    "aios.session_id": name,
+                },
+            ),
+        )
+
+    a = owned("a")
+    b = owned("b")
+    states = {
+        "a": _acct_state("a", account_id="acct", days_dormant=30),
+        "b": _acct_state("b", account_id="acct", days_dormant=20),
+    }
+    fresh = {
+        "a": replace(states["a"], last_event_at=_NOW - timedelta(days=1)),
+        "b": replace(states["b"], last_event_at=_NOW - timedelta(days=20)),
+    }
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda session_id: fresh[session_id]
+    )
+    removed: list[str] = []
+
+    async def reclaim(verdict: GcImageVerdict, *_args: Any) -> bool:
+        removed.append(cast(str, verdict.session_id))
+        return True
+
+    registry._reclaim_pool_candidate = AsyncMock(side_effect=reclaim)  # type: ignore[method-assign]
+
+    await registry._gc_pool_budget_pass(
+        [a, b], states, 2_000_000, get_settings().instance_id, dry_run=False
+    )
+
+    assert removed == ["b"]
 
 
 @pytest.mark.asyncio
