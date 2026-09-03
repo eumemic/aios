@@ -256,3 +256,45 @@ async def test_only_malformed_health_log_is_unknown_not_exception(
     health = await DockerConnectorHealthReader().read()
 
     assert health["whatsapp"].healthy is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_policy_still_counts_for_connector_health_attribution() -> None:
+    from aios.harness.connector_liveness import (
+        ConnectorLivenessDetector,
+        TransportHealth,
+    )
+
+    now = datetime(2026, 9, 3, tzinfo=UTC)
+    pool = _SQLitePool()
+    for connection_id, metadata in (
+        ("bad", {"liveness_silence_threshold_seconds": "invalid"}),
+        ("good", {}),
+    ):
+        session_id = f"session_{connection_id}"
+        pool.db.execute(
+            "INSERT INTO connections VALUES (?, 'whatsapp', ?, NULL)",
+            (connection_id, json.dumps(metadata)),
+        )
+        pool.db.execute(
+            "INSERT INTO sessions VALUES (?, ?, NULL)",
+            (session_id, (now - timedelta(days=9)).isoformat()),
+        )
+        pool.db.execute(
+            "INSERT INTO bindings VALUES (?, 'single_session', ?, ?, NULL)",
+            (connection_id, session_id, (now - timedelta(days=9)).isoformat()),
+        )
+
+    class HealthReader:
+        async def read(self) -> dict[str, TransportHealth]:
+            return {"whatsapp": TransportHealth(False, "running (unhealthy)")}
+
+    detector = ConnectorLivenessDetector(
+        pool,
+        thresholds={"whatsapp": 7 * 86400},
+        health_reader=HealthReader(),
+        alarm=MagicMock(),
+        rate_limit_seconds=3600,
+    )
+
+    assert await detector.check_once(now=now, monotonic_now=10000) == []

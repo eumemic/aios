@@ -43,6 +43,23 @@ class BoundConnectionActivity:
     threshold_seconds: float
 
 
+class BoundConnectionActivities(list[BoundConnectionActivity]):
+    """Evaluable activities plus cardinality of every active binding.
+
+    Connections with invalid or missing policy remain relevant when deciding
+    whether connector-wide health can be attributed, even though they cannot
+    themselves be evaluated for silence.
+    """
+
+    def __init__(
+        self,
+        activities: list[BoundConnectionActivity],
+        active_connection_counts: Mapping[str, int],
+    ) -> None:
+        super().__init__(activities)
+        self.active_connection_counts = dict(active_connection_counts)
+
+
 @dataclass(frozen=True, slots=True)
 class TransportHealth:
     healthy: bool
@@ -120,7 +137,10 @@ async def read_bound_connection_activity(
         """
     )
     result: list[BoundConnectionActivity] = []
+    active_connection_counts: dict[str, int] = {}
     for row in rows:
+        connector = row["connector"]
+        active_connection_counts[connector] = active_connection_counts.get(connector, 0) + 1
         metadata = row["metadata"] or {}
         configured = (
             metadata.get("liveness_silence_threshold_seconds")
@@ -162,7 +182,7 @@ async def read_bound_connection_activity(
                 threshold_seconds=threshold,
             )
         )
-    return result
+    return BoundConnectionActivities(result, active_connection_counts)
 
 
 class DockerConnectorHealthReader:
@@ -378,9 +398,14 @@ class ConnectorLivenessDetector:
             read_bound_connection_activity(self.pool, self.thresholds), self.health_reader.read()
         )
         alarms: list[dict[str, Any]] = []
-        connection_counts: dict[str, int] = {}
-        for activity in activities:
-            connection_counts[activity.connector] = connection_counts.get(activity.connector, 0) + 1
+        connection_counts = getattr(activities, "active_connection_counts", None)
+        if connection_counts is None:
+            # Preserve compatibility with injected readers in callers and tests.
+            connection_counts = {}
+            for activity in activities:
+                connection_counts[activity.connector] = (
+                    connection_counts.get(activity.connector, 0) + 1
+                )
         for activity in activities:
             connection_transport = health.get(activity.connection_id)
             transport = connection_transport or health.get(

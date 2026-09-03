@@ -324,3 +324,35 @@ def test_healthcheck_rejects_stale_or_missing_heartbeat(tmp_path: Path) -> None:
     old = time.time() - 31
     os.utime(heartbeat, (old, old))
     assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_claim_is_stale_before_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fail-closed inode is invisible until its timestamp is stale."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    entered_link = asyncio.Event()
+    release_link = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    real_link = os.link
+
+    def paused_link(source: str, destination: Path) -> None:
+        loop.call_soon_threadsafe(entered_link.set)
+        asyncio.run_coroutine_threadsafe(release_link.wait(), loop).result()
+        real_link(source, destination)
+
+    monkeypatch.setattr(os, "link", paused_link)
+    claim = asyncio.create_task(
+        asyncio.to_thread(connector._claim_heartbeat, heartbeat, b"payload", False)
+    )
+    await entered_link.wait()
+    assert not heartbeat.exists()
+    assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+    release_link.set()
+    identity = await claim
+
+    assert identity is not None
+    assert heartbeat.read_bytes() == b"payload"
+    assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)

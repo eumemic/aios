@@ -57,6 +57,7 @@ import inspect
 import json
 import os
 import signal as _signal
+import tempfile
 import time
 import types
 from collections.abc import Awaitable, Callable
@@ -1048,57 +1049,70 @@ class HttpConnector:
     ) -> tuple[int, int] | None:
         """Create a heartbeat, or recover one old enough to be crash debris.
 
-        Fresh pre-existing paths are left alone.  File-descriptor based updates
-        ensure a pathname replacement race cannot make us touch the replacement.
-
-        ``touch_mtime`` separates the two heartbeat signals exactly as
-        :meth:`_refresh_heartbeat` does. A fail-closed claim (all transports
-        unhealthy from startup, no prior heartbeat inode) must still WRITE the
-        current all-unhealthy content so the out-of-container connector-liveness
-        detector can correlate WHICH connections are down — otherwise the probe
-        emits empty ID lists and a multi-connection connector's alarm is
-        suppressed as an uncorrelated sibling failure. But the FRESHNESS signal
-        (mtime) must be born stale so Docker's own HEALTHCHECK still ages the
-        file out and marks the runtime unhealthy. When ``touch_mtime`` is False
-        the newly created inode's mtime is backdated past the max heartbeat age.
+        A fail-closed heartbeat is fully prepared with a stale timestamp under a
+        temporary name, then linked into place atomically.  Thus readers can
+        never observe the naturally fresh mtime of a newly created inode.
+        File-descriptor based updates retain replacement-inode safety.
         """
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd: int | None = None
+        temporary_path: str | None = None
         created = False
         try:
-            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
-            created = True
-        except FileExistsError:
-            fd = os.open(path, flags)
-        try:
+            if not touch_mtime:
+                # Publish a new fail-closed inode only after both its correlated
+                # content and stale timestamp are complete. os.link provides
+                # atomic O_EXCL-like publication without replacing an operator
+                # owned path.
+                fd, temporary_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+                if payload:
+                    os.write(fd, payload)
+                os.fsync(fd)
+                stale = time.time() - heartbeat_max_age_seconds() - 1
+                os.utime(fd, (stale, stale))
+                try:
+                    os.link(temporary_path, path)
+                except FileExistsError:
+                    # Never rewrite a published inode on the fail-closed path:
+                    # the write itself would transiently advance its mtime.
+                    # A stale pre-existing heartbeat is already safely unhealthy.
+                    return None
+                else:
+                    created = True
+            else:
+                try:
+                    fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
+                    created = True
+                except FileExistsError:
+                    fd = os.open(path, flags)
+
             stat = os.fstat(fd)
             if not created and time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
                 return None
             identity = (stat.st_dev, stat.st_ino)
             if created:
-                # The pathname can be replaced after O_EXCL succeeds.  Establish
-                # ownership from the descriptor, then ensure the path still
-                # names that inode before publishing the claim.
                 try:
                     path_stat = path.stat()
                 except FileNotFoundError:
                     return None
                 if (path_stat.st_dev, path_stat.st_ino) != identity:
                     return None
-            if payload:
+            if not created and payload:
                 os.ftruncate(fd, 0)
                 os.write(fd, payload)
                 os.fsync(fd)
             if touch_mtime:
                 os.utime(fd, None)
-            else:
-                # Fail-closed birth: publish content but keep the file stale so
-                # Docker's freshness probe still fails. Backdate a full max-age
-                # beyond the threshold so a single interval cannot appear fresh.
+            elif not created:
                 stale = time.time() - heartbeat_max_age_seconds() - 1
                 os.utime(fd, (stale, stale))
             return identity
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
+            if temporary_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary_path)
 
     @staticmethod
     def _refresh_heartbeat(
