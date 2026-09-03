@@ -211,12 +211,24 @@ class DockerConnectorHealthReader:
             if isinstance(state_payload, dict):
                 health_payload = state_payload.get("Health") or {}
                 health_log = health_payload.get("Log") if isinstance(health_payload, dict) else None
+                # A malformed record is the NEWEST probe observation when it
+                # precedes (in newest-first order) the first record we accept.
+                # The current probe failed to read/serialize, so a stale
+                # "healthy" attribution from an older record is no longer a
+                # current-health claim we may trust: it is downgraded to
+                # unhealthy. We still consume the older record to attribute
+                # WHICH connections were served, and an older "unhealthy"
+                # attribution is safe to keep (fail closed). We only suppress
+                # the resurrection of stale GREEN, never invent a stale outage.
+                newest_probe_malformed = False
                 for entry in reversed(health_log if isinstance(health_log, list) else []):
                     try:
                         correlated = json.loads(entry.get("Output") or "")
                     except (AttributeError, TypeError, ValueError):
+                        newest_probe_malformed = True
                         continue
                     if not isinstance(correlated, dict):
+                        newest_probe_malformed = True
                         continue
                     healthy_ids = correlated.get("healthy_connection_ids")
                     unhealthy_ids = correlated.get("unhealthy_connection_ids")
@@ -225,13 +237,23 @@ class DockerConnectorHealthReader:
                         and all(isinstance(value, str) for value in values)
                         for values in (healthy_ids, unhealthy_ids)
                     ):
+                        newest_probe_malformed = True
                         continue
                     for connection_id in healthy_ids:
-                        observation = (
-                            TransportHealth(False, detail, definitive_connector_outage=True)
-                            if runtime_down
-                            else TransportHealth(True, "healthy")
-                        )
+                        if runtime_down:
+                            observation = TransportHealth(
+                                False, detail, definitive_connector_outage=True
+                            )
+                        elif newest_probe_malformed:
+                            # Current probe is unreadable; do not resurrect a
+                            # stale healthy verdict as current health.
+                            observation = TransportHealth(
+                                False,
+                                "probe read failed",
+                                definitive_connector_outage=False,
+                            )
+                        else:
+                            observation = TransportHealth(True, "healthy")
                         correlated_observations.setdefault(str(connection_id), []).append(
                             observation
                         )
