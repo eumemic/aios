@@ -113,3 +113,66 @@ async def test_running_correlated_runtime_wins_over_stopped_replica(
     health = await DockerConnectorHealthReader().read()
 
     assert health["conn_1"].healthy is True
+
+
+@pytest.mark.asyncio
+async def test_malformed_newest_health_log_falls_back_to_valid_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad probe record must not abort or erase connection attribution."""
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "running",
+                "Health": {
+                    "Status": "unhealthy",
+                    "Log": [
+                        {
+                            "Output": json.dumps(
+                                {
+                                    "healthy_connection_ids": [],
+                                    "unhealthy_connection_ids": ["conn_1"],
+                                }
+                            )
+                        },
+                        {"Output": "[]"},
+                    ],
+                },
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+
+    assert health["conn_1"].healthy is False
+    assert health["whatsapp"].healthy is False
+
+
+@pytest.mark.asyncio
+async def test_only_malformed_health_log_is_unknown_not_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = MagicMock()
+    container.show = AsyncMock(
+        return_value={
+            "Names": ["/aios-whatsapp"],
+            "State": {
+                "Status": "running",
+                "Health": {"Status": "unhealthy", "Log": [{"Output": "[]"}]},
+            },
+        }
+    )
+    docker = MagicMock()
+    docker.containers.list = AsyncMock(return_value=[container])
+    docker.close = AsyncMock()
+    monkeypatch.setattr("aios.harness.connector_liveness.aiodocker.Docker", lambda: docker)
+
+    health = await DockerConnectorHealthReader().read()
+
+    assert health["whatsapp"].healthy is False

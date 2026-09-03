@@ -210,12 +210,23 @@ class DockerConnectorHealthReader:
             runtime_down = state in {"dead", "exited", "removing"}
             if isinstance(state_payload, dict):
                 health_payload = state_payload.get("Health") or {}
-                for entry in reversed(health_payload.get("Log") or []):
+                health_log = health_payload.get("Log") if isinstance(health_payload, dict) else None
+                for entry in reversed(health_log if isinstance(health_log, list) else []):
                     try:
                         correlated = json.loads(entry.get("Output") or "")
                     except (AttributeError, TypeError, ValueError):
                         continue
-                    for connection_id in correlated.get("healthy_connection_ids", []):
+                    if not isinstance(correlated, dict):
+                        continue
+                    healthy_ids = correlated.get("healthy_connection_ids")
+                    unhealthy_ids = correlated.get("unhealthy_connection_ids")
+                    if not all(
+                        isinstance(values, list)
+                        and all(isinstance(value, str) for value in values)
+                        for values in (healthy_ids, unhealthy_ids)
+                    ):
+                        continue
+                    for connection_id in healthy_ids:
                         observation = (
                             TransportHealth(False, detail, definitive_connector_outage=True)
                             if runtime_down
@@ -224,7 +235,7 @@ class DockerConnectorHealthReader:
                         correlated_observations.setdefault(str(connection_id), []).append(
                             observation
                         )
-                    for connection_id in correlated.get("unhealthy_connection_ids", []):
+                    for connection_id in unhealthy_ids:
                         correlated_observations.setdefault(str(connection_id), []).append(
                             TransportHealth(
                                 False,
