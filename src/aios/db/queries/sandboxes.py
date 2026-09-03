@@ -209,20 +209,132 @@ async def unscoped_clear_session_snapshot(conn: asyncpg.Connection[Any], session
 
 
 async def unscoped_compare_and_clear_session_snapshot(
-    conn: asyncpg.Connection[Any], session_id: str, *, expected_ref: str
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    expected_ref: str,
+    pending_reset_reason: str | None = None,
 ) -> bool:
-    """Clear only the exact artifact pointer the caller removed/proved missing."""
+    """Clear only the exact artifact pointer the caller removed/proved missing.
+
+    ``pending_reset_reason`` is committed in the same row update as pointer
+    loss.  Pressure reclamation uses it as a durable outbox marker, so a
+    transient lifecycle-event failure cannot make the loss undiscoverable.
+    """
     status: str = await conn.execute(
         """
         UPDATE sessions
            SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
-               snapshot_updated_at = now()
+               snapshot_updated_at = now(),
+               snapshot_reset_pending_reason = COALESCE($3, snapshot_reset_pending_reason),
+               snapshot_reset_pending_ready = CASE
+                   WHEN COALESCE($3, snapshot_reset_pending_reason) IS NOT NULL THEN TRUE
+                   ELSE snapshot_reset_pending_ready
+               END
          WHERE id = $1 AND snapshot_ref = $2
         """,
         session_id,
         expected_ref,
+        pending_reset_reason,
     )
     return status != "UPDATE 0"
+
+
+async def unscoped_prepare_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any],
+    session_id: str,
+    *,
+    expected_ref: str,
+    reason: str,
+) -> bool:
+    """Durably record deletion intent before removing an external artifact.
+
+    The pointer remains intact until removal succeeds.  The marker is initially
+    unready; the exact-ref pointer clear makes it deliverable, so a failed
+    physical removal cannot emit a false reset.
+    """
+    status: str = await conn.execute(
+        """UPDATE sessions
+              SET snapshot_reset_pending_reason = $3
+            WHERE id = $1 AND snapshot_ref = $2""",
+        session_id,
+        expected_ref,
+        reason,
+    )
+    return status != "UPDATE 0"
+
+
+async def unscoped_list_pending_snapshot_reset_notices(
+    conn: asyncpg.Connection[Any], *, limit: int = 1000
+) -> list[tuple[str, str]]:
+    """Return durable filesystem-loss outbox entries for retry."""
+    rows = await conn.fetch(
+        """SELECT id, snapshot_reset_pending_reason
+             FROM sessions
+            WHERE snapshot_reset_pending_reason IS NOT NULL
+              AND snapshot_reset_pending_ready
+            ORDER BY id
+            LIMIT $1""",
+        limit,
+    )
+    return [(row["id"], row["snapshot_reset_pending_reason"]) for row in rows]
+
+
+async def unscoped_clear_pending_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_reason: str
+) -> bool:
+    """Acknowledge an outbox entry only after its lifecycle event committed."""
+    status: str = await conn.execute(
+        """UPDATE sessions
+              SET snapshot_reset_pending_reason = NULL,
+                  snapshot_reset_pending_ready = FALSE
+            WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
+        session_id,
+        expected_reason,
+    )
+    return status != "UPDATE 0"
+
+
+async def unscoped_deliver_pending_snapshot_reset_notice(
+    conn: asyncpg.Connection[Any], session_id: str, *, expected_reason: str
+) -> bool:
+    """Atomically claim, append, and acknowledge one snapshot-reset notice.
+
+    The row lock with ``SKIP LOCKED`` makes concurrent GC workers race for a
+    single claim.  Appending the event and clearing its marker share the outer
+    transaction, so either both become visible or neither does.
+    """
+    # Local import avoids the query-package re-export cycle during startup.
+    from aios.db.queries.events import append_event
+
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """SELECT account_id
+                 FROM sessions
+                WHERE id = $1 AND snapshot_reset_pending_reason = $2
+                  AND snapshot_reset_pending_ready
+                  FOR UPDATE SKIP LOCKED""",
+            session_id,
+            expected_reason,
+        )
+        if row is None:
+            return False
+        await append_event(
+            conn,
+            account_id=row["account_id"],
+            session_id=session_id,
+            kind="lifecycle",
+            data={"event": "sandbox_fs_reset", "reason": expected_reason},
+        )
+        await conn.execute(
+            """UPDATE sessions
+                  SET snapshot_reset_pending_reason = NULL,
+                      snapshot_reset_pending_ready = FALSE
+                WHERE id = $1 AND snapshot_reset_pending_reason = $2""",
+            session_id,
+            expected_reason,
+        )
+        return True
 
 
 async def unscoped_lock_session_snapshot_state(
@@ -237,7 +349,7 @@ async def unscoped_lock_session_snapshot_state(
     return await conn.fetchrow(
         """
         SELECT id, account_id, archived_at, snapshot_ref, snapshot_host,
-               snapshot_bytes,
+               snapshot_bytes, snapshot_reset_pending_reason,
                (SELECT e.created_at FROM events e
                  WHERE e.session_id = sessions.id AND e.seq = sessions.last_event_seq)
                    AS last_event_at
@@ -401,12 +513,28 @@ async def unscoped_reconcile_absent_host_snapshots(
 
     The first is a race guard; the second and third are the never-delete
     protections the pointer clear previously lacked entirely.
+
+    Pending-notice recovery: a pressure reclamation records its reset intent
+    (``snapshot_reset_pending_reason``) *before* removing the image and only
+    marks it deliverable (``snapshot_reset_pending_ready``) in the same
+    statement that clears the pointer. If the process crashes after the image
+    is physically gone but before that exact-ref clear, the intent is stranded
+    unready and the pointer is still set. This reconcile is precisely the code
+    that proves such an image absent, so when it clears a pointer that still
+    carries a pending reset intent it must ATOMICALLY make that notice
+    deliverable — otherwise the durable filesystem-reset event is lost forever.
+    We only flip ``ready`` to TRUE for rows that already hold an intent; a
+    pointer cleared with no pending reason must never fabricate a reset notice.
     """
     status: str = await conn.execute(
         """
         UPDATE sessions
            SET snapshot_ref = NULL, snapshot_host = NULL, snapshot_bytes = NULL,
-               snapshot_updated_at = now()
+               snapshot_updated_at = now(),
+               snapshot_reset_pending_ready = CASE
+                   WHEN snapshot_reset_pending_reason IS NOT NULL THEN TRUE
+                   ELSE snapshot_reset_pending_ready
+               END
          WHERE snapshot_host = $1
            AND snapshot_ref IS NOT NULL
            AND snapshot_ref <> ALL($2::text[])

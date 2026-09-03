@@ -201,3 +201,110 @@ async def test_empty_protection_sets_still_reconcile_the_stale_pointers(
         assert [r["id"] for r in survivors] == ["sess_nulltime", "sess_otherhost", "sess_young"]
     finally:
         await conn.close()
+
+
+async def test_absence_reconcile_makes_stranded_reset_notice_deliverable(
+    migrated_db_url: str, _reset_db_state: None
+) -> None:
+    """Crash-recovery: a stranded pending reset notice becomes deliverable.
+
+    Pressure reclamation records its reset intent
+    (``snapshot_reset_pending_reason``) BEFORE removing the image, and only
+    marks it deliverable (``snapshot_reset_pending_ready = TRUE``) in the same
+    statement that clears the exact-ref pointer
+    (``unscoped_compare_and_clear_session_snapshot``). If the process crashes
+    after the image is physically gone but before that clear, the intent is
+    stranded: pointer still set, marker unready, so
+    ``unscoped_list_pending_snapshot_reset_notices`` excludes it and the
+    filesystem-reset lifecycle event is never emitted.
+
+    Absence reconcile is precisely the pass that later proves the image gone.
+    It must clear the pointer AND atomically flip the stranded marker ready.
+    Deleting the ``snapshot_reset_pending_ready = CASE ... END`` clause from the
+    production UPDATE makes the final ``pending`` assertion read ``[]`` — the
+    notice lost forever.
+    """
+    conn: asyncpg.Connection[Any] = await asyncpg.connect(migrated_db_url)
+    try:
+        now = datetime.now(UTC)
+        await _seed(conn, now)
+
+        # sess_dead already exists (host-owned, absent, old). Strand a pending
+        # reset intent on it that never became ready — the exact crash window.
+        await conn.execute(
+            """UPDATE sessions
+                  SET snapshot_reset_pending_reason = 'snapshot_pool_pressure',
+                      snapshot_reset_pending_ready = FALSE
+                WHERE id = 'sess_dead'"""
+        )
+        # Precondition: the stranded notice is NOT deliverable yet.
+        assert await queries.unscoped_list_pending_snapshot_reset_notices(conn) == []
+
+        cleared = await queries.unscoped_reconcile_absent_host_snapshots(
+            conn,
+            _HOST,
+            ["snap:present"],  # sess_dead's ref is gone
+            observed_before=now - timedelta(minutes=40),
+            protected_session_ids=["sess_live"],
+            min_age=timedelta(minutes=15),
+        )
+        assert cleared == 1
+
+        # The pointer is cleared AND the stranded notice is now deliverable.
+        row = await conn.fetchrow(
+            "SELECT snapshot_ref, snapshot_reset_pending_reason, "
+            "snapshot_reset_pending_ready FROM sessions WHERE id = 'sess_dead'"
+        )
+        assert row["snapshot_ref"] is None
+        assert row["snapshot_reset_pending_reason"] == "snapshot_pool_pressure"
+        assert row["snapshot_reset_pending_ready"] is True
+        assert await queries.unscoped_list_pending_snapshot_reset_notices(conn) == [
+            ("sess_dead", "snapshot_pool_pressure")
+        ]
+    finally:
+        await conn.close()
+
+
+async def test_absence_reconcile_never_fabricates_a_reset_notice(
+    migrated_db_url: str, _reset_db_state: None
+) -> None:
+    """OVER-CORRECTION GUARD: a cleared pointer with no intent stays quiet.
+
+    The recovery only rescues rows that ALREADY carry a pending reset reason.
+    The degenerate over-correction — unconditionally setting
+    ``snapshot_reset_pending_ready = TRUE`` on every reconcile — would emit a
+    filesystem-reset lifecycle event for ordinary GC of a session that never
+    had a pressure reclamation. ``sess_dead`` here has no reset intent, so after
+    reconcile it must have NO deliverable notice.
+
+    Replacing the CASE with a bare ``snapshot_reset_pending_ready = TRUE`` turns
+    this red: ``pending`` would list ``('sess_dead', NULL)`` (or the list would
+    be non-empty), fabricating a reset that never happened.
+    """
+    conn: asyncpg.Connection[Any] = await asyncpg.connect(migrated_db_url)
+    try:
+        now = datetime.now(UTC)
+        await _seed(conn, now)
+        # sess_dead has NO pending reset intent (seeded without one).
+
+        cleared = await queries.unscoped_reconcile_absent_host_snapshots(
+            conn,
+            _HOST,
+            ["snap:present"],
+            observed_before=now - timedelta(minutes=40),
+            protected_session_ids=["sess_live"],
+            min_age=timedelta(minutes=15),
+        )
+        assert cleared == 1
+
+        row = await conn.fetchrow(
+            "SELECT snapshot_ref, snapshot_reset_pending_reason, "
+            "snapshot_reset_pending_ready FROM sessions WHERE id = 'sess_dead'"
+        )
+        assert row["snapshot_ref"] is None
+        assert row["snapshot_reset_pending_reason"] is None
+        assert row["snapshot_reset_pending_ready"] is False
+        # POSITIVE CONTROL side: absolutely no notice fabricated.
+        assert await queries.unscoped_list_pending_snapshot_reset_notices(conn) == []
+    finally:
+        await conn.close()
