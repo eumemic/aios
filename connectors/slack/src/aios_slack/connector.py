@@ -74,6 +74,11 @@ log = structlog.get_logger(__name__)
 # than surfacing as an opaque ``is_error`` result.  ``>= 2`` per design §3.3.
 _RATE_LIMIT_MAX_RETRIES = 2
 
+# The SDK reconnects Socket Mode in background tasks, so ``connect()`` does not
+# unwind when the active WebSocket is lost.  Keep the readiness poll short: the
+# heartbeat must stop before a disconnected transport can be presented as live.
+_SOCKET_HEALTH_POLL_S = 0.1
+
 
 @dataclass
 class _SlackConnectionState:
@@ -240,25 +245,47 @@ class SlackConnector(HttpConnector):
                 {"type": req.type, "envelope_id": req.envelope_id, "payload": req.payload}
             )
 
+        async def on_transport_loss(_message: Any) -> None:
+            # The SDK's CLOSE handler attempts reconnection before invoking
+            # this callback.  Registering it still covers direct/error paths;
+            # _run_socket's connectivity supervisor covers that reconnect gap.
+            self._set_socket_receiving(connection_id, False)
+
         state.socket_client.socket_mode_request_listeners.append(on_request)
+        state.socket_client.on_close_listeners.append(on_transport_loss)
+        state.socket_client.on_error_listeners.append(on_transport_loss)
+
+    def _set_socket_receiving(self, connection_id: str, receiving: bool) -> None:
+        """Reflect current Socket Mode receive capability in heartbeat state."""
+        connection = self._connections.get(connection_id)
+        if receiving:
+            self.mark_transport_ready(connection_id)
+        elif connection is not None and connection.serve_status == "serving":
+            connection.serve_status = "starting"
 
     async def _run_socket(self, state: _SlackConnectionState) -> None:
-        """Open the Socket-Mode connection and keep the task alive.
+        """Open Socket Mode and continuously supervise receive capability.
 
-        ``connect()`` establishes the WebSocket and returns once the
-        background monitor + message receiver are running; the listener
-        fires from that receiver.  We then block forever so this task owns
-        the socket's lifetime — cancellation (``removed`` / shutdown) unwinds
-        into ``serve_connection``'s ``finally`` which closes the client.
+        Slack's SDK reconnects in background tasks and deliberately hides
+        failures from ``connect()``.  Its CLOSE callback also runs only after
+        that reconnect attempt, so callbacks alone leave a failed reconnect
+        green.  Polling ``is_connected()`` keeps readiness tied to the active
+        session and restores it only once a replacement session is usable.
         """
-        await state.socket_client.connect()
         connection_id = next(
             connection_id
             for connection_id, connection_state in self.state.items()
             if connection_state is state
         )
-        self.mark_transport_ready(connection_id)
-        await asyncio.Event().wait()
+        await state.socket_client.connect()
+        self._set_socket_receiving(connection_id, await state.socket_client.is_connected())
+        try:
+            while True:
+                await asyncio.sleep(_SOCKET_HEALTH_POLL_S)
+                receiving = await state.socket_client.is_connected()
+                self._set_socket_receiving(connection_id, receiving)
+        finally:
+            self._set_socket_receiving(connection_id, False)
 
     async def _drain_queue(self, connection_id: str, state: _SlackConnectionState) -> None:
         """Drain the per-connection inbound queue: parse, gate, emit.

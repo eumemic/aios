@@ -46,7 +46,10 @@ def _make_socket_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Patch ``AsyncSocketModeClient`` with a real listener list + async stubs."""
     socket = MagicMock(name="AsyncSocketModeClient")
     socket.socket_mode_request_listeners = []
+    socket.on_close_listeners = []
+    socket.on_error_listeners = []
     socket.connect = AsyncMock()
+    socket.is_connected = AsyncMock(return_value=True)
     socket.disconnect = AsyncMock()
     socket.close = AsyncMock()
     socket.send_socket_mode_response = AsyncMock()
@@ -198,6 +201,47 @@ async def test_listener_acks_before_enqueue(
     assert enqueued["type"] == "events_api"
     assert enqueued["envelope_id"] == "env-1"
     assert enqueued["payload"]["event"]["text"] == "hi"
+
+
+async def test_socket_close_revokes_readiness_until_reconnected(
+    connector: SlackConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket = _make_socket_client(monkeypatch)
+    _register_connection(connector)
+    state = _SlackConnectionState(
+        web_client=MagicMock(),
+        socket_client=socket,
+        bot_user_id=BOT_USER_ID,
+        team_id=TEAM_ID,
+        inbound_queue=asyncio.Queue(),
+    )
+    connector.state[CONNECTION_ID] = state
+    connector._register_listener(CONNECTION_ID, state)
+    monkeypatch.setattr(connector_mod, "_SOCKET_HEALTH_POLL_S", 0)
+
+    task = asyncio.create_task(connector._run_socket(state))
+    await asyncio.sleep(0)
+    assert connector._connections[CONNECTION_ID].serve_status == "serving"
+    assert len(socket.on_close_listeners) == 1
+
+    # A CLOSE must revoke readiness even while the SDK's reconnect machinery
+    # remains blocked or repeatedly fails in its own background task.
+    socket.is_connected.return_value = False
+    await socket.on_close_listeners[0](object())
+    assert connector._connections[CONNECTION_ID].serve_status != "serving"
+
+    # Readiness returns only after is_connected confirms a replacement session.
+    socket.is_connected.return_value = True
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if connector._connections[CONNECTION_ID].serve_status == "serving":
+            break
+    assert connector._connections[CONNECTION_ID].serve_status == "serving"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert connector._connections[CONNECTION_ID].serve_status != "serving"
 
 
 async def test_drain_logs_without_emitting(
