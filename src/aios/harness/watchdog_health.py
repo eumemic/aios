@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+# GC runs hourly. Allow a complete missed scheduling interval plus one in-progress
+# tick before the API can no longer establish that the worker is still running.
+_GC_HEALTH_MAX_AGE = timedelta(hours=2)
+_GC_HEALTH_MAX_FUTURE_SKEW = timedelta(minutes=5)
 
 
 def watchdog_health_path() -> Path:
@@ -51,10 +56,19 @@ def read_gc_health() -> dict[str, Any]:
         payload = json.loads(watchdog_health_path().read_text(encoding="utf-8"))
         failures = payload["gc_consecutive_failures"]
         last_success = payload["gc_last_success_at"]
-        if not isinstance(failures, int) or failures < 0:
+        updated_at = payload["updated_at"]
+        if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
             raise ValueError("invalid GC failure count")
         if last_success is not None and not isinstance(last_success, str):
             raise ValueError("invalid GC last-success value")
+        if not isinstance(updated_at, str):
+            raise ValueError("invalid GC snapshot timestamp")
+        observed_at = datetime.fromisoformat(updated_at)
+        if observed_at.tzinfo is None:
+            raise ValueError("GC snapshot timestamp has no timezone")
+        age = datetime.now(UTC) - observed_at.astimezone(UTC)
+        if age > _GC_HEALTH_MAX_AGE or age < -_GC_HEALTH_MAX_FUTURE_SKEW:
+            raise ValueError("stale GC snapshot timestamp")
         return {
             "gc_health_status": "healthy" if failures == 0 else "failing",
             "gc_consecutive_failures": failures,
