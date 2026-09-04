@@ -60,6 +60,7 @@ import inspect
 import json
 import os
 import signal as _signal
+import tempfile
 import time
 import types
 from collections.abc import Awaitable, Callable
@@ -1105,8 +1106,8 @@ class HttpConnector:
         """Create or safely recover a stale heartbeat.
 
         Payload claims are prepared in an unnamed ``O_TMPFILE`` inode and linked
-        into place only when complete. Recovery mutates the locked stale inode by
-        descriptor, so a pathname replacement is never overwritten or unlinked.
+        into place only when complete. Recovery atomically exchanges that claimant
+        with the locked stale inode, revoking the former ownership generation.
         """
         if not payload:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -1167,9 +1168,11 @@ class HttpConnector:
         finally:
             os.close(fd)
 
-        # The public name already exists. Lock and update only that opened inode.
-        # Scope the unpublished claimant over every refusal path so repeated
-        # attempts against a live owner cannot leak process descriptors.
+        # The public name already exists. Lock its inode while deciding whether
+        # it is stale, then atomically exchange it for the fully prepared claimant.
+        # Replacing the inode establishes a new ownership generation: a paused old
+        # owner can no longer satisfy _refresh_heartbeat's identity check.
+        staging_path: Path | None = None
         try:
             flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             try:
@@ -1179,40 +1182,97 @@ class HttpConnector:
             try:
                 fcntl.flock(existing_fd, fcntl.LOCK_EX)
                 stat = os.fstat(existing_fd)
-                identity = (stat.st_dev, stat.st_ino)
+                incumbent_identity = (stat.st_dev, stat.st_ino)
                 if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
                     return None
                 try:
                     published = os.stat(path)
                 except FileNotFoundError:
                     return None
-                if (published.st_dev, published.st_ino) != identity:
+                if (published.st_dev, published.st_ino) != incumbent_identity:
                     return None
-                # Final checkpoint before touching the incumbent. Tests and peers may
-                # refresh it after our initial stale observation; the operation is on
-                # the unpublished claimant and cannot alter their inode.
+
+                # This test checkpoint occurs before publication and only touches
+                # the claimant. Re-check the incumbent afterwards so a peer which
+                # refreshed it while it was considered stale wins the race.
                 os.ftruncate(claimant_fd, os.fstat(claimant_fd).st_size)
+                if not touch_mtime:
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(claimant_fd, (stale, stale))
                 guarded = os.fstat(existing_fd)
                 if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
                     return None
-                os.ftruncate(existing_fd, 0)
-                os.write(existing_fd, payload)
-                os.fsync(existing_fd)
-                if touch_mtime:
-                    os.utime(existing_fd, None)
-                else:
-                    stale = time.time() - heartbeat_max_age_seconds() - 1
-                    os.utime(existing_fd, (stale, stale))
                 try:
-                    published = os.stat(path)
+                    current = os.stat(path)
                 except FileNotFoundError:
                     return None
-                if (published.st_dev, published.st_ino) != identity:
+                if (current.st_dev, current.st_ino) != incumbent_identity:
                     return None
-                return identity
+
+                # renameat2 cannot exchange an unnamed inode directly. Give the
+                # claimant an unpredictable, private link only for the duration of
+                # the exchange; it is never used as a write target.
+                for _ in range(10):
+                    candidate = path.parent / next(
+                        tempfile._get_candidate_names()  # type: ignore[attr-defined]
+                    )
+                    candidate = candidate.with_name(f".{path.name}.{candidate.name}")
+                    try:
+                        _link_unnamed_file(claimant_fd, candidate)
+                    except FileExistsError:
+                        continue
+                    except OSError:
+                        return None
+                    staging_path = candidate
+                    break
+                if staging_path is None or not _rename_exchange(staging_path, path):
+                    return None
+
+                claimant_stat = os.fstat(claimant_fd)
+                claimant_identity = (claimant_stat.st_dev, claimant_stat.st_ino)
+                try:
+                    displaced = os.stat(staging_path)
+                    public = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                displaced_identity = (displaced.st_dev, displaced.st_ino)
+                public_identity = (public.st_dev, public.st_ino)
+                if (
+                    public_identity != claimant_identity
+                    or displaced_identity != incumbent_identity
+                    or time.time() - displaced.st_mtime <= heartbeat_max_age_seconds()
+                ):
+                    # The pathname was replaced or the incumbent refreshed at the
+                    # exchange boundary. Restore what was displaced when our
+                    # claimant is still public; never overwrite an independent
+                    # replacement.
+                    if public_identity == claimant_identity:
+                        _rename_exchange(staging_path, path)
+                    return None
+                return claimant_identity
             finally:
                 os.close(existing_fd)
         finally:
+            if staging_path is not None:
+                # A successful exchange leaves the obsolete owner here. Only
+                # remove the private name while it still identifies either inode
+                # participating in this claim; preserve an observed replacement.
+                removable = {
+                    incumbent_identity if "incumbent_identity" in locals() else None,
+                    (
+                        claimant_stat.st_dev,
+                        claimant_stat.st_ino,
+                    )
+                    if "claimant_stat" in locals()
+                    else None,
+                }
+                try:
+                    staged = os.stat(staging_path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if (staged.st_dev, staged.st_ino) in removable:
+                        os.unlink(staging_path)
             os.close(claimant_fd)
 
     @staticmethod
