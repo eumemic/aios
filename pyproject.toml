@@ -252,28 +252,18 @@ follow_imports = "skip"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = [
-    "-ra",
-    # Keep the repository-wide default bounded by MEMORY, not just time.
-    # A fresh full-suite run under a ~2 GiB CI worker budget peaks at:
-    #   -n=auto (4w): OOM-kill -> exit 137 (the review's parked symptom);
-    #   -n=3:         2047/2048 MiB -- passes but one MiB from the OOM killer;
-    #   -n=2:         ~1940 MiB, ~100 MiB headroom, ~100 s wall.
-    # The exit-137 the reviewer saw is a SIGKILL from memory exhaustion, not
-    # the 120 s wall clock (the suite finishes well under it). ``-n=2`` leaves
-    # headroom so the complete suite finishes successfully; serial execution
-    # cannot finish within the review test budget, so do not drop below 2.
-    "-n=2",
-    # Distribute individual tests so large modules cannot strand one worker.
-    # With two workers this retains bounded-memory concurrency while allowing
-    # the complete suite to meet its time budget.
+    # Do not print thousands of expected Docker skip reasons after execution;
+    # that reporting alone can push an otherwise complete run over the budget.
+    # Failures and errors retain their short-summary entries.
+    "-rfE",
+    # Use a fixed worker count rather than host-dependent ``auto``. Three
+    # workers avoid the four-worker OOM edge while keeping the complete run
+    # inside the fresh-checkout execution budget.
+    "-n=3",
+    # Per-test scheduling avoids the long tail caused by large test modules.
     "--dist=load",
     "--strict-markers",
     "--strict-config",
-    # Surface slow tests in every CI log so regressions don't accumulate
-    # silently.  ``--durations-min=0.5`` filters out the noise floor so
-    # the report stays a sentence, not a screenful.
-    "--durations=20",
-    "--durations-min=0.5",
 ]
 markers = [
     "integration: tests requiring a Postgres testcontainer",
