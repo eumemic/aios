@@ -341,7 +341,7 @@ class TestImageBranch:
         assert isinstance(result.content, list)
         assert result.content[1]["type"] == "image_url"
 
-    async def test_catalog_miss_reports_unknown_vision_support(
+    async def test_catalog_miss_inlines_actual_image_for_unknown_model(
         self,
         temp_workspace_root: Path,
         stub_runtime: Any,
@@ -353,14 +353,17 @@ class TestImageBranch:
             "litellm.get_model_info",
             lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
         )
-        _stage_workspace_image("sess_01TEST", "future.png", valid_png_bytes())
+        payload = valid_png_bytes()
+        _stage_workspace_image("sess_01TEST", "future.png", payload)
 
         result = await read_handler("sess_01TEST", {"path": "/workspace/future.png"})
 
         assert isinstance(result, ToolResult)
-        assert isinstance(result.content, str)
-        assert "Mind vision support: unknown (LiteLLM catalog lookup failed)" in result.content
-        assert "Mind vision support: no" not in result.content
+        assert isinstance(result.content, list)
+        assert result.content[1] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
+        }
 
     async def test_blocked_for_non_vision_mind_is_not_an_error(
         self,

@@ -127,6 +127,38 @@ class TestVisionAwareRendering:
             },
         }
 
+    def test_unknown_model_inlines_inbound_attachment(
+        self, temp_workspace_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        sandbox_path = _stage_image(
+            temp_workspace_root, "sess-1", "echo", "evt-1-future.jpg", _VALID_JPEG
+        )
+        event = _user_event(
+            attachments=[
+                {
+                    "filename": "future.jpg",
+                    "content_type": "image/jpeg",
+                    "size": len(_VALID_JPEG),
+                    "in_sandbox_path": sandbox_path,
+                }
+            ]
+        )
+
+        msg = render_user_event(
+            event,
+            "echo/acct/chat-1",
+            "echo/acct/chat-1",
+            model="future/model",
+            session_id="sess-1",
+        )
+
+        assert isinstance(msg["content"], list)
+        assert msg["content"][1]["type"] == "image_url"
+
     def test_undecodable_under_cap_image_falls_back_to_marker(
         self, temp_workspace_root: Path
     ) -> None:

@@ -319,6 +319,27 @@ class TestScreenshot:
         assert result.metadata is not None
         assert result.metadata["browser"]["screenshot"] is True
 
+    async def test_unknown_model_inlines_screenshot(
+        self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            sessions_service,
+            "get_session_model",
+            AsyncMock(return_value="future/model"),
+        )
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        payload = valid_png_bytes()
+        (plane / "shot.png").write_bytes(payload)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+
+        result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+        assert isinstance(result.content, list)
+        assert result.content[1]["type"] == "image_url"
+
     async def test_non_vision_model_degrades_to_text(
         self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

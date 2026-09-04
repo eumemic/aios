@@ -44,19 +44,19 @@ class TestSupportsVision:
         _patch_get_model_info(monkeypatch, {"foo/text": {"supports_vision": False}})
         assert vision.supports_vision("foo/text") is False
 
+    def test_unknown_when_capability_is_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_get_model_info(monkeypatch, {"future/model": {}})
+        assert vision.supports_vision("future/model") is None
+        assert vision.can_inline_image(
+            model="future/model", content_type="image/png", size_bytes=100
+        )
+
     def test_unknown_when_litellm_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_get_model_info(monkeypatch, {})  # any model raises
         assert vision.supports_vision("totally/unknown") is None
 
     @pytest.mark.parametrize("model", ["xai/grok-4", "xai/grok-4.5", "xai/grok-4.6"])
-    def test_grok_4_family_assumed_vision_capable_despite_stale_litellm(
-        self, monkeypatch: pytest.MonkeyPatch, model: str
-    ) -> None:
-        _patch_get_model_info(monkeypatch, {})
-        assert vision.supports_vision(model) is True
-
-    @pytest.mark.parametrize("model", ["xai/grok-3", "xai/grok-code-fast-1"])
-    def test_other_grok_families_are_not_asserted_as_vision_capable(
+    def test_model_name_does_not_override_unknown_catalog_capability(
         self, monkeypatch: pytest.MonkeyPatch, model: str
     ) -> None:
         _patch_get_model_info(monkeypatch, {})
@@ -90,85 +90,32 @@ class TestSupportsVision:
     @pytest.mark.parametrize(
         "model",
         [
-            # The predicate is a bare substring, so family/tier/version add no
-            # coverage; the cases that matter are the distinct provider-route
-            # shapes (a regression to an ``anthropic/`` prefix breaks these).
-            "anthropic/claude-opus-4-8",  # current primary, plain anthropic route
-            "anthropic/claude-opus-5",  # unreleased shape: must not need a code edit
-            "openrouter/anthropic/claude-opus-4-8",  # provider-prefixed route
-            "bedrock/anthropic.claude-3-5-sonnet",  # bedrock dot-SKU
-            "vertex_ai/claude-opus-4-8",  # vertex bare-claude SKU
+            "anthropic/claude-opus-5",
+            "openai/responses/gpt-6-astra",
+            "openai/responses/future-model",
         ],
     )
-    def test_claude_assumed_vision_capable_despite_stale_litellm(
+    def test_unknown_models_are_allowed_without_name_inference(
         self, monkeypatch: pytest.MonkeyPatch, model: str
     ) -> None:
-        """A long-running worker pins litellm's catalog at startup, so a Claude
-        model released afterwards makes ``get_model_info`` raise "isn't mapped
-        yet" and ``supports_vision`` would collapse to False — silently
-        degrading image reads to a text marker.  All Claude families support
-        vision, so we assert it by name and never consult litellm for them,
-        across every provider route aios uses.  Returning True under a *raising*
-        patch proves litellm is never reached (so no lookup-failed warning).
-        """
-        _patch_get_model_info(monkeypatch, {})  # stale catalog: every lookup raises
-        assert vision.supports_vision(model) is True
-
-    @pytest.mark.parametrize(
-        "model",
-        [
-            "openai/responses/gpt-5.6-sol",
-            "openai/responses/gpt-4o",
-            "openai/responses/o4-mini",
-        ],
-    )
-    def test_openai_responses_gateway_families_assumed_vision_capable(
-        self, monkeypatch: pytest.MonkeyPatch, model: str
-    ) -> None:
-        """Custom Responses API gateway routes are absent from LiteLLM's model
-        catalog, but the routed OpenAI families all accept image inputs."""
         _patch_get_model_info(monkeypatch, {})
-        assert vision.supports_vision(model) is True
+        assert vision.supports_vision(model) is None
+        assert vision.can_inline_image(model=model, content_type="image/png", size_bytes=100)
 
-    def test_astra_inlines_despite_stale_litellm_catalog(
+    def test_catalog_false_wins_even_for_previously_maintained_family(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Astra is a maintained gateway capability, not a catalog guess."""
-        _patch_get_model_info(monkeypatch, {})  # every LiteLLM lookup raises
-        assert vision.supports_vision("openai/responses/gpt-6-astra") is True
-        assert vision.can_inline_image(
-            model="openai/responses/gpt-6-astra",
-            content_type="image/png",
-            size_bytes=100,
-        )
-
-    @pytest.mark.parametrize(
-        ("model", "expected"),
-        [
-            ("openai/responses/future-text-model", None),
-            ("openai/responses/gpt-6-astra-text-only", None),
-            ("known/text-only", False),
-        ],
-    )
-    def test_astra_rule_does_not_broaden_to_unknown_or_text_only_models(
-        self, monkeypatch: pytest.MonkeyPatch, model: str, expected: bool | None
-    ) -> None:
-        _patch_get_model_info(monkeypatch, {"known/text-only": {"supports_vision": False}})
-        assert vision.supports_vision(model) is expected
-
-    def test_explicit_override_can_force_astra_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _patch_get_model_info(monkeypatch, {})
-        model = "openai/responses/gpt-6-astra"
-        vision._VISION_OVERRIDES[model] = False
+        model = "anthropic/claude-text-only"
+        _patch_get_model_info(monkeypatch, {model: {"supports_vision": False}})
         assert vision.supports_vision(model) is False
         assert not vision.can_inline_image(model=model, content_type="image/png", size_bytes=100)
 
-    def test_explicit_override_can_force_claude_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The override dict is consulted before the Claude-family rule, so an
-        explicit ``False`` still forces a Claude model off."""
+    def test_explicit_override_false_blocks_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        model = "openai/responses/gpt-6-astra"
         _patch_get_model_info(monkeypatch, {})
-        vision._VISION_OVERRIDES["anthropic/claude-opus-4-8"] = False
-        assert vision.supports_vision("anthropic/claude-opus-4-8") is False
+        vision._VISION_OVERRIDES[model] = False
+        assert vision.supports_vision(model) is False
+        assert not vision.can_inline_image(model=model, content_type="image/png", size_bytes=100)
 
 
 class TestCanInlineImage:
