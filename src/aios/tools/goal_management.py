@@ -85,7 +85,7 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.models.sessions import Obligation
 from aios.services import sessions as sessions_service
-from aios.tools.invoke import ToolBail
+from aios.tools.invoke import ToolBail, validate_output_schema_or_bail
 from aios.tools.registry import ToolResult, registry
 
 # ─── argument models ─────────────────────────────────────────────────────────
@@ -160,6 +160,12 @@ async def create_goal_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CreateGoalArgs, arguments)
+    # OPEN-time schema-validity gate (#1513): a malformed output_schema is an
+    # un-closable completion contract — reject it here via ToolBail (the
+    # self-correctable, non-evicting channel) BEFORE it is persisted on the
+    # request_opened edge, rather than letting the CLOSE-time formatter
+    # crash/mis-validate on it. Mirrors step._reject_invalid_output_schema.
+    validate_output_schema_or_bail(args.output_schema)
 
     # Admission cap: count THIS session's currently-open self-goals (concurrency,
     # not a lifetime budget — closing a goal with return/error frees slots).
