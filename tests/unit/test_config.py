@@ -355,3 +355,128 @@ def test_docker_cli_timeout_default_and_env(
     assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 30.0
     monkeypatch.setenv("AIOS_SANDBOX_DOCKER_CLI_TIMEOUT_SECONDS", "45")
     assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 45.0
+
+
+def _browser_secrets(tmp_path: Path) -> Path:
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
+    return secrets
+
+
+def test_browser_call_timeout_default_covers_cold_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped default call_timeout must clear the documented cold-open
+    floor against the shipped inner-budget defaults, so every deployment
+    running defaults never trips the invariant (the bug is dormant otherwise)."""
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.delenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AIOS_SANDBOX_BROWSER_PROVISION_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("AIOS_SANDBOX_BROWSER_TAKEOVER_OPEN_TIMEOUT_SECONDS", raising=False)
+
+    s = Settings(_env_file=(str(secrets),))
+    named_floor = (
+        s.sandbox_browser_provision_timeout_seconds
+        + s.sandbox_browser_takeover_open_timeout_seconds
+    )
+    assert s.sandbox_browser_call_timeout_seconds == 210.0
+    assert named_floor == 120.0 + 45
+    assert s.sandbox_browser_call_timeout_seconds > named_floor
+
+
+def test_browser_call_timeout_rejects_below_named_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tightening the 504 timeout below the cold-open floor 504s the caller
+    while the worker still completes the open and inserts a viewerless grant
+    that wedges the account's browser plane — the documented invariant the
+    field description commits to. Settings construction must reject it loudly
+    at startup rather than letting the misconfiguration ship to the worker."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "60")
+
+    with pytest.raises(ValidationError, match="AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS"):
+        Settings(_env_file=(str(secrets),))
+
+
+def test_browser_call_timeout_rejects_equal_to_named_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "plus margin" the description appends is deliberately unspecified,
+    so a value exactly equal to the named floor is rejected (``must exceed``
+    the floor); the boundary case stays operator judgment."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    # Default inner budgets: 120 + 45 = 165. Exactly the floor must be rejected.
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "165")
+
+    with pytest.raises(ValidationError, match="must exceed the cold-open floor"):
+        Settings(_env_file=(str(secrets),))
+
+
+def test_browser_call_timeout_accepts_just_above_named_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One second above the named floor passes the validator and is stored —
+    the unspecified margin is left as operator judgment, exactly as the
+    field description hedges it."""
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "166")
+
+    s = Settings(_env_file=(str(secrets),))
+    assert s.sandbox_browser_call_timeout_seconds == 166.0
+
+
+def test_browser_call_timeout_rejects_when_sibling_budgets_raise_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The validator reacts to the sibling budgets too, not just the
+    call_timeout field: the default 210s is valid against the default
+    inner budgets (floor 165s), but raising ``takeover_open`` to 130 makes
+    the named floor 120 + 130 = 250s and rejects the same 210s default."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.delenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_TAKEOVER_OPEN_TIMEOUT_SECONDS", "130")
+
+    with pytest.raises(ValidationError, match="AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS"):
+        Settings(_env_file=(str(secrets),))
+
+
+def test_browser_call_timeout_error_names_env_var_and_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection message co-locates the env-var name with the constraint
+    (the only operator-facing surface that does — grep across ``*.md`` finds
+    zero references to the var), so the message must name both the env var
+    and the floor's named components an operator would need to reconcile it."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "60")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=(str(secrets),))
+
+    msg = str(exc_info.value)
+    assert "AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS=60.0" in msg
+    assert "provision 120.0s" in msg
+    assert "takeover_open 45s" in msg
+    assert "165.0s" in msg
+    assert "viewerless grant" in msg
