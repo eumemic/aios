@@ -1090,6 +1090,7 @@ class HttpConnector:
         fd: int | None = None
         lock_fd: int | None = None
         temporary_path: str | None = None
+        staging_exposed = False
         created = False
         try:
             if payload:
@@ -1107,6 +1108,7 @@ class HttpConnector:
                     os.utime(fd, (stale, stale))
                 try:
                     os.link(temporary_path, path)
+                    staging_exposed = True
                 except FileExistsError:
                     # A pre-existing pathname is either crash debris whose
                     # attribution must be refreshed, or a live peer/operator file
@@ -1150,6 +1152,10 @@ class HttpConnector:
                     # Atomically exchange the prepared claimant with the public
                     # pathname. Unlike rename-over, both inodes survive, allowing us
                     # to roll back if the incumbent was replaced or refreshed.
+                    # From this point the staging pathname may identify the
+                    # displaced incumbent (or a concurrent replacement), not
+                    # the inode created above. Never clean it up by name.
+                    staging_exposed = True
                     if not _rename_exchange(temporary_path, path):
                         return None
                     claimant = os.stat(path)
@@ -1237,12 +1243,13 @@ class HttpConnector:
                 os.close(lock_fd)
             if fd is not None:
                 os.close(fd)
-            # Do not unlink ``temporary_path`` by name. Once publication or
-            # exchange has run, another actor may have replaced that pathname.
-            # POSIX has no atomic "unlink iff this inode" primitive, so even an
-            # identity check here would retain a destructive TOCTOU race. The
-            # hidden link/debris is harmless and may be reclaimed out of band;
-            # preserving an inode we do not own is mandatory.
+            # Before publication the private staging name still identifies
+            # our inode and can be removed safely. Once exposed by a successful
+            # link or attempted exchange, another actor may replace that name;
+            # POSIX has no atomic "unlink iff this inode" primitive, so leave it.
+            if temporary_path is not None and not staging_exposed:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary_path)
 
     @staticmethod
     def _refresh_heartbeat(
