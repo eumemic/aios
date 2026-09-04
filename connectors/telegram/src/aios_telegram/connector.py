@@ -261,9 +261,7 @@ class TelegramConnector(HttpConnector):
                     exc_info=True,
                 )
 
-    async def _run_polling(
-        self, connection_id: str, state: _TelegramConnectionState
-    ) -> None:
+    async def _run_polling(self, connection_id: str, state: _TelegramConnectionState) -> None:
         await state.application.start()
         assert state.application.updater is not None
         # ``allowed_updates`` is opt-in — Telegram only delivers update
