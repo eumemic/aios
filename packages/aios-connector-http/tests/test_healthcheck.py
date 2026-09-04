@@ -117,9 +117,8 @@ async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: P
         await asyncio.sleep(0.03)
         assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
         assert connector._heartbeat_owned
-        # Recovery updates the locked stale inode and makes it fresh only after
-        # the complete current payload has been persisted.
-        assert connector._heartbeat_identity == original_identity
+        # Recovery publishes a new inode so a paused former owner cannot resume.
+        assert connector._heartbeat_identity != original_identity
         assert read_connection_health(heartbeat) == ([], [])
     finally:
         task.cancel()
@@ -467,15 +466,33 @@ def test_fresh_owner_refusals_do_not_leak_descriptors(tmp_path: Path) -> None:
     assert after - before < 5
 
 
+def test_stale_reclaim_revokes_superseded_owner(tmp_path: Path) -> None:
+    old_owner = _Connector(base_url="http://example.test", token="token")
+    new_owner = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    old_payload = b"old owner"
+    new_payload = b"new owner"
+
+    old_identity = old_owner._claim_heartbeat(heartbeat, old_payload, True)
+    assert old_identity is not None
+    stale = time.time() - 3600
+    os.utime(heartbeat, (stale, stale))
+
+    new_identity = new_owner._claim_heartbeat(heartbeat, new_payload, True)
+
+    assert new_identity is not None
+    assert new_identity != old_identity
+    assert not old_owner._refresh_heartbeat(heartbeat, old_identity, old_payload, True)
+    assert heartbeat.read_bytes() == new_payload
+
+
 def test_repeated_stale_reclaims_do_not_accumulate_staging_paths(tmp_path: Path) -> None:
     """Restart churn retains only the single public heartbeat inode."""
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
 
     for restart in range(5):
-        identity = connector._claim_heartbeat(
-            heartbeat, f"payload-{restart}".encode(), True
-        )
+        identity = connector._claim_heartbeat(heartbeat, f"payload-{restart}".encode(), True)
         assert identity is not None
         assert heartbeat.read_bytes() == f"payload-{restart}".encode()
         assert list(tmp_path.iterdir()) == [heartbeat]
