@@ -405,14 +405,27 @@ async def ensure_session(lock_session, agent_id):
                                 f"lock requires {want_env!r} (session {sid} cannot be "
                                 f"reconciled in place)")}
 
+    # archive_when_idle is immutable after launch: accepted at create
+    # (SessionCreate declares it) but absent from SessionUpdate
+    # (model_config extra="forbid"), so a PUT carrying it would 422 and
+    # there is no service pathway to apply it. Drift on it cannot be
+    # reconciled in place — report a typed immutable-field error instead
+    # of routing the immutable key into the same PUT body as the mutable
+    # fields (which would poison the whole update request).
+    want_awi = lock_session.get("archive_when_idle", False)
+    live_awi = live.get("archive_when_idle")
+    if live_awi is not None and want_awi != live_awi:
+        return sid, {"object_kind": "session", "object_name": agent_name, "action": "error",
+                      "object_id": sid,
+                      "error": (f"immutable field drift: archive_when_idle is {live_awi!r}, "
+                                f"lock requires {want_awi!r} (session {sid} cannot be "
+                                f"reconciled in place)")}
+
     # Sessions don't have optimistic concurrency — update mutable fields if needed
     changed = False
     if sorted(lock_session.get("vault_ids", [])) != sorted(live.get("vault_ids", [])):
         changed = True
     if lock_session.get("title") != live.get("title"):
-        changed = True
-    want_awi = lock_session.get("archive_when_idle", False)
-    if live.get("archive_when_idle") is not None and want_awi != live.get("archive_when_idle"):
         changed = True
 
     if not changed:
@@ -422,7 +435,6 @@ async def ensure_session(lock_session, agent_id):
     update_body = {
         "title": lock_session.get("title"),
         "vault_ids": lock_session.get("vault_ids", []),
-        "archive_when_idle": want_awi,
     }
     resp = await aios_api("PUT", f"/v1/sessions/{sid}", update_body)
     if is_error(resp):
