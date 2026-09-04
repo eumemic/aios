@@ -287,24 +287,57 @@ async def test_pinned_timeout_sweep_uses_shared_bound_for_new_and_legacy_metadat
     assert (run_id in await _needing(sweep_pool)) is should_wake
 
 
-async def test_malformed_environment_timeout_does_not_abort_legacy_sweep(
-    sweep_pool: asyncpg.Pool[Any],
+@pytest.mark.parametrize(
+    "environment_config",
+    [
+        {"bash_timeout_seconds": 1_200},  # valid today, but unused by old execution
+        {"bash_timeout_seconds": MAX_BASH_TIMEOUT_SECONDS + 1},
+        {"bash_timeout_seconds": 120.5},
+        {"bash_timeout_seconds": "120"},
+        {"bash_timeout_seconds": True},
+        {"bash_timeout_seconds": 0},
+        {"bash_timeout_seconds": -1},
+        {"bash_timeout_seconds": 120, "snapshot_budget_bytes": "malformed"},
+    ],
+)
+async def test_legacy_bash_uses_old_global_ceiling_despite_environment_config(
+    sweep_pool: asyncpg.Pool[Any], environment_config: dict[str, Any]
 ) -> None:
-    """A corrupt tenant config falls back conservatively instead of aborting all rows."""
+    """Pre-pin calls used the global ceiling; environment JSON cannot extend recovery."""
     run_id = await _make_run(sweep_pool)
     await _call_started(
         sweep_pool,
         run_id,
-        "sha:malformed#0",
+        "sha:legacy-env#0",
         "tool",
         age_seconds=301,
         payload_extra={"tool_name": "bash", "input": {"command": "true"}},
     )
     async with sweep_pool.acquire() as conn:
         await conn.execute(
-            'UPDATE environments SET config = \'{"bash_timeout_seconds": "not-a-number"}\'::jsonb '
-            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+            "UPDATE environments SET config = $1::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'",
+            environment_config,
         )
+    assert run_id in await _needing(sweep_pool)
+
+
+async def test_legacy_bash_preserves_old_requested_timeout_clamp(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A pre-pin request shorter than the old global ceiling retains that deadline."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:legacy-request#0",
+        "tool",
+        age_seconds=301,
+        payload_extra={
+            "tool_name": "bash",
+            "input": {"command": "true", "timeout_seconds": 1.9},
+        },
+    )
     assert run_id in await _needing(sweep_pool)
 
 

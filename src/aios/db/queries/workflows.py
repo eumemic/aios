@@ -1245,51 +1245,27 @@ async def list_run_ids_needing_step(
                                     $6::numeric
                                   )::float8
                                 END,
-                                -- Compatibility for pre-pin call_started rows. JSON
-                                -- type guards make malformed persisted strings inert;
-                                -- the finite 100-year recovery cap keeps even hostile
-                                -- numeric JSON bounded before conversion to float8.
-                                LEAST(
-                                  COALESCE(
-                                    (SELECT CASE
-                                       WHEN jsonb_typeof(env.config->'bash_timeout_seconds') = 'number'
-                                        AND (env.config->>'bash_timeout_seconds')::numeric > 0
-                                       THEN LEAST(
-                                         (env.config->>'bash_timeout_seconds')::numeric,
-                                         $6::numeric
-                                       )
-                                     END
-                                       FROM environments env
-                                      WHERE env.id = r.environment_id
-                                        AND env.account_id = r.account_id),
-                                    $4::numeric
-                                  ),
-                                  CASE
-                                    WHEN jsonb_typeof(cs.payload->'input'->'timeout_seconds') = 'number'
-                                     AND (cs.payload->'input'->>'timeout_seconds')::numeric > 0
-                                    THEN GREATEST(
+                                -- Compatibility for pre-pin call_started rows.
+                                -- Those calls were opened before environment-aware
+                                -- workflow bash existed: execution used the worker
+                                -- global ceiling, optionally shortened by a valid
+                                -- request. Do not project today's environment config
+                                -- semantics backward onto their recovery horizon.
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'input'->'timeout_seconds') = 'number'
+                                   AND (cs.payload->'input'->>'timeout_seconds')::numeric > 0
+                                  THEN LEAST(
+                                    $4::numeric,
+                                    GREATEST(
                                       1::numeric,
                                       trunc(LEAST(
                                         (cs.payload->'input'->>'timeout_seconds')::numeric,
                                         $6::numeric
                                       ))
                                     )
-                                    ELSE COALESCE(
-                                      (SELECT CASE
-                                         WHEN jsonb_typeof(env.config->'bash_timeout_seconds') = 'number'
-                                          AND (env.config->>'bash_timeout_seconds')::numeric > 0
-                                         THEN LEAST(
-                                           (env.config->>'bash_timeout_seconds')::numeric,
-                                           $6::numeric
-                                         )
-                                       END
-                                         FROM environments env
-                                        WHERE env.id = r.environment_id
-                                          AND env.account_id = r.account_id),
-                                      $4::numeric
-                                    )
-                                  END
-                                )::float8
+                                  )::float8
+                                  ELSE $4::float8
+                                END
                               ) + $5::float8
                             )
                           ELSE $2::float8 END
