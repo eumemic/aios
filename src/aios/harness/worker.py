@@ -120,6 +120,7 @@ _HEARTBEAT_INTERVAL_SECONDS = 15
 # the DB is behind / unreachable. Matches the api gate's cadence.
 _BOOT_GATE_RETRY_SECONDS = 2.0
 
+
 @dataclass(frozen=True, slots=True)
 class StartupRecoveryResult:
     """Return value of :func:`run_startup_recovery` — the composed counts
