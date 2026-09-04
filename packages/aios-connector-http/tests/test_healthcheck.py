@@ -440,6 +440,18 @@ def test_claim_preserves_replacement_installed_at_staging_path(
     assert replacement_path.read_bytes() == b"operator replacement"
 
 
+def test_refused_claim_removes_unexposed_staging_inode(tmp_path: Path) -> None:
+    """Refusing a fresh incumbent must not leak a new private staging file."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"live peer")
+
+    assert connector._claim_heartbeat(heartbeat, b"claimant", True) is None
+
+    assert heartbeat.read_bytes() == b"live peer"
+    assert list(tmp_path.iterdir()) == [heartbeat]
+
+
 @pytest.mark.asyncio
 async def test_fail_closed_claim_reclaims_stale_crash_debris(tmp_path: Path) -> None:
     """Finding #1: a restart whose transports are all still starting must
