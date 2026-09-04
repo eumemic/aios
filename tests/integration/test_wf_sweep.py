@@ -85,7 +85,13 @@ async def _make_run(pool: asyncpg.Pool[Any], *, status: WfRunStatus = "suspended
 
 
 async def _call_started(
-    pool: asyncpg.Pool[Any], run_id: str, call_key: str, capability: str, *, age_seconds: float = 0
+    pool: asyncpg.Pool[Any],
+    run_id: str,
+    call_key: str,
+    capability: str,
+    *,
+    age_seconds: float = 0,
+    payload_extra: dict[str, Any] | None = None,
 ) -> None:
     async with pool.acquire() as conn:
         await wf_queries.append_run_event(
@@ -94,7 +100,7 @@ async def _call_started(
             run_id=run_id,
             type="call_started",
             call_key=call_key,
-            payload={"capability": capability},
+            payload={"capability": capability, **(payload_extra or {})},
         )
         if age_seconds:
             await conn.execute(
@@ -132,6 +138,8 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
             agent_deadline_seconds=AGENT_DEADLINE,
             tool_stale_seconds=TOOL_STALE,
             call_llm_stale_seconds=CALL_LLM_STALE,
+            bash_default_timeout_seconds=120,
+            sandbox_provisioning_slack_seconds=180,
         )
     return set(ids)
 
@@ -218,6 +226,27 @@ async def test_inflight_call_llm_wakes_past_stale_horizon(
     assert run_id not in await _needing(pool)
 
 
+async def test_long_run_bash_uses_its_bounded_horizon(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A configured long call stays quiet while live, then becomes recoverable."""
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
+    run_id = await _make_run(sweep_pool)
+    payload = {"tool_name": "bash", "input": {"command": "sleep 150", "timeout_seconds": 1200}}
+    await _call_started(
+        sweep_pool, run_id, "sha:long#0", "tool", age_seconds=1300, payload_extra=payload
+    )
+    assert run_id not in await _needing(sweep_pool)  # 1200 + 180 provisioning slack
+    await _call_started(
+        sweep_pool, run_id, "sha:long#1", "tool", age_seconds=1400, payload_extra=payload
+    )
+    assert run_id in await _needing(sweep_pool)
+
+
 async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:
@@ -241,6 +270,8 @@ async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
                 agent_deadline_seconds=AGENT_DEADLINE,
                 tool_stale_seconds=horizon,
                 call_llm_stale_seconds=CALL_LLM_STALE,
+                bash_default_timeout_seconds=120,
+                sandbox_provisioning_slack_seconds=180,
             )
         return set(ids)
 

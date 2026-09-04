@@ -109,6 +109,8 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
                 conn,
                 agent_deadline_seconds=3600,
                 tool_stale_seconds=60,
+                bash_default_timeout_seconds=120,
+                sandbox_provisioning_slack_seconds=180,
                 call_llm_stale_seconds=60,
             )
         )
@@ -4960,6 +4962,32 @@ def _execed_commands(backend: FakeBackend) -> list[str]:
 
 
 # (a) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_uses_own_run_environment_timeout_ceiling(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The real workflow dispatcher/executor resolves the run environment ceiling."""
+    pool, backend = wf_sandbox_runtime
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
+    script = (
+        "async def main(input):\n"
+        "    return await tool('bash', {'command': 'sleep 150', 'timeout_seconds': 1200})\n"
+    )
+    run_id = await _make_tool_run(
+        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-env-timeout"
+    )
+
+    await run_workflow_step(run_id)
+    await _drain_sandbox_tasks()
+
+    exec_calls = [kwargs for verb, kwargs in backend.calls if verb == "exec"]
+    assert len(exec_calls) == 1
+    assert exec_calls[0]["timeout_seconds"] == 1200
+
+
 async def test_bash_dispatch_signal_one_call_result(
     wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
 ) -> None:

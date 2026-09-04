@@ -1178,6 +1178,8 @@ async def list_run_ids_needing_step(
     agent_deadline_seconds: float,
     tool_stale_seconds: float,
     call_llm_stale_seconds: float,
+    bash_default_timeout_seconds: float,
+    sandbox_provisioning_slack_seconds: float,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -1229,7 +1231,36 @@ async def list_run_ids_needing_step(
                 AND cs.created_at < now() - make_interval(secs =>
                       CASE cs.payload->>'capability'
                         WHEN 'agent' THEN $1::float8
-                        WHEN 'tool' THEN $2::float8
+                        WHEN 'tool' THEN
+                          CASE WHEN cs.payload->>'tool_name' = 'bash' THEN
+                            GREATEST(
+                              300.0,
+                              LEAST(
+                                COALESCE(
+                                  (SELECT (env.config->>'bash_timeout_seconds')::float8
+                                     FROM environments env
+                                    WHERE env.id = r.environment_id
+                                      AND env.account_id = r.account_id),
+                                  $4::float8
+                                ),
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'input'->'timeout_seconds') = 'number'
+                                   AND (cs.payload->'input'->>'timeout_seconds')::float8 > 0
+                                  THEN GREATEST(
+                                    1.0,
+                                    trunc((cs.payload->'input'->>'timeout_seconds')::float8)
+                                  )
+                                  ELSE COALESCE(
+                                    (SELECT (env.config->>'bash_timeout_seconds')::float8
+                                       FROM environments env
+                                      WHERE env.id = r.environment_id
+                                        AND env.account_id = r.account_id),
+                                    $4::float8
+                                  )
+                                END
+                              ) + $5::float8
+                            )
+                          ELSE $2::float8 END
                         WHEN 'call_llm' THEN $3::float8
                       END)
                 AND NOT EXISTS (
@@ -1241,6 +1272,8 @@ async def list_run_ids_needing_step(
         agent_deadline_seconds,
         tool_stale_seconds,
         call_llm_stale_seconds,
+        bash_default_timeout_seconds,
+        sandbox_provisioning_slack_seconds,
     )
     return [r["id"] for r in rows]
 

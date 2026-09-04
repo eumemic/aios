@@ -42,6 +42,7 @@ from typing import Any
 import asyncpg
 
 from aios.config import get_settings
+from aios.db import queries as db_queries
 from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
@@ -128,6 +129,27 @@ async def _run_sandbox_task(
         run_tools._INFLIGHT.pop((run.id, call_key), None)
 
 
+async def resolve_run_bash_timeout_ceiling(run: WfRun) -> int:
+    """Resolve a run's account-scoped environment ceiling, conservatively.
+
+    Missing/foreign environments and database failures fall back to the worker
+    default.  This mirrors session bash semantics without using a session as an
+    authority proxy for a workflow run.
+    """
+    default = get_settings().bash_default_timeout_seconds
+    try:
+        async with runtime.require_pool().acquire() as conn:
+            env_config = await db_queries.get_environment_config_for_id(
+                conn, run.environment_id, account_id=run.account_id
+            )
+    except Exception as exc:
+        log.warning("run_sandbox.bash_timeout_resolve_failed", run_id=run.id, error=str(exc))
+        return default
+    if env_config is not None and env_config.bash_timeout_seconds is not None:
+        return env_config.bash_timeout_seconds
+    return default
+
+
 async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any) -> dict[str, Any]:
     """Provision (or reuse) the run's sandbox and run the bash command, returning the
     tool_result VALUE: the bare bash dict on success, ``{"error": str}`` on any
@@ -197,7 +219,7 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
     # ``max(1, int(...))`` keeps truncation (2.7 → 2) while guaranteeing a positive
     # request never disables the timeout; the ``min`` clamps to the same ceiling the
     # bash tool uses.
-    ceiling = settings.bash_default_timeout_seconds
+    ceiling = await resolve_run_bash_timeout_ceiling(run)
     resolved_timeout_seconds = (
         min(ceiling, max(1, int(timeout_seconds))) if timeout_seconds is not None else ceiling
     )
