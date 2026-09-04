@@ -39,4 +39,5 @@ RUN uv pip install --system --no-cache --no-sources \
 # Default listener port (overridable via AIOS_SMS_PORT).
 EXPOSE 8080
 
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 CMD ["python", "-m", "aios_connector_http.healthcheck"]
 CMD ["python", "-m", "aios_sms"]
