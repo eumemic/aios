@@ -137,7 +137,9 @@ async def test_heartbeat_does_not_claim_or_remove_preexisting_file(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> None:
+async def test_cleanup_refuses_to_unlink_replacement_inode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
     heartbeat.touch()
@@ -155,6 +157,10 @@ async def test_cleanup_refuses_to_unlink_replacement_inode(tmp_path: Path) -> No
     assert (heartbeat.stat().st_dev, heartbeat.stat().st_ino) != connector._heartbeat_identity
     old_inode.close()
 
+    def refuse_unlink(_path: Path, *args: object, **kwargs: object) -> None:
+        raise AssertionError("cleanup must not unlink through a replaceable pathname")
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
     await connector._remove_owned_heartbeat(heartbeat)
 
     assert heartbeat.exists()
