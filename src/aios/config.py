@@ -260,7 +260,9 @@ class Settings(BaseSettings):
     sandbox_snapshot_timeout_ns_per_byte: float = Field(
         default=20e-9,
         gt=0,
-        description="Fallback snapshot time per byte until measured throughput is available.",
+        description="Fixed snapshot time per byte used to size ``docker image save``/``load`` "
+        "budgets. The snapshot verb (commit/flatten) is instead budgeted from the "
+        "preceding ``inspect --size`` stat walk (see ``_snapshot_timeout_s``).",
     )
     sandbox_snapshot_timeout_safety_margin: float = Field(
         default=2.0,
@@ -272,13 +274,6 @@ class Settings(BaseSettings):
     )
     sandbox_snapshot_timeout_retry_cap: float = Field(
         default=16.0, ge=1.0, description="Maximum cumulative timeout retry multiplier."
-    )
-    sandbox_snapshot_throughput_ewma_alpha: float = Field(
-        default=0.25, gt=0, le=1, description="Weight of the latest successful snapshot throughput."
-    )
-    sandbox_snapshot_throughput_state_path: Path = Field(
-        default=Path("/var/lib/aios/snapshot-throughput.json"),
-        description="Host-local persisted snapshot throughput calibration.",
     )
     sandbox_salvage_breaker_threshold: int = Field(
         default=3,
