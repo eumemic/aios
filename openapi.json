@@ -14014,6 +14014,42 @@
         "title": "CronSource",
         "description": "Recurring source: a standard 5-field cron expression.\n\nStructure-only here \u2014 grammar/occurrence checks live on the write\nmodels (``TriggerCreate`` / ``TriggerUpdate``) so the read path accepts\nevery row the write path ever accepted (see module docstring + \u00a72.2 of\nthe design contract). The additive ``timezone`` field (IANA name)\ninterprets the cron wall-clock; absent = UTC."
       },
+      "CronSourceReplace": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "cron",
+            "title": "Kind",
+            "default": "cron"
+          },
+          "schedule": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Schedule"
+          },
+          "timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone",
+            "description": "IANA timezone name (e.g. 'America/New_York') the cron wall-clock is interpreted in. Required on update \u2014 ``null`` explicitly means UTC (no implicit default; send the complete object)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "schedule",
+          "timezone"
+        ],
+        "title": "CronSourceReplace",
+        "description": "Update-side variant (\u00a72.2 Replace rule): ``timezone`` is REQUIRED, so a\npartial cron source on update 422s instead of silently resetting a stored\nnon-UTC zone to UTC (a silent shift of every future fire time). ``null`` is\nan explicit, in-band choice of UTC and must be sent deliberately \u2014 create\nkeeps the default for tool ergonomics, mirroring the\n:class:`RunCompletionSourceReplace` / :class:`SandboxCommandActionReplace`\n/ :class:`WorkflowActionReplace` siblings."
+      },
       "DenyAll": {
         "properties": {
           "kind": {
@@ -17269,7 +17305,7 @@
           "statuses"
         ],
         "title": "RunCompletionSourceReplace",
-        "description": "Update-side variant (\u00a72.2 Replace rule): ``statuses`` is REQUIRED, so a\npartial source on update 422s instead of silently resetting a narrowed\nfilter back to all-three. (The first SOURCE member with a defaulted field,\nhence the first ``TriggerSourceReplace`` union.)"
+        "description": "Update-side variant (\u00a72.2 Replace rule): ``statuses`` is REQUIRED, so a\npartial source on update 422s instead of silently resetting a narrowed\nfilter back to all-three."
       },
       "RuntimeChatLifecycleRequest": {
         "properties": {
@@ -20271,7 +20307,7 @@
               {
                 "oneOf": [
                   {
-                    "$ref": "#/components/schemas/CronSource"
+                    "$ref": "#/components/schemas/CronSourceReplace"
                   },
                   {
                     "$ref": "#/components/schemas/OneShotSource"
@@ -20286,7 +20322,7 @@
                 "discriminator": {
                   "propertyName": "kind",
                   "mapping": {
-                    "cron": "#/components/schemas/CronSource",
+                    "cron": "#/components/schemas/CronSourceReplace",
                     "external_event": "#/components/schemas/ExternalEventSource",
                     "one_shot": "#/components/schemas/OneShotSource",
                     "run_completion": "#/components/schemas/RunCompletionSourceReplace"

@@ -35,7 +35,9 @@ TRIGGER_UPDATE_DESCRIPTION = (
     "Update a trigger by name. Omitted top-level fields are left unchanged. "
     "`source` and `action`, when provided, REPLACE the stored object "
     "wholesale — send the complete object (fetch the current values via "
-    "`trigger_list`). Toggling `enabled` true→false pauses the trigger "
+    "`trigger_list`). For a `cron` source this means re-sending `timezone` "
+    "explicitly (null = UTC) — omission 422s rather than silently resetting "
+    "a stored non-UTC zone. Toggling `enabled` true→false pauses the trigger "
     "(clears next_fire); false→true resumes it (recomputes next_fire). "
     "Any update whose resulting state is an enabled cron trigger always "
     "yields a recomputed (non-NULL) next_fire, so a cron trigger that "
@@ -55,10 +57,24 @@ _SOURCE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MAX_SCHEDULE_CHARS,
-                    "description": "Standard 5-field cron expression in UTC.",
+                    "description": (
+                        "Standard 5-field cron expression. Interpreted in the "
+                        "`timezone` frame (UTC when `timezone` is null)."
+                    ),
+                },
+                "timezone": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Required on update — explicit null means UTC (no implicit "
+                        "default; send the complete object). An IANA name (e.g. "
+                        "'America/New_York') interprets the cron wall-clock in that "
+                        "zone, DST-aware. Re-supply the stored value to preserve it; "
+                        "omission 422s instead of silently resetting a stored "
+                        "non-UTC zone."
+                    ),
                 },
             },
-            "required": ["kind", "schedule"],
+            "required": ["kind", "schedule", "timezone"],
             "additionalProperties": False,
         },
         {

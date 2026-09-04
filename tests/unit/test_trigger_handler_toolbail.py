@@ -47,8 +47,11 @@ def _stub_runtime(monkeypatch: Any) -> None:
 
 # A cron schedule that is a non-empty string (passes JSON schema) but is not a
 # valid cron expression (fails the write-path model_validator) — the canonical
-# schema-valid-but-Pydantic-semantically-invalid input.
-_BAD_CRON_SOURCE = {"kind": "cron", "schedule": "definitely not a cron"}
+# schema-valid-but-Pydantic-semantically-invalid input. ``timezone`` is sent
+# explicitly (``null`` = UTC) so the update-side Replace rule (which requires
+# ``timezone``) is structurally satisfied and the semantic cron-grammar check
+# is what fires — keeping the test meaningful on both create and update.
+_BAD_CRON_SOURCE = {"kind": "cron", "schedule": "definitely not a cron", "timezone": None}
 _VALID_ACTION = {"kind": "wake_owner", "content": "wake up"}
 
 
