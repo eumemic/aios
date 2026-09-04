@@ -60,7 +60,6 @@ import inspect
 import json
 import os
 import signal as _signal
-import tempfile
 import time
 import types
 from collections.abc import Awaitable, Callable
@@ -110,6 +109,32 @@ from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
 ToolFn = Callable[..., Awaitable[Any]]
+
+
+def _link_unnamed_file(fd: int, destination: str | Path) -> None:
+    """Publish an ``O_TMPFILE`` descriptor without a staging pathname."""
+    libc_name = ctypes.util.find_library("c")
+    if libc_name is None:
+        raise OSError("linkat is unavailable")
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        raise OSError("linkat is unavailable")
+    linkat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    linkat.restype = ctypes.c_int
+    # AT_EMPTY_PATH requires capabilities that container runtimes commonly
+    # remove. Following the procfs descriptor symlink asks linkat to link the
+    # open inode and works without exposing a staging pathname.
+    source = os.fsencode(f"/proc/self/fd/{fd}")
+    if linkat(-100, source, -100, os.fsencode(destination), 0x400) != 0:  # AT_SYMLINK_FOLLOW
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
 
 
 def _rename_exchange(source: str | Path, destination: str | Path) -> bool:
@@ -1078,178 +1103,101 @@ class HttpConnector:
     def _claim_heartbeat(
         path: Path, payload: bytes = b"", touch_mtime: bool = True
     ) -> tuple[int, int] | None:
-        """Create a heartbeat, or recover one old enough to be crash debris.
+        """Create or safely recover a stale heartbeat.
 
-        A heartbeat with connection-health content is fully prepared under a
-        temporary name, then linked or exchanged into place atomically. Thus a
-        reader can never observe a fresh inode before its complete, validated
-        snapshot is present. Fail-closed claims are additionally backdated before
-        publication. File-descriptor based updates retain replacement-inode safety.
+        Payload claims are prepared in an unnamed ``O_TMPFILE`` inode and linked
+        into place only when complete. Recovery mutates the locked stale inode by
+        descriptor, so a pathname replacement is never overwritten or unlinked.
         """
-        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd: int | None = None
-        lock_fd: int | None = None
-        temporary_path: str | None = None
-        staging_exposed = False
-        created = False
-        try:
-            if payload:
-                # Publish an inode only after its correlated content (and, for a
-                # fail-closed claim, stale timestamp) is complete. os.link provides
-                # atomic O_EXCL-like publication without replacing an operator-owned
-                # path. This also prevents fresh empty or prior-process content from
-                # becoming externally visible during a healthy claim.
-                fd, temporary_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-                if payload:
-                    os.write(fd, payload)
-                os.fsync(fd)
-                if not touch_mtime:
+        if not payload:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(path, flags, 0o666)
+            except FileExistsError:
+                return None
+            try:
+                stat = os.fstat(fd)
+                if touch_mtime:
+                    os.utime(fd, None)
+                else:
                     stale = time.time() - heartbeat_max_age_seconds() - 1
                     os.utime(fd, (stale, stale))
-                try:
-                    os.link(temporary_path, path)
-                    staging_exposed = True
-                except FileExistsError:
-                    # A pre-existing pathname is either crash debris whose
-                    # attribution must be refreshed, or a live peer/operator file
-                    # that must not be disturbed. A stat followed by rename is not
-                    # sufficient: rename would overwrite a replacement installed
-                    # between those operations.
-                    try:
-                        existing = os.stat(path)
-                    except FileNotFoundError:
-                        return None
-                    if time.time() - existing.st_mtime <= heartbeat_max_age_seconds():
-                        return None
-                    debris_identity = (existing.st_dev, existing.st_ino)
+                return (stat.st_dev, stat.st_ino)
+            finally:
+                os.close(fd)
 
-                    # Serialize with cooperative refreshers on the inode and
-                    # validate again after taking the lock. A refresher which opened
-                    # the stale inode first wins; one opening it later revalidates the
-                    # public pathname after acquiring this lock and refuses the now
-                    # displaced inode.
-                    try:
-                        lock_fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                    except OSError:
-                        return None
-                    guarded = os.fstat(lock_fd)
-                    if (guarded.st_dev, guarded.st_ino) != debris_identity:
-                        return None
-                    if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
-                        return None
-
-                    # This no-op truncate is also a final pre-exchange checkpoint:
-                    # any non-cooperating writer interposed here is detected by the
-                    # displaced-inode freshness check below. It only touches our
-                    # already-prepared temporary inode, never the incumbent heartbeat.
-                    os.ftruncate(fd, os.fstat(fd).st_size)
-                    os.fsync(fd)
-                    if not touch_mtime:
-                        stale = time.time() - heartbeat_max_age_seconds() - 1
-                        os.utime(fd, (stale, stale))
-
-                    # Atomically exchange the prepared claimant with the public
-                    # pathname. Unlike rename-over, both inodes survive, allowing us
-                    # to roll back if the incumbent was replaced or refreshed.
-                    # From this point the staging pathname may identify the
-                    # displaced incumbent (or a concurrent replacement), not
-                    # the inode created above. Never clean it up by name.
-                    staging_exposed = True
-                    if not _rename_exchange(temporary_path, path):
-                        return None
-                    claimant = os.stat(path)
-                    claimant_identity = (claimant.st_dev, claimant.st_ino)
-                    try:
-                        displaced = os.stat(temporary_path)
-                    except FileNotFoundError:
-                        return None
-                    displaced_identity = (displaced.st_dev, displaced.st_ino)
-                    if (
-                        displaced_identity != debris_identity
-                        or time.time() - displaced.st_mtime <= heartbeat_max_age_seconds()
-                    ):
-                        try:
-                            current = os.stat(path)
-                        except FileNotFoundError:
-                            return None
-                        if (current.st_dev, current.st_ino) == claimant_identity:
-                            # Roll back by exchange, but verify which inode the
-                            # exchange actually displaced. A replacement can land
-                            # after the identity check. In that case it is now at
-                            # the temporary name: make it the next rollback
-                            # candidate and repeat. We only finish once an exchange
-                            # displaced the inode we ourselves put at the public
-                            # path. Thus every interposed replacement is restored,
-                            # rather than unlinked by the finally block.
-                            expected_public = claimant_identity
-                            while _rename_exchange(temporary_path, path):
-                                try:
-                                    rolled_aside = os.stat(temporary_path)
-                                except FileNotFoundError:
-                                    temporary_path = None
-                                    break
-                                rolled_identity = (
-                                    rolled_aside.st_dev,
-                                    rolled_aside.st_ino,
-                                )
-                                if rolled_identity == expected_public:
-                                    break
-                                try:
-                                    restored = os.stat(path)
-                                except FileNotFoundError:
-                                    temporary_path = None
-                                    break
-                                expected_public = (restored.st_dev, restored.st_ino)
-                            else:
-                                # The temporary pathname may contain another
-                                # owner's replacement; failed/unsupported exchange
-                                # leaves its ownership uncertain, so never unlink it.
-                                temporary_path = None
-                        return None
-                    return claimant_identity
-                else:
-                    created = True
-            else:
-                try:
-                    fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666)
-                    created = True
-                except FileExistsError:
-                    fd = os.open(path, flags)
-
-            stat = os.fstat(fd)
-            if not created and time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
-                return None
-            identity = (stat.st_dev, stat.st_ino)
-            if created:
-                try:
-                    path_stat = path.stat()
-                except FileNotFoundError:
-                    return None
-                if (path_stat.st_dev, path_stat.st_ino) != identity:
-                    return None
-            if not created and payload:
-                os.ftruncate(fd, 0)
-                os.write(fd, payload)
-                os.fsync(fd)
-            if touch_mtime:
-                os.utime(fd, None)
-            elif not created:
+        tmpfile = getattr(os, "O_TMPFILE", 0)
+        if not tmpfile:
+            return None
+        try:
+            fd = os.open(path.parent, os.O_RDWR | tmpfile, 0o666)
+        except OSError:
+            # Safe atomic publication is unavailable on this filesystem. Refuse
+            # the claim rather than expose partial content or leak a staging name.
+            return None
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+            if not touch_mtime:
                 stale = time.time() - heartbeat_max_age_seconds() - 1
                 os.utime(fd, (stale, stale))
+            try:
+                _link_unnamed_file(fd, path)
+            except FileExistsError:
+                claimant_fd = os.dup(fd)
+            except OSError:
+                return None
+            else:
+                stat = os.fstat(fd)
+                return (stat.st_dev, stat.st_ino)
+        finally:
+            os.close(fd)
+
+        # The public name already exists. Lock and update only that opened inode.
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            existing_fd = os.open(path, flags)
+        except OSError:
+            return None
+        try:
+            fcntl.flock(existing_fd, fcntl.LOCK_EX)
+            stat = os.fstat(existing_fd)
+            identity = (stat.st_dev, stat.st_ino)
+            if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+                return None
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return None
+            if (published.st_dev, published.st_ino) != identity:
+                return None
+            # Final checkpoint before touching the incumbent. Tests and peers may
+            # refresh it after our initial stale observation; the operation is on
+            # the unpublished claimant and cannot alter their inode.
+            try:
+                os.ftruncate(claimant_fd, os.fstat(claimant_fd).st_size)
+            finally:
+                os.close(claimant_fd)
+            guarded = os.fstat(existing_fd)
+            if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
+                return None
+            os.ftruncate(existing_fd, 0)
+            os.write(existing_fd, payload)
+            os.fsync(existing_fd)
+            if touch_mtime:
+                os.utime(existing_fd, None)
+            else:
+                stale = time.time() - heartbeat_max_age_seconds() - 1
+                os.utime(existing_fd, (stale, stale))
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return None
+            if (published.st_dev, published.st_ino) != identity:
+                return None
             return identity
         finally:
-            if lock_fd is not None:
-                os.close(lock_fd)
-            if fd is not None:
-                os.close(fd)
-            # Before publication the private staging name still identifies
-            # our inode and can be removed safely. Once exposed by a successful
-            # link or attempted exchange, another actor may replace that name;
-            # POSIX has no atomic "unlink iff this inode" primitive, so leave it.
-            if temporary_path is not None and not staging_exposed:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary_path)
+            os.close(existing_fd)
 
     @staticmethod
     def _refresh_heartbeat(

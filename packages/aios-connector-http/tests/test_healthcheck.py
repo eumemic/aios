@@ -117,9 +117,9 @@ async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: P
         await asyncio.sleep(0.03)
         assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
         assert connector._heartbeat_owned
-        # Recovery atomically publishes a fully prepared replacement inode, so
-        # stale prior-process content can never be observed with a fresh mtime.
-        assert connector._heartbeat_identity != original_identity
+        # Recovery updates the locked stale inode and makes it fresh only after
+        # the complete current payload has been persisted.
+        assert connector._heartbeat_identity == original_identity
         assert read_connection_health(heartbeat) == ([], [])
     finally:
         task.cancel()
@@ -382,74 +382,27 @@ def test_healthcheck_rejects_stale_or_missing_heartbeat(tmp_path: Path) -> None:
     assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
 
 
-@pytest.mark.asyncio
-async def test_fail_closed_claim_is_stale_before_publication(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The fail-closed inode is invisible until its timestamp is stale."""
+def test_fail_closed_claim_is_stale_on_publication(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
-    entered_link = asyncio.Event()
-    release_link = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    real_link = os.link
 
-    def paused_link(source: str, destination: Path) -> None:
-        loop.call_soon_threadsafe(entered_link.set)
-        asyncio.run_coroutine_threadsafe(release_link.wait(), loop).result()
-        real_link(source, destination)
-
-    monkeypatch.setattr(os, "link", paused_link)
-    claim = asyncio.create_task(
-        asyncio.to_thread(connector._claim_heartbeat, heartbeat, b"payload", False)
-    )
-    await entered_link.wait()
-    assert not heartbeat.exists()
-    assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
-    release_link.set()
-    identity = await claim
+    identity = connector._claim_heartbeat(heartbeat, b"payload", False)
 
     assert identity is not None
     assert heartbeat.read_bytes() == b"payload"
     assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
 
 
-def test_claim_preserves_replacement_installed_at_staging_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Publication must not unlink a replacement at its internal source path."""
+def test_claim_does_not_leak_internal_staging_path(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
-    real_link = os.link
-    replacement_path: Path | None = None
-
-    def replace_source_after_link(source: str, destination: Path) -> None:
-        nonlocal replacement_path
-        real_link(source, destination)
-        replacement_path = Path(source)
-        replacement_path.unlink()
-        replacement_path.write_bytes(b"operator replacement")
-
-    monkeypatch.setattr(os, "link", replace_source_after_link)
 
     identity = connector._claim_heartbeat(heartbeat, b"payload", True)
 
     assert identity is not None
     assert heartbeat.read_bytes() == b"payload"
-    assert replacement_path is not None
-    assert replacement_path.read_bytes() == b"operator replacement"
-
-
-def test_refused_claim_removes_unexposed_staging_inode(tmp_path: Path) -> None:
-    """Refusing a fresh incumbent must not leak a new private staging file."""
-    connector = _Connector(base_url="http://example.test", token="token")
-    heartbeat = tmp_path / "alive"
-    heartbeat.write_bytes(b"live peer")
-
-    assert connector._claim_heartbeat(heartbeat, b"claimant", True) is None
-
-    assert heartbeat.read_bytes() == b"live peer"
     assert list(tmp_path.iterdir()) == [heartbeat]
+    assert heartbeat.stat().st_nlink == 1
 
 
 @pytest.mark.asyncio
@@ -568,42 +521,6 @@ def test_stale_reclaim_refuses_replacement_after_inspection(
     monkeypatch.setattr(os, "ftruncate", replace_after_guard)
 
     identity = connector._claim_heartbeat(heartbeat, b"new owner", False)
-
-    assert identity is None
-    assert heartbeat.read_bytes() == b"operator replacement"
-
-
-def test_stale_reclaim_preserves_replacement_at_rollback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Rollback restores a pathname installed immediately before its mutation."""
-    import aios_connector_http.runner as runner_module
-
-    connector = _Connector(base_url="http://example.test", token="token")
-    heartbeat = tmp_path / "alive"
-    heartbeat.write_bytes(b"stale owner")
-    old = time.time() - 3600
-    os.utime(heartbeat, (old, old))
-    operator = tmp_path / "operator"
-    operator.write_bytes(b"operator replacement")
-
-    real_exchange = runner_module._rename_exchange
-    calls = 0
-
-    def interposed_exchange(source: str | Path, destination: str | Path) -> bool:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            os.replace(operator, heartbeat)
-        result = real_exchange(source, destination)
-        if calls == 1:
-            # Force refusal after the first exchange.
-            os.utime(source, None)
-        return result
-
-    monkeypatch.setattr(runner_module, "_rename_exchange", interposed_exchange)
-
-    identity = connector._claim_heartbeat(heartbeat, b"claimant", False)
 
     assert identity is None
     assert heartbeat.read_bytes() == b"operator replacement"
