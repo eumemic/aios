@@ -146,4 +146,5 @@ RUN uv pip install --system --no-cache --no-sources \
 # and connector containers run as root so the chown succeeds; the actual
 # signal-cli process inside aios_signal still runs as root.
 RUN chmod 0755 /app/connectors/signal/entrypoint.sh
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 CMD ["python", "-m", "aios_connector_http.healthcheck"]
 ENTRYPOINT ["/app/connectors/signal/entrypoint.sh"]
