@@ -46,7 +46,7 @@ def publish_gc_health(last_success_at: datetime | None, consecutive_failures: in
 
 
 def read_gc_health() -> dict[str, Any]:
-    """Read a validated snapshot, returning explicit unknown/healthy defaults."""
+    """Read a validated snapshot, explicitly distinguishing read failures."""
     try:
         payload = json.loads(watchdog_health_path().read_text(encoding="utf-8"))
         failures = payload["gc_consecutive_failures"]
@@ -56,11 +56,13 @@ def read_gc_health() -> dict[str, Any]:
         if last_success is not None and not isinstance(last_success, str):
             raise ValueError("invalid GC last-success value")
         return {
+            "gc_health_status": "healthy" if failures == 0 else "failing",
             "gc_consecutive_failures": failures,
             "gc_last_success_at": last_success,
         }
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return {
-            "gc_consecutive_failures": 0,
+            "gc_health_status": "unknown",
+            "gc_consecutive_failures": None,
             "gc_last_success_at": None,
         }
