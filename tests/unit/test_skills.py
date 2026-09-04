@@ -209,6 +209,40 @@ class TestExtractSkillMetadata:
                 }
             )
 
+    def test_rejects_nested_skill_md(self) -> None:
+        """``SKILL.md`` nested below the directory root (e.g.
+        ``pkg/sub/SKILL.md``) used to slip past the single-segment
+        ``directory`` guard: ``directory`` was derived as ``pkg`` (which
+        passes validation) but the prefix-strip persisted ``SKILL.md`` as
+        ``sub/SKILL.md``. The system prompt then advertised
+        ``/workspace/skills/pkg/SKILL.md`` while ``provision_skill_files``
+        wrote ``/workspace/skills/pkg/sub/SKILL.md`` — the on-demand
+        ``read`` of the body always failed. Reject at the upload boundary.
+        """
+        files = {"pkg/sub/SKILL.md": "---\nname: my-skill\ndescription: d\n---\n# body\n"}
+        with pytest.raises(ValidationError, match=r"top level|SKILL\.md"):
+            _extract_skill_metadata(files)
+
+    def test_nested_non_skill_md_files_allowed(self) -> None:
+        """Non-``SKILL.md`` files nested under the directory are still
+        allowed — only the ``SKILL.md`` itself must be at the directory
+        root. Regression guard against over-broad rejection.
+        """
+        files = {
+            "code-review/SKILL.md": "---\nname: code-review\ndescription: Review\n---\n# Go",
+            "code-review/scripts/lint.py": "print('lint')",
+            "code-review/docs/guide.md": "# Guide",
+        }
+        directory, name, desc, normalized = _extract_skill_metadata(files)
+        assert directory == "code-review"
+        assert name == "code-review"
+        assert desc == "Review"
+        assert normalized == {
+            "SKILL.md": files["code-review/SKILL.md"],
+            "scripts/lint.py": "print('lint')",
+            "docs/guide.md": "# Guide",
+        }
+
     def test_rejects_path_traversal_key(self) -> None:
         """A skill upload with a key containing ``..`` segments would,
         when ``provision_skill_files`` does
@@ -316,6 +350,57 @@ class TestProvisionSkillFiles:
             script = workspace / "skills" / "my-skill" / "scripts" / "run.py"
             assert script.exists()
             assert script.read_text() == "print('hello')"
+
+    @pytest.mark.asyncio
+    async def test_advertised_location_exists_after_provisioning(self) -> None:
+        """End-to-end regression guard for the nested-``SKILL.md`` bug: the
+        path that ``build_skills_system_block`` advertises as
+        ``<location>`` (``/workspace/skills/{directory}/SKILL.md``) must
+        actually exist on disk after ``provision_skill_files`` runs over a
+        bundle produced by ``_extract_skill_metadata``. Pre-fix a nested
+        ``pkg/sub/SKILL.md`` upload made ``_extract_skill_metadata``
+        normalize ``SKILL.md`` to ``sub/SKILL.md`` so the advertised
+        ``.../pkg/SKILL.md`` never appeared on disk; post-fix such uploads
+        are rejected, and the valid ``{directory}/SKILL.md`` shape keeps
+        the two paths in agreement.
+        """
+        raw_files = {
+            "my-skill/SKILL.md": "---\nname: my-skill\ndescription: d\n---\n# body\n",
+            "my-skill/scripts/run.py": "print('hello')",
+        }
+        directory, name, desc, normalized = _extract_skill_metadata(raw_files)
+        sv = SkillVersion(
+            skill_id="skl_01TEST",
+            version=1,
+            directory=directory,
+            name=name,
+            description=desc,
+            files=normalized,
+            created_at=_NOW,
+        )
+        block = build_skills_system_block([sv])
+        advertised_rel = f"/workspace/skills/{directory}/SKILL.md"
+        assert f"<location>{advertised_rel}</location>" in block
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "sess_01TEST"
+            with (
+                patch(
+                    "aios.harness.skills._load_workspace_path",
+                    AsyncMock(return_value=str(workspace)),
+                ),
+                patch("aios.harness.skills.ensure_workspace_path", return_value=workspace),
+            ):
+                await provision_skill_files("sess_01TEST", [sv])
+
+            advertised_on_disk = workspace / "skills" / directory / "SKILL.md"
+            assert advertised_on_disk.exists(), (
+                f"the <location> advertised in the system prompt ({advertised_rel}) "
+                f"must exist on disk after provisioning; pre-fix the nested-"
+                f"SKILL.md bug made this path missing. Tree: "
+                f"{sorted(p.relative_to(workspace).as_posix() for p in workspace.rglob('*'))!r}"
+            )
+            assert advertised_on_disk.read_text() == raw_files["my-skill/SKILL.md"]
 
     @pytest.mark.asyncio
     async def test_writes_files_even_when_skills_dir_preexists(self) -> None:
