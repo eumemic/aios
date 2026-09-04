@@ -405,6 +405,23 @@ def test_claim_does_not_leak_internal_staging_path(tmp_path: Path) -> None:
     assert heartbeat.stat().st_nlink == 1
 
 
+def test_repeated_stale_reclaims_do_not_accumulate_staging_paths(tmp_path: Path) -> None:
+    """Restart churn retains only the single public heartbeat inode."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+
+    for restart in range(5):
+        identity = connector._claim_heartbeat(
+            heartbeat, f"payload-{restart}".encode(), True
+        )
+        assert identity is not None
+        assert heartbeat.read_bytes() == f"payload-{restart}".encode()
+        assert list(tmp_path.iterdir()) == [heartbeat]
+        assert heartbeat.stat().st_nlink == 1
+        stale = time.time() - 3600
+        os.utime(heartbeat, (stale, stale))
+
+
 @pytest.mark.asyncio
 async def test_fail_closed_claim_reclaims_stale_crash_debris(tmp_path: Path) -> None:
     """Finding #1: a restart whose transports are all still starting must
