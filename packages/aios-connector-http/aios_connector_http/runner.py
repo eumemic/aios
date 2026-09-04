@@ -1073,46 +1073,52 @@ class HttpConnector:
                 try:
                     os.link(temporary_path, path)
                 except FileExistsError:
-                    # A pre-existing pathname is either (a) crash debris from a
-                    # previous process, whose payload is now obsolete and must be
-                    # replaced so the external liveness detector sees the CURRENT
-                    # connection attribution, or (b) a live peer / operator
-                    # replacement we must never disturb. Freshness discriminates:
-                    # only a file already older than the probe's max age is
-                    # safely reclaimable debris. Reclaim it with os.rename, which
-                    # atomically publishes our fully-prepared, already-stale
-                    # temporary inode over the debris in a single step -- so the
-                    # published pathname is never observed fresh and its mtime is
-                    # never transiently advanced. A fresh file is left untouched.
+                    # A pre-existing pathname is either crash debris whose
+                    # attribution must be refreshed, or a live peer/operator file
+                    # that must not be disturbed. A stat followed by rename is not
+                    # sufficient: rename would overwrite a replacement installed
+                    # between those operations.
                     try:
                         existing = os.stat(path)
                     except FileNotFoundError:
-                        # Debris was unlinked between link and stat; retry on the
-                        # next heartbeat interval rather than racing it.
                         return None
                     if time.time() - existing.st_mtime <= heartbeat_max_age_seconds():
-                        # Fresh: a live peer or operator replacement. Never
-                        # rewrite a published inode on the fail-closed path.
                         return None
                     debris_identity = (existing.st_dev, existing.st_ino)
+
+                    # Atomically capture the inode currently named by ``path`` in
+                    # a hard-link guard, then mutate only through that guard. If
+                    # the pathname changed since inspection, identity validation
+                    # refuses the claim without touching the replacement. If it
+                    # changes later, the update applies only to the unlinked old
+                    # inode and the final identity check still refuses ownership.
+                    os.close(fd)
+                    fd = None
+                    os.unlink(temporary_path)
                     try:
-                        os.rename(temporary_path, path)
+                        os.link(path, temporary_path, follow_symlinks=False)
+                        fd = os.open(temporary_path, flags)
                     except OSError:
                         return None
-                    # os.rename consumed the temporary name; do not unlink it.
-                    temporary_path = None
-                    # Confirm the pathname now names OUR replacement inode and
-                    # not a racing third writer's, so we never later mutate or
-                    # unlink someone else's file.
+                    guarded = os.fstat(fd)
+                    if (guarded.st_dev, guarded.st_ino) != debris_identity:
+                        return None
+                    if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
+                        return None
+
+                    os.ftruncate(fd, 0)
+                    if payload:
+                        os.write(fd, payload)
+                    os.fsync(fd)
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(fd, (stale, stale))
                     try:
                         published = os.stat(path)
                     except FileNotFoundError:
                         return None
-                    published_identity = (published.st_dev, published.st_ino)
-                    if published_identity == debris_identity:
-                        # Our rename did not take effect: refuse ownership.
+                    if (published.st_dev, published.st_ino) != debris_identity:
                         return None
-                    return published_identity
+                    return debris_identity
                 else:
                     created = True
             else:

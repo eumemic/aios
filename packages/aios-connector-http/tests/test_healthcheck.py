@@ -446,3 +446,34 @@ async def test_fail_closed_claim_refuses_fresh_preexisting_file(tmp_path: Path) 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+def test_stale_reclaim_refuses_replacement_after_inspection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A replacement installed after stale inspection is never overwritten."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"stale owner")
+    old = time.time() - 3600
+    os.utime(heartbeat, (old, old))
+
+    real_ftruncate = os.ftruncate
+    replaced = False
+
+    def replace_after_guard(fd: int, length: int) -> None:
+        nonlocal replaced
+        if not replaced:
+            # The stale inode has been inspected and captured by the guard. A
+            # replacement at the public pathname must survive the stale update.
+            heartbeat.unlink()
+            heartbeat.write_bytes(b"operator replacement")
+            replaced = True
+        real_ftruncate(fd, length)
+
+    monkeypatch.setattr(os, "ftruncate", replace_after_guard)
+
+    identity = connector._claim_heartbeat(heartbeat, b"new owner", False)
+
+    assert identity is None
+    assert heartbeat.read_bytes() == b"operator replacement"
