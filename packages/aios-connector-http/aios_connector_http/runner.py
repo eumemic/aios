@@ -1305,12 +1305,15 @@ class HttpConnector:
             os.close(fd)
 
     async def _remove_owned_heartbeat(self, path: Path) -> None:
-        """Remove our heartbeat without unlinking a pathname replacement."""
-        if self._heartbeat_owned and self._heartbeat_identity is not None:
-            with contextlib.suppress(FileNotFoundError):
-                stat = await asyncio.to_thread(path.stat)
-                if (stat.st_dev, stat.st_ino) == self._heartbeat_identity:
-                    await asyncio.to_thread(path.unlink)
+        """Relinquish ownership without unlinking the heartbeat pathname.
+
+        There is no portable pathname-based unlink operation that can atomically
+        require an expected inode. Even a successful identity check can race
+        with an operator replacing ``path`` before ``unlink``. Leave our inode
+        behind to age stale instead; the next process can safely reclaim that
+        stale file through the identity-checked refresh path.
+        """
+        del path
         self._heartbeat_owned = False
         self._heartbeat_identity = None
 
