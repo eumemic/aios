@@ -1,8 +1,8 @@
 """Guard the repository-wide pytest parallelism default.
 
-The complete suite must fit a 115-second fresh-checkout review budget without
+The complete suite must fit a 120-second fresh-checkout review budget without
 using xdist's host-dependent ``auto`` worker count. Keep the default at a fixed
-three workers and use per-test scheduling to avoid a slow-module tail.
+three workers and group tests by scope to amortize setup while retaining balance.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def test_default_parallelism_balances_time_and_memory_budgets() -> None:
         "the full suite needs three bounded workers; do not use slower -n=2 "
         "or host-dependent -n=auto"
     )
-    assert "--dist=load" in addopts, (
-        "--dist=load must be preserved to avoid a slow-module tail; "
-        f"addopts={addopts!r}"
+    assert "--dist=loadscope" in addopts, (
+        "--dist=loadscope must be preserved to amortize setup without "
+        f"sacrificing class-level balancing; addopts={addopts!r}"
     )

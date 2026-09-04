@@ -260,8 +260,10 @@ addopts = [
     # workers avoid the four-worker OOM edge while keeping the complete run
     # inside the fresh-checkout execution budget.
     "-n=3",
-    # Per-test scheduling avoids the long tail caused by large test modules.
-    "--dist=load",
+    # Scope scheduling amortizes fixture/import setup while still balancing the
+    # many test classes across workers. In full-suite measurements this removes
+    # the variable per-test scheduler overhead that can exceed the review budget.
+    "--dist=loadscope",
     "--strict-markers",
     "--strict-config",
 ]
