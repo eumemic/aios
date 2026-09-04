@@ -417,8 +417,8 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
     """Capture pixels: driver writes the shot to the plane; we inline it.
 
     Reuses the ``read`` tool's image ladder verbatim: vision gate → format
-    gate → downsample → data-URI part. A non-vision model gets a text
-    explanation instead of pixels, exactly like ``read``.
+    gate → downsample → data-URI part. A model explicitly known not to support
+    vision gets text; unknown capability is optimistically allowed.
     """
     from aios.sandbox.volumes import browser_plane_dir, read_plane_file
 
@@ -443,12 +443,9 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
     header = f"Screenshot: {os.path.basename(response.shot_path)}"
 
     vision_support = supports_vision(model)
-    if len(data) > INLINE_SIZE_CAP_BYTES or vision_support is not True:
+    if len(data) > INLINE_SIZE_CAP_BYTES or vision_support is False:
         if len(data) > INLINE_SIZE_CAP_BYTES:
             reason = "the image exceeds the inline size cap"
-        elif vision_support is None:
-            # Three-state truthfulness (mirrors read): unknown is not "no".
-            reason = f"image support for model {model!r} is unknown"
         else:
             reason = f"model {model!r} does not support image input"
         return ToolResult(

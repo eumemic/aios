@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Vision capability now treats a missing LiteLLM catalog entry or absent
+  `supports_vision` field as unknown and lets image consumers attempt safe
+  inline delivery by default. Explicit overrides and catalog booleans remain
+  authoritative; image size, decoded-format, and resize limits are unchanged.
+
 - Fix the #2294 schema-diet production incident: the dieted opaque arrays
   rendered as bare `{"type": "array"}` with no `items`, and litellm's
   `token_counter` → `_format_type` dereferences `props['items']`

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import re
 from typing import Any
 
 from aios.logging import get_logger
@@ -65,24 +64,10 @@ INLINE_MAX_DIMENSION = 2000
 # (uploaded TIFFs, multi-100MP camera RAWs, etc.).
 PRE_RESIZE_CEILING_BYTES = 50 * 1024 * 1024
 
-# Explicit per-model vision escape hatch (force True/False).  Empty in
-# production — Claude is matched by name in ``supports_vision`` and everything
-# else defers to litellm — but kept as the stub point for tests.
+# Explicit per-model escape hatch. This is the only name-based assertion:
+# catalog values remain authoritative, while uncatalogued models are unknown
+# and consumers optimistically attempt safe image inputs.
 _VISION_OVERRIDES: dict[str, bool] = {}
-
-# oai-proxy exposes custom Responses API routes that LiteLLM does not catalog.
-# These OpenAI families accept image inputs, so assert their capability rather
-# than silently degrading to text markers when model-info lookup raises.
-_VISION_GATEWAY_PREFIX = "openai/responses/"
-_VISION_GATEWAY_FAMILIES = frozenset({"gpt-5", "gpt-4o", "o4"})
-
-# Maintained family assertions cover provider models whose capability is newer
-# than the pinned LiteLLM catalog. Keep these beside the gateway assertions and
-# completion parameter maps: the catalog is useful metadata, not final
-# authority. xAI's numbered Grok 4 line accepts image input; constrain the
-# match to numbered releases so text-specialized siblings such as grok-code do
-# not inherit vision accidentally.
-_XAI_GROK_4_VISION_RE = re.compile(r"^xai/grok-4(?:\.\d+)*$")
 
 
 def supports_vision(model: str) -> bool | None:
@@ -90,37 +75,21 @@ def supports_vision(model: str) -> bool | None:
 
     Resolution order:
 
-    1. :data:`_VISION_OVERRIDES` — explicit per-model escape hatch (force
-       ``True`` or ``False``).
-    2. Maintained family assertions for provider and custom gateway routes,
-       plus any Claude family, are assumed vision-capable. A long-running worker
-       fetches litellm's catalog once at startup, so a Claude model released
-       afterwards makes
-       ``litellm.get_model_info``
-       raise "isn't mapped yet" and we would otherwise collapse to "no vision"
-       — silently degrading image reads to a text marker.  Asserting the family
-       by name needs no edit when the next Claude lands.  The match is a
-       substring rather than an ``anthropic/`` prefix because aios routes Claude
-       through several providers whose strings all still contain ``claude`` (the
-       routes that :func:`~aios.harness.completion.model_descriptor` maps to
-       :attr:`~aios.harness.completion.CacheChannel.ANTHROPIC` — via the
-       ``_ANTHROPIC_PROXY_PROVIDERS`` frozenset it reads — in
-       :mod:`aios.harness.completion`).
-    3. ``litellm.get_model_info`` for every other provider/model. A lookup
-       failure returns ``None`` (unknown), never a confident ``False``.
+    1. :data:`_VISION_OVERRIDES` — intentional per-model force ``True`` or
+       ``False``.
+    2. LiteLLM's actual boolean ``supports_vision`` catalog value.
+    3. ``None`` when lookup fails or the capability is absent/non-boolean.
+
+    ``None`` means unknown, not unsupported. Image consumers default unknown
+    models to allowed, while retaining all size, mime, decode, and provider
+    format gates. This avoids a model-name allowlist that needs patching for
+    every release and ensures an explicit catalog ``False`` is never silently
+    overridden by a family-name guess.
     """
     if model in _VISION_OVERRIDES:
         return _VISION_OVERRIDES[model]
-    normalized = model.lower()
-    if "claude" in normalized or _XAI_GROK_4_VISION_RE.fullmatch(normalized):
-        return True
-    if normalized.startswith(_VISION_GATEWAY_PREFIX):
-        gateway_model = normalized.removeprefix(_VISION_GATEWAY_PREFIX)
-        if any(gateway_model.startswith(family) for family in _VISION_GATEWAY_FAMILIES):
-            return True
-    # Defer the heavy ``litellm`` import: every harness consumer of this
-    # module pays ~1.18s of bootstrap otherwise, and most call sites never
-    # reach this branch (Claude short-circuits above).
+    # Defer the heavy ``litellm`` import: most harness paths do not ask for
+    # image capability, so they should not pay its ~1.18s import cost.
     import litellm
 
     try:
@@ -132,7 +101,8 @@ def supports_vision(model: str) -> bool | None:
         # model has no vision; callers surface it in their visible marker.
         log.warning("vision.litellm_lookup_failed", model=model, error=str(err))
         return None
-    return bool(info.get("supports_vision"))
+    capability = info.get("supports_vision")
+    return capability if isinstance(capability, bool) else None
 
 
 # Image formats every vision-capable provider in aios's routing set accepts as
@@ -188,16 +158,17 @@ def inline_image_format(data: bytes) -> str | None:
 def can_inline_image(*, model: str, content_type: str, size_bytes: int) -> bool:
     """True when ``model`` can see image bytes inlined as ``image_url``.
 
-    Returns ``False`` for non-image content_types, oversize files
-    (over :data:`INLINE_SIZE_CAP_BYTES`), and models without vision
-    support.  Callers fall back to a text marker referencing the
-    in-sandbox path so the model can still ``read`` the file later.
+    Returns ``False`` for non-image content types, oversize files
+    (over :data:`INLINE_SIZE_CAP_BYTES`), and models explicitly known not to
+    support vision. Unknown capability is allowed so newly released and custom
+    gateway models can receive images without a model-list patch. Callers still
+    apply decoded-format and resize safety gates before constructing a part.
     """
     if not content_type.startswith("image/"):
         return False
     if size_bytes > INLINE_SIZE_CAP_BYTES:
         return False
-    return supports_vision(model) is True
+    return supports_vision(model) is not False
 
 
 def make_image_url_part(*, content_type: str, data_b64: str) -> dict[str, Any]:
