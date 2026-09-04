@@ -486,19 +486,37 @@ def test_stale_reclaim_revokes_superseded_owner(tmp_path: Path) -> None:
     assert heartbeat.read_bytes() == new_payload
 
 
-def test_repeated_stale_reclaims_do_not_accumulate_staging_paths(tmp_path: Path) -> None:
-    """Restart churn retains only the single public heartbeat inode."""
+def test_stale_reclaim_cleanup_never_unlinks_a_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cleanup retains a staging name that another actor replaced."""
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"old owner")
+    stale = time.time() - 3600
+    os.utime(heartbeat, (stale, stale))
 
-    for restart in range(5):
-        identity = connector._claim_heartbeat(heartbeat, f"payload-{restart}".encode(), True)
-        assert identity is not None
-        assert heartbeat.read_bytes() == f"payload-{restart}".encode()
-        assert list(tmp_path.iterdir()) == [heartbeat]
-        assert heartbeat.stat().st_nlink == 1
-        stale = time.time() - 3600
-        os.utime(heartbeat, (stale, stale))
+    real_unlink = os.unlink
+    replacement_survived = False
+
+    def replace_at_cleanup(path: str | bytes | Path, *args: object, **kwargs: object) -> None:
+        nonlocal replacement_survived
+        candidate = Path(path)
+        if candidate != heartbeat:
+            real_unlink(path, *args, **kwargs)
+            candidate.write_bytes(b"independent replacement")
+            replacement_survived = True
+            raise AssertionError("cleanup must not unlink a replaceable staging pathname")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", replace_at_cleanup)
+    identity = connector._claim_heartbeat(heartbeat, b"new owner", True)
+
+    assert identity is not None
+    assert heartbeat.read_bytes() == b"new owner"
+    assert not replacement_survived
+    hidden = [entry for entry in tmp_path.iterdir() if entry != heartbeat]
+    assert len(hidden) == 1
 
 
 @pytest.mark.asyncio

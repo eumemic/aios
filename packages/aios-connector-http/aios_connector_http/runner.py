@@ -1253,26 +1253,10 @@ class HttpConnector:
             finally:
                 os.close(existing_fd)
         finally:
-            if staging_path is not None:
-                # A successful exchange leaves the obsolete owner here. Only
-                # remove the private name while it still identifies either inode
-                # participating in this claim; preserve an observed replacement.
-                removable = {
-                    incumbent_identity if "incumbent_identity" in locals() else None,
-                    (
-                        claimant_stat.st_dev,
-                        claimant_stat.st_ino,
-                    )
-                    if "claimant_stat" in locals()
-                    else None,
-                }
-                try:
-                    staged = os.stat(staging_path)
-                except FileNotFoundError:
-                    pass
-                else:
-                    if (staged.st_dev, staged.st_ino) in removable:
-                        os.unlink(staging_path)
+            # POSIX has no conditional unlink: checking ``staging_path`` and then
+            # unlinking it can delete an independent inode installed between
+            # those operations. Retain the private displaced link; bounded cleanup
+            # cannot be made safe without exclusive control of the directory.
             os.close(claimant_fd)
 
     @staticmethod
