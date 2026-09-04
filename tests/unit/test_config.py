@@ -352,6 +352,12 @@ def test_docker_cli_timeout_default_and_env(
     secrets = tmp_path / "secrets.env"
     secrets.write_text("AIOS_VAULT_KEY=v\nAIOS_EGRESS_CA_KEY=e\nAIOS_DB_URL=postgresql://x/y\n")
     monkeypatch.delenv("AIOS_SANDBOX_DOCKER_CLI_TIMEOUT_SECONDS", raising=False)
-    assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 30.0
+    monkeypatch.delenv("AIOS_SANDBOX_GC_ENUMERATION_TIMEOUT_SECONDS", raising=False)
+    settings = Settings(_env_file=(str(secrets),))
+    assert settings.sandbox_docker_cli_timeout_seconds == 30.0
+    assert settings.sandbox_gc_enumeration_timeout_seconds == 300.0
     monkeypatch.setenv("AIOS_SANDBOX_DOCKER_CLI_TIMEOUT_SECONDS", "45")
-    assert Settings(_env_file=(str(secrets),)).sandbox_docker_cli_timeout_seconds == 45.0
+    monkeypatch.setenv("AIOS_SANDBOX_GC_ENUMERATION_TIMEOUT_SECONDS", "120")
+    settings = Settings(_env_file=(str(secrets),))
+    assert settings.sandbox_docker_cli_timeout_seconds == 45.0
+    assert settings.sandbox_gc_enumeration_timeout_seconds == 120.0

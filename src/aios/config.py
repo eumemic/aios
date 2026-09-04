@@ -247,6 +247,11 @@ class Settings(BaseSettings):
         gt=0,
         description="Timeout for individual Docker CLI management calls.",
     )
+    sandbox_gc_enumeration_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        description="Timeout for Docker image listing and batched inspection during GC.",
+    )
     sandbox_inspect_size_timeout_seconds: float = Field(
         default=300.0,
         gt=0,

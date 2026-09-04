@@ -8,6 +8,7 @@ import json
 import time
 import traceback
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,12 +20,39 @@ from aios.logging import get_logger
 
 log = get_logger("aios.worker.watchdogs")
 
+
+@dataclass(slots=True)
+class ProductionWatchdogState:
+    """Worker-local health values shared with deterministic watchdog observers."""
+
+    gc_last_success_at: datetime | None = None
+    gc_consecutive_failures: int = 0
+
+    def record_gc(self, last_success_at: datetime | None, consecutive_failures: int) -> None:
+        self.gc_last_success_at = last_success_at
+        self.gc_consecutive_failures = consecutive_failures
+        if _GC_CONSECUTIVE_FAILURES is not None:
+            with contextlib.suppress(Exception):
+                _GC_CONSECUTIVE_FAILURES.set(consecutive_failures)
+        if last_success_at is not None and _GC_LAST_SUCCESS is not None:
+            with contextlib.suppress(Exception):
+                _GC_LAST_SUCCESS.set(last_success_at.timestamp())
+
+
 try:
-    from prometheus_client import Counter
+    from prometheus_client import Counter, Gauge
 
     _ALARMS = Counter("aios_worker_watchdog_alarms_total", "Worker watchdog alarms", ["kind"])
+    _GC_LAST_SUCCESS = Gauge(
+        "aios_worker_gc_last_success_unixtime", "Unix time of the latest successful sandbox GC tick"
+    )
+    _GC_CONSECUTIVE_FAILURES = Gauge(
+        "aios_worker_gc_consecutive_failures", "Consecutive failed sandbox GC ticks"
+    )
 except Exception:  # pragma: no cover
     _ALARMS = None
+    _GC_LAST_SUCCESS = None
+    _GC_CONSECUTIVE_FAILURES = None
 
 
 def _emit_alarm(kind: str, specimen: dict[str, Any]) -> None:
@@ -211,6 +239,7 @@ async def run_production_watchdogs(
     operation_timeout_seconds: float = 5.0,
     activity_limit: int = 100,
     max_specimens: int = 20,
+    state: ProductionWatchdogState | None = None,
 ) -> None:
     """Run fail-open observers on a reconnecting, dedicated connection."""
     inspector: Any = None

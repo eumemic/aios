@@ -51,7 +51,7 @@ from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inbound_grants_reaper import sweep_inbound_grants
 from aios.harness.inflight_tool_registry import InflightToolRegistry
-from aios.harness.production_watchdogs import run_production_watchdogs
+from aios.harness.production_watchdogs import ProductionWatchdogState, run_production_watchdogs
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -567,6 +567,8 @@ async def worker_main() -> None:
         if recovery.woken_runs:
             log.info("worker.startup_sweep.workflows", woken_runs=recovery.woken_runs)
 
+        watchdog_state = ProductionWatchdogState()
+
         # Start the snapshot GC reconciler (durable session sandboxes). Its
         # immediate first tick replaces the old boot-time orphan reap: rather
         # than removing every managed container at boot (which lost their
@@ -579,6 +581,7 @@ async def worker_main() -> None:
             pressure_callback=lambda pressure: _consume_snapshot_pressure(
                 sandbox_registry, pressure
             ),
+            health_callback=watchdog_state.record_gc,
         )
         _supervise(sandbox_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
@@ -729,6 +732,7 @@ async def worker_main() -> None:
                 operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
                 activity_limit=settings.worker_watchdog_activity_rows,
                 max_specimens=settings.worker_watchdog_max_specimens,
+                state=watchdog_state,
             ),
             name="production_watchdogs",
         )
