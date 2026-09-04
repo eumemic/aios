@@ -138,6 +138,7 @@ def _rename_exchange(source: str | Path, destination: str | Path) -> bool:
     )
     return result == 0
 
+
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
 _TOOL_ATTR = "__aios_http_tool__"
