@@ -414,6 +414,32 @@ async def test_fail_closed_claim_is_stale_before_publication(
     assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
 
 
+def test_claim_preserves_replacement_installed_at_staging_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Publication must not unlink a replacement at its internal source path."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    real_link = os.link
+    replacement_path: Path | None = None
+
+    def replace_source_after_link(source: str, destination: Path) -> None:
+        nonlocal replacement_path
+        real_link(source, destination)
+        replacement_path = Path(source)
+        replacement_path.unlink()
+        replacement_path.write_bytes(b"operator replacement")
+
+    monkeypatch.setattr(os, "link", replace_source_after_link)
+
+    identity = connector._claim_heartbeat(heartbeat, b"payload", True)
+
+    assert identity is not None
+    assert heartbeat.read_bytes() == b"payload"
+    assert replacement_path is not None
+    assert replacement_path.read_bytes() == b"operator replacement"
+
+
 @pytest.mark.asyncio
 async def test_fail_closed_claim_reclaims_stale_crash_debris(tmp_path: Path) -> None:
     """Finding #1: a restart whose transports are all still starting must
