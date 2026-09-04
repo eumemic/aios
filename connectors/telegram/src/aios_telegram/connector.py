@@ -261,7 +261,9 @@ class TelegramConnector(HttpConnector):
                     exc_info=True,
                 )
 
-    async def _run_polling(self, connection_id: str, state: _TelegramConnectionState) -> None:
+    async def _run_polling(
+        self, connection_id: str, state: _TelegramConnectionState
+    ) -> None:
         await state.application.start()
         assert state.application.updater is not None
         # ``allowed_updates`` is opt-in — Telegram only delivers update
@@ -269,8 +271,8 @@ class TelegramConnector(HttpConnector):
         # reactions never reach the bot regardless of which handlers we
         # register locally.
         await state.application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
-        # Polling startup establishes Telegram's inbound update receiver.
-        # Do not advertise health if application or polling startup fails.
+        # PTB returns after its polling task has started and can receive updates.
+        # Do not advertise this connection before that transport startup succeeds.
         self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()
 
