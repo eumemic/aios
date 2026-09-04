@@ -1073,10 +1073,46 @@ class HttpConnector:
                 try:
                     os.link(temporary_path, path)
                 except FileExistsError:
-                    # Never rewrite a published inode on the fail-closed path:
-                    # the write itself would transiently advance its mtime.
-                    # A stale pre-existing heartbeat is already safely unhealthy.
-                    return None
+                    # A pre-existing pathname is either (a) crash debris from a
+                    # previous process, whose payload is now obsolete and must be
+                    # replaced so the external liveness detector sees the CURRENT
+                    # connection attribution, or (b) a live peer / operator
+                    # replacement we must never disturb. Freshness discriminates:
+                    # only a file already older than the probe's max age is
+                    # safely reclaimable debris. Reclaim it with os.rename, which
+                    # atomically publishes our fully-prepared, already-stale
+                    # temporary inode over the debris in a single step -- so the
+                    # published pathname is never observed fresh and its mtime is
+                    # never transiently advanced. A fresh file is left untouched.
+                    try:
+                        existing = os.stat(path)
+                    except FileNotFoundError:
+                        # Debris was unlinked between link and stat; retry on the
+                        # next heartbeat interval rather than racing it.
+                        return None
+                    if time.time() - existing.st_mtime <= heartbeat_max_age_seconds():
+                        # Fresh: a live peer or operator replacement. Never
+                        # rewrite a published inode on the fail-closed path.
+                        return None
+                    debris_identity = (existing.st_dev, existing.st_ino)
+                    try:
+                        os.rename(temporary_path, path)
+                    except OSError:
+                        return None
+                    # os.rename consumed the temporary name; do not unlink it.
+                    temporary_path = None
+                    # Confirm the pathname now names OUR replacement inode and
+                    # not a racing third writer's, so we never later mutate or
+                    # unlink someone else's file.
+                    try:
+                        published = os.stat(path)
+                    except FileNotFoundError:
+                        return None
+                    published_identity = (published.st_dev, published.st_ino)
+                    if published_identity == debris_identity:
+                        # Our rename did not take effect: refuse ownership.
+                        return None
+                    return published_identity
                 else:
                     created = True
             else:

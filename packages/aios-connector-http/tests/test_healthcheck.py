@@ -356,3 +356,93 @@ async def test_fail_closed_claim_is_stale_before_publication(
     assert identity is not None
     assert heartbeat.read_bytes() == b"payload"
     assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_claim_reclaims_stale_crash_debris(tmp_path: Path) -> None:
+    """Finding #1: a restart whose transports are all still starting must
+    reclaim a STALE heartbeat left by the crashed process and republish the
+    CURRENT connection attribution, while keeping the file stale (freshness
+    withheld) so Docker still ages the runtime out.
+    """
+    import json
+
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    # Stale debris from the previous process: names an obsolete healthy id.
+    heartbeat.write_text(
+        json.dumps(
+            {"healthy_connection_ids": ["old"], "unhealthy_connection_ids": []},
+            sort_keys=True,
+        )
+    )
+    old = time.time() - 3600
+    os.utime(heartbeat, (old, old))
+
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.0
+    # Two current connections, both still starting -> every transport unhealthy.
+    connector._connections["conn_a"] = _ConnectionState("conn_a", "account")
+    connector._connections["conn_b"] = _ConnectionState("conn_b", "account")
+
+    iterated = asyncio.Event()
+
+    async def hook() -> None:
+        iterated.set()
+
+    connector._heartbeat_iteration_hook = hook
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await iterated.wait()
+        # Freshness stays withheld: Docker must still age the runtime out.
+        assert not heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+        # Attribution has converged to the current authoritative set.
+        healthy_ids, unhealthy_ids = read_connection_health(heartbeat)
+        assert healthy_ids == []
+        assert unhealthy_ids == ["conn_a", "conn_b"]
+        assert connector._heartbeat_owned
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_claim_refuses_fresh_preexisting_file(tmp_path: Path) -> None:
+    """Over-correction guard: reclaiming stale debris must NOT extend to a
+    FRESH pre-existing heartbeat (an operator replacement / a live peer). The
+    fail-closed claim path must still refuse it.
+    """
+    import json
+
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_text(
+        json.dumps(
+            {"healthy_connection_ids": ["peer"], "unhealthy_connection_ids": []},
+            sort_keys=True,
+        )
+    )
+    # Fresh: touched now, not aged out.
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.0
+    connector._connections["conn_a"] = _ConnectionState("conn_a", "account")
+
+    iterated = asyncio.Event()
+
+    async def hook() -> None:
+        iterated.set()
+
+    connector._heartbeat_iteration_hook = hook
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await iterated.wait()
+        # The fresh peer/operator file is untouched and unclaimed.
+        healthy_ids, unhealthy_ids = read_connection_health(heartbeat)
+        assert healthy_ids == ["peer"]
+        assert unhealthy_ids == []
+        assert not connector._heartbeat_owned
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
