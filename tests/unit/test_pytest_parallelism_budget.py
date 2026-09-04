@@ -19,8 +19,8 @@ raise the default back onto the OOM edge.
 
 The over-correction guard is explicit below: the fix must NOT degrade to serial
 / ``-n=0`` / ``-n=1`` execution (which the pyproject comment itself notes
-"cannot finish within their test budget"). Parallelism with ``loadfile``
-distribution must be preserved. Bounded, not disabled.
+"cannot finish within their test budget"). Bounded parallelism must be
+preserved, and per-test scheduling prevents a slow module from stranding one worker.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_default_parallelism_is_not_disabled() -> None:
         f"pytest default -n={n} disables meaningful parallelism; serial runs "
         "blow the review time budget -- keep >=2"
     )
-    assert "--dist=loadfile" in addopts, (
-        "--dist=loadfile must be preserved so same-file tests stay on one "
-        f"worker; addopts={addopts!r}"
+    assert "--dist=load" in addopts, (
+        "--dist=load must be preserved so large modules do not strand a "
+        f"bounded worker; addopts={addopts!r}"
     )

@@ -263,7 +263,10 @@ addopts = [
     # headroom so the complete suite finishes successfully; serial execution
     # cannot finish within the review test budget, so do not drop below 2.
     "-n=2",
-    "--dist=loadfile",
+    # Distribute individual tests so large modules cannot strand one worker.
+    # With two workers this retains bounded-memory concurrency while allowing
+    # the complete suite to meet its time budget.
+    "--dist=load",
     "--strict-markers",
     "--strict-config",
     # Surface slow tests in every CI log so regressions don't accumulate
