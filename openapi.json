@@ -14193,6 +14193,7 @@
             "anyOf": [
               {
                 "type": "integer",
+                "maximum": 3155760000.0,
                 "minimum": 1.0
               },
               {

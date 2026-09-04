@@ -192,6 +192,7 @@ async def test_cancelled_sub_run_wakes_its_parent_via_child_done(
             tool_stale_seconds=999,
             bash_default_timeout_seconds=120,
             sandbox_provisioning_slack_seconds=180,
+            max_bash_timeout_seconds=3_155_760_000,
             call_llm_stale_seconds=999,
         )
         assert run_id in needing

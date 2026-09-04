@@ -23,6 +23,7 @@ from aios.config import get_settings
 from aios.db.queries import workflows as wf_queries
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 
 log = get_logger("aios.workflows.sweep")
 
@@ -75,6 +76,7 @@ async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
             call_llm_stale_seconds=settings.workflow_call_llm_stale_seconds,
             bash_default_timeout_seconds=settings.bash_default_timeout_seconds,
             sandbox_provisioning_slack_seconds=SANDBOX_PROVISIONING_SLACK_SECONDS,
+            max_bash_timeout_seconds=MAX_BASH_TIMEOUT_SECONDS,
         )
         reaped_ids = await wf_queries.signal_stale_suspended_runs(
             conn, older_than_seconds=settings.workflow_suspended_reap_seconds

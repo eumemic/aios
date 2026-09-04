@@ -1180,6 +1180,7 @@ async def list_run_ids_needing_step(
     call_llm_stale_seconds: float,
     bash_default_timeout_seconds: float,
     sandbox_provisioning_slack_seconds: float,
+    max_bash_timeout_seconds: int,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -1241,7 +1242,7 @@ async def list_run_ids_needing_step(
                                    AND (cs.payload->>'resolved_timeout_seconds')::numeric > 0
                                   THEN LEAST(
                                     (cs.payload->>'resolved_timeout_seconds')::numeric,
-                                    3155760000::numeric
+                                    $6::numeric
                                   )::float8
                                 END,
                                 -- Compatibility for pre-pin call_started rows. JSON
@@ -1255,7 +1256,7 @@ async def list_run_ids_needing_step(
                                         AND (env.config->>'bash_timeout_seconds')::numeric > 0
                                        THEN LEAST(
                                          (env.config->>'bash_timeout_seconds')::numeric,
-                                         3155760000::numeric
+                                         $6::numeric
                                        )
                                      END
                                        FROM environments env
@@ -1270,7 +1271,7 @@ async def list_run_ids_needing_step(
                                       1::numeric,
                                       trunc(LEAST(
                                         (cs.payload->'input'->>'timeout_seconds')::numeric,
-                                        3155760000::numeric
+                                        $6::numeric
                                       ))
                                     )
                                     ELSE COALESCE(
@@ -1279,7 +1280,7 @@ async def list_run_ids_needing_step(
                                           AND (env.config->>'bash_timeout_seconds')::numeric > 0
                                          THEN LEAST(
                                            (env.config->>'bash_timeout_seconds')::numeric,
-                                           3155760000::numeric
+                                           $6::numeric
                                          )
                                        END
                                          FROM environments env
@@ -1305,6 +1306,7 @@ async def list_run_ids_needing_step(
         call_llm_stale_seconds,
         bash_default_timeout_seconds,
         sandbox_provisioning_slack_seconds,
+        max_bash_timeout_seconds,
     )
     return [r["id"] for r in rows]
 

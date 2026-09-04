@@ -28,6 +28,7 @@ from aios.config import get_settings
 from aios.models.agents import ToolSpec
 from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT
 from aios.sandbox.backends.base import CommandResult, SandboxBackendError, SandboxHandle
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 from aios.workflows import run_sandbox, run_tools
 from aios.workflows.idempotency_key import idempotency_key
 
@@ -266,6 +267,21 @@ async def test_run_environment_ceiling_and_lower_request_are_respected() -> None
         lower = _FakeRegistry()
         await _drive(lower, {}, tool_input={"command": "x", "timeout_seconds": 30})
         assert lower.exec_calls[0]["timeout_seconds"] == 30
+
+
+async def test_legacy_pinned_timeout_is_bounded_at_execution() -> None:
+    registry = _FakeRegistry()
+    with patch(
+        "aios.workflows.run_sandbox.runtime.require_sandbox_registry", return_value=registry
+    ):
+        await run_sandbox._execute(
+            _run(),
+            call_key="legacy",
+            tool_name="bash",
+            tool_input={"command": "true"},
+            resolved_timeout_seconds=MAX_BASH_TIMEOUT_SECONDS + 10_000,
+        )
+    assert registry.exec_calls[0]["timeout_seconds"] == MAX_BASH_TIMEOUT_SECONDS
 
 
 async def test_unset_run_environment_ceiling_falls_back_to_global() -> None:

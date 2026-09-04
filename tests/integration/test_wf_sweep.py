@@ -20,6 +20,7 @@ import pytest
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.models.workflows import WfRunSignalKind, WfRunStatus
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.sweep import wake_runs_needing_step
 
@@ -140,6 +141,7 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
             call_llm_stale_seconds=CALL_LLM_STALE,
             bash_default_timeout_seconds=120,
             sandbox_provisioning_slack_seconds=180,
+            max_bash_timeout_seconds=3_155_760_000,
         )
     return set(ids)
 
@@ -251,6 +253,40 @@ async def test_long_run_bash_uses_its_pinned_horizon_after_environment_lowered(
     assert run_id in await _needing(sweep_pool)
 
 
+@pytest.mark.parametrize(
+    ("pinned_timeout", "age_seconds", "should_wake"),
+    [
+        (MAX_BASH_TIMEOUT_SECONDS - 1, MAX_BASH_TIMEOUT_SECONDS + 178, False),
+        (MAX_BASH_TIMEOUT_SECONDS - 1, MAX_BASH_TIMEOUT_SECONDS + 180, True),
+        (MAX_BASH_TIMEOUT_SECONDS, MAX_BASH_TIMEOUT_SECONDS + 179, False),
+        (MAX_BASH_TIMEOUT_SECONDS, MAX_BASH_TIMEOUT_SECONDS + 181, True),
+        (MAX_BASH_TIMEOUT_SECONDS + 10_000, MAX_BASH_TIMEOUT_SECONDS + 179, False),
+        (MAX_BASH_TIMEOUT_SECONDS + 10_000, MAX_BASH_TIMEOUT_SECONDS + 181, True),
+    ],
+)
+async def test_pinned_timeout_sweep_uses_shared_bound_for_new_and_legacy_metadata(
+    sweep_pool: asyncpg.Pool[Any],
+    pinned_timeout: int,
+    age_seconds: float,
+    should_wake: bool,
+) -> None:
+    """Pins at either side of the bound and legacy oversized pins share one deadline."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        f"sha:bound#{pinned_timeout}-{age_seconds}",
+        "tool",
+        age_seconds=age_seconds,
+        payload_extra={
+            "tool_name": "bash",
+            "input": {"command": "true"},
+            "resolved_timeout_seconds": pinned_timeout,
+        },
+    )
+    assert (run_id in await _needing(sweep_pool)) is should_wake
+
+
 async def test_malformed_environment_timeout_does_not_abort_legacy_sweep(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:
@@ -266,7 +302,7 @@ async def test_malformed_environment_timeout_does_not_abort_legacy_sweep(
     )
     async with sweep_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE environments SET config = '{\"bash_timeout_seconds\": \"not-a-number\"}'::jsonb "
+            'UPDATE environments SET config = \'{"bash_timeout_seconds": "not-a-number"}\'::jsonb '
             "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
         )
     assert run_id in await _needing(sweep_pool)
@@ -297,6 +333,7 @@ async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
                 call_llm_stale_seconds=CALL_LLM_STALE,
                 bash_default_timeout_seconds=120,
                 sandbox_provisioning_slack_seconds=180,
+                max_bash_timeout_seconds=3_155_760_000,
             )
         return set(ids)
 

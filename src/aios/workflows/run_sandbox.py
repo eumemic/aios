@@ -52,6 +52,7 @@ from aios.sandbox.env_keys import (
     AIOS_IDEMPOTENCY_KEY_ENV_KEY,
     AIOS_RUN_ID_ENV_KEY,
 )
+from aios.sandbox.limits import bound_bash_timeout_seconds
 from aios.workflows import run_tools
 from aios.workflows.idempotency_key import idempotency_key
 
@@ -164,10 +165,10 @@ async def resolve_run_bash_timeout_ceiling(
                 )
     except Exception as exc:
         log.warning("run_sandbox.bash_timeout_resolve_failed", run_id=run.id, error=str(exc))
-        return default
+        return bound_bash_timeout_seconds(default)
     if env_config is not None and env_config.bash_timeout_seconds is not None:
-        return env_config.bash_timeout_seconds
-    return default
+        return bound_bash_timeout_seconds(env_config.bash_timeout_seconds)
+    return bound_bash_timeout_seconds(default)
 
 
 async def resolve_bash_call_timeout(
@@ -267,6 +268,9 @@ async def _execute(
         # Legacy call_started rows have no pinned value. Resolve conservatively at
         # re-drive; new rows always carry the immutable value journaled at open.
         resolved_timeout_seconds = await resolve_bash_call_timeout(run, tool_input)
+    # Persisted pins predate the model bound and are untrusted input. Apply the
+    # same hard maximum at the final execution boundary as resolution and sweep.
+    resolved_timeout_seconds = bound_bash_timeout_seconds(resolved_timeout_seconds)
     try:
         result = await registry.exec(
             handle,
