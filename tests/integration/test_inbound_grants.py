@@ -11,7 +11,7 @@ import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.errors import NotFoundError
+from aios.errors import ConflictError, NotFoundError
 from aios.models.inbound_policy import RequireApproval
 from aios.services import connections as connections_service
 from tests.integration.conftest import seed_agent_env_session
@@ -236,3 +236,77 @@ async def test_reparent_moves_every_grant_status(grants_pool: asyncpg.Pool[Any])
             connection_id,
         )
         assert [row["account_id"] for row in accounts] == ["grant-b"]
+
+
+async def test_reapprove_already_active_with_revoked_history_raises_conflict(
+    grants_pool: asyncpg.Pool[Any],
+) -> None:
+    """Re-approving an already-``active`` chat (after approve→revoke→re-approve)
+    must raise ``ConflictError`` (HTTP 409), not the raw
+    ``asyncpg.UniqueViolationError`` on ``inbound_grants_live_uniq`` (HTTP 500).
+
+    Regression for the missing guard on the ``inserted`` CTE: the fourth
+    approve finds no ``pending`` row and a ``revoked`` history row, so it took
+    the fresh-``active``-row INSERT path and collided with the partial unique
+    index (which admits a single non-``revoked`` row per
+    ``(connection_id, chat_id)``). The unguarded INSERT aborted the whole
+    statement before the ``row is None`` → ``ConflictError`` fallthrough, so the
+    API consumer observed an unhandled 500 rather than the documented 409.
+    """
+    connection_id = await _connection(grants_pool)
+    async with grants_pool.acquire() as conn:
+        await queries.upsert_pending_inbound_grant(
+            conn,
+            account_id="grant-a",
+            connection_id=connection_id,
+            chat_id="alice",
+        )
+    await connections_service.approve_inbound_grant(  # 1. pending -> active
+        grants_pool, connection_id, "alice", account_id="grant-a"
+    )
+    await connections_service.revoke_inbound_grant(  # 2. active -> revoked (history kept)
+        grants_pool, connection_id, "alice", account_id="grant-a"
+    )
+    await connections_service.approve_inbound_grant(  # 3. re-approve -> fresh active row
+        grants_pool, connection_id, "alice", account_id="grant-a"
+    )
+    with pytest.raises(ConflictError):  # 4. approve again while already active
+        await connections_service.approve_inbound_grant(
+            grants_pool, connection_id, "alice", account_id="grant-a"
+        )
+
+    async with grants_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, status FROM inbound_grants
+                WHERE connection_id=$1 AND chat_id='alice' ORDER BY created_at, id""",
+            connection_id,
+        )
+        assert sorted(row["status"] for row in rows) == ["active", "revoked"]
+
+
+async def test_approve_already_active_with_no_revoked_history_raises_conflict(
+    grants_pool: asyncpg.Pool[Any],
+) -> None:
+    """Approving a chat that is already ``active`` (and was never revoked) must
+    raise ``ConflictError`` (HTTP 409).
+
+    Covers the non-promotable case where neither ``pending`` nor ``revoked``
+    exists — the 409 contract documented in the function's own message ("grant
+    is not pending/revoked or policy does not require approval"). This negative
+    path was previously unasserted in the integration suite.
+    """
+    connection_id = await _connection(grants_pool)
+    async with grants_pool.acquire() as conn:
+        await queries.upsert_pending_inbound_grant(
+            conn,
+            account_id="grant-a",
+            connection_id=connection_id,
+            chat_id="alice",
+        )
+    await connections_service.approve_inbound_grant(  # pending -> active
+        grants_pool, connection_id, "alice", account_id="grant-a"
+    )
+    with pytest.raises(ConflictError):  # approve again while already active, no revoked row
+        await connections_service.approve_inbound_grant(
+            grants_pool, connection_id, "alice", account_id="grant-a"
+        )
