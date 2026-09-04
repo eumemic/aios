@@ -1230,7 +1230,11 @@ class HttpConnector:
         flags = base_flag | getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(path, flags)
-        except FileNotFoundError:
+        except OSError:
+            # Missing paths and safe-open refusals (for example O_NOFOLLOW
+            # rejecting a symlink replacement with ELOOP) mean the pathname no
+            # longer safely identifies our inode. Relinquish it and retry later
+            # without following or mutating the replacement.
             return False
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)

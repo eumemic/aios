@@ -220,6 +220,51 @@ async def test_cleanup_refuses_to_unlink_replacement_inode(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_loop_survives_symlink_replacement(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    operator_file = tmp_path / "operator"
+    operator_file.write_text("operator")
+    connector._discovery_cursor = 0
+    connector.HEARTBEAT_INTERVAL = 0.01
+    first_published = asyncio.Event()
+    replacement_installed = asyncio.Event()
+    retried = asyncio.Event()
+    iterations = 0
+
+    async def after_iteration() -> None:
+        nonlocal iterations
+        iterations += 1
+        if iterations == 1:
+            first_published.set()
+            await replacement_installed.wait()
+        elif iterations == 2:
+            retried.set()
+
+    connector._heartbeat_iteration_hook = after_iteration
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        async with asyncio.timeout(1):
+            await first_published.wait()
+        heartbeat.unlink()
+        heartbeat.symlink_to(operator_file)
+        replacement_installed.set()
+        async with asyncio.timeout(1):
+            await retried.wait()
+
+        assert not task.done()
+        assert heartbeat.is_symlink()
+        assert operator_file.read_text() == "operator"
+        assert not connector._heartbeat_owned
+        assert connector._heartbeat_identity is None
+    finally:
+        replacement_installed.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_does_not_claim_path_replaced_after_create(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
