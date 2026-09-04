@@ -1255,6 +1255,199 @@ class TestRequestBodyCapDefault:
         assert 0 in metadata
 
 
+class TestRequestTargetAuthorityInjection:
+    """SSRF / IP-pin bypass via request-target authority injection.
+
+    The proxy splices the raw HTTP request-target into the upstream URL
+    *authority* position (``https://{pinned}:443{target}`` — the target is NOT
+    a path/query-only slot). h11's SERVER parser is permissive and yields a
+    non-origin target verbatim, so a target beginning with ``@`` is parsed by
+    httpx as URL *userinfo* (``{pinned}:443``) with everything after the ``@``
+    as the host — rebinding the upstream connect to an attacker-chosen
+    host:port and bypassing the only SSRF gate (``_resolve_pinned_ip`` only
+    ever sees the SNI host). httpcore opens TCP to the rebound host BEFORE
+    the TLS handshake against the SNI host, so even a cert-mismatched rebound
+    is a connect/timing port-scan oracle from the worker's vantage.
+
+    The fix: this proxy is the TLS-terminating ORIGIN, so the only valid
+    request-target is origin-form (``/``-leading). Non-origin forms
+    (``@``/absolute/asterisk/authority) are rejected with ``400`` before the
+    body is read, the upstream is resolved, or the URL is built. httpx itself
+    only emits origin-form targets, so a hostile sandbox must put a non-origin
+    target on the wire by hand — exactly what the raw-socket tests below do.
+    """
+
+    @staticmethod
+    async def _raw_roundtrip(
+        proxy: SecretEgressProxy, sni: str, request_bytes: bytes
+    ) -> tuple[bytes, bytes]:
+        """Open TLS to the proxy, write raw request bytes, return ``(head, body)``.
+
+        httpx normalizes request-targets to origin-form, so the non-origin
+        forms under test must be written to the wire directly — the only path
+        a hostile sandbox has too (it controls the raw bytes of the terminated
+        TLS connection).
+        """
+        reader, writer = await _open_tls(proxy, sni)
+        try:
+            writer.write(request_bytes)
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            body = await asyncio.wait_for(reader.read(), 5)
+            return head, body
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def test_at_target_never_connects_rebound_host(
+        self, crypto_box_runtime: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The load-bearing claim: the upstream TCP connection goes to the
+        worker-resolved, SSRF-validated, pinned IP for the SNI host — NEVER to
+        an attacker-chosen host:port smuggled in via the request-target.
+
+        Before the fix a ``GET @<rebound>:<port>/`` target rebinds the upstream
+        URL host to ``<rebound>`` and httpcore opens TCP to it before the TLS
+        handshake against the SNI host — an unconditional SSRF / port-scan
+        oracle (cert-free, any deployment). This stands up a real loopback
+        "attacker", records every host the SSRF gate sees, and uses the
+        proxy's REAL upstream httpx client (no mock transport — a mock would
+        intercept before ``connect_tcp`` and mask the rebind) to prove the
+        proxy never connects to the rebound host, the gate never sees any
+        host, and the client gets a clean ``400``.
+        """
+        hits = 0
+
+        async def _attacker(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+            nonlocal hits
+            hits += 1
+            w.close()
+            with contextlib.suppress(Exception):
+                await w.wait_closed()
+
+        attacker = await asyncio.start_server(_attacker, "127.0.0.1", 0)
+        attacker_port = attacker.sockets[0].getsockname()[1]
+        hosts_seen: list[str] = []
+
+        async def _recording_resolver(host: str, port: int) -> str | None:
+            hosts_seen.append(host)
+            return PINNED_IP
+
+        monkeypatch.setattr(sep, "_resolve_pinned_ip", _recording_resolver)
+        # NOTE: deliberately NOT installing a mock transport — the proxy's
+        # real httpx client is the only path that reaches httpcore.connect_tcp,
+        # which is where the rebind would open a socket to the rebound host.
+        proxy = SecretEgressProxy(
+            [_cred("GH_TOKEN", "ghp_REALSECRET", ("api.allowed.test",), PH_GH)]
+        )
+        await proxy.start()
+        try:
+            head, body = await self._raw_roundtrip(
+                proxy,
+                "api.allowed.test",
+                b"GET @127.0.0.1:" + str(attacker_port).encode() + b"/ HTTP/1.1\r\n"
+                b"Host: api.allowed.test\r\n\r\n",
+            )
+        finally:
+            await proxy.stop()
+            attacker.close()
+            await attacker.wait_closed()
+
+        assert b" 400 " in head, f"expected 400 for @-form target, got: {head!r}"
+        assert b"invalid request-target" in body
+        assert hits == 0, (
+            "the proxy connected to the attacker-chosen rebound host "
+            "(SSRF / IP-pin bypass still live)"
+        )
+        assert hosts_seen == [], (
+            "the rebound host (or the SNI host) reached the SSRF gate — "
+            "the guard must short-circuit before _resolve_pinned_ip"
+        )
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "@evil.com:443/",  # @-form: the SSRF authority rebind (the exploit)
+            "http://api.allowed.test/x",  # absolute-form
+            "*",  # asterisk-form
+            "api.allowed.test:443",  # authority-form (CONNECT-style)
+            "evil.com/x",  # malformed (no scheme, no leading slash)
+        ],
+    )
+    async def test_non_origin_form_request_target_rejected(
+        self,
+        gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]],
+        target: str,
+    ) -> None:
+        """Every non-origin-form target h11 accepts is rejected with ``400``
+        and opens no upstream. Without the guard the ``@``-form rebinds the
+        URL host (the mock would capture it and return 200); the other forms
+        raise ``InvalidURL`` in ``build_request`` and surface as a misleading
+        ``502`` after the body is read and the upstream resolved. Origin-form
+        is the only valid form for an origin server; reject the rest early.
+        """
+        proxy, captured = gh_proxy
+        head, body = await self._raw_roundtrip(
+            proxy,
+            "api.allowed.test",
+            f"GET {target} HTTP/1.1\r\nHost: api.allowed.test\r\n\r\n".encode(),
+        )
+        assert b" 400 " in head, f"{target!r}: expected 400, got {head!r}"
+        assert b"invalid request-target" in body, f"{target!r}: wrong refusal body"
+        assert captured == [], f"{target!r}: an upstream request was opened"
+
+    async def test_rejected_before_body_read_and_no_interim_100(
+        self,
+        gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]],
+    ) -> None:
+        """The guard runs BEFORE the body is drained and before a 100-continue
+        interim response. A hostile sandbox declaring a huge body toward a
+        non-origin target gets the ``400`` immediately — the worker never
+        buffers the declared body and never emits an interim ``100``.
+
+        No body is ever sent: pre-fix the proxy would emit ``100`` then block
+        on ``_read_body`` (the 60s idle bound) before any final response; the
+        ``400`` arriving within the short bound proves the guard precedes both.
+        """
+        proxy, captured = gh_proxy
+        reader, writer = await _open_tls(proxy, "api.allowed.test")
+        try:
+            writer.write(
+                b"POST @evil.com:443/ HTTP/1.1\r\n"
+                b"Host: api.allowed.test\r\n"
+                b"Content-Length: 1000000\r\n"
+                b"Expect: 100-continue\r\n\r\n"
+            )
+            await writer.drain()
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            body = await asyncio.wait_for(reader.read(), 5)
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        assert head.startswith(b"HTTP/1.1 400 "), head
+        assert b"invalid request-target" in body
+        assert b" 100 " not in head, "an interim 100-continue was emitted before the guard"
+        assert captured == [], "an upstream request was opened before the guard"
+
+    async def test_origin_form_target_still_forwards(
+        self,
+        gh_proxy: tuple[SecretEgressProxy, list[httpx.Request]],
+    ) -> None:
+        """Positive control: an origin-form (``/``-leading) target still
+        forwards normally and pins the resolved IP — the guard rejects ONLY
+        non-origin forms and leaves the documented IP-pin invariant intact.
+        """
+        proxy, captured = gh_proxy
+        r = await _request(
+            proxy, "api.allowed.test", "/x", headers={"Authorization": f"Bearer {PH_GH}"}
+        )
+        assert r.status_code == 200
+        assert captured[0].url.host == PINNED_IP
+        assert captured[0].extensions["sni_hostname"] == "api.allowed.test"
+
+
 def test_module_exports() -> None:
     from aios.sandbox import secret_egress_proxy
 
