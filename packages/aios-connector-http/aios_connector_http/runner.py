@@ -1237,9 +1237,12 @@ class HttpConnector:
                 os.close(lock_fd)
             if fd is not None:
                 os.close(fd)
-            if temporary_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary_path)
+            # Do not unlink ``temporary_path`` by name. Once publication or
+            # exchange has run, another actor may have replaced that pathname.
+            # POSIX has no atomic "unlink iff this inode" primitive, so even an
+            # identity check here would retain a destructive TOCTOU race. The
+            # hidden link/debris is harmless and may be reclaimed out of band;
+            # preserving an inode we do not own is mandatory.
 
     @staticmethod
     def _refresh_heartbeat(
