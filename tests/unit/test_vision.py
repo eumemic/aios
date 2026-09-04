@@ -130,11 +130,38 @@ class TestSupportsVision:
         _patch_get_model_info(monkeypatch, {})
         assert vision.supports_vision(model) is True
 
-    def test_gateway_rule_does_not_match_unknown_family(
+    def test_astra_inlines_despite_stale_litellm_catalog(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Astra is a maintained gateway capability, not a catalog guess."""
+        _patch_get_model_info(monkeypatch, {})  # every LiteLLM lookup raises
+        assert vision.supports_vision("openai/responses/gpt-6-astra") is True
+        assert vision.can_inline_image(
+            model="openai/responses/gpt-6-astra",
+            content_type="image/png",
+            size_bytes=100,
+        )
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("openai/responses/future-text-model", None),
+            ("openai/responses/gpt-6-astra-text-only", None),
+            ("known/text-only", False),
+        ],
+    )
+    def test_astra_rule_does_not_broaden_to_unknown_or_text_only_models(
+        self, monkeypatch: pytest.MonkeyPatch, model: str, expected: bool | None
+    ) -> None:
+        _patch_get_model_info(monkeypatch, {"known/text-only": {"supports_vision": False}})
+        assert vision.supports_vision(model) is expected
+
+    def test_explicit_override_can_force_astra_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_get_model_info(monkeypatch, {})
-        assert vision.supports_vision("openai/responses/future-text-model") is None
+        model = "openai/responses/gpt-6-astra"
+        vision._VISION_OVERRIDES[model] = False
+        assert vision.supports_vision(model) is False
+        assert not vision.can_inline_image(model=model, content_type="image/png", size_bytes=100)
 
     def test_explicit_override_can_force_claude_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The override dict is consulted before the Claude-family rule, so an

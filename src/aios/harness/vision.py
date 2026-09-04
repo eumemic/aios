@@ -75,6 +75,10 @@ _VISION_OVERRIDES: dict[str, bool] = {}
 # than silently degrading to text markers when model-info lookup raises.
 _VISION_GATEWAY_PREFIX = "openai/responses/"
 _VISION_GATEWAY_FAMILIES = frozenset({"gpt-5", "gpt-4o", "o4"})
+# Exact entries are intentionally separate from prefix-matched families: Astra
+# accepts images, but that does not establish vision support for arbitrary
+# future ``gpt-6-*`` routes or text-specialized siblings.
+_VISION_GATEWAY_MODELS = frozenset({"gpt-6-astra"})
 
 # Maintained family assertions cover provider models whose capability is newer
 # than the pinned LiteLLM catalog. Keep these beside the gateway assertions and
@@ -116,7 +120,9 @@ def supports_vision(model: str) -> bool | None:
         return True
     if normalized.startswith(_VISION_GATEWAY_PREFIX):
         gateway_model = normalized.removeprefix(_VISION_GATEWAY_PREFIX)
-        if any(gateway_model.startswith(family) for family in _VISION_GATEWAY_FAMILIES):
+        if gateway_model in _VISION_GATEWAY_MODELS or any(
+            gateway_model.startswith(family) for family in _VISION_GATEWAY_FAMILIES
+        ):
             return True
     # Defer the heavy ``litellm`` import: every harness consumer of this
     # module pays ~1.18s of bootstrap otherwise, and most call sites never
