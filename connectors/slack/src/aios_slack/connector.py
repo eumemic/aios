@@ -242,9 +242,7 @@ class SlackConnector(HttpConnector):
 
         state.socket_client.socket_mode_request_listeners.append(on_request)
 
-    async def _run_socket(
-        self, connection_id: str, state: _SlackConnectionState
-    ) -> None:
+    async def _run_socket(self, connection_id: str, state: _SlackConnectionState) -> None:
         """Open the Socket-Mode connection and keep the task alive.
 
         ``connect()`` establishes the WebSocket and returns once the
