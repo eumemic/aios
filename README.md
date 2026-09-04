@@ -586,7 +586,7 @@ aios envs list | get | create | update | archive
 | `AIOS_DOCKER_IMAGE` | Default sandbox + lockdown-sidecar image (`ghcr.io/eumemic/aios-sandbox:latest`). |
 | `AIOS_EGRESS_CA_KEY` | **Required.** HKDF-derives the deterministic egress CA, separate from the vault key. |
 | `AIOS_SANDBOX_{CPU_QUOTA,MEMORY_BYTES,PIDS_LIMIT,SECCOMP_PROFILE}` | Per-sandbox resource + syscall caps. |
-| `AIOS_SANDBOX_SNAPSHOT_{BUDGET_BYTES,POOL_BYTES,TTL_SECONDS}` | Per-session byte budget / per-host pool / dormancy TTL (30 days). |
+| `AIOS_SANDBOX_SNAPSHOT_{BUDGET_BYTES,POOL_BYTES,POOL_RECLAIM_MODE,TTL_SECONDS}` | Per-session byte budget / per-host pool / pool reclaim mode (`dry_run` default reports only; `enforce` reclaims) / dormancy TTL (30 days). |
 | `AIOS_CONTAINER_IDLE_TIMEOUT_SECONDS` | Inactivity before a sandbox is released (default 1800s; release snapshots first). |
 
 </details>
