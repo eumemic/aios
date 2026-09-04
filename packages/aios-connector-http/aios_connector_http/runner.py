@@ -113,10 +113,9 @@ ToolFn = Callable[..., Awaitable[Any]]
 
 def _link_unnamed_file(fd: int, destination: str | Path) -> None:
     """Publish an ``O_TMPFILE`` descriptor without a staging pathname."""
-    libc_name = ctypes.util.find_library("c")
-    if libc_name is None:
-        raise OSError("linkat is unavailable")
-    libc = ctypes.CDLL(libc_name, use_errno=True)
+    # Resolve libc from the current process. ``find_library`` may invoke the
+    # platform linker utility and delay the first heartbeat publication.
+    libc = ctypes.CDLL(None, use_errno=True)
     linkat = getattr(libc, "linkat", None)
     if linkat is None:
         raise OSError("linkat is unavailable")
