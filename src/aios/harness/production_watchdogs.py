@@ -16,6 +16,7 @@ from typing import Any
 import asyncpg
 
 from aios.db.pool import LISTENER_TCP_KEEPALIVE_SETTINGS, normalize_dsn
+from aios.harness.watchdog_health import publish_gc_health
 from aios.logging import get_logger
 
 log = get_logger("aios.worker.watchdogs")
@@ -31,6 +32,12 @@ class ProductionWatchdogState:
     def record_gc(self, last_success_at: datetime | None, consecutive_failures: int) -> None:
         self.gc_last_success_at = last_success_at
         self.gc_consecutive_failures = consecutive_failures
+        # Gauges are worker-local; the atomic snapshot is the cross-process
+        # source consumed by the API health endpoint.
+        try:
+            publish_gc_health(last_success_at, consecutive_failures)
+        except OSError:
+            log.exception("worker.gc_health_publish_failed")
         if _GC_CONSECUTIVE_FAILURES is not None:
             with contextlib.suppress(Exception):
                 _GC_CONSECUTIVE_FAILURES.set(consecutive_failures)

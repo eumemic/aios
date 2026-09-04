@@ -10,12 +10,13 @@ from fastapi.responses import JSONResponse
 
 from aios import __version__
 from aios.db.queries.events import calibration_telemetry, readiness_append_probe
+from aios.harness.watchdog_health import read_gc_health
 
 router = APIRouter()
 
 
 @router.get("/health", operation_id="get_health")
-async def health() -> dict[str, str]:
+async def health() -> dict[str, object]:
     """Liveness probe. Unauthenticated; returns the running aios version.
 
     Suitable for load balancer health checks and monitoring probes. Always
@@ -40,6 +41,7 @@ async def health() -> dict[str, str]:
         "status": "ok",
         "version": __version__,
         "source_commit": os.environ.get("SOURCE_COMMIT") or "unknown",
+        **read_gc_health(),
     }
 
 
