@@ -1121,7 +1121,22 @@ class HttpConnector:
                 else:
                     stale = time.time() - heartbeat_max_age_seconds() - 1
                     os.utime(fd, (stale, stale))
-                return (stat.st_dev, stat.st_ino)
+                identity = (stat.st_dev, stat.st_ino)
+                # The claim is only valid if the public pathname still resolves
+                # to the inode we just created. An operator (or a racing peer)
+                # can unlink our name and drop a replacement inode in its place
+                # after O_CREAT|O_EXCL succeeds; returning here anyway would
+                # record ownership of an inode no longer reachable through the
+                # heartbeat path, so every later refresh would silently target a
+                # file no consumer reads. Treat a missing or replaced pathname as
+                # claim failure and relinquish it.
+                try:
+                    published = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (published.st_dev, published.st_ino) != identity:
+                    return None
+                return identity
             finally:
                 os.close(fd)
 
