@@ -85,8 +85,15 @@ async def test_heartbeat_withheld_until_discovery_is_authoritative(tmp_path: Pat
     try:
         await asyncio.sleep(0.03)
         assert not heartbeat.exists()
+        published = asyncio.Event()
+
+        async def after_iteration() -> None:
+            published.set()
+
+        connector._heartbeat_iteration_hook = after_iteration
         connector._discovery_cursor = 0
-        await asyncio.sleep(0.03)
+        async with asyncio.timeout(1):
+            await published.wait()
         assert heartbeat.exists()
     finally:
         task.cancel()
@@ -110,8 +117,51 @@ async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: P
         await asyncio.sleep(0.03)
         assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
         assert connector._heartbeat_owned
-        assert connector._heartbeat_identity == original_identity
+        # Recovery atomically publishes a fully prepared replacement inode, so
+        # stale prior-process content can never be observed with a fresh mtime.
+        assert connector._heartbeat_identity != original_identity
+        assert read_connection_health(heartbeat) == ([], [])
     finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.parametrize(
+    "stale_payload", [None, b'{"healthy_connection_ids": ["old"], "unhealthy_connection_ids": []}']
+)
+@pytest.mark.asyncio
+async def test_first_fresh_heartbeat_contains_current_authoritative_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stale_payload: bytes | None
+) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    if stale_payload is not None:
+        heartbeat.write_bytes(stale_payload)
+        old = time.time() - 3600
+        os.utime(heartbeat, (old, old))
+
+    connector._discovery_cursor = 0
+    connector._connections["current"] = _ConnectionState(
+        "current", "account", serve_status="serving"
+    )
+    published = asyncio.Event()
+    release = asyncio.Event()
+
+    async def after_iteration() -> None:
+        published.set()
+        await release.wait()
+
+    connector._heartbeat_iteration_hook = after_iteration
+    task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
+    try:
+        await published.wait()
+        assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
+        assert read_connection_health(heartbeat) == (["current"], [])
+        monkeypatch.setenv("AIOS_CONNECTOR_HEARTBEAT_PATH", str(heartbeat))
+        main()
+    finally:
+        release.set()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

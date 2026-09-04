@@ -1080,10 +1080,11 @@ class HttpConnector:
     ) -> tuple[int, int] | None:
         """Create a heartbeat, or recover one old enough to be crash debris.
 
-        A fail-closed heartbeat is fully prepared with a stale timestamp under a
-        temporary name, then linked into place atomically.  Thus readers can
-        never observe the naturally fresh mtime of a newly created inode.
-        File-descriptor based updates retain replacement-inode safety.
+        A heartbeat with connection-health content is fully prepared under a
+        temporary name, then linked or exchanged into place atomically. Thus a
+        reader can never observe a fresh inode before its complete, validated
+        snapshot is present. Fail-closed claims are additionally backdated before
+        publication. File-descriptor based updates retain replacement-inode safety.
         """
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         fd: int | None = None
@@ -1091,17 +1092,19 @@ class HttpConnector:
         temporary_path: str | None = None
         created = False
         try:
-            if not touch_mtime:
-                # Publish a new fail-closed inode only after both its correlated
-                # content and stale timestamp are complete. os.link provides
-                # atomic O_EXCL-like publication without replacing an operator
-                # owned path.
+            if payload:
+                # Publish an inode only after its correlated content (and, for a
+                # fail-closed claim, stale timestamp) is complete. os.link provides
+                # atomic O_EXCL-like publication without replacing an operator-owned
+                # path. This also prevents fresh empty or prior-process content from
+                # becoming externally visible during a healthy claim.
                 fd, temporary_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
                 if payload:
                     os.write(fd, payload)
                 os.fsync(fd)
-                stale = time.time() - heartbeat_max_age_seconds() - 1
-                os.utime(fd, (stale, stale))
+                if not touch_mtime:
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(fd, (stale, stale))
                 try:
                     os.link(temporary_path, path)
                 except FileExistsError:
@@ -1140,8 +1143,9 @@ class HttpConnector:
                     # already-prepared temporary inode, never the incumbent heartbeat.
                     os.ftruncate(fd, os.fstat(fd).st_size)
                     os.fsync(fd)
-                    stale = time.time() - heartbeat_max_age_seconds() - 1
-                    os.utime(fd, (stale, stale))
+                    if not touch_mtime:
+                        stale = time.time() - heartbeat_max_age_seconds() - 1
+                        os.utime(fd, (stale, stale))
 
                     # Atomically exchange the prepared claimant with the public
                     # pathname. Unlike rename-over, both inodes survive, allowing us
@@ -1389,7 +1393,9 @@ class HttpConnector:
                         self._heartbeat_identity = identity
                 else:
                     try:
-                        identity = await asyncio.to_thread(self._claim_heartbeat, path)
+                        identity = await asyncio.to_thread(
+                            self._claim_heartbeat, path, payload, True
+                        )
                     except FileNotFoundError:
                         # The path vanished between O_EXCL and opening it. Retry
                         # on the next short heartbeat interval.
