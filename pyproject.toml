@@ -253,9 +253,16 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = [
     "-ra",
-    # Keep the repository-wide default bounded: ``auto`` exhausts review
-    # workers, while serial execution cannot finish within their test budget.
-    "-n=3",
+    # Keep the repository-wide default bounded by MEMORY, not just time.
+    # A fresh full-suite run under a ~2 GiB CI worker budget peaks at:
+    #   -n=auto (4w): OOM-kill -> exit 137 (the review's parked symptom);
+    #   -n=3:         2047/2048 MiB -- passes but one MiB from the OOM killer;
+    #   -n=2:         ~1940 MiB, ~100 MiB headroom, ~100 s wall.
+    # The exit-137 the reviewer saw is a SIGKILL from memory exhaustion, not
+    # the 120 s wall clock (the suite finishes well under it). ``-n=2`` leaves
+    # headroom so the complete suite finishes successfully; serial execution
+    # cannot finish within the review test budget, so do not drop below 2.
+    "-n=2",
     "--dist=loadfile",
     "--strict-markers",
     "--strict-config",
