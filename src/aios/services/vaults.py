@@ -51,7 +51,13 @@ from aios.crypto.vault import CryptoBox
 from aios.db import queries
 from aios.db.listen import MCP_EVICT_VAULT_CHANNEL
 from aios.db.pool import normalize_dsn
-from aios.errors import NotFoundError, OAuthReauthRequiredError, OAuthRefreshError, ValidationError
+from aios.errors import (
+    ConflictError,
+    NotFoundError,
+    OAuthReauthRequiredError,
+    OAuthRefreshError,
+    ValidationError,
+)
 from aios.logging import get_logger
 from aios.models.environments import EnvironmentConfig, LimitedNetworking
 from aios.models.vaults import (
@@ -611,12 +617,37 @@ async def create_vault_credential(
         # ``(account_id=A, vault_id=B-vault)``. Mirrors the sessions.py
         # ``SELECT id FROM sessions … FOR UPDATE`` pattern, where the
         # account_id is similarly load-bearing rather than redundant.
+        #
+        # ``archived_at IS NULL`` refuses new credentials in a vault that has
+        # been archived: ``archive_vault`` scrubs the *pre-existing* child
+        # credentials at archive time, but it cannot prevent *future* inserts
+        # — with only existence + ownership checked, a fresh active credential
+        # could be written into an archived vault and then surfaced by the
+        # resolver, silently resurrecting a retired credential source for any
+        # session/run bound to it before archival. The insert-side guard is the
+        # symmetric counterpart to ``update_vault``'s ``ConflictError("vault …
+        # is archived")`` archived-row check (PR #554), which closed the update
+        # path but left the insert path unguarded.
         locked = await conn.fetchrow(
-            "SELECT 1 FROM vaults WHERE id = $1 AND account_id = $2 FOR UPDATE",
+            "SELECT 1 FROM vaults WHERE id = $1 AND account_id = $2 "
+            "AND archived_at IS NULL FOR UPDATE",
             vault_id,
             account_id,
         )
         if locked is None:
+            # Distinguish "not found / not owned" (404) from "exists, owned,
+            # but archived" (409) so the caller gets the right signal — exactly
+            # as ``update_vault`` does for the update-side sibling.
+            existing = await conn.fetchval(
+                "SELECT archived_at FROM vaults WHERE id = $1 AND account_id = $2",
+                vault_id,
+                account_id,
+            )
+            if existing is not None:
+                raise ConflictError(
+                    f"vault {vault_id} is archived",
+                    detail={"vault_id": vault_id},
+                )
             raise NotFoundError(
                 f"vault {vault_id} not found",
                 detail={"vault_id": vault_id},
