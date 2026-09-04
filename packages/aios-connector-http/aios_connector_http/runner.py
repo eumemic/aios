@@ -1173,6 +1173,7 @@ class HttpConnector:
         # Replacing the inode establishes a new ownership generation: a paused old
         # owner can no longer satisfy _refresh_heartbeat's identity check.
         staging_path: Path | None = None
+        staging_dir: Path | None = None
         try:
             flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             try:
@@ -1209,23 +1210,20 @@ class HttpConnector:
                 if (current.st_dev, current.st_ino) != incumbent_identity:
                     return None
 
-                # renameat2 cannot exchange an unnamed inode directly. Give the
-                # claimant an unpredictable, private link only for the duration of
-                # the exchange; it is never used as a write target.
-                for _ in range(10):
-                    candidate = path.parent / next(
-                        tempfile._get_candidate_names()  # type: ignore[attr-defined]
+                # renameat2 cannot exchange an unnamed inode directly. Put its
+                # temporary link in a private directory rather than directly in
+                # the shared heartbeat directory. The private namespace gives us
+                # exclusive control of the exchanged name, so the displaced inode
+                # can be reclaimed without a stat-to-unlink race.
+                try:
+                    staging_dir = Path(
+                        tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent)
                     )
-                    candidate = candidate.with_name(f".{path.name}.{candidate.name}")
-                    try:
-                        _link_unnamed_file(claimant_fd, candidate)
-                    except FileExistsError:
-                        continue
-                    except OSError:
-                        return None
-                    staging_path = candidate
-                    break
-                if staging_path is None or not _rename_exchange(staging_path, path):
+                    staging_path = staging_dir / "claimant"
+                    _link_unnamed_file(claimant_fd, staging_path)
+                except OSError:
+                    return None
+                if not _rename_exchange(staging_path, path):
                     return None
 
                 claimant_stat = os.fstat(claimant_fd)
@@ -1253,10 +1251,16 @@ class HttpConnector:
             finally:
                 os.close(existing_fd)
         finally:
-            # POSIX has no conditional unlink: checking ``staging_path`` and then
-            # unlinking it can delete an independent inode installed between
-            # those operations. Retain the private displaced link; bounded cleanup
-            # cannot be made safe without exclusive control of the directory.
+            # The staging directory is mode 0700 and created uniquely for this
+            # claim, so no cooperating claimant can replace its contents between
+            # cleanup operations. Remove either the displaced incumbent (success)
+            # or the unpublished claimant (refusal), then the private namespace.
+            if staging_path is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    staging_path.unlink()
+            if staging_dir is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    staging_dir.rmdir()
             os.close(claimant_fd)
 
     @staticmethod
