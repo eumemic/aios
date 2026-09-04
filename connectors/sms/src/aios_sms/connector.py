@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
 import structlog
 from aiohttp import web
 from aios_connector_http import HttpConnector
@@ -47,6 +48,25 @@ _FORBIDDEN_EVENT_ID_FIELDS = ("SmsSid", "SmsMessageSid")
 class SmsConnector(HttpConnector):
     connector = "sms"
     state: dict[str, SmsConnectionState]
+
+    # ── emit-retry tunables (transport errors on emit_inbound) ─────────
+    #
+    # Twilio already received ``200`` for every envelope in the queue, so
+    # it will NOT redeliver (design §3.2). On a transient transport failure
+    # (``httpx.RequestError`` — connect/timeout/protocol; no response
+    # object, so ``emit_inbound``'s ``is_error`` guard is unreachable) the
+    # connector holds the ONLY in-process copy and must retry before
+    # dropping, or the 200-acked message is lost. The retry is bounded so a
+    # sustained outage produces a bounded head-of-line stall (subsequent
+    # envelopes pile up behind the held one, up to ``INBOUND_QUEUE_MAXSIZE``)
+    # rather than retrying forever; after exhaustion the envelope is
+    # logged (``sms.inbound.emit_dropped`` carries the ``MessageSid``) and
+    # dropped, and the drain continues. A fatal 401/403 (``HTTPStatusError``,
+    # NOT a ``RequestError``) still propagates and tears the connection
+    # down — auth-broken is not a transient blip.
+    EMIT_RETRY_MAX_ATTEMPTS: int = 3
+    EMIT_RETRY_BACKOFF_INITIAL: float = 0.5
+    EMIT_RETRY_BACKOFF_MAX: float = 5.0
 
     def __init__(
         self,
@@ -131,6 +151,13 @@ class SmsConnector(HttpConnector):
             connection_id=connection_id,
             from_number=from_number,
         )
+        # The drain loop's ``finally`` tears the connection down (unregister
+        # the number + drop the state/queue). Transient transport errors on
+        # ``emit_inbound`` MUST NOT escape here: ``_emit_envelope`` retries
+        # (``httpx.RequestError``) then logs-and-drops so a blip does not
+        # discard the entire 200-acked backlog. Only cancellation, fatal
+        # 401/403 (``HTTPStatusError``), or a programmer bug reaches the
+        # ``finally`` — tearing down is correct for those, not for a blip.
         try:
             while True:
                 envelope = await state.inbound_queue.get()
@@ -151,6 +178,20 @@ class SmsConnector(HttpConnector):
         §5.2): the sender display name flows only through the typed
         ``sender`` dict, and provenance is stamped unverified for the
         model.
+
+        Transport failures (``httpx.RequestError`` — connect/timeout/
+        protocol; raised by ``emit_inbound`` because no ``response`` object
+        exists, so its ``is_error`` guard is unreachable) are retried in a
+        bounded loop. Twilio already received ``200``, so it will not
+        redeliver; the connector holds the only in-process copy and must
+        retry, or the message is lost. The retry is bounded (capped
+        backoff over a few attempts) so a sustained outage causes a bounded
+        head-of-line stall, not a forever-retry; after exhaustion the
+        envelope is logged (``sms.inbound.emit_dropped`` carries the
+        ``MessageSid`` for operator recovery) and dropped, and the drain
+        continues. A fatal 401/403 (``httpx.HTTPStatusError``, NOT a
+        ``RequestError``) propagates and tears the connection down — the
+        right response to broken auth, not to a transient blip.
         """
         params = envelope.params
         from_number = normalize_e164(params.get("From", ""))
@@ -165,22 +206,54 @@ class SmsConnector(HttpConnector):
             )
             return
 
-        result = await self.emit_inbound(
-            connection_id=connection_id,
-            chat_id=from_number,
-            sender={"display_name": from_number},
-            content=body,
-            event_id=event_id,
-            metadata=self._inbound_metadata(params),
-            timestamp=None,
-        )
-        log.info(
-            "sms.inbound.emitted",
-            connection_id=connection_id,
-            chat_id=from_number,
-            event_id=event_id,
-            deduped=bool(result and result.get("deduped")),
-        )
+        backoff = self.EMIT_RETRY_BACKOFF_INITIAL
+        for attempt in range(1, self.EMIT_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                result = await self.emit_inbound(
+                    connection_id=connection_id,
+                    chat_id=from_number,
+                    sender={"display_name": from_number},
+                    content=body,
+                    event_id=event_id,
+                    metadata=self._inbound_metadata(params),
+                    timestamp=None,
+                )
+            except httpx.RequestError as exc:
+                # Transport failure: no response, so the server may never
+                # have seen the request. Retry the same ``event_id``
+                # (idempotent against the ``inbound_acks`` ledger the server
+                # may already have written on the timeout family). Do NOT
+                # let this escape — the drain loop's ``finally`` would
+                # discard the whole 200-acked backlog.
+                if attempt >= self.EMIT_RETRY_MAX_ATTEMPTS:
+                    log.error(
+                        "sms.inbound.emit_dropped",
+                        connection_id=connection_id,
+                        chat_id=from_number,
+                        event_id=event_id,
+                        attempts=attempt,
+                        error=type(exc).__name__,
+                    )
+                    return
+                log.warning(
+                    "sms.inbound.emit_retry",
+                    connection_id=connection_id,
+                    chat_id=from_number,
+                    event_id=event_id,
+                    attempt=attempt,
+                    error=type(exc).__name__,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.EMIT_RETRY_BACKOFF_MAX)
+                continue
+            log.info(
+                "sms.inbound.emitted",
+                connection_id=connection_id,
+                chat_id=from_number,
+                event_id=event_id,
+                deduped=bool(result and result.get("deduped")),
+            )
+            return
 
     @staticmethod
     def _inbound_metadata(params: dict[str, str]) -> dict[str, Any]:

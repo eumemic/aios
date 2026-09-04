@@ -32,8 +32,10 @@ This package currently implements the **inbound / transport layer** slice
 - Pre-parse body cap (`MAX_BODY_BYTES`) before reading the form.
 - Off-loop HMAC via `asyncio.to_thread` so a verify flood can't starve
   the single event loop.
-- Bounded per-connection inbound queue that **sheds** on overflow (a
-  dropped inbound is recoverable via Twilio retry; an OOM is not).
+- Bounded per-connection inbound queue that **sheds** on overflow (the
+  200 is already sent, so Twilio will NOT redeliver a shed inbound — a
+  deliberate loss/OOM trade; transport errors on the drain are retried
+  in-process before dropping).
 - Uniform 403 on any unverified/unroutable request (no enumeration
   oracle).
 - `From` is a **routing key, not a trust anchor**: sender provenance is
