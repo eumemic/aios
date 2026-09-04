@@ -717,8 +717,22 @@ def _build_litellm_kwargs(
         )
     if auth is not None and get_settings().inference_credential_policy != "legacy_env":
         # Account rows are authoritative under non-legacy policies. Inline auth
-        # fields are agent metadata, not account configuration.
-        for key in ("api_key", "api_base", "base_url"):
+        # fields are agent metadata, not account configuration. The redirect keys
+        # mirror ``attenuation.api_base_of`` (``api_base``/``base_url`` plus the
+        # watsonx text-path aliases ``url``/``wx_credentials``/``watsonx_credentials``
+        # — see its docstring): an unstripped alias would let a caller override the
+        # account row's endpoint via a key the conflict guard must detect as a
+        # redirect, reopening the cross-tenant exfiltration hole (#1800). The nested
+        # ``wx_credentials``/``watsonx_credentials`` blobs also carry an ``apikey``
+        # override, no more authoritative than a top-level inline ``api_key``.
+        for key in (
+            "api_key",
+            "api_base",
+            "base_url",
+            "url",
+            "wx_credentials",
+            "watsonx_credentials",
+        ):
             effective_extra.pop(key, None)
     if auth is not None:
         kwargs["api_key"] = auth.api_key
