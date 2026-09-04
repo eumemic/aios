@@ -126,6 +126,10 @@ class SmsConnector(HttpConnector):
                 queue=state.inbound_queue,
             ),
         )
+        # Registration is the point at which the already-running webhook can
+        # route an inbound request to this connection.  Do not advertise the
+        # connection before that concrete receive path exists.
+        self.mark_transport_ready(connection_id)
         log.info(
             "sms.connection.ready",
             connection_id=connection_id,

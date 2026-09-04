@@ -126,7 +126,7 @@ class TelegramConnector(HttpConnector):
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(
-                    self._run_polling(state),
+                    self._run_polling(connection_id, state),
                     name=f"telegram-polling-{connection_id}",
                 )
                 tg.create_task(
@@ -203,7 +203,9 @@ class TelegramConnector(HttpConnector):
         with contextlib.suppress(Exception):
             await application.shutdown()
 
-    async def _run_polling(self, state: _TelegramConnectionState) -> None:
+    async def _run_polling(
+        self, connection_id: str, state: _TelegramConnectionState
+    ) -> None:
         await state.application.start()
         assert state.application.updater is not None
         # ``allowed_updates`` is opt-in — Telegram only delivers update
