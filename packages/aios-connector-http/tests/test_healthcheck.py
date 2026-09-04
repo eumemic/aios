@@ -479,6 +479,42 @@ def test_stale_reclaim_refuses_replacement_after_inspection(
     assert heartbeat.read_bytes() == b"operator replacement"
 
 
+def test_stale_reclaim_preserves_replacement_at_rollback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rollback restores a pathname installed immediately before its mutation."""
+    import aios_connector_http.runner as runner_module
+
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"stale owner")
+    old = time.time() - 3600
+    os.utime(heartbeat, (old, old))
+    operator = tmp_path / "operator"
+    operator.write_bytes(b"operator replacement")
+
+    real_exchange = runner_module._rename_exchange
+    calls = 0
+
+    def interposed_exchange(source: str | Path, destination: str | Path) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            os.replace(operator, heartbeat)
+        result = real_exchange(source, destination)
+        if calls == 1:
+            # Force refusal after the first exchange.
+            os.utime(source, None)
+        return result
+
+    monkeypatch.setattr(runner_module, "_rename_exchange", interposed_exchange)
+
+    identity = connector._claim_heartbeat(heartbeat, b"claimant", False)
+
+    assert identity is None
+    assert heartbeat.read_bytes() == b"operator replacement"
+
+
 def test_stale_reclaim_refuses_same_inode_refresh_before_exchange(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

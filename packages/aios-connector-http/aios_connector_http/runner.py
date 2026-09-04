@@ -1163,7 +1163,38 @@ class HttpConnector:
                         except FileNotFoundError:
                             return None
                         if (current.st_dev, current.st_ino) == claimant_identity:
-                            _rename_exchange(temporary_path, path)
+                            # Roll back by exchange, but verify which inode the
+                            # exchange actually displaced. A replacement can land
+                            # after the identity check. In that case it is now at
+                            # the temporary name: make it the next rollback
+                            # candidate and repeat. We only finish once an exchange
+                            # displaced the inode we ourselves put at the public
+                            # path. Thus every interposed replacement is restored,
+                            # rather than unlinked by the finally block.
+                            expected_public = claimant_identity
+                            while _rename_exchange(temporary_path, path):
+                                try:
+                                    rolled_aside = os.stat(temporary_path)
+                                except FileNotFoundError:
+                                    temporary_path = None
+                                    break
+                                rolled_identity = (
+                                    rolled_aside.st_dev,
+                                    rolled_aside.st_ino,
+                                )
+                                if rolled_identity == expected_public:
+                                    break
+                                try:
+                                    restored = os.stat(path)
+                                except FileNotFoundError:
+                                    temporary_path = None
+                                    break
+                                expected_public = (restored.st_dev, restored.st_ino)
+                            else:
+                                # The temporary pathname may contain another
+                                # owner's replacement; failed/unsupported exchange
+                                # leaves its ownership uncertain, so never unlink it.
+                                temporary_path = None
                         return None
                     return claimant_identity
                 else:
