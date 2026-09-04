@@ -405,6 +405,23 @@ def test_claim_does_not_leak_internal_staging_path(tmp_path: Path) -> None:
     assert heartbeat.stat().st_nlink == 1
 
 
+def test_fresh_owner_refusals_do_not_leak_descriptors(tmp_path: Path) -> None:
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"peer")
+    proc_fds = Path("/proc/self/fd")
+    if not proc_fds.is_dir():
+        pytest.skip("descriptor accounting requires procfs")
+    before = len(list(proc_fds.iterdir()))
+
+    for _ in range(200):
+        assert connector._claim_heartbeat(heartbeat, b"payload", True) is None
+
+    after = len(list(proc_fds.iterdir()))
+    assert heartbeat.read_bytes() == b"peer"
+    assert after - before < 5
+
+
 def test_repeated_stale_reclaims_do_not_accumulate_staging_paths(tmp_path: Path) -> None:
     """Restart churn retains only the single public heartbeat inode."""
     connector = _Connector(base_url="http://example.test", token="token")
