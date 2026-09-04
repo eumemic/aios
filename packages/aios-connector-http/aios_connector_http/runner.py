@@ -1153,50 +1153,52 @@ class HttpConnector:
             os.close(fd)
 
         # The public name already exists. Lock and update only that opened inode.
-        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        # Scope the unpublished claimant over every refusal path so repeated
+        # attempts against a live owner cannot leak process descriptors.
         try:
-            existing_fd = os.open(path, flags)
-        except OSError:
-            return None
-        try:
-            fcntl.flock(existing_fd, fcntl.LOCK_EX)
-            stat = os.fstat(existing_fd)
-            identity = (stat.st_dev, stat.st_ino)
-            if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                existing_fd = os.open(path, flags)
+            except OSError:
                 return None
             try:
-                published = os.stat(path)
-            except FileNotFoundError:
-                return None
-            if (published.st_dev, published.st_ino) != identity:
-                return None
-            # Final checkpoint before touching the incumbent. Tests and peers may
-            # refresh it after our initial stale observation; the operation is on
-            # the unpublished claimant and cannot alter their inode.
-            try:
+                fcntl.flock(existing_fd, fcntl.LOCK_EX)
+                stat = os.fstat(existing_fd)
+                identity = (stat.st_dev, stat.st_ino)
+                if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+                    return None
+                try:
+                    published = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (published.st_dev, published.st_ino) != identity:
+                    return None
+                # Final checkpoint before touching the incumbent. Tests and peers may
+                # refresh it after our initial stale observation; the operation is on
+                # the unpublished claimant and cannot alter their inode.
                 os.ftruncate(claimant_fd, os.fstat(claimant_fd).st_size)
+                guarded = os.fstat(existing_fd)
+                if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
+                    return None
+                os.ftruncate(existing_fd, 0)
+                os.write(existing_fd, payload)
+                os.fsync(existing_fd)
+                if touch_mtime:
+                    os.utime(existing_fd, None)
+                else:
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(existing_fd, (stale, stale))
+                try:
+                    published = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (published.st_dev, published.st_ino) != identity:
+                    return None
+                return identity
             finally:
-                os.close(claimant_fd)
-            guarded = os.fstat(existing_fd)
-            if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
-                return None
-            os.ftruncate(existing_fd, 0)
-            os.write(existing_fd, payload)
-            os.fsync(existing_fd)
-            if touch_mtime:
-                os.utime(existing_fd, None)
-            else:
-                stale = time.time() - heartbeat_max_age_seconds() - 1
-                os.utime(existing_fd, (stale, stale))
-            try:
-                published = os.stat(path)
-            except FileNotFoundError:
-                return None
-            if (published.st_dev, published.st_ino) != identity:
-                return None
-            return identity
+                os.close(existing_fd)
         finally:
-            os.close(existing_fd)
+            os.close(claimant_fd)
 
     @staticmethod
     def _refresh_heartbeat(
