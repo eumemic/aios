@@ -59,8 +59,12 @@ def read_gc_health() -> dict[str, Any]:
         updated_at = payload["updated_at"]
         if not isinstance(failures, int) or isinstance(failures, bool) or failures < 0:
             raise ValueError("invalid GC failure count")
-        if last_success is not None and not isinstance(last_success, str):
-            raise ValueError("invalid GC last-success value")
+        if last_success is not None:
+            if not isinstance(last_success, str):
+                raise ValueError("invalid GC last-success value")
+            last_success_at = datetime.fromisoformat(last_success)
+            if last_success_at.tzinfo is None:
+                raise ValueError("GC last-success timestamp has no timezone")
         if not isinstance(updated_at, str):
             raise ValueError("invalid GC snapshot timestamp")
         observed_at = datetime.fromisoformat(updated_at)
