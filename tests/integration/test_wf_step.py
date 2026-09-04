@@ -4983,6 +4983,8 @@ async def test_bash_uses_own_run_environment_timeout_ceiling(
     await run_workflow_step(run_id)
     await _drain_sandbox_tasks()
 
+    started = await _call_starteds(pool, run_id)
+    assert started[0].payload["resolved_timeout_seconds"] == 1200
     exec_calls = [kwargs for verb, kwargs in backend.calls if verb == "exec"]
     assert len(exec_calls) == 1
     assert exec_calls[0]["timeout_seconds"] == 1200
@@ -5095,8 +5097,17 @@ async def test_bash_crash_path_at_least_once(
         await block.wait()
         return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
 
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
+    script = (
+        "async def main(input):\n"
+        "    return await tool('bash', {'command': 'echo hi', 'timeout_seconds': 1200})\n"
+    )
     run_id = await _make_tool_run(
-        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-c"
+        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-c"
     )
     with mock.patch.object(backend, "exec", new=_blocked):
         await run_workflow_step(run_id)  # parks; launches the task
@@ -5114,10 +5125,17 @@ async def test_bash_crash_path_at_least_once(
     backend.next_result = CommandResult(
         exit_code=0, stdout="2nd\n", stderr="", timed_out=False, truncated=False
     )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 120}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
     await run_workflow_step(run_id)
     assert len(await _call_starteds(pool, run_id)) == 1  # exactly one — no double-open
     assert first_exec_count + _backend_exec_count(backend) == 2
     assert _backend_exec_count(backend) == 1  # the re-dispatch ran exactly once
+    redrive_exec = next(kwargs for verb, kwargs in backend.calls if verb == "exec")
+    assert redrive_exec["timeout_seconds"] == 1200  # dispatch-time pin, not lowered env
     await _drain_sandbox_tasks()
     await run_workflow_step(run_id)  # harvest the re-dispatch → complete
     run = await _get_run(pool, run_id)

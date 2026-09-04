@@ -226,24 +226,49 @@ async def test_inflight_call_llm_wakes_past_stale_horizon(
     assert run_id not in await _needing(pool)
 
 
-async def test_long_run_bash_uses_its_bounded_horizon(
+async def test_long_run_bash_uses_its_pinned_horizon_after_environment_lowered(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:
-    """A configured long call stays quiet while live, then becomes recoverable."""
-    async with sweep_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
-            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
-        )
+    """A live call keeps its dispatch-time deadline if the environment is lowered."""
     run_id = await _make_run(sweep_pool)
-    payload = {"tool_name": "bash", "input": {"command": "sleep 150", "timeout_seconds": 1200}}
+    payload = {
+        "tool_name": "bash",
+        "input": {"command": "sleep 150", "timeout_seconds": 1200},
+        "resolved_timeout_seconds": 1200,
+    }
     await _call_started(
         sweep_pool, run_id, "sha:long#0", "tool", age_seconds=1300, payload_extra=payload
     )
-    assert run_id not in await _needing(sweep_pool)  # 1200 + 180 provisioning slack
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 120}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
+    assert run_id not in await _needing(sweep_pool)  # pinned 1200 + 180 provisioning slack
     await _call_started(
         sweep_pool, run_id, "sha:long#1", "tool", age_seconds=1400, payload_extra=payload
     )
+    assert run_id in await _needing(sweep_pool)
+
+
+async def test_malformed_environment_timeout_does_not_abort_legacy_sweep(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A corrupt tenant config falls back conservatively instead of aborting all rows."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:malformed#0",
+        "tool",
+        age_seconds=301,
+        payload_extra={"tool_name": "bash", "input": {"command": "true"}},
+    )
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": \"not-a-number\"}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
     assert run_id in await _needing(sweep_pool)
 
 

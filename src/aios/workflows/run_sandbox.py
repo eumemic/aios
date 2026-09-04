@@ -70,6 +70,7 @@ def launch_sandbox_task(
     call_key: str,
     tool_name: str,
     tool_input: Any,
+    resolved_timeout_seconds: int | None = None,
 ) -> None:
     """Launch the worker task for a freshly-opened sandbox-tool frontier (no-op if
     already live).
@@ -81,7 +82,14 @@ def launch_sandbox_task(
     if run_tools.has_inflight(*key):
         return
     run_tools._INFLIGHT[key] = asyncio.create_task(
-        _run_sandbox_task(pool, run, call_key=call_key, tool_name=tool_name, tool_input=tool_input)
+        _run_sandbox_task(
+            pool,
+            run,
+            call_key=call_key,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            resolved_timeout_seconds=resolved_timeout_seconds,
+        )
     )
 
 
@@ -92,13 +100,18 @@ async def _run_sandbox_task(
     call_key: str,
     tool_name: str,
     tool_input: Any,
+    resolved_timeout_seconds: int | None = None,
 ) -> None:
     """Run one sandbox tool, write its ``tool_result`` signal, and wake the run
     (always-signals — mirrors ``run_tools._run_tool_task``)."""
     try:
         try:
             result = await _execute(
-                run, call_key=call_key, tool_name=tool_name, tool_input=tool_input
+                run,
+                call_key=call_key,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                resolved_timeout_seconds=resolved_timeout_seconds,
             )
         except Exception as exc:
             # Backstop — _execute maps gate/validation/provision/exec to their own
@@ -129,19 +142,26 @@ async def _run_sandbox_task(
         run_tools._INFLIGHT.pop((run.id, call_key), None)
 
 
-async def resolve_run_bash_timeout_ceiling(run: WfRun) -> int:
+async def resolve_run_bash_timeout_ceiling(
+    run: WfRun, *, conn: asyncpg.Connection[Any] | None = None
+) -> int:
     """Resolve a run's account-scoped environment ceiling, conservatively.
 
-    Missing/foreign environments and database failures fall back to the worker
-    default.  This mirrors session bash semantics without using a session as an
-    authority proxy for a workflow run.
+    Missing/foreign/malformed environments and database failures fall back to the
+    worker default.  Callers opening a durable frontier pass their existing
+    transaction connection so the resolved value can be journaled atomically.
     """
     default = get_settings().bash_default_timeout_seconds
     try:
-        async with runtime.require_pool().acquire() as conn:
+        if conn is not None:
             env_config = await db_queries.get_environment_config_for_id(
                 conn, run.environment_id, account_id=run.account_id
             )
+        else:
+            async with runtime.require_pool().acquire() as acquired:
+                env_config = await db_queries.get_environment_config_for_id(
+                    acquired, run.environment_id, account_id=run.account_id
+                )
     except Exception as exc:
         log.warning("run_sandbox.bash_timeout_resolve_failed", run_id=run.id, error=str(exc))
         return default
@@ -150,7 +170,31 @@ async def resolve_run_bash_timeout_ceiling(run: WfRun) -> int:
     return default
 
 
-async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any) -> dict[str, Any]:
+async def resolve_bash_call_timeout(
+    run: WfRun, tool_input: Any, *, conn: asyncpg.Connection[Any] | None = None
+) -> int:
+    """Resolve the immutable container deadline for one bash frontier."""
+    ceiling = await resolve_run_bash_timeout_ceiling(run, conn=conn)
+    args = tool_input if isinstance(tool_input, dict) else {}
+    requested = args.get("timeout_seconds")
+    if (
+        isinstance(requested, (int, float))
+        and not isinstance(requested, bool)
+        and math.isfinite(requested)
+        and requested > 0
+    ):
+        return min(ceiling, max(1, int(requested)))
+    return ceiling
+
+
+async def _execute(
+    run: WfRun,
+    *,
+    call_key: str,
+    tool_name: str,
+    tool_input: Any,
+    resolved_timeout_seconds: int | None = None,
+) -> dict[str, Any]:
     """Provision (or reuse) the run's sandbox and run the bash command, returning the
     tool_result VALUE: the bare bash dict on success, ``{"error": str}`` on any
     recoverable failure (gate rejection, malformed argument, provision/exec error).
@@ -219,10 +263,10 @@ async def _execute(run: WfRun, *, call_key: str, tool_name: str, tool_input: Any
     # ``max(1, int(...))`` keeps truncation (2.7 → 2) while guaranteeing a positive
     # request never disables the timeout; the ``min`` clamps to the same ceiling the
     # bash tool uses.
-    ceiling = await resolve_run_bash_timeout_ceiling(run)
-    resolved_timeout_seconds = (
-        min(ceiling, max(1, int(timeout_seconds))) if timeout_seconds is not None else ceiling
-    )
+    if resolved_timeout_seconds is None:
+        # Legacy call_started rows have no pinned value. Resolve conservatively at
+        # re-drive; new rows always carry the immutable value journaled at open.
+        resolved_timeout_seconds = await resolve_bash_call_timeout(run, tool_input)
     try:
         result = await registry.exec(
             handle,
