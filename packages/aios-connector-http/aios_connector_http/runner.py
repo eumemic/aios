@@ -52,6 +52,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
+import ctypes.util
+import fcntl
 import hashlib
 import inspect
 import json
@@ -107,6 +110,33 @@ from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
 ToolFn = Callable[..., Awaitable[Any]]
+
+
+def _rename_exchange(source: str | Path, destination: str | Path) -> bool:
+    """Atomically exchange pathnames while retaining both underlying inodes."""
+    libc_name = ctypes.util.find_library("c")
+    if libc_name is None:
+        return False
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        return False
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result: int = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        2,  # RENAME_EXCHANGE
+    )
+    return result == 0
 
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
@@ -1056,6 +1086,7 @@ class HttpConnector:
         """
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         fd: int | None = None
+        lock_fd: int | None = None
         temporary_path: str | None = None
         created = False
         try:
@@ -1086,39 +1117,55 @@ class HttpConnector:
                         return None
                     debris_identity = (existing.st_dev, existing.st_ino)
 
-                    # Atomically capture the inode currently named by ``path`` in
-                    # a hard-link guard, then mutate only through that guard. If
-                    # the pathname changed since inspection, identity validation
-                    # refuses the claim without touching the replacement. If it
-                    # changes later, the update applies only to the unlinked old
-                    # inode and the final identity check still refuses ownership.
-                    os.close(fd)
-                    fd = None
-                    os.unlink(temporary_path)
+                    # Serialize with cooperative refreshers on the inode and
+                    # validate again after taking the lock. A refresher which opened
+                    # the stale inode first wins; one opening it later revalidates the
+                    # public pathname after acquiring this lock and refuses the now
+                    # displaced inode.
                     try:
-                        os.link(path, temporary_path, follow_symlinks=False)
-                        fd = os.open(temporary_path, flags)
+                        lock_fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
                     except OSError:
                         return None
-                    guarded = os.fstat(fd)
+                    guarded = os.fstat(lock_fd)
                     if (guarded.st_dev, guarded.st_ino) != debris_identity:
                         return None
                     if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
                         return None
 
-                    os.ftruncate(fd, 0)
-                    if payload:
-                        os.write(fd, payload)
+                    # This no-op truncate is also a final pre-exchange checkpoint:
+                    # any non-cooperating writer interposed here is detected by the
+                    # displaced-inode freshness check below. It only touches our
+                    # already-prepared temporary inode, never the incumbent heartbeat.
+                    os.ftruncate(fd, os.fstat(fd).st_size)
                     os.fsync(fd)
                     stale = time.time() - heartbeat_max_age_seconds() - 1
                     os.utime(fd, (stale, stale))
+
+                    # Atomically exchange the prepared claimant with the public
+                    # pathname. Unlike rename-over, both inodes survive, allowing us
+                    # to roll back if the incumbent was replaced or refreshed.
+                    if not _rename_exchange(temporary_path, path):
+                        return None
+                    claimant = os.stat(path)
+                    claimant_identity = (claimant.st_dev, claimant.st_ino)
                     try:
-                        published = os.stat(path)
+                        displaced = os.stat(temporary_path)
                     except FileNotFoundError:
                         return None
-                    if (published.st_dev, published.st_ino) != debris_identity:
+                    displaced_identity = (displaced.st_dev, displaced.st_ino)
+                    if (
+                        displaced_identity != debris_identity
+                        or time.time() - displaced.st_mtime <= heartbeat_max_age_seconds()
+                    ):
+                        try:
+                            current = os.stat(path)
+                        except FileNotFoundError:
+                            return None
+                        if (current.st_dev, current.st_ino) == claimant_identity:
+                            _rename_exchange(temporary_path, path)
                         return None
-                    return debris_identity
+                    return claimant_identity
                 else:
                     created = True
             else:
@@ -1150,6 +1197,8 @@ class HttpConnector:
                 os.utime(fd, (stale, stale))
             return identity
         finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
             if fd is not None:
                 os.close(fd)
             if temporary_path is not None:
@@ -1189,8 +1238,15 @@ class HttpConnector:
         except FileNotFoundError:
             return False
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             stat = os.fstat(fd)
             if (stat.st_dev, stat.st_ino) != identity:
+                return False
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return False
+            if (published.st_dev, published.st_ino) != identity:
                 return False
             if not touch_mtime:
                 # Idempotent content correction: only write (and only disturb

@@ -477,3 +477,39 @@ def test_stale_reclaim_refuses_replacement_after_inspection(
 
     assert identity is None
     assert heartbeat.read_bytes() == b"operator replacement"
+
+
+def test_stale_reclaim_refuses_same_inode_refresh_before_exchange(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A peer refreshing stale inode content/freshness wins reclamation."""
+    connector = _Connector(base_url="http://example.test", token="token")
+    heartbeat = tmp_path / "alive"
+    heartbeat.write_bytes(b"stale owner")
+    old = time.time() - 3600
+    os.utime(heartbeat, (old, old))
+    original_identity = (heartbeat.stat().st_dev, heartbeat.stat().st_ino)
+
+    real_ftruncate = os.ftruncate
+    refreshed = False
+
+    def refresh_incumbent(fd: int, length: int) -> None:
+        nonlocal refreshed
+        if not refreshed:
+            # Refresh through the public path without replacing its inode, at the
+            # claimant's final pre-exchange checkpoint.
+            with heartbeat.open("r+b") as peer:
+                peer.seek(0)
+                peer.truncate()
+                peer.write(b"live peer")
+            refreshed = True
+        real_ftruncate(fd, length)
+
+    monkeypatch.setattr(os, "ftruncate", refresh_incumbent)
+
+    identity = connector._claim_heartbeat(heartbeat, b"claimant", False)
+
+    assert identity is None
+    assert (heartbeat.stat().st_dev, heartbeat.stat().st_ino) == original_identity
+    assert heartbeat.read_bytes() == b"live peer"
+    assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
