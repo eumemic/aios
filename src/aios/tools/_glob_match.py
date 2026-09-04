@@ -15,12 +15,18 @@ from __future__ import annotations
 
 def match_glob(pattern: str, path: str) -> bool:
     """Return True if ``path`` matches the segment-glob ``pattern``."""
-    return _match(pattern.strip("/").split("/"), path.strip("/").split("/"))
+    p = pattern.strip("/").split("/")
+    s = path.strip("/").split("/")
+    if p == [""]:
+        p = []
+    if s == [""]:
+        s = []
+    return _match(p, s)
 
 
 def _match(p: list[str], s: list[str]) -> bool:
     if not p:
-        return not s or s == [""]
+        return not s
     head, rest = p[0], p[1:]
     if head == "**":
         if not rest:
