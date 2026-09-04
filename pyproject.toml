@@ -253,6 +253,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = [
     "-ra",
+    # Keep the repository-wide default bounded: ``auto`` exhausts review
+    # workers, while serial execution cannot finish within their test budget.
+    "-n=3",
+    "--dist=loadfile",
     "--strict-markers",
     "--strict-config",
     # Surface slow tests in every CI log so regressions don't accumulate
