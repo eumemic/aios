@@ -798,7 +798,7 @@ all from one source of truth, with **CI drift-guards** (including a coverage tes
 | Long-poll | `GET /v1/sessions/{id}/wait` | Stacks that can't consume SSE (notably Node `fetch`). |
 | Quiescence join | `GET /v1/sessions/{id}/await` | MCP-usable drive-and-join: block until the session fully reacts to a watermark. |
 
-The SDK re-exports a generated `AuthenticatedClient` plus hand-written SSE consumers for the streaming endpoints the generator can't model (read timeout sized as 3× the server's 15s heartbeat). A separate `packages/aios-connector-http` SDK (`HttpConnector` + `@tool`) builds connectors against the same API. Errors render a structured `{error:{type,message,detail}}` envelope; `/health` is DB-free liveness, `/ready` does `SELECT 1` under a 2s budget.
+The SDK re-exports a generated `AuthenticatedClient` plus hand-written SSE consumers for the streaming endpoints the generator can't model (read timeout sized as 3× the server's 15s heartbeat). A separate `packages/aios-connector-http` SDK (`HttpConnector` + `@tool`) builds connectors against the same API. Errors render a structured `{error:{type,message,detail}}` envelope; `/health` is DB-free liveness, `/ready` exercises `append_event` under a 2s budget.
 
 <details>
 <summary><b>CLI cheatsheet</b></summary>
