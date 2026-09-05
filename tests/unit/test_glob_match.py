@@ -62,6 +62,13 @@ class TestDoubleStar:
         ("**", "/", True),
         ("/api/v1/*", "/api/v1/users", True),
         ("/api/v1/*", "/api/v2/users", False),
+        ("/*", "", False),
+        ("/*", "/", False),
+        ("*", "", False),
+        ("*", "/", False),
+        ("**/*", "", False),
+        ("**/*", "/", False),
+        ("**", "", True),
     ],
 )
 def test_table(pattern: str, path: str, expected: bool) -> None:
