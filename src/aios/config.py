@@ -1327,16 +1327,26 @@ class Settings(BaseSettings):
         # unspecified, so this rejects only clear-cut under-coverage of the
         # named sum — it cannot invent the margin without contradicting the
         # doc. The boundary case stays operator judgment.
+        #
+        # _BROWSER_EXEC_KILL_MARGIN_S mirrors aios.sandbox.browser.EXEC_KILL_MARGIN_S
+        # (kept here as a literal to avoid the circular import that would result
+        # from importing aios.sandbox.browser — which itself imports get_settings).
+        # The worker's driver_call wraps every takeover_open exec with
+        # timeout_s = takeover_open_timeout + EXEC_KILL_MARGIN_S, so the actual
+        # cold-open wall-clock budget is provision + takeover_open + that margin.
+        _BROWSER_EXEC_KILL_MARGIN_S = 5  # must stay in sync with browser.EXEC_KILL_MARGIN_S
         named_floor = (
             self.sandbox_browser_provision_timeout_seconds
             + self.sandbox_browser_takeover_open_timeout_seconds
+            + _BROWSER_EXEC_KILL_MARGIN_S
         )
         if self.sandbox_browser_call_timeout_seconds <= named_floor:
             raise ValueError(
                 f"AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS="
                 f"{self.sandbox_browser_call_timeout_seconds} must exceed the cold-open "
                 f"floor (provision {self.sandbox_browser_provision_timeout_seconds}s + "
-                f"takeover_open {self.sandbox_browser_takeover_open_timeout_seconds}s = "
+                f"takeover_open {self.sandbox_browser_takeover_open_timeout_seconds}s + "
+                f"exec_kill_margin {_BROWSER_EXEC_KILL_MARGIN_S}s = "
                 f"{named_floor}s) plus margin, otherwise every cold open 504s the "
                 f"caller while the worker completes it, leaving a viewerless grant."
             )

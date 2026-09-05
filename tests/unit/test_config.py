@@ -377,12 +377,15 @@ def test_browser_call_timeout_default_covers_cold_open(
     monkeypatch.delenv("AIOS_SANDBOX_BROWSER_TAKEOVER_OPEN_TIMEOUT_SECONDS", raising=False)
 
     s = Settings(_env_file=(str(secrets),))
+    # Floor includes exec_kill_margin (5s) mirroring browser.EXEC_KILL_MARGIN_S.
+    _exec_kill_margin = 5
     named_floor = (
         s.sandbox_browser_provision_timeout_seconds
         + s.sandbox_browser_takeover_open_timeout_seconds
+        + _exec_kill_margin
     )
     assert s.sandbox_browser_call_timeout_seconds == 210.0
-    assert named_floor == 120.0 + 45
+    assert named_floor == 120.0 + 45 + 5
     assert s.sandbox_browser_call_timeout_seconds > named_floor
 
 
@@ -416,26 +419,46 @@ def test_browser_call_timeout_rejects_equal_to_named_floor(
     from aios.config import Settings
 
     secrets = _browser_secrets(tmp_path)
-    # Default inner budgets: 120 + 45 = 165. Exactly the floor must be rejected.
-    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "165")
+    # Default inner budgets: 120 + 45 + exec_kill_margin 5 = 170.
+    # Exactly the floor must be rejected.
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "170")
 
     with pytest.raises(ValidationError, match="must exceed the cold-open floor"):
+        Settings(_env_file=(str(secrets),))
+
+
+def test_browser_call_timeout_rejects_provision_plus_takeover_plus_exec_margin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call_timeout that exceeds provision+takeover_open but not the full
+    cold-open path (which adds exec_kill_margin) must be rejected.
+    Configure provision=120, takeover_open=45, call_timeout=166:
+    166 > 165 (old two-field floor) but 166 < 170 (full floor with margin),
+    so the worker can still be executing its cold-open path when the caller 504s."""
+    from pydantic import ValidationError
+
+    from aios.config import Settings
+
+    secrets = _browser_secrets(tmp_path)
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "166")
+
+    with pytest.raises(ValidationError, match="AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS"):
         Settings(_env_file=(str(secrets),))
 
 
 def test_browser_call_timeout_accepts_just_above_named_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One second above the named floor passes the validator and is stored —
-    the unspecified margin is left as operator judgment, exactly as the
-    field description hedges it."""
+    """One second above the full cold-open floor (provision + takeover_open +
+    exec_kill_margin = 170s) passes the validator and is stored — the
+    unspecified extra margin is left as operator judgment."""
     from aios.config import Settings
 
     secrets = _browser_secrets(tmp_path)
-    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "166")
+    monkeypatch.setenv("AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS", "171")
 
     s = Settings(_env_file=(str(secrets),))
-    assert s.sandbox_browser_call_timeout_seconds == 166.0
+    assert s.sandbox_browser_call_timeout_seconds == 171.0
 
 
 def test_browser_call_timeout_rejects_when_sibling_budgets_raise_floor(
@@ -443,8 +466,8 @@ def test_browser_call_timeout_rejects_when_sibling_budgets_raise_floor(
 ) -> None:
     """The validator reacts to the sibling budgets too, not just the
     call_timeout field: the default 210s is valid against the default
-    inner budgets (floor 165s), but raising ``takeover_open`` to 130 makes
-    the named floor 120 + 130 = 250s and rejects the same 210s default."""
+    inner budgets (floor 170s), but raising ``takeover_open`` to 130 makes
+    the named floor 120 + 130 + 5 = 255s and rejects the same 210s default."""
     from pydantic import ValidationError
 
     from aios.config import Settings
@@ -478,5 +501,6 @@ def test_browser_call_timeout_error_names_env_var_and_floor(
     assert "AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS=60.0" in msg
     assert "provision 120.0s" in msg
     assert "takeover_open 45s" in msg
-    assert "165.0s" in msg
+    assert "exec_kill_margin 5s" in msg
+    assert "170.0s" in msg
     assert "viewerless grant" in msg
