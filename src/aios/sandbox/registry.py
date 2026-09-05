@@ -3535,19 +3535,46 @@ class SandboxRegistry:
                 await self._write_snapshot_pointer(sid, v.removal_ref, ub)
 
     async def _unique_bytes_for_image(self, image: ManagedImage, base_sizes: dict[str, int]) -> int:
-        """Unique bytes for accounting: full size for a flattened (standalone)
-        image, else ``tag.Size - base.Size``. ``base_sizes`` caches base lookups."""
+        """Unique bytes for accounting: full chain cost for a flattened
+        (standalone) image, else ``tag chain - base chain``. ``base_sizes``
+        caches base lookups.
+
+        The figure is the on-disk CHAIN cost (Σ layer bytes), not ``.Size``
+        (#2349). ``.Size`` is the current filesystem view: it charges a byte
+        once however many superseded copies overlay still holds in the interior
+        layers, so a long commit chain reports a fraction of the disk it
+        occupies. Enforced against the view, the pool budget was structurally
+        unenforceable — it read 28.6 GB used against a 60 GB budget while the
+        tagged images held ~38 GB of unique layer bytes, and logged
+        ``reclaimed_bytes: 0`` every tick in enforce mode.
+        """
+        image_bytes = await self._chain_bytes_for_image(image)
         if image.labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
-            return image.size_bytes
+            return image_bytes
         base_ref = image.labels.get(BASE_IMAGE_LABEL_KEY)
         if not base_ref:
-            return image.size_bytes
+            return image_bytes
         if base_ref not in base_sizes:
             try:
-                base_sizes[base_ref] = await self._backend.image_size(base_ref)
+                base_sizes[base_ref] = await self._backend.image_chain_bytes(base_ref)
             except SandboxBackendError:
                 base_sizes[base_ref] = 0  # over-count is safe; never under-report
-        return max(0, image.size_bytes - base_sizes[base_ref])
+        return max(0, image_bytes - base_sizes[base_ref])
+
+    async def _chain_bytes_for_image(self, image: ManagedImage) -> int:
+        """On-disk chain cost of an enumerated image, falling back to its view.
+
+        The enumeration carries ``.Size`` only, so the chain is measured by a
+        second probe keyed on the (content-addressed, hence cacheable) image id.
+        An unreadable probe degrades to the view rather than failing the tick:
+        under-reporting reclaims less than it could, whereas raising here would
+        stop reclamation altogether — the failure this change exists to end.
+        """
+        try:
+            return await self._backend.image_chain_bytes(image.image_id)
+        except SandboxBackendError:
+            log.warning("sandbox.chain_bytes_unavailable", image_id=image.image_id[:19])
+            return image.size_bytes
 
     async def _remove_canonical_image_and_clear_pointer(
         self,
