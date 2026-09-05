@@ -613,6 +613,54 @@ class TestSessionResourcesUpdate:
         assert ids == [prior["id"]]
 
 
+class TestSessionResourceReattachBug:
+    """Regression: re-attaching a *renamed* memory store via the granular
+    ``POST /v1/sessions/{id}/resources`` add-one path must return a handled
+    4xx (409 ``conflict``), not the bare HTTP 500 ``Internal Server Error``
+    the pre-fix bug produced when the ``(session_id, memory_store_id)``
+    primary key's ``asyncpg.UniqueViolationError`` escaped the service and
+    fell through Starlette's default error middleware.
+    """
+
+    async def test_readd_renamed_store_returns_409_not_500(
+        self, http_client: httpx.AsyncClient, pool: Any
+    ) -> None:
+        store = await _create_store(http_client, name=f"reattach-{_uniq()}")
+        session = await _create_session_for_resources_test(pool)
+
+        r = await http_client.post(
+            f"/v1/sessions/{session['id']}/resources",
+            json={"type": "memory_store", "memory_store_id": store["id"]},
+        )
+        assert r.status_code == 201, r.text
+
+        # Rename the parent store so the resolved name diverges from the
+        # snapshotted name_at_attach, bypassing the name-collision guard.
+        r = await http_client.put(
+            f"/v1/memory-stores/{store['id']}", json={"name": f"renamed-{_uniq()}"}
+        )
+        assert r.status_code == 200, r.text
+
+        # Re-POST the same store: the PK fires and must surface as a handled
+        # 409 — not the pre-fix 500 with content-type text/plain.
+        r = await http_client.post(
+            f"/v1/sessions/{session['id']}/resources",
+            json={"type": "memory_store", "memory_store_id": store["id"]},
+        )
+        assert r.status_code == 409, r.text
+        assert r.headers["content-type"].startswith("application/json"), r.headers["content-type"]
+        body = r.json()
+        assert body["error"]["type"] == "conflict"
+        assert body["error"]["detail"]["memory_store_id"] == store["id"]
+        assert body["error"]["detail"]["session_id"] == session["id"]
+
+        # The original attachment survives (the rolled-back re-add left it intact).
+        r = await http_client.get(f"/v1/sessions/{session['id']}")
+        assert r.status_code == 200, r.text
+        ids = [e["memory_store_id"] for e in r.json()["resources"]]
+        assert ids == [store["id"]]
+
+
 class TestSessionListResourcesBatched:
     """``GET /v1/sessions`` enriches each row with its ``resources`` field via a
     single batched query per echo family — regression guard for issue #617."""
