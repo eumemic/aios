@@ -27,6 +27,7 @@ from aios.harness.context import (
 )
 from aios.harness.window import WindowOmission
 from aios.models.events import Event
+from tests.support import assert_message_prefix
 
 
 @pytest.fixture(autouse=True)
@@ -859,15 +860,7 @@ class TestTimezoneRendering:
 # ─── monotonicity ──────────────────────────────────────────────────────────
 
 
-def _assert_prefix(short: list[dict[str, Any]], long: list[dict[str, Any]]) -> None:
-    """Assert that *short* is a message-for-message prefix of *long*."""
-    assert len(short) <= len(long), (
-        f"short ({len(short)} msgs) is longer than long ({len(long)} msgs)"
-    )
-    for i, (a, b) in enumerate(zip(short, long, strict=False)):
-        assert a == b, (
-            f"monotonicity violation at index {i}:\n  short[{i}] = {a!r}\n  long[{i}]  = {b!r}"
-        )
+_assert_prefix = assert_message_prefix
 
 
 class TestMonotonicity:
@@ -1218,6 +1211,70 @@ class TestMonotonicity:
 
 
 # ─── field stripping ────────────────────────────────────────────────────────
+
+
+class TestBlindSpotUserAnchoring:
+    """A user message that landed while the model was mid-inference is blind
+    to the assistant turn that inference produced. It must render AFTER that
+    assistant — the first one whose ``reacting_to < seq < assistant.seq`` —
+    in EVERY later build, never jumping back to its seq position once a
+    newer assistant exists. That reorder broke the prompt prefix on both
+    providers for every channel agent with a mid-inference inbound."""
+
+    @staticmethod
+    def _build(events: list[Event]) -> list[dict[str, Any]]:
+        return build_messages(events, system_prompt=None).messages
+
+    @staticmethod
+    def _blind_spot_fixture() -> list[Event]:
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "tool", tool_call_id="bash_1", content="ok"),
+            _evt(4, "user", content="mid-inference note"),
+            _evt(5, "assistant", content="done"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[4].data["reacting_to"] = 3  # blind to the user at seq 4
+        return events
+
+    def test_anchors_after_its_assistant_when_reply_appended(self) -> None:
+        l1 = self._blind_spot_fixture()
+        # The model then replies to the mid-inference note.
+        l2 = [*l1, _evt(6, "assistant", content="noted")]
+        l2[5].data["reacting_to"] = 4
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert b1[-1]["content"].endswith("mid-inference note")
+        _assert_prefix(b1, b2)
+
+    def test_anchors_when_later_inbound_arrives(self) -> None:
+        l1 = self._blind_spot_fixture()
+        l2 = [*l1, _evt(6, "user", content="and another thing")]
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        _assert_prefix(b1, b2)
+        assert b2[-1]["content"].endswith("and another thing")
+
+    def test_anchor_is_the_assistant_that_was_blind_not_the_last(self) -> None:
+        events = [
+            _evt(1, "user", content="first"),
+            _evt(2, "assistant", content="a1"),
+            _evt(3, "user", content="mid-inference note"),
+            _evt(4, "assistant", content="a2"),
+            _evt(5, "user", content="third"),
+            _evt(6, "assistant", content="a3"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # a2 never saw seq 3
+        events[5].data["reacting_to"] = 5  # a3 saw everything
+        contents = [str(m.get("content")) for m in self._build(events)]
+
+        def _at(suffix: str) -> int:
+            return next(i for i, c in enumerate(contents) if c.endswith(suffix))
+
+        # a2 was blind to the note, so the note renders right after a2.
+        assert _at("a2") < _at("mid-inference note") < _at("third")
 
 
 class TestFieldStripping:

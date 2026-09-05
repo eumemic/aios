@@ -1435,25 +1435,42 @@ def build_messages(
             horizon_for[seq] = _INF
 
     # Blind-spot window for USER messages — the symmetric twin of the tool-result
-    # injection below. A user message that arrived DURING the last assistant's
+    # injection below. A user message that arrived DURING an assistant's
     # inference (committed before it, but after its visibility horizon
-    # ``reacting_to``) is "stranded": in seq order it lands *before* that trailing
-    # assistant turn, so the assembled context would END on an assistant message.
-    # Current reasoning models reject a trailing assistant turn as an unsupported
-    # prefill ("the conversation must end with a user message"), and the inference
-    # gate fires for it anyway (it's genuinely unreacted). So defer a user message
-    # in the window ``last_asst_rt < seq < last_asst_seq`` to the tail (flushed
-    # after the walk). Only the LAST assistant can strand the tail — a user blind
-    # to an earlier assistant is followed by a later one that reacted, so it never
-    # ends the list.
-    last_asst_seq, last_asst_rt = asst_list[-1] if asst_list else (0, 0)
+    # ``reacting_to``) is "stranded": in seq order it lands *before* that
+    # assistant turn, whose context never contained it. Rendered at its seq
+    # position the assembled context can END on an assistant message (current
+    # reasoning models reject that as an unsupported prefill) — and, worse for
+    # the prompt-prefix cache, its position would MOVE between builds: deferred
+    # to the tail while that assistant is the last one, then back to its seq
+    # position once a newer assistant exists. So a blind-spot user is ANCHORED
+    # after the first assistant that was blind to it (``_blind_anchor``, emitted
+    # from the assistant branch below): the same position in every build, the
+    # faithful chronology, and never a trailing assistant.
+    #
+    # ``last_asst_rt`` (the last assistant's horizon) is still what the
+    # trailing-stimulus guard at the end of the build compares against.
+    _, last_asst_rt = asst_list[-1] if asst_list else (0, 0)
 
     # Walk events in seq order.
     emitted_tcids: set[str] = set()
     messages: list[dict[str, Any]] = []
     inject_after: dict[int, list[tuple[str, dict[str, Any]]]] = {}
-    deferred_user_tail: list[dict[str, Any]] = []
+    # Blind-spot USER messages, keyed by the seq of the assistant they anchor
+    # after (see ``_blind_anchor`` below).
+    anchored_users: dict[int, list[dict[str, Any]]] = {}
     max_stimulus_seq: int = 0
+
+    def _blind_anchor(seq: int) -> int | None:
+        """The seq of the FIRST assistant that was blind to a user event at
+        ``seq`` (``reacting_to < seq < assistant.seq``), or ``None`` when every
+        assistant either preceded it or reacted to it. ``asst_list`` is in seq
+        order, so the first hit is the earliest blind assistant — a stable
+        anchor that never moves as later assistants are appended."""
+        for asst_seq, asst_rt in asst_list:
+            if asst_rt < seq < asst_seq:
+                return asst_seq
+        return None
 
     for e in events:
         # Durable-session-sandbox FS-loss notices (§5.9): the only non-message
@@ -1509,10 +1526,13 @@ def build_messages(
                     workspace_path=workspace_path,
                 )
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
-                if last_asst_rt < e.seq < last_asst_seq:
-                    # Blind to the last assistant — defer to the tail (below) so
-                    # the context can't end on that assistant turn.
-                    deferred_user_tail.append(msg)
+                anchor = _blind_anchor(e.seq)
+                if anchor is not None:
+                    # Blind to an assistant — anchor after THAT assistant (it is
+                    # emitted when the walk reaches the anchor) so the context
+                    # can't end on that assistant turn AND the position is the
+                    # same in every later build (prefix stability).
+                    anchored_users.setdefault(anchor, []).append(msg)
                 else:
                     messages.append(msg)
 
@@ -1593,6 +1613,12 @@ def build_messages(
                         )
                     max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
 
+                # Blind-spot USER messages anchored to this assistant follow its
+                # paired results and inline injections — the faithful chronology
+                # (this turn's context never contained them) at a position that
+                # is a pure function of the log, so it never moves between builds.
+                messages.extend(anchored_users.pop(e.seq, []))
+
             elif role == "tool":
                 # Reaching this branch means NO in-window assistant declared
                 # this tcid — the assistant branch above records every id it
@@ -1634,13 +1660,6 @@ def build_messages(
             )
             messages.append(_quarantine_placeholder(e.seq))
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
-
-    # Flush deferred blind-spot USER messages at the tail (see the window above):
-    # they now follow the assistant turn that never saw them, so the context ends
-    # on a user turn — the faithful chronology, since that turn's context never
-    # contained them — and no accidental prefill is sent. (max_stimulus_seq was
-    # already advanced for each at collection time, since max is order-independent.)
-    messages.extend(deferred_user_tail)
 
     # Prune dangling messages at the start of the window.  DB-level
     # windowing can cut in the middle of an assistant+tool_result group,
