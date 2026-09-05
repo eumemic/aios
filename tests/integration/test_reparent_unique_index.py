@@ -397,8 +397,11 @@ class TestReparentCarriesAccountScopedChildren:
         # primitive does not move sessions — we leave the session on
         # acc_a, and after reparent the binding still references it.
         # The DB-level FK accepts cross-account session_id; the
-        # resolver re-checks tenancy at read time. The carry-over we
-        # verify here is bindings.account_id, not the session itself.
+        # resolver re-checks tenancy at read time (``_session_is_archived``
+        # treats a 0-row cross-account session as not-live → DETACHED).
+        # That re-check is exercised end-to-end in
+        # ``test_resolver_reparent_cross_account.py``; the carry-over we
+        # verify here is ``bindings.account_id``, not the session itself.
         await connections_service.reparent_connection(
             pool,
             connection.id,
