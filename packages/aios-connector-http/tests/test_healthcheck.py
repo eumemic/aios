@@ -105,10 +105,15 @@ async def test_heartbeat_withheld_until_discovery_is_authoritative(tmp_path: Pat
 async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: Path) -> None:
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "crash-left-alive"
-    heartbeat.touch()
+    # A crashed process leaves a fully-formed stale heartbeat it OWNED: build it
+    # via a real claim so it carries a former-owner ownership identity (dev, ino,
+    # nonce), then age it out. ``original_identity`` is the identity a paused
+    # former owner would still be holding.
+    crashed_owner = _Connector(base_url="http://example.test", token="token")
+    original_identity = crashed_owner._claim_heartbeat(heartbeat, b"", True)
+    assert original_identity is not None
     old = time.time() - 3600
     os.utime(heartbeat, (old, old))
-    original_identity = (heartbeat.stat().st_dev, heartbeat.stat().st_ino)
     connector._discovery_cursor = 0
     connector.HEARTBEAT_INTERVAL = 0.01
 
@@ -117,8 +122,16 @@ async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: P
         await asyncio.sleep(0.03)
         assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
         assert connector._heartbeat_owned
-        # Recovery publishes a new inode so a paused former owner cannot resume.
-        assert connector._heartbeat_identity != original_identity
+        # Recovery establishes a new ownership generation so a paused former
+        # owner cannot resume. Assert the PROPERTY directly rather than
+        # inode-number inequality: a freed inode number can be recycled by the
+        # replacement inode on tmpfs, so identity-tuple inequality is a flaky
+        # proxy. What must hold is that a process still holding
+        # ``original_identity`` can no longer refresh the live heartbeat -- which
+        # the ownership nonce guarantees even when the inode number is recycled.
+        assert connector._refresh_heartbeat(heartbeat, original_identity, b"stale", True) is None, (
+            "a paused former owner must not be able to refresh after recovery"
+        )
         assert read_connection_health(heartbeat) == ([], [])
     finally:
         task.cancel()
