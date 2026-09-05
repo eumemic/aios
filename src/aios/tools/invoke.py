@@ -20,6 +20,8 @@ import contextvars
 import json
 from typing import Any
 
+import jsonschema
+
 from aios.tools.registry import ToolNotFoundError, ToolResult, registry
 from aios.tools.schema_errors import format_schema_violation
 
@@ -107,6 +109,31 @@ def validate_arguments(arguments: dict[str, Any], schema: dict[str, Any]) -> str
         retry_hint="Look at the tool's `parameters` schema for the correct shape and retry.",
         site="invoke.validate_arguments",
     )
+
+
+def validate_output_schema_or_bail(output_schema: dict[str, Any] | None) -> None:
+    """Gate an ``output_schema`` at OPEN time: reject a structurally-invalid JSON
+    Schema via :class:`ToolBail` before it is persisted as an un-closable completion
+    contract.
+
+    ``None`` (an omitted optional schema on the ``call_*`` surface) passes. A
+    malformed schema — the class of typo ``check_schema`` rejects (a non-array
+    ``required``, a non-object ``properties``, a bogus ``type`` keyword, ...) —
+    raises ``ToolBail`` so the model can self-correct instead of opening an
+    obligation whose CLOSE-time gate
+    (:func:`aios.tools.schema_errors.normalize_and_format_schema_violation`) would
+    crash or mis-validate. Mirrors the trusted workflow-authoring gate
+    (:func:`aios.workflows.step._reject_invalid_output_schema`, #758 / #1585) on the
+    untrusted model-tool surface (#1513 / #1314): the OPEN-time validity check that
+    already existed in the codebase was not copied to the model surface, so any
+    ``dict`` was accepted and persisted, breaking the shared CLOSE-time formatter.
+    """
+    if output_schema is None:
+        return
+    try:
+        jsonschema.Draft202012Validator.check_schema(output_schema)
+    except jsonschema.SchemaError as exc:
+        raise ToolBail(f"output_schema is not a valid JSON Schema: {exc.message}") from exc
 
 
 def prepare_builtin(tool_name: str, raw_arguments: Any) -> dict[str, Any]:

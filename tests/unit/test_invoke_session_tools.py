@@ -23,12 +23,30 @@ import pytest
 
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.models.tasks import AwaitResponse, TaskHandle
-from aios.tools.invoke import ToolBail, invoke_builtin
+from aios.tools.invoke import ToolBail, invoke_builtin, validate_output_schema_or_bail
 from aios.tools.invoke_session import _CallAgentArgs
 from aios.tools.registry import ToolResult
 
 _CALLER = "ses_caller"
 _ACCOUNT = "acc_x"
+
+# A representative well-formed completion contract (positive control).
+_VALID_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"shipped": {"type": "boolean"}},
+    "required": ["shipped"],
+}
+
+# The minimal structural-invalidity shapes: the smallest class of schema typo — a
+# bogus `type` keyword, a non-object `properties`, a non-array `required`. Each is a
+# valid `dict[str, Any]` (so passes the tool-schema `dict` field + `_parse`) but is NOT
+# a valid JSON Schema, so the OPEN-time gate must reject it before persistence.
+_MALFORMED_SCHEMAS = [
+    pytest.param({"type": "ans"}, id="bogus-type-string"),
+    pytest.param({"type": 123}, id="bogus-type-int"),
+    pytest.param({"properties": "not_an_object"}, id="non-object-properties"),
+    pytest.param({"required": "done"}, id="non-array-required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -491,3 +509,115 @@ async def test_call_agent_auto_archive_is_forwarded_in_both_directions(monkeypat
     )
     assert inv_mock.await_args is not None
     assert inv_mock.await_args.kwargs["auto_archive_on_completion"] is True
+
+
+# ─── OPEN-time output_schema validity gate (#1513 / #1314) ────────────────────
+# The call_* surface accepts an UNTRUSTED model-authored `output_schema` and
+# persists it as the completion contract; a malformed schema used to round-trip
+# into the CLOSE-time formatter (normalize_and_format_schema_violation) and crash
+# (UnknownType/TypeError) or mis-validate. The OPEN-time gate rejects it via
+# ToolBail BEFORE the edge is written — the precise unification of the trusted
+# workflow-authoring gate (step._reject_invalid_output_schema) onto the model
+# surface. These pin the gate at the helper AND through each handler's OPEN path.
+
+
+def test_validate_output_schema_or_bail_accepts_none() -> None:
+    """The call_* surface's optional schema (omitted → None) passes the gate — no
+    schema, no contract, no validation."""
+    validate_output_schema_or_bail(None)  # no raise
+
+
+def test_validate_output_schema_or_bail_accepts_valid_schema() -> None:
+    validate_output_schema_or_bail(_VALID_SCHEMA)  # no raise
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+def test_validate_output_schema_or_bail_rejects_malformed(bad_schema: dict[str, Any]) -> None:
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        validate_output_schema_or_bail(bad_schema)
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+async def test_call_session_rejects_malformed_output_schema(
+    monkeypatch: Any, bad_schema: dict[str, Any]
+) -> None:
+    """A malformed `output_schema` is rejected at OPEN time via ToolBail before the
+    request edge is written, so it can never reach the CLOSE-time formatter."""
+    inv_mock = AsyncMock(return_value=_handle())
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(
+            _CALLER,
+            "call_session",
+            {"session_id": "ses_target", "output_schema": bad_schema},
+        )
+    # No edge opened: the persistence call never ran.
+    inv_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+async def test_call_agent_rejects_malformed_output_schema(
+    monkeypatch: Any, bad_schema: dict[str, Any]
+) -> None:
+    """Same OPEN-time gate on the create+invoke porcelain arm — rejected before the
+    child session edge is written."""
+    inv_mock = AsyncMock(return_value=_handle(servicer_id="ses_child"))
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(
+            _CALLER, "call_agent", {"agent_id": "agt_1", "output_schema": bad_schema}
+        )
+    inv_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+async def test_call_workflow_rejects_malformed_output_schema(
+    monkeypatch: Any, bad_schema: dict[str, Any]
+) -> None:
+    """Same OPEN-time gate on the launch-awaited-run arm (a different persistence
+    backend — wf_service.launch_awaited_run → create_run — but the same
+    schema-validity gap); rejected before the run is launched."""
+    run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
+    monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(
+            _CALLER, "call_workflow", {"workflow_id": "wf_1", "output_schema": bad_schema}
+        )
+    run_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+async def test_call_workflow_inline_rejects_malformed_output_schema(
+    monkeypatch: Any, bad_schema: dict[str, Any]
+) -> None:
+    """The gate fires on the inline-script arm too (the model_tool diet path), not
+    just the registered-workflow arm — the gate is on the handler, before the
+    source-arm branch."""
+    run_mock = AsyncMock(return_value=SimpleNamespace(id="run_1"))
+    monkeypatch.setattr("aios.services.workflows.create_run", run_mock)
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(
+            _CALLER,
+            "call_workflow",
+            {
+                "inline": {"script": "return 1"},
+                "output_schema": bad_schema,
+            },
+        )
+    run_mock.assert_not_awaited()
+
+
+async def test_call_session_omitted_output_schema_still_passes(monkeypatch: Any) -> None:
+    """Positive control: omitting the optional `output_schema` (None) still opens the
+    edge — the gate no-ops on None, so the optional-contract path is not regressed."""
+    inv_mock = AsyncMock(return_value=_handle())
+    monkeypatch.setattr("aios.services.sessions.invoke", inv_mock)
+    monkeypatch.setattr(
+        "aios.services.tasks.await_task",
+        AsyncMock(return_value=AwaitResponse(outcome="ok", result="r")),
+    )
+    out = await invoke_builtin(_CALLER, "call_session", {"session_id": "ses_target"})
+    assert out == {"ok": "r"}
+    inv_mock.assert_awaited_once()
+    assert inv_mock.await_args is not None
+    assert inv_mock.await_args.kwargs["output_schema"] is None
