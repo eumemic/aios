@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -32,7 +33,10 @@ async def tavily_request(endpoint: str, payload: dict[str, Any]) -> dict[str, An
                 timeout=60,
             )
             resp.raise_for_status()
-            result: dict[str, Any] = resp.json()
+            try:
+                result: dict[str, Any] = resp.json()
+            except json.JSONDecodeError as exc:
+                raise ToolBail(f"Tavily {endpoint} returned a non-JSON response") from exc
             return result
     except httpx.HTTPStatusError as exc:
         raise ToolBail(f"HTTP {exc.response.status_code}: {exc.response.text[:200]}") from exc
