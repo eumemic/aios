@@ -1305,7 +1305,7 @@ ephemeral message with anything stays ephemeral.
 # models a false pointer invites inventing the missed content, so the notice
 # redirects to ``search_events`` instead — the same contract the head-omission
 # marker offers ("Nothing is lost: the full transcript remains queryable").
-_TRAILING_STIMULUS_NOTICE = (
+TRAILING_STIMULUS_NOTICE = (
     "[New events arrived while you were working. Some may not be rendered above. "
     "Nothing is lost: the full transcript remains queryable with search_events — "
     "if something is referred to that you cannot see, search for it rather than "
@@ -1853,18 +1853,12 @@ def build_messages(
     # the uncovered residual is the pre-existing behaviour, not a regression
     # introduced here.
     #
-    # The notice is tagged ``EPHEMERAL_TAIL_KEY`` like every other per-step
-    # tail producer (``channels.py``, ``obligations.py``, ``concise.py``): it
-    # is render-only and position-volatile, so the Anthropic cache breakpoint
-    # must skip it and land on the last COMMITTED message. Untagged, on a
-    # build with no other tail — the exact population this guard serves — the
-    # breakpoint would land on the notice itself and the conversation prefix
-    # would be re-cache-created every step (see ``inject_cache_breakpoints``).
+    # The condition is REPORTED, not acted on: the composer writes the notice
+    # (:data:`TRAILING_STIMULUS_NOTICE`) as a durable reminder row
+    # (``aios.harness.reminders``), so the next build replays it at its seq
+    # and the prompt stays a byte-prefix of its successor. Appending it here
+    # would make this build's tail a message the log does not hold.
     needs_trailing_notice = tail_origin == "assistant" and max_stimulus_seq > last_asst_rt
-    if needs_trailing_notice:
-        stripped.append(
-            {"role": "user", "content": _TRAILING_STIMULUS_NOTICE, EPHEMERAL_TAIL_KEY: True}
-        )
 
     return ContextResult(
         messages=stripped,

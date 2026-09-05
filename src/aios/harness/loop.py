@@ -1182,6 +1182,7 @@ async def _run_session_step_body(
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
+            persist_reminders=True,
         )
     except Exception:
         await sessions_service.append_event(
@@ -1214,9 +1215,13 @@ async def _run_session_step_body(
             "event": "context_build_end",
             "context_build_start_id": context_build_start.id,
             "is_error": False,
+            # The windowed slate as read; reminder rows the compose wrote are
+            # NOT in it (``compose_step_context`` never mutates ``events``).
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
+            "reminders_written": list(step_ctx.reminders_written),
+            "reminders_skipped": step_ctx.reminders_skipped,
         },
         account_id=account_id,
     )

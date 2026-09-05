@@ -1076,6 +1076,7 @@ async def get_context(
         events=windowed.events,
         omission=windowed.omission,
         persist_image_rewrites=False,
+        persist_reminders=False,
     )
     return ContextResponse(
         session_id=session_id,

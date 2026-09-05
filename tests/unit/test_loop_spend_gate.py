@@ -290,7 +290,12 @@ async def test_usage_charged_only_after_assistant_persists() -> None:
         preempt_policy="wait",
     )
     step_ctx = SimpleNamespace(
-        messages=[{"role": "user", "content": "hi"}], tools=[], skill_versions=[], reacting_to=0
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        skill_versions=[],
+        reacting_to=0,
+        reminders_written=(),
+        reminders_skipped=0,
     )
     increment = AsyncMock(return_value=5)
     # The persist fails — models the soft path (DB error caught upstream → retry).

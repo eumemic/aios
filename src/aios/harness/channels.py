@@ -181,19 +181,18 @@ def max_tail_block_local(channels: list[str]) -> int:
     )
 
 
-def build_channels_tail_block(
+def render_channels_reminder(
     channels: list[str],
     events: list[Event],
     focal_channel: str | None,
-) -> dict[str, Any] | None:
-    """Ephemeral per-step listing of bound channels with unread counts.
+) -> str | None:
+    """The bound-channel listing with unread counts — a reminder's content.
 
-    Rebuilt at each step from the monotonic event log; appended after
-    :func:`~aios.harness.context.build_messages` as the last user-role
-    message so per-step mutations don't bust the prompt prefix cache.
-    Pure data — the paradigm prose (what the symbols mean, how
-    switch_channel works) lives in the cache-stable
-    :func:`build_focal_paradigm_block`.
+    Derived from the windowed event log; the composer writes it as a durable
+    reminder row when it changes (see :mod:`aios.harness.reminders`), so the
+    render must be a pure function of the slate. Pure data — the paradigm
+    prose (what the symbols mean, how switch_channel works) lives in the
+    cache-stable :func:`build_focal_paradigm_block`.
 
     Returns ``None`` when the session has no channels (no listing to
     render and the paradigm block is also omitted).
@@ -230,7 +229,20 @@ def build_channels_tail_block(
             lines.append(f"○ channel_id={addr} — {count} unread{preview_clause}")
         else:
             lines.append(f"○ channel_id={addr} — 0 unread")
-    return {"role": "user", "content": "\n".join(lines), EPHEMERAL_TAIL_KEY: True}
+    return "\n".join(lines)
+
+
+def build_channels_tail_block(
+    channels: list[str],
+    events: list[Event],
+    focal_channel: str | None,
+) -> dict[str, Any] | None:
+    """Ephemeral-tail wrapper of :func:`render_channels_reminder` (retired
+    with the ``EPHEMERAL_TAIL_KEY`` machinery)."""
+    content = render_channels_reminder(channels, events, focal_channel)
+    if content is None:
+        return None
+    return {"role": "user", "content": content, EPHEMERAL_TAIL_KEY: True}
 
 
 def _switch_marker(e: Event) -> dict[str, Any] | None:

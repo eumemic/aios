@@ -33,12 +33,16 @@ from aios.harness._text import join_blocks
 from aios.harness.concise import CONCISE_NAG_UPPER_BOUND_LOCAL
 from aios.harness.context import (
     OMISSION_MARKER_UPPER_BOUND_LOCAL,
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
     build_messages,
     merge_adjacent_user_messages,
-    message_is_notification_marker,
     stub_missing_reasoning_content,
 )
 from aios.harness.context_persist import persist_clamped_image_parts
+from aios.harness.obligations import (
+    OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL,
+    max_obligations_reminder_local,
+)
 from aios.harness.tokens import approx_tokens
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
@@ -208,11 +212,14 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
 
     System prompt + tool schemas (each weighted separately by the
     windower), plus the reserved upper bounds for the post-windowing
-    additions: the channels tail block, the obligations tail block
-    (#1413), the concise tail reminder, and the omission marker (#738).
-    All reserves are reserved unconditionally — any may not render, but
-    the budget must hold when they do — and are accounted as
-    ``text``-class padding.
+    additions — the reminder rows THIS step may write on top of the
+    windowed slate (``aios.harness.reminders``: the channels listing, the
+    obligations listing, the obligations-emptied one-liner, the concise
+    nag, the trailing-stimulus notice) and the omission marker (#738).
+    Rows written on earlier steps are ordinary log rows already priced
+    into ``cumulative_tokens``. All reserves are reserved unconditionally
+    — any may not be written, but the budget must hold when they are —
+    and are accounted as ``text``-class padding.
 
     Returns a :class:`PreludeOverheadSplit`; ``.total`` reproduces the
     old single scalar exactly (system+tools costed together previously,
@@ -223,7 +230,9 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     reserves_local = (
         prelude.tail_block_upper_bound_local
         + prelude.obligations_block_upper_bound_local
+        + OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
         + CONCISE_NAG_UPPER_BOUND_LOCAL
+        + TRAILING_NOTICE_UPPER_BOUND_LOCAL
         + OMISSION_MARKER_UPPER_BOUND_LOCAL
     )
     return PreludeOverheadSplit(
@@ -242,6 +251,14 @@ class StepContext:
     tools: list[dict[str, Any]]
     reacting_to: int
     skill_versions: list[SkillVersion]
+    # Reminder sections this compose wrote as durable rows (or rendered as
+    # unpersisted stand-ins on the preview path), in write order, and how
+    # many applicable sections it left alone because their in-window row
+    # already said the same thing — the change-gate's telemetry
+    # (``context_build_end``). A fleet where ``reminders_written`` is
+    # non-empty on most steps has a churning render, not a working gate.
+    reminders_written: tuple[str, ...]
+    reminders_skipped: int
 
 
 async def _advance_open_request_scan_floor_best_effort(
@@ -324,7 +341,6 @@ async def compute_step_prelude(
         discover_session_mcp_tools,
     )
     from aios.harness.memory_stores import augment_with_memory_stores
-    from aios.harness.obligations import max_obligations_block_local
     from aios.harness.resource_health import augment_with_resource_health
     from aios.harness.skills import augment_system_prompt
     from aios.services import skills as skills_service
@@ -446,7 +462,7 @@ async def compute_step_prelude(
         skill_versions=skill_versions,
         tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
-        obligations_block_upper_bound_local=max_obligations_block_local(obligations),
+        obligations_block_upper_bound_local=max_obligations_reminder_local(obligations),
     )
 
 
@@ -601,71 +617,6 @@ def _build_ssh_servers_block(ssh_servers: list[SshServerSpec]) -> str:
     return "\n\n".join(sections)
 
 
-def _agent_owes_response(messages: list[dict[str, Any]]) -> bool:
-    """True when the conversation ends with a *direct* stimulus to answer.
-
-    Gates the ephemeral channels tail block. Two trailing cases are a direct
-    stimulus the agent must engage with in focal context, where appending the
-    tail would make a status listing the literal final message and mute
-    literal-minded models (claude-fable-5): a **focal user inbound** (full
-    content) and a **tool result**. Keep the real stimulus last for those.
-    The synthetic trailing-stimulus notice from ``build_messages`` deliberately
-    takes the focal-user arm — the missed events it points at ARE the stimulus.
-
-    Two trailing cases are NOT a direct stimulus, so keep the tail:
-    * a non-focal **notification marker** (``🔔 …``) — the tail's channel
-      listing is its navigation companion (how to ``switch_channel`` to it);
-    * an **assistant** turn — an idle/sweep re-check where the channel-status
-      listing is the useful signal. Since the trailing-assistant guard pads
-      every gate-firing build, a sent payload no longer ends on an assistant —
-      this arm now effectively serves the read-only context preview.
-    """
-    if not messages:
-        return False
-    last = messages[-1]
-    role = last.get("role")
-    if role == "tool":
-        return True
-    if role == "user":
-        return not message_is_notification_marker(last)
-    return False
-
-
-def _present_request_ids(events: list[Event]) -> frozenset[str]:
-    """``request_id``s whose ORIGINAL request user message survived windowing.
-
-    The obligations tail (#1413) is rebuilt each step from a full-log query, so it
-    lists obligations whose original ask may or may not still be in the window.
-    That distinction decides how an OVERSIZED task renders (#2221):
-
-    * present -> the task is intact earlier in this same prompt, so the reminder
-      abridges it (bounded preview + a pointer to the original). Telling the model
-      to refuse here is false, and — being the last user-role content it reads —
-      gets obeyed over the real task sitting above.
-    * absent -> the task is genuinely unrecoverable from context, so the reminder
-      keeps #2080's loud refuse marker rather than a plausible-looking prefix.
-
-    Reads the same ``metadata.request.request_id`` stamp that
-    :func:`~aios.harness.context.render_user_event` surfaces as the reply marker,
-    off the POST-windowing slate. Defensive about shape throughout: a malformed
-    ``metadata`` blob yields no id rather than raising inside context assembly.
-    """
-    present: set[str] = set()
-    for event in events:
-        if event.kind != "message":
-            continue
-        metadata = event.data.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        request = metadata.get("request")
-        if not isinstance(request, dict):
-            continue
-        request_id = request.get("request_id")
-        if isinstance(request_id, str) and request_id:
-            present.add(request_id)
-    return frozenset(present)
-
-
 def _stub_reasoning_content_for_thinking_target(
     messages: list[dict[str, Any]], model: str
 ) -> list[dict[str, Any]]:
@@ -705,11 +656,25 @@ async def compose_step_context(
     omission: WindowOmission | None = None,
     capability_model: str | None = None,
     persist_image_rewrites: bool = False,
+    persist_reminders: bool = False,
 ) -> StepContext:
     """Compose the chat-completions payload for a step.
 
     Takes a prelude built by :func:`compute_step_prelude` and the
     windowed events slate; glues them into the final message list.
+
+    ``persist_reminders``: when ``True``, the reminder rows this step's
+    plan calls for (``aios.harness.reminders`` — channels listing, open
+    obligations, concise nag, trailing-stimulus notice; each only when its
+    content changed or its last row scrolled out of the window) are WRITTEN
+    to the session log before the model call, so the next build replays
+    them at their seq and the prompt stays a byte-prefix of its successor.
+    The worker step path passes ``True``; the read-only ``/context``
+    preview passes ``False`` and renders the identical rows as unpersisted
+    stand-ins, so the preview is byte-for-byte what the next step sends.
+    The rows are non-stimulus (no wake, no ``last_stimulus_seq`` bump), and
+    the write is digest-gated, so a step that persists nothing new is the
+    common case. ``events`` is not mutated.
 
     ``persist_image_rewrites`` (#1745 Part C): when ``True``, an oversize
     persisted ``image_url`` part (the pre-#1616 backlog) is downsampled
@@ -735,9 +700,7 @@ async def compose_step_context(
     "still executing in the background" wording; everything else
     (custom, awaiting-confirm) gets the "external action" wording.
     """
-    from aios.harness.channels import build_channels_tail_block
-    from aios.harness.concise import build_concise_nag_message
-    from aios.harness.obligations import build_obligations_tail_block
+    from aios.harness.reminders import plan_reminders, reminder_event_data, reminder_message
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
 
@@ -794,64 +757,41 @@ async def compose_step_context(
         omission=omission,
     )
 
-    # Tail block lives *after* build_messages so its per-step mutations
-    # (unread counts, previews) don't bust the prefix cache.  Paradigm
-    # prose stays in the cache-stable system prompt above.
-    #
-    # Only append it when the conversation already ends with an assistant turn
-    # (an idle/sweep re-check, where the channel-status listing is the useful
-    # signal). When the last message is a user or tool turn, the agent owes a
-    # response: appending the tail makes a "0 unread" status block the literal
-    # final message, and literal-minded models (claude-fable-5) anchor on it and
-    # emit an empty turn instead of answering (opus looks back past it; fable does
-    # not). Keep the real stimulus last in that case.
-    tail = build_channels_tail_block(channels, events, session.focal_channel)
-    if tail is not None and not _agent_owes_response(ctx.messages):
-        ctx.messages.append(tail)
-
-    # Obligations tail block (#1413): the always-on reminder of every open
-    # awaited request the session owes a response to, rebuilt each step from the
-    # full log (``prelude.obligations``) so it survives windowing erasure of the
-    # original request user message. Appended AFTER the channels tail and BEFORE
-    # the merge so an unanswered obligation is the FINAL user-role line — the
-    # higher-priority stimulus (literal-minded models anchor on the last line).
-    # (When ``output_style == "concise"``, the one-line nag below lands after it.)
-    #
-    # Gated on the open set being non-empty ALONE — deliberately NOT
-    # ``_agent_owes_response`` (which suppresses the channels tail on a trailing
-    # direct stimulus). The obligations block needs the OPPOSITE bias: an open
-    # obligation IS the stimulus to act on, so it renders even after a tool
-    # result (where ``build_obligations_tail_block`` returning non-None already
-    # encodes "non-empty").
-    #
-    # ``present_request_ids`` (#2221) is computed from the POST-windowing slate:
-    # the request_ids whose ORIGINAL ask survived into this step's context. It is
-    # the only signal that distinguishes an oversized-but-recoverable task (render
-    # an abridged preview + a pointer to the intact original) from one genuinely
-    # gone (keep #2080's loud refuse marker). Computed here because this is the
-    # only layer that holds both the obligations and the windowed events.
-    obligations_block = build_obligations_tail_block(
-        prelude.obligations,
+    # Reminders (``aios.harness.reminders``): the standing per-step reminders
+    # — channels listing, open obligations, concise nag, trailing-stimulus
+    # notice — are durable rows written only when their content changes or
+    # their last row has scrolled out of the window, never appended
+    # ephemerally: an ephemeral tail sits past the OpenAI backend's implicit
+    # cache checkpoint (it caches through the END of the prompt), so every
+    # step re-sent the whole conversation uncached. Planned from the windowed
+    # slate + this build's tail class, and written BEFORE the model call that
+    # first sees them, so the next build replays each row at its seq and the
+    # prompt stays a byte-prefix of its successor. The one ordering rule
+    # survives from the ephemeral era: while the tail is a direct stimulus
+    # (focal inbound / tool result / the notice), the channels listing waits
+    # — a "0 unread" listing as the literal last line mutes literal-minded
+    # models (claude-fable-5). Everything else about recency is traded for
+    # the prefix: a reminder is seen at least once per window, not per step.
+    plan = plan_reminders(
+        events=events,
+        channels=channels,
+        focal_channel=session.focal_channel,
+        obligations=prelude.obligations,
         session_id=session.id,
-        present_request_ids=_present_request_ids(events),
+        output_style=agent.output_style,
+        tail_origin=ctx.tail_origin,
+        needs_trailing_notice=ctx.needs_trailing_notice,
     )
-    if obligations_block is not None:
-        ctx.messages.append(obligations_block)
-
-    # Concise tail reminder ("nag"): appended LAST — after the channels +
-    # obligations tails — and BEFORE the merge below, so a trailing user turn
-    # folds it in as its final content while an assistant/tool turn leaves it
-    # standing as its own final user message.  Why a per-step user-content
-    # injection at all (exactly-once, max recency, never persisted, survives
-    # LiteLLM's provider transforms): see ``aios.harness.concise``.
-    #
-    # ``has_channels`` selects the channel-attached variant (#2262): landing
-    # after the channels tail is what let "be concise" read as licence to stop
-    # posting, so for a bound session the nag carries the delivery clause at
-    # that same maximum recency.  The position is deliberately unchanged —
-    # the counter-pressure has to sit exactly where the pressure was.
-    if agent.output_style == "concise":
-        ctx.messages.append(build_concise_nag_message(has_channels=bool(channels)))
+    for item in plan.writes:
+        if persist_reminders:
+            await sessions_service.append_event(
+                pool,
+                session.id,
+                "message",
+                reminder_event_data(item.section, item.content),
+                account_id=account_id,
+            )
+        ctx.messages.append(reminder_message(item.content))
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,
@@ -871,4 +811,6 @@ async def compose_step_context(
         tools=prelude.tools,
         reacting_to=ctx.reacting_to,
         skill_versions=prelude.skill_versions,
+        reminders_written=tuple(item.section for item in plan.writes),
+        reminders_skipped=plan.skipped,
     )

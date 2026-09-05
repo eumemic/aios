@@ -22,7 +22,6 @@ from aios.harness.concise import (
     CONCISE_STYLE_BLOCK,
     build_concise_nag_message,
 )
-from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.harness.step_context import (
     StepPrelude,
     compose_step_context,
@@ -209,14 +208,6 @@ class TestConciseNag:
         text = _text(messages[-1])
         assert text == CONCISE_NAG_CONTENT
         assert CONCISE_NAG_DELIVERY_CLAUSE.strip() not in text
-
-    async def test_nag_carries_ephemeral_tail_marker(self) -> None:
-        """The nag (and any merge containing it) must never host the
-        stable-prefix cache breakpoint — its position is per-step."""
-        assert build_concise_nag_message()[EPHEMERAL_TAIL_KEY] is True
-        events = [_evt(1, role="user", content="please respond")]
-        messages = await _compose(_agent(output_style="concise"), events)
-        assert messages[-1].get(EPHEMERAL_TAIL_KEY) is True
 
     async def test_no_nag_when_not_concise(self) -> None:
         for channels in ([], ["signal/+1/chat-a"]):

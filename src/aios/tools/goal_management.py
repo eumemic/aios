@@ -47,9 +47,9 @@ resolved-by-#1516 by the seat/chairman.
 The mechanism (unchanged)
 -------------------------
 The *gating* already exists and works — an open awaited obligation drives the
-quiescence-guard nudge / ``no_return`` loop (``db/queries/sessions.py`` +
-``harness/context.py`` ``_agent_owes_response``) and renders in the "Open
-obligations" tail block (``harness/obligations.py``). The ONLY way to open a
+quiescence-guard nudge / ``no_return`` loop (``db/queries/sessions.py``) and
+renders in the durable "Open obligations" reminder row (``harness/obligations.py``
++ ``harness/reminders.py``). The ONLY way to open a
 self-goal used to be the cryptic ``call_session(session_id=<its own id>, input=…)``
 awaited self-call (#1414) — undiscoverable, awkward, easy to forget; ``create_goal``
 is the explicit, first-class surface over that SAME mechanism (it does NOT reinvent
