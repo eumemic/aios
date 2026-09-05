@@ -180,3 +180,64 @@ async def test_returns_max_last_seen_at(
     assert results[0][0] == "chat_a"
     assert isinstance(results[0][1], datetime)
     assert results[0][1].tzinfo is UTC or results[0][1].tzinfo is not None
+
+
+async def test_slash_bearing_chat_id_returned_intact(
+    session_in_account: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """A ``chat_id`` containing ``/`` is returned whole, not truncated to its
+    first ``/``-segment.
+
+    ``events.channel`` is stored as ``{connector}/{external_account_id}/
+    {chat_id}`` with the chat_id verbatim — only ``connector`` and
+    ``external_account_id`` are validated slash-free. The pre-fix parse used
+    ``split_part(channel, '/', 3)``, which for a channel like
+    ``telegram/bot_a/group/abc123==`` returns only ``group`` (the token between
+    the 2nd and 3rd ``/``) instead of the whole chat_id ``group/abc123==``.
+    An operator who copies that truncated value into ``bind-chat`` / AllowList
+    creates a ghost entry that never matches the real inbound chat_id.
+    """
+    pool, account_id, session_id = session_in_account
+
+    await _insert_user_event(pool, session_id, account_id, "telegram/bot_a/group/abc123==")
+
+    async with pool.acquire() as conn:
+        results = await queries.list_recent_chat_ids(
+            conn, "telegram", "bot_a", account_id=account_id, limit=10
+        )
+
+    assert len(results) == 1, f"expected one chat, got {results!r}"
+    assert results[0][0] == "group/abc123==", (
+        f"slash-bearing chat_id was truncated to its first '/'-segment "
+        f"(got {results[0][0]!r}, expected 'group/abc123=='); the parse must "
+        f"strip the '{'telegram'}/{'bot_a'}/' prefix by length and keep the "
+        f"whole remainder, not split on '/'"
+    )
+
+
+async def test_slash_bearing_chat_id_with_underscore_account(
+    session_in_account: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """Slash-bearing chat_id AND an underscore-bearing account together.
+
+    Guards the subtle part of the fix: the substring offset MUST be computed
+    from the RAW ``external_account_id`` (``bot_a``), not the LIKE-escaped
+    prefix (``bot\\_a``). ``_escape_like`` prepends a ``\\`` before the ``_``,
+    so an offset derived from the escaped prefix would over-count by one and
+    strip the leading char of the chat_id (``group/abc123==`` → ``roup/abc123==``).
+    """
+    pool, account_id, session_id = session_in_account
+
+    await _insert_user_event(pool, session_id, account_id, "telegram/bot_a/group/abc123==")
+
+    async with pool.acquire() as conn:
+        results = await queries.list_recent_chat_ids(
+            conn, "telegram", "bot_a", account_id=account_id, limit=10
+        )
+
+    assert len(results) == 1
+    assert results[0][0] == "group/abc123==", (
+        f"chat_id was leading-char truncated (got {results[0][0]!r}, expected "
+        f"'group/abc123=='); the substring offset used the LIKE-escaped prefix "
+        f"length instead of the raw account length"
+    )

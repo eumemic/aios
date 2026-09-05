@@ -1185,12 +1185,14 @@ async def list_recent_chat_ids(
     bind-chat`` when the operator doesn't know the chat_id off the top
     of their head.
 
-    The chat_id is the third path segment of the derived
-    ``events.channel`` column; events arriving on a different
-    ``focal_channel_at_arrival`` still have ``orig_channel`` set to
-    their inbound channel, but ``channel`` (derived) collapses them
-    correctly.  We filter on user role to skip assistant / tool rows
-    that share the channel.
+    The chat_id is the whole remainder of the derived ``events.channel``
+    column after the ``"{connector}/{external_account_id}/"`` prefix —
+    chat_ids may legally contain ``/``, so it is NOT parsed as the third
+    ``/``-segment (that would truncate a slash-bearing chat_id).  Events
+    arriving on a different ``focal_channel_at_arrival`` still have
+    ``orig_channel`` set to their inbound channel, but ``channel``
+    (derived) collapses them correctly.  We filter on user role to skip
+    assistant / tool rows that share the channel.
     """
     # Escape LIKE metacharacters in operator-supplied ``connector`` and
     # ``external_account_id``: ``_`` and ``%`` would otherwise act as
@@ -1198,10 +1200,31 @@ async def list_recent_chat_ids(
     # identity ``bot_a`` would see chats from ``botXa`` too. Mirrors the
     # ``_escape_like`` usage at the memory-prefix query below.
     prefix = f"{_escape_like(connector)}/{_escape_like(external_account_id)}/"
+    # Strip the ``"{connector}/{external_account_id}/"`` prefix by length and
+    # keep the WHOLE remainder as the chat_id, instead of
+    # ``split_part(channel, '/', 3)`` which truncates a slash-bearing chat_id to
+    # its first ``/``-segment (a chat_id may legally contain ``/`` — only
+    # ``connector`` / ``external_account_id`` are validated slash-free). Mirrors
+    # migration 0121's slash-correct events scan.
+    #
+    # The offset is computed from the RAW ``connector`` / ``external_account_id``,
+    # NOT the LIKE-escaped ``prefix``: ``_escape_like`` prepends a ``\`` before
+    # every ``_``, ``%``, and ``\``, so ``len(prefix)`` overstates the raw prefix
+    # length by the metacharacter count and would strip leading chars off the
+    # chat_id (e.g. ``bot_a`` → escaped ``bot\_a`` → chat_id ``hat_alpha``).
+    # ``+2`` for the two ``/`` separators, ``+1`` for SQL's 1-based substring
+    # start — i.e. start at position ``len(connector) + len(external_account_id)
+    # + 3``. The ``$4::int`` cast is load-bearing: a bare ``$4`` parameter is
+    # type-ambiguous and Postgres resolves it to the regex overload
+    # ``substring(text FROM text)`` (asyncpg then rejects the int). The ``::int``
+    # pins the integer-position overload ``substring(text FROM int)`` — the
+    # sibling migration 0121 avoids this via an inline ``length(...) + 3`` int
+    # expression instead of a parameter.
+    offset = len(connector) + len(external_account_id) + 3
     rows = await conn.fetch(
         """
         SELECT
-          split_part(channel, '/', 3) AS chat_id,
+          substring(channel FROM $4::int) AS chat_id,
           MAX(created_at) AS last_seen_at
         FROM events
         WHERE channel LIKE $1
@@ -1215,6 +1238,7 @@ async def list_recent_chat_ids(
         prefix + "%",
         limit,
         account_id,
+        offset,
     )
     return [(r["chat_id"], r["last_seen_at"]) for r in rows if r["chat_id"]]
 
