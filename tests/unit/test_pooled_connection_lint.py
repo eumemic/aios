@@ -35,6 +35,17 @@ async def work(pool):
     )
 
 
+def test_allows_workflow_timeout_db_helpers_receiving_the_held_connection() -> None:
+    assert not _messages(
+        """
+async def work(pool, run):
+    async with pool.acquire() as conn:
+        await db_queries.get_environment_config_for_id(conn, "acc", "env")
+        await run_sandbox.resolve_bash_call_timeout(conn, run, {})
+"""
+    )
+
+
 def test_allows_database_stats_helpers_receiving_the_held_connection() -> None:
     assert not _messages(
         """
