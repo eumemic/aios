@@ -779,7 +779,7 @@ async def get_open_obligations(
     edge so the tail-injected obligations block (and the ``obligations`` read
     model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
     **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
-    (``req.created_at``, for age), and the request content in the legacy-named
+    (``req.created_at``, rendered as an absolute ``opened_at``), and the request content in the legacy-named
     ``summary`` field (``req.data->>'summary'``, additive — absent on pre-#1413
     frames -> ``None`` -> a loud unavailable marker, no migration).
 

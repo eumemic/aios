@@ -312,7 +312,7 @@ def build_obligations_tail_block(
     return {"role": "user", "content": "\n".join(lines), EPHEMERAL_TAIL_KEY: True}
 
 
-def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime) -> dict[str, Any]:
+def render_owed_entry(obligation: Obligation, *, session_id: str) -> dict[str, Any]:
     """The shared per-obligation owed-read-model entry (#1522) — the ONE place the
     "outstanding obligation + its contract" projection is formatted.
 
@@ -326,10 +326,12 @@ def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime)
 
     Each entry carries ``request_id``, ``caller_kind`` (the trusted frame kind),
     ``origin`` (``api``/``session``/``run`` plus ``self`` for a #1414 self-goal),
-    the task in ``summary``, a terse ``age``, and the **bounded**
-    ``output_schema`` contract (elided to :data:`_SCHEMA_MAX`; ``None`` when the
-    request demands no schema). The schema bound is what lets the surfacing render
-    stay within :func:`max_obligations_block_local`'s upper bound.
+    the task in ``summary``, the absolute ``opened_at`` (ISO-8601 UTC — never a
+    relative age: the durable reminder row built from this render must be
+    byte-stable across wall-clock time, or its change-gate would churn every
+    minute), and the **bounded** ``output_schema`` contract (elided to
+    :data:`_SCHEMA_MAX`; ``None`` when the request demands no schema). The schema
+    bound is what lets the render stay within its reserved upper bound.
 
     ``summary`` renders through :func:`_reminder_content`, NOT
     :func:`_request_content` (#2221 round 2). Both consumers above are REMINDER
@@ -353,18 +355,20 @@ def render_owed_entry(obligation: Obligation, *, session_id: str, now: datetime)
         # a refuse-order from here re-parks the very sessions #2221 unparks, through
         # a more permanent door than the ephemeral tail block ever had.
         "summary": _reminder_content(obligation.summary),
-        "age": _format_age(obligation.opened_at, now),
+        "opened_at": obligation.opened_at.astimezone(UTC).isoformat(timespec="seconds"),
         "output_schema": _render_schema(obligation.output_schema),
     }
 
 
 def _owed_listing_line(entry: dict[str, Any]) -> str:
-    """One human-readable line for the quiescence-attempt surfacing, built from a
-    :func:`render_owed_entry` row — ``request_id``, ``[origin]``, optional quoted
-    summary, age, and (when present) the bounded ``output_schema`` contract."""
+    """One human-readable line built from a :func:`render_owed_entry` row —
+    ``request_id``, ``[origin]``, optional quoted summary, the absolute
+    ``opened_at``, and (when present) the bounded ``output_schema`` contract."""
     summary = entry["summary"]
     summary_clause = f' "{summary}"' if summary else ""
-    line = f"• {entry['request_id']} [{entry['origin']}]{summary_clause} (open {entry['age']})"
+    line = (
+        f"• {entry['request_id']} [{entry['origin']}]{summary_clause} (opened {entry['opened_at']})"
+    )
     schema = entry["output_schema"]
     if schema:
         line += f"\n    expected output_schema: {schema}"
@@ -376,7 +380,6 @@ def render_owed_listing(
     *,
     session_id: str,
     header: str,
-    now: datetime | None = None,
 ) -> str:
     """The shared **contract-bearing** owed render (#1522) used by the
     quiescence-attempt surfacing (consumer (a), folding #1514).
@@ -390,16 +393,65 @@ def render_owed_listing(
     each schema is :data:`_SCHEMA_MAX`-elided so a large contract can't blow the
     budget either.
     """
-    if now is None:
-        now = datetime.now(UTC)
     lines = [header]
     rendered = obligations[:MAX_RENDERED_OBLIGATIONS]
     for ob in rendered:
-        lines.append(_owed_listing_line(render_owed_entry(ob, session_id=session_id, now=now)))
+        lines.append(_owed_listing_line(render_owed_entry(ob, session_id=session_id)))
     remaining = len(obligations) - len(rendered)
     if remaining > 0:
         lines.append(f"…(+{remaining} more)")
     return "\n".join(lines)
+
+
+# The durable obligations reminder written when the LAST open obligation is
+# answered while a listing is still in the window — so the stale listing is
+# visibly superseded once, in the transcript, rather than lingering as the last
+# word on what the session owes. A fixed string: written at most once per
+# non-empty→empty transition.
+OBLIGATIONS_EMPTY_CONTENT = (
+    "━━━ Open obligations ━━━\n(none — every request this session owed has been answered)"
+)
+
+# Upper bound (local approx_tokens units) reserved in the window budget for the
+# empty one-liner above, priced with the adjacent-user separator pre-pay. Paid
+# unconditionally on every session, like the omission-marker reserve: whether
+# a listing is in the window — the only thing that decides if the one-liner is
+# written — is unknowable at prelude time. ``TestObligationsEmptyReserve`` pins
+# the render under this bound.
+OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL = 64
+
+
+def render_obligations_reminder(obligations: list[Obligation], *, session_id: str) -> str:
+    """The durable obligations reminder: the shared contract-bearing owed render
+    under the tail header. Age-free by construction (``opened_at`` is absolute),
+    so the SAME open set renders to the SAME bytes in every build — the
+    property the reminder's change-gate and the prompt-prefix cache both need.
+    Never called on an empty set (the empty transition writes
+    :data:`OBLIGATIONS_EMPTY_CONTENT`)."""
+    return render_owed_listing(obligations, session_id=session_id, header=_HEADER)
+
+
+def max_obligations_reminder_local(obligations: list[Obligation]) -> int:
+    """Worst-case local-token cost of :func:`render_obligations_reminder` for
+    THIS step, computed at windowing time from the already-fetched open set (the
+    real count, capped at :data:`MAX_RENDERED_OBLIGATIONS` + the ``+K more``
+    marker; each task through :func:`_reminder_content`'s bound; each schema
+    :data:`_SCHEMA_MAX`-elided). Priced with the adjacent-user separator, like
+    every user row. Returns 0 on an empty set — the empty one-liner has its own
+    unconditional reserve, :data:`OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL`."""
+    if not obligations:
+        return 0
+    from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
+    from aios.harness.tokens import approx_tokens
+
+    # session_id="" keeps the origin label bare ("self" never widens the bound
+    # vs. the literal caller_kind).
+    return approx_tokens(
+        [
+            {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+            {"role": "user", "content": render_obligations_reminder(obligations, session_id="")},
+        ]
+    )
 
 
 def max_obligations_block_local(obligations: list[Obligation]) -> int:
