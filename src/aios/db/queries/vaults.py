@@ -798,12 +798,20 @@ async def resolve_session_credential(
     is keyed ``(session_id, vault_id)`` and ``vault_credentials`` carries a
     unique index on ``(vault_id, target_url) WHERE archived_at IS NULL``), so
     the rank ordering is inert and the collision branch cannot fire.
+
+    The ``vaults`` join + ``v.archived_at IS NULL`` is defense-in-depth: the
+    write gate (``create_vault_credential``) refuses inserts into archived
+    vaults, but a credential that becomes active in an archived vault through
+    any other path (a future insert path, direct SQL) must not resolve. A bound
+    session would otherwise surface a credential from a vault the operator
+    believes is retired.
     """
     rows = await conn.fetch(
         """
         SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.auth_type,
                vc.vault_id, sv.rank
           FROM session_vaults sv
+          JOIN vaults v ON v.id = sv.vault_id AND v.archived_at IS NULL
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
            AND vc.target_url = $2
@@ -860,11 +868,17 @@ async def resolve_session_ssh_key_credential(
     logged. This is NOT ``_ENV_VAR_CREDENTIALS_FROM_WHERE`` widened — env-var
     resolution materializes ALL bound secrets at provision time, whereas an ssh
     key is resolved one-at-a-time by ``credential`` name at tool-call time.
+
+    The ``vaults`` join + ``v.archived_at IS NULL`` mirrors the
+    :func:`resolve_session_credential` defense-in-depth guard: an archived vault
+    must not surface a credential even if one became active in it through
+    another path.
     """
     rows = await conn.fetch(
         """
         SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.vault_id, sv.rank
           FROM session_vaults sv
+          JOIN vaults v ON v.id = sv.vault_id AND v.archived_at IS NULL
           JOIN vault_credentials vc ON vc.vault_id = sv.vault_id
          WHERE sv.session_id = $1
            AND vc.auth_type = 'ssh_key'
@@ -913,12 +927,17 @@ async def resolve_run_credential(
     ``wf_run_vaults``/``run_id`` swapped for ``session_vaults``/``session_id``. The
     decrypt + OAuth-refresh + header-render tail downstream is owner-agnostic (it
     keys off ``account_id`` + ``vault_id``), so only this lookup differs by owner.
+
+    Like its session twin, joins ``vaults`` with ``archived_at IS NULL`` as
+    defense-in-depth so a credential that becomes active in an archived vault
+    through any path (a future insert path, direct SQL) does not resolve.
     """
     rows = await conn.fetch(
         """
         SELECT vc.id AS credential_id, vc.ciphertext, vc.nonce, vc.auth_type,
                vc.vault_id, rv.rank
           FROM wf_run_vaults rv
+          JOIN vaults v ON v.id = rv.vault_id AND v.archived_at IS NULL
           JOIN vault_credentials vc ON vc.vault_id = rv.vault_id
          WHERE rv.run_id = $1
            AND vc.target_url = $2
@@ -1049,7 +1068,8 @@ class EnvVarCredentialEcho(NamedTuple):
 # membership/resolution predicate — the security-critical scope shared by ALL
 # three credential queries below (the two session sets *and* the run set). The
 # cross-tenant scope (``account_id = $2`` on BOTH the binding row and the
-# credential row), archival filter (``archived_at IS NULL``), DISTINCT-ON-rank
+# credential row), the vault-archival guard (``v.archived_at IS NULL``), the
+# credential-archival filter (``vc.archived_at IS NULL``), DISTINCT-ON-rank
 # predicate and first-vault-wins ordering live here ONCE, across BOTH owners,
 # so the provision-set (:func:`list_session_env_var_credentials`), the per-step
 # drift echo-set (:func:`list_session_env_var_credential_echoes`) and the
@@ -1058,12 +1078,18 @@ class EnvVarCredentialEcho(NamedTuple):
 # three. ``$1`` is the owner id (session/run), ``$2`` the account id — bind
 # positions are identical across owners, so no call-site change.
 #
+# The ``vaults`` join + ``v.archived_at IS NULL`` is the env-var-query defense
+# against the same archived-vault resurrection the URL-keyed resolvers guard:
+# an archived vault must not materialize an env-var secret into a bound
+# sandbox, even if a credential became active in it through another path.
+#
 # The interpolated names (``table``/``a``/``owner_col``) are static module
 # literals — never user input, so no injection risk — matching the already
 # blessed f-string interpolation idiom in ``db/queries/__init__.py``
 # (``_get_scoped``/``_list_scoped`` interpolate ``{table}``/``{column}``).
 _ENV_VAR_CREDENTIALS_FROM_WHERE = """
           FROM {table} {a}
+          JOIN vaults v ON v.id = {a}.vault_id AND v.archived_at IS NULL
           JOIN vault_credentials vc ON vc.vault_id = {a}.vault_id
          WHERE {a}.{owner_col} = $1
            AND vc.auth_type = 'environment_variable'
