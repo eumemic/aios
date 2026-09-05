@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-_INGEST_PATH_RE = re.compile(r"^(/v1/triggers/ingest/)[^/]+")
+_INGEST_PATH_RE = re.compile(r"^/*v1/triggers/ingest/+[^/]+", re.IGNORECASE)
 
 
 def redact_sensitive_path(path: str) -> str:
@@ -22,5 +22,15 @@ def redact_sensitive_path(path: str) -> str:
     /v1/triggers/ingest/{ingest_token}`` — see
     ``aios.api.routers.triggers_ingest``) is rewritten; all other paths pass
     through unchanged (a broad heuristic would risk mangling legitimate ids).
+
+    The prefix match tolerates duplicated leading slashes and extra separators
+    before the token, and is case-insensitive. uvicorn does not normalize
+    ``scope["path"]``, so an ingest-shaped path that carries a live token must
+    still be redacted regardless of those variations — e.g. ``//v1/...`` (a
+    trailing-slash base-URL join), ``/v1/triggers/ingest//<token>`` (an extra
+    separator before the token), or a ``/V1/...`` case variant. The replacement
+    always yields the canonical single-slash redacted form
+    ``/v1/triggers/ingest/<redacted>`` regardless of how many slashes the
+    inbound path carried.
     """
-    return _INGEST_PATH_RE.sub(r"\1<redacted>", path)
+    return _INGEST_PATH_RE.sub(r"/v1/triggers/ingest/<redacted>", path)
