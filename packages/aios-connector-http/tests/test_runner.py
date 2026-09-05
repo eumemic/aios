@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -425,7 +426,7 @@ class TestOutboundIdempotency:
         async def _save(tool_call_id: str, result: str | None = None) -> None:
             saved.append((tool_call_id, result))
 
-        c.save_answered = _save  # type: ignore[assignment,method-assign]
+        c.save_answered = _save  # type: ignore[method-assign]
         await c.dispatch_call(self._call("call_s"))
         assert saved == [("call_s", "HI")]
 
@@ -1181,7 +1182,7 @@ class TestIsolatedServeConnection:
         ]
         assert [record["attempt"] for record in reconnects] == [1, 2]
         state = c._connections["conn_1"]
-        assert state.serve_status == "serving"
+        assert state.serve_status == "stopped"
         assert state.serve_restart_count == 2
         assert state.last_serve_error == "RuntimeError: failure 2"
 
@@ -1441,7 +1442,7 @@ class TestDiscoveryLoopReconnectsOnStaleStream:
     """
 
     @staticmethod
-    def _added_msg(connection_id: str):
+    def _added_msg(connection_id: str) -> Any:
         from aios_sdk import SseMessage
 
         return SseMessage(
@@ -1473,7 +1474,7 @@ class TestDiscoveryLoopReconnectsOnStaleStream:
             *,
             arm: str | None = None,
             after_change_seq: int | None = None,
-        ):
+        ) -> AsyncIterator[Any]:
             del httpx_client, connector, arm, after_change_seq
             attempts["n"] += 1
             if attempts["n"] == 1:
@@ -1528,12 +1529,14 @@ class TestDiscoveryCursorAndResetRecovery:
     dropping the cursor and re-running ``fresh`` (issue #1905)."""
 
     @staticmethod
-    def _msg(payload: dict[str, Any]):
+    def _msg(payload: dict[str, Any]) -> Any:
         from aios_sdk import SseMessage
 
         return SseMessage(event="connection", data=json.dumps(payload))
 
-    async def _drive(self, connector: HttpConnector, scripts: list[list[dict[str, Any]]]):
+    async def _drive(
+        self, connector: HttpConnector, scripts: list[list[dict[str, Any]]]
+    ) -> list[tuple[str | None, int | None]]:
         """Run ``_discovery_loop`` against successive scripted streams.
 
         Each inner list is one stream lifetime's payloads; after the last
@@ -1549,7 +1552,7 @@ class TestDiscoveryCursorAndResetRecovery:
             *,
             arm: str | None = None,
             after_change_seq: int | None = None,
-        ):
+        ) -> AsyncIterator[Any]:
             del httpx_client, connector_name
             subscribes.append((arm, after_change_seq))
             if not scripts:
@@ -1717,7 +1720,7 @@ class TestServeSupervisor:
             {"token": "still-revoked"},
             {"token": "corrected"},
         ]
-        assert c._fetch_runtime_secrets.await_args_list == [call("conn_1"), call("conn_1")]  # type: ignore[attr-defined]
+        assert c._fetch_runtime_secrets.await_args_list == [call("conn_1"), call("conn_1")]
         assert state.secrets == {"token": "corrected"}
 
     async def test_lifecycle_failure_does_not_escape_supervisor(self) -> None:
@@ -2030,3 +2033,101 @@ class TestDeliveryAcks:
                 session_id="sess_1",
                 platform_message_id="SM123",
             )
+
+
+class TestHeartbeatWholeOutage:
+    """Finding #2: connection-correlated health must reflect current state even
+    when every active connection is unhealthy; a previously-healthy connection
+    must not remain classified healthy because freshness is withheld."""
+
+    async def _drive(self, connector: HttpConnector, path: Any, iterations: int) -> None:
+        """Run exactly ``iterations`` heartbeat-loop iterations, then stop.
+
+        The heartbeat is a two-phase publisher: it claims the inode on one
+        iteration and writes the payload on the next, so a fresh publish needs
+        two iterations before the file carries content."""
+        import asyncio as _asyncio
+
+        done = _asyncio.Event()
+        count = 0
+
+        async def _counting_sleep(_interval: float) -> None:
+            nonlocal count
+            count += 1
+            if count >= iterations:
+                done.set()
+                await _asyncio.Event().wait()  # park until cancelled
+            # otherwise return immediately to run the next iteration
+
+        with (
+            patch.object(connector, "HEARTBEAT_INTERVAL", 0.0),
+            patch("aios_connector_http.runner.asyncio.sleep", _counting_sleep),
+        ):
+            loop = _asyncio.create_task(connector._heartbeat_loop(path))
+            await done.wait()
+            loop.cancel()
+            with contextlib.suppress(_asyncio.CancelledError):
+                await loop
+
+    async def _drive_once(self, connector: HttpConnector, path: Any) -> None:
+        """Run two loop iterations so the two-phase claim+write completes."""
+        await self._drive(connector, path, iterations=2)
+
+    async def test_all_unhealthy_transition_is_published_not_stale(self, tmp_path: Any) -> None:
+        from aios_connector_http.healthcheck import read_connection_health
+        from aios_connector_http.runner import _ConnectionState
+
+        class _C(HttpConnector):
+            connector = "echo"
+            HEARTBEAT_INTERVAL = 0.0
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        path = tmp_path / "hb"
+        c._discovery_cursor = 1
+        # Two serving connections; publish both healthy.
+        c._connections["conn_1"] = _ConnectionState(
+            connection_id="conn_1", external_account_id="a1", serve_status="serving"
+        )
+        c._connections["conn_2"] = _ConnectionState(
+            connection_id="conn_2", external_account_id="a2", serve_status="serving"
+        )
+        await self._drive_once(c, path)
+        healthy, unhealthy = read_connection_health(path)
+        assert healthy == ["conn_1", "conn_2"], (healthy, unhealthy)
+
+        # Both transition to restarting: every active connection is unhealthy.
+        c._connections["conn_1"].serve_status = "restarting"
+        c._connections["conn_2"].serve_status = "restarting"
+        await self._drive_once(c, path)
+
+        healthy, unhealthy = read_connection_health(path)
+        # The file must now describe the CURRENT state: neither healthy, both
+        # unhealthy. On the current head it retains the stale all-healthy
+        # payload, so this fails.
+        assert healthy == [], f"stale healthy payload retained: {healthy}"
+        assert set(unhealthy) == {"conn_1", "conn_2"}, unhealthy
+
+    async def test_mixed_state_still_publishes_healthy_sibling(self, tmp_path: Any) -> None:
+        """Over-correction guard: a mixed healthy/unhealthy state must still
+        publish the healthy sibling — the fix must not degrade into 'never
+        publish while any connection is unhealthy'."""
+        from aios_connector_http.healthcheck import read_connection_health
+        from aios_connector_http.runner import _ConnectionState
+
+        class _C(HttpConnector):
+            connector = "echo"
+            HEARTBEAT_INTERVAL = 0.0
+
+        c = _C(base_url="http://x", token="aios_runtime_x")
+        path = tmp_path / "hb"
+        c._discovery_cursor = 1
+        c._connections["conn_ok"] = _ConnectionState(
+            connection_id="conn_ok", external_account_id="a1", serve_status="serving"
+        )
+        c._connections["conn_bad"] = _ConnectionState(
+            connection_id="conn_bad", external_account_id="a2", serve_status="restarting"
+        )
+        await self._drive_once(c, path)
+        healthy, unhealthy = read_connection_health(path)
+        assert healthy == ["conn_ok"], healthy
+        assert unhealthy == ["conn_bad"], unhealthy

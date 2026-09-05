@@ -126,7 +126,7 @@ class TelegramConnector(HttpConnector):
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(
-                    self._run_polling(state),
+                    self._run_polling(connection_id, state),
                     name=f"telegram-polling-{connection_id}",
                 )
                 tg.create_task(
@@ -203,7 +203,7 @@ class TelegramConnector(HttpConnector):
         with contextlib.suppress(Exception):
             await application.shutdown()
 
-    async def _run_polling(self, state: _TelegramConnectionState) -> None:
+    async def _run_polling(self, connection_id: str, state: _TelegramConnectionState) -> None:
         await state.application.start()
         assert state.application.updater is not None
         # ``allowed_updates`` is opt-in — Telegram only delivers update
@@ -211,6 +211,9 @@ class TelegramConnector(HttpConnector):
         # reactions never reach the bot regardless of which handlers we
         # register locally.
         await state.application.updater.start_polling(allowed_updates=_ALLOWED_UPDATES)
+        # PTB returns after its polling task has started and can receive updates.
+        # Do not advertise this connection before that transport startup succeeds.
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _TelegramConnectionState) -> None:
