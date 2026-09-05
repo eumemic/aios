@@ -26,8 +26,11 @@ __all__ = [
 MAX_BODY_BYTES = 64 * 1024
 
 # Bounded per-connection inbound queue (design §5.3). A full queue sheds
-# (ack 200, drop) rather than growing unbounded — a dropped inbound is
-# recoverable via Twilio retry; an OOM is not.
+# (ack 200, drop) rather than growing unbounded. The 200 is already sent
+# before ``emit_inbound`` runs, so Twilio will NOT redeliver a shed
+# inbound — the bound is a deliberate loss/OOM trade, not "recoverable
+# via Twilio retry"; transport errors on the drain are retried in-process
+# (``connector.py``) before dropping.
 INBOUND_QUEUE_MAXSIZE = 1000
 
 # SMS connections want server-side ``inbound_debounce_seconds > 0``

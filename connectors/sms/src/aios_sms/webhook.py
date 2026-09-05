@@ -234,8 +234,11 @@ class WebhookListener:
 
         The handler does the minimum on the critical path: verify and
         enqueue. ``emit_inbound`` happens off this path in the drain loop
-        (design §3.2). On queue overflow we **shed** (still ack 200) — a
-        dropped inbound is recoverable via Twilio retry; an OOM is not.
+        (design §3.2). On queue overflow we **shed** (still ack 200) —
+        the 200 is already sent, so Twilio will NOT redeliver a shed
+        inbound; the bound is a deliberate loss/OOM trade (design §5.3),
+        and transport errors on the drain are retried in-process before
+        dropping (``connector.py``).
         """
         outcome = await self._verify_request(request, route_key="To")
         if isinstance(outcome, web.Response):
