@@ -15,6 +15,7 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aios.models.vaults import OAuthProviderApp
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 
 # Wall-clock cap on a single ``run_session_step`` call (the harness step
 # budget). Imported by ``aios.harness.loop`` as the job-level asyncio.wait_for
@@ -495,6 +496,7 @@ class Settings(BaseSettings):
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,
+        le=MAX_BASH_TIMEOUT_SECONDS,
         description="Default ceiling for a single bash tool call, in seconds. "
         "The agent can override per-call up to this maximum. A session bound "
         "to an environment with ``EnvironmentConfig.bash_timeout_seconds`` set "
