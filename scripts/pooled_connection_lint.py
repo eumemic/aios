@@ -417,6 +417,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "_cancel_run",
         "_classify_existing_tool_result",
         "_complete_run",
+        "_count_recent_wakes_from_conn",
         "_current_alembic_version",
         "_dedup_skip",
         "_enrich_agent_result",
