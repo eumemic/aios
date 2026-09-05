@@ -746,12 +746,18 @@ def surface_diff(expected: Surface, actual: Surface) -> dict[str, list[str]]:
 # an operator allowlist of trusted endpoints. Pure here; the runtime binding (the
 # allowlist source) lives in ``services.attenuation``.
 #
-# The clamp keys on ``api_base`` (and its ``base_url`` alias) — the sharpest edge,
-# which redirects the *whole* model request to a chosen endpoint. Sampling knobs
-# (``temperature`` etc.) are deliberately out of scope: they don't move where the
-# child's context goes. Other endpoint-shaping keys (e.g. ``custom_llm_provider``)
-# only retarget *within* an ``api_base`` LiteLLM already resolves, so pinning the
-# endpoint is the load-bearing check.
+# The clamp keys on ``api_base`` (and its ``base_url`` alias) plus the watsonx
+# text-path redirect aliases ``url`` and the nested ``wx_credentials["url"]`` /
+# ``watsonx_credentials["url"]`` — the sharpest edge, which redirects the *whole*
+# model request to a chosen endpoint. Sampling knobs (``temperature`` etc.) are
+# deliberately out of scope: they don't move where the child's context goes. Other
+# endpoint-shaping keys (e.g. ``custom_llm_provider``) only retarget *within* an
+# ``api_base`` LiteLLM already resolves, so pinning the endpoint is the load-bearing
+# check. The watsonx aliases are covered because LiteLLM's ``_complete_watsonx_text``
+# dispatch (``watsonx_text/...``) sources its endpoint from ``optional_params`` via
+# those keys rather than the top-level ``api_base`` kwarg — a clamp that read only
+# ``api_base``/``base_url`` would treat ``{"url": hostile}`` as "no redirect" and
+# let an ancestor's inherited key ride onto a caller-chosen endpoint.
 
 
 def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
@@ -760,13 +766,36 @@ def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
     ``None`` means "no redirect" — the default operator-trusted endpoint for the model
     string. LiteLLM accepts both ``api_base`` and the ``base_url`` alias; either pins
     the endpoint, so both are read here (``api_base`` wins when both are present).
+
+    The watsonx text-completion dispatch (``watsonx_text/...``) additionally honors a
+    third redirect key — ``url`` — and the nested ``wx_credentials["url"]`` /
+    ``watsonx_credentials["url"]`` (the ``{provider}_credentials`` shape LiteLLM
+    reuses for vertex too), sourcing its endpoint from ``optional_params`` rather
+    than the top-level ``api_base`` kwarg. A caller-supplied ``url`` redirects the
+    call just as ``api_base`` does, so it is read here too — otherwise the
+    cross-tenant conflict guard (#1800) and the spawn-time model-identity clamp
+    (#823) would both see "no redirect" for ``{"url": …}`` and let an ancestor's
+    inherited key ride onto a caller-chosen endpoint. ``url`` is not a standard
+    OpenAI request param (absent from LiteLLM's ``DEFAULT_CHAT_COMPLETION_PARAM_VALUES``),
+    so reading it as a redirect never collides with a legitimate passthrough.
+
+    On an upgrade past the pinned ``litellm==1.96.2``, confirm ``_complete_watsonx_text``
+    still pops ``url``/``wx_credentials`` for endpoint resolution before relaxing this
+    (mirrors the existing upgrade-discipline note in ``harness/completion.py``).
     """
     if not litellm_extra:
         return None
-    raw = litellm_extra.get("api_base")
-    if raw is None:
-        raw = litellm_extra.get("base_url")
-    return raw if isinstance(raw, str) else None
+    for key in ("api_base", "base_url", "url"):
+        raw = litellm_extra.get(key)
+        if isinstance(raw, str):
+            return raw
+    for creds_key in ("wx_credentials", "watsonx_credentials"):
+        creds = litellm_extra.get(creds_key)
+        if isinstance(creds, dict):
+            inner = creds.get("url")
+            if isinstance(inner, str):
+                return inner
+    return None
 
 
 def api_base_trusted(

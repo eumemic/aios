@@ -737,6 +737,80 @@ class TestApiBaseExtraction:
         # A garbage non-string value can't pin a real endpoint; treat as no redirect.
         assert api_base_of({"api_base": 1234}) is None
 
+    def test_watsonx_url_key_redirects(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # LiteLLM's ``_complete_watsonx_text`` dispatch (``watsonx_text/...``) pops a
+        # THIRD redirect key — ``url`` — from optional_params for endpoint resolution.
+        # Reading only api_base/base_url let ``{"url": hostile}`` bypass both guards.
+        assert api_base_of({"url": "https://hostile.example"}) == "https://hostile.example"
+
+    def test_api_base_wins_over_url(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # ``api_base`` is the dominant redirect key; ``url`` is a watsonx-text alias.
+        out = api_base_of({"api_base": "https://a", "url": "https://b"})
+        assert out == "https://a"
+
+    def test_base_url_wins_over_url(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # ``base_url`` (the generic alias) outranks the watsonx-text ``url`` alias.
+        out = api_base_of({"base_url": "https://a", "url": "https://b"})
+        assert out == "https://a"
+
+    def test_watsonx_non_string_url_is_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # A garbage non-string ``url`` can't pin a real endpoint; treat as no redirect.
+        assert api_base_of({"url": 1234}) is None
+
+    def test_wx_credentials_nested_url_redirects(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # LiteLLM pops ``wx_credentials`` and reads its nested ``url`` as the endpoint.
+        # A clamp that ignored the nest let an attacker hide a redirect one level deep.
+        assert (
+            api_base_of({"wx_credentials": {"url": "https://hostile.example"}})
+            == "https://hostile.example"
+        )
+
+    def test_watsonx_credentials_nested_url_redirects(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # The ``watsonx_credentials`` alias (the ``{provider}_credentials`` shape) is
+        # honored identically to ``wx_credentials``.
+        assert (
+            api_base_of({"watsonx_credentials": {"url": "https://hostile.example"}})
+            == "https://hostile.example"
+        )
+
+    def test_credentials_nested_non_string_url_is_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        assert api_base_of({"wx_credentials": {"url": 1234}}) is None
+
+    def test_credentials_without_url_is_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # A credentials blob carrying only an apikey/token (no redirect) must not be
+        # mistaken for one — only the nested ``url`` is a redirect source.
+        assert api_base_of({"wx_credentials": {"apikey": "sk-x"}}) is None
+
+    def test_non_dict_credentials_is_no_redirect(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # A garbage non-dict credentials value can't carry a nested redirect.
+        assert api_base_of({"wx_credentials": "https://hostile.example"}) is None
+        assert api_base_of({"watsonx_credentials": ["https://hostile.example"]}) is None
+
+    def test_top_level_redirect_wins_over_nested_credentials_url(self) -> None:
+        from aios.models.attenuation import api_base_of
+
+        # A top-level redirect key is checked before the nested credentials nest.
+        out = api_base_of({"api_base": "https://a", "wx_credentials": {"url": "https://b"}})
+        assert out == "https://a"
+
 
 class TestApiBaseTrusted:
     """``api_base_trusted`` — the spawn-edge identity check (equality OR allowlist)."""
@@ -790,6 +864,52 @@ def test_model_identity_trusted_binds_settings_allowlist(monkeypatch: pytest.Mon
         assert attenuation_service.model_identity_trusted({"api_base": "https://x"}, None) is True
         assert (
             attenuation_service.model_identity_trusted({"api_base": "https://other"}, None) is False
+        )
+    finally:
+        monkeypatch.delenv("AIOS_TRUSTED_INFERENCE_API_BASES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_model_identity_trusted_detects_watsonx_url_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spawn-edge clamp must treat a watsonx-text ``url`` redirect exactly like an
+    ``api_base`` redirect — failing closed by default and admitting only via the
+    operator allowlist. Before the fix, ``model_identity_trusted({"url": …}, None)``
+    saw "no redirect" (``api_base_of`` ignored ``url``) and admitted any redirect."""
+    from aios.config import get_settings
+    from aios.services import attenuation as attenuation_service
+
+    # Fails closed by default (empty allowlist) — would have admitted before the fix.
+    assert (
+        attenuation_service.model_identity_trusted({"url": "https://attacker.example"}, None)
+        is False
+    )
+    # The nested credentials nest is also a redirect.
+    assert (
+        attenuation_service.model_identity_trusted(
+            {"wx_credentials": {"url": "https://attacker.example"}}, None
+        )
+        is False
+    )
+
+    monkeypatch.setenv("AIOS_TRUSTED_INFERENCE_API_BASES", '["https://trusted.example"]')
+    get_settings.cache_clear()
+    try:
+        assert (
+            attenuation_service.model_identity_trusted({"url": "https://trusted.example"}, None)
+            is True
+        )
+        assert (
+            attenuation_service.model_identity_trusted(
+                {"watsonx_credentials": {"url": "https://trusted.example"}}, None
+            )
+            is True
+        )
+        # A redirect not in the allowlist still fails closed.
+        assert (
+            attenuation_service.model_identity_trusted({"url": "https://attacker.example"}, None)
+            is False
         )
     finally:
         monkeypatch.delenv("AIOS_TRUSTED_INFERENCE_API_BASES", raising=False)
