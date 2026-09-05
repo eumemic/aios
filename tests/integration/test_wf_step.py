@@ -5107,9 +5107,7 @@ async def test_bash_crash_path_at_least_once(
         "async def main(input):\n"
         "    return await tool('bash', {'command': 'echo hi', 'timeout_seconds': 1200})\n"
     )
-    run_id = await _make_tool_run(
-        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-c"
-    )
+    run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-c")
     with mock.patch.object(backend, "exec", new=_blocked):
         await run_workflow_step(run_id)  # parks; launches the task
         await asyncio.wait_for(entered.wait(), timeout=5)  # task blocks IN exec
