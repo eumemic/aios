@@ -24,7 +24,7 @@ from aios_sdk._generated.models.environment_update import EnvironmentUpdate
 
 app = typer.Typer(name="envs", help="Manage environments (sandbox configs).", no_args_is_help=True)
 
-_COLS = ("id", "name", "archived_at", "updated_at")
+_COLS = ("id", "name", "archived_at", "created_at")
 
 
 @app.command("list")
