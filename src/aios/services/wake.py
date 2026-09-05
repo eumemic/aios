@@ -48,6 +48,34 @@ WAKE_SESSION_MAX_PER_HOUR = 10
 # pass through unstripped — see issue #1083).
 WAKE_LINEAGE_SPAN_EVENT = "wake_lineage"
 
+# Per-(source, target) transaction-scoped advisory lock guarding the rate-cap
+# count+append.  Mirrors ``outbound_tool_quota._LOCK_SQL``: the lock is taken
+# inside the append transaction, so concurrent wakes sharing the SAME
+# (source, target) pair serialize — every prior caller's span is committed
+# (and visible under READ COMMITTED) before the next caller's count read.
+# Wakes from OTHER sources to the same target take a DIFFERENT lock and are
+# unaffected, preserving the per-pair (not per-target) scope of the cap.
+# ``hashtextextended`` maps the pair string to the ``bigint`` key
+# ``pg_advisory_xact_lock`` requires; any hash collision is a harmless
+# spurious wait between unrelated pairs (a rate-limit lock, not a
+# correctness lock).
+_WAKE_RATE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+
+# The target-side ``wake_lineage`` span count for the per-pair rate cap.  The
+# window is the last hour.  ``$3``-then-``$4`` parameter ordering is
+# historical (``wake_source_session_id`` was added after ``event``); kept
+# stable so callers bind positionally.
+_COUNT_RECENT_WAKES_SQL = """
+    SELECT count(*)
+    FROM events
+    WHERE session_id = $1
+      AND account_id = $2
+      AND kind = 'span'
+      AND data->>'event' = $4
+      AND data->>'wake_source_session_id' = $3
+      AND created_at > now() - interval '1 hour'
+"""
+
 # ─── cross-session wake error classes ────────────────────────────────────────
 #
 # Status-code-bearing AiosError subclasses (the tool's public contract). They
@@ -146,24 +174,40 @@ async def count_recent_wakes_from(
     only gets ``WAKE_SESSION_MAX_PER_HOUR`` wakes/hour at any one target.
     The ``source_session_id`` is an OPAQUE string: a trigger root passes
     ``f"trigger:{trigger_id}"``, getting its own per-(trigger,target) bucket.
+
+    This is the public, self-contained wrapper (acquires its own pooled
+    connection).  The concurrency-safe rate-cap enforcement in
+    :func:`deliver_cross_session_wake` does NOT use this wrapper — it runs
+    the SAME count via :func:`_count_recent_wakes_from_conn` INSIDE a
+    transaction-scoped advisory lock so concurrent same-pair callers
+    serialize on the count+append.
     """
     async with pool.acquire() as conn:
-        count = await conn.fetchval(
-            """
-            SELECT count(*)
-            FROM events
-            WHERE session_id = $1
-              AND account_id = $2
-              AND kind = 'span'
-              AND data->>'event' = $4
-              AND data->>'wake_source_session_id' = $3
-              AND created_at > now() - interval '1 hour'
-            """,
-            target_session_id,
-            account_id,
-            source_session_id,
-            WAKE_LINEAGE_SPAN_EVENT,
+        return await _count_recent_wakes_from_conn(
+            conn,
+            source_session_id=source_session_id,
+            target_session_id=target_session_id,
+            account_id=account_id,
         )
+
+
+async def _count_recent_wakes_from_conn(
+    conn: Any,
+    *,
+    source_session_id: str,
+    target_session_id: str,
+    account_id: str,
+) -> int:
+    """Connection-bound form of :func:`count_recent_wakes_from` — runs the
+    count on the caller-supplied connection (typically inside the locked
+    append transaction in :func:`deliver_cross_session_wake`)."""
+    count = await conn.fetchval(
+        _COUNT_RECENT_WAKES_SQL,
+        target_session_id,
+        account_id,
+        source_session_id,
+        WAKE_LINEAGE_SPAN_EVENT,
+    )
     return int(count or 0)
 
 
@@ -181,11 +225,13 @@ async def deliver_cross_session_wake(
     action.
 
     Validate the target (same ``account_id``, not archived) → enforce
-    ``WAKE_SESSION_MAX_DEPTH`` (chain) and ``WAKE_SESSION_MAX_PER_HOUR``
-    (per ``(root.source_id, target)`` pair) BEFORE any side effect → in ONE
-    transaction stamp the non-forgeable ``wake_lineage`` span
+    ``WAKE_SESSION_MAX_DEPTH`` (chain) BEFORE any side effect → in ONE
+    transaction take a per-``(root.source_id, target)`` transaction-scoped
+    advisory lock, enforce ``WAKE_SESSION_MAX_PER_HOUR`` under that lock (so
+    concurrent same-pair callers serialize and the count+append is atomic),
+    THEN stamp the non-forgeable ``wake_lineage`` span
     (``wake_depth = root.source_depth + 1``,
-    ``wake_source_session_id = root.source_id``) THEN append ``content`` as a
+    ``wake_source_session_id = root.source_id``) and append ``content`` as a
     user-role message to the target (display-only wake metadata) →
     ``defer_wake(cause=cause)``. Span-first-and-atomic so the trusted depth
     carrier is never visible later than the message that makes the target
@@ -247,27 +293,14 @@ async def deliver_cross_session_wake(
 
     # Per (root.source_id, target) rate limit. Counted BEFORE the append so
     # the window starts fresh for the next hour — a burst at the cap doesn't
-    # rebuild forward on every retry.
-    recent_wakes = await count_recent_wakes_from(
-        pool,
-        source_session_id=root.source_id,
-        target_session_id=target_session_id,
-        account_id=target_account_id,
-    )
-    if recent_wakes >= WAKE_SESSION_MAX_PER_HOUR:
-        raise WakeSessionRateLimitedError(
-            f"rate limit: {recent_wakes} wakes from {root.source_id} to "
-            f"{target_session_id} in the last hour (max "
-            f"{WAKE_SESSION_MAX_PER_HOUR})",
-            detail={
-                "recent_wakes": recent_wakes,
-                "max_per_hour": WAKE_SESSION_MAX_PER_HOUR,
-            },
-        )
-
-    # Append the lineage span + the user message to the TARGET atomically,
-    # then defer a wake there.
-    #
+    # rebuild forward on every retry.  The count + append run in ONE
+    # transaction serialized by a per-pair transaction-scoped advisory lock:
+    # a concurrent burst of ``wake_session`` calls all acquired separate
+    # pooled connections for the count (READ COMMITTED — each sees only
+    # committed rows), so without serialization each caller read a stale
+    # count and overshot the cap.  The lock is taken on the SAME pair
+    # ``(root.source_id, target)`` the cap keys on, so concurrent wakes
+    # from OTHER sources to this target are unaffected.
     # The ``metadata`` on the user message is DISPLAY-ONLY: it drives the
     # model-visible wake header (``_wake_header`` in harness/context.py).
     # It is NOT trusted by the depth / rate-limit cap, because the
@@ -295,6 +328,25 @@ async def deliver_cross_session_wake(
     # uses (``_stimulate_existing_ask``). NOTIFY is queued to the outermost COMMIT, so
     # the nested per-append ``pg_notify`` fires once, after commit (invariant #6).
     async with pool.acquire() as conn, conn.transaction():
+        # Per-pair serialization: hold until COMMIT/ROLLBACK so the count
+        # read sees every prior concurrent caller's committed span.
+        await conn.execute(_WAKE_RATE_LOCK_SQL, f"{root.source_id}:{target_session_id}")
+        recent_wakes = await _count_recent_wakes_from_conn(
+            conn,
+            source_session_id=root.source_id,
+            target_session_id=target_session_id,
+            account_id=target_account_id,
+        )
+        if recent_wakes >= WAKE_SESSION_MAX_PER_HOUR:
+            raise WakeSessionRateLimitedError(
+                f"rate limit: {recent_wakes} wakes from {root.source_id} to "
+                f"{target_session_id} in the last hour (max "
+                f"{WAKE_SESSION_MAX_PER_HOUR})",
+                detail={
+                    "recent_wakes": recent_wakes,
+                    "max_per_hour": WAKE_SESSION_MAX_PER_HOUR,
+                },
+            )
         await queries.append_event(
             conn,
             account_id=target_account_id,
