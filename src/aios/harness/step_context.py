@@ -12,11 +12,22 @@ dry-run):
 - ``provision_skill_files`` — filesystem writes.  Returned via
   ``StepContext.skill_versions`` so ``run_session_step`` can call it
   afterward, before the model runs.
-- Session-state mutations (``set_session_status``, event appends).
+- Session-state mutations (``set_session_status``).
 - Tool dispatch (the confirmed-tool early-return path in
   ``run_session_step`` runs BEFORE this function).
 - Span emission (``context_build_start``/``end`` live in
   ``run_session_step``).
+
+Two writes are opt-in flags, both ``False`` by default and ``True`` only
+on the worker's step path, so the endpoint stays a dry-run that renders
+the identical payload:
+
+- ``persist_image_rewrites`` — the one-time downsample of an oversize
+  persisted image part (#1745).
+- ``persist_reminders`` — the durable reminder rows
+  (``aios.harness.reminders``) this step's plan calls for, written to the
+  session log before the model call so the next build replays them at
+  their seq. The preview renders the same rows as unpersisted stand-ins.
 
 I/O still happens: MCP discovery, skill-ref resolution, read-only
 database queries.  That's unavoidable — the endpoint has to do the same

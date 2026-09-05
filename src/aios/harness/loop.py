@@ -425,7 +425,11 @@ async def refresh_session_mount_state(
 # and the assistant append; streaming deltas are transient pg_notify only), so
 # cancelling the model child task discards nothing durable; the event append
 # that made the session eligible already deferred a wake, and the preempted
-# step's normal early return releases the procrastinate lock for it. Once the
+# step's normal early return releases the procrastinate lock for it. The
+# compose phase's reminder-row writes (``compose_step_context`` with
+# ``persist_reminders=True``) land BEFORE ``model_request_start`` and are
+# non-stimulus, digest-gated rows: a preempted step leaves them in the log
+# for the next build to replay, never to duplicate. Once the
 # model call returns, the watcher is torn down before the append/dispatch tail
 # — un-preemptibility after the model phase is structural, not checked.
 
