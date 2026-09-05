@@ -38,6 +38,7 @@ from aios.harness.channels import max_channels_reminder_local, render_channels_r
 from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
     CONCISE_NAG_CONTENT_CHANNELS,
+    CONCISE_NAG_OFF_CONTENT,
     CONCISE_NAG_UPPER_BOUND_LOCAL,
 )
 from aios.harness.context import (
@@ -145,10 +146,14 @@ def tail_owes_response(tail_origin: TailOrigin, *, needs_trailing_notice: bool) 
     Not a direct stimulus, so the listing may be written: an **assistant**
     turn (an idle/sweep re-check, where the channel status IS the useful
     signal), a non-focal **notification** marker (the listing is its
-    navigation companion — how to ``switch_channel`` to it), a prior
-    **reminder** row, or an empty/system-only build.
+    navigation companion — how to ``switch_channel`` to it), or an
+    empty/system-only build. The other reminder rows never classify the
+    tail at all (``build_messages`` looks past them), so a row a failed or
+    preempted attempt wrote behind an unanswered inbound cannot flip this
+    gate on the retry; a durable **notice** row is the one reminder that
+    is a tail, and it is owed for the same reason the planned notice is.
     """
-    return needs_trailing_notice or tail_origin in ("user", "tool")
+    return needs_trailing_notice or tail_origin in ("user", "tool", "notice")
 
 
 def max_reminders_local(channels: list[str], obligations: list[Obligation]) -> int:
@@ -194,15 +199,17 @@ def plan_reminders(
     * **channels** — bound channels only; held back while the tail owes a
       response (:func:`tail_owes_response`), written on any content change
       (unread counts, previews, focal switch).
-    * **obligations** — presence-gated on EVERY write
+    * **obligations** — presence-gated on the FIRST write
       (:func:`present_request_ids`): a listing goes in only when some open
-      obligation's original ask is gone from the window and the listing
-      differs from the in-window one. When the open set empties while an
-      obligations row is still in the window, the one-line "(none)" row
-      supersedes it, once; that one-liner is not a listing, so the next
+      obligation's original ask is gone from the window. Once a listing is in
+      the window it is kept truthful: any change to the open set rewrites it
+      (a row that keeps naming an answered request would be the model's last
+      word on what it owes), and when the set empties the one-line "(none)"
+      row supersedes it, once. That one-liner is not a listing, so the next
       obligation is presence-gated afresh.
     * **concise** — once per window per variant (the channel-attached variant
-      carries the delivery clause, #2262).
+      carries the delivery clause, #2262); when the style is turned off while
+      a nag is in the window, a one-line "no longer active" row supersedes it.
     * **trailing_stimulus** — whenever the build ends on an assistant turn
       while holding an unreacted stimulus; it cannot re-fire on the next build
       because the row itself becomes the tail.
@@ -226,9 +233,13 @@ def plan_reminders(
             assert listing is not None  # channels is non-empty
             consider("channels", listing)
 
+    listing_in_window = (
+        "obligations" in latest and latest["obligations"] != OBLIGATIONS_EMPTY_CONTENT
+    )
     if obligations:
-        present = present_request_ids(events)
-        if any(o.request_id not in present for o in obligations):
+        if listing_in_window or any(
+            o.request_id not in present_request_ids(events) for o in obligations
+        ):
             consider("obligations", render_obligations_reminder(obligations, session_id=session_id))
         else:
             skipped += 1
@@ -237,6 +248,8 @@ def plan_reminders(
 
     if output_style == "concise":
         consider("concise", CONCISE_NAG_CONTENT_CHANNELS if channels else CONCISE_NAG_CONTENT)
+    elif "concise" in latest:
+        consider("concise", CONCISE_NAG_OFF_CONTENT)
 
     if needs_trailing_notice:
         writes.append(PlannedReminder("trailing_stimulus", TRAILING_STIMULUS_NOTICE))

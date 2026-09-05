@@ -17,9 +17,16 @@ from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
     CONCISE_NAG_CONTENT_CHANNELS,
     CONCISE_NAG_DELIVERY_CLAUSE,
+    CONCISE_NAG_OFF_CONTENT,
     CONCISE_NAG_UPPER_BOUND_LOCAL,
     CONCISE_STYLE_BLOCK,
 )
+from aios.harness.context import (
+    OMISSION_MARKER_UPPER_BOUND_LOCAL,
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
+)
+from aios.harness.obligations import OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+from aios.harness.reminders import max_reminders_local
 from aios.harness.step_context import (
     StepPrelude,
     compute_step_prelude,
@@ -218,7 +225,7 @@ class TestConciseNagReserve:
         alone, before the composer knows whether the session has channels, so
         the bound has to hold for the longer channel-attached nag (#2262).
         """
-        for content in (CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS):
+        for content in (CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS, CONCISE_NAG_OFF_CONTENT):
             cost = approx_tokens([{"role": "user", "content": content}])
             assert cost <= CONCISE_NAG_UPPER_BOUND_LOCAL, (
                 f"nag variant {content[:40]!r}… costs {cost} local tokens, "
@@ -227,9 +234,17 @@ class TestConciseNagReserve:
             )
 
     def test_reserve_summed_unconditionally(self) -> None:
-        """Reserved for every agent (the omission-marker idiom) -- the prelude
-        carries no per-agent reserve field to forget."""
-        assert prelude_overhead_local(_prelude()).reserves >= CONCISE_NAG_UPPER_BOUND_LOCAL
+        """Reserved for every agent (the omission-marker idiom): the planner's
+        bound carries the nag reserve even for an agent with no channels and
+        no obligations, and the prelude's overhead sums that bound whole."""
+        floor = max_reminders_local([], [])
+        assert floor == (
+            OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+            + CONCISE_NAG_UPPER_BOUND_LOCAL
+            + TRAILING_NOTICE_UPPER_BOUND_LOCAL
+        )
+        reserves = prelude_overhead_local(make_prelude(reminders_upper_bound_local=floor)).reserves
+        assert reserves == floor + OMISSION_MARKER_UPPER_BOUND_LOCAL
 
 
 # ── the wire enum ────────────────────────────────────────────────────────────

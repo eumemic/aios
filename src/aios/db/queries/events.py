@@ -84,24 +84,56 @@ async def _latest_cumulative_tokens(
 ) -> int | None:
     """Fetch the cumulative_tokens value of the most recent message event.
 
-    ``stimulus_only`` narrows it to the most recent STIMULUS — a non-assistant
-    row that is not a harness-authored reminder. The windower's retain-the-
-    tail clamp keys on that row, not on the newest message: durable reminder
-    rows are appended AFTER the stimulus and BEFORE the model call, so on a
-    failed attempt (context overflow retry with ``window_min=0``, a provider
-    error, a deadline) they are the newest rows. Clamping to the newest
-    *message* would retain a reminder and evict the unanswered stimulus — the
-    retry would then succeed on a reminder-only prompt and the session would
-    idle with the stimulus never answered.
+    ``stimulus_only`` narrows it to the RENDERABLE ANCHOR of the most recent
+    STIMULUS — a non-assistant row that is not a harness-authored reminder.
+    The windower's retain-the-tail clamp keys on that anchor, not on the
+    newest message: durable reminder rows are appended AFTER the stimulus and
+    BEFORE the model call, so on a failed attempt (context overflow retry with
+    ``window_min=0``, a provider error, a deadline) they are the newest rows.
+    Clamping to the newest *message* would retain a reminder and evict the
+    unanswered stimulus — the retry would then succeed on a reminder-only
+    prompt and the session would idle with the stimulus never answered. A
+    tool-result stimulus renders only with its issuing assistant in the slate
+    (``_prune_orphans`` drops it otherwise, while the watermark still
+    advances), so its anchor is that assistant's ``cumulative_tokens``.
     """
-    val: int | None = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
+    if not stimulus_only:
+        val: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+        )
+        return val
+    row = await conn.fetchrow(
+        "SELECT cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
-        f"{_STIMULUS_ROW_SQL if stimulus_only else ''}"
+        f"{_STIMULUS_ROW_SQL}"
         "AND cumulative_tokens IS NOT NULL "
         "ORDER BY seq DESC LIMIT 1",
         session_id,
     )
+    if row is None:
+        return None
+    if row["role"] == "tool" and isinstance(row["tool_call_id"], str) and row["tool_call_id"]:
+        # Same predicates as ``_lookup_tool_parent_channel`` (the
+        # ``events_assistant_tool_calls_idx`` partial index, reverse-seq walk).
+        anchor: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "  AND data->>'role' = 'assistant' "
+            "  AND data ? 'tool_calls' "
+            "  AND data->'tool_calls' @> jsonb_build_array("
+            "    jsonb_build_object('id', $2::text)) "
+            "  AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            row["tool_call_id"],
+        )
+        if anchor is not None:
+            return anchor
+    val = row["cumulative_tokens"]
     return val
 
 
@@ -1692,7 +1724,10 @@ async def append_event(
             effective_delta = precomputed.delta_for(token_baseline_v)
             prev = await _latest_cumulative_state(conn, session_id)
             cum_tokens = (prev.tokens or 0) + effective_delta
-            counts_as_message = role in ("user", "assistant")
+            # Reminder rows are user-role but not conversation: the head
+            # omission marker reports ``cumulative_messages`` as "messages
+            # omitted", which must not count the harness's own bookkeeping.
+            counts_as_message = role in ("user", "assistant") and not is_reminder
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
             cls = _message_content_class(role, data)
             if image_aware:
@@ -2875,7 +2910,8 @@ async def read_windowed_events(
         # index cond, and only for the un-backfilled tail (transient across a
         # rolling deploy), so it never re-introduces the O(session-size) term.
         omitted_messages = await conn.fetchval(
-            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant')) "
+            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant') "
+            f"AND {REMINDER_EXCLUDE_SQL.format(col='data')}) "
             "FROM events "
             "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
             "AND cumulative_tokens <= $2",

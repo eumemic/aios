@@ -125,10 +125,11 @@ class TestWindowingOverhead:
             tools=[ToolSpec(type=t) for t in ("bash", "read", "write", "edit", "glob", "grep")],
             description=None,
             metadata={},
-            # Snug window — the listing's ~400 local tokens push past
-            # the cap if they aren't reserved during windowing.
-            window_min=3_500,
-            window_max=4_500,
+            # Snug window — the listing's reserve (~1.6k local tokens for six
+            # channels at their fattest preview) pushes past the cap if it
+            # isn't subtracted during windowing.
+            window_min=6_000,
+            window_max=8_000,
             account_id=account_id,
         )
         session = await sessions_service.create_session(

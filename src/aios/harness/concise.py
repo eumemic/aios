@@ -83,6 +83,14 @@ CONCISE_NAG_CONTENT_CHANNELS: Final[str] = (
 )
 """The reminder row content for a channel-attached session."""
 
+CONCISE_NAG_OFF_CONTENT: Final[str] = (
+    "<system-reminder>Concise output style is no longer active: the earlier "
+    "concise-style reminder in this transcript no longer applies.</system-reminder>"
+)
+"""Written once when the style is turned OFF while a nag is still in the
+window: the system-prompt rules block is gone at that point, so without this
+row the stale nag would be the only — and contradictory — steering left."""
+
 # Local-token reserve for the nag at windowing time, mirroring
 # ``OMISSION_MARKER_UPPER_BOUND_LOCAL`` (context.py): the row this step may
 # write lands on top of the windowed slate, so without a reserve it could
@@ -93,9 +101,9 @@ CONCISE_NAG_CONTENT_CHANNELS: Final[str] = (
 # LONGEST variant — the channel-attached nag, which carries
 # :data:`CONCISE_NAG_DELIVERY_CLAUSE` — because the reserve is computed at
 # windowing time from the agent alone, before the composer knows which
-# variant renders.  ``TestConciseNagReserve`` pins BOTH variants
-# under this bound, so it is verified rather than guessed: if a future edit
-# lengthens either variant past it, raise the constant — never shorten the
+# variant renders.  ``TestConciseNagReserve`` pins BOTH variants and the OFF
+# row under this bound, so it is verified rather than guessed: if a future
+# edit lengthens any of them past it, raise the constant — never shorten the
 # clause to fit.
 CONCISE_NAG_UPPER_BOUND_LOCAL: Final[int] = 128
 

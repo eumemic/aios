@@ -37,6 +37,7 @@ from aios.harness.sweep import (
     UNREACTED_ROWS_SQL,
     find_sessions_needing_inference,
 )
+from aios.models.events import REMINDER_EXCLUDE_SQL, REMINDER_METADATA_KEY, is_reminder_event
 from aios.services import sessions as sessions_service
 from aios.services.inbound_budget import check_inbound_budget_agent
 from tests.conftest import needs_docker
@@ -198,6 +199,113 @@ class TestWindowerRetainsTheNewestStimulus:
         assert any("lorem ipsum" in str(m.get("content")) for m in ctx.messages)
         # The reminder is not a stimulus: the build reacts to the inbound only.
         assert ctx.reacting_to == 1
+
+
+class TestPredicateTwins:
+    async def test_sql_and_python_agree_on_every_row_shape(
+        self, pool_session: tuple[asyncpg.Pool[Any], str]
+    ) -> None:
+        """``REMINDER_EXCLUDE_SQL`` and ``is_reminder_event`` are one predicate:
+        run both over the same persisted rows — every role, every metadata
+        shape a writer could produce — and they must partition them alike."""
+        pool, sid = pool_session
+        shapes: list[dict[str, Any]] = [
+            {"role": "user", "content": "plain"},
+            {"role": "user", "content": "meta", "metadata": {"note": "x"}},
+            {"role": "user", "content": "req", "metadata": {"request": {"request_id": "r1"}}},
+            _reminder_data("listing"),
+            {"role": "assistant", "content": "reply", "reacting_to": 1},
+            {"role": "assistant", "content": "", "metadata": {REMINDER_METADATA_KEY: {}}},
+            {"role": "tool", "tool_call_id": "t0", "content": "ok"},
+            {"role": "tool", "tool_call_id": "t1", "content": "ok", "metadata": {"k": 1}},
+            {
+                "role": "tool",
+                "tool_call_id": "t2",
+                "content": "ok",
+                "metadata": {REMINDER_METADATA_KEY: 1},
+            },
+            # Non-object metadata that merely CONTAINS the key string.
+            {"role": "user", "content": "arr", "metadata": [REMINDER_METADATA_KEY]},
+            {"role": "user", "content": "str", "metadata": REMINDER_METADATA_KEY},
+        ]
+        async with pool.acquire() as conn:
+            expected: dict[int, bool] = {}
+            for data in shapes:
+                row = await queries.append_event(
+                    conn, account_id=_ACCOUNT, session_id=sid, kind="message", data=data
+                )
+                expected[row.seq] = is_reminder_event("message", data)
+            kept = await conn.fetch(
+                "SELECT seq FROM events WHERE session_id = $1 AND kind = 'message' "
+                f"AND {REMINDER_EXCLUDE_SQL.format(col='data')} ORDER BY seq",
+                sid,
+            )
+        kept_seqs = {r["seq"] for r in kept}
+        sql_says_reminder = {seq: seq not in kept_seqs for seq in expected}
+        assert sql_says_reminder == expected
+        # The three object-marker rows, whatever their role — and nothing else.
+        assert sum(expected.values()) == 3
+
+
+class TestWindowerAnchorsAToolResultOnItsAssistant:
+    async def test_trailing_tool_result_keeps_its_issuing_assistant(
+        self, pool_session: tuple[asyncpg.Pool[Any], str]
+    ) -> None:
+        """A tool-result stimulus renders only with its issuing assistant in
+        the slate (``_prune_orphans`` drops it otherwise, while the watermark
+        still advances). Clamping to the RESULT row alone would let an
+        overflow retry drop the assistant, prune the result, and answer with
+        ``reacting_to`` covering an output the model never saw."""
+        pool, sid = pool_session
+        big = "lorem ipsum dolor sit amet " * 400
+        await sessions_service.append_user_message(pool, sid, big, account_id=_ACCOUNT)
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn,
+                account_id=_ACCOUNT,
+                session_id=sid,
+                kind="message",
+                data={
+                    "role": "assistant",
+                    "content": "",
+                    "reacting_to": 1,
+                    "tool_calls": [
+                        {
+                            "id": "t1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                        }
+                    ],
+                },
+            )
+            await queries.append_event(
+                conn,
+                account_id=_ACCOUNT,
+                session_id=sid,
+                kind="message",
+                data={"role": "tool", "tool_call_id": "t1", "content": "the output"},
+            )
+            await queries.append_event(
+                conn, account_id=_ACCOUNT, session_id=sid, kind="message", data=_reminder_data()
+            )
+            # A window far smaller than the log: the chunked snap alone would
+            # drop through the assistant; the clamp must hold it.
+            windowed = await events_q.read_windowed_events(
+                conn,
+                sid,
+                account_id=_ACCOUNT,
+                window_min=0,
+                window_max=40,
+                model=f"fake/anchor-{uuid.uuid4().hex[:8]}",
+                overhead_local=0,
+            )
+        seqs = [e.seq for e in windowed.events]
+        assert 1 not in seqs, f"the oversized inbound should be evicted; retained seqs={seqs}"
+        assert seqs == [2, 3, 4], f"assistant + result + row must all be retained; got {seqs}"
+        ctx = build_messages(windowed.events, system_prompt=None, omission=windowed.omission)
+        assert ctx.reacting_to == 3
+        rendered = [(m.get("role"), str(m.get("content"))[:60]) for m in ctx.messages]
+        assert any(role == "tool" for role, _ in rendered), rendered
 
 
 class TestReminderRowsArePricedBare:

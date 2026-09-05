@@ -64,7 +64,12 @@ from aios.harness.vision import (
 )
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
-from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event, is_reminder_event
+from aios.models.events import (
+    MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    Event,
+    is_reminder_event,
+    reminder_section,
+)
 from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
@@ -1281,10 +1286,19 @@ TRAILING_STIMULUS_NOTICE = (
 
 # What the LAST rendered message of a build is, classified structurally during
 # the walk (never by sniffing rendered prose): the composer's tail gate keys on
-# it — a trailing ``user`` / ``tool`` is a direct stimulus the agent owes a
-# response to; ``assistant`` / ``notification`` (a non-focal 🔔 marker) /
-# ``reminder`` (a durable harness reminder row) / ``system`` / ``none`` are not.
-TailOrigin = Literal["none", "system", "assistant", "tool", "user", "notification", "reminder"]
+# it — a trailing ``user`` / ``tool`` / ``notice`` (a durable trailing-stimulus
+# notice row) is a direct stimulus the agent owes a response to;
+# ``assistant`` / ``notification`` (a non-focal 🔔 marker) / ``system`` /
+# ``none`` are not. Every OTHER durable reminder row (channels listing,
+# obligations listing, concise nag) is TRANSPARENT: the tail is the last
+# rendered message that is not one of them. A failed or preempted step leaves
+# the rows it wrote in the log behind a still-unanswered stimulus; were they
+# the tail, the retry would see "not owed" and write a status listing after
+# the very inbound the gate exists to keep last.
+TailOrigin = Literal["none", "system", "assistant", "tool", "user", "notification", "notice"]
+# The walk's per-message tag: a TailOrigin, or ``reminder`` for a transparent
+# row (never a tail).
+_WalkOrigin = TailOrigin | Literal["reminder"]
 
 
 class ContextInvariantError(RuntimeError):
@@ -1513,7 +1527,7 @@ def build_messages(
     # Structural origin of the rendered dicts whose role alone does not tell
     # (non-focal notification markers and durable reminder rows are both
     # ``user``); everything else classifies by role at the end of the build.
-    origin_of: dict[int, TailOrigin] = {}
+    origin_of: dict[int, _WalkOrigin] = {}
 
     def _user_anchor(seq: int) -> int | None:
         """The assistant a user event at ``seq`` was blind to, or ``None``.
@@ -1606,9 +1620,16 @@ def build_messages(
                     # A durable reminder is model-visible but NOT a stimulus:
                     # it never advances ``reacting_to`` (so it never wakes or
                     # re-wakes the session) and is never anchored — its
-                    # position is its seq, in every build.
+                    # position is its seq, in every build. The trailing-
+                    # stimulus notice is the one row that IS a tail of its
+                    # own: it stands in for the missed events, so the gate
+                    # treats it as owed; every other section is transparent.
                     messages.append(msg)
-                    origin_of[id(msg)] = "reminder"
+                    origin_of[id(msg)] = (
+                        "notice"
+                        if reminder_section("message", e.data) == "trailing_stimulus"
+                        else "reminder"
+                    )
                     continue
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
                 if e.orig_channel is not None and e.orig_channel != e.focal_channel_at_arrival:
@@ -1773,13 +1794,16 @@ def build_messages(
     # The tail is classified AFTER the prune / strip / degenerate filter — the
     # walk's last append is not the tail when those drop it (a pruned orphan
     # tool row, an empty assistant), which is exactly when the gates below
-    # must see the message before it. ``_strip_to_spec`` is an index-preserving
+    # must see the message before it — and looks PAST transparent reminder
+    # rows (see ``TailOrigin``). ``_strip_to_spec`` is an index-preserving
     # map, so the survivor's pre-strip dict (the one the walk tagged by
     # identity) is ``messages[i]``; every untagged dict classifies by role.
     tail_origin: TailOrigin = "none"
-    if survivors:
-        last = messages[survivors[-1]]
-        tail_origin = origin_of.get(id(last), _role_origin(last))
+    for i in reversed(survivors):
+        origin = origin_of.get(id(messages[i]), _role_origin(messages[i]))
+        if origin != "reminder":
+            tail_origin = origin
+            break
     stripped = [stripped[i] for i in survivors]
 
     # Trailing-assistant guard: blind-spot USER messages and TOOL results are

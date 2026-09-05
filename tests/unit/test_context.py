@@ -1147,7 +1147,7 @@ class TestMonotonicity:
             ),
         ]
         r2 = build_messages(l2, system_prompt=None)
-        assert r2.tail_origin == "reminder"
+        assert r2.tail_origin == "notice"
         assert r2.needs_trailing_notice is False
         assert r2.reacting_to == 3  # the row is not a stimulus
         assert r2.messages[-1] == {"role": "user", "content": TRAILING_STIMULUS_NOTICE}
@@ -1446,7 +1446,9 @@ class TestReminderEvents:
         ctx = build_messages(events, system_prompt=None)
         assert ctx.messages[1] == {"role": "user", "content": "━━━ Open obligations ━━━\n• req_1"}
         assert ctx.reacting_to == 1
-        assert ctx.tail_origin == "reminder"
+        # Transparent to the tail gate: the unanswered inbound before it is
+        # still the tail (a failed attempt leaves its rows behind the inbound).
+        assert ctx.tail_origin == "user"
 
     def test_reminder_render_is_independent_of_created_at_and_tz(self) -> None:
         data = {"role": "user", "content": "nag", "metadata": _reminder_meta("concise")}
@@ -1469,9 +1471,9 @@ class TestReminderEvents:
         l2[2].data["reacting_to"] = 1
         b1 = build_messages(l1, system_prompt=None).messages
         b2 = build_messages(l2, system_prompt=None).messages
-        assert [m.get("content") for m in b2] == ["hello", "reminder", "hi"] or [
-            str(m.get("content")).split("\n")[-1] for m in b2
-        ] == ["hello", "reminder", "hi"]
+        # The inbound renders with its ``[received=…]`` envelope, so compare
+        # the last line of each message: the reminder stays at its seq.
+        assert [str(m.get("content")).split("\n")[-1] for m in b2] == ["hello", "reminder", "hi"]
         assert_message_prefix(b1, b2)
 
     def test_prefix_holds_with_reminder_rows_across_two_steps(self) -> None:
@@ -1515,8 +1517,27 @@ class TestTailOrigin:
         t_call = _evt(2, "assistant", tool_calls=[_tc("c1")])
         t_call.data["reacting_to"] = 1
         assert self._origin([u, t_call, _evt(3, "tool", tool_call_id="c1", content="ok")]) == "tool"
-        assert self._origin([u, _evt(2, "user", content="r", metadata=_reminder_meta())]) == (
-            "reminder"
+        # Transparent rows: the tail is the last non-reminder message.
+        assert self._origin([u, _evt(2, "user", content="r", metadata=_reminder_meta())]) == "user"
+        assert (
+            self._origin([u, a, _evt(3, "user", content="r", metadata=_reminder_meta("concise"))])
+            == "assistant"
+        )
+        # The trailing-stimulus notice row is a tail of its own.
+        assert (
+            self._origin(
+                [
+                    u,
+                    a,
+                    _evt(
+                        3,
+                        "user",
+                        content=TRAILING_STIMULUS_NOTICE,
+                        metadata=_reminder_meta("trailing_stimulus"),
+                    ),
+                ]
+            )
+            == "notice"
         )
         assert (
             self._origin(
@@ -1552,6 +1573,68 @@ class TestTailOrigin:
         ctx = build_messages(events, system_prompt=None)
         assert ctx.tail_origin == "assistant"
         assert ctx.needs_trailing_notice is True
+
+
+class TestReminderRowsAreTransparentToTheTail:
+    """A failed or preempted step leaves the rows it wrote in the log behind a
+    still-unanswered stimulus. The retry's build must classify the tail past
+    them, or the gate would see "not owed" and write a status listing after
+    the very inbound it exists to keep last — and a pruned-orphan stimulus
+    would lose its notice."""
+
+    def test_retry_after_rows_written_behind_an_inbound_still_owes(self) -> None:
+        events = [
+            _evt(1, "user", content="please handle this"),
+            _evt(2, "user", content="━━━ Open obligations ━━━\n• r", metadata=_reminder_meta()),
+            _evt(3, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "user"
+        assert ctx.reacting_to == 1
+
+    def test_retry_after_rows_written_behind_a_tool_result_still_owes(self) -> None:
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("t1")]),
+            _evt(3, "tool", tool_call_id="t1", content="ok"),
+            _evt(4, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "tool"
+
+    def test_pruned_orphan_behind_an_assistant_and_a_row_still_reports_the_notice(self) -> None:
+        # A row written after the assistant must not mask the trailing-
+        # assistant guard: the orphan result is still unreacted and unrendered.
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late result"),
+            _evt(4, "user", content="━━━ Open obligations ━━━\n• r", metadata=_reminder_meta()),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.reacting_to == 3
+        assert ctx.tail_origin == "assistant"
+        assert ctx.needs_trailing_notice is True
+
+    def test_a_written_notice_row_is_the_tail_and_is_not_re_reported(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late result"),
+            _evt(
+                4,
+                "user",
+                content=TRAILING_STIMULUS_NOTICE,
+                metadata=_reminder_meta("trailing_stimulus"),
+            ),
+            _evt(5, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "notice"
+        assert ctx.needs_trailing_notice is False
 
 
 class TestTrailingNoticeReserve:

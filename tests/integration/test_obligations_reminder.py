@@ -20,7 +20,7 @@ from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness.obligations import OBLIGATIONS_EMPTY_CONTENT
 from aios.harness.step_context import StepContext
-from aios.models.events import Event
+from aios.models.events import REMINDER_METADATA_KEY, Event
 from aios.models.sessions import Ok
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
@@ -168,3 +168,36 @@ class TestPresenceGate:
         await _answer(pool, sid, "req-quick")
         assert (await _compose(pool, sid, events=[])).reminders_written == ()
         assert await _rows(pool, sid) == []
+
+
+class TestMultiSectionWriteOrder:
+    async def test_two_rows_in_one_step_replay_in_plan_order(
+        self, aios_env: dict[str, str], migrated_db_url: str, stub_tool_provider: None
+    ) -> None:
+        """A concise agent whose ask has scrolled out writes TWO rows on one
+        step (obligations, then concise). The persisted order must be the
+        stand-in order, or the next build would not be a prefix extension
+        and the preview would differ from the sent payload."""
+        pool = await create_pool(migrated_db_url, min_size=1, max_size=4)
+        try:
+            _agent, env, session = await seed_agent_env_session(
+                pool,
+                account_id=_ACCOUNT,
+                prefix=f"obl-order-{uuid.uuid4().hex[:6]}",
+                output_style="concise",
+            )
+            sid = session.id
+            await _open(pool, sid, env.id, "req-order", ask="the scrolled-out task")
+            sent, _ = await compose_step_for(pool, sid, account_id=_ACCOUNT, events=[])
+            assert sent.reminders_written == ("obligations", "concise")
+            rows = await _rows(pool, sid)
+            assert [r.data["metadata"][REMINDER_METADATA_KEY]["section"] for r in rows] == [
+                "obligations",
+                "concise",
+            ]
+            # Replay over the persisted rows: nothing new, and byte-identical.
+            replay, _ = await compose_step_for(pool, sid, account_id=_ACCOUNT, events=rows)
+            assert replay.reminders_written == ()
+            assert sent.messages == replay.messages
+        finally:
+            await pool.close()

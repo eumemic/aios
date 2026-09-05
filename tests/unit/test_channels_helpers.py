@@ -10,12 +10,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from aios.harness.channels import (
     apply_monologue_prefix,
     augment_with_focal_paradigm,
     build_focal_paradigm_block,
+    max_channels_reminder_local,
     render_channels_reminder,
 )
+from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
+from aios.harness.tokens import approx_tokens
 from aios.models.events import Event
 
 
@@ -189,6 +194,46 @@ class TestRenderChannelsReminder:
         )
         assert content is not None
         assert f"○ channel_id={self._FAMILY} — 0 unread" in content
+
+
+class TestMaxChannelsReminderLocal:
+    """The reserve must cover the fattest listing a step can WRITE — the
+    preview is truncated by code point, so a dense non-ASCII preview costs
+    several times an ASCII one of the same length."""
+
+    _ALICE = "signal/bot/alice"
+    _OTHERS = tuple(f"signal/bot/peer-{i:02d}" for i in range(6))
+
+    def test_zero_without_channels(self) -> None:
+        assert max_channels_reminder_local([]) == 0
+
+    @pytest.mark.parametrize(
+        "preview",
+        [
+            "x" * 200,
+            "the quick brown fox jumps over the lazy dog " * 5,
+            "日本語のテキストがここに長く続いています" * 6,
+            "😀🚀🎉🔥💯🙏" * 20,
+            "\U0001f9d1‍\U0001f4bb" * 60,
+            "".join(chr(0x1FA70 + i) for i in range(60)),
+            "\U0010fffd" * 60,
+        ],
+    )
+    def test_bound_covers_the_real_render(self, preview: str) -> None:
+        channels = [self._ALICE, *self._OTHERS]
+        events = [
+            _user_event(i + 1, orig=addr, focal_at=self._ALICE, content=preview)
+            for i, addr in enumerate(self._OTHERS)
+        ]
+        content = render_channels_reminder(channels, events, focal_channel=self._ALICE)
+        assert content is not None
+        priced = approx_tokens(
+            [
+                {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+                {"role": "user", "content": content},
+            ]
+        )
+        assert priced <= max_channels_reminder_local(channels), (preview[:20], priced)
 
 
 # ── apply_monologue_prefix ─────────────────────────────────────────────────

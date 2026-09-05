@@ -31,7 +31,10 @@ from aios.models.events import (
     reminder_section,
 )
 from aios.services.inbound import _RESERVED_METADATA_KEYS
-from aios.services.inbound_budget import _INFERENCE_BEARING_PREDICATE
+from aios.services.inbound_budget import (
+    _INFERENCE_BEARING_PREDICATE,
+    _SESSION_INFERENCE_BEARING_PREDICATE,
+)
 
 
 def _reminder(section: ReminderSection = "concise", role: str = "user") -> dict[str, Any]:
@@ -50,22 +53,28 @@ class TestPredicate:
             {"role": "user", "content": "hi"},
             {"role": "user", "content": "hi", "metadata": {}},
             {"role": "user", "content": "hi", "metadata": {"request": {"request_id": "r"}}},
-            _reminder(role="assistant"),
             {"role": "tool", "content": "x"},
+            # A scalar or array metadata that merely CONTAINS the string is
+            # not an object carrying the key — to Python or to SQL.
+            {"role": "user", "content": "hi", "metadata": REMINDER_METADATA_KEY},
+            {"role": "user", "content": "hi", "metadata": [REMINDER_METADATA_KEY]},
         ):
             assert is_reminder_event("message", data) is False, data
             assert reminder_section("message", data) is None, data
         assert is_reminder_event("lifecycle", _reminder()) is False
 
     def test_presence_is_the_whole_predicate(self) -> None:
-        # The Python predicate keys on the marker's PRESENCE, exactly like the
-        # SQL twin: a marker with an odd section (or no dict at all) is still a
-        # reminder to every reader, never a stimulus to some of them.
+        # The Python predicate keys on the marker's PRESENCE in a metadata
+        # object, exactly like the SQL twin — no role term on either side: a
+        # marker with an odd section, a non-dict marker value, or a non-user
+        # role is still a reminder to every reader, never a stimulus to some.
         assert is_reminder_event("message", _reminder(section="bogus")) is True  # type: ignore[arg-type]
         assert reminder_section("message", _reminder(section="bogus")) == "bogus"  # type: ignore[arg-type]
         odd = {"role": "user", "metadata": {REMINDER_METADATA_KEY: 7}}
         assert is_reminder_event("message", odd) is True
         assert reminder_section("message", odd) is None
+        for role in ("assistant", "tool"):
+            assert is_reminder_event("message", _reminder(role=role)) is True, role
 
     def test_marker_shape_is_defensive(self) -> None:
         assert is_reminder_event("message", {"role": "user", "metadata": "junk"}) is False
@@ -83,17 +92,28 @@ class TestSqlForm:
         for name, sql, col in (
             ("UNREACTED_ROWS_SQL", UNREACTED_ROWS_SQL, "e.data"),
             ("UNREACTED_ROWS_FLOORED_SQL", UNREACTED_ROWS_FLOORED_SQL, "e.data"),
-            ("_INFERENCE_BEARING_PREDICATE", _INFERENCE_BEARING_PREDICATE, "data"),
+            ("_SESSION_INFERENCE_BEARING_PREDICATE", _SESSION_INFERENCE_BEARING_PREDICATE, "data"),
         ):
             assert REMINDER_EXCLUDE_SQL.format(col=col) in sql, (
                 f"{name} must exclude reminder rows via REMINDER_EXCLUDE_SQL"
             )
+        # The per-counterparty counter keys on ``orig_channel = $2`` and
+        # reminder rows carry no origin channel, so it deliberately stays on
+        # the 0128 index-only predicate (see inbound_budget.py).
+        assert REMINDER_METADATA_KEY not in _INFERENCE_BEARING_PREDICATE
+
+    def test_sql_form_requires_an_object_metadata(self) -> None:
+        sql = REMINDER_EXCLUDE_SQL.format(col="data")
+        assert "jsonb_typeof(data->'metadata') = 'object'" in sql
 
     def test_windower_tail_clamp_keys_on_the_newest_stimulus(self) -> None:
         assert REMINDER_EXCLUDE_SQL.format(col="data") in events_mod._STIMULUS_ROW_SQL
         assert "role <> 'assistant'" in events_mod._STIMULUS_ROW_SQL
         seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
-        assert "_STIMULUS_ROW_SQL if stimulus_only" in seek_src
+        assert "stimulus_only" in seek_src
+        assert "_STIMULUS_ROW_SQL" in seek_src
+        # A tool-result stimulus anchors on its issuing assistant.
+        assert "jsonb_build_object('id', $2::text)" in seek_src
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
         assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
 

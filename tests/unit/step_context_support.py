@@ -64,13 +64,15 @@ def message_event(
     )
 
 
-def make_prelude(*, system_prompt: str = "sys") -> StepPrelude:
+def make_prelude(
+    *, system_prompt: str = "sys", reminders_upper_bound_local: int = 0
+) -> StepPrelude:
     return StepPrelude(
         system_prompt=system_prompt,
         tools=[],
         skill_versions=[],
         obligations=[],
-        reminders_upper_bound_local=0,
+        reminders_upper_bound_local=reminders_upper_bound_local,
     )
 
 

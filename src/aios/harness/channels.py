@@ -144,6 +144,14 @@ def augment_with_focal_paradigm(base_system: str, channels: list[str]) -> str:
     return join_blocks(base_system, build_focal_paradigm_block(channels))
 
 
+# Sixty four-byte code points the tokenizer has no merges for (a private-use
+# character costs one token per UTF-8 byte — the byte-fallback ceiling), plus
+# the ellipsis: the densest preview ``render_channels_reminder`` can emit,
+# since it truncates by code point at 60. Prices above any real 60-character
+# preview — ASCII, CJK, or the emoji mixes that tokenize worst.
+_FATTEST_PREVIEW = "\U0010fffd" * 60 + "…"
+
+
 def max_channels_reminder_local(channels: list[str]) -> int:
     """Worst-case local-token cost of :func:`render_channels_reminder`.
 
@@ -166,8 +174,10 @@ def max_channels_reminder_local(channels: list[str]) -> int:
     lines = ["━━━ Channels ━━━"]
     for addr in channels:
         # Preview length matches the 60-char truncation + ellipsis in
-        # render_channels_reminder below.
-        lines.append(f'○ channel_id={addr} — 9999 unread: "{"x" * 61}"')
+        # render_channels_reminder below; the truncation is by CODE POINT, so
+        # the fattest preview is 60 four-byte characters (emoji tokenize at
+        # ~3-4 tokens each), not 60 ASCII letters.
+        lines.append(f'○ channel_id={addr} — 9999 unread: "{_FATTEST_PREVIEW}"')
     # The row is user-role and lands after the log's final message. When
     # that message is also user-role, ``merge_adjacent_user_messages``
     # concatenates them; reserving an assistant-separator's worth of tokens

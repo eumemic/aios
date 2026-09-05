@@ -74,7 +74,9 @@ _TASK_UNAVAILABLE = "[TASK CONTENT UNAVAILABLE — return an error; do not infer
 _REMINDER_ABRIDGED = (
     "[TASK ABRIDGED IN THIS REMINDER — {chars} characters, over this reminder's "
     "{cap}-character budget. This is a reminder, not the task: the original request "
-    "message carries it in full. Do not refuse on account of this line.]"
+    "message (this request_id) carries it in full. If that message is not in your "
+    "context, retrieve it with search_events before acting; do not infer the task "
+    "from this line, and do not refuse on account of it.]"
 )
 
 # Max chars of a rendered ``output_schema`` contract (#1522). Kept narrower

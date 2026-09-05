@@ -14,7 +14,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from aios.harness.channels import render_channels_reminder
-from aios.harness.concise import CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS
+from aios.harness.concise import (
+    CONCISE_NAG_CONTENT,
+    CONCISE_NAG_CONTENT_CHANNELS,
+    CONCISE_NAG_OFF_CONTENT,
+)
 from aios.harness.context import TRAILING_STIMULUS_NOTICE, TailOrigin
 from aios.harness.obligations import OBLIGATIONS_EMPTY_CONTENT, render_obligations_reminder
 from aios.harness.reminders import (
@@ -177,16 +181,8 @@ class TestChannels:
         assert _sections(plan) == ["channels"]
         assert "channel_id=signal/+1/chat-b (focal)" in plan.writes[0].content
 
-    def test_evicted_row_re_emits_same_content(self) -> None:
-        # The row scrolled out: the slate simply lacks it, so the same
-        # listing is written again (the re-emit-on-eviction policy).
-        listing = self._listing(_BASE)
-        plan = _plan(_BASE, channels=_CHANNELS, focal_channel=_FOCAL)
-        assert _sections(plan) == ["channels"]
-        assert plan.writes[0].content == listing
-
     def test_owed_tail_holds_the_listing_back(self) -> None:
-        for origin in ("user", "tool"):
+        for origin in ("user", "tool", "notice"):
             plan = _plan(_BASE, channels=_CHANNELS, focal_channel=_FOCAL, tail_origin=origin)
             assert plan == ReminderPlan(writes=(), skipped=1), origin
         plan = _plan(
@@ -200,7 +196,7 @@ class TestChannels:
         assert plan.skipped == 1
 
     def test_not_owed_tails_allow_the_listing(self) -> None:
-        for origin in ("assistant", "notification", "reminder", "none"):
+        for origin in ("assistant", "notification", "none"):
             plan = _plan(_BASE, channels=_CHANNELS, focal_channel=_FOCAL, tail_origin=origin)
             assert _sections(plan) == ["channels"], origin
 
@@ -236,6 +232,26 @@ class TestObligations:
         plan = _plan(events, obligations=[_ob("req_1"), _ob("req_2")])
         assert _sections(plan) == ["obligations"]
         assert "req_2" in plan.writes[0].content
+
+    def test_set_shrinks_with_remaining_asks_present_rewrites_the_listing(self) -> None:
+        # An in-window listing is kept truthful regardless of presence: once
+        # req_1 is answered, a row still naming it would be the model's last
+        # word on what it owes for the rest of the window.
+        listing = render_obligations_reminder([_ob("req_1"), _ob("req_2")], session_id=_SESSION)
+        events = [
+            *_BASE,
+            _row(3, "obligations", listing),
+            _evt(4, "user", "do req_2", metadata={"request": {"request_id": "req_2"}}),
+        ]
+        plan = _plan(events, obligations=[_ob("req_2")], tail_origin="user")
+        assert _sections(plan) == ["obligations"]
+        assert "req_1" not in plan.writes[0].content
+        assert "req_2" in plan.writes[0].content
+        # And once rewritten, nothing more.
+        after = [*events, _row(5, "obligations", plan.writes[0].content)]
+        assert _plan(after, obligations=[_ob("req_2")], tail_origin="user") == ReminderPlan(
+            writes=(), skipped=1
+        )
 
     def test_partially_present_set_still_lists_everything(self) -> None:
         # One ask in the window, one not: the listing is owed (for the absent
@@ -308,8 +324,17 @@ class TestConcise:
         assert len(concise) == 1
         assert concise[0].content == CONCISE_NAG_CONTENT_CHANNELS
 
-    def test_evicted_row_re_emits(self) -> None:
-        assert _sections(_plan(_BASE, output_style="concise")) == ["concise"]
+    def test_style_turned_off_supersedes_the_row_once(self) -> None:
+        # The system-prompt rules block is gone the moment the style is off;
+        # the stale nag must not remain the transcript's only steering.
+        events = [*_BASE, _row(3, "concise", CONCISE_NAG_CONTENT)]
+        plan = _plan(events, output_style="default")
+        assert _sections(plan) == ["concise"]
+        assert plan.writes[0].content == CONCISE_NAG_OFF_CONTENT
+        after = [*events, _row(4, "concise", CONCISE_NAG_OFF_CONTENT)]
+        assert _plan(after, output_style="default") == ReminderPlan(writes=(), skipped=1)
+        # Turned back on: the nag is written again (differs from the OFF row).
+        assert _sections(_plan(after, output_style="concise")) == ["concise"]
 
 
 class TestTrailingStimulus:
@@ -321,7 +346,7 @@ class TestTrailingStimulus:
     def test_not_digest_gated(self) -> None:
         # A prior notice row in the window never suppresses a new one: the
         # condition is about THIS build's tail, and a build whose tail is the
-        # prior row cannot report it (tail_origin == "reminder").
+        # prior row cannot report it (its tail_origin is "notice").
         events = [*_BASE, _row(3, "trailing_stimulus", TRAILING_STIMULUS_NOTICE)]
         plan = _plan(events, needs_trailing_notice=True)
         assert _sections(plan) == ["trailing_stimulus"]

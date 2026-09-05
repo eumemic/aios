@@ -118,24 +118,32 @@ def is_errored_lifecycle_event(kind: str, data: dict[str, Any]) -> bool:
 # the SQL readers through :data:`REMINDER_EXCLUDE_SQL` (the sweep's
 # unreacted-rows gate, the inbound budget, the windower's
 # retain-the-stimulus clamp), the Python readers through
-# :func:`is_reminder_event` — and both key on the marker's PRESENCE, so the
-# write↔read coupling is one constant, not a set of free strings (the #1084
-# stance) and a row is a reminder to every reader or to none.
+# :func:`is_reminder_event` — and both are THE SAME predicate: a message
+# event whose ``metadata`` is an object carrying the key (no role term on
+# either side; the SQL's object test mirrors the Python ``isinstance`` so a
+# scalar or array ``metadata`` that happens to contain the string is a
+# reminder to neither). The write↔read coupling is one constant, not a set of
+# free strings (the #1084 stance), and a row is a reminder to every reader or
+# to none — ``tests/integration/test_reminder_rows.py`` runs both predicates
+# over the same rows.
 REMINDER_METADATA_KEY: Final[str] = "aios_reminder"
 ReminderSection = Literal["channels", "obligations", "concise", "trailing_stimulus"]
 # NULL-safe on purpose: ``<col>->'metadata'`` is NULL on every row without a
 # metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` is NULL,
 # which a WHERE clause treats as false — the bare form would drop those rows.
+# Every SQL reader applies it under ``kind = 'message'``.
 REMINDER_EXCLUDE_SQL: Final[str] = (
-    "NOT COALESCE({col}->'metadata' ? '" + REMINDER_METADATA_KEY + "', false)"
+    "NOT COALESCE(jsonb_typeof({col}->'metadata') = 'object' "
+    "AND {col}->'metadata' ? '" + REMINDER_METADATA_KEY + "', false)"
 )
 
 
 def is_reminder_event(kind: str, data: dict[str, Any]) -> bool:
     """The non-stimulus predicate ``append_event`` reads (see the block comment
-    above): ``True`` iff the event is a user message carrying the reminder
-    marker — the Python twin of :data:`REMINDER_EXCLUDE_SQL`."""
-    if kind != "message" or data.get("role") != "user":
+    above): ``True`` iff the event is a message whose ``metadata`` object
+    carries the reminder marker — the Python twin of
+    :data:`REMINDER_EXCLUDE_SQL`."""
+    if kind != "message":
         return False
     metadata = data.get("metadata")
     return isinstance(metadata, dict) and REMINDER_METADATA_KEY in metadata

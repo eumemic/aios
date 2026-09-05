@@ -14,7 +14,7 @@ from tests.e2e.harness import Harness, assistant
 from tests.e2e.local_targets import allow_local_targets
 from tests.helpers.connections import authed_client, wired_app
 from tests.helpers.images import valid_png_bytes
-from tests.support import assert_message_prefix
+from tests.support import assert_message_prefix, reminder_rows
 
 
 def _uniq() -> str:
@@ -162,8 +162,11 @@ class TestContextEndpoint:
         r = await http_client.get(f"/v1/sessions/{session.id}/context")
         assert r.status_code == 200, r.text
         preview1 = r.json()["messages"]
+        # The preview renders the row it would write, but writes nothing.
+        assert reminder_rows(await harness.events(session.id)) == []
         await harness.run_step(session.id)
         assert preview1 == harness.model_calls[0]["messages"]
+        assert len(reminder_rows(await harness.events(session.id))) == 1
 
         await harness.inject_message(session.id, "more")
         r = await http_client.get(f"/v1/sessions/{session.id}/context")

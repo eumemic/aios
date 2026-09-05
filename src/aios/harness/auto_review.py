@@ -72,6 +72,7 @@ from aios.harness.completion import (
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
 from aios.models.agents import StepSurface
+from aios.models.events import is_reminder_event
 from aios.services import model_providers as model_providers_service
 from aios.services import sessions as sessions_service
 
@@ -479,6 +480,11 @@ async def _recent_user_lines(
     for event in events:
         data = event.data
         if data.get("role") != "user":
+            continue
+        if is_reminder_event("message", data):
+            # Harness-authored reminder rows are user-role bookkeeping, not
+            # anyone's line: they carry no authorisation and must not consume
+            # the checker's line budget ahead of the human's real ask.
             continue
         text = _content_text(data.get("content"))
         if not text:

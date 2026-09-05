@@ -59,11 +59,19 @@ from aios.models.events import REMINDER_EXCLUDE_SQL
 # writes: a no-wake lifecycle and every internal harness lifecycle transition
 # carry no ``wake`` key (``->>`` yields ``NULL`` → not true), so the free paths
 # stay uncounted by construction.
+_INFERENCE_BEARING_PREDICATE = """
+              (kind = 'message'   AND data->>'role' = 'user')
+           OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE)
+"""
 # Harness-authored durable reminder rows are ``role='user'`` but carry no
 # inference of their own (they are non-stimulus by construction — see
 # ``REMINDER_EXCLUDE_SQL``); counting them would let a session's own
-# bookkeeping consume its inbound budget and 429 real inbounds.
-_INFERENCE_BEARING_PREDICATE = f"""
+# bookkeeping consume its inbound budget and 429 real inbounds. Only the
+# SESSION-grain counter can meet one: the per-counterparty counter keys on
+# ``orig_channel = $2`` and reminder rows are appended with no origin
+# channel, so adding the JSONB term there would only cost the 0128 partial
+# index its index-only scan for rows it already excludes.
+_SESSION_INFERENCE_BEARING_PREDICATE = f"""
               (kind = 'message'   AND data->>'role' = 'user'
                AND {REMINDER_EXCLUDE_SQL.format(col="data")})
            OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE)
@@ -132,7 +140,7 @@ async def _count_recent_session_inbounds(
             FROM events
             WHERE account_id = $1
               AND session_id = $2
-              AND ({_INFERENCE_BEARING_PREDICATE})
+              AND ({_SESSION_INFERENCE_BEARING_PREDICATE})
               AND created_at > now() - make_interval(secs => $3::bigint)
             """,
             account_id,
