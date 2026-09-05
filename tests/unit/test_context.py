@@ -15,7 +15,10 @@ import pytest
 from aios.harness.channels import build_channels_tail_block
 from aios.harness.context import (
     _TRAILING_STIMULUS_NOTICE,
+    _USER_MESSAGE_SEPARATOR_CONTENT,
     EPHEMERAL_TAIL_KEY,
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
+    ContextInvariantError,
     _approx_count,
     _concat_user_messages,
     _is_degenerate_empty_assistant,
@@ -26,7 +29,7 @@ from aios.harness.context import (
     stub_missing_reasoning_content,
 )
 from aios.harness.window import WindowOmission
-from aios.models.events import Event
+from aios.models.events import REMINDER_METADATA_KEY, Event
 from tests.support import assert_message_prefix
 
 
@@ -1427,6 +1430,144 @@ class TestBlindSpotUserAnchoring:
         events[4].data["reacting_to"] = 1  # poisoned: lower than seq 3
         contents = [str(m.get("content")).split("\n")[-1] for m in self._build(events)]
         assert contents[:5] == ["one", "a1", "two", "a2", "a3"]
+
+
+def _reminder_meta(section: str = "obligations") -> dict[str, Any]:
+    return {REMINDER_METADATA_KEY: {"section": section, "digest": "d", "v": 1}}
+
+
+class TestReminderEvents:
+    """Durable harness reminders are model-visible user rows that are NOT
+    stimuli: rendered bare at their seq, never advancing ``reacting_to``,
+    never anchored."""
+
+    def test_reminder_renders_bare_and_does_not_advance_reacting_to(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="━━━ Open obligations ━━━\n• req_1", metadata=_reminder_meta()),
+        ]
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.messages[1] == {"role": "user", "content": "━━━ Open obligations ━━━\n• req_1"}
+        assert ctx.reacting_to == 1
+        assert ctx.tail_origin == "reminder"
+
+    def test_reminder_render_is_independent_of_created_at_and_tz(self) -> None:
+        data = {"role": "user", "content": "nag", "metadata": _reminder_meta("concise")}
+        a = render_user_event(data, None, None, datetime(2026, 1, 1, tzinfo=UTC), tz_name="UTC")
+        b = render_user_event(
+            data, None, None, datetime(2027, 6, 30, 5, tzinfo=UTC), tz_name="America/Los_Angeles"
+        )
+        assert a == b == {"role": "user", "content": "nag"}
+
+    def test_reminder_between_reacting_to_and_assistant_stays_at_seq(self) -> None:
+        """A reminder written after the stimulus but before the assistant's
+        inference sits in the "blind spot" window by seq — it must NOT be
+        anchored after that assistant (its position is its seq), and the
+        assistant's arrival must be a pure append."""
+        l1 = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="reminder", metadata=_reminder_meta()),
+        ]
+        l2 = [*l1, _evt(3, "assistant", content="hi")]
+        l2[2].data["reacting_to"] = 1
+        b1 = build_messages(l1, system_prompt=None).messages
+        b2 = build_messages(l2, system_prompt=None).messages
+        assert [m.get("content") for m in b2] == ["hello", "reminder", "hi"] or [
+            str(m.get("content")).split("\n")[-1] for m in b2
+        ] == ["hello", "reminder", "hi"]
+        assert_message_prefix(b1, b2)
+
+    def test_prefix_holds_with_reminder_rows_across_two_steps(self) -> None:
+        l1 = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="channels", metadata=_reminder_meta("channels")),
+            _evt(3, "user", content="obligations", metadata=_reminder_meta("obligations")),
+        ]
+        l2 = [*l1, _evt(4, "assistant", content="hi"), _evt(5, "user", content="more")]
+        l2[3].data["reacting_to"] = 1
+        b1 = build_messages(l1, system_prompt=None).messages
+        b2 = build_messages(l2, system_prompt=None).messages
+        assert_message_prefix(b1, b2)
+        assert build_messages(l2, system_prompt=None).reacting_to == 5
+
+    def test_reminder_only_window_with_omission_fails_loud(self) -> None:
+        """A windowed slate holding reminders but no stimulus would report
+        ``reacting_to=0`` and idle the session with an inbound unanswered just
+        past the boundary. The windower makes it unreachable; the build
+        refuses rather than returning the lie."""
+        events = [_evt(7, "user", content="reminder", metadata=_reminder_meta())]
+        omission = WindowOmission(omitted_messages=6, began_at=events[0].created_at)
+        with pytest.raises(ContextInvariantError):
+            build_messages(events, system_prompt=None, omission=omission)
+
+
+class TestTailOrigin:
+    """``ContextResult.tail_origin`` classifies the LAST rendered message
+    structurally, after prune / strip / degenerate filtering."""
+
+    @staticmethod
+    def _origin(events: list[Event]) -> str:
+        return build_messages(events, system_prompt=None).tail_origin
+
+    def test_classifies_each_kind(self) -> None:
+        u = _evt(1, "user", content="hi")
+        a = _evt(2, "assistant", content="hello")
+        a.data["reacting_to"] = 1
+        assert self._origin([u]) == "user"
+        assert self._origin([u, a]) == "assistant"
+        t_call = _evt(2, "assistant", tool_calls=[_tc("c1")])
+        t_call.data["reacting_to"] = 1
+        assert self._origin([u, t_call, _evt(3, "tool", tool_call_id="c1", content="ok")]) == "tool"
+        assert self._origin([u, _evt(2, "user", content="r", metadata=_reminder_meta())]) == (
+            "reminder"
+        )
+        assert (
+            self._origin(
+                [
+                    u,
+                    _evt(
+                        2,
+                        "user",
+                        content="ping",
+                        orig_channel="tg:1",
+                        focal_channel_at_arrival="tg:2",
+                    ),
+                ]
+            )
+            == "notification"
+        )
+        assert build_messages([], system_prompt=None).tail_origin == "none"
+        assert build_messages([], system_prompt="SYS").tail_origin == "system"
+
+    def test_trailing_empty_assistant_is_filtered_before_classification(self) -> None:
+        u = _evt(1, "user", content="hi")
+        empty = _evt(2, "assistant", content="")
+        empty.data["reacting_to"] = 1
+        assert self._origin([u, empty]) == "user"
+
+    def test_pruned_orphan_tail_classifies_as_the_assistant_before_it(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late"),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "assistant"
+        assert ctx.needs_trailing_notice is True
+
+
+class TestTrailingNoticeReserve:
+    def test_render_under_bound(self) -> None:
+        from aios.harness.tokens import approx_tokens
+
+        priced = approx_tokens(
+            [
+                {"role": "user", "content": _TRAILING_STIMULUS_NOTICE},
+                {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+            ]
+        )
+        assert 0 < priced <= TRAILING_NOTICE_UPPER_BOUND_LOCAL
 
 
 class TestFieldStripping:

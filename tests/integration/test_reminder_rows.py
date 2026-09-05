@@ -200,6 +200,42 @@ class TestWindowerRetainsTheNewestStimulus:
         assert 2 in seqs
         ctx = build_messages(windowed.events, system_prompt=None, omission=windowed.omission)
         assert any("lorem ipsum" in str(m.get("content")) for m in ctx.messages)
+        # The reminder is not a stimulus: the build reacts to the inbound only.
+        assert ctx.reacting_to == 1
+
+
+class TestReminderRowsArePricedBare:
+    async def test_cumulative_tokens_is_bare_render_plus_separator(
+        self, pool_session: tuple[asyncpg.Pool[Any], str]
+    ) -> None:
+        """A reminder's stored delta is its bare render plus the adjacent-user
+        separator pre-pay — the same pricing path as any user row, minus the
+        ``[received=…]`` envelope that path adds to a real inbound."""
+        from datetime import UTC, datetime
+
+        from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, render_user_event
+        from aios.harness.tokens import approx_tokens
+
+        pool, sid = pool_session
+        text = "━━━ Open obligations ━━━\n• req_01 [self] opened=2026-09-05T00:00:00Z task"
+        data = _reminder_data(text)
+        await sessions_service.append_user_message(pool, sid, "hello", account_id=_ACCOUNT)
+        async with pool.acquire() as conn:
+            await queries.append_event(
+                conn, account_id=_ACCOUNT, session_id=sid, kind="message", data=data
+            )
+            cums = await conn.fetch(
+                "SELECT cumulative_tokens FROM events WHERE session_id = $1 "
+                "AND kind = 'message' ORDER BY seq",
+                sid,
+            )
+        stored_delta = cums[1]["cumulative_tokens"] - cums[0]["cumulative_tokens"]
+        bare = {"role": "user", "content": text}
+        expected = approx_tokens(
+            [bare, {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT}]
+        )
+        assert stored_delta == expected
+        assert render_user_event(data, None, None, datetime.now(UTC)) == bare
 
 
 class TestInboundBudgetIgnoresReminders:

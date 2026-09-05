@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from operator import itemgetter
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from aios.harness.image_resize import (
@@ -64,7 +64,7 @@ from aios.harness.vision import (
 )
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
-from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event
+from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event, is_reminder_event
 from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
@@ -714,6 +714,14 @@ def render_user_event(
     msg = {k: v for k, v in event_data.items() if k != "metadata"}
     metadata = event_data.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else None
+
+    # A harness-authored durable reminder row renders as its bare content: no
+    # ``[received=…]`` envelope, no headers, no attachments — a pure function of
+    # the row, so its bytes are identical in every build (the prompt-prefix
+    # invariant) and never depend on ``created_at`` or the account timezone.
+    if is_reminder_event("message", event_data):
+        return {"role": "user", "content": event_data.get("content", "")}
+
     received = _format_received(created_at, tz_name)
 
     # A request injected via invoke_session (e.g. a workflow agent child's first
@@ -1305,12 +1313,38 @@ _TRAILING_STIMULUS_NOTICE = (
 )
 
 
+# What the LAST rendered message of a build is, classified structurally during
+# the walk (never by sniffing rendered prose): the composer's tail gate keys on
+# it — a trailing ``user`` / ``tool`` is a direct stimulus the agent owes a
+# response to; ``assistant`` / ``notification`` (a non-focal 🔔 marker) /
+# ``reminder`` (a durable harness reminder row) / ``system`` / ``none`` are not.
+TailOrigin = Literal["none", "system", "assistant", "tool", "user", "notification", "reminder"]
+
+
+class ContextInvariantError(RuntimeError):
+    """A build that would misreport what the model is reacting to.
+
+    Raised — loudly, so the step errors and latches instead of idling the
+    session — when a windowed slate holds durable reminder rows but not a
+    single stimulus: the windower's retain-the-newest-stimulus clamp makes
+    this unreachable, and returning ``reacting_to=0`` here would mark the
+    assistant as having reacted to nothing while an unanswered inbound sits
+    just past the window boundary.
+    """
+
+
 @dataclass(slots=True)
 class ContextResult:
     """Return value of :func:`build_messages`."""
 
     messages: list[dict[str, Any]]
     reacting_to: int  # max seq of user/tool events included in context
+    # Structural class of the last rendered message (post prune/strip/filter).
+    tail_origin: TailOrigin = "none"
+    # The build ends on an assistant turn while holding an unreacted stimulus —
+    # the trailing-assistant guard condition — reported so the composer can
+    # act on it structurally.
+    needs_trailing_notice: bool = False
 
 
 def _quarantine_placeholder(seq: int) -> dict[str, Any]:
@@ -1331,6 +1365,12 @@ def _quarantine_placeholder(seq: int) -> dict[str, Any]:
 # Reserved unconditionally — like the tail block, which also may not render.
 # ``TestOmissionMarker`` pins a worst-case render under this bound.
 OMISSION_MARKER_UPPER_BOUND_LOCAL = 128
+
+# Same shape for the trailing-stimulus notice (rendered after windowing, so
+# the reserve keeps the send-time payload under ``window_max``); priced with
+# the adjacent-user separator pre-pay, like every user row.
+# ``TestTrailingNoticeReserve`` pins the render under this bound.
+TRAILING_NOTICE_UPPER_BOUND_LOCAL = 128
 
 
 def _approx_count(n: int) -> str:
@@ -1504,6 +1544,10 @@ def build_messages(
     # is the same in every build that contains it.
     after_assistant: dict[int, list[tuple[int, dict[str, Any]]]] = {}
     max_stimulus_seq: int = 0
+    # Structural origin of the rendered dicts whose role alone does not tell
+    # (non-focal notification markers and durable reminder rows are both
+    # ``user``); everything else classifies by role at the end of the build.
+    origin_of: dict[int, TailOrigin] = {}
 
     def _user_anchor(seq: int) -> int | None:
         """The assistant a user event at ``seq`` was blind to, or ``None``.
@@ -1592,7 +1636,17 @@ def build_messages(
                     session_id=session_id,
                     workspace_path=workspace_path,
                 )
+                if is_reminder_event("message", e.data):
+                    # A durable reminder is model-visible but NOT a stimulus:
+                    # it never advances ``reacting_to`` (so it never wakes or
+                    # re-wakes the session) and is never anchored — its
+                    # position is its seq, in every build.
+                    messages.append(msg)
+                    origin_of[id(msg)] = "reminder"
+                    continue
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
+                if e.orig_channel is not None and e.orig_channel != e.focal_channel_at_arrival:
+                    origin_of[id(msg)] = "notification"
                 anchor = _user_anchor(e.seq)
                 if anchor is not None:
                     after_assistant.setdefault(anchor, []).append((e.seq, msg))
@@ -1689,6 +1743,16 @@ def build_messages(
     # leaving orphan tool results or an assistant with missing paired
     # results.
     messages = _prune_orphans(messages)
+    # ``_prune_orphans`` keeps the surviving dict objects, so the structural
+    # origins carry over by identity; every other dict classifies by role.
+    origins: list[TailOrigin] = [origin_of.get(id(m), _role_origin(m)) for m in messages]
+
+    if omission is not None and max_stimulus_seq == 0 and "reminder" in origins:
+        raise ContextInvariantError(
+            "windowed slate holds durable reminder rows but no stimulus; the "
+            "windower must retain the newest stimulus (session "
+            f"{session_id}, {len(events)} events)"
+        )
 
     # Head omission marker (#738): when the window omits transcript, tell
     # the model how much and how to recall it. After the prune (so it can't
@@ -1698,9 +1762,11 @@ def build_messages(
     # is the first retained event — the boundary.
     if omission is not None:
         messages.insert(0, _omission_marker(omission, events[0].created_at, tz_name))
+        origins.insert(0, "user")
 
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
+        origins.insert(0, "system")
 
     _correct_image_data_url_mimes(messages)
     _clamp_oversize_image_data_urls(messages)
@@ -1738,7 +1804,17 @@ def build_messages(
     # content sanitised…]" marker on the wire, so the model literally sees a wall
     # of its own malfunction markers. Excluding them is safe for every model
     # (nothing is lost) and breaks the imitation loop at the source.
-    stripped = [m for m in stripped if not _is_degenerate_empty_assistant(m)]
+    kept = [
+        (m, o)
+        for m, o in zip(stripped, origins, strict=True)
+        if not _is_degenerate_empty_assistant(m)
+    ]
+    stripped = [m for m, _o in kept]
+    # The tail is classified AFTER the prune / strip / degenerate filter — the
+    # walk's last append is not the tail when those drop it (a pruned orphan
+    # tool row, an empty assistant), which is exactly when the gates below
+    # must see the message before it.
+    tail_origin: TailOrigin = kept[-1][1] if kept else "none"
 
     # Trailing-assistant guard: blind-spot USER messages and TOOL results are
     # anchored after the assistant that was blind to them (#1120), so neither
@@ -1784,12 +1860,32 @@ def build_messages(
     # build with no other tail — the exact population this guard serves — the
     # breakpoint would land on the notice itself and the conversation prefix
     # would be re-cache-created every step (see ``inject_cache_breakpoints``).
-    if stripped and stripped[-1].get("role") == "assistant" and max_stimulus_seq > last_asst_rt:
+    needs_trailing_notice = tail_origin == "assistant" and max_stimulus_seq > last_asst_rt
+    if needs_trailing_notice:
         stripped.append(
             {"role": "user", "content": _TRAILING_STIMULUS_NOTICE, EPHEMERAL_TAIL_KEY: True}
         )
 
-    return ContextResult(messages=stripped, reacting_to=max_stimulus_seq)
+    return ContextResult(
+        messages=stripped,
+        reacting_to=max_stimulus_seq,
+        tail_origin=tail_origin,
+        needs_trailing_notice=needs_trailing_notice,
+    )
+
+
+def _role_origin(msg: dict[str, Any]) -> TailOrigin:
+    """Structural origin of a rendered dict from its role alone (see
+    :data:`TailOrigin`); the two ``user``-role specialisations are recorded
+    by identity during the walk instead."""
+    role = msg.get("role")
+    if role == "assistant":
+        return "assistant"
+    if role == "tool":
+        return "tool"
+    if role == "system":
+        return "system"
+    return "user"
 
 
 def _is_degenerate_empty_assistant(msg: dict[str, Any]) -> bool:
