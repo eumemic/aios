@@ -5,10 +5,59 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from aios.config import get_settings
 from aios.sandbox.backends import docker as docker_backend
 from aios.sandbox.backends.base import SandboxBackendError
 from aios.sandbox.backends.docker import DockerBackend
 from aios.sandbox.registry import GcPressureResult, SandboxRegistry
+
+
+@pytest.mark.asyncio
+async def test_managed_enumeration_uses_dedicated_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], object]] = []
+
+    async def fake_run(argv: list[str], **kwargs: object) -> tuple[int, bytes, bytes]:
+        calls.append((argv, kwargs.get("timeout_s")))
+        return 0, b"", b""
+
+    backend = DockerBackend()
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "sandbox_gc_enumeration_timeout_seconds", 1.0)
+
+    assert await backend.list_managed_images(instance_id="test") == []
+    assert calls == [
+        (
+            [
+                "docker",
+                "images",
+                "--all",
+                "--no-trunc",
+                "--quiet",
+                "--filter",
+                "label=aios.managed=true",
+                "--filter",
+                "label=aios.instance_id=test",
+            ],
+            1.0,
+        ),
+        (
+            [
+                "docker",
+                "images",
+                "--all",
+                "--no-trunc",
+                "--quiet",
+                "--filter",
+                "label=aios.managed=true",
+                "--filter",
+                "label=aios.instance_id=test",
+            ],
+            1.0,
+        ),
+    ]
 
 
 @pytest.mark.asyncio

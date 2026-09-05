@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 from typing import Any, cast
 from unittest.mock import Mock
 
@@ -72,6 +73,46 @@ async def test_aborted_tick_reports_what_the_failure_costs(
     assert kwargs["carried_pool_budget_bytes"] == 10
     assert kwargs["provisioning_gate_closed"] is True
     assert kwargs["consecutive_failures"] == 1
+
+
+async def test_gc_stalled_fires_on_second_failure_and_publishes_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    stalled = Mock()
+    health: list[tuple[datetime | None, int]] = []
+    monkeypatch.setattr("aios.sandbox.registry.log.error", stalled)
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+    monkeypatch.setattr("aios.sandbox.registry.log.exception", Mock())
+    monkeypatch.setattr("aios.sandbox.registry._GC_INTERVAL_SECONDS", 0)
+
+    ticks = 0
+
+    async def twice_then_block(pool: Any) -> GcPressureResult:
+        nonlocal ticks
+        ticks += 1
+        if ticks <= 2:
+            raise RuntimeError("enumeration failed")
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(registry, "_gc_once", twice_then_block)
+    task = asyncio.create_task(
+        registry._gc_loop(
+            cast(Any, object()), None, lambda last, failures: health.append((last, failures))
+        )
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert [call[0][0] for call in stalled.call_args_list] == ["sandbox.gc_stalled"]
+    assert stalled.call_args.kwargs["consecutive_failures"] == 2
+    assert stalled.call_args.kwargs["last_success_at"] is None
+    assert stalled.call_args.kwargs["exception_class"] == "RuntimeError"
+    assert health[:2] == [(None, 1), (None, 2)]
 
 
 async def test_sustained_failure_escalates_to_exception_level(
@@ -180,3 +221,38 @@ async def test_recovery_after_failures_is_announced(
     recovered = [c for c in info.call_args_list if c[0][0] == "sandbox.gc_tick_recovered"]
     assert recovered, "GC recovery was never reported"
     assert recovered[0][1]["failed_ticks"] == 2
+
+
+async def test_recovery_clears_watchdog_failure_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = SandboxRegistry(backend=cast(Any, FakeBackend()))
+    health: list[tuple[datetime | None, int]] = []
+    monkeypatch.setattr("aios.sandbox.registry.log.info", Mock())
+    monkeypatch.setattr("aios.sandbox.registry.log.warning", Mock())
+    monkeypatch.setattr("aios.sandbox.registry._GC_INTERVAL_SECONDS", 0)
+    ticks = 0
+
+    async def recover_then_block(pool: Any) -> GcPressureResult:
+        nonlocal ticks
+        ticks += 1
+        if ticks == 1:
+            raise RuntimeError("enumeration failed")
+        if ticks == 2:
+            return GcPressureResult()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(registry, "_gc_once", recover_then_block)
+    task = asyncio.create_task(
+        registry._gc_loop(
+            cast(Any, object()), None, lambda last, failures: health.append((last, failures))
+        )
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert health[0] == (None, 1)
+    assert health[1][1] == 0
+    assert health[1][0] is not None
