@@ -38,9 +38,11 @@ import hashlib
 import json
 import os
 import threading
+from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
+from operator import itemgetter
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -1377,6 +1379,40 @@ def _omission_marker(omission: WindowOmission, boundary: datetime, tz_name: str)
     }
 
 
+def _render_blind_result(tcid: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Render a tool result that landed in an assistant's blind spot as the
+    synthetic user message injected after the last assistant blind to it.
+
+    Multimodal results (``list[dict]`` content, e.g. an image-aware ``read``)
+    are spliced part-wise rather than f-stringed — the Python repr of the list
+    would lose the pixels. Spec'd text parts are concatenated under the header;
+    non-text parts (``image_url`` …) follow as siblings.
+    """
+    name = data.get("name", "tool")
+    header = f"[Tool result: {name} (call {tcid}) completed]"
+    content = data.get("content", "")
+    if not isinstance(content, list):
+        return {"role": "user", "content": f"{header}\n{content}"}
+    text_chunks: list[str] = [header]
+    other_parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            txt = part.get("text")
+            if isinstance(txt, str) and txt:
+                text_chunks.append(txt)
+        else:
+            other_parts.append(part)
+    combined_text = "\n".join(text_chunks)
+    if other_parts:
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": combined_text}, *other_parts],
+        }
+    return {"role": "user", "content": combined_text}
+
+
 def build_messages(
     events: list[Event],
     *,
@@ -1403,9 +1439,13 @@ def build_messages(
     of the next assistant after it. A tool result with
     ``seq <= horizon`` was visible; one with ``seq > horizon`` arrived
     in the blind spot and is shown as pending in the paired position,
-    then injected as a user message right after the horizon-setting
-    assistant. This placement preserves monotonicity — new events
-    append after the injection rather than before it.
+    then injected as a user message after the LAST assistant that was
+    blind to it. A user message that landed during an assistant's
+    inference (``reacting_to < seq < assistant.seq``) likewise renders
+    after that assistant. Both anchors are pure functions of the log, so
+    a blind-spot message keeps its position in every later build — the
+    placement that preserves monotonicity (and never ends the context on
+    an assistant turn).
     """
     # Index: tool_call_id → (data, seq).
     real_results: dict[str, dict[str, Any]] = {}
@@ -1420,57 +1460,77 @@ def build_messages(
     # Visibility horizon per assistant: the reacting_to of the NEXT
     # assistant. If there's no next assistant, horizon is infinite.
     _INF: int = 2**63
-    asst_list = [
-        (e.seq, e.data.get("reacting_to", e.seq))
-        for e in events
-        if e.kind == "message" and e.data.get("role") == "assistant"
-    ]
+    asst_list: list[tuple[int, int]] = []
+    for e in events:
+        if e.kind == "message" and e.data.get("role") == "assistant":
+            # A missing or malformed ``reacting_to`` reads as "reacted to
+            # everything before me" (the writers always stamp an int; a poisoned
+            # row must not quarantine every user message compared against it).
+            rt = e.data.get("reacting_to")
+            asst_list.append((e.seq, rt if isinstance(rt, int) else e.seq))
+    asst_seqs = [seq for seq, _rt in asst_list]
     horizon_for: dict[int, int] = {}
-    horizon_setter_for: dict[int, int] = {}
     for i, (seq, _rt) in enumerate(asst_list):
-        if i + 1 < len(asst_list):
-            horizon_for[seq] = asst_list[i + 1][1]
-            horizon_setter_for[seq] = asst_list[i + 1][0]
-        else:
-            horizon_for[seq] = _INF
+        horizon_for[seq] = asst_list[i + 1][1] if i + 1 < len(asst_list) else _INF
 
-    # Blind-spot window for USER messages — the symmetric twin of the tool-result
-    # injection below. A user message that arrived DURING an assistant's
-    # inference (committed before it, but after its visibility horizon
-    # ``reacting_to``) is "stranded": in seq order it lands *before* that
-    # assistant turn, whose context never contained it. Rendered at its seq
-    # position the assembled context can END on an assistant message (current
-    # reasoning models reject that as an unsupported prefill) — and, worse for
-    # the prompt-prefix cache, its position would MOVE between builds: deferred
-    # to the tail while that assistant is the last one, then back to its seq
-    # position once a newer assistant exists. So a blind-spot user is ANCHORED
-    # after the first assistant that was blind to it (``_blind_anchor``, emitted
-    # from the assistant branch below): the same position in every build, the
-    # faithful chronology, and never a trailing assistant.
-    #
-    # ``last_asst_rt`` (the last assistant's horizon) is still what the
-    # trailing-stimulus guard at the end of the build compares against.
-    _, last_asst_rt = asst_list[-1] if asst_list else (0, 0)
+    # The last assistant's horizon: what the trailing-stimulus guard at the end
+    # of the build compares ``max_stimulus_seq`` against.
+    last_asst_rt = asst_list[-1][1] if asst_list else 0
 
     # Walk events in seq order.
     emitted_tcids: set[str] = set()
     messages: list[dict[str, Any]] = []
-    inject_after: dict[int, list[tuple[str, dict[str, Any]]]] = {}
-    # Blind-spot USER messages, keyed by the seq of the assistant they anchor
-    # after (see ``_blind_anchor`` below).
-    anchored_users: dict[int, list[dict[str, Any]]] = {}
+    # Blind-spot messages, keyed by the seq of the assistant they render AFTER:
+    # ``(seq, rendered message)`` entries drained in log order when the walk
+    # reaches that assistant (``_drain_after``). Two producers feed it — user
+    # messages that landed during an assistant's inference (``_user_anchor``)
+    # and tool results that landed after their caller's next assistant was
+    # produced (``_result_anchor``).
+    #
+    # Why anchor rather than render at seq position or defer to the tail: a
+    # blind-spot message rendered at its seq position sits BEFORE an assistant
+    # whose context never contained it (the build can then end on an assistant
+    # turn — rejected as an unsupported prefill by current reasoning models),
+    # and any position that depends on which assistant is currently LAST moves
+    # between builds, rewriting the prompt prefix and busting the prompt cache.
+    # The anchors below are pure functions of the log, so a message's position
+    # is the same in every build that contains it.
+    after_assistant: dict[int, list[tuple[int, dict[str, Any]]]] = {}
     max_stimulus_seq: int = 0
 
-    def _blind_anchor(seq: int) -> int | None:
-        """The seq of the FIRST assistant that was blind to a user event at
-        ``seq`` (``reacting_to < seq < assistant.seq``), or ``None`` when every
-        assistant either preceded it or reacted to it. ``asst_list`` is in seq
-        order, so the first hit is the earliest blind assistant — a stable
-        anchor that never moves as later assistants are appended."""
-        for asst_seq, asst_rt in asst_list:
-            if asst_rt < seq < asst_seq:
-                return asst_seq
+    def _user_anchor(seq: int) -> int | None:
+        """The assistant a user event at ``seq`` was blind to, or ``None``.
+
+        Only the assistant immediately following the event can be blind to it
+        (``reacting_to < seq < assistant.seq``): every later assistant was
+        produced from a context that already contained the event, so its
+        ``reacting_to`` covers ``seq``. One bisect, not a scan.
+        """
+        i = bisect_right(asst_seqs, seq)
+        if i < len(asst_list) and asst_list[i][1] < seq:
+            return asst_list[i][0]
         return None
+
+    def _result_anchor(caller_seq: int, rseq: int) -> int:
+        """The LAST assistant after ``caller_seq`` that was blind to a tool
+        result at ``rseq`` (``reacting_to < rseq``).
+
+        Callers reach this only when the caller's NEXT assistant is blind
+        (``rseq > horizon``), so at least one candidate exists. Anchoring after
+        the last blind assistant — not the first — is what keeps the position
+        stable: a result that landed after several turns renders after the
+        newest of them, i.e. exactly where the previous build ended.
+        """
+        i = bisect_right(asst_seqs, caller_seq)
+        anchor = asst_list[i][0] if i < len(asst_list) else caller_seq
+        for asst_seq, asst_rt in asst_list[i:]:
+            if asst_rt >= rseq:
+                break
+            anchor = asst_seq
+        return anchor
+
+    def _drain_after(asst_seq: int) -> list[dict[str, Any]]:
+        return [m for _seq, m in sorted(after_assistant.pop(asst_seq, []), key=itemgetter(0))]
 
     for e in events:
         # Durable-session-sandbox FS-loss notices (§5.9): the only non-message
@@ -1526,13 +1586,9 @@ def build_messages(
                     workspace_path=workspace_path,
                 )
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
-                anchor = _blind_anchor(e.seq)
+                anchor = _user_anchor(e.seq)
                 if anchor is not None:
-                    # Blind to an assistant — anchor after THAT assistant (it is
-                    # emitted when the walk reaches the anchor) so the context
-                    # can't end on that assistant turn AND the position is the
-                    # same in every later build (prefix stability).
-                    anchored_users.setdefault(anchor, []).append(msg)
+                    after_assistant.setdefault(anchor, []).append((e.seq, msg))
                 else:
                     messages.append(msg)
 
@@ -1556,68 +1612,19 @@ def build_messages(
                         messages.append(
                             {"role": "tool", "tool_call_id": tcid, "content": placeholder}
                         )
-                        if tcid in real_results:
-                            # Safe: last assistant has horizon=INF so rseq<=INF
-                            # always takes the REAL branch above; only non-last
-                            # assistants reach here, and they all have entries.
-                            setter_seq = horizon_setter_for[e.seq]
-                            inject_after.setdefault(setter_seq, []).append(
-                                (tcid, real_results[tcid])
+                        if rseq is not None:
+                            # Landed in the blind spot: shown as pending in the
+                            # paired slot, and injected as a user message after
+                            # the last assistant that was blind to it.
+                            after_assistant.setdefault(_result_anchor(e.seq, rseq), []).append(
+                                (rseq, _render_blind_result(tcid, real_results[tcid]))
                             )
+                            max_stimulus_seq = max(max_stimulus_seq, rseq)
                     emitted_tcids.add(tcid)
 
-                # Inline blind-spot injections anchored to this assistant
-                # (preserves prefix monotonicity — see docstring).
-                for inj_tcid, inj_data in inject_after.pop(e.seq, []):
-                    name = inj_data.get("name", "tool")
-                    header = f"[Tool result: {name} (call {inj_tcid}) completed]"
-                    inj_content = inj_data.get("content", "")
-                    if isinstance(inj_content, list):
-                        # Multimodal tool result (e.g. image-aware read returning a
-                        # text + image_url part list).  F-stringing would emit the
-                        # Python repr of the list, losing the pixels — splice the
-                        # parts into the synthetic user message instead so the model
-                        # sees the image in the blind-spot signal too.  Spec'd text
-                        # parts are concatenated under the header; non-text parts
-                        # (image_url, etc.) follow as siblings.
-                        text_chunks: list[str] = [header]
-                        other_parts: list[dict[str, Any]] = []
-                        for part in inj_content:
-                            if not isinstance(part, dict):
-                                continue
-                            if part.get("type") == "text":
-                                txt = part.get("text")
-                                if isinstance(txt, str) and txt:
-                                    text_chunks.append(txt)
-                            else:
-                                other_parts.append(part)
-                        combined_text = "\n".join(text_chunks)
-                        if other_parts:
-                            messages.append(
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {"type": "text", "text": combined_text},
-                                        *other_parts,
-                                    ],
-                                }
-                            )
-                        else:
-                            messages.append({"role": "user", "content": combined_text})
-                    else:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": f"{header}\n{inj_content}",
-                            }
-                        )
-                    max_stimulus_seq = max(max_stimulus_seq, real_result_seqs[inj_tcid])
-
-                # Blind-spot USER messages anchored to this assistant follow its
-                # paired results and inline injections — the faithful chronology
-                # (this turn's context never contained them) at a position that
-                # is a pure function of the log, so it never moves between builds.
-                messages.extend(anchored_users.pop(e.seq, []))
+                # Blind-spot messages anchored to this assistant follow its paired
+                # results, in log order (see ``after_assistant``).
+                messages.extend(_drain_after(e.seq))
 
             elif role == "tool":
                 # Reaching this branch means NO in-window assistant declared
@@ -1660,6 +1667,21 @@ def build_messages(
             )
             messages.append(_quarantine_placeholder(e.seq))
             max_stimulus_seq = max(max_stimulus_seq, e.seq)
+            # A quarantined ASSISTANT still anchors blind-spot messages: drain
+            # them after the placeholder so they are never lost from the replay
+            # (their seqs are already counted in ``max_stimulus_seq``).
+            messages.extend(_drain_after(e.seq))
+
+    if after_assistant:
+        # Every anchor is an assistant event of this same slate, so the walk
+        # always reaches it; this is a non-lossy backstop, never expected to run.
+        log.warning(
+            "context.anchored_messages_unflushed",
+            session_id=session_id,
+            anchors=sorted(after_assistant),
+        )
+        for asst_seq in sorted(after_assistant):
+            messages.extend(_drain_after(asst_seq))
 
     # Prune dangling messages at the start of the window.  DB-level
     # windowing can cut in the middle of an assistant+tool_result group,
@@ -1717,11 +1739,10 @@ def build_messages(
     # (nothing is lost) and breaks the imitation loop at the source.
     stripped = [m for m in stripped if not _is_degenerate_empty_assistant(m)]
 
-    # Trailing-assistant guard: the user-deferral window above keeps
-    # blind-spot USER messages off the tail (#1120), but a blind-spot TOOL
-    # result injected mid-list (horizon-setter ≠ last assistant) — or a
-    # pruned structural orphan — still leaves a build ending on an assistant
-    # turn: the same rejected prefill, the same volatile-tail trade.
+    # Trailing-assistant guard: blind-spot USER messages and TOOL results are
+    # anchored after the assistant that was blind to them (#1120), so neither
+    # leaves a build ending on an assistant turn — but a pruned structural
+    # orphan still can: the same rejected prefill, the same volatile-tail trade.
     #
     # ``max_stimulus_seq > last_asst_rt`` is NOT the inference gate. The gate
     # is ``session_active_predicate`` (``db/queries/sessions.py``):
