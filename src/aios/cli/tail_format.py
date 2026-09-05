@@ -14,6 +14,7 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Any
 
+from aios.models.events import is_reminder_event, reminder_section
 from aios_sdk.streaming import SseMessage
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -66,6 +67,11 @@ def _format_message(seq: Any, event: dict[str, Any]) -> str | None:
 
     if role == "user":
         content = _preview(_as_text(data.get("content")))
+        if is_reminder_event("message", data):
+            # A harness-authored durable reminder row (channels listing,
+            # obligations listing, concise nag, trailing notice): user-role on
+            # the wire, but nobody's message.
+            return f"#{seq} REMINDER[{reminder_section('message', data) or '?'}]: {content}"
         channel = event.get("orig_channel")
         tag = f"USER[{channel}]" if channel else "USER"
         return f"#{seq} {tag}: {content}"

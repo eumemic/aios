@@ -12,21 +12,25 @@ from typing import Any
 
 import pytest
 
-from aios.harness.channels import build_channels_tail_block
+from aios.harness.channels import render_channels_reminder
 from aios.harness.context import (
-    _TRAILING_STIMULUS_NOTICE,
-    EPHEMERAL_TAIL_KEY,
+    _USER_MESSAGE_SEPARATOR_CONTENT,
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
+    TRAILING_STIMULUS_NOTICE,
+    ContextInvariantError,
     _approx_count,
     _concat_user_messages,
     _is_degenerate_empty_assistant,
     _quarantine_placeholder,
     build_messages,
     merge_adjacent_user_messages,
+    reminder_message,
     render_user_event,
     stub_missing_reasoning_content,
 )
+from aios.harness.reminders import reminder_event_data
 from aios.harness.window import WindowOmission
-from aios.models.events import Event
+from aios.models.events import Event, ReminderSection
 from tests.support import assert_message_prefix
 
 
@@ -49,13 +53,14 @@ def _full_pipeline(
     channels: list[str],
     focal_channel: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compose ``build_messages`` → tail-block append → adjacent-user
-    merge — the same sequence ``compose_step_context`` runs before
-    handing the message list to LiteLLM."""
+    """Compose ``build_messages`` → channels-listing append → adjacent-user
+    merge — the sequence ``compose_step_context`` runs on a step whose
+    reminder plan writes the channels row (the listing is appended
+    unconditionally here; the real planner gates it on the tail class)."""
     ctx = build_messages(events, system_prompt=None)
-    tail = build_channels_tail_block(channels, events, focal_channel)
-    if tail is not None:
-        ctx.messages.append(tail)
+    listing = render_channels_reminder(channels, events, focal_channel)
+    if listing is not None:
+        ctx.messages.append(reminder_message(listing))
     return merge_adjacent_user_messages(ctx.messages)
 
 
@@ -378,14 +383,16 @@ class TestBuildMessages:
         assert msgs[-1] is injected[0], (
             "late result must be anchored after the last blind assistant"
         )
-        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in msgs)
+        assert not any(m.get("content") == TRAILING_STIMULUS_NOTICE for m in msgs)
 
-    def test_pruned_orphan_stimulus_still_gets_trailing_notice(self) -> None:
+    def test_pruned_orphan_stimulus_reports_trailing_notice(self) -> None:
         """The waking stimulus can be structurally INVISIBLE: a tool result
         whose issuing assistant was windowed out is pruned as an orphan
         (``_prune_orphans``) yet still advances the watermark — the gate
         fires and the build is sent. Without the guard it ends on the last
-        assistant (terminal 400); the notice must still land."""
+        assistant (terminal 400); the build must REPORT the condition so the
+        composer writes the notice row (it never appends one itself: the
+        prompt must stay a replay of the log)."""
         events = [
             _evt(1, "user", content="hello"),
             _evt(2, "assistant", content="hi"),
@@ -401,112 +408,92 @@ class TestBuildMessages:
         assert ctx.reacting_to == 3
         # The orphan itself is pruned from the build...
         assert not any(m.get("role") == "tool" for m in msgs)
-        # ...but the gate-firing build still must not end on an assistant.
-        assert msgs[-1]["role"] == "user"
-        assert msgs[-1]["content"] == _TRAILING_STIMULUS_NOTICE
-        # The notice is a per-step render-only tail, so it MUST carry the
-        # ephemeral marker: the Anthropic cache breakpoint has to skip it and
-        # land on the last COMMITTED message. On this build the notice is the
-        # ONLY tail, so an untagged notice would host the breakpoint itself and
-        # the conversation prefix would be re-cache-created every step.
-        assert msgs[-1][EPHEMERAL_TAIL_KEY] is True
+        # ...so the build ends on the assistant, and says so: the composer
+        # writes the notice as a durable reminder row on this step.
+        assert msgs[-1]["role"] == "assistant"
+        assert ctx.tail_origin == "assistant"
+        assert ctx.needs_trailing_notice is True
+        assert not any(m.get("content") == TRAILING_STIMULUS_NOTICE for m in msgs)
         # The notice must NOT claim the stimulus is visible: in this arm the
         # orphan was pruned, so it is rendered in no message of the build.
         # Pointing at absent content invites a literal-minded model to invent
         # what it "missed"; the notice redirects to search_events instead.
-        assert "see above" not in msgs[-1]["content"]
-        assert "search_events" in msgs[-1]["content"]
+        assert "see above" not in TRAILING_STIMULUS_NOTICE
+        assert "search_events" in TRAILING_STIMULUS_NOTICE
 
-    def test_guard_exposure_boundary_is_the_channel_less_build(self) -> None:
-        """Pin the REAL exposure boundary, which the PR body overstates.
+    def test_notice_step_suppresses_the_channels_listing(self) -> None:
+        """The composer's reminder plan on a notice-bearing build.
 
-        The 400 is NOT general. ``compose_step_context`` appends the channels
-        tail whenever ``_agent_owes_response`` is False, and an
-        assistant-ending build is exactly that case
-        (``step_context.py`` tail-gate call site). So a CHANNEL-BOUND session
-        already ends on a user turn on master — the tail saves it by
-        accident. The guard's exposure is the channel-less, obligation-less,
-        non-concise session, where no other tail producer runs.
+        The reachable assistant-ending shape: a late tool result whose issuing
+        assistant has been windowed out. The walk counts it as a stimulus
+        (``reacting_to`` = f(log)) but ``_prune_orphans`` drops the structural
+        orphan, so the build ends on the assistant turn and REPORTS the notice
+        condition. Two things pinned:
 
-        Two things pinned here:
-
-        (a) the guard fires for the channel-less build (the reachable 400);
-        (b) with the guard, the channels tail is now SUPPRESSED on that step
-            — the notice takes the focal-user arm of ``_agent_owes_response``,
-            which is intended (the missed events ARE the stimulus) but is a
-            live behaviour change for every channel-bound session hitting this
-            shape, and nothing else tests it.
+        (a) the notice is a planned durable row, never an appended message —
+            the build itself still ends on the assistant;
+        (b) the notice counts as owed for the channels gate, so a channel-
+            bound session gets the notice row and NOT a channels listing on
+            this step (a "0 unread" listing as the literal last line mutes
+            literal-minded models); once the reply commits, the next build's
+            plan writes the listing on that idle re-check.
         """
-        from aios.harness.step_context import _agent_owes_response
+        from aios.harness.reminders import plan_reminders
 
-        # The reachable assistant-ending shape: a late tool result whose issuing
-        # assistant has been windowed out. The walk counts it as a stimulus
-        # (``reacting_to`` = f(log)) but ``_prune_orphans`` drops the structural
-        # orphan, so without the guard the build ends on the assistant turn.
-        # (Blind-spot results whose caller IS in the window are anchored after
-        # the last assistant blind to them, so they never leave a trailing
-        # assistant — this orphan shape is what the guard still exists for.)
         events = [
             _evt(1, "user", content="ping the peer"),
             _evt(2, "assistant", content="on it"),
             _evt(3, "tool", tool_call_id="slow", content="peer replied: ok"),
         ]
         events[1].data["reacting_to"] = 1
+        channels = ["telegram:1", "telegram:2"]
 
-        # MASTER's shape: what build_messages would have produced without the
-        # guard is an assistant-ending list. Reconstruct that predicate input
-        # by dropping the guard's own tail.
         ctx = build_messages(events, system_prompt=None)
         assert ctx.reacting_to == 3
-        without_notice = [m for m in ctx.messages if m.get("content") != _TRAILING_STIMULUS_NOTICE]
-        assert without_notice[-1]["role"] == "assistant", (
-            "precondition: without the guard this build ends on an assistant"
+        assert ctx.messages[-1]["role"] == "assistant"
+        assert ctx.needs_trailing_notice is True
+
+        plan = plan_reminders(
+            events=events,
+            channels=channels,
+            focal_channel="telegram:1",
+            obligations=[],
+            session_id="sess",
+            output_style="default",
+            tail_origin=ctx.tail_origin,
+            needs_trailing_notice=ctx.needs_trailing_notice,
         )
+        assert [w.section for w in plan.writes] == ["trailing_stimulus"]
+        assert plan.writes[0].content == TRAILING_STIMULUS_NOTICE
+        assert plan.skipped == 1  # the channels listing, held back
 
-        # (a) Channel-less: the guard is the ONLY thing keeping this build off
-        # a trailing assistant — this is the reachable 400.
-        assert _agent_owes_response(without_notice) is False, (
-            "an assistant-ending build does not owe a response, so a bound "
-            "channels tail would be appended and would mask the 400"
+        # The notice row lands in the log; the reply reacts to the result.
+        replied = [
+            *events,
+            _evt(
+                4,
+                "user",
+                content=TRAILING_STIMULUS_NOTICE,
+                metadata=_reminder_meta("trailing_stimulus"),
+            ),
+            _evt(5, "assistant", content="good, the peer is on it"),
+        ]
+        replied[4].data["reacting_to"] = 3
+        ctx2 = build_messages(replied, system_prompt=None)
+        assert ctx2.needs_trailing_notice is False
+        assert ctx2.tail_origin == "assistant"
+        plan2 = plan_reminders(
+            events=replied,
+            channels=channels,
+            focal_channel="telegram:1",
+            obligations=[],
+            session_id="sess",
+            output_style="default",
+            tail_origin=ctx2.tail_origin,
+            needs_trailing_notice=ctx2.needs_trailing_notice,
         )
-        assert ctx.messages[-1]["role"] == "user"
-        assert ctx.messages[-1]["content"] == _TRAILING_STIMULUS_NOTICE
-
-        # On master the channels tail lands for a channel-bound session, so
-        # that population never saw the 400 — the boundary the PR body misses.
-        tail = build_channels_tail_block(["telegram:1", "telegram:2"], events, "telegram:1")
-        assert tail is not None
-        assert tail["role"] == "user"
-
-        # (b) WITH the guard the notice ends the build, so the tail gate now
-        # SUPPRESSES the channels tail on this step — a live behaviour change
-        # for every channel-bound session hitting this shape.
-        #
-        # NB ``_full_pipeline`` appends the tail UNCONDITIONALLY, so it cannot
-        # show this; mirror the real call site (``step_context.py``:
-        # ``if tail is not None and not _agent_owes_response(ctx.messages)``).
-        assert _agent_owes_response(ctx.messages) is True, (
-            "the notice must classify as a direct stimulus, else the tail "
-            "would be appended after it and become the literal final message"
-        )
-
-        def _gated(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            out = list(messages)
-            if tail is not None and not _agent_owes_response(out):
-                out.append(tail)
-            return out
-
-        # Master (no notice): tail appended -> build ends on a USER turn
-        # already, which is why the channel-bound population never saw the 400.
-        master_final = _gated(without_notice)
-        assert master_final[-1] is tail
-        assert master_final[-1]["role"] == "user"
-
-        # With the guard: tail suppressed, notice is the final message.
-        guarded_final = _gated(ctx.messages)
-        assert guarded_final[-1]["content"] == _TRAILING_STIMULUS_NOTICE
-        assert "━━━ Channels ━━━" not in str(guarded_final[-1]["content"])
-        assert tail not in guarded_final
+        assert [w.section for w in plan2.writes] == ["channels"]
+        assert "━━━ Channels ━━━" in plan2.writes[0].content
 
     def test_user_message_after_last_assistant_stays_at_tail(self) -> None:
         """The ordinary case — a user message that genuinely follows the last
@@ -1027,7 +1014,7 @@ class TestMonotonicity:
         # The injection is the tail, so the build ends on a user turn on its
         # own — no trailing-stimulus notice is needed or appended.
         assert b2[-1]["role"] == "user"
-        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in b2)
+        assert not any(m.get("content") == TRAILING_STIMULUS_NOTICE for m in b2)
 
     def test_anchored_user_and_later_blind_result_drain_in_seq_order(self) -> None:
         """A blind-spot user and a later blind-spot tool result anchored to the
@@ -1089,13 +1076,13 @@ class TestMonotonicity:
         assert_message_prefix(ctx2, ctx3)
 
     def test_merge_insertion_preserves_monotonicity(self) -> None:
-        """Full pipeline (build_messages → tail-block → adjacent-user
+        """Full pipeline (build_messages → channels-listing → adjacent-user
         merge) must keep the prefix-stability invariant: output(L1) is a
         prefix of output(L2) when L1 ⊂ L2.  Pins the "mutations only at
         the volatile suffix" claim — a refactor that merged messages into
         the cache-stable prefix would fail this.
 
-        The tail block lands as the trailing user-role message. When the
+        The channels listing lands as the trailing user-role message. When the
         preceding message is also user-role (L2: ``…, user "do B"``), the
         merge folds the tail *into* that user turn, so the tail header is
         no longer a standalone message — it's a substring of the final
@@ -1118,7 +1105,7 @@ class TestMonotonicity:
         for out in (out1, out2, out3):
             assert not any(m == {"role": "assistant", "content": "."} for m in out)
 
-        # The tail block mutates per step, so compare prefixes only up to
+        # The listing changes with unread counts, so compare prefixes only up to
         # (but not including) the trailing user turn that carries it —
         # whether standalone or merged into the preceding inbound.
         def _strip_tail(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1131,37 +1118,48 @@ class TestMonotonicity:
         assert_message_prefix(_strip_tail(out1), _strip_tail(out2))
         assert_message_prefix(_strip_tail(out2), _strip_tail(out3))
 
-    def test_trailing_guard_notice_is_volatile_tail_only(self) -> None:
+    def test_trailing_notice_is_a_durable_row_not_a_volatile_tail(self) -> None:
         """The trailing-assistant guard notice (a late tool result whose
         issuing assistant was windowed out — a pruned structural orphan — so
-        the build would end on an assistant) lives ONLY at the volatile tail
-        of the sent build. When the model's reply commits, the next build
-        drops the notice and puts the reply at that index — the committed
-        prefix before it must not shift (a one-boundary cache miss, never a
-        prefix rewrite)."""
+        the build ends on an assistant) is REPORTED by the build and written
+        by the composer as a durable reminder row. The sent build ends on the
+        assistant; the next build replays the row at its seq; the reply lands
+        after it — every build a prefix of the next, no volatile tail."""
         l1 = [
             _evt(1, "user", content="ping the peer"),
             _evt(2, "assistant", content="on it"),
             _evt(3, "tool", tool_call_id="slow", content="peer replied: ok"),
         ]
         l1[1].data["reacting_to"] = 1
+        r1 = build_messages(l1, system_prompt=None)
+        assert r1.needs_trailing_notice is True
+        assert r1.messages[-1]["role"] == "assistant"
+        assert not any(m.get("content") == TRAILING_STIMULUS_NOTICE for m in r1.messages)
 
-        l2 = [*l1, _evt(4, "assistant", content="good, the peer is on it")]
-        l2[3].data["reacting_to"] = 3
+        # The composer wrote the notice row; the next build replays it bare.
+        l2 = [
+            *l1,
+            _evt(
+                4,
+                "user",
+                content=TRAILING_STIMULUS_NOTICE,
+                metadata=_reminder_meta("trailing_stimulus"),
+            ),
+        ]
+        r2 = build_messages(l2, system_prompt=None)
+        assert r2.tail_origin == "notice"
+        assert r2.needs_trailing_notice is False
+        assert r2.reacting_to == 3  # the row is not a stimulus
+        assert r2.messages[-1] == {"role": "user", "content": TRAILING_STIMULUS_NOTICE}
 
-        ctx1 = self._build(l1)
-        ctx2 = self._build(l2)
+        l3 = [*l2, _evt(5, "assistant", content="good, the peer is on it")]
+        l3[4].data["reacting_to"] = 3
+        r3 = build_messages(l3, system_prompt=None)
+        assert r3.needs_trailing_notice is False
+        assert r3.messages[-1]["role"] == "assistant"
 
-        # Sent build: guard notice at the tail, tagged ephemeral so the cache
-        # breakpoint skips it and lands on the last committed message.
-        assert ctx1[-1]["role"] == "user"
-        assert ctx1[-1]["content"] == _TRAILING_STIMULUS_NOTICE
-        assert ctx1[-1][EPHEMERAL_TAIL_KEY] is True
-        # Next build: the reply reacted to the result — no notice anywhere.
-        assert ctx2[-1]["role"] == "assistant"
-        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in ctx2)
-        # Everything before the volatile tail is a stable prefix.
-        assert_message_prefix(ctx1[:-1], ctx2)
+        assert_message_prefix(r1.messages, r2.messages)
+        assert_message_prefix(r2.messages, r3.messages)
 
     def test_reacting_to_includes_inline_injection_seq(self) -> None:
         """ContextResult.reacting_to must account for the seq of blind-spot
@@ -1427,6 +1425,229 @@ class TestBlindSpotUserAnchoring:
         events[4].data["reacting_to"] = 1  # poisoned: lower than seq 3
         contents = [str(m.get("content")).split("\n")[-1] for m in self._build(events)]
         assert contents[:5] == ["one", "a1", "two", "a2", "a3"]
+
+
+def _reminder_meta(section: ReminderSection = "obligations") -> dict[str, Any]:
+    """The marker exactly as the writer stamps it (content is irrelevant here)."""
+    metadata: dict[str, Any] = reminder_event_data(section, "")["metadata"]
+    return metadata
+
+
+class TestReminderEvents:
+    """Durable harness reminders are model-visible user rows that are NOT
+    stimuli: rendered bare at their seq, never advancing ``reacting_to``,
+    never anchored."""
+
+    def test_reminder_renders_bare_and_does_not_advance_reacting_to(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="━━━ Open obligations ━━━\n• req_1", metadata=_reminder_meta()),
+        ]
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.messages[1] == {"role": "user", "content": "━━━ Open obligations ━━━\n• req_1"}
+        assert ctx.reacting_to == 1
+        # Transparent to the tail gate: the unanswered inbound before it is
+        # still the tail (a failed attempt leaves its rows behind the inbound).
+        assert ctx.tail_origin == "user"
+
+    def test_reminder_render_is_independent_of_created_at_and_tz(self) -> None:
+        data = {"role": "user", "content": "nag", "metadata": _reminder_meta("concise")}
+        a = render_user_event(data, None, None, datetime(2026, 1, 1, tzinfo=UTC), tz_name="UTC")
+        b = render_user_event(
+            data, None, None, datetime(2027, 6, 30, 5, tzinfo=UTC), tz_name="America/Los_Angeles"
+        )
+        assert a == b == {"role": "user", "content": "nag"}
+
+    def test_reminder_between_reacting_to_and_assistant_stays_at_seq(self) -> None:
+        """A reminder written after the stimulus but before the assistant's
+        inference sits in the "blind spot" window by seq — it must NOT be
+        anchored after that assistant (its position is its seq), and the
+        assistant's arrival must be a pure append."""
+        l1 = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="reminder", metadata=_reminder_meta()),
+        ]
+        l2 = [*l1, _evt(3, "assistant", content="hi")]
+        l2[2].data["reacting_to"] = 1
+        b1 = build_messages(l1, system_prompt=None).messages
+        b2 = build_messages(l2, system_prompt=None).messages
+        # The inbound renders with its ``[received=…]`` envelope, so compare
+        # the last line of each message: the reminder stays at its seq.
+        assert [str(m.get("content")).split("\n")[-1] for m in b2] == ["hello", "reminder", "hi"]
+        assert_message_prefix(b1, b2)
+
+    def test_prefix_holds_with_reminder_rows_across_two_steps(self) -> None:
+        l1 = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "user", content="channels", metadata=_reminder_meta("channels")),
+            _evt(3, "user", content="obligations", metadata=_reminder_meta("obligations")),
+        ]
+        l2 = [*l1, _evt(4, "assistant", content="hi"), _evt(5, "user", content="more")]
+        l2[3].data["reacting_to"] = 1
+        b1 = build_messages(l1, system_prompt=None).messages
+        b2 = build_messages(l2, system_prompt=None).messages
+        assert_message_prefix(b1, b2)
+        assert build_messages(l2, system_prompt=None).reacting_to == 5
+
+    def test_reminder_only_window_with_omission_fails_loud(self) -> None:
+        """A windowed slate holding reminders but no stimulus would report
+        ``reacting_to=0`` and idle the session with an inbound unanswered just
+        past the boundary. The windower makes it unreachable; the build
+        refuses rather than returning the lie."""
+        events = [_evt(7, "user", content="reminder", metadata=_reminder_meta())]
+        omission = WindowOmission(omitted_messages=6, began_at=events[0].created_at)
+        with pytest.raises(ContextInvariantError):
+            build_messages(events, system_prompt=None, omission=omission)
+
+
+class TestTailOrigin:
+    """``ContextResult.tail_origin`` classifies the LAST rendered message
+    structurally, after prune / strip / degenerate filtering."""
+
+    @staticmethod
+    def _origin(events: list[Event]) -> str:
+        return build_messages(events, system_prompt=None).tail_origin
+
+    def test_classifies_each_kind(self) -> None:
+        u = _evt(1, "user", content="hi")
+        a = _evt(2, "assistant", content="hello")
+        a.data["reacting_to"] = 1
+        assert self._origin([u]) == "user"
+        assert self._origin([u, a]) == "assistant"
+        t_call = _evt(2, "assistant", tool_calls=[_tc("c1")])
+        t_call.data["reacting_to"] = 1
+        assert self._origin([u, t_call, _evt(3, "tool", tool_call_id="c1", content="ok")]) == "tool"
+        # Transparent rows: the tail is the last non-reminder message.
+        assert self._origin([u, _evt(2, "user", content="r", metadata=_reminder_meta())]) == "user"
+        assert (
+            self._origin([u, a, _evt(3, "user", content="r", metadata=_reminder_meta("concise"))])
+            == "assistant"
+        )
+        # The trailing-stimulus notice row is a tail of its own.
+        assert (
+            self._origin(
+                [
+                    u,
+                    a,
+                    _evt(
+                        3,
+                        "user",
+                        content=TRAILING_STIMULUS_NOTICE,
+                        metadata=_reminder_meta("trailing_stimulus"),
+                    ),
+                ]
+            )
+            == "notice"
+        )
+        assert (
+            self._origin(
+                [
+                    u,
+                    _evt(
+                        2,
+                        "user",
+                        content="ping",
+                        orig_channel="tg:1",
+                        focal_channel_at_arrival="tg:2",
+                    ),
+                ]
+            )
+            == "notification"
+        )
+        assert build_messages([], system_prompt=None).tail_origin == "none"
+        assert build_messages([], system_prompt="SYS").tail_origin == "system"
+
+    def test_trailing_empty_assistant_is_filtered_before_classification(self) -> None:
+        u = _evt(1, "user", content="hi")
+        empty = _evt(2, "assistant", content="")
+        empty.data["reacting_to"] = 1
+        assert self._origin([u, empty]) == "user"
+
+    def test_pruned_orphan_tail_classifies_as_the_assistant_before_it(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late"),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "assistant"
+        assert ctx.needs_trailing_notice is True
+
+
+class TestReminderRowsAreTransparentToTheTail:
+    """A failed or preempted step leaves the rows it wrote in the log behind a
+    still-unanswered stimulus. The retry's build must classify the tail past
+    them, or the gate would see "not owed" and write a status listing after
+    the very inbound it exists to keep last — and a pruned-orphan stimulus
+    would lose its notice."""
+
+    def test_retry_after_rows_written_behind_an_inbound_still_owes(self) -> None:
+        events = [
+            _evt(1, "user", content="please handle this"),
+            _evt(2, "user", content="━━━ Open obligations ━━━\n• r", metadata=_reminder_meta()),
+            _evt(3, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "user"
+        assert ctx.reacting_to == 1
+
+    def test_retry_after_rows_written_behind_a_tool_result_still_owes(self) -> None:
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("t1")]),
+            _evt(3, "tool", tool_call_id="t1", content="ok"),
+            _evt(4, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "tool"
+
+    def test_pruned_orphan_behind_an_assistant_and_a_row_still_reports_the_notice(self) -> None:
+        # A row written after the assistant must not mask the trailing-
+        # assistant guard: the orphan result is still unreacted and unrendered.
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late result"),
+            _evt(4, "user", content="━━━ Open obligations ━━━\n• r", metadata=_reminder_meta()),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.reacting_to == 3
+        assert ctx.tail_origin == "assistant"
+        assert ctx.needs_trailing_notice is True
+
+    def test_a_written_notice_row_is_the_tail_and_is_not_re_reported(self) -> None:
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="hi"),
+            _evt(3, "tool", tool_call_id="ghost", content="late result"),
+            _evt(
+                4,
+                "user",
+                content=TRAILING_STIMULUS_NOTICE,
+                metadata=_reminder_meta("trailing_stimulus"),
+            ),
+            _evt(5, "user", content="nag", metadata=_reminder_meta("concise")),
+        ]
+        events[1].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        assert ctx.tail_origin == "notice"
+        assert ctx.needs_trailing_notice is False
+
+
+class TestTrailingNoticeReserve:
+    def test_render_under_bound(self) -> None:
+        from aios.harness.tokens import approx_tokens
+
+        priced = approx_tokens(
+            [
+                {"role": "user", "content": TRAILING_STIMULUS_NOTICE},
+                {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+            ]
+        )
+        assert 0 < priced <= TRAILING_NOTICE_UPPER_BOUND_LOCAL
 
 
 class TestFieldStripping:
@@ -2451,24 +2672,12 @@ class TestConcatUserMessages:
             ],
         }
 
-    def test_ephemeral_marker_sticky_under_or(self) -> None:
-        """#1535: the ephemeral-tail marker propagates under OR — a merge of
-        any ephemeral message with anything is ephemeral (a dict containing
-        *any* per-step-mutating content cannot host the stable-prefix cache
-        breakpoint). Covers the trailing real-inbound + obligations case."""
-        inbound = {"role": "user", "content": "real peer text"}
-        ephemeral = {"role": "user", "content": "tail", EPHEMERAL_TAIL_KEY: True}
-        # ephemeral on either side -> merged dict is ephemeral.
-        assert _concat_user_messages(inbound, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
-        assert _concat_user_messages(ephemeral, inbound).get(EPHEMERAL_TAIL_KEY) is True
-        # both ephemeral -> still ephemeral.
-        assert _concat_user_messages(ephemeral, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
-
-    def test_no_marker_when_neither_ephemeral(self) -> None:
-        """Plain inbound + plain inbound stays unmarked - no spurious marker."""
-        a = {"role": "user", "content": "one"}
+    def test_merged_dict_carries_only_role_and_content(self) -> None:
+        """A merge never invents keys: two user messages fold into exactly
+        ``{role, content}`` (no out-of-band markers survive on the wire)."""
+        a = {"role": "user", "content": "one", "stray": True}
         b = {"role": "user", "content": "two"}
-        assert EPHEMERAL_TAIL_KEY not in _concat_user_messages(a, b)
+        assert _concat_user_messages(a, b) == {"role": "user", "content": "one\n\ntwo"}
 
 
 class TestIsDegenerateEmptyAssistant:
@@ -2629,7 +2838,7 @@ class TestMergeAdjacentUserMessagesPipeline:
     role sequence can't silently break the fix."""
 
     def test_inbound_then_tail_block_merge_into_one_user(self) -> None:
-        """An inbound followed by the user-role channels tail block is the
+        """An inbound followed by the user-role channels listing is the
         canonical adjacency: the two fold into a single user turn, and no
         degenerate ``"."`` assistant placeholder is produced."""
         events = [_evt(1, "user", content="hello")]
@@ -2671,7 +2880,7 @@ class TestMergeAdjacentUserMessagesPipeline:
         assert merged["content"].count("RESULT") == 1
 
     def test_alternating_events_no_tail_block_no_merge(self) -> None:
-        """No adjacency (empty bindings → tail block is ``None``) → the
+        """No adjacency (empty bindings → listing is ``None``) → the
         role sequence is untouched and no placeholder is produced."""
         events = [
             _evt(1, "user", content="hi"),

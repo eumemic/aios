@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from operator import itemgetter
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from aios.harness.image_resize import (
@@ -64,7 +64,12 @@ from aios.harness.vision import (
 )
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
-from aios.models.events import MODEL_VISIBLE_LIFECYCLE_EVENTS, Event
+from aios.models.events import (
+    MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    Event,
+    is_reminder_event,
+    reminder_section,
+)
 from aios.sandbox.volumes import resolve_to_host_path
 
 log = get_logger("aios.harness.context")
@@ -612,28 +617,18 @@ def _format_notification_marker(
     return f"{header}\n{hint}"
 
 
-def message_is_notification_marker(msg: dict[str, Any]) -> bool:
-    """True if *msg* is a non-focal-channel notification marker (``🔔 …``).
+def reminder_message(content: str) -> dict[str, Any]:
+    """The rendered message for a durable reminder row (``aios.harness.reminders``).
 
-    Mirrors the shape produced by :func:`_format_notification_marker`: a
-    user-role message whose (text) content begins with the bell prefix. The
-    composer uses this to tell a *direct* trailing stimulus the agent must
-    answer (a focal inbound or tool result — keep it last, suppress the
-    channels tail block so a literal model doesn't anchor on the tail) apart
-    from a *navigation* prompt (a non-focal notification, whose companion is
-    the tail listing — keep the tail).
+    Bare ``{role, content}``: no ``[received=…]`` envelope, no headers, no
+    attachments — a pure function of the row, so its bytes are identical in
+    every build (the prompt-prefix invariant) and never depend on
+    ``created_at`` or the account timezone. The ONE producer of the shape:
+    :func:`render_user_event` uses it to replay a persisted row and the
+    composer uses it for the unpersisted stand-in, so preview and replay are
+    byte-identical by construction.
     """
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content.startswith(_NOTIFICATION_MARKER_PREFIX)
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                return isinstance(text, str) and text.startswith(_NOTIFICATION_MARKER_PREFIX)
-    return False
+    return {"role": "user", "content": content}
 
 
 def render_user_event(
@@ -711,9 +706,17 @@ def render_user_event(
       pixels via the reorient recap.  Before #718 they were silently
       dropped here.
     """
+    # A harness-authored durable reminder row renders as its bare content: no
+    # ``[received=…]`` envelope, no headers, no attachments — a pure function of
+    # the row, so its bytes are identical in every build (the prompt-prefix
+    # invariant) and never depend on ``created_at`` or the account timezone.
+    if is_reminder_event("message", event_data):
+        return reminder_message(event_data.get("content", ""))
+
     msg = {k: v for k, v in event_data.items() if k != "metadata"}
     metadata = event_data.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else None
+
     received = _format_received(created_at, tz_name)
 
     # A request injected via invoke_session (e.g. a workflow agent child's first
@@ -1252,30 +1255,6 @@ _PENDING_EXTERNAL = json.dumps(
     }
 )
 
-EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
-"""Out-of-band marker key tagging a per-step-ephemeral tail message.
-
-Set to ``True`` at construction on any per-step-assembled tail message —
-a render-only block appended after ``build_messages`` rather than sourced
-from the event log.  Producers tag their own dicts; nothing enumerates
-them here.  What makes a message ephemeral is that its content OR its
-position varies per step (unread counts mutate; a constant reminder is
-re-appended at the moving tail), so caching a prefix through it can never
-hit.
-
-The cache-breakpoint recognizer in ``completion.py`` reads this marker —
-never the rendered prose — to decide which message must NOT host the
-conversation prefix ``cache_control`` breakpoint.  It is a *property*
-("this message is per-step-ephemeral"), not a discriminated kind, so a
-boolean is the honest shape.
-
-The marker is non-standard (Anthropic rejects unknown message fields) and
-is stripped from every message by ``inject_cache_breakpoints`` before any
-provider call — on every route, including non-Anthropic early returns.
-``_concat_user_messages`` propagates it under OR so a merge of any
-ephemeral message with anything stays ephemeral.
-"""
-
 
 # Synthetic user turn ending a gate-firing build that would otherwise end on
 # an assistant message (see the trailing-assistant guard in build_messages).
@@ -1297,12 +1276,41 @@ ephemeral message with anything stays ephemeral.
 # models a false pointer invites inventing the missed content, so the notice
 # redirects to ``search_events`` instead — the same contract the head-omission
 # marker offers ("Nothing is lost: the full transcript remains queryable").
-_TRAILING_STIMULUS_NOTICE = (
+TRAILING_STIMULUS_NOTICE = (
     "[New events arrived while you were working. Some may not be rendered above. "
     "Nothing is lost: the full transcript remains queryable with search_events — "
     "if something is referred to that you cannot see, search for it rather than "
     "assuming what it was.]"
 )
+
+
+# What the LAST rendered message of a build is, classified structurally during
+# the walk (never by sniffing rendered prose): the composer's tail gate keys on
+# it — a trailing ``user`` / ``tool`` / ``notice`` (a durable trailing-stimulus
+# notice row) is a direct stimulus the agent owes a response to;
+# ``assistant`` / ``notification`` (a non-focal 🔔 marker) / ``system`` /
+# ``none`` are not. Every OTHER durable reminder row (channels listing,
+# obligations listing, concise nag) is TRANSPARENT: the tail is the last
+# rendered message that is not one of them. A failed or preempted step leaves
+# the rows it wrote in the log behind a still-unanswered stimulus; were they
+# the tail, the retry would see "not owed" and write a status listing after
+# the very inbound the gate exists to keep last.
+TailOrigin = Literal["none", "system", "assistant", "tool", "user", "notification", "notice"]
+# The walk's per-message tag: a TailOrigin, or ``reminder`` for a transparent
+# row (never a tail).
+_WalkOrigin = TailOrigin | Literal["reminder"]
+
+
+class ContextInvariantError(RuntimeError):
+    """A build that would misreport what the model is reacting to.
+
+    Raised — loudly, so the step errors and latches instead of idling the
+    session — when a windowed slate holds durable reminder rows but not a
+    single stimulus: the windower's retain-the-newest-stimulus clamp makes
+    this unreachable, and returning ``reacting_to=0`` here would mark the
+    assistant as having reacted to nothing while an unanswered inbound sits
+    just past the window boundary.
+    """
 
 
 @dataclass(slots=True)
@@ -1311,6 +1319,12 @@ class ContextResult:
 
     messages: list[dict[str, Any]]
     reacting_to: int  # max seq of user/tool events included in context
+    # Structural class of the last rendered message (post prune/strip/filter).
+    tail_origin: TailOrigin
+    # The build ends on an assistant turn while holding an unreacted stimulus —
+    # the trailing-assistant guard condition — reported so the composer can
+    # act on it structurally.
+    needs_trailing_notice: bool
 
 
 def _quarantine_placeholder(seq: int) -> dict[str, Any]:
@@ -1328,9 +1342,15 @@ def _quarantine_placeholder(seq: int) -> dict[str, Any]:
 # the omission marker, mirroring ``tail_block_upper_bound_local``: the marker
 # is appended after windowing runs, so without a reserve it would push the
 # send-time payload past ``window_max`` (the PR #165 full-payload invariant).
-# Reserved unconditionally — like the tail block, which also may not render.
+# Reserved unconditionally — like the reminder reserves, which also may not be used.
 # ``TestOmissionMarker`` pins a worst-case render under this bound.
 OMISSION_MARKER_UPPER_BOUND_LOCAL = 128
+
+# Same shape for the trailing-stimulus notice (rendered after windowing, so
+# the reserve keeps the send-time payload under ``window_max``); priced with
+# the adjacent-user separator pre-pay, like every user row.
+# ``TestTrailingNoticeReserve`` pins the render under this bound.
+TRAILING_NOTICE_UPPER_BOUND_LOCAL = 128
 
 
 def _approx_count(n: int) -> str:
@@ -1504,6 +1524,10 @@ def build_messages(
     # is the same in every build that contains it.
     after_assistant: dict[int, list[tuple[int, dict[str, Any]]]] = {}
     max_stimulus_seq: int = 0
+    # Structural origin of the rendered dicts whose role alone does not tell
+    # (non-focal notification markers and durable reminder rows are both
+    # ``user``); everything else classifies by role at the end of the build.
+    origin_of: dict[int, _WalkOrigin] = {}
 
     def _user_anchor(seq: int) -> int | None:
         """The assistant a user event at ``seq`` was blind to, or ``None``.
@@ -1592,7 +1616,24 @@ def build_messages(
                     session_id=session_id,
                     workspace_path=workspace_path,
                 )
+                if is_reminder_event("message", e.data):
+                    # A durable reminder is model-visible but NOT a stimulus:
+                    # it never advances ``reacting_to`` (so it never wakes or
+                    # re-wakes the session) and is never anchored — its
+                    # position is its seq, in every build. The trailing-
+                    # stimulus notice is the one row that IS a tail of its
+                    # own: it stands in for the missed events, so the gate
+                    # treats it as owed; every other section is transparent.
+                    messages.append(msg)
+                    origin_of[id(msg)] = (
+                        "notice"
+                        if reminder_section("message", e.data) == "trailing_stimulus"
+                        else "reminder"
+                    )
+                    continue
                 max_stimulus_seq = max(max_stimulus_seq, e.seq)
+                if e.orig_channel is not None and e.orig_channel != e.focal_channel_at_arrival:
+                    origin_of[id(msg)] = "notification"
                 anchor = _user_anchor(e.seq)
                 if anchor is not None:
                     after_assistant.setdefault(anchor, []).append((e.seq, msg))
@@ -1690,6 +1731,17 @@ def build_messages(
     # results.
     messages = _prune_orphans(messages)
 
+    if (
+        omission is not None
+        and max_stimulus_seq == 0
+        and any(is_reminder_event(e.kind, e.data) for e in events)
+    ):
+        raise ContextInvariantError(
+            "windowed slate holds durable reminder rows but no stimulus; the "
+            "windower must retain the newest stimulus (session "
+            f"{session_id}, {len(events)} events)"
+        )
+
     # Head omission marker (#738): when the window omits transcript, tell
     # the model how much and how to recall it. After the prune (so it can't
     # be pruned), before the system insert (so it lands at messages[1]).
@@ -1738,7 +1790,21 @@ def build_messages(
     # content sanitised…]" marker on the wire, so the model literally sees a wall
     # of its own malfunction markers. Excluding them is safe for every model
     # (nothing is lost) and breaks the imitation loop at the source.
-    stripped = [m for m in stripped if not _is_degenerate_empty_assistant(m)]
+    survivors = [i for i, m in enumerate(stripped) if not _is_degenerate_empty_assistant(m)]
+    # The tail is classified AFTER the prune / strip / degenerate filter — the
+    # walk's last append is not the tail when those drop it (a pruned orphan
+    # tool row, an empty assistant), which is exactly when the gates below
+    # must see the message before it — and looks PAST transparent reminder
+    # rows (see ``TailOrigin``). ``_strip_to_spec`` is an index-preserving
+    # map, so the survivor's pre-strip dict (the one the walk tagged by
+    # identity) is ``messages[i]``; every untagged dict classifies by role.
+    tail_origin: TailOrigin = "none"
+    for i in reversed(survivors):
+        origin = origin_of.get(id(messages[i]), _role_origin(messages[i]))
+        if origin != "reminder":
+            tail_origin = origin
+            break
+    stripped = [stripped[i] for i in survivors]
 
     # Trailing-assistant guard: blind-spot USER messages and TOOL results are
     # anchored after the assistant that was blind to them (#1120), so neither
@@ -1777,19 +1843,33 @@ def build_messages(
     # the uncovered residual is the pre-existing behaviour, not a regression
     # introduced here.
     #
-    # The notice is tagged ``EPHEMERAL_TAIL_KEY`` like every other per-step
-    # tail producer (``channels.py``, ``obligations.py``, ``concise.py``): it
-    # is render-only and position-volatile, so the Anthropic cache breakpoint
-    # must skip it and land on the last COMMITTED message. Untagged, on a
-    # build with no other tail — the exact population this guard serves — the
-    # breakpoint would land on the notice itself and the conversation prefix
-    # would be re-cache-created every step (see ``inject_cache_breakpoints``).
-    if stripped and stripped[-1].get("role") == "assistant" and max_stimulus_seq > last_asst_rt:
-        stripped.append(
-            {"role": "user", "content": _TRAILING_STIMULUS_NOTICE, EPHEMERAL_TAIL_KEY: True}
-        )
+    # The condition is REPORTED, not acted on: the composer writes the notice
+    # (:data:`TRAILING_STIMULUS_NOTICE`) as a durable reminder row
+    # (``aios.harness.reminders``), so the next build replays it at its seq
+    # and the prompt stays a byte-prefix of its successor. Appending it here
+    # would make this build's tail a message the log does not hold.
+    needs_trailing_notice = tail_origin == "assistant" and max_stimulus_seq > last_asst_rt
 
-    return ContextResult(messages=stripped, reacting_to=max_stimulus_seq)
+    return ContextResult(
+        messages=stripped,
+        reacting_to=max_stimulus_seq,
+        tail_origin=tail_origin,
+        needs_trailing_notice=needs_trailing_notice,
+    )
+
+
+def _role_origin(msg: dict[str, Any]) -> TailOrigin:
+    """Structural origin of a rendered dict from its role alone (see
+    :data:`TailOrigin`); the two ``user``-role specialisations are recorded
+    by identity during the walk instead."""
+    role = msg.get("role")
+    if role == "assistant":
+        return "assistant"
+    if role == "tool":
+        return "tool"
+    if role == "system":
+        return "system"
+    return "user"
 
 
 def _is_degenerate_empty_assistant(msg: dict[str, Any]) -> bool:
@@ -1952,16 +2032,17 @@ def merge_adjacent_user_messages(
     Anthropic requires alternating roles, so two adjacent user messages
     must become one. The earlier approach inserted a placeholder
     assistant turn (a ``"."``) between them to *force* them apart and
-    stop LiteLLM concatenating a user inbound with the channels tail
-    block (which made models narrate "your message included the channel
+    stop LiteLLM concatenating a user inbound with the channels listing
+    (which made models narrate "your message included the channel
     state"). That placeholder is now both unnecessary and harmful:
 
-    * Unnecessary — the channels tail block is no longer appended after
-      an unanswered user inbound (see ``compose_step_context`` /
-      ``_agent_owes_response``), so the tail-merge case it guarded
-      against no longer arises; the only remaining adjacent-user case is
-      genuine successive inbounds (feeder pings + user text that landed
-      before the agent acted), which *should* read as one block.
+    * Unnecessary — the channels listing is never written after an
+      unanswered user inbound (``aios.harness.reminders``: the listing
+      waits while the tail owes a response), so the listing-merge case it
+      guarded against no longer arises; the remaining adjacent-user cases
+      are genuine successive inbounds (feeder pings + user text that landed
+      before the agent acted) and a reminder row followed by an inbound,
+      which *should* read as one block.
     * Harmful — a ``"."`` is a degenerate assistant turn. Literal-minded
       models imitate it: ``claude-fable-5`` pattern-completes a run of
       ``"."`` placeholders into silence and emits empty turns
@@ -1998,10 +2079,4 @@ def _concat_user_messages(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any
         la = ca if isinstance(ca, list) else [{"type": "text", "text": ca or ""}]
         lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
         merged = {"role": "user", "content": [*la, *lb]}
-    # Propagate the ephemeral-tail marker under OR: a dict that contains
-    # *any* per-step-mutating content cannot host the stable-prefix cache
-    # breakpoint, so the merge of any ephemeral message with anything is
-    # ephemeral. This fixes the trailing-inbound + obligations merge case.
-    if a.get(EPHEMERAL_TAIL_KEY) or b.get(EPHEMERAL_TAIL_KEY):
-        merged[EPHEMERAL_TAIL_KEY] = True
     return merged

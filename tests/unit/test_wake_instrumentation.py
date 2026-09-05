@@ -300,6 +300,8 @@ class TestStepStartEndSpans:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),
@@ -414,6 +416,8 @@ class TestStepStartEndSpans:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),
@@ -535,6 +539,8 @@ class TestStepStartEndSpans:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),
@@ -642,6 +648,8 @@ class TestStepStartEndSpans:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),
@@ -751,6 +759,8 @@ class TestStepStartEndSpans:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),
@@ -837,7 +847,13 @@ async def _harness_with_guard(
             "aios.harness.loop.compose_step_context",
             AsyncMock(
                 return_value=SimpleNamespace(
-                    model="openrouter/x", messages=[], tools=[], reacting_to=0, skill_versions=[]
+                    model="openrouter/x",
+                    messages=[],
+                    tools=[],
+                    reacting_to=0,
+                    skill_versions=[],
+                    reminders_written=(),
+                    reminders_skipped=0,
                 )
             ),
         ),

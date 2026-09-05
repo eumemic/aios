@@ -14,7 +14,6 @@ from collections.abc import Iterable
 from typing import Any
 
 from aios.harness._text import join_blocks
-from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.models.events import Event
 
 MONOLOGUE_PREFIX = "INTERNAL_MONOLOGUE_NOT_SEEN_BY_USER: "
@@ -74,10 +73,10 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
 
     Cache-stable: the block's text does not vary across steps, so the
     prompt prefix stays hot.  Per-channel state (unread counts, recent
-    previews) lives in the ephemeral tail block — see
-    :func:`build_channels_tail_block` — which is rebuilt each step and
-    appended AFTER ``build_messages`` so its mutations don't bust the
-    prefix cache.
+    previews) lives in the channels reminder row — see
+    :func:`render_channels_reminder` — a durable transcript row the
+    composer rewrites only when the listing changes
+    (``aios.harness.reminders``).
 
     Per-platform specifics (Signal markdown subset, mention syntax,
     response idioms) live in each MCP server's
@@ -107,7 +106,7 @@ def build_focal_paradigm_block(channels: list[str]) -> str:
         "\n"
         "Call `switch_channel(channel_id=<id>)` to focus on a "
         "different bound channel — copy the `channel_id` value from "
-        "the tail block listing or from the `channel_id=<id>` field "
+        "the channels listing or from the `channel_id=<id>` field "
         "of a notification marker.  Its result is a re-orient block "
         "quoting recent messages on that channel so you can pick up "
         "the conversation in context.  Call "
@@ -145,19 +144,27 @@ def augment_with_focal_paradigm(base_system: str, channels: list[str]) -> str:
     return join_blocks(base_system, build_focal_paradigm_block(channels))
 
 
-def max_tail_block_local(channels: list[str]) -> int:
-    """Worst-case local-token cost of :func:`build_channels_tail_block`.
+# Sixty four-byte code points the tokenizer has no merges for (a private-use
+# character costs one token per UTF-8 byte — the byte-fallback ceiling), plus
+# the ellipsis: the densest preview ``render_channels_reminder`` can emit,
+# since it truncates by code point at 60. Prices above any real 60-character
+# preview — ASCII, CJK, or the emoji mixes that tokenize worst.
+_FATTEST_PREVIEW = "\U0010fffd" * 60 + "…"
 
-    Called at windowing time when the *actual* tail block isn't yet
+
+def max_channels_reminder_local(channels: list[str]) -> int:
+    """Worst-case local-token cost of :func:`render_channels_reminder`.
+
+    Called at windowing time when the *actual* listing isn't yet
     knowable (it depends on the windowed events).  Returns the upper
     bound by synthesizing the fattest line each channel can contribute
     — non-focal, 9999 unread, with a maxed-out preview — then summing
-    via :func:`~aios.harness.tokens.approx_tokens`.  The produced tail
-    at send time is guaranteed ≤ this bound, so reserving it from the
-    window budget never overshoots ``window_max``.
+    via :func:`~aios.harness.tokens.approx_tokens`.  The row the composer
+    may write this step is guaranteed ≤ this bound, so reserving it from
+    the window budget never overshoots ``window_max``.
 
-    Returns 0 when there are no channels: :func:`build_channels_tail_block`
-    returns ``None`` in that case and the composer appends nothing.
+    Returns 0 when there are no channels: :func:`render_channels_reminder`
+    returns ``None`` in that case and the composer writes nothing.
     """
     from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
     from aios.harness.tokens import approx_tokens
@@ -167,9 +174,11 @@ def max_tail_block_local(channels: list[str]) -> int:
     lines = ["━━━ Channels ━━━"]
     for addr in channels:
         # Preview length matches the 60-char truncation + ellipsis in
-        # build_channels_tail_block above.
-        lines.append(f'○ channel_id={addr} — 9999 unread: "{"x" * 61}"')
-    # The tail is user-role and lands after the log's final message. When
+        # render_channels_reminder below; the truncation is by CODE POINT, so
+        # the fattest preview is 60 four-byte characters (emoji tokenize at
+        # ~3-4 tokens each), not 60 ASCII letters.
+        lines.append(f'○ channel_id={addr} — 9999 unread: "{_FATTEST_PREVIEW}"')
+    # The row is user-role and lands after the log's final message. When
     # that message is also user-role, ``merge_adjacent_user_messages``
     # concatenates them; reserving an assistant-separator's worth of tokens
     # here keeps the budget a conservative upper bound either way.
@@ -181,19 +190,18 @@ def max_tail_block_local(channels: list[str]) -> int:
     )
 
 
-def build_channels_tail_block(
+def render_channels_reminder(
     channels: list[str],
     events: list[Event],
     focal_channel: str | None,
-) -> dict[str, Any] | None:
-    """Ephemeral per-step listing of bound channels with unread counts.
+) -> str | None:
+    """The bound-channel listing with unread counts — a reminder's content.
 
-    Rebuilt at each step from the monotonic event log; appended after
-    :func:`~aios.harness.context.build_messages` as the last user-role
-    message so per-step mutations don't bust the prompt prefix cache.
-    Pure data — the paradigm prose (what the symbols mean, how
-    switch_channel works) lives in the cache-stable
-    :func:`build_focal_paradigm_block`.
+    Derived from the windowed event log; the composer writes it as a durable
+    reminder row when it changes (see :mod:`aios.harness.reminders`), so the
+    render must be a pure function of the slate. Pure data — the paradigm
+    prose (what the symbols mean, how switch_channel works) lives in the
+    cache-stable :func:`build_focal_paradigm_block`.
 
     Returns ``None`` when the session has no channels (no listing to
     render and the paradigm block is also omitted).
@@ -230,7 +238,7 @@ def build_channels_tail_block(
             lines.append(f"○ channel_id={addr} — {count} unread{preview_clause}")
         else:
             lines.append(f"○ channel_id={addr} — 0 unread")
-    return {"role": "user", "content": "\n".join(lines), EPHEMERAL_TAIL_KEY: True}
+    return "\n".join(lines)
 
 
 def _switch_marker(e: Event) -> dict[str, Any] | None:

@@ -31,7 +31,7 @@ class Obligation:
     :func:`aios.db.queries.sessions.get_open_obligations`, NEVER the forgeable
     ``metadata.request`` user-message blob (#1131-proof). ``caller_kind`` is the
     trusted ``caller.kind`` (``api``|``session``|``run``); ``opened_at`` is the
-    edge's ``created_at`` (for age); ``summary`` is a short truncated preview of
+    edge's ``created_at`` (rendered as an absolute ``opened_at``); ``summary`` is a short truncated preview of
     the request input (absent on pre-#1413 frames → ``None``, rendered id-only).
 
     ``output_schema`` (#1522) is the JSON Schema the request demands of its

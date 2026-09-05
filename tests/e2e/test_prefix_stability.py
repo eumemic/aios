@@ -19,10 +19,25 @@ from unittest import mock
 
 import litellm
 
-from tests.e2e.harness import Harness, assistant
+from aios.models.events import Event, is_reminder_event
+from tests.e2e.harness import Harness, assistant, tool_call
 from tests.support import assert_message_prefix
 
 _AGENT_MODEL = "fake/test"
+
+
+def _reminder_rows(events: list[Event]) -> list[Event]:
+    return [e for e in events if is_reminder_event(e.kind, e.data)]
+
+
+def _context_build_ends(events: list[Event]) -> list[dict[str, Any]]:
+    return [
+        e.data
+        for e in events
+        if e.kind == "span"
+        and e.data.get("event") == "context_build_end"
+        and not e.data["is_error"]
+    ]
 
 
 class TestPrefixStability:
@@ -61,3 +76,49 @@ class TestPrefixStability:
         assert len(calls) == 3, f"expected 3 agent calls, got {len(calls)}"
         assert_message_prefix(calls[0], calls[1])
         assert_message_prefix(calls[1], calls[2])
+
+    async def test_concise_agent_writes_its_reminder_once_and_keeps_prefix(
+        self, harness: Harness
+    ) -> None:
+        """A concise agent through a tool-call step and a follow-up: the nag is
+        a durable row written on the first build only, every later build is a
+        prefix extension, a writing step does not re-wake the session, and the
+        ``context_build_end`` span carries the change-gate telemetry."""
+
+        async def echo(session_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {"echo": arguments.get("text")}
+
+        harness.register_tool("echo", echo)
+        harness.script_model(
+            [
+                assistant("", tool_calls=[tool_call("echo", {"text": "x"})]),
+                assistant("done"),
+                assistant("again"),
+            ]
+        )
+        session = await harness.start("hello", output_style="concise")
+        await harness.run_until_idle(session.id)
+        await harness.inject_message(session.id, "follow-up")
+        await harness.run_until_idle(session.id)
+
+        calls = [c["messages"] for c in harness.model_calls]
+        assert len(calls) == 3, f"expected 3 agent calls, got {len(calls)}"
+        assert_message_prefix(calls[0], calls[1])
+        assert_message_prefix(calls[1], calls[2])
+
+        messages = await harness.events(session.id)
+        rows = _reminder_rows(messages)
+        assert len(rows) == 1, [r.data for r in rows]
+        # Written on the first build: after the opening inbound, before the
+        # first assistant turn that build produced.
+        first_assistant = next(e for e in messages if e.data.get("role") == "assistant")
+        assert messages[0].seq < rows[0].seq < first_assistant.seq
+        # The row is not a stimulus: nothing left to react to.
+        assert await harness.sessions_needing_inference(session.id) == set()
+
+        ends = _context_build_ends(await harness.all_events(session.id))
+        assert [e["reminders_written"] for e in ends] == [["concise"], [], []]
+        assert [e["reminders_skipped"] for e in ends] == [0, 1, 1]
+        # The slate as read: the first build read ONLY the inbound — the row
+        # it wrote is not counted.
+        assert ends[0]["event_count_read"] == 1

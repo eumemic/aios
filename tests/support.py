@@ -9,6 +9,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from aios.models.events import Event, is_reminder_event
+
+
+def reminder_rows(events: list[Event]) -> list[Event]:
+    """The durable harness reminder rows in a list of events (the predicate
+    ``append_event`` reads, so a test sees exactly what the harness sees)."""
+    return [e for e in events if is_reminder_event(e.kind, e.data)]
+
 
 def assert_message_prefix(short: list[dict[str, Any]], long: list[dict[str, Any]]) -> None:
     """Assert that *short* is a message-for-message prefix of *long*.

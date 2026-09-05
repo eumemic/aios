@@ -42,7 +42,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
-from aios.models.events import Event, EventKind
+from aios.models.events import REMINDER_METADATA_KEY, Event, EventKind
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -1450,6 +1450,16 @@ async def append_user_message(
             f"user message exceeds {MAX_USER_MESSAGE_CHARS:,} characters "
             f"(got {len(content):,}); split into multiple messages",
             detail={"max_chars": MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
+        )
+    if metadata is not None and REMINDER_METADATA_KEY in metadata:
+        # Reserved for harness-authored reminder rows, which ``append_event``
+        # treats as non-stimulus: a caller-minted one would be a user message
+        # that never wakes the session. Enforced here — the one writer behind
+        # every externally-sourced user message (POST /messages, the initial
+        # message on create, invoke/tell, the connector inbound) — rather than
+        # per ingress. Harness reminders go through ``append_event`` directly.
+        raise ValidationError(
+            f"metadata.{REMINDER_METADATA_KEY} is reserved for harness-authored reminder rows"
         )
     data: dict[str, Any] = {"role": "user", "content": content}
     if metadata:

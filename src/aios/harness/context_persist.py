@@ -33,11 +33,48 @@ from aios.harness.vision import INLINE_MAX_DIMENSION, INLINE_SIZE_CAP_BYTES
 from aios.logging import get_logger
 
 if TYPE_CHECKING:
+    from aios.harness.reminders import ReminderPlan
+
+if TYPE_CHECKING:
     import asyncpg
 
     from aios.models.events import Event
 
 log = get_logger("aios.harness.context_persist")
+
+
+async def persist_reminder_rows(
+    pool: asyncpg.Pool[Any],
+    plan: ReminderPlan,
+    *,
+    session_id: str,
+    account_id: str,
+) -> None:
+    """Write a step's planned reminder rows to the session log, in plan order.
+
+    The composer's ``persist_reminders=True`` arm (``compose_step_context``):
+    the rows land BEFORE ``model_request_start``, so the next build replays
+    them at their seq and the prompt stays a byte-prefix of its successor.
+    Each row is an ordinary ``append_event`` (its own transaction, gapless
+    seq) on ONE acquired connection; the rows are non-stimulus by construction
+    (:func:`aios.models.events.is_reminder_event`), so writing them wakes
+    nothing, and the planner's change-gate makes a partial write on failure
+    harmless — the next step's plan sees the rows that landed.
+    """
+    if not plan.writes:
+        return
+    from aios.db import queries
+    from aios.harness.reminders import reminder_event_data
+
+    async with pool.acquire() as conn:
+        for item in plan.writes:
+            await queries.append_event(
+                conn,
+                session_id=session_id,
+                kind="message",
+                data=reminder_event_data(item.section, item.content),
+                account_id=account_id,
+            )
 
 
 async def persist_clamped_image_parts(

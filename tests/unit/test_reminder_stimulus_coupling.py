@@ -1,0 +1,151 @@
+"""Write↔read coupling for durable reminder rows (non-stimulus user messages).
+
+A reminder is a ``role='user'`` message row tagged
+``metadata[REMINDER_METADATA_KEY]``. ``append_event`` treats it as
+non-stimulus (no ``last_stimulus_seq`` / ``last_user_seq`` / ``updated_at``
+bump). Every LOG-DERIVED reader of user rows must agree, or a reminder past
+the reaction watermark would (a) defeat the sweep's incomplete-batch filter,
+(b) consume the inbound budget, (c) be retained by the windower's tail clamp
+in place of the real stimulus. These tests pin that every such reader routes
+through the single-source constants in ``aios.models.events`` — and that the
+SQL form is NULL-safe, since ``data->'metadata'`` is NULL on every row without
+a metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` would
+exclude those rows entirely.
+"""
+
+from __future__ import annotations
+
+import ast
+import inspect
+import textwrap
+from typing import Any
+
+from aios.db.queries import events as events_mod
+from aios.harness.reminders import reminder_event_data
+from aios.harness.sweep import UNREACTED_ROWS_FLOORED_SQL, UNREACTED_ROWS_SQL
+from aios.models.events import (
+    REMINDER_EXCLUDE_SQL,
+    REMINDER_METADATA_KEY,
+    ReminderSection,
+    is_reminder_event,
+    reminder_section,
+)
+from aios.services.inbound import _RESERVED_METADATA_KEYS
+from aios.services.inbound_budget import (
+    _INFERENCE_BEARING_PREDICATE,
+    _SESSION_INFERENCE_BEARING_PREDICATE,
+)
+
+
+def _reminder(section: ReminderSection = "concise", role: str = "user") -> dict[str, Any]:
+    data = reminder_event_data(section, "reminder text")
+    data["role"] = role
+    return data
+
+
+class TestPredicate:
+    def test_recognises_a_reminder_row(self) -> None:
+        assert reminder_section("message", _reminder("obligations")) == "obligations"
+        assert is_reminder_event("message", _reminder()) is True
+
+    def test_rejects_everything_else(self) -> None:
+        for data in (
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "hi", "metadata": {}},
+            {"role": "user", "content": "hi", "metadata": {"request": {"request_id": "r"}}},
+            {"role": "tool", "content": "x"},
+            # A scalar or array metadata that merely CONTAINS the string is
+            # not an object carrying the key — to Python or to SQL.
+            {"role": "user", "content": "hi", "metadata": REMINDER_METADATA_KEY},
+            {"role": "user", "content": "hi", "metadata": [REMINDER_METADATA_KEY]},
+        ):
+            assert is_reminder_event("message", data) is False, data
+            assert reminder_section("message", data) is None, data
+        assert is_reminder_event("lifecycle", _reminder()) is False
+
+    def test_presence_is_the_whole_predicate(self) -> None:
+        # The Python predicate keys on the marker's PRESENCE in a metadata
+        # object, exactly like the SQL twin — no role term on either side: a
+        # marker with an odd section, a non-dict marker value, or a non-user
+        # role is still a reminder to every reader, never a stimulus to some.
+        assert is_reminder_event("message", _reminder(section="bogus")) is True  # type: ignore[arg-type]
+        assert reminder_section("message", _reminder(section="bogus")) == "bogus"  # type: ignore[arg-type]
+        odd = {"role": "user", "metadata": {REMINDER_METADATA_KEY: 7}}
+        assert is_reminder_event("message", odd) is True
+        assert reminder_section("message", odd) is None
+        for role in ("assistant", "tool"):
+            assert is_reminder_event("message", _reminder(role=role)) is True, role
+
+    def test_marker_shape_is_defensive(self) -> None:
+        assert is_reminder_event("message", {"role": "user", "metadata": "junk"}) is False
+        assert reminder_section("message", {"role": "user", "metadata": "junk"}) is None
+
+
+class TestSqlForm:
+    def test_exclusion_is_null_safe(self) -> None:
+        sql = REMINDER_EXCLUDE_SQL.format(col="e.data")
+        assert "COALESCE(" in sql, "the JSONB ? test must be COALESCE'd: NOT (NULL ? k) is NULL"
+        assert f"'{REMINDER_METADATA_KEY}'" in sql
+        assert "e.data->'metadata'" in sql
+
+    def test_every_log_derived_reader_excludes_reminders(self) -> None:
+        for name, sql, col in (
+            ("UNREACTED_ROWS_SQL", UNREACTED_ROWS_SQL, "e.data"),
+            ("UNREACTED_ROWS_FLOORED_SQL", UNREACTED_ROWS_FLOORED_SQL, "e.data"),
+            ("_SESSION_INFERENCE_BEARING_PREDICATE", _SESSION_INFERENCE_BEARING_PREDICATE, "data"),
+        ):
+            assert REMINDER_EXCLUDE_SQL.format(col=col) in sql, (
+                f"{name} must exclude reminder rows via REMINDER_EXCLUDE_SQL"
+            )
+        # The per-counterparty counter keys on ``orig_channel = $2`` and
+        # reminder rows carry no origin channel, so it deliberately stays on
+        # the 0128 index-only predicate (see inbound_budget.py).
+        assert REMINDER_METADATA_KEY not in _INFERENCE_BEARING_PREDICATE
+
+    def test_sql_form_requires_an_object_metadata(self) -> None:
+        sql = REMINDER_EXCLUDE_SQL.format(col="data")
+        assert "jsonb_typeof(data->'metadata') = 'object'" in sql
+
+    def test_windower_tail_clamp_keys_on_the_newest_stimulus(self) -> None:
+        assert REMINDER_EXCLUDE_SQL.format(col="data") in events_mod._STIMULUS_ROW_SQL
+        assert "role <> 'assistant'" in events_mod._STIMULUS_ROW_SQL
+        seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
+        assert "stimulus_only" in seek_src
+        assert "_STIMULUS_ROW_SQL" in seek_src
+        # A tool-result stimulus anchors on its issuing assistant.
+        assert "jsonb_build_object('id', $2::text)" in seek_src
+        clamp_src = inspect.getsource(events_mod.read_windowed_events)
+        assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
+
+    def test_connectors_cannot_mint_a_reminder(self) -> None:
+        assert REMINDER_METADATA_KEY in _RESERVED_METADATA_KEYS
+
+
+class TestAppendEventReadsThePredicate:
+    def test_is_reminder_evaluated_before_the_row_lock(self) -> None:
+        source = textwrap.dedent(inspect.getsource(events_mod.append_event))
+        tree = ast.parse(source)
+        func = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef))
+        call_lines = [
+            n.lineno
+            for n in ast.walk(func)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "is_reminder_event"
+        ]
+        assert call_lines, (
+            "append_event must derive is_stimulus/is_user_message via is_reminder_event"
+        )
+        tx_lines = [
+            n.lineno
+            for n in ast.walk(func)
+            if isinstance(n, ast.AsyncWith)
+            for item in n.items
+            if isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and item.context_expr.func.attr == "transaction"
+        ]
+        assert tx_lines, "no `async with conn.transaction()` block found"
+        assert all(line < min(tx_lines) for line in call_lines), (
+            "the reminder predicate is pure Python and must run before the row lock"
+        )

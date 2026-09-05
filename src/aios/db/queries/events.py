@@ -29,9 +29,11 @@ from aios.ids import (
 )
 from aios.models.events import (
     MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    REMINDER_EXCLUDE_SQL,
     Event,
     EventKind,
     is_errored_lifecycle_event,
+    is_reminder_event,
 )
 
 
@@ -74,15 +76,64 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
-async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
-    """Fetch the cumulative_tokens value of the most recent message event."""
-    val: int | None = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
+_STIMULUS_ROW_SQL = f"AND role <> 'assistant' AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
+
+
+async def _latest_cumulative_tokens(
+    conn: asyncpg.Connection[Any], session_id: str, *, stimulus_only: bool = False
+) -> int | None:
+    """Fetch the cumulative_tokens value of the most recent message event.
+
+    ``stimulus_only`` narrows it to the RENDERABLE ANCHOR of the most recent
+    STIMULUS — a non-assistant row that is not a harness-authored reminder.
+    The windower's retain-the-tail clamp keys on that anchor, not on the
+    newest message: durable reminder rows are appended AFTER the stimulus and
+    BEFORE the model call, so on a failed attempt (context overflow retry with
+    ``window_min=0``, a provider error, a deadline) they are the newest rows.
+    Clamping to the newest *message* would retain a reminder and evict the
+    unanswered stimulus — the retry would then succeed on a reminder-only
+    prompt and the session would idle with the stimulus never answered. A
+    tool-result stimulus renders only with its issuing assistant in the slate
+    (``_prune_orphans`` drops it otherwise, while the watermark still
+    advances), so its anchor is that assistant's ``cumulative_tokens``.
+    """
+    if not stimulus_only:
+        val: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+        )
+        return val
+    row = await conn.fetchrow(
+        "SELECT cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
+        f"{_STIMULUS_ROW_SQL}"
         "AND cumulative_tokens IS NOT NULL "
         "ORDER BY seq DESC LIMIT 1",
         session_id,
     )
+    if row is None:
+        return None
+    if row["role"] == "tool" and isinstance(row["tool_call_id"], str) and row["tool_call_id"]:
+        # Same predicates as ``_lookup_tool_parent_channel`` (the
+        # ``events_assistant_tool_calls_idx`` partial index, reverse-seq walk).
+        anchor: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "  AND data->>'role' = 'assistant' "
+            "  AND data ? 'tool_calls' "
+            "  AND data->'tool_calls' @> jsonb_build_array("
+            "    jsonb_build_object('id', $2::text)) "
+            "  AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            row["tool_call_id"],
+        )
+        if anchor is not None:
+            return anchor
+    val = row["cumulative_tokens"]
     return val
 
 
@@ -1312,9 +1363,11 @@ async def precompute_event_append(
     delta = delta_v1 = delta_v2 = 0
     if kind == "message":
         pre_focal: str | None = None
-        if data.get("role") == "user":
+        if data.get("role") == "user" and not is_reminder_event(kind, data):
             # USER token count needs the focal channel to render the as-sent
-            # form.  This pre-read is OUTSIDE any transaction; a concurrent
+            # form (a reminder row renders bare — no focal, no envelope — so
+            # its price needs no pre-read).  This pre-read is OUTSIDE any
+            # transaction; a concurrent
             # ``switch_channel`` committing before the lock can make it stale
             # (bounded drift — see ``append_event``'s docstring).  The STORED
             # stamp is always the locked RETURNING value, unaffected by this read.
@@ -1475,7 +1528,12 @@ async def append_event(
     # so an errored session recovers automatically once a user message lands
     # (its seq exceeds the latest error lifecycle event — see
     # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
-    is_user_message = kind == "message" and role == "user"
+    # A harness-authored reminder row (``is_reminder_event``) is a user-role
+    # message the model reads but not a stimulus: it must neither bump the
+    # interaction time / clear the error latch nor look like something the
+    # assistant has yet to react to.
+    is_reminder = is_reminder_event(kind, data)
+    is_user_message = kind == "message" and role == "user" and not is_reminder
     # A *stimulus* is any message the assistant must react to: user OR tool
     # (role <> 'assistant'). ``last_stimulus_seq`` tracks its max seq and drives
     # the active predicate. This is deliberately broader than ``is_user_message``
@@ -1485,7 +1543,7 @@ async def append_event(
     # Every tool result is a stimulus: the session wakes and the model gets a
     # turn to react to any tool completion (including a ``signal_send`` delivery
     # ack), restoring the standard agentic loop (tool call → result → continue).
-    is_stimulus = kind == "message" and role != "assistant"
+    is_stimulus = kind == "message" and role != "assistant" and not is_reminder
     # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
     # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
     # ``data`` (type ``Any``), which cannot bind to the write literal — see the
@@ -1666,7 +1724,10 @@ async def append_event(
             effective_delta = precomputed.delta_for(token_baseline_v)
             prev = await _latest_cumulative_state(conn, session_id)
             cum_tokens = (prev.tokens or 0) + effective_delta
-            counts_as_message = role in ("user", "assistant")
+            # Reminder rows are user-role but not conversation: the head
+            # omission marker reports ``cumulative_messages`` as "messages
+            # omitted", which must not count the harness's own bookkeeping.
+            counts_as_message = role in ("user", "assistant") and not is_reminder
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
             cls = _message_content_class(role, data)
             if image_aware:
@@ -2799,10 +2860,14 @@ async def read_windowed_events(
     # while the omission complement still matches every row. That pairing
     # (empty events + a non-None omission) crashes ``build_messages``, which
     # reads ``events[0].created_at`` to anchor the omission marker and relies
-    # on the inverse invariant. Clamp so the most recent event always survives
-    # (its ``cumulative_tokens == total``) — the
-    # retain-the-tail-even-when-oversized guarantee.
-    drop = min(drop, total - 1)
+    # on the inverse invariant. Clamp so the most recent STIMULUS always
+    # survives — the retain-the-tail-even-when-oversized guarantee. The newest
+    # message row may be a durable reminder written before a failed attempt
+    # (see ``_latest_cumulative_tokens``); keying on it would evict the
+    # unanswered stimulus behind it. Falls back to the newest message when
+    # the log holds no stimulus row at all.
+    stimulus_cum = await _latest_cumulative_tokens(conn, session_id, stimulus_only=True)
+    drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
     # Bounded range scan: messages past the boundary, plus the FS-loss
     # notices past the dropped-message prefix. Bare call (not via ``queries``)
@@ -2845,7 +2910,8 @@ async def read_windowed_events(
         # index cond, and only for the un-backfilled tail (transient across a
         # rolling deploy), so it never re-introduces the O(session-size) term.
         omitted_messages = await conn.fetchval(
-            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant')) "
+            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant') "
+            f"AND {REMINDER_EXCLUDE_SQL.format(col='data')}) "
             "FROM events "
             "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
             "AND cumulative_tokens <= $2",

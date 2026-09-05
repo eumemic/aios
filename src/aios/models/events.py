@@ -26,7 +26,7 @@ user/assistant/tool axis).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -103,6 +103,61 @@ def is_errored_lifecycle_event(kind: str, data: dict[str, Any]) -> bool:
     write↔read coupling is one constant rather than two free strings (#1084).
     """
     return kind == "lifecycle" and data.get("stop_reason") == ERRORED_LIFECYCLE_STOP_REASON
+
+
+# ── Durable reminders ─────────────────────────────────────────────────────────
+#
+# A harness-authored reminder (the open-obligations listing, the channels
+# status listing, the concise-style nag, the trailing-stimulus notice) is a
+# durable ``kind="message"`` / ``role="user"`` event tagged
+# ``data.metadata[REMINDER_METADATA_KEY] = {"section": <ReminderSection>}``.
+# It is priced and windowed like any user message but is NOT a stimulus: it
+# never bumps ``last_stimulus_seq`` / ``last_user_seq`` / ``updated_at`` and
+# never advances a build's ``reacting_to``. Every reader that must tell
+# reminders apart from real user rows routes through the constants below —
+# the SQL readers through :data:`REMINDER_EXCLUDE_SQL` (the sweep's
+# unreacted-rows gate, the inbound budget, the windower's
+# retain-the-stimulus clamp), the Python readers through
+# :func:`is_reminder_event` — and both are THE SAME predicate: a message
+# event whose ``metadata`` is an object carrying the key (no role term on
+# either side; the SQL's object test mirrors the Python ``isinstance`` so a
+# scalar or array ``metadata`` that happens to contain the string is a
+# reminder to neither). The write↔read coupling is one constant, not a set of
+# free strings (the #1084 stance), and a row is a reminder to every reader or
+# to none — ``tests/integration/test_reminder_rows.py`` runs both predicates
+# over the same rows.
+REMINDER_METADATA_KEY: Final[str] = "aios_reminder"
+ReminderSection = Literal["channels", "obligations", "concise", "trailing_stimulus"]
+# NULL-safe on purpose: ``<col>->'metadata'`` is NULL on every row without a
+# metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` is NULL,
+# which a WHERE clause treats as false — the bare form would drop those rows.
+# Every SQL reader applies it under ``kind = 'message'``.
+REMINDER_EXCLUDE_SQL: Final[str] = (
+    "NOT COALESCE(jsonb_typeof({col}->'metadata') = 'object' "
+    "AND {col}->'metadata' ? '" + REMINDER_METADATA_KEY + "', false)"
+)
+
+
+def is_reminder_event(kind: str, data: dict[str, Any]) -> bool:
+    """The non-stimulus predicate ``append_event`` reads (see the block comment
+    above): ``True`` iff the event is a message whose ``metadata`` object
+    carries the reminder marker — the Python twin of
+    :data:`REMINDER_EXCLUDE_SQL`."""
+    if kind != "message":
+        return False
+    metadata = data.get("metadata")
+    return isinstance(metadata, dict) and REMINDER_METADATA_KEY in metadata
+
+
+def reminder_section(kind: str, data: dict[str, Any]) -> str | None:
+    """The section name a reminder row's marker carries (the planner's
+    per-section change-gate key), or ``None`` for a non-reminder event or a
+    marker without a string section."""
+    if not is_reminder_event(kind, data):
+        return None
+    marker = data["metadata"][REMINDER_METADATA_KEY]
+    section = marker.get("section") if isinstance(marker, dict) else None
+    return section if isinstance(section, str) else None
 
 
 class Event(BaseModel):

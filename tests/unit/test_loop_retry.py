@@ -227,10 +227,6 @@ def mock_step_dependencies() -> Any:
             return_value="sys",
         ),
         patch(
-            "aios.harness.channels.build_channels_tail_block",
-            return_value=None,
-        ),
-        patch(
             "aios.harness.skills.augment_system_prompt",
             return_value="sys",
         ),
@@ -259,6 +255,8 @@ def mock_step_dependencies() -> Any:
                     tools=[],
                     reacting_to=0,
                     skill_versions=[],
+                    reminders_written=(),
+                    reminders_skipped=0,
                 )
             ),
         ),
