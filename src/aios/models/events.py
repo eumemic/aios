@@ -26,7 +26,7 @@ user/assistant/tool axis).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal, cast, get_args
 
 from pydantic import BaseModel, Field
 
@@ -103,6 +103,51 @@ def is_errored_lifecycle_event(kind: str, data: dict[str, Any]) -> bool:
     write↔read coupling is one constant rather than two free strings (#1084).
     """
     return kind == "lifecycle" and data.get("stop_reason") == ERRORED_LIFECYCLE_STOP_REASON
+
+
+# ── Durable reminders ─────────────────────────────────────────────────────────
+#
+# A harness-authored reminder (the open-obligations listing, the channels
+# status listing, the concise-style nag, the trailing-stimulus notice) is a
+# durable ``kind="message"`` / ``role="user"`` event tagged
+# ``data.metadata[REMINDER_METADATA_KEY] = {section, digest, v}``. It is
+# priced and windowed like any user message but is NOT a stimulus: it never
+# bumps ``last_stimulus_seq`` / ``last_user_seq`` / ``updated_at`` and never
+# advances a build's ``reacting_to``. Every reader that must tell reminders
+# apart from real user rows routes through the constants below — the SQL
+# readers through :data:`REMINDER_EXCLUDE_SQL` (the sweep's unreacted-rows
+# gate, the inbound budget, the windower's retain-the-stimulus clamp), the
+# Python readers through :func:`is_reminder_event` — so the write↔read
+# coupling is one constant, not a set of free strings (the #1084 stance).
+REMINDER_METADATA_KEY: Final[str] = "aios_reminder"
+ReminderSection = Literal["channels", "obligations", "concise", "trailing_stimulus"]
+REMINDER_SECTIONS: Final[frozenset[str]] = frozenset(get_args(ReminderSection))
+# NULL-safe on purpose: ``<col>->'metadata'`` is NULL on every row without a
+# metadata key (tool results, plain user posts) and ``NOT (NULL ? k)`` is NULL,
+# which a WHERE clause treats as false — the bare form would drop those rows.
+REMINDER_EXCLUDE_SQL: Final[str] = (
+    "NOT COALESCE({col}->'metadata' ? '" + REMINDER_METADATA_KEY + "', false)"
+)
+
+
+def reminder_section(kind: str, data: dict[str, Any]) -> ReminderSection | None:
+    """The reminder section a message event carries, or ``None`` for every
+    other event (non-message kinds, non-user roles, no marker, or a marker
+    naming an unknown section — treated as not-a-reminder rather than trusted)."""
+    if kind != "message" or data.get("role") != "user":
+        return None
+    metadata = data.get("metadata")
+    marker = metadata.get(REMINDER_METADATA_KEY) if isinstance(metadata, dict) else None
+    section = marker.get("section") if isinstance(marker, dict) else None
+    if isinstance(section, str) and section in REMINDER_SECTIONS:
+        return cast(ReminderSection, section)
+    return None
+
+
+def is_reminder_event(kind: str, data: dict[str, Any]) -> bool:
+    """The non-stimulus predicate ``append_event`` reads (see the block comment
+    above); ``True`` iff the event is a harness-authored durable reminder."""
+    return reminder_section(kind, data) is not None
 
 
 class Event(BaseModel):

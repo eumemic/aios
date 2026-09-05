@@ -29,9 +29,11 @@ from aios.ids import (
 )
 from aios.models.events import (
     MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    REMINDER_EXCLUDE_SQL,
     Event,
     EventKind,
     is_errored_lifecycle_event,
+    is_reminder_event,
 )
 
 
@@ -79,6 +81,32 @@ async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: s
     val: int | None = await conn.fetchval(
         "SELECT cumulative_tokens FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
+        "AND cumulative_tokens IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1",
+        session_id,
+    )
+    return val
+
+
+async def _latest_stimulus_cumulative_tokens(
+    conn: asyncpg.Connection[Any], session_id: str
+) -> int | None:
+    """``cumulative_tokens`` of the most recent message event that is a
+    STIMULUS — a non-assistant row that is not a harness-authored reminder.
+
+    The windower's retain-the-tail clamp keys on this row, not on the newest
+    message: durable reminder rows are appended AFTER the stimulus and BEFORE
+    the model call, so on a failed attempt (context overflow retry with
+    ``window_min=0``, a provider error, a deadline) they are the newest rows.
+    Clamping to the newest *message* would retain a reminder and evict the
+    unanswered stimulus — the retry would then succeed on a reminder-only
+    prompt and the session would idle with the stimulus never answered.
+    """
+    val: int | None = await conn.fetchval(
+        "SELECT cumulative_tokens FROM events "
+        "WHERE session_id = $1 AND kind = 'message' "
+        "AND role <> 'assistant' "
+        f"AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
         "AND cumulative_tokens IS NOT NULL "
         "ORDER BY seq DESC LIMIT 1",
         session_id,
@@ -1475,7 +1503,12 @@ async def append_event(
     # so an errored session recovers automatically once a user message lands
     # (its seq exceeds the latest error lifecycle event — see
     # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
-    is_user_message = kind == "message" and role == "user"
+    # A harness-authored reminder row (``is_reminder_event``) is a user-role
+    # message the model reads but not a stimulus: it must neither bump the
+    # interaction time / clear the error latch nor look like something the
+    # assistant has yet to react to.
+    is_reminder = is_reminder_event(kind, data)
+    is_user_message = kind == "message" and role == "user" and not is_reminder
     # A *stimulus* is any message the assistant must react to: user OR tool
     # (role <> 'assistant'). ``last_stimulus_seq`` tracks its max seq and drives
     # the active predicate. This is deliberately broader than ``is_user_message``
@@ -1485,7 +1518,7 @@ async def append_event(
     # Every tool result is a stimulus: the session wakes and the model gets a
     # turn to react to any tool completion (including a ``signal_send`` delivery
     # ack), restoring the standard agentic loop (tool call → result → continue).
-    is_stimulus = kind == "message" and role != "assistant"
+    is_stimulus = kind == "message" and role != "assistant" and not is_reminder
     # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
     # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
     # ``data`` (type ``Any``), which cannot bind to the write literal — see the
@@ -2799,10 +2832,14 @@ async def read_windowed_events(
     # while the omission complement still matches every row. That pairing
     # (empty events + a non-None omission) crashes ``build_messages``, which
     # reads ``events[0].created_at`` to anchor the omission marker and relies
-    # on the inverse invariant. Clamp so the most recent event always survives
-    # (its ``cumulative_tokens == total``) — the
-    # retain-the-tail-even-when-oversized guarantee.
-    drop = min(drop, total - 1)
+    # on the inverse invariant. Clamp so the most recent STIMULUS always
+    # survives — the retain-the-tail-even-when-oversized guarantee. The newest
+    # message row may be a durable reminder written before a failed attempt
+    # (see ``_latest_stimulus_cumulative_tokens``); keying on it would evict
+    # the unanswered stimulus behind it. Falls back to the newest message when
+    # the log holds no stimulus row at all.
+    stimulus_cum = await _latest_stimulus_cumulative_tokens(conn, session_id)
+    drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
     # Bounded range scan: messages past the boundary, plus the FS-loss
     # notices past the dropped-message prefix. Bare call (not via ``queries``)

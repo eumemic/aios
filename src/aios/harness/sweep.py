@@ -47,6 +47,7 @@ from aios.harness.auto_review import (
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
+from aios.models.events import REMINDER_EXCLUDE_SQL
 from aios.services import sessions as sessions_service
 
 log = get_logger("aios.harness.sweep")
@@ -388,14 +389,22 @@ CONFIRMED_ROWS_FLOORED_SQL = f"""
 # Every unreacted tool result counts (matching the scalar gate's ``is_stimulus``
 # in ``append_event``): a session with any tool result past its reaction
 # watermark is a wake candidate.
-_UNREACTED_ROWS_TEMPLATE = """
+# Durable reminder rows are ``role='user'`` but NOT stimuli (``append_event``
+# leaves ``last_stimulus_seq`` alone for them — the SAME predicate, single-
+# sourced from ``REMINDER_EXCLUDE_SQL``); exclude them here too or a reminder
+# past the watermark would defeat the incomplete-batch filter below. The form
+# is NULL-safe: ``data->'metadata'`` is NULL on every row without a metadata
+# key (tool results, plain user posts), and ``NOT (NULL ? k)`` would exclude
+# those rows entirely.
+_UNREACTED_ROWS_TEMPLATE = f"""
     SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e
       JOIN sessions s ON s.id = e.session_id
      WHERE e.session_id = ANY($1::text[])
        AND e.kind = 'message'
        AND e.role <> 'assistant'
-       AND e.seq > {watermark_expr}
+       AND {REMINDER_EXCLUDE_SQL.format(col="e.data")}
+       AND e.seq > {{watermark_expr}}
 """
 
 UNREACTED_ROWS_SQL = _UNREACTED_ROWS_TEMPLATE.format(watermark_expr="s.last_reacted_seq")

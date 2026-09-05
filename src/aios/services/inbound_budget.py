@@ -46,6 +46,7 @@ import asyncpg
 
 from aios.config import get_settings
 from aios.models.connections import inbound_orig_channel
+from aios.models.events import REMINDER_EXCLUDE_SQL
 
 # The "inference-bearing inbound" shape, defined ONCE and shared by both
 # ``_count_recent_*`` counters (single-source rather than duplicated-by-
@@ -58,8 +59,13 @@ from aios.models.connections import inbound_orig_channel
 # writes: a no-wake lifecycle and every internal harness lifecycle transition
 # carry no ``wake`` key (``->>`` yields ``NULL`` → not true), so the free paths
 # stay uncounted by construction.
-_INFERENCE_BEARING_PREDICATE = """
-              (kind = 'message'   AND data->>'role' = 'user')
+# Harness-authored durable reminder rows are ``role='user'`` but carry no
+# inference of their own (they are non-stimulus by construction — see
+# ``REMINDER_EXCLUDE_SQL``); counting them would let a session's own
+# bookkeeping consume its inbound budget and 429 real inbounds.
+_INFERENCE_BEARING_PREDICATE = f"""
+              (kind = 'message'   AND data->>'role' = 'user'
+               AND {REMINDER_EXCLUDE_SQL.format(col="data")})
            OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE)
 """
 
