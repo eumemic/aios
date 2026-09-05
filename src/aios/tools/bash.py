@@ -163,7 +163,13 @@ async def bash_handler(session_id: str, arguments: dict[str, Any]) -> dict[str, 
             timeout_seconds=timeout,
             max_output_bytes=settings.bash_max_output_bytes,
         )
-    except Exception:
+    except BaseException:
+        # ``asyncio.CancelledError`` is a ``BaseException`` (not ``Exception``)
+        # since 3.8, so ``except Exception`` would leave ``exec_raised`` false on
+        # cancel and a reconcile raise in the finally below would shadow the
+        # in-flight ``CancelledError``. Catch ``BaseException`` so the suppression
+        # fires for every exec raise (cancellation included); we re-raise
+        # immediately, so nothing is swallowed.
         exec_raised = True
         raise
     finally:
