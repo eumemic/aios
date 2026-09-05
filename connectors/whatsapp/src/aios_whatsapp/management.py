@@ -207,9 +207,15 @@ class WhatsappManagementMixin:
         return {"external_account_id": external_account_id, "status": "ok"}
 
     def _state_for_phone(self, phone: str) -> _WhatsappConnectionState:
-        target = normalize_phone(phone)
+        # Compare digits-only (mirrors confirmPairing's JID gate and
+        # connector._phone_to_jid): normalize_phone strips only spaces/dashes,
+        # so a phone stored as "+1 (555) 111-2222" or "+1.555.111.2222" would
+        # otherwise never equal the same number supplied as "+15551112222" and
+        # a live connection would be reported as missing.  Guard on a non-empty
+        # target so a degenerate no-digit id can never match a no-digit state.
+        target_digits = "".join(c for c in phone if c.isdigit())
         for state in self.state.values():
-            if state.phone == target:
+            if target_digits and "".join(c for c in state.phone if c.isdigit()) == target_digits:
                 return state
         raise ManagementHandlerError(
             {
