@@ -40,7 +40,7 @@ from aios.ids import GITHUB_REPOSITORY, split_id
 from aios.jobs.app import defer_wake
 from aios.logging import get_logger
 from aios.models.common import ListResponse
-from aios.models.events import REMINDER_METADATA_KEY, Event, EventKind
+from aios.models.events import Event, EventKind
 from aios.models.files import FileUploadResponse
 from aios.models.github_repositories import (
     GithubRepositoryResourceEcho,
@@ -578,13 +578,6 @@ async def post_message(
     account_id: AccountIdDep,
 ) -> Event:
     metadata = body.metadata or None
-    if metadata is not None and REMINDER_METADATA_KEY in metadata:
-        # Reserved for harness-authored reminder rows, which ``append_event``
-        # treats as non-stimulus: a client-minted one would be a user message
-        # that never wakes the session.
-        raise ValidationError(
-            f"metadata.{REMINDER_METADATA_KEY} is reserved for harness-authored reminder rows"
-        )
     if metadata is not None:
         channel = metadata.get("channel")
         if isinstance(channel, str):

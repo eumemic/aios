@@ -776,7 +776,7 @@ async def get_open_obligations(
     fire-and-forget ``Tell`` edge is excluded), same ``ORDER BY req.seq ASC``
     (oldest-first, deterministic). But
     instead of bare ``request_id``s it projects a full :class:`Obligation` per open
-    edge so the tail-injected obligations block (and the ``obligations`` read
+    edge so the durable obligations reminder row (harness/reminders.py) (and the ``obligations`` read
     model) can render it: ``caller_kind`` (``req.data->'caller'->>'kind'`` — the
     **trusted** frame, not the forgeable ``metadata.request`` blob), ``opened_at``
     (``req.created_at``, rendered as an absolute ``opened_at``), and the request content in the legacy-named
@@ -1334,7 +1334,7 @@ async def append_request_opened(
     asked-minus-answered derivation this feeds).
 
     ``summary`` (#1413, retained field name for event compatibility) is the
-    verbatim request input, carried so the always-on tail-injected obligations block
+    verbatim request input, carried so the durable obligations reminder row
     can recover the task after its original user message is windowed out. **Purely
     additive**: omitted (the legacy/None case) it is simply not written to the frame,
     and the obligations renderer shows a loud unavailable marker (no migration, #1131-proof

@@ -31,12 +31,12 @@ from aios.db.pool import create_pool
 from aios.db.queries import events as events_q
 from aios.harness.context import build_messages
 from aios.harness.inflight_tool_registry import InflightToolRegistry
+from aios.harness.reminders import reminder_event_data
 from aios.harness.sweep import (
     UNREACTED_ROWS_FLOORED_SQL,
     UNREACTED_ROWS_SQL,
     find_sessions_needing_inference,
 )
-from aios.models.events import REMINDER_METADATA_KEY
 from aios.services import sessions as sessions_service
 from aios.services.inbound_budget import check_inbound_budget_agent
 from tests.conftest import needs_docker
@@ -63,11 +63,7 @@ async def pool_session(
 
 
 def _reminder_data(text: str = "━━━ Open obligations ━━━\n(none)") -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": text,
-        "metadata": {REMINDER_METADATA_KEY: {"section": "obligations", "digest": "d", "v": 1}},
-    }
+    return reminder_event_data("obligations", text)
 
 
 async def _scalars(conn: asyncpg.Connection[Any], session_id: str) -> tuple[int, int, Any, int]:

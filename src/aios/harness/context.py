@@ -612,28 +612,18 @@ def _format_notification_marker(
     return f"{header}\n{hint}"
 
 
-def message_is_notification_marker(msg: dict[str, Any]) -> bool:
-    """True if *msg* is a non-focal-channel notification marker (``🔔 …``).
+def reminder_message(content: str) -> dict[str, Any]:
+    """The rendered message for a durable reminder row (``aios.harness.reminders``).
 
-    Mirrors the shape produced by :func:`_format_notification_marker`: a
-    user-role message whose (text) content begins with the bell prefix. The
-    walk uses this to classify the tail (``TailOrigin``): a *direct* trailing
-    stimulus the agent must answer (a focal inbound or tool result — keep it
-    last, hold the channels listing row back so a literal model doesn't
-    anchor on it) versus a *navigation* prompt (a non-focal notification,
-    whose companion IS the channels listing — write it).
+    Bare ``{role, content}``: no ``[received=…]`` envelope, no headers, no
+    attachments — a pure function of the row, so its bytes are identical in
+    every build (the prompt-prefix invariant) and never depend on
+    ``created_at`` or the account timezone. The ONE producer of the shape:
+    :func:`render_user_event` uses it to replay a persisted row and the
+    composer uses it for the unpersisted stand-in, so preview and replay are
+    byte-identical by construction.
     """
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content.startswith(_NOTIFICATION_MARKER_PREFIX)
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                return isinstance(text, str) and text.startswith(_NOTIFICATION_MARKER_PREFIX)
-    return False
+    return {"role": "user", "content": content}
 
 
 def render_user_event(
@@ -711,16 +701,16 @@ def render_user_event(
       pixels via the reorient recap.  Before #718 they were silently
       dropped here.
     """
-    msg = {k: v for k, v in event_data.items() if k != "metadata"}
-    metadata = event_data.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else None
-
     # A harness-authored durable reminder row renders as its bare content: no
     # ``[received=…]`` envelope, no headers, no attachments — a pure function of
     # the row, so its bytes are identical in every build (the prompt-prefix
     # invariant) and never depend on ``created_at`` or the account timezone.
     if is_reminder_event("message", event_data):
-        return {"role": "user", "content": event_data.get("content", "")}
+        return reminder_message(event_data.get("content", ""))
+
+    msg = {k: v for k, v in event_data.items() if k != "metadata"}
+    metadata = event_data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else None
 
     received = _format_received(created_at, tz_name)
 
@@ -1316,11 +1306,11 @@ class ContextResult:
     messages: list[dict[str, Any]]
     reacting_to: int  # max seq of user/tool events included in context
     # Structural class of the last rendered message (post prune/strip/filter).
-    tail_origin: TailOrigin = "none"
+    tail_origin: TailOrigin
     # The build ends on an assistant turn while holding an unreacted stimulus —
     # the trailing-assistant guard condition — reported so the composer can
     # act on it structurally.
-    needs_trailing_notice: bool = False
+    needs_trailing_notice: bool
 
 
 def _quarantine_placeholder(seq: int) -> dict[str, Any]:
@@ -1719,11 +1709,12 @@ def build_messages(
     # leaving orphan tool results or an assistant with missing paired
     # results.
     messages = _prune_orphans(messages)
-    # ``_prune_orphans`` keeps the surviving dict objects, so the structural
-    # origins carry over by identity; every other dict classifies by role.
-    origins: list[TailOrigin] = [origin_of.get(id(m), _role_origin(m)) for m in messages]
 
-    if omission is not None and max_stimulus_seq == 0 and "reminder" in origins:
+    if (
+        omission is not None
+        and max_stimulus_seq == 0
+        and any(is_reminder_event(e.kind, e.data) for e in events)
+    ):
         raise ContextInvariantError(
             "windowed slate holds durable reminder rows but no stimulus; the "
             "windower must retain the newest stimulus (session "
@@ -1738,11 +1729,9 @@ def build_messages(
     # is the first retained event — the boundary.
     if omission is not None:
         messages.insert(0, _omission_marker(omission, events[0].created_at, tz_name))
-        origins.insert(0, "user")
 
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
-        origins.insert(0, "system")
 
     _correct_image_data_url_mimes(messages)
     _clamp_oversize_image_data_urls(messages)
@@ -1780,17 +1769,18 @@ def build_messages(
     # content sanitised…]" marker on the wire, so the model literally sees a wall
     # of its own malfunction markers. Excluding them is safe for every model
     # (nothing is lost) and breaks the imitation loop at the source.
-    kept = [
-        (m, o)
-        for m, o in zip(stripped, origins, strict=True)
-        if not _is_degenerate_empty_assistant(m)
-    ]
-    stripped = [m for m, _o in kept]
+    survivors = [i for i, m in enumerate(stripped) if not _is_degenerate_empty_assistant(m)]
     # The tail is classified AFTER the prune / strip / degenerate filter — the
     # walk's last append is not the tail when those drop it (a pruned orphan
     # tool row, an empty assistant), which is exactly when the gates below
-    # must see the message before it.
-    tail_origin: TailOrigin = kept[-1][1] if kept else "none"
+    # must see the message before it. ``_strip_to_spec`` is an index-preserving
+    # map, so the survivor's pre-strip dict (the one the walk tagged by
+    # identity) is ``messages[i]``; every untagged dict classifies by role.
+    tail_origin: TailOrigin = "none"
+    if survivors:
+        last = messages[survivors[-1]]
+        tail_origin = origin_of.get(id(last), _role_origin(last))
+    stripped = [stripped[i] for i in survivors]
 
     # Trailing-assistant guard: blind-spot USER messages and TOOL results are
     # anchored after the assistant that was blind to them (#1120), so neither

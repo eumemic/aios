@@ -2,46 +2,20 @@
 
 ``metadata[REMINDER_METADATA_KEY]`` marks harness-authored durable reminder
 rows, which ``append_event`` treats as non-stimulus. A client-minted one would
-be a user message that never wakes the session — so the router rejects it
-with 422 rather than appending it.
+be a user message that never wakes the session — so ``append_user_message``
+(the one writer behind every externally-sourced user message) rejects it and
+the API answers 422 rather than appending it.
 """
 
 from __future__ import annotations
 
 import secrets
-from collections.abc import AsyncIterator
 from typing import Any
-from unittest import mock
 
 import httpx
 import pytest
 
 from aios.models.events import REMINDER_METADATA_KEY
-from tests.helpers.connections import authed_client, wired_app
-
-
-@pytest.fixture
-async def http_client(pool: Any, aios_env: dict[str, str]) -> AsyncIterator[httpx.AsyncClient]:
-    from aios.config import get_settings
-    from aios.crypto.vault import CryptoBox
-    from aios.harness import runtime
-    from aios_connectors.providers import SubsystemToolProvider
-
-    crypto_box = CryptoBox.from_base64(get_settings().vault_key.get_secret_value())
-    app = wired_app(pool)
-    prev_crypto = runtime.crypto_box
-    prev_tool_provider = runtime.tool_provider
-    runtime.crypto_box = crypto_box
-    runtime.tool_provider = SubsystemToolProvider()
-    try:
-        transport = httpx.ASGITransport(app=app)
-        async with authed_client(
-            "http://testserver", aios_env["AIOS_API_KEY"], transport=transport
-        ) as client:
-            yield client
-    finally:
-        runtime.crypto_box = prev_crypto
-        runtime.tool_provider = prev_tool_provider
 
 
 @pytest.fixture
@@ -85,7 +59,7 @@ class TestReservedReminderMetadata:
             f"/v1/sessions/{session_id}/messages",
             json={
                 "content": "sneaky",
-                "metadata": {REMINDER_METADATA_KEY: {"section": "concise", "digest": "d", "v": 1}},
+                "metadata": {REMINDER_METADATA_KEY: {"section": "concise"}},
             },
         )
         assert resp.status_code == 422, resp.text
@@ -100,11 +74,8 @@ class TestReservedReminderMetadata:
     async def test_ordinary_metadata_still_accepted(
         self, http_client: httpx.AsyncClient, session_id: str
     ) -> None:
-        # A successful append defers a wake through procrastinate, which the
-        # ASGI test app does not open — stub the deferral, keep the append real.
-        with mock.patch("aios.api.routers.sessions.defer_wake", new=mock.AsyncMock()):
-            resp = await http_client.post(
-                f"/v1/sessions/{session_id}/messages",
-                json={"content": "hello", "metadata": {"note": "fine"}},
-            )
+        resp = await http_client.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"content": "hello", "metadata": {"note": "fine"}},
+        )
         assert resp.status_code == 201, resp.text

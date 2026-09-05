@@ -391,11 +391,9 @@ CONFIRMED_ROWS_FLOORED_SQL = f"""
 # watermark is a wake candidate.
 # Durable reminder rows are ``role='user'`` but NOT stimuli (``append_event``
 # leaves ``last_stimulus_seq`` alone for them — the SAME predicate, single-
-# sourced from ``REMINDER_EXCLUDE_SQL``); exclude them here too or a reminder
-# past the watermark would defeat the incomplete-batch filter below. The form
-# is NULL-safe: ``data->'metadata'`` is NULL on every row without a metadata
-# key (tool results, plain user posts), and ``NOT (NULL ? k)`` would exclude
-# those rows entirely.
+# sourced from ``REMINDER_EXCLUDE_SQL``, NULL-safe by its definition); exclude
+# them here too or a reminder past the watermark would defeat the
+# incomplete-batch filter below.
 _UNREACTED_ROWS_TEMPLATE = f"""
     SELECT e.session_id, e.role, e.data->>'tool_call_id' AS tool_call_id
       FROM events e

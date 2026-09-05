@@ -18,12 +18,15 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+from typing import Any
 
 from aios.db.queries import events as events_mod
+from aios.harness.reminders import reminder_event_data
 from aios.harness.sweep import UNREACTED_ROWS_FLOORED_SQL, UNREACTED_ROWS_SQL
 from aios.models.events import (
     REMINDER_EXCLUDE_SQL,
     REMINDER_METADATA_KEY,
+    ReminderSection,
     is_reminder_event,
     reminder_section,
 )
@@ -31,12 +34,10 @@ from aios.services.inbound import _RESERVED_METADATA_KEYS
 from aios.services.inbound_budget import _INFERENCE_BEARING_PREDICATE
 
 
-def _reminder(section: str = "concise", role: str = "user") -> dict[str, object]:
-    return {
-        "role": role,
-        "content": "reminder text",
-        "metadata": {REMINDER_METADATA_KEY: {"section": section, "digest": "d", "v": 1}},
-    }
+def _reminder(section: ReminderSection = "concise", role: str = "user") -> dict[str, Any]:
+    data = reminder_event_data(section, "reminder text")
+    data["role"] = role
+    return data
 
 
 class TestPredicate:
@@ -45,22 +46,30 @@ class TestPredicate:
         assert is_reminder_event("message", _reminder()) is True
 
     def test_rejects_everything_else(self) -> None:
-        assert reminder_section("message", {"role": "user", "content": "hi"}) is None
-        assert (
-            reminder_section("message", {"role": "user", "content": "hi", "metadata": {}}) is None
-        )
-        assert reminder_section("message", _reminder(role="assistant")) is None
-        assert reminder_section("lifecycle", _reminder()) is None
-        # An unknown section is NOT trusted as a reminder.
-        assert reminder_section("message", _reminder(section="bogus")) is None
-        assert is_reminder_event("message", {"role": "tool", "content": "x"}) is False
+        for data in (
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "hi", "metadata": {}},
+            {"role": "user", "content": "hi", "metadata": {"request": {"request_id": "r"}}},
+            _reminder(role="assistant"),
+            {"role": "tool", "content": "x"},
+        ):
+            assert is_reminder_event("message", data) is False, data
+            assert reminder_section("message", data) is None, data
+        assert is_reminder_event("lifecycle", _reminder()) is False
+
+    def test_presence_is_the_whole_predicate(self) -> None:
+        # The Python predicate keys on the marker's PRESENCE, exactly like the
+        # SQL twin: a marker with an odd section (or no dict at all) is still a
+        # reminder to every reader, never a stimulus to some of them.
+        assert is_reminder_event("message", _reminder(section="bogus")) is True  # type: ignore[arg-type]
+        assert reminder_section("message", _reminder(section="bogus")) == "bogus"  # type: ignore[arg-type]
+        odd = {"role": "user", "metadata": {REMINDER_METADATA_KEY: 7}}
+        assert is_reminder_event("message", odd) is True
+        assert reminder_section("message", odd) is None
 
     def test_marker_shape_is_defensive(self) -> None:
+        assert is_reminder_event("message", {"role": "user", "metadata": "junk"}) is False
         assert reminder_section("message", {"role": "user", "metadata": "junk"}) is None
-        assert (
-            reminder_section("message", {"role": "user", "metadata": {REMINDER_METADATA_KEY: 7}})
-            is None
-        )
 
 
 class TestSqlForm:
@@ -81,11 +90,12 @@ class TestSqlForm:
             )
 
     def test_windower_tail_clamp_keys_on_the_newest_stimulus(self) -> None:
-        src = inspect.getsource(events_mod._latest_stimulus_cumulative_tokens)
-        assert "REMINDER_EXCLUDE_SQL" in src
-        assert "role <> 'assistant'" in src
+        assert REMINDER_EXCLUDE_SQL.format(col="data") in events_mod._STIMULUS_ROW_SQL
+        assert "role <> 'assistant'" in events_mod._STIMULUS_ROW_SQL
+        seek_src = inspect.getsource(events_mod._latest_cumulative_tokens)
+        assert "_STIMULUS_ROW_SQL if stimulus_only" in seek_src
         clamp_src = inspect.getsource(events_mod.read_windowed_events)
-        assert "_latest_stimulus_cumulative_tokens" in clamp_src
+        assert "_latest_cumulative_tokens(conn, session_id, stimulus_only=True)" in clamp_src
 
     def test_connectors_cannot_mint_a_reminder(self) -> None:
         assert REMINDER_METADATA_KEY in _RESERVED_METADATA_KEYS

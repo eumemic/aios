@@ -7,17 +7,21 @@ count cap + ``+K more``, the neutral abridged pointer past the task cap, the
 loud unavailable marker) and ``max_obligations_reminder_local`` (a
 never-under-reserving upper bound, bounded regardless of count or task size).
 The byte-stability and absolute-timestamp properties the durable row depends on
-are pinned in ``test_obligations_reminder.py``.
+are pinned here as well.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
 from aios.harness.obligations import (
     _HEADER,
     _TASK_MAX,
     MAX_RENDERED_OBLIGATIONS,
+    OBLIGATIONS_EMPTY_CONTENT,
+    OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL,
     max_obligations_reminder_local,
     render_obligations_reminder,
 )
@@ -34,6 +38,7 @@ def _ob(
     caller_id: str | None = None,
     age: timedelta = timedelta(seconds=0),
     summary: str | None = "do the thing",
+    output_schema: dict[str, Any] | None = None,
 ) -> Obligation:
     return Obligation(
         request_id=rid,
@@ -41,6 +46,7 @@ def _ob(
         caller_id=caller_id,
         opened_at=_NOW - age,
         summary=summary,
+        output_schema=output_schema,
     )
 
 
@@ -48,7 +54,34 @@ def _render(obs: list[Obligation]) -> str:
     return render_obligations_reminder(obs, session_id="sess_x")
 
 
+def _priced(content: str) -> int:
+    """A user row's price as the reserve functions count it: with the
+    adjacent-user separator pre-paid."""
+    return approx_tokens(
+        [
+            {"role": "assistant", "content": _USER_MESSAGE_SEPARATOR_CONTENT},
+            {"role": "user", "content": content},
+        ]
+    )
+
+
 class TestRenderObligationsReminder:
+    def test_uses_absolute_opened_timestamp_not_a_relative_age(self) -> None:
+        # The row is replayed byte-for-byte on every later step and the
+        # change-gate compares content, so a relative age would churn.
+        text = _render([_ob("req_1")])
+        assert text.startswith(_HEADER)
+        assert "(opened 2025-01-01T12:00:00+00:00)" in text
+        assert "(open " not in text
+
+    def test_byte_stable_across_calls(self) -> None:
+        obs = [_ob("req_1"), _ob("req_2", age=timedelta(days=3))]
+        assert _render(obs) == _render(list(obs))
+
+    def test_schema_contract_renders(self) -> None:
+        ob = _ob("req_s", output_schema={"type": "object", "required": ["done"]})
+        assert "expected output_schema" in _render([ob])
+
     def test_header_then_one_line_per_obligation_with_literal_request_id(self) -> None:
         obs = [_ob("req_aaa"), _ob("req_bbb")]
         lines = _render(obs).splitlines()
@@ -144,15 +177,16 @@ class TestMaxObligationsReminderLocal:
         for n in (1, 3, MAX_RENDERED_OBLIGATIONS, MAX_RENDERED_OBLIGATIONS + 50):
             obs = [_ob(f"req_{i}", summary="s" * 80) for i in range(n)]
             bound = max_obligations_reminder_local(obs)
-            actual = approx_tokens([{"role": "user", "content": _render(obs)}])
-            assert bound >= actual, f"under-reserved for n={n}: {bound} < {actual}"
+            assert bound >= _priced(_render(obs)), f"under-reserved for n={n}"
 
-    def test_bound_covers_oversized_tasks(self) -> None:
+    def test_bound_covers_oversized_tasks_and_schemas(self) -> None:
         for n in (1, MAX_RENDERED_OBLIGATIONS, MAX_RENDERED_OBLIGATIONS + 5):
-            obs = [_ob(f"req_{i}", summary="w" * 23_631) for i in range(n)]
+            obs = [
+                _ob(f"req_{i}", summary="w" * 23_631, output_schema={"type": "object"})
+                for i in range(n)
+            ]
             bound = max_obligations_reminder_local(obs)
-            actual = approx_tokens([{"role": "user", "content": _render(obs)}])
-            assert bound >= actual, f"under-reserved for n={n}: {bound} < {actual}"
+            assert bound >= _priced(_render(obs)), f"under-reserved for n={n}"
 
     def test_bound_stays_bounded_for_oversized_tasks(self) -> None:
         # The abridged pointer must not scale with task size: a 40x larger task
@@ -183,3 +217,9 @@ class TestMaxObligationsReminderLocal:
         # huge has only the extra "+K more" marker over small — a small, fixed delta,
         # not an unbounded inflation.
         assert huge - small < 50
+
+
+class TestObligationsEmptyReserve:
+    def test_one_liner_render_under_bound(self) -> None:
+        assert 0 < _priced(OBLIGATIONS_EMPTY_CONTENT) <= OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+        assert OBLIGATIONS_EMPTY_CONTENT.startswith(_HEADER.split(" (")[0])

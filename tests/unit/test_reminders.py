@@ -18,14 +18,11 @@ from aios.harness.concise import CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNE
 from aios.harness.context import TRAILING_STIMULUS_NOTICE, TailOrigin
 from aios.harness.obligations import OBLIGATIONS_EMPTY_CONTENT, render_obligations_reminder
 from aios.harness.reminders import (
-    REMINDER_SCHEMA_VERSION,
     ReminderPlan,
-    latest_reminder_digests,
+    latest_reminder_contents,
     plan_reminders,
     present_request_ids,
-    reminder_digest,
     reminder_event_data,
-    reminder_message,
 )
 from aios.models.agents import OutputStyle
 from aios.models.events import REMINDER_METADATA_KEY, Event, ReminderSection
@@ -118,35 +115,28 @@ _BASE = [_evt(1, "user", "hello"), _evt(2, "assistant", "hi", reacting_to=1)]
 class TestRowShape:
     def test_event_data_is_a_tagged_user_message(self) -> None:
         data = reminder_event_data("concise", CONCISE_NAG_CONTENT)
-        assert data["role"] == "user"
-        assert data["content"] == CONCISE_NAG_CONTENT
-        assert data["metadata"][REMINDER_METADATA_KEY] == {
-            "section": "concise",
-            "digest": reminder_digest(CONCISE_NAG_CONTENT),
-            "v": REMINDER_SCHEMA_VERSION,
+        assert data == {
+            "role": "user",
+            "content": CONCISE_NAG_CONTENT,
+            "metadata": {REMINDER_METADATA_KEY: {"section": "concise"}},
         }
 
-    def test_rendered_message_is_bare(self) -> None:
-        # No envelope: the persisted row replays through ``render_user_event``
-        # as exactly this, so preview stand-in == next-step replay.
-        assert reminder_message("x") == {"role": "user", "content": "x"}
-
-    def test_latest_digest_is_the_greatest_seq_row_per_section(self) -> None:
+    def test_latest_content_is_the_greatest_seq_row_per_section(self) -> None:
         events = [
             *_BASE,
             _row(3, "channels", "old listing"),
             _row(4, "concise", CONCISE_NAG_CONTENT),
             _row(5, "channels", "new listing"),
         ]
-        assert latest_reminder_digests(events) == {
-            "channels": reminder_digest("new listing"),
-            "concise": reminder_digest(CONCISE_NAG_CONTENT),
+        assert latest_reminder_contents(events) == {
+            "channels": "new listing",
+            "concise": CONCISE_NAG_CONTENT,
         }
 
-    def test_latest_digest_is_recomputed_from_content_not_trusted(self) -> None:
-        row = _row(3, "channels", "listing")
-        row.data["metadata"][REMINDER_METADATA_KEY]["digest"] = "forged"
-        assert latest_reminder_digests([*_BASE, row]) == {"channels": reminder_digest("listing")}
+    def test_non_reminder_rows_are_not_a_baseline(self) -> None:
+        # A plain user row whose text happens to equal a reminder is not one.
+        events = [*_BASE, _evt(3, "user", CONCISE_NAG_CONTENT)]
+        assert latest_reminder_contents(events) == {}
 
 
 class TestNothingApplicable:
@@ -267,7 +257,7 @@ class TestObligations:
         assert plan.writes[0].content == OBLIGATIONS_EMPTY_CONTENT
         # Once written, the one-liner is the in-window baseline: nothing more.
         after = [*events, _row(4, "obligations", OBLIGATIONS_EMPTY_CONTENT)]
-        assert _plan(after, obligations=[]) == ReminderPlan(writes=(), skipped=0)
+        assert _plan(after, obligations=[]) == ReminderPlan(writes=(), skipped=1)
 
     def test_emptied_with_no_listing_in_window_writes_nothing(self) -> None:
         # The listing already scrolled out (or never existed): a "(none)" row

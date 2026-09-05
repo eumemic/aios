@@ -31,6 +31,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.db.queries.prune import prune_archived_runs
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
+from aios.harness.reminders import max_reminders_local
 from aios.ids import REQUEST, make_id
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
@@ -1477,7 +1478,7 @@ async def _check_completion_injection(
     # return/error gate (it stayed bool(obligations), asserted above).
     assert child_prelude.obligations, "background child's run obligation must be computed"
     assert child_prelude.obligations[0].caller_kind == "run"
-    assert child_prelude.obligations_block_upper_bound_local > 0
+    assert child_prelude.reminders_upper_bound_local > max_reminders_local([], [])
 
     fg = await sessions_service.create_session(
         pool,
@@ -1503,7 +1504,7 @@ async def _check_completion_injection(
     # An ordinary foreground session owes nothing -> no obligations, no reserved
     # tail budget (the unconditional query returns []).
     assert fg_prelude.obligations == []
-    assert fg_prelude.obligations_block_upper_bound_local == 0
+    assert fg_prelude.reminders_upper_bound_local == max_reminders_local([], [])
 
 
 async def test_return_writes_response_and_wakes_caller_without_archiving(

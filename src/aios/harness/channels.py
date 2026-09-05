@@ -144,7 +144,7 @@ def augment_with_focal_paradigm(base_system: str, channels: list[str]) -> str:
     return join_blocks(base_system, build_focal_paradigm_block(channels))
 
 
-def max_tail_block_local(channels: list[str]) -> int:
+def max_channels_reminder_local(channels: list[str]) -> int:
     """Worst-case local-token cost of :func:`render_channels_reminder`.
 
     Called at windowing time when the *actual* listing isn't yet

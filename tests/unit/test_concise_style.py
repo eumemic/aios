@@ -6,7 +6,6 @@ Mechanism and rationale live in ``aios.harness.concise``.
 from __future__ import annotations
 
 import itertools
-from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -23,94 +22,40 @@ from aios.harness.concise import (
 )
 from aios.harness.step_context import (
     StepPrelude,
-    compose_step_context,
     compute_step_prelude,
     prelude_overhead_local,
 )
 from aios.harness.tokens import approx_tokens
 from aios.models.agents import (
-    AgentBinding,
     AgentCreate,
     AgentUpdate,
-    OutputStyle,
     StepSurface,
 )
 from aios.models.events import Event
 from tests.unit.conftest import fake_pool_yielding_conn
+from tests.unit.step_context_support import (
+    ACCOUNT,
+    SESSION,
+    compose_with_stubs,
+    make_prelude,
+    make_step_surface,
+    message_event,
+)
 
-_ACCOUNT = "acc_concise"
-_SESSION = "sess_concise"
-
-
-def _agent(*, output_style: OutputStyle = "default") -> StepSurface:
-    return StepSurface(
-        model="gpt-test",
-        system="you are a test agent",
-        tools=[],
-        skills=[],
-        mcp_servers=[],
-        http_servers=[],
-        litellm_extra={},
-        window_min=1,
-        window_max=10,
-        preempt_policy="wait",
-        output_style=output_style,
-        binding=AgentBinding(agent_id="agt_concise", version=1),
-    )
+_ACCOUNT = ACCOUNT
+_SESSION = SESSION
+_agent = make_step_surface
+_prelude = make_prelude
 
 
 def _evt(seq: int, *, role: str, content: str = "hi") -> Event:
-    return Event(
-        id=f"evt_{seq:04d}",
-        session_id=_SESSION,
-        seq=seq,
-        kind="message",
-        data={"role": role, "content": content},
-        cumulative_tokens=None,
-        created_at=datetime(2026, 8, 25, tzinfo=UTC),
-    )
-
-
-def _prelude(*, system_prompt: str = "sys") -> StepPrelude:
-    return StepPrelude(
-        system_prompt=system_prompt,
-        tools=[],
-        skill_versions=[],
-        tail_block_upper_bound_local=0,
-        obligations=[],
-        obligations_block_upper_bound_local=0,
-    )
-
-
-class _Session:
-    id = _SESSION
-    focal_channel = None
+    return message_event(seq, role, content)
 
 
 async def _compose(
     agent: StepSurface, events: list[Event], *, channels: list[str] | None = None
 ) -> list[dict[str, Any]]:
-    with (
-        mock.patch(
-            "aios.services.sessions.load_session_workspace_path",
-            new=AsyncMock(return_value=None),
-        ),
-        mock.patch(
-            "aios.services.accounts.resolve_effective_timezone",
-            new=AsyncMock(return_value="UTC"),
-        ),
-    ):
-        step_ctx = await compose_step_context(
-            pool=MagicMock(),
-            session=_Session(),  # type: ignore[arg-type]
-            account_id=_ACCOUNT,
-            agent=agent,
-            channels=channels or [],
-            prelude=_prelude(),
-            events=events,
-            persist_image_rewrites=False,
-        )
-    return step_ctx.messages
+    return (await compose_with_stubs(agent, events, channels=channels)).messages
 
 
 def _text(msg: dict[str, Any]) -> str:

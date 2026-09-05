@@ -10,25 +10,22 @@ and a later obligation whose ask is present writes nothing again.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from typing import Any
-from unittest import mock
-from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
 
 from aios.db import queries
 from aios.db.pool import create_pool
-from aios.harness import runtime
 from aios.harness.obligations import OBLIGATIONS_EMPTY_CONTENT
-from aios.harness.step_context import StepContext, compose_step_context, compute_step_prelude
-from aios.models.events import Event, is_reminder_event
+from aios.harness.step_context import StepContext
+from aios.models.events import Event
 from aios.models.sessions import Ok
-from aios.services import agents as agents_service
 from aios.services import sessions as sessions_service
 from tests.conftest import needs_docker
-from tests.integration.conftest import seed_agent_env_session
+from tests.integration.conftest import compose_step_for, seed_agent_env_session
+from tests.support import reminder_rows
 
 pytestmark = [pytest.mark.integration, needs_docker]
 
@@ -48,18 +45,6 @@ async def pool_session(
         yield pool, session.id, env.id
     finally:
         await pool.close()
-
-
-@pytest.fixture
-def _stub_tool_provider() -> Iterator[None]:
-    prev = runtime.tool_provider
-    tp = mock.Mock()
-    tp.list_tools_for_session = AsyncMock(return_value=[])
-    runtime.tool_provider = tp
-    try:
-        yield
-    finally:
-        runtime.tool_provider = prev
 
 
 async def _open(
@@ -101,61 +86,42 @@ async def _answer(pool: asyncpg.Pool[Any], session_id: str, request_id: str) -> 
 
 
 async def _compose(pool: asyncpg.Pool[Any], session_id: str, *, events: list[Event]) -> StepContext:
-    """Prelude + compose over a caller-chosen slate (the windower's output is
-    simulated so an ask can be 'scrolled out' without a real overflow)."""
-    session = await sessions_service.get_session_basic(pool, session_id, account_id=_ACCOUNT)
-    agent = await agents_service.load_for_session(pool, session, account_id=_ACCOUNT)
-    prelude = await compute_step_prelude(
-        pool,
-        session_id,
-        account_id=_ACCOUNT,
-        session=session,
-        agent=agent,
-        channels=[],
-        memory_store_echoes=[],
-    )
-    return await compose_step_context(
-        pool=pool,
-        session=session,
-        account_id=_ACCOUNT,
-        agent=agent,
-        channels=[],
-        prelude=prelude,
-        events=events,
-        persist_reminders=True,
-    )
+    """Compose over a caller-chosen slate (the windower's output is simulated
+    so an ask can be 'scrolled out' without a real overflow)."""
+    ctx, _ = await compose_step_for(pool, session_id, account_id=_ACCOUNT, events=events)
+    return ctx
 
 
 async def _log(pool: asyncpg.Pool[Any], session_id: str) -> list[Event]:
     return await sessions_service.read_message_events(pool, session_id, account_id=_ACCOUNT)
 
 
-async def _reminder_rows(pool: asyncpg.Pool[Any], session_id: str) -> list[Event]:
-    return [e for e in await _log(pool, session_id) if is_reminder_event(e.kind, e.data)]
+async def _rows(pool: asyncpg.Pool[Any], session_id: str) -> list[Event]:
+    return reminder_rows(await _log(pool, session_id))
 
 
 class TestPresenceGate:
     async def test_ask_in_window_writes_no_row(
-        self, pool_session: tuple[asyncpg.Pool[Any], str, str], _stub_tool_provider: None
+        self, pool_session: tuple[asyncpg.Pool[Any], str, str], stub_tool_provider: None
     ) -> None:
         pool, sid, env_id = pool_session
         await _open(pool, sid, env_id, "req-present", ask="summarise the dossier")
         ctx = await _compose(pool, sid, events=await _log(pool, sid))
         assert ctx.reminders_written == ()
         assert ctx.reminders_skipped == 1
-        assert await _reminder_rows(pool, sid) == []
+        assert await _rows(pool, sid) == []
         # The ask itself is the final user content — the real stimulus.
         assert "summarise the dossier" in str(ctx.messages[-1]["content"])
 
     async def test_ask_scrolled_out_writes_the_listing_once(
-        self, pool_session: tuple[asyncpg.Pool[Any], str, str], _stub_tool_provider: None
+        self, pool_session: tuple[asyncpg.Pool[Any], str, str], stub_tool_provider: None
     ) -> None:
         pool, sid, env_id = pool_session
         await _open(pool, sid, env_id, "req-gone", ask="summarise the dossier")
         # The ask has scrolled out: an empty slate.
         ctx = await _compose(pool, sid, events=[])
         assert ctx.reminders_written == ("obligations",)
-        rows = await _reminder_rows(pool, sid)
+        rows = await _rows(pool, sid)
         assert len(rows) == 1
         assert "req-gone" in rows[0].data["content"]
         assert "[run]" in rows[0].data["content"]
@@ -163,36 +129,36 @@ class TestPresenceGate:
         # The next compose sees the row in its window: no second write.
         ctx2 = await _compose(pool, sid, events=rows)
         assert ctx2.reminders_written == ()
-        assert len(await _reminder_rows(pool, sid)) == 1
+        assert len(await _rows(pool, sid)) == 1
 
     async def test_emptied_then_new_present_ask(
-        self, pool_session: tuple[asyncpg.Pool[Any], str, str], _stub_tool_provider: None
+        self, pool_session: tuple[asyncpg.Pool[Any], str, str], stub_tool_provider: None
     ) -> None:
         pool, sid, env_id = pool_session
         await _open(pool, sid, env_id, "req-1", ask="first task")
         ctx1 = await _compose(pool, sid, events=[])  # ask scrolled out → listing
         assert ctx1.reminders_written == ("obligations",)
-        listing = (await _reminder_rows(pool, sid))[0]
+        listing = (await _rows(pool, sid))[0]
 
         # Answered while the listing is still in the window: the one-liner,
         # exactly once.
         await _answer(pool, sid, "req-1")
         ctx2 = await _compose(pool, sid, events=[listing])
         assert ctx2.reminders_written == ("obligations",)
-        rows = await _reminder_rows(pool, sid)
+        rows = await _rows(pool, sid)
         assert [r.data["content"] for r in rows][-1] == OBLIGATIONS_EMPTY_CONTENT
         ctx3 = await _compose(pool, sid, events=rows)
         assert ctx3.reminders_written == ()
-        assert len(await _reminder_rows(pool, sid)) == 2
+        assert len(await _rows(pool, sid)) == 2
 
         # A new obligation whose ask is in the window: presence-gated, no row.
         await _open(pool, sid, env_id, "req-2", ask="second task")
         ctx4 = await _compose(pool, sid, events=await _log(pool, sid))
         assert ctx4.reminders_written == ()
-        assert len(await _reminder_rows(pool, sid)) == 2
+        assert len(await _rows(pool, sid)) == 2
 
     async def test_never_owed_and_emptied_without_listing_write_nothing(
-        self, pool_session: tuple[asyncpg.Pool[Any], str, str], _stub_tool_provider: None
+        self, pool_session: tuple[asyncpg.Pool[Any], str, str], stub_tool_provider: None
     ) -> None:
         pool, sid, env_id = pool_session
         await sessions_service.append_user_message(pool, sid, "hello", account_id=_ACCOUNT)
@@ -201,4 +167,4 @@ class TestPresenceGate:
         await _open(pool, sid, env_id, "req-quick", ask="quick one")
         await _answer(pool, sid, "req-quick")
         assert (await _compose(pool, sid, events=[])).reminders_written == ()
-        assert await _reminder_rows(pool, sid) == []
+        assert await _rows(pool, sid) == []

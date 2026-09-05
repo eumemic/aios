@@ -76,37 +76,28 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
-async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
-    """Fetch the cumulative_tokens value of the most recent message event."""
-    val: int | None = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
-        "WHERE session_id = $1 AND kind = 'message' "
-        "AND cumulative_tokens IS NOT NULL "
-        "ORDER BY seq DESC LIMIT 1",
-        session_id,
-    )
-    return val
+_STIMULUS_ROW_SQL = f"AND role <> 'assistant' AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
 
 
-async def _latest_stimulus_cumulative_tokens(
-    conn: asyncpg.Connection[Any], session_id: str
+async def _latest_cumulative_tokens(
+    conn: asyncpg.Connection[Any], session_id: str, *, stimulus_only: bool = False
 ) -> int | None:
-    """``cumulative_tokens`` of the most recent message event that is a
-    STIMULUS — a non-assistant row that is not a harness-authored reminder.
+    """Fetch the cumulative_tokens value of the most recent message event.
 
-    The windower's retain-the-tail clamp keys on this row, not on the newest
-    message: durable reminder rows are appended AFTER the stimulus and BEFORE
-    the model call, so on a failed attempt (context overflow retry with
-    ``window_min=0``, a provider error, a deadline) they are the newest rows.
-    Clamping to the newest *message* would retain a reminder and evict the
-    unanswered stimulus — the retry would then succeed on a reminder-only
-    prompt and the session would idle with the stimulus never answered.
+    ``stimulus_only`` narrows it to the most recent STIMULUS — a non-assistant
+    row that is not a harness-authored reminder. The windower's retain-the-
+    tail clamp keys on that row, not on the newest message: durable reminder
+    rows are appended AFTER the stimulus and BEFORE the model call, so on a
+    failed attempt (context overflow retry with ``window_min=0``, a provider
+    error, a deadline) they are the newest rows. Clamping to the newest
+    *message* would retain a reminder and evict the unanswered stimulus — the
+    retry would then succeed on a reminder-only prompt and the session would
+    idle with the stimulus never answered.
     """
     val: int | None = await conn.fetchval(
         "SELECT cumulative_tokens FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
-        "AND role <> 'assistant' "
-        f"AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
+        f"{_STIMULUS_ROW_SQL if stimulus_only else ''}"
         "AND cumulative_tokens IS NOT NULL "
         "ORDER BY seq DESC LIMIT 1",
         session_id,
@@ -1340,9 +1331,11 @@ async def precompute_event_append(
     delta = delta_v1 = delta_v2 = 0
     if kind == "message":
         pre_focal: str | None = None
-        if data.get("role") == "user":
+        if data.get("role") == "user" and not is_reminder_event(kind, data):
             # USER token count needs the focal channel to render the as-sent
-            # form.  This pre-read is OUTSIDE any transaction; a concurrent
+            # form (a reminder row renders bare — no focal, no envelope — so
+            # its price needs no pre-read).  This pre-read is OUTSIDE any
+            # transaction; a concurrent
             # ``switch_channel`` committing before the lock can make it stale
             # (bounded drift — see ``append_event``'s docstring).  The STORED
             # stamp is always the locked RETURNING value, unaffected by this read.
@@ -2835,10 +2828,10 @@ async def read_windowed_events(
     # on the inverse invariant. Clamp so the most recent STIMULUS always
     # survives — the retain-the-tail-even-when-oversized guarantee. The newest
     # message row may be a durable reminder written before a failed attempt
-    # (see ``_latest_stimulus_cumulative_tokens``); keying on it would evict
-    # the unanswered stimulus behind it. Falls back to the newest message when
+    # (see ``_latest_cumulative_tokens``); keying on it would evict the
+    # unanswered stimulus behind it. Falls back to the newest message when
     # the log holds no stimulus row at all.
-    stimulus_cum = await _latest_stimulus_cumulative_tokens(conn, session_id)
+    stimulus_cum = await _latest_cumulative_tokens(conn, session_id, stimulus_only=True)
     drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
     # Bounded range scan: messages past the boundary, plus the FS-loss

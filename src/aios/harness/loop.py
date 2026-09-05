@@ -950,7 +950,7 @@ async def _run_session_step_body(
     #
     # This pair of reads runs in the window between ``step_start`` and
     # ``context_build_start`` and used to be UNSPANNED — the ``context_build_*``
-    # pair only brackets ``compose_step_context`` (which measures ~0.00s), so a
+    # pair only brackets ``compose_step_context`` (sub-millisecond unless it writes reminder rows), so a
     # multi-second pre-inference read cost was blind-spotted by every profiling
     # angle that keyed on ``context_build_*``. Bracketing each read individually
     # turns "where did the pre-inference seconds go?" into a query instead of a

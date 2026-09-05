@@ -18,9 +18,10 @@ provider — and the model still sees each reminder at least once per window.
 
 This module is the pure planner: given the windowed slate and this step's
 context it decides which rows to write. The composer executes the plan
-(``persist_reminders=True`` on the worker's step path) or renders the same
-rows as unpersisted stand-ins (the read-only ``/context`` preview), so the two
-paths produce byte-identical message lists.
+(``persist_reminders=True`` on the worker's step path, via
+:func:`aios.harness.context_persist.persist_reminder_rows`) or renders the
+same rows as unpersisted stand-ins (the read-only ``/context`` preview), so
+the two paths produce byte-identical message lists.
 
 Rows are **non-stimulus** by construction (see
 :func:`aios.models.events.is_reminder_event`): they never bump the session's
@@ -30,25 +31,32 @@ session, and are excluded from every log-derived stimulus reader.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
-from aios.harness.channels import render_channels_reminder
-from aios.harness.concise import CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS
-from aios.harness.context import TRAILING_STIMULUS_NOTICE, TailOrigin
-from aios.harness.obligations import OBLIGATIONS_EMPTY_CONTENT, render_obligations_reminder
+from aios.harness.channels import max_channels_reminder_local, render_channels_reminder
+from aios.harness.concise import (
+    CONCISE_NAG_CONTENT,
+    CONCISE_NAG_CONTENT_CHANNELS,
+    CONCISE_NAG_UPPER_BOUND_LOCAL,
+)
+from aios.harness.context import (
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
+    TRAILING_STIMULUS_NOTICE,
+    TailOrigin,
+)
+from aios.harness.obligations import (
+    OBLIGATIONS_EMPTY_CONTENT,
+    OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL,
+    max_obligations_reminder_local,
+    render_obligations_reminder,
+)
 from aios.models.events import REMINDER_METADATA_KEY, ReminderSection, reminder_section
 
 if TYPE_CHECKING:
     from aios.models.agents import OutputStyle
     from aios.models.events import Event
     from aios.models.sessions import Obligation
-
-# Bumped when the row's ``data`` shape changes; readers key on
-# ``metadata.aios_reminder`` presence, not the version, so old rows keep
-# rendering as plain user messages.
-REMINDER_SCHEMA_VERSION: Final[int] = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,15 +68,13 @@ class PlannedReminder:
 @dataclass(frozen=True, slots=True)
 class ReminderPlan:
     """What this step writes, in canonical order (channels → obligations →
-    concise → trailing_stimulus), and how many applicable sections it left
-    alone because their in-window row already says the same thing."""
+    concise → trailing_stimulus), and how many applicable sections it did
+    NOT write — because the in-window row already says the same thing, the
+    tail owes a response (channels), or every open ask is still in the window
+    (obligations)."""
 
     writes: tuple[PlannedReminder, ...]
     skipped: int
-
-
-def reminder_digest(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def reminder_event_data(section: ReminderSection, content: str) -> dict[str, Any]:
@@ -76,36 +82,21 @@ def reminder_event_data(section: ReminderSection, content: str) -> dict[str, Any
     return {
         "role": "user",
         "content": content,
-        "metadata": {
-            REMINDER_METADATA_KEY: {
-                "section": section,
-                "digest": reminder_digest(content),
-                "v": REMINDER_SCHEMA_VERSION,
-            }
-        },
+        "metadata": {REMINDER_METADATA_KEY: {"section": section}},
     }
 
 
-def reminder_message(content: str) -> dict[str, Any]:
-    """The rendered message for a reminder row — the same bare shape
-    :func:`~aios.harness.context.render_user_event` gives a persisted row, so
-    a stand-in (preview) and a replay (next step) are byte-identical."""
-    return {"role": "user", "content": content}
-
-
-def latest_reminder_digests(events: list[Event]) -> dict[ReminderSection, str]:
-    """Digest of the greatest-seq in-window reminder row per section.
-
-    The change-gate's baseline. Recomputed from the row's content rather than
-    read from its metadata so a row can never claim a digest it doesn't have.
-    """
-    latest: dict[ReminderSection, str] = {}
+def latest_reminder_contents(events: list[Event]) -> dict[str, str]:
+    """Content of the greatest-seq in-window reminder row per section — the
+    change-gate's baseline (reminder contents are bounded by their reserves,
+    so comparing them directly is as cheap as anything derived from them)."""
+    latest: dict[str, str] = {}
     for e in events:  # seq-ascending: the last row per section wins
         section = reminder_section(e.kind, e.data)
         if section is None:
             continue
         content = e.data.get("content")
-        latest[section] = reminder_digest(content if isinstance(content, str) else "")
+        latest[section] = content if isinstance(content, str) else ""
     return latest
 
 
@@ -160,7 +151,26 @@ def tail_owes_response(tail_origin: TailOrigin, *, needs_trailing_notice: bool) 
     return needs_trailing_notice or tail_origin in ("user", "tool")
 
 
-_EMPTY_OBLIGATIONS_DIGEST: Final[str] = reminder_digest(OBLIGATIONS_EMPTY_CONTENT)
+def max_reminders_local(channels: list[str], obligations: list[Obligation]) -> int:
+    """Worst-case local-token cost of the rows ONE step may write, reserved
+    from the window budget at windowing time (``prelude_overhead_local``).
+
+    Rows written on earlier steps are ordinary log rows already priced into
+    ``cumulative_tokens``; this covers only this step's possible writes: the
+    channels listing at its fattest, the obligations listing for the fetched
+    open set, the obligations-emptied one-liner (presence of a listing in the
+    window is unknowable before the slate exists, so its reserve is
+    unconditional), the concise nag, and the trailing-stimulus notice. Every
+    reserve is unconditional — any may not be written, but the budget must
+    hold when they are.
+    """
+    return (
+        max_channels_reminder_local(channels)
+        + max_obligations_reminder_local(obligations)
+        + OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+        + CONCISE_NAG_UPPER_BOUND_LOCAL
+        + TRAILING_NOTICE_UPPER_BOUND_LOCAL
+    )
 
 
 def plan_reminders(
@@ -177,55 +187,53 @@ def plan_reminders(
     """Decide this step's reminder rows from the windowed slate.
 
     Every section is gated on the greatest-seq in-window row of that section
-    (:func:`latest_reminder_digests`): no row, or a row saying something
+    (:func:`latest_reminder_contents`): no row, or a row saying something
     else, means write. A row that scrolled out of the window is simply absent
     from the slate, so eviction re-emits without any extra bookkeeping.
 
-    * **channels** — bound channels only; suppressed while the tail owes a
+    * **channels** — bound channels only; held back while the tail owes a
       response (:func:`tail_owes_response`), written on any content change
       (unread counts, previews, focal switch).
     * **obligations** — presence-gated on EVERY write
       (:func:`present_request_ids`): a listing goes in only when some open
       obligation's original ask is gone from the window and the listing
-      differs from the in-window one. When the open set empties while a
-      listing is still in the window, a one-line "(none)" row supersedes it,
-      once; that one-liner is not a listing baseline, so the next obligation
-      is presence-gated afresh.
+      differs from the in-window one. When the open set empties while an
+      obligations row is still in the window, the one-line "(none)" row
+      supersedes it, once; that one-liner is not a listing, so the next
+      obligation is presence-gated afresh.
     * **concise** — once per window per variant (the channel-attached variant
       carries the delivery clause, #2262).
     * **trailing_stimulus** — whenever the build ends on an assistant turn
       while holding an unreacted stimulus; it cannot re-fire on the next build
       because the row itself becomes the tail.
     """
-    latest = latest_reminder_digests(events)
+    latest = latest_reminder_contents(events)
     writes: list[PlannedReminder] = []
     skipped = 0
 
     def consider(section: ReminderSection, content: str) -> None:
         nonlocal skipped
-        if latest.get(section) == reminder_digest(content):
+        if latest.get(section) == content:
             skipped += 1
         else:
             writes.append(PlannedReminder(section, content))
 
-    owes = tail_owes_response(tail_origin, needs_trailing_notice=needs_trailing_notice)
-
-    channels_content = render_channels_reminder(channels, events, focal_channel)
-    if channels_content is not None:
-        if owes:
+    if channels:
+        if tail_owes_response(tail_origin, needs_trailing_notice=needs_trailing_notice):
             skipped += 1
         else:
-            consider("channels", channels_content)
+            listing = render_channels_reminder(channels, events, focal_channel)
+            assert listing is not None  # channels is non-empty
+            consider("channels", listing)
 
-    latest_obligations = latest.get("obligations")
     if obligations:
         present = present_request_ids(events)
         if any(o.request_id not in present for o in obligations):
             consider("obligations", render_obligations_reminder(obligations, session_id=session_id))
         else:
             skipped += 1
-    elif latest_obligations is not None and latest_obligations != _EMPTY_OBLIGATIONS_DIGEST:
-        writes.append(PlannedReminder("obligations", OBLIGATIONS_EMPTY_CONTENT))
+    elif "obligations" in latest:
+        consider("obligations", OBLIGATIONS_EMPTY_CONTENT)
 
     if output_style == "concise":
         consider("concise", CONCISE_NAG_CONTENT_CHANNELS if channels else CONCISE_NAG_CONTENT)

@@ -49,12 +49,12 @@ from aios.harness.loop import run_session_step
 from aios.harness.model_workflow import write_harvest_event
 from aios.harness.sweep import find_sessions_needing_inference
 from aios.models.agents import OutputStyle
-from aios.models.events import REMINDER_METADATA_KEY
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from aios.workflows import run_tools
 from aios.workflows.step import run_workflow_step
+from tests.support import reminder_rows
 
 pytestmark = pytest.mark.integration
 
@@ -365,15 +365,9 @@ async def test_park_ticks_write_the_reminder_once(mwf_runtime: asyncpg.Pool[Any]
     for _ in range(3):
         await run_session_step(session_id, cause="sweep")
 
+    messages = await sessions_service.read_message_events(pool, session_id, account_id=_ACCOUNT)
+    reminder_seqs = [e.seq for e in reminder_rows(messages)]
     async with pool.acquire() as conn:
-        reminder_seqs = [
-            r["seq"]
-            for r in await conn.fetch(
-                "SELECT seq FROM events WHERE session_id = $1 AND kind = 'message' "
-                f"AND data->'metadata' ? '{REMINDER_METADATA_KEY}' ORDER BY seq",
-                session_id,
-            )
-        ]
         park_seq = await conn.fetchval(
             "SELECT min(seq) FROM events WHERE session_id = $1 AND kind = 'span' "
             "AND data->>'event' = 'model_workflow_park'",

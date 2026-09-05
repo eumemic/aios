@@ -41,19 +41,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aios.harness._text import join_blocks
-from aios.harness.concise import CONCISE_NAG_UPPER_BOUND_LOCAL
 from aios.harness.context import (
     OMISSION_MARKER_UPPER_BOUND_LOCAL,
-    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
     build_messages,
     merge_adjacent_user_messages,
+    reminder_message,
     stub_missing_reasoning_content,
 )
-from aios.harness.context_persist import persist_clamped_image_parts
-from aios.harness.obligations import (
-    OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL,
-    max_obligations_reminder_local,
-)
+from aios.harness.context_persist import persist_clamped_image_parts, persist_reminder_rows
+from aios.harness.reminders import max_reminders_local, plan_reminders
 from aios.harness.tokens import approx_tokens
 from aios.harness.window import WindowOmission
 from aios.logging import get_logger
@@ -167,30 +163,24 @@ class StepPrelude:
     ``read_windowed_events`` can subtract the overhead from the budget
     (see ``overhead_local`` there).
 
-    ``tail_block_upper_bound_local`` is the worst-case size of the
-    channels listing row the composer may write after windowing — a
-    conservative bound computed from ``channels`` alone (no events, no
-    unread counts).  Reserving this ahead of time keeps the send-time
-    payload under ``window_max`` even when the listing renders at its
-    fattest (every channel at 9999 unread with a maxed-out preview).
-
     ``obligations`` is the session's open **awaited** obligations (#1413),
     fetched once here (the unconditional ``get_open_obligations`` that also
     decides the ``return``/``error`` tool gate) and reused by the composer's
     reminder plan — no second query.
-    ``obligations_block_upper_bound_local`` is the worst-case size of the
-    obligations reminder row, bounded from the actual fetched obligations
-    (real count + each real summary, capped) so reserving it keeps the
-    payload under ``window_max``.
 
+    ``reminders_upper_bound_local`` is the worst-case size of the reminder
+    rows the composer may write after windowing
+    (:func:`aios.harness.reminders.max_reminders_local`: the channels listing
+    at its fattest, the obligations listing for the fetched open set, the
+    fixed one-liners). Reserving it ahead of time keeps the send-time payload
+    under ``window_max`` whatever this step's plan writes.
     """
 
     system_prompt: str
     tools: list[dict[str, Any]]
     skill_versions: list[SkillVersion]
-    tail_block_upper_bound_local: int
     obligations: list[Obligation]
-    obligations_block_upper_bound_local: int
+    reminders_upper_bound_local: int
 
 
 class PreludeOverheadSplit(NamedTuple):
@@ -200,8 +190,9 @@ class PreludeOverheadSplit(NamedTuple):
     per-class coefficients (the system prompt and tool schemas price
     differently against the provider tokenizer), so the overhead is no
     longer a single opaque scalar.  ``reserves`` is the post-windowing
-    reserved upper bounds (channels tail, obligations tail, omission
-    marker) — conservative text-shaped padding, weighted as ``text``.
+    reserved upper bounds (this step's possible reminder rows, the
+    omission marker) — conservative text-shaped padding, weighted as
+    ``text``.
 
     ``total`` reproduces the pre-#1609 single ``overhead_local`` integer
     (the three fields summed), so any caller that only needs the scalar
@@ -225,13 +216,11 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     System prompt + tool schemas (each weighted separately by the
     windower), plus the reserved upper bounds for the post-windowing
     additions — the reminder rows THIS step may write on top of the
-    windowed slate (``aios.harness.reminders``: the channels listing, the
-    obligations listing, the obligations-emptied one-liner, the concise
-    nag, the trailing-stimulus notice) and the omission marker (#738).
-    Rows written on earlier steps are ordinary log rows already priced
-    into ``cumulative_tokens``. All reserves are reserved unconditionally
-    — any may not be written, but the budget must hold when they are —
-    and are accounted as ``text``-class padding.
+    windowed slate (``prelude.reminders_upper_bound_local``, see
+    :func:`aios.harness.reminders.max_reminders_local`) and the omission
+    marker (#738). All reserves are reserved unconditionally — any may not
+    be written, but the budget must hold when they are — and are accounted
+    as ``text``-class padding.
 
     Returns a :class:`PreludeOverheadSplit`; ``.total`` reproduces the
     old single scalar exactly (system+tools costed together previously,
@@ -239,14 +228,7 @@ def prelude_overhead_local(prelude: StepPrelude) -> PreludeOverheadSplit:
     """
     system_local = approx_tokens([{"role": "system", "content": prelude.system_prompt}])
     tools_local = approx_tokens([], tools=prelude.tools) if prelude.tools else 0
-    reserves_local = (
-        prelude.tail_block_upper_bound_local
-        + prelude.obligations_block_upper_bound_local
-        + OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
-        + CONCISE_NAG_UPPER_BOUND_LOCAL
-        + TRAILING_NOTICE_UPPER_BOUND_LOCAL
-        + OMISSION_MARKER_UPPER_BOUND_LOCAL
-    )
+    reserves_local = prelude.reminders_upper_bound_local + OMISSION_MARKER_UPPER_BOUND_LOCAL
     return PreludeOverheadSplit(
         system=system_local,
         tools=tools_local,
@@ -265,10 +247,11 @@ class StepContext:
     skill_versions: list[SkillVersion]
     # Reminder sections this compose wrote as durable rows (or rendered as
     # unpersisted stand-ins on the preview path), in write order, and how
-    # many applicable sections it left alone because their in-window row
-    # already said the same thing — the change-gate's telemetry
-    # (``context_build_end``). A fleet where ``reminders_written`` is
-    # non-empty on most steps has a churning render, not a working gate.
+    # many applicable sections it did NOT write (in-window row unchanged,
+    # channels held back while the tail owes a response, every open ask still
+    # in the window) — the change-gate's telemetry (``context_build_end``).
+    # A fleet where ``reminders_written`` is non-empty on most steps has a
+    # churning render, not a working gate.
     reminders_written: tuple[str, ...]
     reminders_skipped: int
 
@@ -345,7 +328,6 @@ async def compute_step_prelude(
     from aios.db import queries
     from aios.harness.channels import (
         augment_with_focal_paradigm,
-        max_tail_block_local,
     )
     from aios.harness.concise import augment_with_concise_style
     from aios.harness.loop import (
@@ -472,9 +454,8 @@ async def compute_step_prelude(
         system_prompt=system_prompt,
         tools=tools,
         skill_versions=skill_versions,
-        tail_block_upper_bound_local=max_tail_block_local(channels),
         obligations=obligations,
-        obligations_block_upper_bound_local=max_obligations_reminder_local(obligations),
+        reminders_upper_bound_local=max_reminders_local(channels, obligations),
     )
 
 
@@ -712,7 +693,6 @@ async def compose_step_context(
     "still executing in the background" wording; everything else
     (custom, awaiting-confirm) gets the "external action" wording.
     """
-    from aios.harness.reminders import plan_reminders, reminder_event_data, reminder_message
     from aios.services import accounts as accounts_service
     from aios.services import sessions as sessions_service
 
@@ -794,16 +774,9 @@ async def compose_step_context(
         tail_origin=ctx.tail_origin,
         needs_trailing_notice=ctx.needs_trailing_notice,
     )
-    for item in plan.writes:
-        if persist_reminders:
-            await sessions_service.append_event(
-                pool,
-                session.id,
-                "message",
-                reminder_event_data(item.section, item.content),
-                account_id=account_id,
-            )
-        ctx.messages.append(reminder_message(item.content))
+    if persist_reminders:
+        await persist_reminder_rows(pool, plan, session_id=session.id, account_id=account_id)
+    ctx.messages.extend(reminder_message(item.content) for item in plan.writes)
 
     # Merge consecutive user inbounds into one turn (Anthropic requires
     # alternating roles). This replaces the old "." placeholder separator,

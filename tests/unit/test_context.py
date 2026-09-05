@@ -24,12 +24,13 @@ from aios.harness.context import (
     _quarantine_placeholder,
     build_messages,
     merge_adjacent_user_messages,
+    reminder_message,
     render_user_event,
     stub_missing_reasoning_content,
 )
-from aios.harness.reminders import reminder_message
+from aios.harness.reminders import reminder_event_data
 from aios.harness.window import WindowOmission
-from aios.models.events import REMINDER_METADATA_KEY, Event
+from aios.models.events import Event, ReminderSection
 from tests.support import assert_message_prefix
 
 
@@ -1426,8 +1427,10 @@ class TestBlindSpotUserAnchoring:
         assert contents[:5] == ["one", "a1", "two", "a2", "a3"]
 
 
-def _reminder_meta(section: str = "obligations") -> dict[str, Any]:
-    return {REMINDER_METADATA_KEY: {"section": section, "digest": "d", "v": 1}}
+def _reminder_meta(section: ReminderSection = "obligations") -> dict[str, Any]:
+    """The marker exactly as the writer stamps it (content is irrelevant here)."""
+    metadata: dict[str, Any] = reminder_event_data(section, "")["metadata"]
+    return metadata
 
 
 class TestReminderEvents:
