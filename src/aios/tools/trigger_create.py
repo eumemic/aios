@@ -40,8 +40,9 @@ TRIGGER_CREATE_DESCRIPTION = (
     "Add a trigger to this session: a `source` (what fires it) paired with "
     "an `action` (what runs at fire time).\n"
     "\n"
-    "Sources: `{kind: 'cron', schedule}` (recurring, standard 5-field cron "
-    "in UTC); `{kind: 'one_shot', fire_at}` (fires once at an absolute UTC "
+    "Sources: `{kind: 'cron', schedule, timezone?}` (recurring, standard "
+    "5-field cron, interpreted in UTC unless an IANA `timezone` is set); "
+    "`{kind: 'one_shot', fire_at}` (fires once at an absolute UTC "
     "time, then self-deletes); `{kind: 'run_completion', workflow_id, "
     "statuses?}` (reactive — fires once per terminal completion of any run "
     "of that workflow; narrow `statuses` to e.g. ['errored'] for "
@@ -80,7 +81,19 @@ _SOURCE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MAX_SCHEDULE_CHARS,
-                    "description": "Standard 5-field cron expression in UTC (e.g. '*/5 * * * *').",
+                    "description": (
+                        "Standard 5-field cron expression. Interpreted in UTC unless "
+                        "`timezone` is set (e.g. '*/5 * * * *')."
+                    ),
+                },
+                "timezone": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "IANA timezone name (e.g. 'America/New_York') the cron "
+                        "wall-clock is interpreted in (DST-aware). Omit / null = UTC. "
+                        "'0 9 * * *' with timezone 'America/New_York' fires at 9am "
+                        "Eastern."
+                    ),
                 },
             },
             "required": ["kind", "schedule"],

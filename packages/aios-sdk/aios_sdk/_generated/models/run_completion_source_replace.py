@@ -22,8 +22,7 @@ T = TypeVar("T", bound="RunCompletionSourceReplace")
 class RunCompletionSourceReplace:
     """Update-side variant (§2.2 Replace rule): ``statuses`` is REQUIRED, so a
     partial source on update 422s instead of silently resetting a narrowed
-    filter back to all-three. (The first SOURCE member with a defaulted field,
-    hence the first ``TriggerSourceReplace`` union.)
+    filter back to all-three.
 
         Attributes:
             workflow_id (str):

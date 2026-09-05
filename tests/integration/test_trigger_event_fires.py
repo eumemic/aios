@@ -1301,7 +1301,9 @@ async def test_update_to_external_event_mints_and_away_revokes(
         pool,
         session.id,
         "morph",
-        TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "*/9 * * * *"}}),
+        TriggerUpdate.model_validate(
+            {"source": {"kind": "cron", "schedule": "*/9 * * * *", "timezone": None}}
+        ),
         account_id=ACC,
     )
     assert away.ingest_token is None

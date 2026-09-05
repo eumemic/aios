@@ -176,8 +176,20 @@ class TestCronSourceTimezone:
                 }
             )
 
-    def test_update_omitting_timezone_defaults_none(self) -> None:
-        upd = TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}})
+    def test_update_omitting_timezone_rejected(self) -> None:
+        # §2.2 Replace rule: timezone is REQUIRED on update (CronSourceReplace),
+        # so a partial cron source on update 422s instead of silently
+        # resetting a stored non-UTC zone to UTC (a silent shift of every
+        # future fire time). Mirrors test_partial_sandbox_command_action_rejected.
+        with pytest.raises(ValidationError, match="timezone"):
+            TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}})
+
+    def test_update_accepts_explicit_null_timezone(self) -> None:
+        # null is the explicit, in-band choice of UTC on update — REQUIRED but
+        # nullable, so a caller deliberately switching to UTC sends `null`.
+        upd = TriggerUpdate.model_validate(
+            {"source": {"kind": "cron", "schedule": "0 9 * * *", "timezone": None}}
+        )
         assert isinstance(upd.source, CronSource)
         assert upd.source.timezone is None
 
@@ -389,9 +401,13 @@ class TestTriggerUpdate:
         assert u.enabled is None
 
     def test_validates_cron_when_provided(self) -> None:
-        TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "*/10 * * * *"}})
+        TriggerUpdate.model_validate(
+            {"source": {"kind": "cron", "schedule": "*/10 * * * *", "timezone": None}}
+        )
         with pytest.raises(ValidationError):
-            TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "not a cron"}})
+            TriggerUpdate.model_validate(
+                {"source": {"kind": "cron", "schedule": "not a cron", "timezone": None}}
+            )
 
     def test_rejects_extra_fields(self) -> None:
         with pytest.raises(ValidationError):
