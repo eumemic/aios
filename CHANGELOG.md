@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Snapshot flatten trigger and the snapshot pool budget now measure the on-disk
+  CHAIN cost (Σ layer bytes, via `docker history`, cached per content-addressed
+  image id) instead of `docker image inspect .Size` — the current filesystem
+  *view*, which charges a superseded byte once however many copies overlay
+  still holds in the interior layers. On server-b three live chains held ~65 GB
+  for ~23 GB of content while reporting 6.6/9.0/7.6 GB, so neither the 12 GiB
+  per-session budget nor the 200-layer depth ceiling could ever fire (zero
+  `flattened` events in 24 h), and the pool reclaimer logged
+  `reclaimed_bytes: 0` every tick against a budget it read as 28.6/60 GB used.
+  A flatten now also fires on `chain > 2 × view` — more than half the chain is
+  dead history — which is the one budget-less trigger short of the depth
+  ceiling. The flatten headroom gate still sizes on the view, since the export
+  writes content, not history.
+
 - **Operator triggers show up in `list_account_triggers`; a non-finite
   `budget_usd` is a 422 (#2525).** The account-wide trigger read INNER JOINed
   `sessions`, so operator triggers (#2473, no owning session) never appeared
