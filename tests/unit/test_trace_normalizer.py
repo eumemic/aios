@@ -134,6 +134,8 @@ def test_session_root_end_turn_running_when_owes_request() -> None:
 
 
 def test_session_root_archived_resolves_owed_child_gone() -> None:
+    # Never-stepped, abandoned child: stop_reason IS NULL (no step_end ran), so
+    # the owed child_gone is the oldest answered request. Real production shape.
     state, kind = norm.normalize_session_root(
         None,
         owes_open_request=True,
@@ -143,5 +145,85 @@ def test_session_root_archived_resolves_owed_child_gone() -> None:
     assert (state, kind) == ("errored", "child_gone")
 
 
+def test_session_root_end_turn_archived_owed_no_return_is_errored() -> None:
+    # Path A: single-Ask child stalled on its first Ask, quiescence guard wrote
+    # no_return, step_end then wrote end_turn unconditionally, reclaim archived.
+    # The end_turn branch must NOT short-circuit before the archived override.
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
+        is_archived=True,
+    ) == ("errored", "no_return")
+
+
+def test_session_root_end_turn_archived_owed_child_gone_is_errored() -> None:
+    # Path B: stepped child whose creation Ask was never answered; C5
+    # revoked_lease archival wrote child_gone for the now-oldest answered
+    # request, but step_end already wrote end_turn on the last turn.
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "child_gone"}},
+        is_archived=True,
+    ) == ("errored", "child_gone")
+
+
+def test_session_root_end_turn_archived_owed_recoverable_error_still_ok() -> None:
+    # Regression pin for the preserved shape: a child self-emitted an error on
+    # its first Ask (error_handler writes Err(error={"message": ...}) with NO
+    # ``kind``), got latched errored for that step, then recovered on a later
+    # step and ended cleanly. Once archived its oldest answered response is the
+    # recoverable error — not a doom kind — so end_turn must still win as ok.
+    # This would FAIL under a naive "any errored owed -> errored" guard, proving
+    # the doom-kind gate is necessary AND sufficient.
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"message": "boom"}},
+        is_archived=True,
+    ) == ("ok", None)
+
+
+def test_session_root_end_turn_archived_owed_non_doom_kind_still_ok() -> None:
+    # Locks the doom-kind gate from the "any kind" side: a non-doom kind on the
+    # oldest answered request does not dominate end_turn, even when archived.
+    # (Harness error kinds like context_overflow come with stop_reason=error,
+    # not end_turn, so an end_turn + non-doom-kind-errored-owed combo can only
+    # arise from the SQL's oldest-answered semantics on a recovered session.)
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "context_overflow"}},
+        is_archived=True,
+    ) == ("ok", None)
+
+
+def test_session_root_end_turn_archived_owed_no_return_with_open_request_is_errored() -> None:
+    # The doom-kind override does not consult owes_open_request (a doom kind on
+    # the oldest answered request is terminal regardless). Pins that the guard
+    # fires even when owes_open_request=True — the no_return response closes the
+    # request in production, but the guard must not depend on it.
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=True,
+        owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
+        is_archived=True,
+    ) == ("errored", "no_return")
+
+
 def test_session_root_live_no_stop_reason_is_running() -> None:
     assert norm.normalize_session_root(None, owes_open_request=False) == ("running", None)
+
+
+def test_session_root_end_turn_not_archived_with_doom_owed_is_ok() -> None:
+    # The doom-kind override is gated on is_archived. A live (non-archived)
+    # session carrying a doom-kind owed response (an artefact of the
+    # oldest-answered SQL, e.g. a parent read mid-step) must still route through
+    # the end_turn branch — a live session can still run again.
+    assert norm.normalize_session_root(
+        {"type": "end_turn"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
+        is_archived=False,
+    ) == ("ok", None)
