@@ -2612,6 +2612,15 @@ async def clone_session(
     """Clone a session — see :func:`queries.clone_session`."""
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
+        # Store the realpath-normalized form, matching the sibling shared-path
+        # writers (``create_session``'s shared child, ``create_run``'s shared
+        # arm). The workspace reaper's under-lock recheck
+        # (``unscoped_workspace_path_is_live``) compares an ``os.path.realpath``
+        # probe against the stored column in SQL, so a stored literal whose
+        # form differs from its realpath (a ``..`` segment, or an
+        # ``AIOS_WORKSPACE_ROOT`` crossing a symlink ancestor) would defeat the
+        # recheck and let the reaper delete a directory a live clone references.
+        workspace_path = queries.normalized_workspace_path(workspace_path)
     async with pool.acquire() as conn, conn.transaction():
         shared_path = workspace_path or await queries.get_session_workspace_path(
             conn, parent_session_id, account_id=account_id
