@@ -1178,6 +1178,9 @@ async def list_run_ids_needing_step(
     agent_deadline_seconds: float,
     tool_stale_seconds: float,
     call_llm_stale_seconds: float,
+    bash_default_timeout_seconds: float,
+    sandbox_provisioning_slack_seconds: float,
+    max_bash_timeout_seconds: int,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -1229,7 +1232,43 @@ async def list_run_ids_needing_step(
                 AND cs.created_at < now() - make_interval(secs =>
                       CASE cs.payload->>'capability'
                         WHEN 'agent' THEN $1::float8
-                        WHEN 'tool' THEN $2::float8
+                        WHEN 'tool' THEN
+                          CASE WHEN cs.payload->>'tool_name' = 'bash' THEN
+                            GREATEST(
+                              300.0,
+                              COALESCE(
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'resolved_timeout_seconds') = 'number'
+                                   AND (cs.payload->>'resolved_timeout_seconds')::numeric > 0
+                                  THEN LEAST(
+                                    (cs.payload->>'resolved_timeout_seconds')::numeric,
+                                    $6::numeric
+                                  )::float8
+                                END,
+                                -- Compatibility for pre-pin call_started rows.
+                                -- Those calls were opened before environment-aware
+                                -- workflow bash existed: execution used the worker
+                                -- global ceiling, optionally shortened by a valid
+                                -- request. Do not project today's environment config
+                                -- semantics backward onto their recovery horizon.
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'input'->'timeout_seconds') = 'number'
+                                   AND (cs.payload->'input'->>'timeout_seconds')::numeric > 0
+                                  THEN LEAST(
+                                    $4::numeric,
+                                    GREATEST(
+                                      1::numeric,
+                                      trunc(LEAST(
+                                        (cs.payload->'input'->>'timeout_seconds')::numeric,
+                                        $6::numeric
+                                      ))
+                                    )
+                                  )::float8
+                                  ELSE $4::float8
+                                END
+                              ) + $5::float8
+                            )
+                          ELSE $2::float8 END
                         WHEN 'call_llm' THEN $3::float8
                       END)
                 AND NOT EXISTS (
@@ -1241,6 +1280,9 @@ async def list_run_ids_needing_step(
         agent_deadline_seconds,
         tool_stale_seconds,
         call_llm_stale_seconds,
+        bash_default_timeout_seconds,
+        sandbox_provisioning_slack_seconds,
+        max_bash_timeout_seconds,
     )
     return [r["id"] for r in rows]
 
