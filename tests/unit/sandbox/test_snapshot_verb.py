@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 from collections import namedtuple
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -121,11 +120,8 @@ class _FakeDocker:
 
 
 @pytest.fixture
-def fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDocker:
+def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
     fd = _FakeDocker()
-    monkeypatch.setattr(
-        get_settings(), "sandbox_snapshot_throughput_state_path", tmp_path / "throughput.json"
-    )
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fd.cli)
     monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_pipeline", fd.pipeline)
     # Default to abundant free disk so flatten-path tests are deterministic;
