@@ -20,7 +20,6 @@ from aios.harness.concise import (
     CONCISE_NAG_DELIVERY_CLAUSE,
     CONCISE_NAG_UPPER_BOUND_LOCAL,
     CONCISE_STYLE_BLOCK,
-    build_concise_nag_message,
 )
 from aios.harness.step_context import (
     StepPrelude,
@@ -157,7 +156,7 @@ class TestConciseNag:
             assert not (a.get("role") == "user" and b.get("role") == "user")
 
     async def test_nag_stands_alone_after_assistant_turn(self) -> None:
-        """No channels -> no tail block, but the nag still renders, standing as
+        """No channels -> no channels listing, but the nag still renders, standing as
         its own final user message after the trailing assistant turn."""
         events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
         messages = await _compose(_agent(output_style="concise"), events)
@@ -274,10 +273,10 @@ class TestConciseNagReserve:
         alone, before the composer knows whether the session has channels, so
         the bound has to hold for the longer channel-attached nag (#2262).
         """
-        for has_channels in (False, True):
-            cost = approx_tokens([build_concise_nag_message(has_channels=has_channels)])
+        for content in (CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS):
+            cost = approx_tokens([{"role": "user", "content": content}])
             assert cost <= CONCISE_NAG_UPPER_BOUND_LOCAL, (
-                f"nag variant has_channels={has_channels} costs {cost} local tokens, "
+                f"nag variant {content[:40]!r}… costs {cost} local tokens, "
                 f"over the {CONCISE_NAG_UPPER_BOUND_LOCAL} reserve -- raise the "
                 f"constant rather than shortening the clause"
             )

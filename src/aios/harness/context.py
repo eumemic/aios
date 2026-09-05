@@ -617,11 +617,11 @@ def message_is_notification_marker(msg: dict[str, Any]) -> bool:
 
     Mirrors the shape produced by :func:`_format_notification_marker`: a
     user-role message whose (text) content begins with the bell prefix. The
-    composer uses this to tell a *direct* trailing stimulus the agent must
-    answer (a focal inbound or tool result — keep it last, suppress the
-    channels tail block so a literal model doesn't anchor on the tail) apart
-    from a *navigation* prompt (a non-focal notification, whose companion is
-    the tail listing — keep the tail).
+    walk uses this to classify the tail (``TailOrigin``): a *direct* trailing
+    stimulus the agent must answer (a focal inbound or tool result — keep it
+    last, hold the channels listing row back so a literal model doesn't
+    anchor on it) versus a *navigation* prompt (a non-focal notification,
+    whose companion IS the channels listing — write it).
     """
     if msg.get("role") != "user":
         return False
@@ -1260,30 +1260,6 @@ _PENDING_EXTERNAL = json.dumps(
     }
 )
 
-EPHEMERAL_TAIL_KEY = "_aios_ephemeral_tail"
-"""Out-of-band marker key tagging a per-step-ephemeral tail message.
-
-Set to ``True`` at construction on any per-step-assembled tail message —
-a render-only block appended after ``build_messages`` rather than sourced
-from the event log.  Producers tag their own dicts; nothing enumerates
-them here.  What makes a message ephemeral is that its content OR its
-position varies per step (unread counts mutate; a constant reminder is
-re-appended at the moving tail), so caching a prefix through it can never
-hit.
-
-The cache-breakpoint recognizer in ``completion.py`` reads this marker —
-never the rendered prose — to decide which message must NOT host the
-conversation prefix ``cache_control`` breakpoint.  It is a *property*
-("this message is per-step-ephemeral"), not a discriminated kind, so a
-boolean is the honest shape.
-
-The marker is non-standard (Anthropic rejects unknown message fields) and
-is stripped from every message by ``inject_cache_breakpoints`` before any
-provider call — on every route, including non-Anthropic early returns.
-``_concat_user_messages`` propagates it under OR so a merge of any
-ephemeral message with anything stays ephemeral.
-"""
-
 
 # Synthetic user turn ending a gate-firing build that would otherwise end on
 # an assistant message (see the trailing-assistant guard in build_messages).
@@ -1362,7 +1338,7 @@ def _quarantine_placeholder(seq: int) -> dict[str, Any]:
 # the omission marker, mirroring ``tail_block_upper_bound_local``: the marker
 # is appended after windowing runs, so without a reserve it would push the
 # send-time payload past ``window_max`` (the PR #165 full-payload invariant).
-# Reserved unconditionally — like the tail block, which also may not render.
+# Reserved unconditionally — like the reminder reserves, which also may not be used.
 # ``TestOmissionMarker`` pins a worst-case render under this bound.
 OMISSION_MARKER_UPPER_BOUND_LOCAL = 128
 
@@ -2042,16 +2018,17 @@ def merge_adjacent_user_messages(
     Anthropic requires alternating roles, so two adjacent user messages
     must become one. The earlier approach inserted a placeholder
     assistant turn (a ``"."``) between them to *force* them apart and
-    stop LiteLLM concatenating a user inbound with the channels tail
-    block (which made models narrate "your message included the channel
+    stop LiteLLM concatenating a user inbound with the channels listing
+    (which made models narrate "your message included the channel
     state"). That placeholder is now both unnecessary and harmful:
 
-    * Unnecessary — the channels tail block is no longer appended after
-      an unanswered user inbound (see ``compose_step_context`` /
-      ``_agent_owes_response``), so the tail-merge case it guarded
-      against no longer arises; the only remaining adjacent-user case is
-      genuine successive inbounds (feeder pings + user text that landed
-      before the agent acted), which *should* read as one block.
+    * Unnecessary — the channels listing is never written after an
+      unanswered user inbound (``aios.harness.reminders``: the listing
+      waits while the tail owes a response), so the listing-merge case it
+      guarded against no longer arises; the remaining adjacent-user cases
+      are genuine successive inbounds (feeder pings + user text that landed
+      before the agent acted) and a reminder row followed by an inbound,
+      which *should* read as one block.
     * Harmful — a ``"."`` is a degenerate assistant turn. Literal-minded
       models imitate it: ``claude-fable-5`` pattern-completes a run of
       ``"."`` placeholders into silence and emits empty turns
@@ -2088,10 +2065,4 @@ def _concat_user_messages(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any
         la = ca if isinstance(ca, list) else [{"type": "text", "text": ca or ""}]
         lb = cb if isinstance(cb, list) else [{"type": "text", "text": cb or ""}]
         merged = {"role": "user", "content": [*la, *lb]}
-    # Propagate the ephemeral-tail marker under OR: a dict that contains
-    # *any* per-step-mutating content cannot host the stable-prefix cache
-    # breakpoint, so the merge of any ephemeral message with anything is
-    # ephemeral. This fixes the trailing-inbound + obligations merge case.
-    if a.get(EPHEMERAL_TAIL_KEY) or b.get(EPHEMERAL_TAIL_KEY):
-        merged[EPHEMERAL_TAIL_KEY] = True
     return merged

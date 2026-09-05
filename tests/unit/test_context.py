@@ -12,10 +12,9 @@ from typing import Any
 
 import pytest
 
-from aios.harness.channels import build_channels_tail_block
+from aios.harness.channels import render_channels_reminder
 from aios.harness.context import (
     _USER_MESSAGE_SEPARATOR_CONTENT,
-    EPHEMERAL_TAIL_KEY,
     TRAILING_NOTICE_UPPER_BOUND_LOCAL,
     TRAILING_STIMULUS_NOTICE,
     ContextInvariantError,
@@ -28,6 +27,7 @@ from aios.harness.context import (
     render_user_event,
     stub_missing_reasoning_content,
 )
+from aios.harness.reminders import reminder_message
 from aios.harness.window import WindowOmission
 from aios.models.events import REMINDER_METADATA_KEY, Event
 from tests.support import assert_message_prefix
@@ -52,13 +52,14 @@ def _full_pipeline(
     channels: list[str],
     focal_channel: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compose ``build_messages`` → tail-block append → adjacent-user
-    merge — the same sequence ``compose_step_context`` runs before
-    handing the message list to LiteLLM."""
+    """Compose ``build_messages`` → channels-listing append → adjacent-user
+    merge — the sequence ``compose_step_context`` runs on a step whose
+    reminder plan writes the channels row (the listing is appended
+    unconditionally here; the real planner gates it on the tail class)."""
     ctx = build_messages(events, system_prompt=None)
-    tail = build_channels_tail_block(channels, events, focal_channel)
-    if tail is not None:
-        ctx.messages.append(tail)
+    listing = render_channels_reminder(channels, events, focal_channel)
+    if listing is not None:
+        ctx.messages.append(reminder_message(listing))
     return merge_adjacent_user_messages(ctx.messages)
 
 
@@ -1074,13 +1075,13 @@ class TestMonotonicity:
         assert_message_prefix(ctx2, ctx3)
 
     def test_merge_insertion_preserves_monotonicity(self) -> None:
-        """Full pipeline (build_messages → tail-block → adjacent-user
+        """Full pipeline (build_messages → channels-listing → adjacent-user
         merge) must keep the prefix-stability invariant: output(L1) is a
         prefix of output(L2) when L1 ⊂ L2.  Pins the "mutations only at
         the volatile suffix" claim — a refactor that merged messages into
         the cache-stable prefix would fail this.
 
-        The tail block lands as the trailing user-role message. When the
+        The channels listing lands as the trailing user-role message. When the
         preceding message is also user-role (L2: ``…, user "do B"``), the
         merge folds the tail *into* that user turn, so the tail header is
         no longer a standalone message — it's a substring of the final
@@ -1103,7 +1104,7 @@ class TestMonotonicity:
         for out in (out1, out2, out3):
             assert not any(m == {"role": "assistant", "content": "."} for m in out)
 
-        # The tail block mutates per step, so compare prefixes only up to
+        # The listing changes with unread counts, so compare prefixes only up to
         # (but not including) the trailing user turn that carries it —
         # whether standalone or merged into the preceding inbound.
         def _strip_tail(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2585,24 +2586,12 @@ class TestConcatUserMessages:
             ],
         }
 
-    def test_ephemeral_marker_sticky_under_or(self) -> None:
-        """#1535: the ephemeral-tail marker propagates under OR — a merge of
-        any ephemeral message with anything is ephemeral (a dict containing
-        *any* per-step-mutating content cannot host the stable-prefix cache
-        breakpoint). Covers the trailing real-inbound + obligations case."""
-        inbound = {"role": "user", "content": "real peer text"}
-        ephemeral = {"role": "user", "content": "tail", EPHEMERAL_TAIL_KEY: True}
-        # ephemeral on either side -> merged dict is ephemeral.
-        assert _concat_user_messages(inbound, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
-        assert _concat_user_messages(ephemeral, inbound).get(EPHEMERAL_TAIL_KEY) is True
-        # both ephemeral -> still ephemeral.
-        assert _concat_user_messages(ephemeral, ephemeral).get(EPHEMERAL_TAIL_KEY) is True
-
-    def test_no_marker_when_neither_ephemeral(self) -> None:
-        """Plain inbound + plain inbound stays unmarked - no spurious marker."""
-        a = {"role": "user", "content": "one"}
+    def test_merged_dict_carries_only_role_and_content(self) -> None:
+        """A merge never invents keys: two user messages fold into exactly
+        ``{role, content}`` (no out-of-band markers survive on the wire)."""
+        a = {"role": "user", "content": "one", "stray": True}
         b = {"role": "user", "content": "two"}
-        assert EPHEMERAL_TAIL_KEY not in _concat_user_messages(a, b)
+        assert _concat_user_messages(a, b) == {"role": "user", "content": "one\n\ntwo"}
 
 
 class TestIsDegenerateEmptyAssistant:
@@ -2763,7 +2752,7 @@ class TestMergeAdjacentUserMessagesPipeline:
     role sequence can't silently break the fix."""
 
     def test_inbound_then_tail_block_merge_into_one_user(self) -> None:
-        """An inbound followed by the user-role channels tail block is the
+        """An inbound followed by the user-role channels listing is the
         canonical adjacency: the two fold into a single user turn, and no
         degenerate ``"."`` assistant placeholder is produced."""
         events = [_evt(1, "user", content="hello")]
@@ -2805,7 +2794,7 @@ class TestMergeAdjacentUserMessagesPipeline:
         assert merged["content"].count("RESULT") == 1
 
     def test_alternating_events_no_tail_block_no_merge(self) -> None:
-        """No adjacency (empty bindings → tail block is ``None``) → the
+        """No adjacency (empty bindings → listing is ``None``) → the
         role sequence is untouched and no placeholder is produced."""
         events = [
             _evt(1, "user", content="hi"),

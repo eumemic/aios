@@ -6,7 +6,7 @@ DB-backed (testcontainer Postgres). These drive the REAL service/query path —
 on its ``request_opened`` frame, and the general ``return`` / ``error`` answer verbs
 writing the ``request_response`` via ``respond_to_request`` — and assert the
 acceptance criteria against the same open-obligation queries the quiescence guard
-and the obligations tail block read:
+and the obligations reminder read:
 
 * ``create_goal`` opens an obligation that lands in the session's OPEN set
   (``get_open_request_ids`` / ``get_open_obligations``) as a ``self`` caller — so

@@ -1473,7 +1473,7 @@ async def _check_completion_injection(
     # #1413 background-child path: get_open_obligations now runs UNCONDITIONALLY
     # (the background-child fast-path short-circuit was removed), so the child's
     # open `run` obligation is fetched onto the prelude -- the data the always-on
-    # obligations tail block renders. The fast-path removal did NOT regress the
+    # obligations reminder renders. The fast-path removal did NOT regress the
     # return/error gate (it stayed bool(obligations), asserted above).
     assert child_prelude.obligations, "background child's run obligation must be computed"
     assert child_prelude.obligations[0].caller_kind == "run"

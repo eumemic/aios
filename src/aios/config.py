@@ -1093,7 +1093,7 @@ class Settings(BaseSettings):
         "slots, so a sequential goal loop is unbounded by design. On exceed, "
         "``create_goal`` returns a clear tool error (no obligation opened). Matched "
         "to ``MAX_RENDERED_OBLIGATIONS`` so the open "
-        "self-goals always render as full lines in the tail block.",
+        "self-goals always render as full lines in the obligations reminder.",
     )
     workflow_runs_per_account_max: int = Field(
         default=100,

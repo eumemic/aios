@@ -157,19 +157,20 @@ class StepPrelude:
     (see ``overhead_local`` there).
 
     ``tail_block_upper_bound_local`` is the worst-case size of the
-    channels tail block the composer will append after windowing — a
+    channels listing row the composer may write after windowing — a
     conservative bound computed from ``channels`` alone (no events, no
     unread counts).  Reserving this ahead of time keeps the send-time
-    payload under ``window_max`` even when the tail renders at its
+    payload under ``window_max`` even when the listing renders at its
     fattest (every channel at 9999 unread with a maxed-out preview).
 
     ``obligations`` is the session's open **awaited** obligations (#1413),
     fetched once here (the unconditional ``get_open_obligations`` that also
-    decides the ``return``/``error`` tool gate) and reused by the composer to
-    render the obligations tail block — no second query.
-    ``obligations_block_upper_bound_local`` is the worst-case size of that
-    block, bounded from the actual fetched obligations (real count + each real
-    summary, capped) so reserving it keeps the payload under ``window_max``.
+    decides the ``return``/``error`` tool gate) and reused by the composer's
+    reminder plan — no second query.
+    ``obligations_block_upper_bound_local`` is the worst-case size of the
+    obligations reminder row, bounded from the actual fetched obligations
+    (real count + each real summary, capped) so reserving it keeps the
+    payload under ``window_max``.
 
     """
 
@@ -362,9 +363,9 @@ async def compute_step_prelude(
     # was invoked owes a response and must be handed the means to give one.
     #
     # #1413: run ``get_open_obligations`` UNCONDITIONALLY (the prior background-child
-    # fast-path short-circuit is gone). The obligations tail block MUST be computed
+    # fast-path short-circuit is gone). The obligations reminder MUST be planned
     # for background children too — their obligation is exactly what windowing
-    # erases, so they are the headline beneficiary of the always-on reminder. The
+    # erases, so they are the headline beneficiary of the durable reminder. The
     # ``return``/``error`` tool gate is preserved EXACTLY: ``owes_request`` is now
     # ``bool(obligations)``, correctness-equivalent to the old gate (the same
     # awaited anti-join), trading the fast-path for one indexed anti-join per

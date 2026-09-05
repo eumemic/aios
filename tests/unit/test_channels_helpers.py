@@ -13,10 +13,9 @@ from typing import Any
 from aios.harness.channels import (
     apply_monologue_prefix,
     augment_with_focal_paradigm,
-    build_channels_tail_block,
     build_focal_paradigm_block,
+    render_channels_reminder,
 )
-from aios.harness.context import EPHEMERAL_TAIL_KEY
 from aios.models.events import Event
 
 
@@ -47,7 +46,7 @@ class TestBuildFocalParadigmBlock:
     """Cache-stable prose introducing the focal-channel model.
 
     Text does not vary with per-channel state (unread counts, previews) —
-    that lives in the ephemeral tail block.
+    that lives in the channels reminder row.
     """
 
     def test_no_channels_returns_empty_string(self) -> None:
@@ -83,7 +82,7 @@ class TestBuildFocalParadigmBlock:
 
     def test_no_per_channel_data_leakage(self) -> None:
         """The block must not name any specific bound channel — that's
-        the tail block's job.  Paradigm prose stays cache-stable.
+        the channels listing's job.  Paradigm prose stays cache-stable.
         """
         block = build_focal_paradigm_block(
             [
@@ -117,27 +116,27 @@ class TestAugmentWithFocalParadigm:
         assert not result.startswith("\n")
 
 
-# ── build_channels_tail_block ──────────────────────────────────────────────
+# ── render_channels_reminder ───────────────────────────────────────────────
 
 
-class TestBuildChannelsTailBlock:
-    """The ephemeral per-step listing of bound channels.
+class TestRenderChannelsReminder:
+    """The bound-channel listing — content of the channels reminder row.
 
-    Pure data block — no prose explaining the paradigm (that's the job
-    of :func:`build_focal_paradigm_block`, which is cache-stable and
-    lives in the system prompt).
+    Pure data — no prose explaining the paradigm (that's the job of
+    :func:`build_focal_paradigm_block`, which is cache-stable and lives in
+    the system prompt). Returned as plain text: the composer decides
+    whether a row is written (``aios.harness.reminders``).
     """
 
     _ALICE = "signal/bot/alice"
     _FAMILY = "signal/bot/family"
 
     def test_no_channels_returns_none(self) -> None:
-        assert build_channels_tail_block([], [], focal_channel=None) is None
+        assert render_channels_reminder([], [], focal_channel=None) is None
 
     def test_focal_line_marked_with_triangle_no_unread_count(self) -> None:
-        block = build_channels_tail_block([self._ALICE], [], focal_channel=self._ALICE)
-        assert block is not None
-        content = block["content"]
+        content = render_channels_reminder([self._ALICE], [], focal_channel=self._ALICE)
+        assert content is not None
         assert "▸ channel_id=signal/bot/alice (focal)" in content
         focal_line = next(ln for ln in content.splitlines() if "▸" in ln)
         assert not any(ch.isdigit() for ch in focal_line), focal_line
@@ -147,58 +146,48 @@ class TestBuildChannelsTailBlock:
             _user_event(1, orig=self._FAMILY, focal_at=self._ALICE, content="hi from mom"),
             _user_event(2, orig=self._FAMILY, focal_at=self._ALICE, content="and again"),
         ]
-        block = build_channels_tail_block(
+        content = render_channels_reminder(
             [self._ALICE, self._FAMILY],
             events,
             focal_channel=self._ALICE,
         )
-        assert block is not None
-        content = block["content"]
+        assert content is not None
         assert "○ channel_id=signal/bot/family — 2 unread" in content
 
     def test_non_focal_preview_truncated(self) -> None:
         long = "x" * 200
         events = [_user_event(1, orig=self._FAMILY, focal_at=self._ALICE, content=long)]
-        block = build_channels_tail_block(
+        content = render_channels_reminder(
             [self._ALICE, self._FAMILY],
             events,
             focal_channel=self._ALICE,
         )
-        assert block is not None
-        content = block["content"]
+        assert content is not None
         assert "x" * 60 + "…" in content
         assert "x" * 61 not in content
 
     def test_phone_down_shows_no_focal_marker(self) -> None:
-        block = build_channels_tail_block(
+        content = render_channels_reminder(
             [self._ALICE, self._FAMILY],
             [],
             focal_channel=None,
         )
-        assert block is not None
-        content = block["content"]
+        assert content is not None
         assert "▸" not in content
         assert "(focal)" not in content
 
-    def test_tail_message_shape_is_user_role(self) -> None:
-        block = build_channels_tail_block([self._ALICE], [], focal_channel=self._ALICE)
-        assert block is not None
-        assert block["role"] == "user"
-        assert isinstance(block["content"], str)
-        # The block is tagged out-of-band as a per-step-ephemeral tail so the
-        # cache-breakpoint recognizer skips it without re-parsing prose; the
-        # marker is stripped before the wire by ``inject_cache_breakpoints``.
-        assert block[EPHEMERAL_TAIL_KEY] is True
-        assert set(block.keys()) <= {"role", "content", EPHEMERAL_TAIL_KEY}
+    def test_render_is_plain_text_starting_with_the_header(self) -> None:
+        content = render_channels_reminder([self._ALICE], [], focal_channel=self._ALICE)
+        assert isinstance(content, str)
+        assert content.startswith("━━━ Channels ━━━\n")
 
     def test_zero_unread_non_focal_still_listed(self) -> None:
-        block = build_channels_tail_block(
+        content = render_channels_reminder(
             [self._ALICE, self._FAMILY],
             [],
             focal_channel=self._ALICE,
         )
-        assert block is not None
-        content = block["content"]
+        assert content is not None
         assert f"○ channel_id={self._FAMILY} — 0 unread" in content
 
 

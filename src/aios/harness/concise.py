@@ -1,30 +1,30 @@
 """Concise output style: per-agent steering toward short, direct output.
 
-When ``agent.output_style == "concise"`` the harness adds two injections, both
-assembled at step time — nothing is ever persisted to the ``agent_events``
-transcript:
+When ``agent.output_style == "concise"`` the harness adds two injections:
 
 * a cache-stable rules block joined into the system prompt
   (:func:`augment_with_concise_style`, called from ``compute_step_prelude``),
   and
-* a one-line tail reminder — the "nag" — appended as the final message of
-  the composed payload (:func:`build_concise_nag_message`, called from
-  ``compose_step_context``).
+* a one-line reminder — the "nag" — written ONCE per context window as a
+  durable user-role reminder row (:data:`CONCISE_NAG_CONTENT` /
+  :data:`CONCISE_NAG_CONTENT_CHANNELS`, planned by
+  ``aios.harness.reminders`` and written by ``compose_step_context`` when no
+  row of the current variant is in the window).
 
-The nag is injected at assembly time each step so there is exactly ONE
-copy, always at maximum recency, and it never pollutes the persisted
-transcript. A plain user-content message is the only mid-transcript
-steering channel that survives LiteLLM's provider transforms: Anthropic
-and Gemini hoist any ``role: "system"`` message into the top-level system
-param, destroying position.
+A plain user-content message is the only mid-transcript steering channel
+that survives LiteLLM's provider transforms: Anthropic and Gemini hoist any
+``role: "system"`` message into the top-level system param, destroying
+position. The row is replayed at its seq on every later step, so the
+prompt stays a byte-prefix of its successor (the reason it is a row and
+not a per-step append: an appended tail busts the OpenAI prompt cache,
+which checkpoints through the END of the prompt).
 """
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Final
 
 from aios.harness._text import join_blocks
-from aios.harness.context import EPHEMERAL_TAIL_KEY
 
 CONCISE_STYLE_BLOCK = (
     "# Output style: Concise\n"
@@ -67,36 +67,33 @@ CONCISE_NAG_DELIVERY_CLAUSE: Final[str] = (
 )
 """Appended for a channel-attached session ONLY.
 
-The mute this guards against (#2262) is a per-step pressure, so its
-counter-pressure has to sit at the same recency: the nag is the final
-message of the payload, landing after the channels tail, which is exactly
-where the "stay terse, don't post" reading was winning. Rendered only when
+The mute this guards against (#2262) is a steering pressure the nag itself
+applies, so its counter-pressure rides the same message — the "stay terse,
+don't post" reading was winning wherever the nag sat. Rendered only when
 the session has bound channels — for a channel-less agent there is no
-connector to send through and the clause would be noise."""
+connector to send through and the clause would be noise. A change of
+variant (a channel bound or unbound) is a content change, so the planner
+writes the new variant's row."""
 
 CONCISE_NAG_CONTENT: Final[str] = f"<system-reminder>{CONCISE_NAG_BODY}</system-reminder>"
-"""The tail reminder for a session with no bound channels."""
+"""The reminder row content for a session with no bound channels."""
 
 CONCISE_NAG_CONTENT_CHANNELS: Final[str] = (
     f"<system-reminder>{CONCISE_NAG_BODY}{CONCISE_NAG_DELIVERY_CLAUSE}</system-reminder>"
 )
-"""The tail reminder for a channel-attached session.
-
-Both variants are constant — only the nag's *position* moves (it is always
-re-appended at the tail), which is why the message carries
-:data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`."""
+"""The reminder row content for a channel-attached session."""
 
 # Local-token reserve for the nag at windowing time, mirroring
-# ``OMISSION_MARKER_UPPER_BOUND_LOCAL`` (context.py): the nag is appended
-# after windowing runs, so without a reserve it could push the send-time
-# payload past ``window_max``.  Reserved UNCONDITIONALLY — like the omission
-# marker and the tail block, any reserve may not render; the named tradeoff
+# ``OMISSION_MARKER_UPPER_BOUND_LOCAL`` (context.py): the row this step may
+# write lands on top of the windowed slate, so without a reserve it could
+# push the send-time payload past ``window_max``.  Reserved UNCONDITIONALLY —
+# like the omission marker, any reserve may not be used; the named tradeoff
 # is the same one the omission marker already accepted: a non-concise agent
 # over-reserves against a >=50k window floor.  The bound must cover the
 # LONGEST variant — the channel-attached nag, which carries
 # :data:`CONCISE_NAG_DELIVERY_CLAUSE` — because the reserve is computed at
 # windowing time from the agent alone, before the composer knows which
-# variant renders.  ``TestConciseNagReserve`` pins BOTH real builder outputs
+# variant renders.  ``TestConciseNagReserve`` pins BOTH variants
 # under this bound, so it is verified rather than guessed: if a future edit
 # lengthens either variant past it, raise the constant — never shorten the
 # clause to fit.
@@ -108,20 +105,3 @@ def augment_with_concise_style(base_system: str, concise: bool) -> str:
     if not concise:
         return base_system
     return join_blocks(base_system, CONCISE_STYLE_BLOCK)
-
-
-def build_concise_nag_message(*, has_channels: bool = False) -> dict[str, Any]:
-    """The tail-reminder user message, built fresh each step.
-
-    ``has_channels`` selects the variant: a channel-attached session also
-    gets :data:`CONCISE_NAG_DELIVERY_CLAUSE`, so the reminder that steers
-    the model shorter can never be read as licence to stop posting (#2262).
-
-    Marked :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY` so the
-    cache-breakpoint recognizer never hosts the stable-prefix
-    ``cache_control`` breakpoint on it: the content is constant but the
-    *position* is per-step (always last), so a prefix cached through it
-    would never be re-usable.
-    """
-    content = CONCISE_NAG_CONTENT_CHANNELS if has_channels else CONCISE_NAG_CONTENT
-    return {"role": "user", "content": content, EPHEMERAL_TAIL_KEY: True}

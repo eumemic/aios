@@ -179,7 +179,7 @@ async def create_goal_handler(
         )
 
     # The goal text becomes the request input (the definition-of-done preview the
-    # tail block renders); the REQUIRED output_schema becomes the completion contract,
+    # reminder row renders); the REQUIRED output_schema becomes the completion contract,
     # persisted on the same request_opened frame the way call_* carry output_schema
     # (#1512) — `return` validates its value against it servicer-side.
     goal_input: dict[str, Any] = {"goal": args.goal}

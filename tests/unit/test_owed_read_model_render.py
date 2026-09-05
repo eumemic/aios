@@ -9,9 +9,9 @@ consumers (the quiescence-attempt surfacing via ``render_owed_listing`` and the
   summary / age / output_schema, with the schema bounded/elided.
 * a large output_schema is elided in the render (the #1522 schema-side cap, the
   analogue of the 60-char summary cap).
-* the per-step obligations tail budget bound (``max_obligations_block_local``)
-  holds for the (schema-free) tail even when obligations carry large schemas —
-  the contract-bearing render is the nudge/tool path, not the reserved tail.
+* the obligations reminder budget bound (``max_obligations_reminder_local``)
+  holds for the reminder row even when obligations carry large schemas (the
+  contract-bearing render is now the row itself, so the schema is priced in).
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from aios.harness.obligations import (
     _SCHEMA_MAX,
     _TASK_MAX,
     MAX_RENDERED_OBLIGATIONS,
-    build_obligations_tail_block,
-    max_obligations_block_local,
+    max_obligations_reminder_local,
+    render_obligations_reminder,
     render_owed_entry,
     render_owed_listing,
 )
@@ -112,7 +112,7 @@ class TestRenderOwedEntry:
     def test_oversized_task_render_is_bounded_and_leaks_no_prefix(self) -> None:
         # Two properties at once. (a) BOUNDED: this render is persisted on the nudge
         # path, so a 40x larger task must not produce a 40x larger durable event.
-        # (b) NO PREFIX: unlike the tail block — which shows a preview only because
+        # (b) NO PREFIX: unlike the retired tail block — which showed a preview only because
         # it has PROVEN the original is present — this surface cannot prove that, and
         # a plausible-looking prefix of a possibly-unrecoverable task is exactly
         # #2080's improvisation hazard. So it points, and shows no content at all.
@@ -245,17 +245,16 @@ class TestRenderOwedListing:
         assert len(text) < MAX_RENDERED_OBLIGATIONS * (_SCHEMA_MAX + 200)
 
 
-class TestTailBudgetBoundHoldsWithSchemas:
-    def test_per_step_tail_bound_holds_even_with_large_schemas(self) -> None:
-        # The reserved per-step obligations tail (build_obligations_tail_block) is
-        # schema-FREE by design — the contract-bearing render is the nudge/tool
-        # path. A large output_schema on the obligations therefore must NOT make
-        # the actual tail exceed the reserved upper bound.
+class TestReminderBudgetBoundHoldsWithSchemas:
+    def test_reminder_bound_holds_even_with_large_schemas(self) -> None:
+        # The durable obligations reminder IS the contract-bearing render, so a
+        # large output_schema on the obligations lands in the row — elided to
+        # ``_SCHEMA_MAX`` per entry — and the reserved upper bound must cover
+        # that actual render.
         big = {"type": "object", "properties": {f"k{i}": {"type": "string"} for i in range(1000)}}
         for n in (1, MAX_RENDERED_OBLIGATIONS, MAX_RENDERED_OBLIGATIONS + 25):
             obs = [_ob(f"req_{i}", summary="s" * 80, output_schema=big) for i in range(n)]
-            bound = max_obligations_block_local(obs)
-            block = build_obligations_tail_block(obs, session_id="sess_x")
-            assert block is not None
-            actual = approx_tokens([block])
+            bound = max_obligations_reminder_local(obs)
+            content = render_obligations_reminder(obs, session_id="sess_x")
+            actual = approx_tokens([{"role": "user", "content": content}])
             assert bound >= actual, f"under-reserved for n={n}: {bound} < {actual}"

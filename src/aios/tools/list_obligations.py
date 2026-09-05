@@ -8,7 +8,7 @@ session owes a response to — regardless of caller kind (``api`` / ``session`` 
 ``run``, and a self-goal where ``origin=self``).
 
 Each entry carries ``request_id``, ``caller_kind``, ``origin`` (incl. ``self``),
-``summary``, ``age``, and the **acceptance contract** ``output_schema`` (the JSON
+``summary``, ``opened_at``, and the **acceptance contract** ``output_schema`` (the JSON
 Schema the closing ``return`` value must satisfy). It draws those entries from the
 ONE shared owed-read-model renderer (:func:`aios.harness.obligations.render_owed_entry`)
 that the quiescence-attempt surfacing also feeds from — so the "what you owe +
@@ -51,7 +51,7 @@ async def list_obligations_handler(
     Reads the widened owed-read-model (:func:`queries.get_open_obligations`, now
     carrying ``output_schema``) and projects each open edge through the shared
     :func:`render_owed_entry` formatter: ``request_id``, ``caller_kind``,
-    ``origin`` (``api``/``session``/``run``/``self``), ``summary``, ``age``, and
+    ``origin`` (``api``/``session``/``run``/``self``), ``summary``, ``opened_at``, and
     the bounded ``output_schema`` contract. Lists ALL caller kinds — a caller's
     api/run/peer task AND a #1414 self-goal alike (``origin`` distinguishes them).
     """

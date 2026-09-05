@@ -227,10 +227,6 @@ def mock_step_dependencies() -> Any:
             return_value="sys",
         ),
         patch(
-            "aios.harness.channels.build_channels_tail_block",
-            return_value=None,
-        ),
-        patch(
             "aios.harness.skills.augment_system_prompt",
             return_value="sys",
         ),
