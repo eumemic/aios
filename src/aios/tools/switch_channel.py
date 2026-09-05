@@ -51,7 +51,7 @@ SWITCH_CHANNEL_DESCRIPTION = (
     "channel render in full; inbound on other channels show up as short "
     "notification markers in your context. Call "
     "switch_channel(channel_id=<id>) to focus on a bound channel — use one "
-    "of the channel_ids listed in the channels tail block or named in a "
+    "of the channel_ids listed in the channels listing or named in a "
     "notification marker. Call switch_channel(channel_id=null) to clear "
     "focal (no channel focused; all inbound renders as notifications). "
     "On a real switch the tool result includes a recap block: peer "
@@ -70,7 +70,7 @@ SWITCH_CHANNEL_PARAMETERS_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "The channel_id to focus on (must be a bound channel on "
-                "this session — look it up from the channels tail block "
+                "this session — look it up from the channels listing "
                 "or the most recent notification marker), or null to "
                 "clear focal."
             ),

@@ -8,7 +8,7 @@ session owes a response to — regardless of caller kind (``api`` / ``session`` 
 ``run``, and a self-goal where ``origin=self``).
 
 Each entry carries ``request_id``, ``caller_kind``, ``origin`` (incl. ``self``),
-``summary``, ``age``, and the **acceptance contract** ``output_schema`` (the JSON
+``summary``, ``opened_at``, and the **acceptance contract** ``output_schema`` (the JSON
 Schema the closing ``return`` value must satisfy). It draws those entries from the
 ONE shared owed-read-model renderer (:func:`aios.harness.obligations.render_owed_entry`)
 that the quiescence-attempt surfacing also feeds from — so the "what you owe +
@@ -22,7 +22,6 @@ a smuggled ``caller``/``account_id`` field).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -52,7 +51,7 @@ async def list_obligations_handler(
     Reads the widened owed-read-model (:func:`queries.get_open_obligations`, now
     carrying ``output_schema``) and projects each open edge through the shared
     :func:`render_owed_entry` formatter: ``request_id``, ``caller_kind``,
-    ``origin`` (``api``/``session``/``run``/``self``), ``summary``, ``age``, and
+    ``origin`` (``api``/``session``/``run``/``self``), ``summary``, ``opened_at``, and
     the bounded ``output_schema`` contract. Lists ALL caller kinds — a caller's
     api/run/peer task AND a #1414 self-goal alike (``origin`` distinguishes them).
     """
@@ -65,17 +64,14 @@ async def list_obligations_handler(
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     async with pool.acquire() as conn:
         obligations = await queries.get_open_obligations(conn, session_id, account_id=account_id)
-    now = datetime.now(UTC)
-    return {
-        "obligations": [render_owed_entry(o, session_id=session_id, now=now) for o in obligations]
-    }
+    return {"obligations": [render_owed_entry(o, session_id=session_id) for o in obligations]}
 
 
 LIST_OBLIGATIONS_DESCRIPTION = (
     "List every open obligation you owe a response to — your INCOMING tasks, "
     "source-agnostic (a caller's api/run/peer-session request AND any self-goal "
     "you pinned with create_goal, where origin=self). Each entry has its "
-    "request_id, caller_kind, origin, summary, age, and output_schema (the "
+    "request_id, caller_kind, origin, summary, opened_at (ISO-8601 UTC), and output_schema (the "
     "acceptance contract the answer must satisfy, when one is set). Answer each "
     "with return(request_id=<request_id>, value=...) when done (the value is "
     "validated against output_schema), or error(request_id=<request_id>, "

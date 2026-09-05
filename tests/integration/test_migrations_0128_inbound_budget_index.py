@@ -27,6 +27,7 @@ from typing import Any
 import asyncpg
 import pytest
 
+from aios.services.inbound_budget import _INFERENCE_BEARING_PREDICATE
 from tests.conftest import needs_docker
 from tests.helpers.alembic import run_alembic
 
@@ -77,13 +78,12 @@ FROM generate_series(5, 1004) AS n;
 # The EXACT ``_count_recent_inbounds`` query (predicate copied verbatim from
 # ``inbound_budget._INFERENCE_BEARING_PREDICATE``), so the plan we assert on is
 # the plan production runs — not a paraphrase.
-_COUNT_SQL = """
+_COUNT_SQL = f"""
 SELECT count(*)
 FROM events
 WHERE account_id = $1
   AND orig_channel = $2
-  AND ( (kind = 'message'   AND data->>'role' = 'user')
-     OR (kind = 'lifecycle' AND (data->>'wake')::boolean IS TRUE) )
+  AND ({_INFERENCE_BEARING_PREDICATE})
   AND created_at > now() - make_interval(secs => $3::bigint)
 """
 

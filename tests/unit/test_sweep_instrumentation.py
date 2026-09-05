@@ -295,6 +295,8 @@ class TestEntrySweepSpan:
                         tools=[],
                         reacting_to=0,
                         skill_versions=[],
+                        reminders_written=(),
+                        reminders_skipped=0,
                     )
                 ),
             ),

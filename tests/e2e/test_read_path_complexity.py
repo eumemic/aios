@@ -1036,6 +1036,10 @@ class TestLifecycleArmPlanShapeGate:
 _READ_PHASE_ENTRIES: tuple[tuple[str, str], ...] = (
     ("aios.db.queries.events", "read_windowed_events"),
     ("aios.harness.step_context", "compute_step_prelude"),
+    # The composer writes reminder rows (``append_event``: O(1) index seeks
+    # inside its own transaction) and reads the workspace path + timezone by
+    # primary key; registered so a future slate-scaled read lands here RED.
+    ("aios.harness.step_context", "compose_step_context"),
     # Append / tool-result phase (#1750): the entry points reached by every
     # tool-result intake and by cross-session ghost repair.
     ("aios.services.sessions", "append_tool_result"),
@@ -1236,6 +1240,7 @@ class TestRegistryCompletenessGate:
         assert scanned == {
             "aios.db.queries.events.read_windowed_events",
             "aios.harness.step_context.compute_step_prelude",
+            "aios.harness.step_context.compose_step_context",
             "aios.services.sessions.append_tool_result",
             "aios.harness.sweep.find_and_repair_ghosts",
         }

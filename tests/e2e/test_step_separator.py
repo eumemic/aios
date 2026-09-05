@@ -63,13 +63,13 @@ class TestAdjacentUserMergeAtLiteLLMBoundary:
         assert "second inbound" in merged
 
     async def test_inbound_then_tail_block_merge_no_placeholder(self, harness: Harness) -> None:
-        """When a session has interacted with a channel,
-        ``build_channels_tail_block`` appends a user-role tail. If the
-        conversation already ends with an assistant turn (idle re-check),
-        the tail lands adjacent to nothing problematic; but when an
-        inbound precedes it the two user turns merge. Either way, assert
-        no ``"."`` placeholder reaches litellm and the tail content is
-        carried by a user-role message.
+        """When a session has interacted with a channel, the composer writes
+        a user-role channels reminder row (``render_channels_reminder``). If
+        the conversation already ends with an assistant turn (idle re-check),
+        the row lands adjacent to nothing problematic; but when an inbound
+        precedes it the two user turns merge. Either way, assert no ``"."``
+        placeholder reaches litellm and the listing content is carried by a
+        user-role message.
 
         Channels are derived from event-log ``channel`` stamps (connector
         redesign #200). An inbound with ``metadata.channel`` set gives the
@@ -80,7 +80,7 @@ class TestAdjacentUserMergeAtLiteLLMBoundary:
         from aios.services import sessions as sess_svc
 
         # Two scripted replies: one for the channel inbound, one for the
-        # idle re-check step where the tail block is appended.
+        # idle re-check step where the listing row is written.
         harness.script_model([assistant("ack"), assistant("idle")])
         session = await harness.start("hello")
         await sess_svc.append_user_message(
@@ -98,7 +98,7 @@ class TestAdjacentUserMergeAtLiteLLMBoundary:
                 f"degenerate '.' placeholder reached litellm: {call['messages']!r}"
             )
 
-        # Across all calls, when the channels tail block appears it is on a
+        # Across all calls, when the channels listing appears it is on a
         # user-role message (merged into the trailing inbound or standalone).
         saw_tail = False
         for call in harness.model_calls:
@@ -106,18 +106,18 @@ class TestAdjacentUserMergeAtLiteLLMBoundary:
                 if m.get("role") == "user" and _TAIL_HEADER in msg_text(m):
                     saw_tail = True
         assert saw_tail, (
-            "channels tail block never appeared on a user-role message across "
+            "channels listing never appeared on a user-role message across "
             f"model calls: {[c['messages'] for c in harness.model_calls]!r}"
         )
 
     async def test_no_placeholder_when_tail_block_absent(self, harness: Harness) -> None:
-        """Without channel bindings, ``build_channels_tail_block`` returns
-        ``None`` and no adjacency arises from the tail. Assert no
+        """Without channel bindings, ``render_channels_reminder`` returns
+        ``None`` and no adjacency arises from a listing row. Assert no
         placeholder assistant turn is inserted — guards against a future
         change that always inserts a degenerate empty assistant turn."""
         harness.script_model([assistant("ok")])
         session = await harness.start("hello")
-        # No binding created → tail block is None → no user/user adjacency.
+        # No binding created → listing is None → no user/user adjacency.
         await harness.run_until_idle(session.id)
 
         assert len(harness.model_calls) == 1

@@ -42,7 +42,12 @@ _AGENT = SimpleNamespace(
     preempt_policy="wait",
 )
 _STEP_CTX = SimpleNamespace(
-    messages=[{"role": "user", "content": "hi"}], tools=[], skill_versions=[], reacting_to=0
+    messages=[{"role": "user", "content": "hi"}],
+    tools=[],
+    skill_versions=[],
+    reacting_to=0,
+    reminders_written=(),
+    reminders_skipped=0,
 )
 
 

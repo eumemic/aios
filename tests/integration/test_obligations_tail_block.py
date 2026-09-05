@@ -1,4 +1,4 @@
-"""Integration tests for the always-on obligations tail block (#1413).
+"""Integration tests for the obligations reminder row (#1413).
 
 DB-backed (testcontainer Postgres). The block's whole reason to exist is to
 survive context-window erasure of the original request user message: a long-lived
