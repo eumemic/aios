@@ -27,6 +27,7 @@ from aios.harness.context import (
 )
 from aios.harness.window import WindowOmission
 from aios.models.events import Event
+from tests.support import assert_message_prefix
 
 
 @pytest.fixture(autouse=True)
@@ -296,13 +297,15 @@ class TestBuildMessages:
         user_msgs = [m for m in msgs if m["role"] == "user"]
         assert len(user_msgs) == 1  # only the original user message
 
-    def test_user_message_in_last_assistant_blind_spot_moves_to_tail(self) -> None:
+    def test_user_message_in_last_assistant_blind_spot_anchors_after_it(self) -> None:
         """A user message that arrives mid-inference (so the resulting assistant
         turn's ``reacting_to`` is behind it) must not be left stranded before that
         trailing assistant turn: the context would then END on an assistant
         message, which current reasoning models reject as an unsupported prefill
-        ("the conversation must end with a user message"). It is deferred to the
-        tail — symmetric with the blind-spot handling for late tool results."""
+        ("the conversation must end with a user message"). It is anchored after
+        the assistant that was blind to it — here the last one, so it lands at
+        the tail — symmetric with the blind-spot handling for late tool results
+        (see ``TestBlindSpotUserAnchoring`` for the non-last-assistant shape)."""
         events = [
             _evt(1, "user", content="summarize the news"),
             _evt(2, "assistant", tool_calls=[_tc("a", "web_search")]),
@@ -334,15 +337,15 @@ class TestBuildMessages:
         # inference gate sees it as reacted and won't re-fire for it next step.
         assert ctx.reacting_to == 4
 
-    def test_late_tool_result_injection_cannot_strand_trailing_assistant(self) -> None:
+    def test_late_tool_result_anchors_after_the_last_blind_assistant(self) -> None:
         """A slow tool's result lands TWO assistant turns after the call was
-        issued: the blind-spot injection anchors inline after its
-        horizon-setter — an assistant that is NOT the last one — so the later
-        assistant turns leave the build ENDING on an assistant message. That
-        build is exactly the one sent (the injected result is an unreacted
-        stimulus, so the gate fires), and current reasoning models reject
-        trailing-assistant prefill with a terminal 400, wedging the session
-        until the next message."""
+        issued. Both later assistants were blind to it, so the injection
+        anchors after the LAST of them — the build ends on the injected
+        result itself (a user turn), with no trailing-stimulus notice needed.
+        Anchoring after the FIRST blind assistant instead would leave the
+        build ending on the second assistant: a provider-rejected prefill
+        (terminal 400) that the guard would have to paper over with a notice,
+        and a mid-list splice that rewrites the prompt prefix."""
         events = [
             _evt(1, "user", content="ping the peer"),
             _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
@@ -370,11 +373,12 @@ class TestBuildMessages:
         ]
         assert len(injected) == 1
         # THE INVARIANT: a gate-firing build must never end on an assistant
-        # turn — that is a provider-rejected prefill (terminal 400).
-        assert msgs[-1]["role"] != "assistant", (
-            "gate-firing build ends on an assistant turn — Anthropic rejects "
-            "this as unsupported prefill and the session wedges"
+        # turn — that is a provider-rejected prefill (terminal 400). Here the
+        # injected result IS the tail, so no notice is (or may be) appended.
+        assert msgs[-1] is injected[0], (
+            "late result must be anchored after the last blind assistant"
         )
+        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in msgs)
 
     def test_pruned_orphan_stimulus_still_gets_trailing_notice(self) -> None:
         """The waking stimulus can be structurally INVISIBLE: a tool result
@@ -435,27 +439,25 @@ class TestBuildMessages:
         """
         from aios.harness.step_context import _agent_owes_response
 
-        # TWO assistant turns must follow the slow call: the injection anchors
-        # after its horizon-setter, so with only ONE later assistant the
-        # injected result IS the last message and no guard is needed.
+        # The reachable assistant-ending shape: a late tool result whose issuing
+        # assistant has been windowed out. The walk counts it as a stimulus
+        # (``reacting_to`` = f(log)) but ``_prune_orphans`` drops the structural
+        # orphan, so without the guard the build ends on the assistant turn.
+        # (Blind-spot results whose caller IS in the window are anchored after
+        # the last assistant blind to them, so they never leave a trailing
+        # assistant — this orphan shape is what the guard still exists for.)
         events = [
             _evt(1, "user", content="ping the peer"),
-            _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
-            _evt(3, "user", content="unrelated question one"),
-            _evt(4, "assistant", content="answer one"),
-            _evt(5, "user", content="unrelated question two"),
-            _evt(6, "assistant", content="answer two"),
-            _evt(7, "tool", tool_call_id="slow", content="peer replied: ok"),
+            _evt(2, "assistant", content="on it"),
+            _evt(3, "tool", tool_call_id="slow", content="peer replied: ok"),
         ]
         events[1].data["reacting_to"] = 1
-        events[3].data["reacting_to"] = 3
-        events[5].data["reacting_to"] = 5
 
         # MASTER's shape: what build_messages would have produced without the
         # guard is an assistant-ending list. Reconstruct that predicate input
         # by dropping the guard's own tail.
         ctx = build_messages(events, system_prompt=None)
-        assert ctx.reacting_to == 7
+        assert ctx.reacting_to == 3
         without_notice = [m for m in ctx.messages if m.get("content") != _TRAILING_STIMULUS_NOTICE]
         assert without_notice[-1]["role"] == "assistant", (
             "precondition: without the guard this build ends on an assistant"
@@ -859,17 +861,6 @@ class TestTimezoneRendering:
 # ─── monotonicity ──────────────────────────────────────────────────────────
 
 
-def _assert_prefix(short: list[dict[str, Any]], long: list[dict[str, Any]]) -> None:
-    """Assert that *short* is a message-for-message prefix of *long*."""
-    assert len(short) <= len(long), (
-        f"short ({len(short)} msgs) is longer than long ({len(long)} msgs)"
-    )
-    for i, (a, b) in enumerate(zip(short, long, strict=False)):
-        assert a == b, (
-            f"monotonicity violation at index {i}:\n  short[{i}] = {a!r}\n  long[{i}]  = {b!r}"
-        )
-
-
 class TestMonotonicity:
     """build_messages(L1) must be a prefix of build_messages(L2) whenever L1
     is a prefix of L2.  This is the property that keeps the prompt prefix
@@ -884,9 +875,9 @@ class TestMonotonicity:
 
     def test_injection_stable_when_assistant_appended(self) -> None:
         """A blind-spot tool result is injected as a user message after
-        the horizon-setter.  When the model responds (new assistant
-        appended), the injection must not shift — the new assistant
-        should appear AFTER the injection, preserving the prefix."""
+        the last assistant blind to it.  When the model responds (new
+        assistant appended), the injection must not shift — the new
+        assistant should appear AFTER the injection, preserving the prefix."""
         # L1: blind-spot result exists, model is about to be called.
         #   seq 4 (tool result) > reacting_to=3 of asst at seq 5
         #   → paired position shows PENDING, real result injected inline.
@@ -908,7 +899,7 @@ class TestMonotonicity:
         ctx2 = self._build(l2)
 
         # ctx1 should be a prefix of ctx2.
-        _assert_prefix(ctx1, ctx2)
+        assert_message_prefix(ctx1, ctx2)
 
     def test_inline_injection_position(self) -> None:
         """Blind-spot injection appears right after the horizon-setter
@@ -929,13 +920,13 @@ class TestMonotonicity:
 
         msgs = self._build(events)
         roles = [m["role"] for m in msgs]
-        # Injection (user) sits between horizon-setter and the following user msg.
+        # Injection (user) sits after the blind assistant, before the following user msg.
         assert roles == ["user", "assistant", "tool", "assistant", "user", "user", "assistant"]
         assert "RESULT" in msgs[4]["content"]
 
-    def test_horizon_setter_with_tool_calls_injection_after(self) -> None:
-        """When the horizon-setter itself has tool_calls, the blind-spot
-        injection goes after the horizon-setter's own tool results."""
+    def test_blind_assistant_with_tool_calls_injection_after_its_results(self) -> None:
+        """When the blind assistant itself has tool_calls, the blind-spot
+        injection goes after that assistant's own paired tool results."""
         events = [
             _evt(1, "user", content="do A and B"),
             _evt(2, "assistant", tool_calls=[_tc("a1")]),
@@ -959,7 +950,7 @@ class TestMonotonicity:
 
     def test_multiple_blind_spot_tools_same_assistant(self) -> None:
         """Multiple blind-spot tools from the same assistant are all injected
-        inline after the same horizon-setter."""
+        inline after the same blind assistant, in result-seq order."""
         events = [
             _evt(1, "user", content="run two"),
             _evt(2, "assistant", tool_calls=[_tc("x"), _tc("y")]),
@@ -980,7 +971,7 @@ class TestMonotonicity:
 
     def test_multiple_assistants_with_blind_spots(self) -> None:
         """Two different assistants each with blind-spot tools inject after
-        their respective horizon-setters."""
+        the respective assistant that was blind to each result."""
         events = [
             _evt(1, "user", content="go"),
             _evt(2, "assistant", tool_calls=[_tc("a")]),
@@ -1012,6 +1003,70 @@ class TestMonotonicity:
         assert "A done" in msgs[5]["content"]
         assert "B done" in msgs[7]["content"]
 
+    def test_late_result_after_two_later_turns_anchors_after_the_last_blind_one(self) -> None:
+        """A background tool's result that lands after TWO later assistant turns
+        must render after the newest of them — exactly where the previous build
+        ended — not spliced after the caller's immediate successor (which would
+        insert it before already-committed messages)."""
+        l1 = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("bg1")]),
+            _evt(3, "user", content="meanwhile"),
+            _evt(4, "assistant", content="sure"),
+            _evt(5, "user", content="and this"),
+            _evt(6, "assistant", content="ok"),
+        ]
+        l1[1].data["reacting_to"] = 1
+        l1[3].data["reacting_to"] = 3
+        l1[5].data["reacting_to"] = 5
+        l2 = [*l1, _evt(7, "tool", tool_call_id="bg1", content="bg done")]
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert_message_prefix(b1, b2)
+        assert "bg done" in str(b2[len(b1)]["content"])
+        # The injection is the tail, so the build ends on a user turn on its
+        # own — no trailing-stimulus notice is needed or appended.
+        assert b2[-1]["role"] == "user"
+        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in b2)
+
+    def test_anchored_user_and_later_blind_result_drain_in_seq_order(self) -> None:
+        """A blind-spot user and a later blind-spot tool result anchored to the
+        same assistant render in log order (user first), so the result's
+        arrival appends after the user instead of displacing it."""
+        l1 = [
+            _evt(1, "user", content="go"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "user", content="mid-inference note"),
+            _evt(4, "assistant", content="still working"),
+        ]
+        l1[1].data["reacting_to"] = 1
+        l1[3].data["reacting_to"] = 1  # blind to seq 3
+        l2 = [*l1, _evt(5, "tool", tool_call_id="bash_1", content="DONE")]
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert_message_prefix(b1, b2)
+        assert b1[-1]["content"].endswith("mid-inference note")
+        assert "DONE" in str(b2[-1]["content"])
+
+    def test_two_blind_results_landing_out_of_order_drain_in_seq_order(self) -> None:
+        """Two results from one assistant that land in the opposite order of
+        their tool_calls render in RESULT-seq order, so the second arrival
+        appends rather than reordering the injected block."""
+        l1 = [
+            _evt(1, "user", content="run two"),
+            _evt(2, "assistant", tool_calls=[_tc("x"), _tc("y")]),
+            _evt(3, "assistant", content="both pending..."),
+            _evt(4, "tool", tool_call_id="y", content="Y done"),
+        ]
+        l1[1].data["reacting_to"] = 1
+        l1[2].data["reacting_to"] = 1
+        l2 = [*l1, _evt(5, "tool", tool_call_id="x", content="X done")]
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert_message_prefix(b1, b2)
+        assert "Y done" in str(b2[-2]["content"])
+        assert "X done" in str(b2[-1]["content"])
+
     def test_monotonicity_across_three_successive_appends(self) -> None:
         """L1 ⊂ L2 ⊂ L3: prefix preserved at each step."""
         base = [
@@ -1030,8 +1085,8 @@ class TestMonotonicity:
         l3 = [*l2, _evt(7, "user", content="great, now do Y")]
 
         ctx1, ctx2, ctx3 = self._build(l1), self._build(l2), self._build(l3)
-        _assert_prefix(ctx1, ctx2)
-        _assert_prefix(ctx2, ctx3)
+        assert_message_prefix(ctx1, ctx2)
+        assert_message_prefix(ctx2, ctx3)
 
     def test_merge_insertion_preserves_monotonicity(self) -> None:
         """Full pipeline (build_messages → tail-block → adjacent-user
@@ -1073,31 +1128,26 @@ class TestMonotonicity:
                     return msgs[:i]
             return msgs
 
-        _assert_prefix(_strip_tail(out1), _strip_tail(out2))
-        _assert_prefix(_strip_tail(out2), _strip_tail(out3))
+        assert_message_prefix(_strip_tail(out1), _strip_tail(out2))
+        assert_message_prefix(_strip_tail(out2), _strip_tail(out3))
 
     def test_trailing_guard_notice_is_volatile_tail_only(self) -> None:
-        """The trailing-assistant guard notice (late tool result injected
-        mid-list, build would end on an assistant) lives ONLY at the volatile
-        tail of the sent build. When the model's reply commits, the next build
+        """The trailing-assistant guard notice (a late tool result whose
+        issuing assistant was windowed out — a pruned structural orphan — so
+        the build would end on an assistant) lives ONLY at the volatile tail
+        of the sent build. When the model's reply commits, the next build
         drops the notice and puts the reply at that index — the committed
-        prefix before it must not shift (same trade as the #1120 user
-        deferral: a one-boundary cache miss, never a prefix rewrite)."""
+        prefix before it must not shift (a one-boundary cache miss, never a
+        prefix rewrite)."""
         l1 = [
             _evt(1, "user", content="ping the peer"),
-            _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
-            _evt(3, "user", content="unrelated question one"),
-            _evt(4, "assistant", content="answer one"),
-            _evt(5, "user", content="unrelated question two"),
-            _evt(6, "assistant", content="answer two"),
-            _evt(7, "tool", tool_call_id="slow", content="peer replied: ok"),
+            _evt(2, "assistant", content="on it"),
+            _evt(3, "tool", tool_call_id="slow", content="peer replied: ok"),
         ]
         l1[1].data["reacting_to"] = 1
-        l1[3].data["reacting_to"] = 3
-        l1[5].data["reacting_to"] = 5
 
-        l2 = [*l1, _evt(8, "assistant", content="good, the peer is on it")]
-        l2[7].data["reacting_to"] = 7
+        l2 = [*l1, _evt(4, "assistant", content="good, the peer is on it")]
+        l2[3].data["reacting_to"] = 3
 
         ctx1 = self._build(l1)
         ctx2 = self._build(l2)
@@ -1111,7 +1161,7 @@ class TestMonotonicity:
         assert ctx2[-1]["role"] == "assistant"
         assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in ctx2)
         # Everything before the volatile tail is a stable prefix.
-        _assert_prefix(ctx1[:-1], ctx2)
+        assert_message_prefix(ctx1[:-1], ctx2)
 
     def test_reacting_to_includes_inline_injection_seq(self) -> None:
         """ContextResult.reacting_to must account for the seq of blind-spot
@@ -1218,6 +1268,165 @@ class TestMonotonicity:
 
 
 # ─── field stripping ────────────────────────────────────────────────────────
+
+
+class TestBlindSpotUserAnchoring:
+    """A user message that landed while the model was mid-inference is blind
+    to the assistant turn that inference produced. It must render AFTER that
+    assistant — the first one whose ``reacting_to < seq < assistant.seq`` —
+    in EVERY later build, never jumping back to its seq position once a
+    newer assistant exists. That reorder broke the prompt prefix on both
+    providers for every channel agent with a mid-inference inbound."""
+
+    @staticmethod
+    def _build(events: list[Event]) -> list[dict[str, Any]]:
+        return build_messages(events, system_prompt=None).messages
+
+    @staticmethod
+    def _blind_spot_fixture() -> list[Event]:
+        events = [
+            _evt(1, "user", content="run it"),
+            _evt(2, "assistant", tool_calls=[_tc("bash_1")]),
+            _evt(3, "tool", tool_call_id="bash_1", content="ok"),
+            _evt(4, "user", content="mid-inference note"),
+            _evt(5, "assistant", content="done"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[4].data["reacting_to"] = 3  # blind to the user at seq 4
+        return events
+
+    def test_anchors_after_its_assistant_when_reply_appended(self) -> None:
+        l1 = self._blind_spot_fixture()
+        # The model then replies to the mid-inference note.
+        l2 = [*l1, _evt(6, "assistant", content="noted")]
+        l2[5].data["reacting_to"] = 4
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert b1[-1]["content"].endswith("mid-inference note")
+        assert_message_prefix(b1, b2)
+
+    def test_anchors_when_later_inbound_arrives(self) -> None:
+        l1 = self._blind_spot_fixture()
+        l2 = [*l1, _evt(6, "user", content="and another thing")]
+        b1 = self._build(l1)
+        b2 = self._build(l2)
+        assert_message_prefix(b1, b2)
+        assert b2[-1]["content"].endswith("and another thing")
+
+    def test_anchor_is_the_assistant_that_was_blind_not_the_last(self) -> None:
+        events = [
+            _evt(1, "user", content="first"),
+            _evt(2, "assistant", content="a1"),
+            _evt(3, "user", content="mid-inference note"),
+            _evt(4, "assistant", content="a2"),
+            _evt(5, "user", content="third"),
+            _evt(6, "assistant", content="a3"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # a2 never saw seq 3
+        events[5].data["reacting_to"] = 5  # a3 saw everything
+        contents = [str(m.get("content")) for m in self._build(events)]
+
+        def _at(suffix: str) -> int:
+            return next(i for i, c in enumerate(contents) if c.endswith(suffix))
+
+        # a2 was blind to the note, so the note renders right after a2.
+        assert _at("a2") < _at("mid-inference note") < _at("third")
+
+    def test_anchored_user_follows_the_anchor_assistants_paired_results(self) -> None:
+        """The anchor assistant's own tool results stay paired directly after
+        it; the anchored user follows them. Emitting the user between the
+        assistant and its results is the exact shape strict providers reject."""
+        events = [
+            _evt(1, "user", content="first"),
+            _evt(2, "assistant", content="a1"),
+            _evt(3, "user", content="mid-inference note"),
+            _evt(4, "assistant", tool_calls=[_tc("c1")]),
+            _evt(5, "tool", tool_call_id="c1", content="ok"),
+            _evt(6, "assistant", content="a3"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1  # blind to seq 3
+        events[5].data["reacting_to"] = 5
+        msgs = self._build(events)
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "assistant", "tool", "user", "assistant"]
+        assert msgs[3]["tool_call_id"] == "c1"
+        assert msgs[4]["content"].endswith("mid-inference note")
+
+    def test_quarantined_anchor_assistant_still_renders_the_anchored_user(self) -> None:
+        """If the anchor assistant's own render raises (quarantine backstop),
+        the user anchored to it must still appear — after the placeholder —
+        or the message is silently lost from every replay while ``reacting_to``
+        already counts it as seen."""
+        events = [
+            _evt(1, "user", content="hello"),
+            _evt(2, "assistant", content="a1"),
+            _evt(3, "user", content="BLIND NOTE"),
+            _evt(4, "assistant", content="poison", tool_calls="not-a-list"),  # type: ignore[arg-type]
+            # A later inbound: the note must render right after the
+            # placeholder (its anchor), not be swept to the tail.
+            _evt(5, "user", content="later"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 1
+        ctx = build_messages(events, system_prompt=None)
+        contents = [str(m.get("content")) for m in ctx.messages]
+        assert [c.split("\n")[-1] for c in contents] == [
+            "hello",
+            "a1",
+            _quarantine_placeholder(4)["content"],
+            "BLIND NOTE",
+            "later",
+        ]
+        assert ctx.reacting_to == 5
+
+    def test_assistant_with_null_reacting_to_does_not_quarantine_users(self) -> None:
+        """A non-int ``reacting_to`` on some assistant (a poisoned or legacy
+        row: ``None``, a string …) must read as "reacted to everything before
+        it", not blow up the horizon / anchor comparisons made against it and
+        quarantine its neighbours."""
+        for junk in (None, "7", 4.5):
+            events = [
+                _evt(1, "user", content="one"),
+                _evt(2, "assistant", tool_calls=[_tc("c1")]),
+                _evt(3, "tool", tool_call_id="c1", content="ok"),
+                _evt(4, "user", content="two"),
+                # This assistant's reacting_to is the horizon for seq 2 AND the
+                # anchor candidate for the user at seq 4.
+                _evt(5, "assistant", content="a2"),
+                _evt(6, "user", content="three"),
+            ]
+            events[1].data["reacting_to"] = 1
+            events[4].data["reacting_to"] = junk
+            contents = [str(m.get("content")) for m in self._build(events)]
+            assert not any("quarantined" in c for c in contents), junk
+            assert [c.split("\n")[-1] for c in contents] == [
+                "one",
+                "",
+                "ok",
+                "two",
+                "a2",
+                "three",
+            ], junk
+
+    def test_only_the_immediately_following_assistant_can_be_blind(self) -> None:
+        """A user message the very next assistant reacted to stays at its seq
+        position even if a later assistant carries a lower ``reacting_to``
+        (a hand-poisoned watermark): anchoring keys on the immediate
+        successor, never on a scan for any assistant with a low watermark."""
+        events = [
+            _evt(1, "user", content="one"),
+            _evt(2, "assistant", content="a1"),
+            _evt(3, "user", content="two"),
+            _evt(4, "assistant", content="a2"),
+            _evt(5, "assistant", content="a3"),
+        ]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 3  # reacted to seq 3
+        events[4].data["reacting_to"] = 1  # poisoned: lower than seq 3
+        contents = [str(m.get("content")).split("\n")[-1] for m in self._build(events)]
+        assert contents[:5] == ["one", "a1", "two", "a2", "a3"]
 
 
 class TestFieldStripping:
@@ -2807,7 +3016,7 @@ class TestOmissionMarker:
         grown = [*head, _evt(52, "user", content="more"), _evt(53, "assistant", content="ok")]
         ctx_before = build_messages(head, system_prompt="SYS", omission=omission)
         ctx_after = build_messages(grown, system_prompt="SYS", omission=omission)
-        _assert_prefix(ctx_before.messages, ctx_after.messages)
+        assert_message_prefix(ctx_before.messages, ctx_after.messages)
 
     def test_marker_changes_when_boundary_moves(self) -> None:
         """After a snap the head event differs → the marker re-renders with
