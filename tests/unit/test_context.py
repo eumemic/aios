@@ -337,15 +337,15 @@ class TestBuildMessages:
         # inference gate sees it as reacted and won't re-fire for it next step.
         assert ctx.reacting_to == 4
 
-    def test_late_tool_result_injection_cannot_strand_trailing_assistant(self) -> None:
+    def test_late_tool_result_anchors_after_the_last_blind_assistant(self) -> None:
         """A slow tool's result lands TWO assistant turns after the call was
-        issued: the blind-spot injection anchors inline after its
-        horizon-setter — an assistant that is NOT the last one — so the later
-        assistant turns leave the build ENDING on an assistant message. That
-        build is exactly the one sent (the injected result is an unreacted
-        stimulus, so the gate fires), and current reasoning models reject
-        trailing-assistant prefill with a terminal 400, wedging the session
-        until the next message."""
+        issued. Both later assistants were blind to it, so the injection
+        anchors after the LAST of them — the build ends on the injected
+        result itself (a user turn), with no trailing-stimulus notice needed.
+        Anchoring after the FIRST blind assistant instead would leave the
+        build ending on the second assistant: a provider-rejected prefill
+        (terminal 400) that the guard would have to paper over with a notice,
+        and a mid-list splice that rewrites the prompt prefix."""
         events = [
             _evt(1, "user", content="ping the peer"),
             _evt(2, "assistant", tool_calls=[_tc("slow", "message_bot")]),
@@ -373,11 +373,12 @@ class TestBuildMessages:
         ]
         assert len(injected) == 1
         # THE INVARIANT: a gate-firing build must never end on an assistant
-        # turn — that is a provider-rejected prefill (terminal 400).
-        assert msgs[-1]["role"] != "assistant", (
-            "gate-firing build ends on an assistant turn — Anthropic rejects "
-            "this as unsupported prefill and the session wedges"
+        # turn — that is a provider-rejected prefill (terminal 400). Here the
+        # injected result IS the tail, so no notice is (or may be) appended.
+        assert msgs[-1] is injected[0], (
+            "late result must be anchored after the last blind assistant"
         )
+        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in msgs)
 
     def test_pruned_orphan_stimulus_still_gets_trailing_notice(self) -> None:
         """The waking stimulus can be structurally INVISIBLE: a tool result
@@ -874,9 +875,9 @@ class TestMonotonicity:
 
     def test_injection_stable_when_assistant_appended(self) -> None:
         """A blind-spot tool result is injected as a user message after
-        the horizon-setter.  When the model responds (new assistant
-        appended), the injection must not shift — the new assistant
-        should appear AFTER the injection, preserving the prefix."""
+        the last assistant blind to it.  When the model responds (new
+        assistant appended), the injection must not shift — the new
+        assistant should appear AFTER the injection, preserving the prefix."""
         # L1: blind-spot result exists, model is about to be called.
         #   seq 4 (tool result) > reacting_to=3 of asst at seq 5
         #   → paired position shows PENDING, real result injected inline.
@@ -919,13 +920,13 @@ class TestMonotonicity:
 
         msgs = self._build(events)
         roles = [m["role"] for m in msgs]
-        # Injection (user) sits between horizon-setter and the following user msg.
+        # Injection (user) sits after the blind assistant, before the following user msg.
         assert roles == ["user", "assistant", "tool", "assistant", "user", "user", "assistant"]
         assert "RESULT" in msgs[4]["content"]
 
-    def test_horizon_setter_with_tool_calls_injection_after(self) -> None:
-        """When the horizon-setter itself has tool_calls, the blind-spot
-        injection goes after the horizon-setter's own tool results."""
+    def test_blind_assistant_with_tool_calls_injection_after_its_results(self) -> None:
+        """When the blind assistant itself has tool_calls, the blind-spot
+        injection goes after that assistant's own paired tool results."""
         events = [
             _evt(1, "user", content="do A and B"),
             _evt(2, "assistant", tool_calls=[_tc("a1")]),
@@ -949,7 +950,7 @@ class TestMonotonicity:
 
     def test_multiple_blind_spot_tools_same_assistant(self) -> None:
         """Multiple blind-spot tools from the same assistant are all injected
-        inline after the same horizon-setter."""
+        inline after the same blind assistant, in result-seq order."""
         events = [
             _evt(1, "user", content="run two"),
             _evt(2, "assistant", tool_calls=[_tc("x"), _tc("y")]),
@@ -970,7 +971,7 @@ class TestMonotonicity:
 
     def test_multiple_assistants_with_blind_spots(self) -> None:
         """Two different assistants each with blind-spot tools inject after
-        their respective horizon-setters."""
+        the respective assistant that was blind to each result."""
         events = [
             _evt(1, "user", content="go"),
             _evt(2, "assistant", tool_calls=[_tc("a")]),
@@ -1023,6 +1024,10 @@ class TestMonotonicity:
         b2 = self._build(l2)
         assert_message_prefix(b1, b2)
         assert "bg done" in str(b2[len(b1)]["content"])
+        # The injection is the tail, so the build ends on a user turn on its
+        # own — no trailing-stimulus notice is needed or appended.
+        assert b2[-1]["role"] == "user"
+        assert not any(m.get("content") == _TRAILING_STIMULUS_NOTICE for m in b2)
 
     def test_anchored_user_and_later_blind_result_drain_in_seq_order(self) -> None:
         """A blind-spot user and a later blind-spot tool result anchored to the
@@ -1359,31 +1364,69 @@ class TestBlindSpotUserAnchoring:
             _evt(2, "assistant", content="a1"),
             _evt(3, "user", content="BLIND NOTE"),
             _evt(4, "assistant", content="poison", tool_calls="not-a-list"),  # type: ignore[arg-type]
+            # A later inbound: the note must render right after the
+            # placeholder (its anchor), not be swept to the tail.
+            _evt(5, "user", content="later"),
         ]
         events[1].data["reacting_to"] = 1
         events[3].data["reacting_to"] = 1
         ctx = build_messages(events, system_prompt=None)
         contents = [str(m.get("content")) for m in ctx.messages]
-        assert any("quarantined" in c for c in contents)
-        assert contents[-1].endswith("BLIND NOTE")
-        assert ctx.reacting_to == 4
+        assert [c.split("\n")[-1] for c in contents] == [
+            "hello",
+            "a1",
+            _quarantine_placeholder(4)["content"],
+            "BLIND NOTE",
+            "later",
+        ]
+        assert ctx.reacting_to == 5
 
     def test_assistant_with_null_reacting_to_does_not_quarantine_users(self) -> None:
-        """An explicit ``reacting_to: None`` on some assistant (a poisoned or
-        legacy row) must read as "reacted to everything before it", not blow
-        up the comparison for every user event scanned against it."""
+        """A non-int ``reacting_to`` on some assistant (a poisoned or legacy
+        row: ``None``, a string …) must read as "reacted to everything before
+        it", not blow up the horizon / anchor comparisons made against it and
+        quarantine its neighbours."""
+        for junk in (None, "7", 4.5):
+            events = [
+                _evt(1, "user", content="one"),
+                _evt(2, "assistant", tool_calls=[_tc("c1")]),
+                _evt(3, "tool", tool_call_id="c1", content="ok"),
+                _evt(4, "user", content="two"),
+                # This assistant's reacting_to is the horizon for seq 2 AND the
+                # anchor candidate for the user at seq 4.
+                _evt(5, "assistant", content="a2"),
+                _evt(6, "user", content="three"),
+            ]
+            events[1].data["reacting_to"] = 1
+            events[4].data["reacting_to"] = junk
+            contents = [str(m.get("content")) for m in self._build(events)]
+            assert not any("quarantined" in c for c in contents), junk
+            assert [c.split("\n")[-1] for c in contents] == [
+                "one",
+                "",
+                "ok",
+                "two",
+                "a2",
+                "three",
+            ], junk
+
+    def test_only_the_immediately_following_assistant_can_be_blind(self) -> None:
+        """A user message the very next assistant reacted to stays at its seq
+        position even if a later assistant carries a lower ``reacting_to``
+        (a hand-poisoned watermark): anchoring keys on the immediate
+        successor, never on a scan for any assistant with a low watermark."""
         events = [
             _evt(1, "user", content="one"),
             _evt(2, "assistant", content="a1"),
             _evt(3, "user", content="two"),
             _evt(4, "assistant", content="a2"),
-            _evt(5, "user", content="three"),
+            _evt(5, "assistant", content="a3"),
         ]
-        events[1].data["reacting_to"] = None
-        events[3].data["reacting_to"] = 3
-        contents = [str(m.get("content")) for m in self._build(events)]
-        assert not any("quarantined" in c for c in contents)
-        assert [c.split("\n")[-1] for c in contents] == ["one", "a1", "two", "a2", "three"]
+        events[1].data["reacting_to"] = 1
+        events[3].data["reacting_to"] = 3  # reacted to seq 3
+        events[4].data["reacting_to"] = 1  # poisoned: lower than seq 3
+        contents = [str(m.get("content")).split("\n")[-1] for m in self._build(events)]
+        assert contents[:5] == ["one", "a1", "two", "a2", "a3"]
 
 
 class TestFieldStripping:

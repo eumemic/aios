@@ -1431,9 +1431,16 @@ def build_messages(
     handles message assembly, pending-result synthesis, blind-spot
     injection, and leading-orphan pruning — but not windowing itself.
 
-    **Monotonicity invariant:** the context is a monotonic function of
-    the log — appending events only appends to the context, never
-    rewrites earlier messages.
+    **Monotonicity invariant:** across the sequence of payloads the step
+    loop actually SENDS, each build is a message-for-message prefix of
+    the next — appending events only appends to the context, never
+    rewrites earlier messages. The precise form: for a log ``L`` and the
+    assistant ``A`` produced from ``build(L)`` (so ``A.reacting_to ==
+    build(L).reacting_to``), ``build(L)`` is a prefix of
+    ``build(L + [A] + later events)``. It is NOT a property of arbitrary
+    log prefixes: an event that only later turns out to be in an
+    assistant's blind spot moves from its seq position to after that
+    assistant — which is exactly the position the sent payload had.
 
     Each assistant has a **visibility horizon** — the ``reacting_to``
     of the next assistant after it. A tool result with
@@ -1653,8 +1660,10 @@ def build_messages(
             # ``tool_calls`` raised, which would leave an orphan tool_calls
             # turn — an invalid chat-completions sequence that re-bricks).
             # Residual limitation: a quarantined ASSISTANT event's downstream
-            # tool-result events (later in the window) may still render as
-            # orphan ``tool`` messages — accepted, because assistant events are
+            # tool-result events (later in the window) are not rendered — ids
+            # added to ``emitted_tcids`` before the raise make the tool branch
+            # skip them, and any other lands as an orphan ``tool`` message that
+            # ``_prune_orphans`` drops — accepted, because assistant events are
             # harness-produced, not external connector poison (the realistic
             # source), and the alternative is the permanent brick this guard exists
             # to prevent.
@@ -1671,17 +1680,9 @@ def build_messages(
             # them after the placeholder so they are never lost from the replay
             # (their seqs are already counted in ``max_stimulus_seq``).
             messages.extend(_drain_after(e.seq))
-
-    if after_assistant:
-        # Every anchor is an assistant event of this same slate, so the walk
-        # always reaches it; this is a non-lossy backstop, never expected to run.
-        log.warning(
-            "context.anchored_messages_unflushed",
-            session_id=session_id,
-            anchors=sorted(after_assistant),
-        )
-        for asst_seq in sorted(after_assistant):
-            messages.extend(_drain_after(asst_seq))
+    # Every anchor is the seq of an assistant event in this same slate, so the
+    # walk always reaches it (success or quarantine arm) and ``after_assistant``
+    # is empty here by construction.
 
     # Prune dangling messages at the start of the window.  DB-level
     # windowing can cut in the middle of an assistant+tool_result group,
