@@ -116,7 +116,11 @@ def normalize_session_root(
         # oldest answered request carried a child-self-emitted, since-recovered
         # error (the ``owed_request_response`` SQL resolves the oldest
         # *answered* request, not the currently-owed one).
-        if is_archived and owed_request_response is not None and owed_request_response.get("is_error"):
+        if (
+            is_archived
+            and owed_request_response is not None
+            and owed_request_response.get("is_error")
+        ):
             kind = _kind_of(owed_request_response.get("error"))
             if kind in {"no_return", "child_gone"}:
                 return "errored", kind
