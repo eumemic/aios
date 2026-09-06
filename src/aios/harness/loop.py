@@ -425,7 +425,11 @@ async def refresh_session_mount_state(
 # and the assistant append; streaming deltas are transient pg_notify only), so
 # cancelling the model child task discards nothing durable; the event append
 # that made the session eligible already deferred a wake, and the preempted
-# step's normal early return releases the procrastinate lock for it. Once the
+# step's normal early return releases the procrastinate lock for it. The
+# compose phase's reminder-row writes (``compose_step_context`` with
+# ``persist_reminders=True``) land BEFORE ``model_request_start`` and are
+# non-stimulus, digest-gated rows: a preempted step leaves them in the log
+# for the next build to replay, never to duplicate. Once the
 # model call returns, the watcher is torn down before the append/dispatch tail
 # — un-preemptibility after the model phase is structural, not checked.
 
@@ -946,7 +950,7 @@ async def _run_session_step_body(
     #
     # This pair of reads runs in the window between ``step_start`` and
     # ``context_build_start`` and used to be UNSPANNED — the ``context_build_*``
-    # pair only brackets ``compose_step_context`` (which measures ~0.00s), so a
+    # pair only brackets ``compose_step_context`` (sub-millisecond unless it writes reminder rows), so a
     # multi-second pre-inference read cost was blind-spotted by every profiling
     # angle that keyed on ``context_build_*``. Bracketing each read individually
     # turns "where did the pre-inference seconds go?" into a query instead of a
@@ -1182,6 +1186,7 @@ async def _run_session_step_body(
             omission=windowed.omission,
             capability_model=capability_model,
             persist_image_rewrites=True,
+            persist_reminders=True,
         )
     except Exception:
         await sessions_service.append_event(
@@ -1214,9 +1219,13 @@ async def _run_session_step_body(
             "event": "context_build_end",
             "context_build_start_id": context_build_start.id,
             "is_error": False,
+            # The windowed slate as read; reminder rows the compose wrote are
+            # NOT in it (``compose_step_context`` never mutates ``events``).
             "event_count_read": len(events),
             "message_count": len(messages),
             "tools_count": len(tools),
+            "reminders_written": list(step_ctx.reminders_written),
+            "reminders_skipped": step_ctx.reminders_skipped,
         },
         account_id=account_id,
     )
