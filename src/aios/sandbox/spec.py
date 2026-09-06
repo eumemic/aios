@@ -66,6 +66,7 @@ from aios.sandbox.github_clone import (
     ensure_cache_clone,
     ensure_session_working_tree,
 )
+from aios.sandbox.limits import bound_bash_timeout_seconds
 from aios.sandbox.network import (
     BROWSER_NETWORK_NAME,
     WORKER_NETWORK_ALIAS,
@@ -314,10 +315,10 @@ async def resolve_bash_timeout_ceiling(session_id: str) -> int:
             session_id=session_id,
             error=str(exc),
         )
-        return default
+        return bound_bash_timeout_seconds(default)
     if env_config is not None and env_config.bash_timeout_seconds is not None:
-        return env_config.bash_timeout_seconds
-    return default
+        return bound_bash_timeout_seconds(env_config.bash_timeout_seconds)
+    return bound_bash_timeout_seconds(default)
 
 
 async def _load_session_provisioning(

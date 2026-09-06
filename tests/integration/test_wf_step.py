@@ -31,6 +31,7 @@ from aios.db.queries import workflows as wf_queries
 from aios.db.queries.prune import prune_archived_runs
 from aios.errors import ForbiddenError, NotFoundError
 from aios.harness import runtime
+from aios.harness.reminders import max_reminders_local
 from aios.ids import REQUEST, make_id
 from aios.models.agents import HttpRouteSpec, HttpServerSpec, ToolSpec
 from aios.models.attenuation import Surface
@@ -109,6 +110,9 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
                 conn,
                 agent_deadline_seconds=3600,
                 tool_stale_seconds=60,
+                bash_default_timeout_seconds=120,
+                sandbox_provisioning_slack_seconds=180,
+                max_bash_timeout_seconds=3_155_760_000,
                 call_llm_stale_seconds=60,
             )
         )
@@ -1470,11 +1474,11 @@ async def _check_completion_injection(
     # #1413 background-child path: get_open_obligations now runs UNCONDITIONALLY
     # (the background-child fast-path short-circuit was removed), so the child's
     # open `run` obligation is fetched onto the prelude -- the data the always-on
-    # obligations tail block renders. The fast-path removal did NOT regress the
+    # obligations reminder renders. The fast-path removal did NOT regress the
     # return/error gate (it stayed bool(obligations), asserted above).
     assert child_prelude.obligations, "background child's run obligation must be computed"
     assert child_prelude.obligations[0].caller_kind == "run"
-    assert child_prelude.obligations_block_upper_bound_local > 0
+    assert child_prelude.reminders_upper_bound_local > max_reminders_local([], [])
 
     fg = await sessions_service.create_session(
         pool,
@@ -1500,7 +1504,7 @@ async def _check_completion_injection(
     # An ordinary foreground session owes nothing -> no obligations, no reserved
     # tail budget (the unconditional query returns []).
     assert fg_prelude.obligations == []
-    assert fg_prelude.obligations_block_upper_bound_local == 0
+    assert fg_prelude.reminders_upper_bound_local == max_reminders_local([], [])
 
 
 async def test_return_writes_response_and_wakes_caller_without_archiving(
@@ -4960,6 +4964,34 @@ def _execed_commands(backend: FakeBackend) -> list[str]:
 
 
 # (a) ──────────────────────────────────────────────────────────────────────────
+async def test_bash_uses_own_run_environment_timeout_ceiling(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """The real workflow dispatcher/executor resolves the run environment ceiling."""
+    pool, backend = wf_sandbox_runtime
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
+    script = (
+        "async def main(input):\n"
+        "    return await tool('bash', {'command': 'sleep 150', 'timeout_seconds': 1200})\n"
+    )
+    run_id = await _make_tool_run(
+        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-env-timeout"
+    )
+
+    await run_workflow_step(run_id)
+    await _drain_sandbox_tasks()
+
+    started = await _call_starteds(pool, run_id)
+    assert started[0].payload["resolved_timeout_seconds"] == 1200
+    exec_calls = [kwargs for verb, kwargs in backend.calls if verb == "exec"]
+    assert len(exec_calls) == 1
+    assert exec_calls[0]["timeout_seconds"] == 1200
+
+
 async def test_bash_dispatch_signal_one_call_result(
     wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
 ) -> None:
@@ -5067,9 +5099,16 @@ async def test_bash_crash_path_at_least_once(
         await block.wait()
         return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
 
-    run_id = await _make_tool_run(
-        pool, _BASH_SCRIPT, tools=[ToolSpec(type="bash")], name="wt-bash-c"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
+    script = (
+        "async def main(input):\n"
+        "    return await tool('bash', {'command': 'echo hi', 'timeout_seconds': 1200})\n"
     )
+    run_id = await _make_tool_run(pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-c")
     with mock.patch.object(backend, "exec", new=_blocked):
         await run_workflow_step(run_id)  # parks; launches the task
         await asyncio.wait_for(entered.wait(), timeout=5)  # task blocks IN exec
@@ -5086,10 +5125,17 @@ async def test_bash_crash_path_at_least_once(
     backend.next_result = CommandResult(
         exit_code=0, stdout="2nd\n", stderr="", timed_out=False, truncated=False
     )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 120}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
     await run_workflow_step(run_id)
     assert len(await _call_starteds(pool, run_id)) == 1  # exactly one — no double-open
     assert first_exec_count + _backend_exec_count(backend) == 2
     assert _backend_exec_count(backend) == 1  # the re-dispatch ran exactly once
+    redrive_exec = next(kwargs for verb, kwargs in backend.calls if verb == "exec")
+    assert redrive_exec["timeout_seconds"] == 1200  # dispatch-time pin, not lowered env
     await _drain_sandbox_tasks()
     await run_workflow_step(run_id)  # harvest the re-dispatch → complete
     run = await _get_run(pool, run_id)

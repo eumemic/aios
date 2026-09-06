@@ -10,9 +10,11 @@ from unittest import mock
 import httpx
 import pytest
 
+from tests.e2e.harness import Harness, assistant
 from tests.e2e.local_targets import allow_local_targets
 from tests.helpers.connections import authed_client, wired_app
 from tests.helpers.images import valid_png_bytes
+from tests.support import assert_message_prefix, reminder_rows
 
 
 def _uniq() -> str:
@@ -146,6 +148,33 @@ class TestContextEndpoint:
         messages = r.json()["messages"]
         assert messages, "expected non-empty messages"
         assert messages[0]["role"] == "system"
+
+    async def test_preview_is_byte_for_byte_the_next_step_payload(
+        self, http_client: httpx.AsyncClient, harness: Harness
+    ) -> None:
+        """The read-only preview renders the reminder rows the next step will
+        WRITE as unpersisted stand-ins, so for a concise agent (whose first
+        build writes the nag) the preview equals what the worker then sends;
+        a later preview extends it."""
+        harness.script_model([assistant("hi"), assistant("again")])
+        session = await harness.start("hello", output_style="concise")
+
+        r = await http_client.get(f"/v1/sessions/{session.id}/context")
+        assert r.status_code == 200, r.text
+        preview1 = r.json()["messages"]
+        # The preview renders the row it would write, but writes nothing.
+        assert reminder_rows(await harness.events(session.id)) == []
+        await harness.run_step(session.id)
+        assert preview1 == harness.model_calls[0]["messages"]
+        assert len(reminder_rows(await harness.events(session.id))) == 1
+
+        await harness.inject_message(session.id, "more")
+        r = await http_client.get(f"/v1/sessions/{session.id}/context")
+        assert r.status_code == 200, r.text
+        preview2 = r.json()["messages"]
+        await harness.run_step(session.id)
+        assert preview2 == harness.model_calls[1]["messages"]
+        assert_message_prefix(preview1, preview2)
 
     async def test_404_when_session_missing(self, http_client: httpx.AsyncClient) -> None:
         r = await http_client.get(f"/v1/sessions/sess_{_uniq()}doesnotexist/context")

@@ -93,6 +93,8 @@ def _drive(
         tools=[_openai_tool(n) for n in offered],
         skill_versions=[],
         reacting_to=0,
+        reminders_written=(),
+        reminders_skipped=0,
     )
     assistant_msg = {
         "role": "assistant",
