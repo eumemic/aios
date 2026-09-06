@@ -227,3 +227,39 @@ def test_session_root_end_turn_not_archived_with_doom_owed_is_ok() -> None:
         owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
         is_archived=False,
     ) == ("ok", None)
+
+
+def test_session_root_archived_interrupt_beats_stale_doom_kind() -> None:
+    # A session that was interrupted (explicit terminal verdict) and then
+    # archived must report cancelled, not errored — even if the oldest answered
+    # request carried a stale doom kind (no_return). interrupt is a deliberate
+    # write by the operator; the doom-kind override applies only to end_turn.
+    assert norm.normalize_session_root(
+        {"type": "interrupt"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
+        is_archived=True,
+    ) == ("cancelled", None)
+
+
+def test_session_root_archived_interrupt_with_synthesized_child_gone_is_cancelled() -> None:
+    # child_gone can be synthesized by _resolve_owed_response from (archived,
+    # open_ids) alone — no actual failure need have occurred. An interrupted
+    # session with an open awaited edge must still report cancelled.
+    assert norm.normalize_session_root(
+        {"type": "interrupt"},
+        owes_open_request=True,
+        owed_request_response={"is_error": True, "error": {"kind": "child_gone"}},
+        is_archived=True,
+    ) == ("cancelled", None)
+
+
+def test_session_root_archived_explicit_error_kind_beats_stale_doom_kind() -> None:
+    # A session that latched its own error stop_reason (e.g. content_filter)
+    # must report that discriminant, not a stale doom kind from an older request.
+    assert norm.normalize_session_root(
+        {"type": "error", "finish_reason": "content_filter"},
+        owes_open_request=False,
+        owed_request_response={"is_error": True, "error": {"kind": "no_return"}},
+        is_archived=True,
+    ) == ("errored", "content_filter")

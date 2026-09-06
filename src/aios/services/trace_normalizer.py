@@ -92,25 +92,14 @@ def normalize_session_root(
       ``error.kind`` / ``finish_reason`` when present).
     * ``interrupt`` → ``cancelled``.
     * ``rescheduling`` → ``running`` (a model-error backoff is still live).
-    * ``end_turn`` → ``ok`` if it owes no open request, else ``running``.
-    * an archived session whose oldest answered request was failed with a
-      system doom kind (``no_return`` / ``child_gone``) → ``errored`` + that
-      kind, dominating any stop_reason (the harness writes ``end_turn``
-      unconditionally before archival).
+    * ``end_turn`` → ``ok`` if it owes no open request, else ``running``;
+      except for an archived session whose oldest answered request was failed
+      with a system doom kind (``no_return`` / ``child_gone``) → ``errored``
+      + that kind (the harness writes ``end_turn`` unconditionally before
+      archival, so it carries no terminal signal).
     * an archived session with no (or unknown) stop_reason resolves its owed
       request (``child_gone`` → ``errored + child_gone``) else ``ok``.
     """
-    # An archived session can never run again. If its oldest answered request
-    # was failed by the system with a doom kind (no_return / child_gone), that
-    # dominates any stop_reason (including end_turn, which the harness writes
-    # unconditionally before archival). Gating on the doom kinds avoids
-    # regressing archived sessions whose oldest answered request carried a
-    # child-self-emitted, since-recovered error (the ``owed_request_response``
-    # SQL resolves the oldest *answered* request, not the currently-owed one).
-    if is_archived and owed_request_response is not None and owed_request_response.get("is_error"):
-        kind = _kind_of(owed_request_response.get("error"))
-        if kind in {"no_return", "child_gone"}:
-            return "errored", kind
     reason_type = (stop_reason or {}).get("type")
     if reason_type == "error":
         return "errored", _session_error_kind(stop_reason)
@@ -119,6 +108,18 @@ def normalize_session_root(
     if reason_type == "rescheduling":
         return "running", None
     if reason_type == "end_turn":
+        # An archived session can never run again. If its oldest answered
+        # request was failed by the system with a doom kind (no_return /
+        # child_gone), that overrides the unconditional end_turn (which the
+        # harness writes before archival and thus carries no terminal signal).
+        # Gating on the doom kinds avoids regressing archived sessions whose
+        # oldest answered request carried a child-self-emitted, since-recovered
+        # error (the ``owed_request_response`` SQL resolves the oldest
+        # *answered* request, not the currently-owed one).
+        if is_archived and owed_request_response is not None and owed_request_response.get("is_error"):
+            kind = _kind_of(owed_request_response.get("error"))
+            if kind in {"no_return", "child_gone"}:
+                return "errored", kind
         return ("running", None) if owes_open_request else ("ok", None)
     # No (or unknown) stop_reason. An archived session can never run again, so
     # resolve any owed request; a live one is simply still running.
