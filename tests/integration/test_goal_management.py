@@ -39,7 +39,7 @@ from aios.config import get_settings
 from aios.db import queries
 from aios.db.pool import create_pool
 from aios.harness import runtime
-from aios.tools.invoke import invoke_builtin
+from aios.tools.invoke import ToolBail, invoke_builtin
 from aios.tools.registry import ToolResult
 from tests.integration.conftest import seed_agent_env_session
 
@@ -139,6 +139,30 @@ async def test_create_goal_opens_holding_self_obligation(
     async with pool.acquire() as conn:
         persisted = await queries.get_request_output_schema(conn, session_id, request_id=goal_id)
     assert persisted == _SCHEMA
+
+
+async def test_create_goal_rejects_malformed_output_schema_at_open(
+    pool_session: tuple[asyncpg.Pool[Any], str, str],
+) -> None:
+    """A malformed ``output_schema`` is rejected at OPEN time (``ToolBail``) before
+    any edge is written — no ``request_opened`` event is persisted, so no un-closable
+    obligation is created. End-to-end over the REAL service/query path (not just the
+    stubbed unit path): the schema-validity gate runs before ``sessions_service.invoke``
+    ever writes the edge, so the malformed schema can never reach the CLOSE-time
+    formatter (``normalize_and_format_schema_violation``) that would crash or
+    mis-validate on it.
+    """
+    pool, _account, session_id = pool_session
+    assert await _open_ids(pool, session_id) == []
+
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(
+            session_id,
+            "create_goal",
+            {"goal": "ship it", "output_schema": {"type": "ans"}},
+        )
+    # No obligation opened: the open set stays empty (no request_opened persisted).
+    assert await _open_ids(pool, session_id) == []
 
 
 async def test_list_obligations_enumerates_open_self_goals(
