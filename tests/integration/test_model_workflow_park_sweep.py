@@ -48,11 +48,13 @@ from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.harness.loop import run_session_step
 from aios.harness.model_workflow import write_harvest_event
 from aios.harness.sweep import find_sessions_needing_inference
+from aios.models.agents import OutputStyle
 from aios.services import agents as agents_service
 from aios.services import environments as environments_service
 from aios.services import sessions as sessions_service
 from aios.workflows import run_tools
 from aios.workflows.step import run_workflow_step
+from tests.support import reminder_rows
 
 pytestmark = pytest.mark.integration
 
@@ -146,7 +148,9 @@ async def mwf_runtime(
         await pool.close()
 
 
-async def _make_bound_session(pool: asyncpg.Pool[Any]) -> tuple[str, str]:
+async def _make_bound_session(
+    pool: asyncpg.Pool[Any], *, output_style: OutputStyle = "default"
+) -> tuple[str, str]:
     """Create a workflow, an agent bound to ``workflow:<id>``, and a session.
 
     Returns ``(session_id, workflow_id)``.
@@ -166,6 +170,7 @@ async def _make_bound_session(pool: asyncpg.Pool[Any]) -> tuple[str, str]:
         metadata={},
         window_min=50_000,
         window_max=150_000,
+        output_style=output_style,
     )
     env = await environments_service.get_environment(pool, _ENV, account_id=_ACCOUNT)
     session = await sessions_service.create_session(
@@ -344,6 +349,44 @@ async def test_sweep_ticks_do_not_relaunch_inner_run(mwf_runtime: asyncpg.Pool[A
         "run-level call_llm cost must be charged exactly once across the whole turn"
     )
     assert await _inner_run_ids(pool, session_id) == [inner_run_id]
+
+
+async def test_park_ticks_write_the_reminder_once(mwf_runtime: asyncpg.Pool[Any]) -> None:
+    """The composer's reminder writer runs on every tick (compose precedes the
+    park-pending check), so a parked session is the sharpest place to show the
+    change-gate: a concise agent parks, ≥3 sweep ticks elapse, and exactly ONE
+    reminder row exists — written on tick 1, before the park span — with every
+    later tick's ``context_build_end`` reporting nothing written."""
+    pool = mwf_runtime
+    session_id, _ = await _make_bound_session(pool, output_style="concise")
+
+    await run_session_step(session_id)
+    assert await _park_events(pool, session_id) == 1
+    for _ in range(3):
+        await run_session_step(session_id, cause="sweep")
+
+    messages = await sessions_service.read_message_events(pool, session_id, account_id=_ACCOUNT)
+    reminder_seqs = [e.seq for e in reminder_rows(messages)]
+    async with pool.acquire() as conn:
+        park_seq = await conn.fetchval(
+            "SELECT min(seq) FROM events WHERE session_id = $1 AND kind = 'span' "
+            "AND data->>'event' = 'model_workflow_park'",
+            session_id,
+        )
+        ends = [
+            r["data"]
+            for r in await conn.fetch(
+                "SELECT data FROM events WHERE session_id = $1 AND kind = 'span' "
+                "AND data->>'event' = 'context_build_end' ORDER BY seq",
+                session_id,
+            )
+        ]
+    assert len(reminder_seqs) == 1, reminder_seqs
+    assert reminder_seqs[0] < park_seq
+    assert [e["reminders_written"] for e in ends] == [["concise"], [], [], []]
+    # The ticks were real: the parked session stayed a sweep candidate.
+    needing = await find_sessions_needing_inference(pool, runtime.require_inflight_tool_registry())
+    assert session_id in needing
 
 
 async def test_deliberation_spanning_multiple_wakes_does_not_trip_cap(
