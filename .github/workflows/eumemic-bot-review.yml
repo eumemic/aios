@@ -1,6 +1,9 @@
-# eumemic-bot PR reviews — kick the live aios reviewer as the GitHub App.
-# Must never fail the PR check: aios account/agent misses are ops, not a
-# code defect. The job is named "aios-review" so it does not collide with
+# eumemic-bot PR reviews — run the live aios reviewer and publish its artifact
+# as the GitHub App. The launcher (scripts/eumemic_bot_review.py) waits for the
+# session, POSTs the `### Code review` comment itself, and verifies it landed
+# before archiving, so the job outlives the review rather than firing and
+# forgetting. Must never FAIL the PR check: aios account/agent misses are ops,
+# not a code defect. The job is named "aios-review" so it does not collide with
 # other "review" required checks.
 name: eumemic-bot review
 
@@ -22,6 +25,8 @@ jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    # The review turn owns REVIEW_TIMEOUT_SECONDS of this; the rest is
+    # checkout + token mint + the GitHub POST.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -33,19 +38,33 @@ jobs:
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
-          # The job waits for the session, then POSTs and verifies ### Code review.
-          # Keep the token alive until that publisher step has completed.
-          skip-token-revoke: true
+          # No skip-token-revoke: the launcher POSTs and verifies ### Code review
+          # inside this job, so nothing needs the installation token once the job
+          # ends. The action's post-step revoke runs after every step, so it can
+          # no longer 401 the publisher the way it did when the session posted.
 
-      - name: Start aios review session
+      - name: Review and post as eumemic-bot
+        id: review
         if: steps.app.outcome == 'success'
         continue-on-error: true
         env:
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
           AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          REVIEW_TIMEOUT_SECONDS: "1200"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CLONE_URL: ${{ github.event.pull_request.head.repo.clone_url }}
         run: python3 scripts/eumemic_bot_review.py
+
+      # continue-on-error above keeps an ops miss (live agent down, API
+      # unreachable) from blocking merges. But a silently green run is exactly
+      # how the missing `### Code review` comments went unnoticed, so a run that
+      # published nothing says so where a reader sees it without opening logs.
+      - name: Note an unpublished review in the run summary
+        if: always() && (steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
+        run: |
+          echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
+          echo "No \`### Code review\` comment was published for this run. See the step log." \
+            >> "$GITHUB_STEP_SUMMARY"

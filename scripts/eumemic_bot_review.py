@@ -4,6 +4,12 @@
 Used by .github/workflows/eumemic-bot-review.yml. The workflow hands in a
 short-lived eumemic-bot installation token as GH_TOKEN.
 
+The launcher owns publication: it waits for the session to stop working, reads
+the `### Code review` artifact off the event log, POSTs it as eumemic-bot,
+verifies GitHub stored it, and only then archives the session. The session
+itself never posts — a review that never reached GitHub now fails loudly here
+instead of vanishing with a self-archiving session.
+
 Resolution order for the reviewer agent:
   1. AGENT_ID if set
   2. exact name match for AGENT_NAME (default: dev-review)
@@ -18,6 +24,8 @@ Env:
   AIOS_URL, AIOS_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, CLONE_URL
   AGENT_NAME (default: dev-review), AGENT_ID (optional)
   ENVIRONMENT_NAME (default: dev-pipeline-real), ENVIRONMENT_ID (optional)
+  REVIEW_TIMEOUT_SECONDS (default: 1200) — whole-review budget, shared by the
+    first turn and the corrective turn. Keep it under the job's timeout-minutes.
 """
 
 from __future__ import annotations
@@ -29,17 +37,26 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any, NoReturn
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "dev-review")
 ENVIRONMENT_NAME = os.environ.get("ENVIRONMENT_NAME", "dev-pipeline-real")
 
+ARTIFACT_HEADING = "### Code review"
 
-def _die(msg: str, code: int = 1) -> None:
+# Long-poll window for GET /v1/sessions/{id}/wait (server caps it at 60). The
+# socket deadline must OUTLIVE it, or every poll dies on a client read timeout
+# before the server ever answers.
+_WAIT_SECONDS = 30
+_WAIT_HTTP_TIMEOUT = _WAIT_SECONDS * 2
+
+
+def _die(msg: str, code: int = 1) -> NoReturn:
     print(f"FATAL: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
 
-def _skip(msg: str) -> None:
+def _skip(msg: str) -> NoReturn:
     print(f"SKIP: {msg}", file=sys.stderr)
     raise SystemExit(0)
 
@@ -51,7 +68,9 @@ def _env(name: str) -> str:
     return val
 
 
-def _request(method: str, url: str, api_key: str, body: dict | None = None) -> dict:
+def _request(
+    method: str, url: str, api_key: str, body: dict | None = None, timeout: float = 30
+) -> dict:
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {api_key}")
@@ -59,13 +78,14 @@ def _request(method: str, url: str, api_key: str, body: dict | None = None) -> d
     if body is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:800]
         _die(f"{method} {url} returned {exc.code}: {detail}")
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError) as exc:
+        # A read timeout surfaces as a bare TimeoutError, not a URLError.
         _die(f"{method} {url} failed: {exc}")
 
 
@@ -84,44 +104,87 @@ def _github_request(method: str, url: str, token: str, body: dict | None = None)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:800]
         _die(f"{method} {url} returned {exc.code}: {detail}")
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError) as exc:
         _die(f"{method} {url} failed: {exc}")
 
 
-def _await_turn(base: str, api_key: str, session_id: str, watermark: int | None = None) -> None:
-    deadline = time.monotonic() + int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1200"))
-    query = {"timeout": "60"}
-    if watermark is not None:
-        query["watermark"] = str(watermark)
-    url = f"{base}/v1/sessions/{session_id}/await?{urllib.parse.urlencode(query)}"
+def _wait_until_working_stops(base: str, api_key: str, session_id: str, deadline: float) -> str:
+    """Block until the session is no longer ``active``; return its status.
+
+    ``GET /wait`` is the right primitive: it long-polls, returns the moment new
+    events land (so the status read happens milliseconds after the final
+    assistant message), and reports the derived session status. ``GET /await``
+    is NOT — it resolves on ``last_reacted_seq >= watermark``, and the model's
+    very first tool-call turn already satisfies that, long before the review
+    exists.
+    """
+    after = 0
     while time.monotonic() < deadline:
-        if _request("GET", url, api_key).get("done") is True:
-            return
-    _die(f"session {session_id} did not finish its review turn before the timeout")
+        query = urllib.parse.urlencode({"after": after, "timeout": _WAIT_SECONDS})
+        payload = _request(
+            "GET",
+            f"{base}/v1/sessions/{session_id}/wait?{query}",
+            api_key,
+            timeout=_WAIT_HTTP_TIMEOUT,
+        )
+        after = payload.get("next_after", after)
+        status = payload.get("session_status")
+        if status != "active":
+            return str(status)
+    _die(f"session {session_id} was still working after the review timeout")
+
+
+def _message_text(content: Any) -> str:
+    """Assistant content is a plain string, or content-part blocks on providers
+    that emit them (mirrors ``aios.cli.tail_format._as_text``)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return ""
+
+
+def _artifact_in(text: str) -> str | None:
+    """The artifact is the heading line and everything after it, or None."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(ARTIFACT_HEADING):
+            # The comment body must OPEN with the heading, so drop any lead-in
+            # lines and the heading line's own indent; the rest is verbatim.
+            return "\n".join([line.lstrip(), *lines[i + 1 :]]).strip()
+    return None
 
 
 def _review_from_events(base: str, api_key: str, session_id: str) -> str | None:
     query = urllib.parse.urlencode({"dir": "backward", "kind": "message", "limit": "100"})
     payload = _request("GET", f"{base}/v1/sessions/{session_id}/events?{query}", api_key)
-    for event in payload.get("items", []):
+    # ``dir=backward`` pages newest-first, so the first hit is the latest artifact.
+    for event in payload.get("data", []):
         data = event.get("data", {})
-        content = data.get("content")
-        if data.get("role") == "assistant" and isinstance(content, str):
-            text = content.strip()
-            if text.startswith("### Code review"):
-                return text
+        if data.get("role") != "assistant":
+            continue
+        artifact = _artifact_in(_message_text(data.get("content")))
+        if artifact is not None:
+            return artifact
     return None
 
 
 def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
-    _await_turn(base, api_key, session_id)
+    deadline = time.monotonic() + int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1200"))
+    status = _wait_until_working_stops(base, api_key, session_id, deadline)
     review = _review_from_events(base, api_key, session_id)
     if review is not None:
         return review
+    if status == "archived":
+        _die(f"session {session_id} was archived without a `{ARTIFACT_HEADING}` artifact")
 
     # One corrective turn handles a model that followed the dev-review workflow-child
     # contract and attempted the unavailable `return` tool in this foreground session.
-    event = _request(
+    _request(
         "POST",
         f"{base}/v1/sessions/{session_id}/messages",
         api_key,
@@ -129,21 +192,28 @@ def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
             "content": (
                 "The GitHub publisher needs your review as a normal assistant message now. "
                 "Do not call `return` or any posting tool. Reply with the complete artifact, "
-                "starting exactly with `### Code review`."
+                f"starting exactly with `{ARTIFACT_HEADING}`."
             )
         },
     )
-    watermark = event.get("seq")
-    _await_turn(
-        base,
-        api_key,
-        session_id,
-        watermark=watermark if isinstance(watermark, int) else None,
-    )
+    status = _wait_until_working_stops(base, api_key, session_id, deadline)
     review = _review_from_events(base, api_key, session_id)
     if review is None:
-        _die(f"session {session_id} completed without a `### Code review` artifact")
+        _die(f"session {session_id} went {status} without a `{ARTIFACT_HEADING}` artifact")
     return review
+
+
+def _archive(base: str, api_key: str, session_id: str) -> None:
+    """Reclaim the session on every exit path.
+
+    ``archive_when_idle`` can no longer do it — the session must outlive its own
+    idleness so the launcher can read the artifact — so the launcher owns the
+    reclaim, including when publishing failed. Never masks the original failure.
+    """
+    try:
+        _request("POST", f"{base}/v1/sessions/{session_id}/archive", api_key)
+    except SystemExit:
+        print(f"WARN: session {session_id} was left unarchived", file=sys.stderr)
 
 
 def _list_agents(base: str, api_key: str, name: str | None = None) -> list[dict]:
@@ -214,12 +284,15 @@ def main() -> None:
         f"If http_request is unauthorized, use GH_TOKEN from the environment with gh or curl. "
         f"This is a foreground session, so the `return` tool is unavailable. Do not post to "
         f"GitHub yourself. Reply as a normal assistant message with the complete review artifact; "
-        f"its first line must be exactly `### Code review`. The launcher will post and verify it."
+        f"its first line must be exactly `{ARTIFACT_HEADING}`. The launcher will post and verify "
+        f"it."
     )
     body = {
         "agent_id": agent_id,
         "environment_id": environment_id,
         "title": f"eumemic-bot review {repo}#{pr_number}",
+        # The launcher archives — see _archive. Self-reclaim would race the read
+        # of the artifact the launcher is about to publish.
         "archive_when_idle": False,
         "initial_message": prompt,
         "env": {"GH_TOKEN": token, "GH_REPO": repo, "PR_NUMBER": pr_number},
@@ -248,21 +321,25 @@ def main() -> None:
         f"started session {sid} on agent {agent_id} env {environment_id} "
         f"for {repo}#{pr_number}@{head_sha}"
     )
-    review = _ask_for_review_artifact(base, api_key, str(sid))
-    marker = f"<!-- eumemic-bot-review:{head_sha} -->"
-    if marker not in review:
-        review = f"{review}\n\n{marker}"
-    comment = _github_request(
-        "POST",
-        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-        token,
-        {"body": review},
-    )
-    comment_url = comment.get("html_url")
-    if not comment_url or comment.get("body") != review:
-        _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
-    print(f"posted and verified Code review: {comment_url}")
-    _request("POST", f"{base}/v1/sessions/{sid}/archive", api_key)
+    try:
+        review = _ask_for_review_artifact(base, api_key, str(sid))
+        marker = f"<!-- eumemic-bot-review:{head_sha} -->"
+        if marker not in review:
+            review = f"{review}\n\n{marker}"
+        comment = _github_request(
+            "POST",
+            f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+            token,
+            {"body": review},
+        )
+        comment_url = comment.get("html_url")
+        # The marker round-trip proves GitHub stored THIS run's artifact; exact
+        # body equality would also fail on any server-side normalization.
+        if not comment_url or marker not in _message_text(comment.get("body")):
+            _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
+        print(f"posted and verified {ARTIFACT_HEADING}: {comment_url}")
+    finally:
+        _archive(base, api_key, str(sid))
 
 
 if __name__ == "__main__":
