@@ -99,7 +99,7 @@ def test_worker_boot_backstop_fires_when_harness_tasks_missing() -> None:
     ``remove_old_jobs`` task, so ``app.tasks`` is NEVER empty — a bare
     ``assert app.tasks`` truthiness check is VACUOUS: it passes in exactly the
     missing-import state it must reject. This proves the strengthened per-item
-    guard (``_REQUIRED_HARNESS_TASKS - set(app.tasks)``) catches that gap.
+    guard (``REQUIRED_HARNESS_TASKS - set(app.tasks)``) catches that gap.
 
     Run in a fresh interpreter, building a fresh ``App`` (the ``@app.task``
     decorators bind against the ``aios.jobs.app`` singleton, never this
@@ -108,8 +108,8 @@ def test_worker_boot_backstop_fires_when_harness_tasks_missing() -> None:
         """
         from procrastinate import App
 
-        from aios.harness.worker import _REQUIRED_HARNESS_TASKS
         from aios.jobs.app import _build_connector
+        from aios.jobs.task_names import REQUIRED_HARNESS_TASKS
 
         # A worker App that never had aios.harness.tasks registered against it.
         app = App(connector=_build_connector())
@@ -122,7 +122,7 @@ def test_worker_boot_backstop_fires_when_harness_tasks_missing() -> None:
 
         # The strengthened per-item guard fires: the required harness tasks are
         # absent, so the missing-set is non-empty and the worker-boot assert raises.
-        missing = _REQUIRED_HARNESS_TASKS - set(app.tasks)
+        missing = REQUIRED_HARNESS_TASKS - set(app.tasks)
         if not missing:
             raise SystemExit(
                 "backstop did NOT fire: required harness tasks present without importing them"

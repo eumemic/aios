@@ -910,7 +910,10 @@ class DockerBackend:
             "--filter",
             f"label={INSTANCE_LABEL_KEY}={instance_id}",
         ]
-        rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+        enumeration_timeout = get_settings().sandbox_gc_enumeration_timeout_seconds
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+            ls_argv, timeout_s=enumeration_timeout
+        )
         if rc != 0:
             raise SandboxBackendError(
                 f"docker images failed (exit {rc}): "
@@ -939,7 +942,9 @@ class DockerBackend:
             # the first read is PROVED incomplete and must not drive a negative
             # reconciliation. A genuinely empty host re-reads empty and still
             # returns [], so the GC does not stall.
-            rc, stdout_bytes, stderr_bytes = await run_docker_cli(ls_argv)
+            rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+                ls_argv, timeout_s=enumeration_timeout
+            )
             if rc != 0:
                 raise SandboxBackendError(
                     f"incomplete managed image enumeration: empty listing could not be "
@@ -983,7 +988,8 @@ class DockerBackend:
             batch = image_ids[offset : offset + _MANAGED_INSPECT_BATCH_SIZE]
             try:
                 rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-                    ["docker", "image", "inspect", *batch]
+                    ["docker", "image", "inspect", *batch],
+                    timeout_s=enumeration_timeout,
                 )
             except SandboxBackendError as err:
                 # Unreachable/timed-out daemon: nothing about this batch is
@@ -1079,7 +1085,7 @@ class DockerBackend:
             if iid in resolved:
                 continue
             try:
-                fields = await self._inspect_image_fields(iid)
+                fields = await self._inspect_image_fields(iid, timeout_s=enumeration_timeout)
             except SandboxBackendError as err:
                 log.warning(
                     "sandbox.image_enumeration_incomplete",
@@ -1300,7 +1306,9 @@ class DockerBackend:
         raw_rw = stdout_bytes.decode("utf-8").strip()
         return int(raw_rw) if raw_rw.isdigit() else None
 
-    async def _inspect_image_fields(self, ref: str) -> tuple[str, int, int, dict[str, str]] | None:
+    async def _inspect_image_fields(
+        self, ref: str, *, timeout_s: float | None = None
+    ) -> tuple[str, int, int, dict[str, str]] | None:
         """Return ``(image_id, size_bytes, layer_depth, labels)`` or ``None`` if absent.
 
         Verified-negative: a confirmed "No such image" returns ``None``; any
@@ -1316,7 +1324,7 @@ class DockerBackend:
         """
         fmt = "{{.Id}}\t{{.Size}}\t{{len .RootFS.Layers}}\t{{json .Config}}"
         rc, stdout_bytes, stderr_bytes = await run_docker_cli(
-            ["docker", "image", "inspect", "--format", fmt, ref]
+            ["docker", "image", "inspect", "--format", fmt, ref], timeout_s=timeout_s
         )
         if rc != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()

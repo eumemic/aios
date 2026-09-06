@@ -219,6 +219,7 @@ class GcPressureResult:
 
 
 PressureCallback = Callable[[GcPressureResult], Awaitable[None] | None]
+GcHealthCallback = Callable[[datetime | None, int], Awaitable[None] | None]
 
 
 def _archive_eligible(state: SessionSnapshotState, now: datetime, grace_seconds: int) -> bool:
@@ -2750,7 +2751,11 @@ class SandboxRegistry:
     # ── GC: one retain-rule reconciler (§5.5) ───────────────────────────────
 
     def start_gc(
-        self, pool: asyncpg.Pool[Any], *, pressure_callback: PressureCallback | None = None
+        self,
+        pool: asyncpg.Pool[Any],
+        *,
+        pressure_callback: PressureCallback | None = None,
+        health_callback: GcHealthCallback | None = None,
     ) -> asyncio.Task[None]:
         """Start the snapshot GC reconciler (hourly, immediate first tick).
 
@@ -2763,7 +2768,7 @@ class SandboxRegistry:
         if self._gc_task is not None:
             return self._gc_task
         self._gc_task = asyncio.create_task(
-            self._gc_loop(pool, pressure_callback), name="sandbox-snapshot-gc"
+            self._gc_loop(pool, pressure_callback, health_callback), name="sandbox-snapshot-gc"
         )
         return self._gc_task
 
@@ -2774,7 +2779,10 @@ class SandboxRegistry:
             self._gc_task = None
 
     async def _gc_loop(
-        self, pool: asyncpg.Pool[Any], pressure_callback: PressureCallback | None
+        self,
+        pool: asyncpg.Pool[Any],
+        pressure_callback: PressureCallback | None,
+        health_callback: GcHealthCallback | None = None,
     ) -> None:
         """Background loop: immediate first tick, then hourly.
 
@@ -2807,6 +2815,7 @@ class SandboxRegistry:
         """
         first = True
         consecutive_failures = 0
+        last_success_at: datetime | None = None
         while True:
             try:
                 if not first:
@@ -2819,12 +2828,28 @@ class SandboxRegistry:
                         failed_ticks=consecutive_failures,
                     )
                 consecutive_failures = 0
+                last_success_at = datetime.now(UTC)
+                if health_callback is not None:
+                    health_result = health_callback(last_success_at, 0)
+                    if health_result is not None:
+                        await health_result
                 if pressure_callback is not None:
                     callback_result = pressure_callback(pressure)
                     if callback_result is not None:
                         await callback_result
-            except Exception:
+            except Exception as err:
                 consecutive_failures += 1
+                if health_callback is not None:
+                    health_result = health_callback(last_success_at, consecutive_failures)
+                    if health_result is not None:
+                        await health_result
+                if consecutive_failures == 2:
+                    log.error(
+                        "sandbox.gc_stalled",
+                        consecutive_failures=consecutive_failures,
+                        last_success_at=last_success_at,
+                        exception_class=type(err).__name__,
+                    )
                 carried = self._provisioning_pressure
                 # Escalate once the GC has been down long enough that the
                 # carried-forward figure is materially stale: one aborted tick

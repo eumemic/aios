@@ -21,7 +21,7 @@ in-container experience.
 from __future__ import annotations
 
 import secrets
-import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -647,30 +647,41 @@ class TestApi:
 
 
 def _git_available() -> bool:
-    return shutil.which("git") is not None
-
-
-def _network_available() -> bool:
-    """Cheap connectivity check — just resolve github.com."""
-    import socket
-
     try:
-        socket.gethostbyname("github.com")
-        return True
-    except OSError:
+        return (
+            subprocess.run(
+                ["git", "--version"], capture_output=True, check=False, timeout=2
+            ).returncode
+            == 0
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-needs_real_clone = pytest.mark.skipif(
-    not (_git_available() and _network_available()),
-    reason="needs git on PATH and reachable github.com",
-)
+needs_real_clone = pytest.mark.skipif(not _git_available(), reason="needs git on PATH")
+
+
+@pytest.fixture(scope="session")
+def clone_source(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """A local upstream exercises real git without making the suite network-bound."""
+    root = tmp_path_factory.mktemp("github-clone-source")
+    work = root / "work"
+    bare = root / "upstream.git"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=work, check=True)
+    subprocess.run(["git", "config", "user.name", "AIOS tests"], cwd=work, check=True)
+    (work / "README").write_text("Hello World!\n")
+    subprocess.run(["git", "add", "README"], cwd=work, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=work, check=True)
+    subprocess.run(["git", "clone", "-q", "--bare", str(work), str(bare)], check=True)
+    return str(bare)
 
 
 @needs_real_clone
 class TestRealClone:
     async def test_cache_clone_then_session_clone_origin_scrubbed(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_source: str
     ) -> None:
         """End-to-end clone of a tiny public repo. After
         ``ensure_session_working_tree``, ``.git/config`` must hold the
@@ -692,7 +703,7 @@ class TestRealClone:
 
         monkeypatch.setattr(github_clone, "_build_auth_url", lambda url, _tok: url)
 
-        cache_dir = await github_clone.ensure_cache_clone(_OCTOCAT_REPO, "ignored")
+        cache_dir = await github_clone.ensure_cache_clone(clone_source, "ignored")
         assert cache_dir.exists()
         assert (cache_dir / "HEAD").exists()
         assert (cache_dir / "objects").is_dir()
@@ -733,7 +744,7 @@ class TestRealClone:
             )
 
     async def test_per_session_clone_recreated_on_call(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_source: str
     ) -> None:
         """Calling ``ensure_session_working_tree`` twice rms-and-re-clones
         — that's how token rotation propagates the new auth into
@@ -747,7 +758,7 @@ class TestRealClone:
 
         monkeypatch.setattr(github_clone, "_build_auth_url", lambda url, _tok: url)
 
-        cache_dir = await github_clone.ensure_cache_clone(_OCTOCAT_REPO, "ignored")
+        cache_dir = await github_clone.ensure_cache_clone(clone_source, "ignored")
         proxy_url = "http://aios.test:9999/git/SECRET/octocat/Hello-World"
 
         work_dir = await github_clone.ensure_session_working_tree(

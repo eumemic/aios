@@ -51,7 +51,7 @@ from aios.harness.exit_diagnostics import install_exit_diagnostics
 from aios.harness.host_dir_reaper import sweep_host_dirs
 from aios.harness.inbound_grants_reaper import sweep_inbound_grants
 from aios.harness.inflight_tool_registry import InflightToolRegistry
-from aios.harness.production_watchdogs import run_production_watchdogs
+from aios.harness.production_watchdogs import ProductionWatchdogState, run_production_watchdogs
 from aios.harness.reclaimable_prune import sweep_reclaimable_ephemera
 from aios.harness.scheduler import _LISTEN_RECONNECT_BACKOFF_SECONDS, event_driven_scheduler
 from aios.harness.sweep import (
@@ -62,6 +62,7 @@ from aios.harness.trigger_runner import sweep_trigger_fires
 from aios.harness.workspace_reaper import sweep_archived_workspaces
 from aios.jobs.app import WORKER_POLLED_QUEUES as WORKER_POLLED_QUEUES
 from aios.jobs.app import app as procrastinate_app
+from aios.jobs.task_names import REQUIRED_HARNESS_TASKS
 from aios.logging import configure_logging, get_logger
 from aios.mcp.pool import McpSessionPool
 from aios.retirements.boot_gate import (
@@ -118,21 +119,6 @@ _HEARTBEAT_INTERVAL_SECONDS = 15
 # How long the worker startup loops between boot-admission proof attempts while
 # the DB is behind / unreachable. Matches the api gate's cadence.
 _BOOT_GATE_RETRY_SECONDS = 2.0
-
-# The harness ``@app.task`` handlers that MUST be registered before this worker
-# consumes jobs (#1476). Registration is a side effect of ``import
-# aios.harness.tasks`` at the top of this module; the worker-boot backstop below
-# names each one so a dropped import fails loud. A bare truthiness check on
-# ``app.tasks`` is VACUOUS: procrastinate's ``App.__init__`` unconditionally
-# registers its own builtin ``remove_old_jobs`` task, so ``app.tasks`` is never
-# empty even when the harness import is missing — the exact degraded state this
-# guard exists to catch. Keep in sync with the ``@app.task(name=...)`` decls in
-# ``aios.harness.tasks``.
-_REQUIRED_HARNESS_TASKS = {
-    "harness.wake_session",
-    "harness.wake_workflow",
-    "harness.run_trigger",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,7 +514,7 @@ async def worker_main() -> None:
         # itself, so it can't catch a worker entrypoint missing the import —
         # this boot assert is the only check on the production path, converting
         # that silent failure into a loud one at startup.
-        missing = _REQUIRED_HARNESS_TASKS - set(procrastinate_app.tasks)
+        missing = REQUIRED_HARNESS_TASKS - set(procrastinate_app.tasks)
         assert not missing, (
             f"harness tasks not registered: {missing} — the worker must "
             "`import aios.harness.tasks` before consuming jobs"
@@ -567,6 +553,8 @@ async def worker_main() -> None:
         if recovery.woken_runs:
             log.info("worker.startup_sweep.workflows", woken_runs=recovery.woken_runs)
 
+        watchdog_state = ProductionWatchdogState()
+
         # Start the snapshot GC reconciler (durable session sandboxes). Its
         # immediate first tick replaces the old boot-time orphan reap: rather
         # than removing every managed container at boot (which lost their
@@ -579,6 +567,7 @@ async def worker_main() -> None:
             pressure_callback=lambda pressure: _consume_snapshot_pressure(
                 sandbox_registry, pressure
             ),
+            health_callback=watchdog_state.record_gc,
         )
         _supervise(sandbox_gc_task, latch=supervised_latch, fatal=supervised_failure)
 
@@ -729,6 +718,7 @@ async def worker_main() -> None:
                 operation_timeout_seconds=settings.worker_watchdog_operation_timeout_seconds,
                 activity_limit=settings.worker_watchdog_activity_rows,
                 max_specimens=settings.worker_watchdog_max_specimens,
+                state=watchdog_state,
             ),
             name="production_watchdogs",
         )
