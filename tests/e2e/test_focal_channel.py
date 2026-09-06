@@ -14,7 +14,7 @@ Coverage:
 * Per_chat-spawned sessions reject ``switch_channel`` calls regardless
   of target (focal-locked invariant).
 * The cache-stable focal paradigm prose appears in the system prompt
-  whenever the session has any bound channel; the per-step tail block
+  whenever the session has any bound channel; the channels listing row
   appears as a user-role message and renders unread counts off the
   event log.
 * Bare assistant text is auto-prefixed with the monologue marker once
@@ -196,7 +196,7 @@ class TestFocalChannelE2E:
     async def test_paradigm_block_renders_when_session_has_channels(self, harness: Harness) -> None:
         """The cache-stable focal-channel paradigm block appears in the
         system prompt once the session has any bound channel; the
-        ephemeral tail block appears as a user-role message.
+        channels listing appears as a user-role message.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
         harness.script_model([assistant("ok")])
@@ -219,7 +219,7 @@ class TestFocalChannelE2E:
             (m for m in msgs if m.get("role") == "user" and _TAIL_HEADER in msg_text(m)),
             None,
         )
-        assert tail is not None, f"tail block not found: {msgs!r}"
+        assert tail is not None, f"channels listing not found: {msgs!r}"
         assert "channel_id=signal/+1/chat-a" in msg_text(tail)
 
     async def test_bare_assistant_text_gets_monologue_prefix(self, harness: Harness) -> None:
