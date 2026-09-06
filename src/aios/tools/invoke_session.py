@@ -63,7 +63,7 @@ from aios.models.workflows import InlineScriptBody
 from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
-from aios.tools.invoke import ToolBail, current_tool_call_id
+from aios.tools.invoke import ToolBail, current_tool_call_id, validate_output_schema_or_bail
 from aios.tools.registry import ToolResult, registry
 from aios.tools.schema_errors import (
     format_schema_violation,
@@ -347,6 +347,9 @@ async def call_session_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CallSessionArgs, arguments)
+    # OPEN-time schema-validity gate: reject a malformed output_schema before it is
+    # persisted on the request_opened edge — see validate_output_schema_or_bail.
+    validate_output_schema_or_bail(args.output_schema)
     # Write the trusted edge into the EXISTING same-account session (404s a foreign
     # target before any edge is written). caller names THIS session.
     handle = await sessions_service.invoke(
@@ -374,6 +377,9 @@ async def call_agent_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CallAgentArgs, arguments)
+    # OPEN-time schema-validity gate: reject a malformed output_schema before it is
+    # persisted on the request_opened edge — see validate_output_schema_or_bail.
+    validate_output_schema_or_bail(args.output_schema)
     # Porcelain = create_session(from the agent) + invoke that fresh session. The
     # child inherits THIS session's environment (a caller-chosen env id would be a
     # cross-tenant attack surface — same stance as create_run).
@@ -417,6 +423,9 @@ async def call_workflow_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CallWorkflowArgs, arguments)
+    # OPEN-time schema-validity gate: reject a malformed output_schema before it is
+    # persisted on the awaited run's edge — see validate_output_schema_or_bail.
+    validate_output_schema_or_bail(args.output_schema)
     # Porcelain = launch the run as an awaited servicer + park on it (single-shot). The
     # run inherits THIS session's environment + lineage and is launched by it.
     session = await sessions_service.get_session_basic(pool, session_id, account_id=account_id)
