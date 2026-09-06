@@ -138,6 +138,19 @@ def raw_request(
             error_type="timeout",
             message=f"request to {path} timed out: {exc}",
         ) from exc
+    except httpx.RequestError as exc:
+        # ``RequestError`` is httpx's base for every transport failure.
+        # ``ReadError``/``WriteError``/``ProxyError``/``*ProtocolError``/
+        # ``UnsupportedProtocol``/``CloseError`` are SIBLINGS of
+        # ``ConnectError``/``TimeoutException`` under it, not subclasses,
+        # so the two leaves above let them leak as a raw httpx traceback.
+        # Catch the base so the contract holds: any transport failure
+        # becomes ``status_code == 0`` (issue #1682).
+        raise AiosApiError(
+            status_code=0,
+            error_type="connection_error",
+            message=f"request to {path} failed: {exc}",
+        ) from exc
     if 200 <= response.status_code < 300:
         if response.status_code == 204 or not response.content:
             return None
