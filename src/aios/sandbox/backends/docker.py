@@ -698,7 +698,7 @@ class DockerBackend:
             return SnapshotOutcome(
                 kind="skipped_stale",
                 image_id=tag_fields[0],
-                unique_bytes=await self._unique_bytes(tag_fields, base_ref),
+                unique_bytes=await self._unique_bytes(tag, tag_fields, base_ref),
                 depth=tag_fields[2],
             )
 
@@ -713,7 +713,7 @@ class DockerBackend:
             return SnapshotOutcome(
                 kind="skipped_empty",
                 image_id=tag_fields[0],
-                unique_bytes=await self._unique_bytes(tag_fields, base_ref),
+                unique_bytes=await self._unique_bytes(tag, tag_fields, base_ref),
                 depth=tag_fields[2],
             )
 
@@ -728,21 +728,33 @@ class DockerBackend:
         #    reporting 6.6 GB — under any budget an operator would set, forever,
         #    which is exactly why nothing on server-b ever flattened.
         base_chain = await self._image_chain_bytes_or_zero(base_ref)
+        base_size = await self._image_size_or_zero(base_ref)
         parent_fields = await self._inspect_image_fields(parent_image)
         parent_size = parent_fields[1] if parent_fields else 0
         parent_depth = parent_fields[2] if parent_fields else 1
         parent_chain = await self._image_chain_bytes_or_zero(parent_image) if parent_fields else 0
         rw = size_rw if size_rw is not None else 0
-        projected_unique = max(0, parent_chain - base_chain) + rw
+        # Everything the trigger reasons about is BASE-RELATIVE: a flatten can
+        # only reclaim (or duplicate) dead history in the layers THIS SESSION
+        # added on top of its shared base — never the base's own internal chain,
+        # which the flatten would copy forward verbatim (#2349, company#383 F1).
+        added_chain = max(0, parent_chain - base_chain)
+        added_view = max(0, parent_size - base_size)
+        projected_unique = added_chain + rw
         over_budget = (
             flatten_if_unique_bytes_over is not None
             and projected_unique > flatten_if_unique_bytes_over
         )
-        # Dead history: once the chain costs more than K times the view it presents,
-        # over half of what it occupies is superseded bytes only a flatten can
-        # reclaim. This fires with no budget configured at all — the depth
-        # ceiling alone let 96-layer chains run unbounded.
-        dead_history = parent_chain > _CHAIN_DEAD_HISTORY_RATIO * parent_size > 0
+        # Dead history: once the SESSION-ADDED chain costs more than K times the
+        # SESSION-ADDED view it presents, over half of what this session added
+        # is superseded bytes only a flatten can reclaim. Measured base-relative
+        # so a base whose OWN chain exceeds K times its own view (the ordinary
+        # ``apt-get install … && rm -rf /var/lib/apt/lists`` shape) does not
+        # force a reclaim-nothing flatten on every session's first snapshot —
+        # then the corpse's parent IS the base and the base terms cancel. Fires
+        # with no budget configured at all — the depth ceiling alone let
+        # 96-layer chains run unbounded.
+        dead_history = added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view > 0
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
@@ -830,7 +842,7 @@ class DockerBackend:
         return SnapshotOutcome(
             kind="committed",
             image_id=new[0],
-            unique_bytes=await self._unique_bytes(new, base_ref),
+            unique_bytes=await self._unique_bytes(tag, new, base_ref),
             depth=new[2],
         )
 
@@ -908,10 +920,18 @@ class DockerBackend:
             raise SandboxBackendError(f"flattened image {tag} not found after import")
         self._record_throughput(size_rw, elapsed)
         # A flattened image is standalone — it shares no layers with the base,
-        # so it is charged its FULL size (subtracting a base it doesn't share
+        # so it is charged its FULL chain cost (``_unique_bytes`` returns the
+        # whole chain for a flattened image; subtracting a base it doesn't share
         # would hide ~hundreds of MB from the accounting that must see the host
-        # filling).
-        return SnapshotOutcome(kind="flattened", image_id=new[0], unique_bytes=new[1], depth=new[2])
+        # filling). Denominating this in the on-disk chain — like the commit
+        # path and the GC pointer-heal — keeps sessions.snapshot_bytes one
+        # quantity no matter which writer wrote it last (company#383 F2).
+        return SnapshotOutcome(
+            kind="flattened",
+            image_id=new[0],
+            unique_bytes=await self._unique_bytes(tag, new, labels.get(BASE_IMAGE_LABEL_KEY)),
+            depth=new[2],
+        )
 
     async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
         """Enumerate managed images (incl. untagged residue) via ``docker images -a``.
@@ -1425,14 +1445,33 @@ class DockerBackend:
             return 0
 
     async def _unique_bytes(
-        self, image_fields: tuple[str, int, int, dict[str, str]], base_ref: str | None
+        self,
+        image_ref: str,
+        image_fields: tuple[str, int, int, dict[str, str]],
+        base_ref: str | None,
     ) -> int:
-        """Unique bytes for the accounting pointer: full size for a flattened
-        (standalone) image, else ``tag.Size - base.Size``."""
-        _image_id, size, _depth, labels = image_fields
+        """Unique bytes for the accounting pointer: the on-disk CHAIN cost
+        (base-relative), the SAME denomination the GC pointer-heal path
+        (:meth:`_unique_bytes_for_image` in the registry) and the pool budget
+        enforce against — NOT the ``.Size`` view (#2349, company#383 F2).
+
+        A flattened image is standalone, so it is charged its full chain cost;
+        any other image is charged its chain cost minus the shared base's chain
+        cost, exactly the ``max(0, parent_chain - base_chain) + rw`` figure the
+        flatten trigger projects. Recording the view here instead left the same
+        image reading 0-to-view bytes to this writer and the full chain to the
+        GC writer — the disk over-limit notice then never fired for precisely
+        the superseded-history chains this feature exists to catch.
+
+        ``image_chain_bytes`` reads ``docker history`` and clamps up to the
+        view, so it never reports below ``.Size`` and degrades to the view only
+        when history is unreadable."""
+        _image_id, _size, _depth, labels = image_fields
+        chain = await self._image_chain_bytes_or_zero(image_ref)
         if labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
-            return size
-        return max(0, size - await self._image_size_or_zero(base_ref))
+            return chain
+        base_chain = await self._image_chain_bytes_or_zero(base_ref)
+        return max(0, chain - base_chain)
 
 
 # Shared with the registry's resume-time placeholder neutralization so the

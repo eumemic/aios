@@ -53,7 +53,7 @@ async def test_successful_commit_updates_and_persists_throughput(
     monkeypatch.setattr(
         backend, "_inspect_image_fields", lambda tag: _async_value(("id", 100, 2, {}))
     )
-    monkeypatch.setattr(backend, "_unique_bytes", lambda fields, base: _async_value(100))
+    monkeypatch.setattr(backend, "_unique_bytes", lambda ref, fields, base: _async_value(100))
 
     await backend._commit("cid", "tag", [], None, timeout_s=60.0, size_rw=200)
 

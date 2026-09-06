@@ -62,6 +62,19 @@ class _FakeDocker:
         # size-scaled timeout.
         self.pipeline_timeouts: list[tuple[float, float]] = []
 
+    def _lookup(self, ref: str) -> dict[str, Any] | None:
+        """Resolve an image by tag OR by content id, as ``docker`` does — the
+        chain-cost probe inspects by tag to get the id, then runs
+        ``docker history`` on that id, so a fake keyed only by tag would 404
+        the very history call the real daemon answers."""
+        img = self.images.get(ref)
+        if img is not None:
+            return img
+        for entry in self.images.values():
+            if entry.get("id") == ref:
+                return entry
+        return None
+
     async def cli(
         self, argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
     ) -> tuple[int, bytes, bytes]:
@@ -79,7 +92,7 @@ class _FakeDocker:
             return 0, out.encode(), b""
         if sub == "image" and len(argv) > 2 and argv[2] == "inspect":
             ref = argv[-1]
-            img = self.images.get(ref)
+            img = self._lookup(ref)
             if img is None:
                 return 1, b"", f"Error: No such image: {ref}".encode()
             # Real code inspects ``{{json .Config}}`` (the whole config), then
@@ -100,7 +113,7 @@ class _FakeDocker:
             # human-readable per-layer size per line, oldest last. The real CLI
             # renders the FORMATTED field ("1.13GB"), never raw bytes.
             ref = argv[-1]
-            img = self.images.get(ref)
+            img = self._lookup(ref)
             if img is None:
                 return 1, b"", f"Error: No such image: {ref}".encode()
             chain = img.get("chain", img["size"])
@@ -111,12 +124,20 @@ class _FakeDocker:
             return 0, ("\n".join(lines) + "\n").encode(), b""
         if sub == "commit":
             tag = argv[-1]
-            self.images[tag] = {
+            entry: dict[str, Any] = {
                 "id": "committed",
-                "size": self.size_rw + 100_000,
+                "size": getattr(self, "commit_view", None) or self.size_rw + 100_000,
                 "depth": 2,
                 "labels": dict(self.container_labels),
             }
+            # A commit adds one thin layer over the parent chain; a test that
+            # models a real base-relative chain sets ``commit_chain`` so
+            # ``docker history`` on the committed image reports the parent's
+            # accumulated layer bytes plus that thin layer, not just its view.
+            commit_chain = getattr(self, "commit_chain", None)
+            if commit_chain is not None:
+                entry["chain"] = commit_chain
+            self.images[tag] = entry
             return 0, b"sha256:committed\n", b""
         raise AssertionError(f"unexpected docker cli: {argv}")
 
@@ -568,6 +589,135 @@ class TestChainCostTriggers:
         monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", cli)
 
         assert await DockerBackend().image_chain_bytes("img_S1") == 6 * GB
+
+
+class TestBaseRelativeChainTriggers:
+    """Regression coverage for company#383 F1/F2: the chain-cost accounting must
+    be BASE-RELATIVE. The dead-history flatten trigger must fire only on dead
+    history in the layers THIS SESSION added on top of its base — a flatten
+    cannot reclaim (and would only duplicate) dead history inside the shared
+    base image. And the snapshot commit path must record the SAME chain-cost
+    denomination the GC pointer-heal path and the pool budget enforce against,
+    so the over-limit signal fires for exactly the chains this feature exists
+    to catch.
+
+    Every scenario below models a real session: the corpse's parent carries an
+    ``aios.base_image`` label pointing at a shared base image that itself owns a
+    long internal chain. The pre-existing ``TestChainCostTriggers`` cases all
+    use base-LESS parents, so they cannot see either defect.
+    """
+
+    BASE_REF = "base:latest"
+
+    @classmethod
+    def _base(cls, fake_docker: _FakeDocker, *, view: int, chain: int, depth: int = 8) -> None:
+        """A shared base image: ``view`` bytes of content, ``chain`` on disk."""
+        fake_docker.images[cls.BASE_REF] = {
+            "id": "base_img",
+            "size": view,
+            "chain": chain,
+            "depth": depth,
+            "labels": {},
+        }
+
+    @classmethod
+    def _parent_on_base(
+        cls, fake_docker: _FakeDocker, *, view: int, chain: int, depth: int = 16
+    ) -> None:
+        """The corpse's parent, built on the shared base. The container carries
+        the ``aios.base_image`` label so ``snapshot`` resolves the base."""
+        fake_docker.parent_image = "img_S1"
+        fake_docker.images["img_S1"] = {
+            "id": "img_S1",
+            "size": view,
+            "chain": chain,
+            "depth": depth,
+            "labels": {"aios.base_image": cls.BASE_REF},
+        }
+        fake_docker.container_labels = {"aios.base_image": cls.BASE_REF}
+
+    @pytest.mark.asyncio
+    async def test_first_snapshot_does_not_flatten_on_base_internal_dead_history(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """F1 (BLOCKING): a session's FIRST snapshot — parent IS the base — must
+        COMMIT when its own added layers are small and mostly-live, even if the
+        base image's own chain is many times its own view.
+
+        Probe P1 scale: base view 1 GB / chain 3 GB (the ordinary
+        ``apt-get install … && rm -rf /var/lib/apt/lists`` shape), size_rw 5 MB,
+        budget 12 GiB. A base-relative trigger sees ~5 MB of live added content
+        and commits; the buggy whole-chain-vs-whole-view ratio sees the base's
+        3:1 dead history and flattens every session on that base, every idle,
+        forever — a flatten that reclaims nothing and duplicates the base."""
+        self._base(fake_docker, view=1 * GB, chain=3 * GB)
+        # First snapshot: the corpse's parent IS the base image.
+        fake_docker.parent_image = "base_img"
+        fake_docker.images["base_img"] = fake_docker.images[self.BASE_REF]
+        fake_docker.container_labels = {"aios.base_image": self.BASE_REF}
+        fake_docker.size_rw = 5 * 1000**2  # 5 MB of live added content
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=12 * GIB
+        )
+
+        assert out.kind == "committed", "must commit — the added layers are tiny and live"
+        assert not fake_docker.pipelines, "a flatten here reclaims nothing and duplicates the base"
+
+    @pytest.mark.asyncio
+    async def test_base_relative_dead_history_still_flattens_when_added_layers_are_dead(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """OVER-CORRECTION GUARD for F1: base-relative must not degrade into
+        'never flatten on dead history'. A session whose OWN added layers carry
+        the dead history (added chain 8 GB over an added view 1 GB, on a cheap
+        1 GB/1 GB base ⇒ 7 GB of session-added dead history, > 2x the 1 GB of
+        session-added live view) must still flatten, with no budget at all."""
+        self._base(fake_docker, view=1 * GB, chain=1 * GB)
+        # parent view = base_view + added_live; parent chain = base_chain + added_chain
+        self._parent_on_base(fake_docker, view=2 * GB, chain=9 * GB)
+        fake_docker.size_rw = 1_000_000
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "flattened", "session-added dead history must still trigger a flatten"
+        assert fake_docker.pipelines
+
+    @pytest.mark.asyncio
+    async def test_committed_unique_bytes_is_chain_denominated_like_the_gc_heal(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """F2 (BLOCKING): the commit path must record the on-disk CHAIN cost
+        (base-relative), the same quantity the GC pointer-heal and the pool
+        budget enforce against — not the ``.Size`` view.
+
+        Probe P2b scale: parent view 6 GB / chain 11 GB over a 1 GB/1 GB base,
+        high budget ⇒ commit path. The session's added chain cost is
+        11 - 1 = 10 GB; the view delta is only 6 - 1 = 5 GB. Recorded as the
+        view, the same image is 0-to-5 GB to the commit writer while the GC
+        writer sees 10 GB — the over-limit notice (registry.py:1779) then never
+        fires for the very chains this feature exists to catch."""
+        self._base(fake_docker, view=1 * GB, chain=1 * GB)
+        self._parent_on_base(fake_docker, view=6 * GB, chain=11 * GB)
+        fake_docker.size_rw = 1_000_000
+        # The committed image inherits the parent's chain (a commit adds one
+        # thin layer over the parent chain) and the base label.
+        fake_docker.commit_view = 6 * GB
+        fake_docker.commit_chain = 11 * GB
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=64 * GIB
+        )
+
+        assert out.kind == "committed"
+        # Base-relative chain cost: (parent_chain + one thin layer) - base_chain
+        # must be ~10 GB, NOT the 5 GB view delta.
+        assert out.unique_bytes >= 9 * GB, (
+            f"snapshot_bytes must be chain-denominated (≈10 GB), got {out.unique_bytes} "
+            "— the .Size view (≈5 GB) leaves the over-limit notice unreachable"
+        )
 
 
 class TestHistorySizeParsing:
