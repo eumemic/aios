@@ -102,6 +102,14 @@ def run_or_die(fn: Callable[[], int | None]) -> None:
     except httpx.TimeoutException as exc:
         print_error(f"timeout: request timed out: {exc}")
         raise typer.Exit(1) from exc
+    except httpx.RequestError as exc:
+        # Sibling transport failures (``ReadError``/``WriteError``/
+        # ``ProxyError``/``ProtocolError``/...) are NOT subclasses of
+        # ``ConnectError`` or ``TimeoutException``, so the two leaves
+        # above don't catch them. Catch the base so the generated arm
+        # never leaks an httpx traceback either (issue #1682).
+        print_error(f"connection_error: request failed: {exc}")
+        raise typer.Exit(1) from exc
     except PayloadError as exc:
         print_error(str(exc))
         raise typer.Exit(64) from exc
