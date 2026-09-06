@@ -13,7 +13,6 @@ from aios.harness.completion import (
     inject_cache_breakpoints,
     model_descriptor,
 )
-from aios.harness.context import EPHEMERAL_TAIL_KEY
 
 
 @pytest.fixture(autouse=True)
@@ -143,13 +142,6 @@ def _msg(role: str, content: str = "") -> dict[str, Any]:
     return {"role": role, "content": content}
 
 
-def _tail(content: str) -> dict[str, Any]:
-    """Build an ephemeral-tail user message, tagged out-of-band like the
-    real channels/obligations tail producers (carries
-    :data:`EPHEMERAL_TAIL_KEY`)."""
-    return {"role": "user", "content": content, EPHEMERAL_TAIL_KEY: True}
-
-
 def _tool_def(name: str) -> dict[str, Any]:
     """Build a minimal OpenAI-format tool definition."""
     return {
@@ -228,32 +220,28 @@ class TestInjectCacheBreakpoints:
         assert msgs[0]["content"][0]["cache_control"] == _CACHE_CONTROL
         assert tools[0]["cache_control"] == _CACHE_CONTROL
 
-    def test_skips_tail_block_and_marks_prior_message(self) -> None:
-        """The channels tail block mutates every step; caching it is
-        pointless — every next step's tail is different, so the prefix
-        cache never hits.  Breakpoint goes on the last *stable*
-        message (the event-sourced one just before the tail).
-        """
-        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
+    def test_trailing_channels_listing_row_hosts_the_breakpoint(self) -> None:
+        """The channels listing is a durable reminder row now: the next step
+        replays it unchanged (it is rewritten only when the listing changes),
+        so the breakpoint goes on it like any other last message."""
+        listing = "━━━ Channels ━━━\n▸ channel_id=x (focal)"
         msgs = [
             _msg("system", "sys"),
             _msg("user", "hi there"),
             _msg("assistant", "hello"),
-            tail,
+            _msg("user", listing),
         ]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
-        # Last stable message (the assistant) gets the breakpoint.
-        assert msgs[2]["content"] == [
-            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
+        assert msgs[3]["content"] == [
+            {"type": "text", "text": listing, "cache_control": _CACHE_CONTROL}
         ]
-        # Tail block stays un-annotated.
-        assert msgs[3]["content"] == tail["content"]
+        assert msgs[2]["content"] == "hello"
 
-    def test_skips_tail_and_adjacency_separator(self) -> None:
-        """``inject_cache_breakpoints`` must skip *both* the tail block and
-        a single-byte ``"."`` placeholder assistant separator before it —
-        annotating the placeholder would be a wasted breakpoint that also
-        wouldn't survive content normalization on some routes.
+    def test_skips_adjacency_separator(self) -> None:
+        """``inject_cache_breakpoints`` must skip a trailing single-byte
+        ``"."`` placeholder assistant separator — annotating the placeholder
+        would be a wasted breakpoint that also wouldn't survive content
+        normalization on some routes.
 
         ``merge_adjacent_user_messages`` no longer *produces* this
         placeholder (adjacent users are merged in place), but
@@ -261,30 +249,26 @@ class TestInjectCacheBreakpoints:
         still recognise one from any other source — pinned here against a
         hand-constructed separator.
         """
-        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
         stable = _msg("user", "real peer message")
         separator = {"role": "assistant", "content": "."}
-        msgs = [_msg("system", "sys"), stable, separator, tail]
+        msgs = [_msg("system", "sys"), stable, separator]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         # Breakpoint lands on the stable user message, not the separator.
         assert msgs[1]["content"] == [
             {"type": "text", "text": "real peer message", "cache_control": _CACHE_CONTROL}
         ]
-        # Separator stays bare; tail stays bare.
         assert msgs[2] == {"role": "assistant", "content": "."}
-        assert msgs[3]["content"] == tail["content"]
 
-    def test_tail_only_context_falls_back_to_system_and_tool(self) -> None:
-        """Degenerate case: only system + tail.  No stable conversation
-        message exists — the last-stable-message rule produces nothing,
-        but the system breakpoint still applies."""
-        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
-        msgs = [_msg("system", "sys"), tail]
+    def test_separator_only_context_falls_back_to_system_and_tool(self) -> None:
+        """Degenerate case: only system + a separator.  No stable
+        conversation message exists — the last-stable-message rule produces
+        nothing, but the system breakpoint still applies."""
+        msgs = [_msg("system", "sys"), {"role": "assistant", "content": "."}]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
         assert msgs[0]["content"] == [
             {"type": "text", "text": "sys", "cache_control": _CACHE_CONTROL}
         ]
-        assert msgs[1]["content"] == tail["content"]  # un-annotated
+        assert msgs[1] == {"role": "assistant", "content": "."}  # un-annotated
 
     def test_content_already_list(self) -> None:
         """When content is already a list of blocks, annotate the last block."""
@@ -302,67 +286,56 @@ class TestInjectCacheBreakpoints:
         assert "cache_control" not in msgs[1]["content"][0]
         assert msgs[1]["content"][1]["cache_control"] == _CACHE_CONTROL
 
-    def test_obligations_tail_after_tool_result_skipped_via_marker(self) -> None:
-        """Regression for #1535: an Anthropic-route session owing a response
-        (last log line a tool result) appends the always-on obligations tail
-        as the final user-role line. The breakpoint must land on the last
-        *stable* message (the tool result), NOT on the per-step-mutating
-        obligations block — which the old ``━━━ Channels ━━━`` substring
-        recognizer never matched, so it busted the prefix cache every step.
-        """
+    def test_trailing_reminder_row_hosts_the_breakpoint(self) -> None:
+        """A durable obligations reminder row is a log-sourced user message
+        like any other: the next step replays it byte-for-byte, so the
+        breakpoint lands ON it (the ephemeral-tail recognizer that used to
+        skip it is gone — there is no per-step tail left to skip)."""
         from aios.harness.obligations import _HEADER as _OBLIGATIONS_HEADER
 
-        obligations_tail = _tail(f"{_OBLIGATIONS_HEADER}\n• req_1 [api] (open 3s)")
+        text = f"{_OBLIGATIONS_HEADER}\n• req_1 [api] (opened …)"
         msgs = [
             _msg("system", "sys"),
             _msg("user", "do the thing"),
             {"role": "assistant", "content": "", "tool_calls": [{"id": "a"}]},
             {"role": "tool", "tool_call_id": "a", "content": "tool done"},
-            obligations_tail,
+            _msg("user", text),
         ]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
-        # Breakpoint on the tool result (last stable), not the obligations tail.
-        assert msgs[3]["content"] == [
-            {"type": "text", "text": "tool done", "cache_control": _CACHE_CONTROL}
+        assert msgs[4]["content"] == [
+            {"type": "text", "text": text, "cache_control": _CACHE_CONTROL}
         ]
-        # Obligations tail stays bare (content unchanged) and carries no marker.
-        assert msgs[4]["content"] == obligations_tail["content"]
-        assert EPHEMERAL_TAIL_KEY not in msgs[4]
+        assert msgs[3]["content"] == "tool done"
 
-    def test_merged_inbound_plus_obligation_is_ephemeral(self) -> None:
-        """A trailing real user inbound + an open obligation fold into one
-        ``user`` dict via ``merge_adjacent_user_messages``; the merged dict
-        must inherit the ephemeral marker (sticky under OR) so the breakpoint
-        skips it. This is the latent merged-dict case the old substring
-        recognizer silently mishandled.
-        """
+    def test_merged_inbound_plus_reminder_hosts_the_breakpoint(self) -> None:
+        """A trailing inbound + a reminder row fold into one ``user`` dict via
+        ``merge_adjacent_user_messages``; the merged dict is the last
+        log-sourced message and hosts the breakpoint."""
         from aios.harness.context import merge_adjacent_user_messages
 
         inbound = _msg("user", "real peer message")
-        obligation = _tail(
-            "━━━ Open obligations (answer with return/error) ━━━\n• r [api] (open 3s)"
+        reminder = _msg(
+            "user", "━━━ Open obligations (answer with return/error) ━━━\n• r [api] (opened …)"
         )
-        merged = merge_adjacent_user_messages([inbound, obligation])
+        merged = merge_adjacent_user_messages([inbound, reminder])
         assert len(merged) == 1  # folded into one user turn
-        assert merged[0][EPHEMERAL_TAIL_KEY] is True  # marker is sticky
+        assert set(merged[0]) == {"role", "content"}
 
         msgs = [_msg("system", "sys"), _msg("assistant", "hello"), merged[0]]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
-        # Breakpoint lands on the stable assistant turn, skipping the merged
-        # ephemeral user dict.
-        assert msgs[1]["content"] == [
-            {"type": "text", "text": "hello", "cache_control": _CACHE_CONTROL}
-        ]
-        assert "cache_control" not in str(msgs[2].get("content"))
-        assert EPHEMERAL_TAIL_KEY not in msgs[2]
+        assert msgs[1]["content"] == "hello"
+        assert msgs[2]["content"][0]["cache_control"] == _CACHE_CONTROL
 
-    def test_marker_stripped_on_anthropic_route(self) -> None:
-        """No ``_aios_ephemeral_tail`` key may reach a provider: strip runs on
-        the Anthropic path after the recognizer consumes the markers."""
-        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
+    def test_no_out_of_band_key_is_special_cased(self) -> None:
+        """The retired ``_aios_ephemeral_tail`` marker gets no treatment: a
+        message carrying it still hosts the breakpoint and the key is left
+        alone (nothing produces it; nothing should silently launder it)."""
+        tail = {"role": "user", "content": "━━━ Channels ━━━", "_aios_ephemeral_tail": True}
         msgs = [_msg("system", "sys"), _msg("user", "hi"), tail]
         inject_cache_breakpoints(msgs, None, _ANTHROPIC_MODEL)
-        assert not any(EPHEMERAL_TAIL_KEY in m for m in msgs)
+        assert msgs[2]["content"][0]["cache_control"] == _CACHE_CONTROL
+        assert msgs[2]["_aios_ephemeral_tail"] is True
+        assert "cache_control" not in str(msgs[1]["content"])
 
 
 class TestInjectCacheBreakpointsProviderGuard:
@@ -439,18 +412,14 @@ class TestInjectCacheBreakpointsProviderGuard:
             {"type": "text", "text": "hi", "cache_control": _CACHE_CONTROL}
         ]
 
-    def test_marker_stripped_on_non_anthropic_route(self) -> None:
-        """The ephemeral-tail marker is non-standard and must never reach a
-        provider — even on non-Anthropic routes that place no breakpoint but
-        still carry the tail dict to the wire (#1535: strip is unconditional,
-        not gated behind the Anthropic early return)."""
-        tail = _tail("━━━ Channels ━━━\n▸ channel_id=x (focal)")
-        msgs = [_msg("system", "sys"), _msg("user", "hi"), tail]
+    def test_non_anthropic_route_leaves_messages_untouched(self) -> None:
+        """The gate held: no ``cache_control`` anywhere and every dict is
+        exactly what the composer produced."""
+        listing = _msg("user", "━━━ Channels ━━━\n▸ channel_id=x (focal)")
+        msgs = [_msg("system", "sys"), _msg("user", "hi"), listing]
+        before = [dict(m) for m in msgs]
         inject_cache_breakpoints(msgs, None, "openai/gpt-4o")
-        # Gate held: no cache_control injected (content stays a plain string)…
-        assert msgs[1]["content"] == "hi"
-        # …but the marker is still stripped from every message.
-        assert not any(EPHEMERAL_TAIL_KEY in m for m in msgs)
+        assert msgs == before
 
 
 class TestModelDescriptor:
