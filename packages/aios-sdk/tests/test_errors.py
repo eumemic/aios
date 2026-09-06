@@ -112,6 +112,60 @@ def test_raw_request_maps_connect_error() -> None:
     assert excinfo.value.error_type == "connection_error"
 
 
+def test_raw_request_maps_timeout() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out reading body")
+
+    with _mock_client(handler) as client, pytest.raises(AiosApiError) as excinfo:
+        raw_request(client, "GET", "/health")
+    assert excinfo.value.status_code == 0
+    assert excinfo.value.error_type == "timeout"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(httpx.ReadError("connection reset mid-body"), id="ReadError"),
+        pytest.param(httpx.WriteError("failed writing request body"), id="WriteError"),
+        pytest.param(httpx.CloseError("connection closed"), id="CloseError"),
+        pytest.param(httpx.ProxyError("proxy handshake failed"), id="ProxyError"),
+        pytest.param(httpx.LocalProtocolError("bad local framing"), id="LocalProtocolError"),
+        pytest.param(httpx.RemoteProtocolError("bad remote framing"), id="RemoteProtocolError"),
+        pytest.param(httpx.UnsupportedProtocol("no protocol support"), id="UnsupportedProtocol"),
+        pytest.param(httpx.DecodingError("could not decode body"), id="DecodingError"),
+        pytest.param(httpx.TooManyRedirects("too many redirects"), id="TooManyRedirects"),
+    ],
+)
+def test_raw_request_maps_request_error_leaves(exc: Exception) -> None:
+    """Every transport-failure leaf of httpx's ``RequestError`` tree maps to
+    ``AiosApiError(status_code=0, error_type="connection_error")`` instead of
+    leaking a raw ``httpx`` traceback (issue #1682)."""
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise exc
+
+    with _mock_client(handler) as client, pytest.raises(AiosApiError) as excinfo:
+        raw_request(client, "GET", "/health")
+    assert excinfo.value.status_code == 0
+    assert excinfo.value.error_type == "connection_error"
+    assert isinstance(excinfo.value.__cause__, httpx.RequestError)
+
+
+def test_raw_request_does_not_swallow_http_status_error() -> None:
+    """A non-2xx response must NOT be caught by the transport branch:
+    ``httpx.HTTPStatusError`` is not a ``RequestError``, and ``raw_request``
+    decodes such responses via ``error_from_response`` with the real status."""
+    body = {"error": {"type": "forbidden", "message": "no access", "detail": {}}}
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json=body)
+
+    with _mock_client(handler) as client, pytest.raises(AiosApiError) as excinfo:
+        raw_request(client, "GET", "/v1/agents/x")
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.error_type == "forbidden"
+
+
 def test_stream_session_decodes_error_envelope() -> None:
     """A non-2xx on the SSE stream must decode the envelope, not leak httpx."""
     body = {"error": {"type": "not_found", "message": "no such session", "detail": {}}}
