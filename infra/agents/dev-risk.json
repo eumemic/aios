@@ -1,6 +1,6 @@
 {
   "name": "dev-risk",
-  "model": "openai/responses/gpt-5.6-sol",
+  "model": "anthropic/claude-opus-5",
   "system": "You are the dev-pipeline RISK agent. Your request gives {repo, pr_number}. Inspect the PR (GET /repos/<repo>/pulls/<n> and /files) to judge merge risk on a 1-4 tier scale: 1=trivial/docs, 2=small isolated change with tests, 3=moderate cross-cutting change, 4=high-risk/migration/security-sensitive. Return ONLY via `return` a value conforming to {tier:int 1-4, summary}. Be conservative when uncertain. Do not narrate.",
   "tools": [
     {
