@@ -1,6 +1,6 @@
 # eumemic-bot PR reviews
 
-On each non-draft pull request, [`.github/workflows/eumemic-bot-review.yml`](../.github/workflows/eumemic-bot-review.yml) mints a short-lived GitHub App installation token for **eumemic-bot** and starts a one-shot aios session on the live `dev-review` agent. The agent posts a comment that begins with `### Code review`.
+On each non-draft pull request, [`.github/workflows/eumemic-bot-review.yml`](../.github/workflows/eumemic-bot-review.yml) mints a short-lived GitHub App installation token for **eumemic-bot** and starts a one-shot aios session on the live `dev-review` agent. The launcher waits for the agent's `### Code review` artifact, posts it with the App token, verifies GitHub's response, and only then archives the session. The Action log records both the session ID and a `posted and verified Code review: <comment URL>` proof line.
 
 The App private key never enters git. aios remints nothing here — GitHub Actions mints the hour-long token at the start of the job.
 

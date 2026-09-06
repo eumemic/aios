@@ -22,7 +22,7 @@ jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -33,8 +33,8 @@ jobs:
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
-          # Session outlives this job and POSTs ### Code review with GH_TOKEN.
-          # Default post-step revoke made sess_01M156PTBDBE7PQGXEEYVR4RRG 401.
+          # The job waits for the session, then POSTs and verifies ### Code review.
+          # Keep the token alive until that publisher step has completed.
           skip-token-revoke: true
 
       - name: Start aios review session

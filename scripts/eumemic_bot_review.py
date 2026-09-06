@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start an aios dev-review session for a GitHub pull request.
+"""Run an aios dev-review session and publish its GitHub review artifact.
 
 Used by .github/workflows/eumemic-bot-review.yml. The workflow hands in a
 short-lived eumemic-bot installation token as GH_TOKEN.
@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,6 +67,83 @@ def _request(method: str, url: str, api_key: str, body: dict | None = None) -> d
         _die(f"{method} {url} returned {exc.code}: {detail}")
     except urllib.error.URLError as exc:
         _die(f"{method} {url} failed: {exc}")
+
+
+def _github_request(method: str, url: str, token: str, body: dict | None = None) -> dict:
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:800]
+        _die(f"{method} {url} returned {exc.code}: {detail}")
+    except urllib.error.URLError as exc:
+        _die(f"{method} {url} failed: {exc}")
+
+
+def _await_turn(base: str, api_key: str, session_id: str, watermark: int | None = None) -> None:
+    deadline = time.monotonic() + int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1200"))
+    query = {"timeout": "60"}
+    if watermark is not None:
+        query["watermark"] = str(watermark)
+    url = f"{base}/v1/sessions/{session_id}/await?{urllib.parse.urlencode(query)}"
+    while time.monotonic() < deadline:
+        if _request("GET", url, api_key).get("done") is True:
+            return
+    _die(f"session {session_id} did not finish its review turn before the timeout")
+
+
+def _review_from_events(base: str, api_key: str, session_id: str) -> str | None:
+    query = urllib.parse.urlencode({"dir": "backward", "kind": "message", "limit": "100"})
+    payload = _request("GET", f"{base}/v1/sessions/{session_id}/events?{query}", api_key)
+    for event in payload.get("items", []):
+        data = event.get("data", {})
+        content = data.get("content")
+        if data.get("role") == "assistant" and isinstance(content, str):
+            text = content.strip()
+            if text.startswith("### Code review"):
+                return text
+    return None
+
+
+def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
+    _await_turn(base, api_key, session_id)
+    review = _review_from_events(base, api_key, session_id)
+    if review is not None:
+        return review
+
+    # One corrective turn handles a model that followed the dev-review workflow-child
+    # contract and attempted the unavailable `return` tool in this foreground session.
+    event = _request(
+        "POST",
+        f"{base}/v1/sessions/{session_id}/messages",
+        api_key,
+        {
+            "content": (
+                "The GitHub publisher needs your review as a normal assistant message now. "
+                "Do not call `return` or any posting tool. Reply with the complete artifact, "
+                "starting exactly with `### Code review`."
+            )
+        },
+    )
+    watermark = event.get("seq")
+    _await_turn(
+        base,
+        api_key,
+        session_id,
+        watermark=watermark if isinstance(watermark, int) else None,
+    )
+    review = _review_from_events(base, api_key, session_id)
+    if review is None:
+        _die(f"session {session_id} completed without a `### Code review` artifact")
+    return review
 
 
 def _list_agents(base: str, api_key: str, name: str | None = None) -> list[dict]:
@@ -134,16 +212,15 @@ def main() -> None:
         f"Fetch the PR diff via the github http_request server "
         f"(GET /repos/{repo}/pulls/{pr_number} and /repos/{repo}/pulls/{pr_number}/files). "
         f"If http_request is unauthorized, use GH_TOKEN from the environment with gh or curl. "
-        f"Post a review-artifact comment whose body begins with the line `### Code review` "
-        f"(POST /repos/{repo}/issues/{pr_number}/comments). "
-        f"Return ONLY via return a value conforming to "
-        f"{{verdict:'pass'|'fail', issues:[...], artifact_posted:true}}."
+        f"This is a foreground session, so the `return` tool is unavailable. Do not post to "
+        f"GitHub yourself. Reply as a normal assistant message with the complete review artifact; "
+        f"its first line must be exactly `### Code review`. The launcher will post and verify it."
     )
     body = {
         "agent_id": agent_id,
         "environment_id": environment_id,
         "title": f"eumemic-bot review {repo}#{pr_number}",
-        "archive_when_idle": True,
+        "archive_when_idle": False,
         "initial_message": prompt,
         "env": {"GH_TOKEN": token, "GH_REPO": repo, "PR_NUMBER": pr_number},
         "resources": [
@@ -171,6 +248,21 @@ def main() -> None:
         f"started session {sid} on agent {agent_id} env {environment_id} "
         f"for {repo}#{pr_number}@{head_sha}"
     )
+    review = _ask_for_review_artifact(base, api_key, str(sid))
+    marker = f"<!-- eumemic-bot-review:{head_sha} -->"
+    if marker not in review:
+        review = f"{review}\n\n{marker}"
+    comment = _github_request(
+        "POST",
+        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+        token,
+        {"body": review},
+    )
+    comment_url = comment.get("html_url")
+    if not comment_url or comment.get("body") != review:
+        _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
+    print(f"posted and verified Code review: {comment_url}")
+    _request("POST", f"{base}/v1/sessions/{sid}/archive", api_key)
 
 
 if __name__ == "__main__":
