@@ -25,9 +25,12 @@ jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # The review turn owns REVIEW_TIMEOUT_SECONDS of this; the rest is
-    # checkout + token mint + the GitHub POST.
-    timeout-minutes: 30
+    # Must outlive REVIEW_TIMEOUT_SECONDS plus the launcher's final long-poll
+    # (a poll issued just under the deadline holds the socket for up to 60s),
+    # plus checkout + token mint + the GitHub POST. A review that overruns has
+    # to hit the launcher's own FATAL, not this: continue-on-error then keeps
+    # the check green and still writes the "did not post" job summary below.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +54,7 @@ jobs:
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
           AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REVIEW_TIMEOUT_SECONDS: "1200"
+          REVIEW_TIMEOUT_SECONDS: "2700"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
