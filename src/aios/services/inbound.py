@@ -24,6 +24,7 @@ from aios.db import queries
 from aios.errors import NotFoundError
 from aios.jobs.app import defer_wake
 from aios.models.connections import inbound_orig_channel
+from aios.models.events import REMINDER_METADATA_KEY
 from aios.models.inbound_policy import (
     AllowAll,
     AllowList,
@@ -51,7 +52,13 @@ from aios.services.inbound_budget import check_inbound_budget, check_inbound_bud
 # instead left the security boundary off the consumed slot — a connector
 # could forge an arbitrary ``sender_name`` and the renderer would surface
 # it as the trusted ``from=`` clause.
-_RESERVED_METADATA_KEYS = frozenset({"channel", "sender_name", "attachments", "platform_timestamp"})
+#
+# ``REMINDER_METADATA_KEY`` marks harness-authored durable reminder rows,
+# which ``append_event`` treats as non-stimulus; a connector must not be able
+# to mint one.
+_RESERVED_METADATA_KEYS = frozenset(
+    {"channel", "sender_name", "attachments", "platform_timestamp", REMINDER_METADATA_KEY}
+)
 
 
 class _DedupRollback(Exception):
