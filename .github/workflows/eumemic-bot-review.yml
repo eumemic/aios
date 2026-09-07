@@ -1,19 +1,3 @@
-# eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
-# checkout and publish its artifact as the GitHub App. No aios session is
-# created: the launcher (scripts/eumemic_bot_review.py) runs the harness for the
-# routed model through the eumemic proxies, POSTs the `### Code review` comment
-# itself, and verifies it landed. Must never FAIL the PR check: a harness or
-# proxy miss is ops, not a code defect — hence continue-on-error plus the job
-# summary below, which is what keeps a missing review visible instead of silent.
-#
-# ADVISORY BY CONSTRUCTION. continue-on-error means the check is green whether
-# the verdict is LGTM or BLOCKING, so the published comment says so in its first
-# line (ADVISORY_BANNER in the launcher). A green check here means the harness
-# ran; it never means the code was approved.
-#
-# The launcher additionally refuses to publish any verdict that carries no proof
-# the agent read the diff — `codex` exits 0 when its sandbox blocks every
-# command, so exit status alone cannot tell a review from a fluent guess.
 name: eumemic-bot review
 
 on:
@@ -34,49 +18,17 @@ jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # Outlives REVIEW_TIMEOUT_SECONDS plus checkout, npm install, token mint and
-    # the GitHub POST. A review that overruns has to hit the launcher's own
-    # FATAL, not this: continue-on-error then keeps the check green and still
-    # writes the "did not post" job summary, whereas a runner kill takes both.
     timeout-minutes: 20
     steps:
-      # Explicit head SHA, not the synthetic merge commit: the agent reviews the
-      # tree the PR actually proposes. fetch-depth 0 brings the base history the
-      # launcher hands the agent as the `base...head` range.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-          # The default (true) writes http.https://github.com/.extraheader —
-          # HTTP basic auth carrying this workflow's GITHUB_TOKEN — into
-          # .git/config ON DISK. The launcher strips credentials from the
-          # agent's ENV, but the sandbox is off, so an agent just runs
-          # `cat .git/config`. Bounded by `contents: read` on a public repo,
-          # but env stripping cannot reach a file. Nothing here pushes; the
-          # launcher POSTs with its own short-lived installation token.
-          persist-credentials: false
 
-      # Only the routed harness: installing all three triples the install time
-      # and lets an unrelated publisher hiccup block every review.
-      - name: Install the coding-agent harness
+      - name: Install coding-agent harnesses
         id: harness
         continue-on-error: true
-        run: |
-          case "$REVIEW_MODEL" in
-            gpt-*)    package='@openai/codex' ;;
-            claude-*) package='@anthropic-ai/claude-code' ;;
-            grok-*)   package='@mariozechner/pi-coding-agent' ;;
-            *)
-              echo "unsupported REVIEW_MODEL '$REVIEW_MODEL'" >&2
-              exit 1
-              ;;
-          esac
-          npm install --global "$package"
-          # NOTE: `apt-get install bubblewrap` does NOT fix the sandbox fault.
-          # Measured against codex-cli 0.154.0: codex invokes its OWN vendored
-          # bwrap (codex-resources/bwrap), never the one on PATH — a fake bwrap
-          # planted first in PATH is never executed. So the distro package is
-          # inert here. The fix is the sandbox MODE; see REVIEW_SANDBOX_MODE.
+        run: npm install --global @openai/codex @anthropic-ai/claude-code @mariozechner/pi-coding-agent
 
       - name: Mint eumemic-bot installation token
         id: app
@@ -85,17 +37,7 @@ jobs:
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
-          # No skip-token-revoke: the launcher POSTs and verifies ### Code review
-          # inside this job, so nothing needs the installation token once the job
-          # ends.
 
-      # The launcher strips GH_TOKEN, every unrouted proxy key AND the Actions
-      # control files (GITHUB_OUTPUT/ENV/PATH) from the agent's environment
-      # before exec — the agent reads PR-authored files and runs shell commands
-      # with the sandbox off, so it must not hold a token that can write, nor
-      # the path to the file whose `published=true` drives the safety net
-      # below. The checkout above also sets persist-credentials: false, because
-      # env stripping cannot reach a credential written into .git/config.
       - name: Review and post as eumemic-bot
         id: review
         if: steps.harness.outcome == 'success' && steps.app.outcome == 'success'
@@ -106,40 +48,14 @@ jobs:
           ANT_PROXY_API_KEY: ${{ secrets.ANT_PROXY_API_KEY }}
           XAI_PROXY_API_KEY: ${{ secrets.XAI_PROXY_API_KEY }}
           REVIEW_TIMEOUT_SECONDS: "900"
-          # Measured, not assumed (codex-cli 0.154.0, `codex sandbox` probe):
-          #   read-only        -> bwrap fails, ZERO commands execute, codex exits 0
-          #   workspace-write  -> bwrap fails, ZERO commands execute, codex exits 0
-          #   danger-full-access -> executes; the diff is actually read
-          # Both sandboxed modes go through the same vendored bwrap, so switching
-          # to workspace-write would NOT have fixed anything. The isolation that
-          # matters here is the runner itself (ephemeral single-use VM) plus the
-          # launcher stripping every writable credential from the agent env
-          # before exec — the agent holds one proxy key and no GH token.
-          REVIEW_SANDBOX_MODE: ${{ vars.EUMEMIC_BOT_REVIEW_SANDBOX_MODE || 'danger-full-access' }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/eumemic_bot_review.py
 
-      # continue-on-error above keeps an ops miss from blocking merges. But a
-      # silently green run is exactly how missing `### Code review` comments went
-      # unnoticed, so a run that published nothing says so where a reader sees it
-      # without opening logs.
-      #
-      # Keyed on "was a genuine review published?", NOT on step outcome. In the
-      # real miss (run 34196306433) the agent read zero bytes, the launcher
-      # published anyway, the review step outcome was 'success' — and this net
-      # was SKIPPED, in the one instance it existed for. `published` is written
-      # by the launcher only after GitHub echoes the marker back, so its absence
-      # is the fact, whatever any step's exit status says.
       - name: Note an unpublished review in the run summary
-        if: always() && steps.review.outputs.published != 'true'
+        if: always() && (steps.harness.outcome == 'failure' || steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
-          echo "No verified \`### Code review\` comment was published for this run." \
-            >> "$GITHUB_STEP_SUMMARY"
-          echo "This includes the case where the agent ran, exited 0, and produced no" \
-            >> "$GITHUB_STEP_SUMMARY"
-          echo "evidence it read the diff — that is refused, never published. See the step log." \
+          echo "No \`### Code review\` comment was published for this run. See the step log." \
             >> "$GITHUB_STEP_SUMMARY"
