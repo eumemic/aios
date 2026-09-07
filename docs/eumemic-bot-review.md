@@ -1,30 +1,30 @@
 # eumemic-bot PR reviews
 
-On each non-draft pull request, [`.github/workflows/eumemic-bot-review.yml`](../.github/workflows/eumemic-bot-review.yml) mints a short-lived GitHub App installation token for **eumemic-bot** and starts a one-shot aios session on the live `dev-review` agent.
+On each non-draft pull request, [the workflow](../.github/workflows/eumemic-bot-review.yml) checks out the PR head and runs a coding agent directly on the GitHub Actions runner. It does not create an aios `dev-review` session. The launcher captures the agent's final `### Code review` artifact, posts it with a short-lived eumemic-bot installation token, and verifies GitHub returned the run-specific `<!-- eumemic-bot-review:<sha> -->` marker.
 
-Publication belongs to the launcher, not to the session. [`scripts/eumemic_bot_review.py`](../scripts/eumemic_bot_review.py) long-polls `GET /v1/sessions/{id}/wait` until the session stops working, reads the newest assistant message opening with `### Code review` off the event log, POSTs it as eumemic-bot, checks that GitHub echoed back the run's `<!-- eumemic-bot-review:<sha> -->` marker, and only then archives the session. The Action log records the session ID and a `posted and verified ### Code review: <comment URL>` proof line; a run that published nothing says so in the job summary instead of passing silently.
+The default model is `gpt-5.6-sol`. Set the repository variable `EUMEMIC_BOT_REVIEW_MODEL` to select a model; routing is by prefix:
 
-Two consequences worth knowing:
-
-- The session is created with `archive_when_idle: false` and archived by the launcher on **every** exit path, success or failure — self-reclaim would race the read of the artifact it is about to publish.
-- If the model idles without the artifact (typically because it reached for the workflow-child `return` tool, which a foreground session does not have), the launcher spends one corrective turn asking for it as a plain assistant message, then fails loudly.
-
-The App private key never enters git. aios remints nothing here — GitHub Actions mints the token at the start of the job and revokes it in its post step, which now runs after the publisher rather than before it.
-
-The launcher asks the reviewer to keep verification proportional to the diff: focused affected tests are useful, but repository-wide test/lint/type-check runs duplicate CI and exhaustive ad hoc benchmarks are excluded. On a re-review with an unchanged substantive diff, it also avoids repeating expensive checks already reported by eumemic-bot. This bounds the reviewer's tool loop without reducing source inspection or targeted bug-catching verification.
-
-The `github_repository` resource takes no ref, so the `/mnt/review` clone lands on the repository's **default branch**, not on the PR. The launcher prompt says so and tells the reviewer to check out `HEAD_SHA` there before reading or testing that tree — without it, the focused tests the bound sanctions would run against master and pass for the wrong reason.
-
-Both obligations — the verification bound and the head pin — are also written into the committed `infra/agents/dev-review.json` system prompt, not just into this launcher's prompt. A dev-pipeline workflow child runs the same agent with no launcher prompt at all, so a manifest that carried neither would simply move the unbounded tool loop, and its focused tests, to that caller. `tests/unit/test_eumemic_bot_review.py` pins both copies.
-
-## Required repo config
-
-| Kind | Name | Notes |
+| Model | Harness | Endpoint |
 |---|---|---|
-| Variable | `EUMEMIC_BOT_APP_ID` | `4752589` |
-| Secret | `EUMEMIC_BOT_PRIVATE_KEY` | PEM for the App |
-| Secret | `AIOS_API_KEY` | already used by reconcile-agents |
+| `gpt-*` | Codex CLI (Responses API) | `https://oai-proxy.eumemic.ai/v1` |
+| `claude-*` | Claude Code | `https://ant-proxy.eumemic.ai` |
+| `grok-*` | Pi | `https://xai-proxy.eumemic.ai/v1` |
 
-## Identity
+For example, set the variable to an available `claude-*` model to use Claude Code, or `grok-4.6` to use Pi. The workflow installs all three harnesses, but only the secret for the selected family must contain a usable key.
 
-Reviews post as `eumemic-bot[bot]`, not as `eumemic`. The clone resource uses `4752589+eumemic-bot[bot]@users.noreply.github.com`.
+## Required repository configuration
+
+| Kind | Name | Purpose |
+|---|---|---|
+| Variable | `EUMEMIC_BOT_APP_ID` | GitHub App ID (`4752589`) |
+| Variable | `EUMEMIC_BOT_REVIEW_MODEL` | Optional; defaults to `gpt-5.6-sol` |
+| Secret | `EUMEMIC_BOT_PRIVATE_KEY` | PEM for the GitHub App |
+| Secret | `OAI_PROXY_API_KEY` | oai-proxy client key for `gpt-*` reviews |
+| Secret | `ANT_PROXY_API_KEY` | ant-proxy client key for `claude-*` reviews |
+| Secret | `XAI_PROXY_API_KEY` | xai-proxy client key for `grok-*` reviews |
+
+The launcher also accepts the conventional `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `XAI_API_KEY` names when run manually. It forces the corresponding eumemic proxy base URL.
+
+Checkout explicitly uses `pull_request.head.sha` with full history, and the launcher refuses to review if local `HEAD` does not match `HEAD_SHA`. Review execution has a 15-minute budget inside a 20-minute job. Failures remain `continue-on-error`; when token minting or review/publication fails, the job summary records that no comment was posted.
+
+Reviews are read-only and ask for focused verification only, not repository-wide suites. The existing `infra/agents/dev-review.json` remains available to other callers but is not part of this Action path. Jarbot still uses the old session path until it is ported separately.
