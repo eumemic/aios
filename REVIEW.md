@@ -1,149 +1,164 @@
-# Uncorrelated review — eumemic-bot review comment fix (`1bb1cacc`)
+# Uncorrelated review — dev-review verification bound (`9b6a9286`)
 
-Reviewer: Claude Opus 5, branch `botreviewrev`. Commit under review: `1bb1cacc`
-("fix: require eumemic-bot review comment before archive"). Fixes committed
-locally as `0d1c1b83`. Nothing pushed, no PR opened.
+Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
+Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
+Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
 
 ## Verdict
 
-The commit's **shape is right** — publication belongs to the launcher, not to the
-review session, and `archive_when_idle: false` is the correct consequence. But
-the implementation could not post a comment under any circumstances: three
-independently fatal defects each guarantee zero output on the real API. The
-reported symptom ("archives without posting `### Code review`") would have
-reproduced unchanged after this commit.
+**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
+timeout raise or a machinery rewrite — but it shipped with one material hole and
+a test that could not fail.** Both are fixed on this branch. Land after those two
+commits.
+
+The hole is not in what the bound forbids; it is in what the bound now
+*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
+principal form of verification, the change makes it load-bearing that the tree
+the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
+repository's **default branch**. That was tolerable while verification was
+unbounded and diffuse; it is not tolerable once focused tests are the whole
+verification budget, because a focused test run against master exercises the
+unchanged code and passes for the wrong reason. A fast review that silently
+verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
 
 ## Issues found
 
-### Fatal (each alone means no comment is ever posted)
+### Fatal
 
-1. **Wrong list envelope.** `_review_from_events` iterated
-   `payload.get("items", [])`. `ListResponse[T]` serializes its rows under
-   **`data`** (`src/aios/models/common.py`, confirmed against the committed
-   `openapi.json`). The artifact scan always saw an empty list, so every run
-   took the "no artifact" branch regardless of what the model wrote.
-
-2. **Wrong wait primitive.** `_await_turn` used `GET /v1/sessions/{id}/await`,
-   which resolves on `last_reacted_seq >= watermark`. `reacting_to` advances on
-   **every** assistant message, including the model's very first *tool-call*
-   turn — so the launcher declared the review finished seconds after it started,
-   found no artifact (correctly — the review had not happened yet), spent its one
-   corrective turn immediately, and then failed. Replaced with a cursor-threaded
-   `GET /v1/sessions/{id}/wait` long-poll that blocks until
-   `session_status != "active"`. That status is derived as
-   `last_stimulus_seq > last_reacted_seq OR open_tool_call_count > 0`, and tool
-   results are stimuli, so there is no false-idle window mid-turn.
-
-3. **Client socket timeout shorter than the server long-poll it requested.** The
-   request asked the server to hold for up to 60s while the socket deadline was
-   30s. Worse, a urllib **read** timeout raises a bare `TimeoutError`, not
-   `urllib.error.URLError`, so the handler did not catch it and the launcher died
-   on an unhandled traceback. Now `_WAIT_SECONDS = 30` with a socket deadline of
-   `2 * _WAIT_SECONDS`, and `TimeoutError` is translated alongside `URLError`.
+None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
+access are untouched by `9b6a9286` — verified against the diff. The change cannot
+regress the "green Action, no comment" class the launcher exists to prevent.
 
 ### Serious
 
-4. **Session leak on every failure path.** `archive_when_idle: false` with no
-   archive on the `_die` paths stranded a session forever on each failed run —
-   which, given #1–#3, was every run. `main()` now archives in a `finally`, and
-   the archive helper swallows only its own failure (warns on stderr) so it can
-   never mask the original error.
+1. **The reviewer's clone is on the default branch, not the PR — and the prompt
+   implied otherwise.** `GithubRepositoryResource`
+   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
+   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
+   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
+   branch HEAD, no checkout of anything else anywhere in the provisioning path
+   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
+   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
+   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
+   repository is cloned at /mnt/review", which any reader takes to mean the PR is
+   checked out there.
 
-5. **Timeout budget could not fit the job.** Two independent
-   `REVIEW_TIMEOUT_SECONDS` deadlines (2 × 1200s = 40 min) inside
-   `timeout-minutes: 30` meant the corrective turn was frequently unreachable;
-   the job would be killed mid-wait with no summary. Both waits now share a
-   single deadline.
+   Corroboration that this is live, not theoretical: the DONE's own evidence for
+   PR #2362 reports the reviewer running "a base-code mutation run" — base code
+   is exactly what a default-branch clone hands it.
 
-6. **Verification was too strict to be true.** The check compared the posted body
-   for exact equality with the artifact; any server-side normalization (line
-   endings, trailing whitespace) would report a false failure *after* a comment
-   had in fact been published. Replaced with a
-   `<!-- eumemic-bot-review:<head_sha> -->` marker round-trip plus a non-empty
-   `html_url` — which is what actually proves GitHub stored *this run's*
-   artifact, and additionally ties the comment to the reviewed SHA.
+   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
+   names `head_sha` as the commit to reach, and gives the reviewer a check it can
+   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
+   the model — `origin` is already the per-session git proxy, so `git fetch` works
+   from inside the sandbox, and per CLAUDE.md the model handles that failure
+   itself rather than the launcher scripting it.
 
-### Minor
+2. **The new test asserts the constant's own words, so it cannot fail.**
+   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
+   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
+   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
+   existing while the test stays green — a constant nothing sends is not a bound.
+   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
+   the *only* instruction a workflow child ever sees, so dropping it silently
+   relocates the expensive tool loop to the other caller rather than removing it.
 
-7. **Stale `skip-token-revoke: true`.** It existed because the *session* used to
-   post after the job ended. The publisher now runs inside the job, so the
-   action's post-step revoke can no longer 401 it; leaving the flag would keep an
-   installation token alive for its full hour for no reason. Removed, with a
-   comment explaining why.
+   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
+   asserts the bound and the head-checkout instruction against the
+   `initial_message` the launcher actually sends, and a second holds the same
+   bound in the committed manifest.
 
-8. **A silently green run is indistinguishable from a successful one.**
-   `continue-on-error: true` is correct (an ops miss must not block merges), but
-   it is also exactly how the original misses went unnoticed. Added a
-   `$GITHUB_STEP_SUMMARY` note that fires when the token mint or the review step
-   fails, so a reader sees "did not post" without opening logs.
+### Minor (not fixed — flagged for the implementer's call)
 
-9. **The regression test was a source grep.** The committed test asserted
-   `'"archive_when_idle": False' in source` — it passes on code that cannot run.
-   Replaced with ten behavioral tests.
+3. **The "unchanged substantive diff" clause is unactionable on the launcher
+   path.** It tells the reviewer not to repeat expensive checks "reported by an
+   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
+   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
+   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
+   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
+   the http_server allowlist permits, but nothing directs. If it *does* volunteer
+   it, it pulls prior full review artifacts into context, which is itself a
+   non-trivial token cost. Either pass the comments or drop the clause; leaving it
+   inert is the one option that buys nothing. I did not change it because both
+   directions are product calls, not defects.
 
-## Fixes applied (`0d1c1b83`)
+4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
+   explicitly permitted.** The bound says "focused tests" but offers no scoped
+   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
+   Low impact in practice — this repo's mypy is invoked whole-package
+   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
+   really on offer — but the asymmetry is worth a word if the prompt is revised.
 
-- `scripts/eumemic_bot_review.py` — `data` envelope; `/wait` long-poll with
-  cursor threading and a shared deadline; socket deadline outliving the
-  long-poll; `TimeoutError` translation; content-part block handling; leading
-  whitespace tolerated on the heading line; marker-based verification; archive in
-  a `finally` on every exit path; `REVIEW_TIMEOUT_SECONDS` documented.
-- `.github/workflows/eumemic-bot-review.yml` — dropped `skip-token-revoke`;
-  named/ID'd the review step; `REVIEW_TIMEOUT_SECONDS: "1200"` tied by comment to
-  `timeout-minutes: 30`; added the unpublished-review job-summary step.
-- `tests/unit/test_eumemic_bot_review.py` — rewritten: envelope, content blocks,
-  user-message filtering, wait-cursor threading, corrective turn, second-miss
-  fatality, exact publish→verify→archive call order, archive-on-failure, GitHub
-  non-confirmation, plus a contract test pinning paths, query params and response
-  fields against the committed `openapi.json`.
-- `docs/eumemic-bot-review.md` — matches the implemented behavior.
+5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
+   repo-wide *suites*, not the dependency install that running any test at all in
+   a fresh sandbox requires. Expect that fixed cost to survive. This is context
+   for reading the first post-fix run, not a defect.
 
-`infra/agents/dev-review.json` was reviewed and **not** changed: its dual
-contract (workflow child POSTs and calls `return`; foreground session must not
-POST and must not `return`, emitting the artifact as a plain assistant message)
-is correct, and consistent with the launcher prompt. The `return` tool is only
-injected when a session owes an open request (`harness/step_context.py`), so a
-foreground launcher session genuinely lacks it — which is the most likely reason
-real sessions ended without an artifact even before the launcher bugs.
+6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
+   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
+   events past `after` exist, so the DONE is right that the 30s is a long-poll
+   maximum and not a sleep. One wrinkle: `session_status` is read from the same
+   response, so if the final assistant event lands a beat before the step flips
+   the session out of `active`, one further poll can burn its full 30s. Bounded
+   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
+   regression when the post-fix timings come in.
 
-## Verification
+## Fixes applied
 
-- `uv run pytest -q tests/unit/test_eumemic_bot_review.py` → **10 passed**.
-- With `tests/unit/test_reconcile_agents.py` → **51 passed**.
-- Adjacent CI-script suites (`test_onboarding_docs_drift`,
-  `test_phantom_ref_canary_workflow`, `test_ci_queue_watchdog`) → **19 passed**.
-- `ruff check`, `ruff format --check`, `mypy` clean on the touched files.
-- Mutation check: temporarily reintroducing the `items` envelope bug fails three
-  tests; restored afterwards.
-- Workflow YAML parses (`yaml.safe_load`).
-- Diff touches only `scripts/eumemic_bot_review.py`, the workflow, its test, and
-  the doc. **No product or aios#2384/SMS code is touched.**
+| SHA | Commit | Files |
+|---|---|---|
+| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
+| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
 
-## Leftover risk
+Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
+passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
+`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
+(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
+`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
 
-- **No live proof from this worktree.** There are no aios credentials here (only
-  `.env.example`; no `AIOS_URL`/`AIOS_API_KEY`), and `gh` is authenticated as the
-  user `eumemic`, not as the eumemic-bot App. Real proof requires the repo
-  secrets (`AIOS_API_KEY`, `EUMEMIC_BOT_PRIVATE_KEY`, `DEV_REVIEW_AGENT_ID`) and
-  a PR-triggered Action run — i.e. it can only be obtained after this branch is
-  pushed and a PR opened, from that PR's own `eumemic-bot review` run. The proof
-  to look for in the step log is the line
-  `posted and verified ### Code review: <comment URL>`.
-- **The live agent's prompt lags the merge.** `infra/agents/dev-review.json` only
-  reaches the live agent via `reconcile-agents` after merge to `master`, so the
-  first PR run exercises the new launcher against the *old* agent contract. The
-  launcher tolerates that: a session that ends without the artifact gets one
-  corrective turn asking for it as a plain message.
-- **`continue-on-error: true` still keeps the check green** when nothing is
-  published. That is deliberate (ops misses must not block merges); the job
-  summary is the compensating signal, and it is a summary, not an alert — nobody
-  is paged.
-- **Model compliance is not enforceable.** If the model never emits a
-  `### Code review` heading even after the corrective turn, the launcher fails
-  loudly and posts nothing. That is the intended failure mode, not a regression.
-- **`DEV_REVIEW_AGENT_ID` is read from `secrets`** while `EUMEMIC_BOT_APP_ID` is
-  a variable; if that secret is unset the launcher skips rather than failing.
-  Unchanged from the reviewed commit and out of scope, but worth confirming it is
-  actually populated before expecting a run to post.
+## Do the DONE's claims hold?
 
-REVIEW_DONE
+**Root cause — holds, with one caveat about provenance.** "The dominant
+wall-clock cost is the review model's self-directed tool loop" is consistent with
+everything I can check in-repo: the launcher prompt genuinely placed no bound on
+verification, the manifest genuinely encouraged deeper inspection via the clone,
+and the reviewer genuinely has `bash` plus a full working tree. I could **not**
+independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
+checkout — no network to the Actions API, and the DONE itself notes the older
+logs have expired. I take the timing evidence as reported. The mechanism stands
+on its own, and the "base-code mutation run" detail in the cited artifact turned
+out to be an independent tell for issue 1 above.
+
+**"Checkout, token mint, publication, archive, and the long-poll are not material"
+— holds.** The long-poll half I verified directly in the endpoint code (see
+minor 6). The publication path is a single POST plus a marker round-trip.
+
+**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
+bug-catching verification are unchanged" — holds** for the first five, verified
+against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
+verification unchanged") is the claim that did **not** hold as landed: targeted
+verification against a master tree is not targeted verification of the PR. It
+holds after `8485af35`.
+
+**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
+
+**"No post-fix live timing exists; do not claim a precise old/new number" —
+holds, and is the right call.** Nothing in this branch licenses a speedup figure
+before the first live run. Read that run for two things, not one: the elapsed
+time, and whether the artifact shows the reviewer actually reached `head_sha` in
+`/mnt/review`.
+
+## What I did not verify
+
+- Live behaviour of the reviewer under the new prompt. Prompt bounds are
+  probabilistic; only a real run shows whether the model honours them, and
+  whether it honours the checkout instruction in particular.
+- That `git fetch origin pull/<n>/head` specifically succeeds through the
+  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
+  auth injected, and the prompt deliberately does not prescribe the mechanics, so
+  a model that finds one route blocked can take another — but this is the one
+  step of `8485af35` that wants confirmation from the first live run.
+- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
+  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
+  prompt asks for the SHA rather than a ref, which is the right shape for both
+  cases, but no fork PR has exercised it.
