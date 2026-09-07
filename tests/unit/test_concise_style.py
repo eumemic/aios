@@ -6,7 +6,6 @@ Mechanism and rationale live in ``aios.harness.concise``.
 from __future__ import annotations
 
 import itertools
-from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -18,101 +17,52 @@ from aios.harness.concise import (
     CONCISE_NAG_CONTENT,
     CONCISE_NAG_CONTENT_CHANNELS,
     CONCISE_NAG_DELIVERY_CLAUSE,
+    CONCISE_NAG_OFF_CONTENT,
     CONCISE_NAG_UPPER_BOUND_LOCAL,
     CONCISE_STYLE_BLOCK,
-    build_concise_nag_message,
 )
-from aios.harness.context import EPHEMERAL_TAIL_KEY
+from aios.harness.context import (
+    OMISSION_MARKER_UPPER_BOUND_LOCAL,
+    TRAILING_NOTICE_UPPER_BOUND_LOCAL,
+)
+from aios.harness.obligations import OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+from aios.harness.reminders import max_reminders_local
 from aios.harness.step_context import (
     StepPrelude,
-    compose_step_context,
     compute_step_prelude,
     prelude_overhead_local,
 )
 from aios.harness.tokens import approx_tokens
 from aios.models.agents import (
-    AgentBinding,
     AgentCreate,
     AgentUpdate,
-    OutputStyle,
     StepSurface,
 )
 from aios.models.events import Event
 from tests.unit.conftest import fake_pool_yielding_conn
+from tests.unit.step_context_support import (
+    ACCOUNT,
+    SESSION,
+    compose_with_stubs,
+    make_prelude,
+    make_step_surface,
+    message_event,
+)
 
-_ACCOUNT = "acc_concise"
-_SESSION = "sess_concise"
-
-
-def _agent(*, output_style: OutputStyle = "default") -> StepSurface:
-    return StepSurface(
-        model="gpt-test",
-        system="you are a test agent",
-        tools=[],
-        skills=[],
-        mcp_servers=[],
-        http_servers=[],
-        litellm_extra={},
-        window_min=1,
-        window_max=10,
-        preempt_policy="wait",
-        output_style=output_style,
-        binding=AgentBinding(agent_id="agt_concise", version=1),
-    )
+_ACCOUNT = ACCOUNT
+_SESSION = SESSION
+_agent = make_step_surface
+_prelude = make_prelude
 
 
 def _evt(seq: int, *, role: str, content: str = "hi") -> Event:
-    return Event(
-        id=f"evt_{seq:04d}",
-        session_id=_SESSION,
-        seq=seq,
-        kind="message",
-        data={"role": role, "content": content},
-        cumulative_tokens=None,
-        created_at=datetime(2026, 8, 25, tzinfo=UTC),
-    )
-
-
-def _prelude(*, system_prompt: str = "sys") -> StepPrelude:
-    return StepPrelude(
-        system_prompt=system_prompt,
-        tools=[],
-        skill_versions=[],
-        tail_block_upper_bound_local=0,
-        obligations=[],
-        obligations_block_upper_bound_local=0,
-    )
-
-
-class _Session:
-    id = _SESSION
-    focal_channel = None
+    return message_event(seq, role, content)
 
 
 async def _compose(
     agent: StepSurface, events: list[Event], *, channels: list[str] | None = None
 ) -> list[dict[str, Any]]:
-    with (
-        mock.patch(
-            "aios.services.sessions.load_session_workspace_path",
-            new=AsyncMock(return_value=None),
-        ),
-        mock.patch(
-            "aios.services.accounts.resolve_effective_timezone",
-            new=AsyncMock(return_value="UTC"),
-        ),
-    ):
-        step_ctx = await compose_step_context(
-            pool=MagicMock(),
-            session=_Session(),  # type: ignore[arg-type]
-            account_id=_ACCOUNT,
-            agent=agent,
-            channels=channels or [],
-            prelude=_prelude(),
-            events=events,
-            persist_image_rewrites=False,
-        )
-    return step_ctx.messages
+    return (await compose_with_stubs(agent, events, channels=channels)).messages
 
 
 def _text(msg: dict[str, Any]) -> str:
@@ -158,7 +108,7 @@ class TestConciseNag:
             assert not (a.get("role") == "user" and b.get("role") == "user")
 
     async def test_nag_stands_alone_after_assistant_turn(self) -> None:
-        """No channels -> no tail block, but the nag still renders, standing as
+        """No channels -> no channels listing, but the nag still renders, standing as
         its own final user message after the trailing assistant turn."""
         events = [_evt(1, role="user"), _evt(2, role="assistant", content="done")]
         messages = await _compose(_agent(output_style="concise"), events)
@@ -209,14 +159,6 @@ class TestConciseNag:
         text = _text(messages[-1])
         assert text == CONCISE_NAG_CONTENT
         assert CONCISE_NAG_DELIVERY_CLAUSE.strip() not in text
-
-    async def test_nag_carries_ephemeral_tail_marker(self) -> None:
-        """The nag (and any merge containing it) must never host the
-        stable-prefix cache breakpoint — its position is per-step."""
-        assert build_concise_nag_message()[EPHEMERAL_TAIL_KEY] is True
-        events = [_evt(1, role="user", content="please respond")]
-        messages = await _compose(_agent(output_style="concise"), events)
-        assert messages[-1].get(EPHEMERAL_TAIL_KEY) is True
 
     async def test_no_nag_when_not_concise(self) -> None:
         for channels in ([], ["signal/+1/chat-a"]):
@@ -283,18 +225,26 @@ class TestConciseNagReserve:
         alone, before the composer knows whether the session has channels, so
         the bound has to hold for the longer channel-attached nag (#2262).
         """
-        for has_channels in (False, True):
-            cost = approx_tokens([build_concise_nag_message(has_channels=has_channels)])
+        for content in (CONCISE_NAG_CONTENT, CONCISE_NAG_CONTENT_CHANNELS, CONCISE_NAG_OFF_CONTENT):
+            cost = approx_tokens([{"role": "user", "content": content}])
             assert cost <= CONCISE_NAG_UPPER_BOUND_LOCAL, (
-                f"nag variant has_channels={has_channels} costs {cost} local tokens, "
+                f"nag variant {content[:40]!r}… costs {cost} local tokens, "
                 f"over the {CONCISE_NAG_UPPER_BOUND_LOCAL} reserve -- raise the "
                 f"constant rather than shortening the clause"
             )
 
     def test_reserve_summed_unconditionally(self) -> None:
-        """Reserved for every agent (the omission-marker idiom) -- the prelude
-        carries no per-agent reserve field to forget."""
-        assert prelude_overhead_local(_prelude()).reserves >= CONCISE_NAG_UPPER_BOUND_LOCAL
+        """Reserved for every agent (the omission-marker idiom): the planner's
+        bound carries the nag reserve even for an agent with no channels and
+        no obligations, and the prelude's overhead sums that bound whole."""
+        floor = max_reminders_local([], [])
+        assert floor == (
+            OBLIGATIONS_EMPTY_UPPER_BOUND_LOCAL
+            + CONCISE_NAG_UPPER_BOUND_LOCAL
+            + TRAILING_NOTICE_UPPER_BOUND_LOCAL
+        )
+        reserves = prelude_overhead_local(make_prelude(reminders_upper_bound_local=floor)).reserves
+        assert reserves == floor + OMISSION_MARKER_UPPER_BOUND_LOCAL
 
 
 # ── the wire enum ────────────────────────────────────────────────────────────

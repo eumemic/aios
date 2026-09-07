@@ -9,6 +9,34 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from aios.models.events import Event, is_reminder_event
+
+
+def reminder_rows(events: list[Event]) -> list[Event]:
+    """The durable harness reminder rows in a list of events (the predicate
+    ``append_event`` reads, so a test sees exactly what the harness sees)."""
+    return [e for e in events if is_reminder_event(e.kind, e.data)]
+
+
+def assert_message_prefix(short: list[dict[str, Any]], long: list[dict[str, Any]]) -> None:
+    """Assert that *short* is a message-for-message prefix of *long*.
+
+    The prompt-prefix-cache invariant: the message list built for step N must
+    be a prefix of the list built for step N+1. Shared across tiers — the unit
+    ``build_messages`` monotonicity tests and the e2e real-loop payload tests
+    pin the same property.
+    """
+    assert len(short) <= len(long), (
+        f"short ({len(short)} msgs) is longer than long ({len(long)} msgs)"
+    )
+    for i, (a, b) in enumerate(zip(short, long, strict=False)):
+        assert a == b, (
+            f"monotonicity violation at index {i}:\n  short[{i}] = {a!r}\n  long[{i}]  = {b!r}"
+        )
+
+
+# ─── Postgres EXPLAIN plan-tree oracles ──────────────────────────────────────
+
 
 def find_subplans_over_events(plan_node: dict[str, Any]) -> list[dict[str, Any]]:
     """Walk a Postgres EXPLAIN (FORMAT JSON) plan tree. Return every node
