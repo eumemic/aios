@@ -471,6 +471,15 @@ def test_workflow_least_privilege_and_secret() -> None:
     assert "AIOS_URL: https://api.aios.eumemic.ai" in text
 
 
+def test_workflow_live_step_supplies_non_secret_runtime_settings() -> None:
+    """AgentCreate's MCP URL validator imports Settings in the live process."""
+    text = _WORKFLOW_PATH.read_text()
+    live_step = text[text.index("- name: Reconcile live agents") :]
+    assert "AIOS_VAULT_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" in live_step
+    assert "AIOS_EGRESS_CA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" in live_step
+    assert "AIOS_DB_URL: postgresql://unused:unused@localhost:5432/unused" in live_step
+
+
 def test_workflow_concurrency_serialises() -> None:
     text = _WORKFLOW_PATH.read_text()
     assert "group: reconcile-agents" in text

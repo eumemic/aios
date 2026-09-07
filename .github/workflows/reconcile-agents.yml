@@ -67,4 +67,10 @@ jobs:
         env:
           # Provisioned out-of-band by the maintainer; NEVER inline a key.
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+          # AgentCreate's outbound-URL validator imports the full Settings model.
+          # These values only satisfy Settings construction; reconciliation never
+          # decrypts vault data, signs egress certificates, or connects to the DB.
+          AIOS_VAULT_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          AIOS_EGRESS_CA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          AIOS_DB_URL: postgresql://unused:unused@localhost:5432/unused
         run: uv run python scripts/reconcile_agents.py
