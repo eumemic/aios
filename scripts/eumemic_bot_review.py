@@ -293,7 +293,10 @@ def main() -> None:
     environment_id = resolve_environment(base, api_key)
     prompt = (
         f"Review pull request {repo}#{pr_number} at {head_sha}. "
-        f"The repository is cloned at /mnt/review. "
+        f"The repository is cloned at /mnt/review, but that clone is on the default branch, "
+        f"not on this PR: check out {head_sha} there (fetch the PR head ref first) and confirm "
+        f"`git -C /mnt/review rev-parse HEAD` matches it before you read or test code from that "
+        f"tree. "
         f"Fetch the PR diff via the github http_request server "
         f"(GET /repos/{repo}/pulls/{pr_number} and /repos/{repo}/pulls/{pr_number}/files). "
         f"If http_request is unauthorized, use GH_TOKEN from the environment with gh or curl. "

@@ -13,6 +13,8 @@ The App private key never enters git. aios remints nothing here — GitHub Actio
 
 The launcher asks the reviewer to keep verification proportional to the diff: focused affected tests are useful, but repository-wide test/lint/type-check runs duplicate CI and exhaustive ad hoc benchmarks are excluded. On a re-review with an unchanged substantive diff, it also avoids repeating expensive checks already reported by eumemic-bot. This bounds the reviewer's tool loop without reducing source inspection or targeted bug-catching verification.
 
+The `github_repository` resource takes no ref, so the `/mnt/review` clone lands on the repository's **default branch**, not on the PR. The launcher prompt says so and tells the reviewer to check out `HEAD_SHA` there before reading or testing that tree — without it, the focused tests the bound sanctions would run against master and pass for the wrong reason.
+
 ## Required repo config
 
 | Kind | Name | Notes |
