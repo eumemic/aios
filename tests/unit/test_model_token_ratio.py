@@ -14,10 +14,12 @@ linear relationship, blend arithmetic, caching, and the scalar shim.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import pytest
 
 from aios.db.queries import (
@@ -69,6 +71,51 @@ def _linear_rows(coefs: dict[str, float], *, n: int, base: int = 100) -> list[di
 
 
 class TestModelTokenClassRatios:
+    @pytest.mark.asyncio
+    async def test_query_canceled_fails_open_to_neutral_targets(self) -> None:
+        conn = MagicMock()
+        conn.fetch = AsyncMock(
+            side_effect=asyncpg.exceptions.QueryCanceledError(
+                "canceling statement due to statement timeout"
+            )
+        )
+
+        ratios = await model_token_class_ratios(
+            conn, "model-timeout", account_id="acc_test_stub"
+        )
+
+        assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cold_fit_is_single_flight_per_model_bucket(self) -> None:
+        rows = _linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def _fetch(*args: Any) -> list[dict[str, Any]]:
+            started.set()
+            await release.wait()
+            return rows
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(side_effect=_fetch)
+        calls = [
+            asyncio.create_task(
+                model_token_class_ratios(
+                    conn, "model-herd", k_bucket=2.0, account_id=f"acc_{i}"
+                )
+            )
+            for i in range(8)
+        ]
+        await started.wait()
+        await asyncio.sleep(0)
+
+        assert conn.fetch.await_count == 1
+        release.set()
+        results = await asyncio.gather(*calls)
+        assert all(result == results[0] for result in results)
+        assert conn.fetch.await_count == 1
+
     @pytest.mark.asyncio
     async def test_below_min_samples_is_all_neutral(self) -> None:
         # 4 rows < the 5-sample threshold → every class is the neutral 1.0,

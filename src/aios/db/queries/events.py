@@ -7,6 +7,7 @@ asyncpg, same conventions as the rest of the package.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -323,17 +324,46 @@ _WINDOW_SAFETY_MARGIN = 0.30
 _WINDOW_FLOOR_MAX_FRACTION = 0.75
 
 _model_token_ratio_cache: dict[tuple[str, float], tuple[float, dict[str, float]]] = {}
+_model_token_ratio_fits: dict[tuple[str, float], asyncio.Task[dict[str, float]]] = {}
 
 
 def _clear_model_token_ratio_cache() -> None:
     """Clear the process-local token-ratio cache for tests."""
     _model_token_ratio_cache.clear()
+    for task in _model_token_ratio_fits.values():
+        task.cancel()
+    _model_token_ratio_fits.clear()
 
 
-def _neutral_class_ratios() -> dict[str, float]:
+def _neutral_class_targets() -> dict[str, float]:
     """The all-1.0 coefficient dict — reduces the windower to today's
     byte-identical model-neutral behavior (issue #1609 acceptance #5)."""
     return {c: 1.0 for c in CONTENT_CLASSES}
+
+
+# Kept as a private compatibility alias for tests and diagnostic callers that
+# predate the class-target terminology.
+_neutral_class_ratios = _neutral_class_targets
+
+
+async def _fit_and_cache_class_targets(
+    conn: asyncpg.Connection[Any],
+    model: str,
+    *,
+    account_id: str,
+    cache_key: tuple[str, float],
+) -> dict[str, float]:
+    """Run one cold fit and publish its cache entry before completing."""
+    fitted, n_samples = await model_token_class_ratio_fit(conn, model, account_id=account_id)
+    now = time.monotonic()
+    if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
+        targets = _neutral_class_targets()
+        ttl = _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS
+    else:
+        targets = fitted
+        ttl = _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS
+    _model_token_ratio_cache[cache_key] = (now + ttl, targets)
+    return dict(targets)
 
 
 def _solve_ridge(
@@ -448,10 +478,12 @@ async def model_token_class_ratios(
     they accumulate (same contract as #160).
 
     Mature fits are cached 60 s; below-threshold neutral results are cached
-    10 s to bound the activation lag.  ``k_bucket`` partitions the cache so
-    callers using different calibration bucket widths do not share fitted
-    results.  The per-class fit's stability comes from the ridge regularizer,
-    not bucket quantization.
+    10 s to bound the activation lag. Cold fits are single-flight per
+    ``(model, k_bucket)`` so concurrent post-restart wakes share one bounded
+    query. ``k_bucket`` partitions both the cache and in-flight work so callers
+    using different calibration bucket widths do not share fitted results. The
+    per-class fit's stability comes from the ridge regularizer, not bucket
+    quantization.
 
     ``model`` is the raw model string (``agent.model``) — NO
     NORMALIZATION; the same string must appear at stamp and query time.
@@ -490,21 +522,28 @@ async def model_token_class_ratios(
             return dict(ratios)
         del _model_token_ratio_cache[cache_key]
 
-    fitted, n_samples = await model_token_class_ratio_fit(conn, model, account_id=account_id)
-
-    if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
-        neutral = _neutral_class_ratios()
-        _model_token_ratio_cache[cache_key] = (
-            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
-            neutral,
+    # A restart can put many wakes for the same model on this cold-cache path
+    # at once. Let exactly one of them perform the bounded fit. Shielding is
+    # important: cancellation of one wake must not cancel the shared query for
+    # every other waiter.
+    fit_task = _model_token_ratio_fits.get(cache_key)
+    if fit_task is None:
+        fit_task = asyncio.create_task(
+            _fit_and_cache_class_targets(
+                conn, model, account_id=account_id, cache_key=cache_key
+            )
         )
-        return dict(neutral)
+        _model_token_ratio_fits[cache_key] = fit_task
 
-    _model_token_ratio_cache[cache_key] = (
-        now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
-        fitted,
-    )
-    return dict(fitted)
+        def _discard_finished(
+            finished: asyncio.Task[dict[str, float]],
+        ) -> None:
+            if _model_token_ratio_fits.get(cache_key) is finished:
+                del _model_token_ratio_fits[cache_key]
+
+        fit_task.add_done_callback(_discard_finished)
+
+    return await asyncio.shield(fit_task)
 
 
 async def model_token_class_ratio_fit(
@@ -522,10 +561,14 @@ async def model_token_class_ratio_fit(
     provider-native), so mixing baselines in one fit would poison the
     coefficients.  After a baseline bump the fit self-heals: it returns the
     neutral fallback until enough current-baseline spans accumulate.
+
+    A statement timeout is also a neutral result: calibration is optional and
+    must not turn database pressure into a failed product wake (issue #2244).
     """
     del account_id
-    rows = await conn.fetch(
-        """
+    try:
+        rows = await conn.fetch(
+            """
         SELECT
             (data->'model_usage'->>'input_tokens')::float AS it,
             data->'local_tokens_by_class'                 AS by_class
@@ -551,11 +594,15 @@ async def model_token_class_ratio_fit(
         -- MIN_SAMPLES is still checked below the fetch.
         ORDER BY created_at DESC, session_id DESC, seq DESC
         LIMIT $2
-        """,
-        model,
-        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
-        TOKEN_BASELINE_CURRENT,
-    )
+            """,
+            model,
+            _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
+            TOKEN_BASELINE_CURRENT,
+        )
+    except asyncpg.exceptions.QueryCanceledError:
+        # Calibration is optional. A neutral window is safer than turning a
+        # busy database's statement timeout into a failed product wake.
+        return _neutral_class_targets(), 0
     return _fit_class_ratios(rows), len(rows)
 
 
