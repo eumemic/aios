@@ -171,6 +171,15 @@ def test_review_budget_fits_under_the_job_timeout() -> None:
     )
 
 
+def test_review_scope_avoids_repeating_ci_and_exhaustive_work() -> None:
+    """The launcher must constrain the costly tool loops seen in live reviews."""
+    guidance = reviewer.REVIEW_SCOPE
+    assert "focused tests" in guidance
+    assert "repository-wide test, lint, format, or type-check suites" in guidance
+    assert "exhaustive ad hoc benchmarks" in guidance
+    assert "substantive PR diff is unchanged" in guidance
+
+
 def test_missing_artifact_gets_one_corrective_turn(monkeypatch: Any) -> None:
     reviews = iter([None, "### Code review\n\nFound on retry."])
     posts: list[tuple[Any, ...]] = []

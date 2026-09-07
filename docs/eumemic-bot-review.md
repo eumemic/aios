@@ -11,6 +11,8 @@ Two consequences worth knowing:
 
 The App private key never enters git. aios remints nothing here — GitHub Actions mints the token at the start of the job and revokes it in its post step, which now runs after the publisher rather than before it.
 
+The launcher asks the reviewer to keep verification proportional to the diff: focused affected tests are useful, but repository-wide test/lint/type-check runs duplicate CI and exhaustive ad hoc benchmarks are excluded. On a re-review with an unchanged substantive diff, it also avoids repeating expensive checks already reported by eumemic-bot. This bounds the reviewer's tool loop without reducing source inspection or targeted bug-catching verification.
+
 ## Required repo config
 
 | Kind | Name | Notes |

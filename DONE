@@ -1,0 +1,79 @@
+# eumemic-bot / dev-review speed investigation
+
+## Root cause
+
+The dominant wall-clock cost is the review model's self-directed tool loop. It
+does substantially more verification than a PR review needs: repository-wide
+unit tests, repo-wide mypy/ruff/format checks, mutation runs against the base,
+and exhaustive generated comparisons. Checkout, token mint, GitHub publication,
+archive, and the launcher's long-poll are not material contributors.
+
+The launcher prompt told the agent to review for correctness but placed no bound
+on verification scope. The managed `dev-review` prompt even encouraged deeper
+inspection via the full clone. The model consequently duplicated CI and invented
+large verification jobs, including on repeated reviews where only `master` had
+been merged and the substantive PR diff had not changed.
+
+## Evidence
+
+- PR #2371 run 34080735524 spent 30m35s inside `python3
+  scripts/eumemic_bot_review.py` (03:45:49–04:16:24 UTC). Setup and publication
+  took only seconds; the final `started session` and `posted and verified` lines
+  share essentially the same timestamp because Python stdout was block-buffered,
+  so those lines do not imply session creation was slow.
+- PR #2371 run 34078790664 similarly spent 29m02s in the launcher
+  (03:11:41–03:40:43 UTC). Its published review says it ran affected tests,
+  repo-wide mypy, repo-wide ruff and format, the entire unit suite under xdist,
+  then separately investigated failures.
+- PR #2380 run 34078790276 spent 17m10s in the launcher
+  (03:11:41–03:28:51 UTC), again with setup/post outside that interval measured
+  in seconds. Its artifact reports repo-wide checks and a full parallel unit run.
+- PR #2362 run 34073951440 spent 10m23s in the launcher
+  (02:34:36–02:44:59 UTC). Its artifact reports targeted tests plus repo-wide
+  mypy/ruff/format, the full unit suite, a base-code mutation run, and an ad hoc
+  exhaustive old-vs-new comparison over 4,227,136 input pairs.
+- Re-reviews of #2362 explicitly say the substantive three-file diff was
+  unchanged, yet repeat every check. Public artifacts:
+  https://github.com/eumemic/aios/pull/2362#issuecomment-5564318278 and
+  https://github.com/eumemic/aios/pull/2362#issuecomment-5564638351.
+- The successful posting-path control, PR #2370 run 34071478896, spends 9m57s
+  in the launcher and then posts/verifies in the same second. This rules out the
+  GitHub POST and archive path as the multi-minute sink.
+- The older failing logs for the original #2380/#2371/#2362 heads have expired
+  from GitHub (`gh run view --log` returns no log), so they cannot provide
+  event-level timings. The later runs above are public, same PRs, same live
+  agent, and directly expose both elapsed time and the commands summarized by
+  the agent itself.
+
+The 30-second `/wait` value is a long-poll maximum, not a fixed sleep: the API
+returns when events arrive. Clone/session provisioning is inside the measured
+launcher interval, but the review artifacts account for the long intervals with
+explicit expensive commands; no evidence points to clone or polling as dominant.
+The corrective second turn is also not implicated in these successful artifacts.
+
+## Landed fix
+
+Commit on branch `reviewspd` constrains verification in both the launcher prompt
+and managed `dev-review` definition:
+
+- keep source review and focused tests for changed behavior;
+- do not duplicate CI with repository-wide test/lint/format/type-check suites;
+- do not invent exhaustive ad hoc benchmarks;
+- on an unchanged substantive diff, do not repeat expensive checks already
+  reported by an earlier eumemic-bot review.
+
+Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
+bug-catching verification are unchanged. This attacks the observed tool-loop
+cost without weakening review of the affected code.
+
+No post-fix live timing exists until Shepherd opens a PR. Expected runtime is
+now dominated by diff inspection and targeted tests rather than 10–30 minutes
+of repo-wide/exhaustive work; do not claim a precise old/new number before the
+first live run.
+
+## Verification
+
+- `uv run pytest -q tests/unit/test_eumemic_bot_review.py tests/unit/test_reconcile_agents.py`
+  — 53 passed.
+- `git diff --check` — clean.
+

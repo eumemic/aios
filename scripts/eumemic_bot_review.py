@@ -46,6 +46,12 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "dev-review")
 ENVIRONMENT_NAME = os.environ.get("ENVIRONMENT_NAME", "dev-pipeline-real")
 
 ARTIFACT_HEADING = "### Code review"
+REVIEW_SCOPE = (
+    "Keep verification proportional to the changed code. Use focused tests for affected "
+    "behavior, but do not run repository-wide test, lint, format, or type-check suites; CI "
+    "already runs those. Do not build exhaustive ad hoc benchmarks or repeat expensive checks "
+    "reported by an earlier eumemic-bot review when the substantive PR diff is unchanged."
+)
 
 # Long-poll window for GET /v1/sessions/{id}/wait (server caps it at 60). The
 # socket deadline must OUTLIVE it, or every poll dies on a client read timeout
@@ -294,7 +300,7 @@ def main() -> None:
         f"This is a foreground session, so the `return` tool is unavailable. Do not post to "
         f"GitHub yourself. Reply as a normal assistant message with the complete review artifact; "
         f"its first line must be exactly `{ARTIFACT_HEADING}`. The launcher will post and verify "
-        f"it."
+        f"it. {REVIEW_SCOPE}"
     )
     body = {
         "agent_id": agent_id,
