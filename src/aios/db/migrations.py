@@ -129,8 +129,15 @@ async def apply_procrastinate_schema(db_url: str, *, verbose: bool = False) -> N
     import asyncpg
     from procrastinate import App, PsycopgConnector
 
+    from aios.db.pool import normalize_dsn
     from aios.db.procrastinate_extensions import LOCK_RELEASE_TRIGGER_DDL
 
+    # ``db_url`` arrives verbatim from ``settings.db_url`` (``aios migrate``) and
+    # from test fixtures. Strip any SQLAlchemy/alembic driver suffix so both
+    # asyncpg (``postgresql://`` only) and procrastinate's psycopg connector
+    # (bare scheme) accept it — mirrors ``aios.db.pool.normalize_dsn`` used by
+    # ``create_pool`` and ``_sync_dsn`` used by the worker's connector.
+    db_url = normalize_dsn(db_url)
     conn = await asyncpg.connect(db_url)
     try:
         present = await conn.fetchval("SELECT to_regclass('procrastinate_jobs')")

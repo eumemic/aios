@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "eumemic_bot_review.py"
 _SPEC = importlib.util.spec_from_file_location("eumemic_bot_review", _SCRIPT)
@@ -21,6 +22,10 @@ reviewer = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(reviewer)
 
 _ARTIFACT = "### Code review\n\nLooks good."
+
+# Checkout, token mint, the GitHub POST and the archive all live outside the
+# review budget; the job timeout must cover them on top of the worst-case wait.
+_JOB_OVERHEAD_SECONDS = 120
 
 
 def _assistant(content: Any) -> dict[str, Any]:
@@ -123,6 +128,47 @@ def test_launcher_matches_the_committed_api_contract() -> None:
     assert "archive_when_idle" in schemas["SessionCreate"]["properties"]
     assert "content" in schemas["SessionUserMessage"]["properties"]
     assert "/v1/sessions/{session_id}/archive" in spec["paths"]
+
+
+def test_review_budget_fits_under_the_job_timeout() -> None:
+    """The launcher must FATAL on its own budget BEFORE the runner kills the job.
+
+    No test can tell that a budget is too SMALL -- that is what raising 1200 to
+    2700 was for. What a test can hold is the ordering between the two clocks,
+    which is precisely what raising one of them can break. Assert the property,
+    not the literals: both numbers are expected to be re-tuned again.
+
+    Order matters. The review step is ``continue-on-error``, so a launcher FATAL
+    leaves the job green and still runs the "did not post" summary step. A job
+    that hits ``timeout-minutes`` instead is killed outright: red check, and the
+    summary step is skipped, which is exactly the silent failure this launcher
+    exists to prevent. So the worst-case launcher wall clock -- the budget plus
+    one final long-poll, which is issued just under the deadline and can hold
+    the socket for ``_WAIT_HTTP_TIMEOUT`` -- must land clear of the job timeout
+    with room for checkout, token mint, the GitHub POST, and the archive.
+    """
+    workflow = yaml.safe_load(
+        (_SCRIPT.parents[1] / ".github/workflows/eumemic-bot-review.yml").read_text()
+    )
+    job = workflow["jobs"]["review"]
+    step = next(s for s in job["steps"] if s.get("id") == "review")
+    budget = int(step["env"]["REVIEW_TIMEOUT_SECONDS"])
+    job_seconds = int(job["timeout-minutes"]) * 60
+
+    worst_case = budget + reviewer._WAIT_HTTP_TIMEOUT
+    assert worst_case + _JOB_OVERHEAD_SECONDS <= job_seconds, (
+        f"REVIEW_TIMEOUT_SECONDS={budget} plus a {reviewer._WAIT_HTTP_TIMEOUT}s final long-poll "
+        f"leaves under {_JOB_OVERHEAD_SECONDS}s of the {job_seconds}s job for checkout, token "
+        f"mint and the GitHub POST: the runner would kill the job before the launcher can "
+        f"report why"
+    )
+
+    # Two copies of one number: the workflow's env and the launcher's default. A
+    # manual `python3 scripts/eumemic_bot_review.py` must get the CI budget too.
+    assert budget == reviewer._REVIEW_SECONDS, (
+        f"launcher default {reviewer._REVIEW_SECONDS}s and workflow env {budget}s "
+        f"disagree on the review budget"
+    )
 
 
 def test_missing_artifact_gets_one_corrective_turn(monkeypatch: Any) -> None:
