@@ -171,6 +171,25 @@ def test_review_budget_fits_under_the_job_timeout() -> None:
     )
 
 
+def test_the_dev_review_manifest_bounds_verification_and_pins_the_head_too() -> None:
+    """The launcher prompt binds only the foreground path.
+
+    A workflow child gets no launcher prompt — its whole instruction set is the
+    committed ``dev-review`` manifest — so both the verification bound and the
+    head pin have to live there too. Otherwise the expensive tool loop can move
+    to the other caller or its focused tests can run against the default branch.
+    """
+    manifest = json.loads((_SCRIPT.parents[1] / "infra/agents/dev-review.json").read_text())
+    system = manifest["system"]
+
+    assert "do not run repository-wide" in system
+    assert "exhaustive ad hoc benchmarks" in system
+    assert "/mnt/review starts on the default branch" in system
+    assert "before reading or running focused tests" in system
+    assert "check out the request head_sha" in system
+    assert "HEAD matches head_sha" in system
+
+
 def test_missing_artifact_gets_one_corrective_turn(monkeypatch: Any) -> None:
     reviews = iter([None, "### Code review\n\nFound on retry."])
     posts: list[tuple[Any, ...]] = []
@@ -206,6 +225,7 @@ class _Api:
         self.events = events
         self.calls: list[str] = []
         self.posted_body: str | None = None
+        self.created: dict[str, Any] | None = None
 
     def request(
         self, method: str, url: str, api_key: str, body: dict[str, Any] | None = None, **kwargs: Any
@@ -213,6 +233,7 @@ class _Api:
         path = url.split("/v1/")[1].split("?")[0]
         self.calls.append(f"{method} /v1/{path}")
         if path == "sessions":
+            self.created = body
             return {"id": "sess_1"}
         if path.endswith("/wait"):
             return {"session_status": "idle", "next_after": 3}
@@ -266,6 +287,35 @@ def test_main_posts_the_artifact_then_archives(
     # The marker is what the verification round-trip asserts on.
     assert "<!-- eumemic-bot-review:9143ff54 -->" in api.posted_body
     assert "posted and verified ### Code review: https://github.com/" in capsys.readouterr().out
+
+
+def test_session_prompt_bounds_verification_and_pins_the_head(
+    monkeypatch: Any, launcher_env: None
+) -> None:
+    """Both bounds have to reach the session, not just exist as constants.
+
+    ``REVIEW_SCOPE`` is inert unless it is interpolated into ``initial_message``,
+    and the checkout instruction is what keeps the focused tests that bound
+    sanctions from running against the wrong tree: the ``github_repository``
+    resource takes no ref, so ``/mnt/review`` lands on the default branch.
+    """
+    api = _Api({"data": [_assistant(_ARTIFACT)]})
+    monkeypatch.setattr(reviewer, "_request", api.request)
+    monkeypatch.setattr(reviewer, "_github_request", api.github)
+
+    reviewer.main()
+
+    assert api.created is not None
+    prompt = api.created["initial_message"]
+
+    assert reviewer.REVIEW_SCOPE in prompt
+    assert "do not run repository-wide test, lint, format, or type-check suites" in prompt
+    assert "focused tests" in prompt
+
+    # HEAD_SHA from launcher_env; the clone is on the default branch until the
+    # reviewer moves it, so the prompt must say so and name the commit to reach.
+    assert "default branch" in prompt
+    assert "check out 9143ff54" in prompt
 
 
 def test_main_archives_even_when_the_artifact_never_arrives(

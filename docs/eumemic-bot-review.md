@@ -11,6 +11,12 @@ Two consequences worth knowing:
 
 The App private key never enters git. aios remints nothing here — GitHub Actions mints the token at the start of the job and revokes it in its post step, which now runs after the publisher rather than before it.
 
+The launcher asks the reviewer to keep verification proportional to the diff: focused affected tests are useful, but repository-wide test/lint/type-check runs duplicate CI and exhaustive ad hoc benchmarks are excluded. On a re-review with an unchanged substantive diff, it also avoids repeating expensive checks already reported by eumemic-bot. This bounds the reviewer's tool loop without reducing source inspection or targeted bug-catching verification.
+
+The `github_repository` resource takes no ref, so the `/mnt/review` clone lands on the repository's **default branch**, not on the PR. The launcher prompt says so and tells the reviewer to check out `HEAD_SHA` there before reading or testing that tree — without it, the focused tests the bound sanctions would run against master and pass for the wrong reason.
+
+Both obligations — the verification bound and the head pin — are also written into the committed `infra/agents/dev-review.json` system prompt, not just into this launcher's prompt. A dev-pipeline workflow child runs the same agent with no launcher prompt at all, so a manifest that carried neither would simply move the unbounded tool loop, and its focused tests, to that caller. `tests/unit/test_eumemic_bot_review.py` pins both copies.
+
 ## Required repo config
 
 | Kind | Name | Notes |
