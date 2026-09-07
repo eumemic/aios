@@ -47,6 +47,9 @@ class _FakeDocker:
     (``size``) cannot see. Absent ⇒ the chain costs exactly its view.
     """
 
+    commit_view: int | None
+    commit_chain: int | None
+
     def __init__(self) -> None:
         self.parent_image = "img_S1"
         self.size_rw = 1_000_000
