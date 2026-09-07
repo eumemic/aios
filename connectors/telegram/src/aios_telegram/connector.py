@@ -13,8 +13,10 @@ Lifecycle:
   ``Application`` from the connection's bot token, register message +
   reaction handlers, ``get_me`` for identity, then race a polling
   loop with an inbound drainer that funnels updates through
-  :meth:`emit_inbound`.  On cancellation, stop polling + shut down
-  the application cleanly.
+  :meth:`emit_inbound`.  On cancellation, stop polling, drain the
+  inbound queue to completion (so no fetched update is lost between
+  Telegram confirming it and aios recording it), then shut the
+  application down cleanly.
 * :meth:`teardown` is a no-op container-wide; per-connection
   cleanup is owned by ``serve_connection``'s ``finally``.
 
@@ -106,8 +108,10 @@ class TelegramConnector(HttpConnector):
 
         Each connection has its own bot token (one PTB Application per
         token); no sharing across connections.  Races polling + drainer
-        in a :class:`asyncio.TaskGroup`; on cancellation, both stop and
-        ``finally`` shuts the application down cleanly.
+        in a :class:`asyncio.TaskGroup`; on cancellation ``finally`` stops
+        polling, drains the inbound queue to completion, then shuts the
+        application down cleanly — see :meth:`_shutdown_application` for
+        why the drain is load-bearing for lossless graceful shutdown.
         """
         bot_token = secrets.get("bot_token")
         if not bot_token:
@@ -134,7 +138,7 @@ class TelegramConnector(HttpConnector):
                     name=f"telegram-drain-{connection_id}",
                 )
         finally:
-            await self._shutdown_application(state.application)
+            await self._shutdown_application(connection_id, state)
 
     async def _build_state(self, bot_token: str) -> _TelegramConnectionState:
         application = Application.builder().token(bot_token).build()
@@ -192,16 +196,70 @@ class TelegramConnector(HttpConnector):
             inbound_queue=inbound_queue,
         )
 
-    @staticmethod
-    async def _shutdown_application(application: Application) -> None:  # type: ignore[type-arg]
-        """Best-effort PTB shutdown sequence."""
+    async def _shutdown_application(
+        self, connection_id: str, state: _TelegramConnectionState
+    ) -> None:
+        """Stop polling, drain queued inbound, then shut the application down.
+
+        Ordering is load-bearing for lossless graceful shutdown (deploys,
+        config reloads, supervisor restarts):
+
+        1. ``updater.stop()`` stops the Telegram fetcher and runs PTB's
+           ``_get_updates_cleanup``, confirming (deleting server-side)
+           every fetched update from Telegram.
+        2. ``application.stop()`` joins PTB's ``update_queue`` so every
+           fetched update's handler has run and put its parsed item into
+           ``inbound_queue`` — after this, nothing else can produce.
+        3. Drain ``inbound_queue`` to completion, emitting every buffered
+           item so its ack row is written before the connector exits.
+           Both PTB producers are now stopped, so this drain is finite.
+           Without it, updates already confirmed to (deleted by) Telegram
+           but still queued locally are silently lost on restart: no
+           Telegram redelivery and no ack row to dedup.  This is the
+           confirm-before-emit race the restart-redelivery ledger does
+           *not* cover (it covers the opposite, emit-before-confirm).
+        4. ``application.shutdown()`` for final resource cleanup.
+
+        Each PTB step is best-effort (``contextlib.suppress(Exception)``)
+        so a failure in one cannot skip the drain or the rest of the
+        teardown.  Per-item emit failures during the drain are logged, not
+        raised, so one bad item cannot abandon the rest of the queue.
+        """
         with contextlib.suppress(Exception):
-            if application.updater is not None:
-                await application.updater.stop()
+            if state.application.updater is not None:
+                await state.application.updater.stop()
         with contextlib.suppress(Exception):
-            await application.stop()
+            await state.application.stop()
+        await self._drain_remaining(connection_id, state)
         with contextlib.suppress(Exception):
-            await application.shutdown()
+            await state.application.shutdown()
+
+    async def _drain_remaining(self, connection_id: str, state: _TelegramConnectionState) -> None:
+        """Emit everything still buffered in ``inbound_queue``.
+
+        Called only after :meth:`_shutdown_application` has stopped both
+        PTB producers — the Telegram fetcher (via ``updater.stop()``) and
+        the update-processing fetcher (via ``application.stop()``) — so no
+        new items can arrive and the drain is finite.  Per-item emit
+        failures are logged and skipped so a single failure cannot lose
+        the rest; the aios dedup ledger (same-``event_id``
+        ``ON CONFLICT DO NOTHING``) suppresses a double-emit of the
+        in-flight item the drainer re-enqueued on cancellation.
+        """
+        while True:
+            try:
+                item = state.inbound_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                await self._emit_item(connection_id, state, item)
+            except Exception:
+                log.warning(
+                    "telegram.inbound.drain_emit_failed",
+                    connection_id=connection_id,
+                    bot_id=state.bot_id,
+                    exc_info=True,
+                )
 
     async def _run_polling(self, state: _TelegramConnectionState) -> None:
         await state.application.start()
@@ -214,12 +272,40 @@ class TelegramConnector(HttpConnector):
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _TelegramConnectionState) -> None:
+        """Emit queued inbound updates at the connector's own pace.
+
+        Decouples PTB's fetch loop from :meth:`emit_inbound`'s per-item
+        service time (attachment download + multipart POST + server
+        transaction): a media-heavy chat fetches faster than we ingest,
+        so items queue up here.
+
+        On cancellation the in-flight item is re-enqueued so the graceful
+        drain in :meth:`_shutdown_application` can still emit it — the aios
+        dedup ledger (``try_record_inbound_ack``: same-``event_id``
+        ``ON CONFLICT DO NOTHING``) suppresses any double-emit if the
+        original POST already committed server-side before the connection
+        was torn down.  Without this, the TaskGroup cancellation that
+        precedes ``_shutdown_application`` would abandon the in-flight
+        item and everything queued behind it.
+        """
         while True:
             item = await state.inbound_queue.get()
-            if isinstance(item, InboundReaction):
-                await self._emit_reaction(connection_id, state, item)
-            else:
-                await self._emit_message(connection_id, state, item)
+            try:
+                await self._emit_item(connection_id, state, item)
+            except asyncio.CancelledError:
+                state.inbound_queue.put_nowait(item)
+                raise
+
+    async def _emit_item(
+        self,
+        connection_id: str,
+        state: _TelegramConnectionState,
+        item: InboundMessage | InboundReaction,
+    ) -> None:
+        if isinstance(item, InboundReaction):
+            await self._emit_reaction(connection_id, state, item)
+        else:
+            await self._emit_message(connection_id, state, item)
 
     async def _emit_message(
         self,
