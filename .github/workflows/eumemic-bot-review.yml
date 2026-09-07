@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     # The review turn owns REVIEW_TIMEOUT_SECONDS of this; the rest is
     # checkout + token mint + the GitHub POST.
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +51,7 @@ jobs:
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
           AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REVIEW_TIMEOUT_SECONDS: "1200"
+          REVIEW_TIMEOUT_SECONDS: "2700"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
