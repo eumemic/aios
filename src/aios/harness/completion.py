@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import litellm
 
 from aios.config import get_settings
-from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT, EPHEMERAL_TAIL_KEY
+from aios.harness.context import _USER_MESSAGE_SEPARATOR_CONTENT
 from aios.harness.context_admission import (
     AdmissionMode,
     AdmissionReport,
@@ -487,86 +487,50 @@ def inject_cache_breakpoints(
 
     1. **System message** — cache-stable across steps.
     2. **Last tool definition** — cache-stable while tools don't change.
-    3. **Last stable conversation message** — the last event-sourced
-       message, skipping any trailing per-step-assembled tail message
-       (content or position varies per step), identified by its
-       out-of-band :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`
-       marker, and any empty-assistant separator inserted before it by
-       :func:`~aios.harness.context.merge_adjacent_user_messages`.
+    3. **Last conversation message** — every message is event-sourced now
+       that the harness's standing reminders are durable rows
+       (``aios.harness.reminders``), so the last message is the last one the
+       next step will replay byte-for-byte; only an empty-assistant
+       separator (a wasted breakpoint) is skipped.
 
-    The marker is stripped from every message before the wire on every
-    path (including the non-Anthropic early-out), so it never reaches a
-    provider.
-
-    Skipping the tail is load-bearing: with the breakpoint on the tail
-    itself, the conversation prefix never gets its own cache entry and
-    has to be re-cache-created every step.  Placing it on the last
-    stable message lets the prefix cache across steps — next step's
-    conversation-through-last-event is byte-identical and hits.
+    The breakpoint on the last message is what lets the conversation prefix
+    cache across steps: the next step's conversation-through-last-event is
+    byte-identical and hits.
     """
     if not messages:
         return
 
-    if model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC:
-        if messages[0].get("role") == "system":
-            _set_content_block_cache(messages[0])
+    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
+        return
 
-        if tools:
-            tools[-1]["cache_control"] = _CACHE_CONTROL
+    if messages[0].get("role") == "system":
+        _set_content_block_cache(messages[0])
 
-        # Consume the ephemeral-tail markers (via _is_ephemeral_tail) to
-        # place the prefix breakpoint, THEN strip the markers below.
-        idx = _last_stable_message_index(messages)
-        if idx is not None and messages[idx].get("role") != "system":
-            _set_content_block_cache(messages[idx])
+    if tools:
+        tools[-1]["cache_control"] = _CACHE_CONTROL
 
-    # Strip the out-of-band marker from every message on EVERY path,
-    # including the non-Anthropic early-out above. The marker is a
-    # non-standard message key (Anthropic rejects unknown fields) and must
-    # never reach a provider — non-Anthropic routes place no breakpoint but
-    # still carry these dicts to the wire, so the strip is unconditional.
-    for msg in messages:
-        msg.pop(EPHEMERAL_TAIL_KEY, None)
+    idx = _last_stable_message_index(messages)
+    if idx is not None and messages[idx].get("role") != "system":
+        _set_content_block_cache(messages[idx])
 
 
 def _last_stable_message_index(messages: list[dict[str, Any]]) -> int | None:
     """Return the index of the last cache-stable message, or ``None``.
 
-    Walks backward from the end, skipping:
+    Walks backward from the end, skipping any role-transition separator —
+    inserted by the former separator mechanism (now
+    :func:`~aios.harness.context.merge_adjacent_user_messages`) to defeat
+    Anthropic's adjacent-user-merge; it carries only a single-byte
+    placeholder and would be a wasted breakpoint.
 
-    * Any per-step-assembled tail message — identified by its out-of-band
-      :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY` marker (producers
-      tag their dicts at construction; always trailing user-role messages
-      when present).
-    * Any role-transition separator — inserted by
-      the former separator mechanism (now
-      :func:`~aios.harness.context.merge_adjacent_user_messages`) to
-      defeat Anthropic's adjacent-user-merge; carries only a
-      single-byte placeholder and would be a wasted breakpoint.
-
-    If nothing stable remains (messages list is just system + tail +
-    separator), returns ``None``.
+    If nothing stable remains (messages list is just system + separator),
+    returns ``None``.
     """
     for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if _is_ephemeral_tail(msg) or _is_separator_placeholder(msg):
+        if _is_separator_placeholder(messages[i]):
             continue
         return i
     return None
-
-
-def _is_ephemeral_tail(msg: dict[str, Any]) -> bool:
-    """Detect a per-step-ephemeral tail block by its out-of-band marker.
-
-    Every per-step tail producer tags its own dict at construction with
-    :data:`~aios.harness.context.EPHEMERAL_TAIL_KEY`; the marker is sticky
-    under :func:`~aios.harness.context._concat_user_messages` merges. We
-    read the structural marker — never the rendered prose — so the
-    recognizer can't drift from the producers and can't be fooled by peer
-    text. Mirrors the out-of-band ``metadata`` handshake on switch_channel
-    tool-result dicts (``channels.py``).
-    """
-    return bool(msg.get(EPHEMERAL_TAIL_KEY))
 
 
 def _is_separator_placeholder(msg: dict[str, Any]) -> bool:

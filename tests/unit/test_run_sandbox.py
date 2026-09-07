@@ -28,6 +28,7 @@ from aios.config import get_settings
 from aios.models.agents import ToolSpec
 from aios.models.workflows import WORKFLOW_SCRIPT_CONTRACT
 from aios.sandbox.backends.base import CommandResult, SandboxBackendError, SandboxHandle
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 from aios.workflows import run_sandbox, run_tools
 from aios.workflows.idempotency_key import idempotency_key
 
@@ -36,7 +37,11 @@ def _run() -> Any:
     """A WfRun stand-in carrying only what the executor reads: id, account, and a
     declared+enabled ``bash`` tool so the surface gate admits the call."""
     return SimpleNamespace(
-        id="wfr_1", account_id="acc_t", tools=[ToolSpec(type="bash")], http_servers=[]
+        id="wfr_1",
+        account_id="acc_t",
+        environment_id="env_t",
+        tools=[ToolSpec(type="bash")],
+        http_servers=[],
     )
 
 
@@ -243,6 +248,71 @@ async def test_subsecond_timeout_floors_to_one() -> None:
         captured: dict[str, Any] = {}
         await _drive(registry, captured, tool_input={"command": "x", "timeout_seconds": sub_second})
         assert registry.exec_calls[0]["timeout_seconds"] == 1, sub_second
+
+
+async def test_run_environment_ceiling_and_lower_request_are_respected() -> None:
+    from aios.models.environments import EnvironmentConfig
+
+    async def configured(*args: Any, **kwargs: Any) -> EnvironmentConfig:
+        return EnvironmentConfig(bash_timeout_seconds=1800)
+
+    with patch(
+        "aios.workflows.run_sandbox.db_queries.get_environment_config_for_id",
+        new=configured,
+    ):
+        registry = _FakeRegistry()
+        await _drive(registry, {}, tool_input={"command": "x", "timeout_seconds": 1200})
+        assert registry.exec_calls[0]["timeout_seconds"] == 1200
+
+        lower = _FakeRegistry()
+        await _drive(lower, {}, tool_input={"command": "x", "timeout_seconds": 30})
+        assert lower.exec_calls[0]["timeout_seconds"] == 30
+
+
+async def test_legacy_pinned_timeout_is_bounded_at_execution() -> None:
+    registry = _FakeRegistry()
+    with patch(
+        "aios.workflows.run_sandbox.runtime.require_sandbox_registry", return_value=registry
+    ):
+        await run_sandbox._execute(
+            _run(),
+            call_key="legacy",
+            tool_name="bash",
+            tool_input={"command": "true"},
+            resolved_timeout_seconds=MAX_BASH_TIMEOUT_SECONDS + 10_000,
+        )
+    assert registry.exec_calls[0]["timeout_seconds"] == MAX_BASH_TIMEOUT_SECONDS
+
+
+async def test_unset_run_environment_ceiling_falls_back_to_global() -> None:
+    from aios.models.environments import EnvironmentConfig
+
+    async def unset(*args: Any, **kwargs: Any) -> EnvironmentConfig:
+        return EnvironmentConfig()
+
+    with patch(
+        "aios.workflows.run_sandbox.db_queries.get_environment_config_for_id",
+        new=unset,
+    ):
+        registry = _FakeRegistry()
+        await _drive(registry, {}, tool_input={"command": "x", "timeout_seconds": 1200})
+    assert registry.exec_calls[0]["timeout_seconds"] == get_settings().bash_default_timeout_seconds
+
+
+async def test_missing_or_foreign_run_environment_cannot_widen_authority() -> None:
+    async def missing(*args: Any, **kwargs: Any) -> None:
+        # Account scoping makes a foreign environment indistinguishable from a
+        # missing one; either result must retain the conservative global bound.
+        assert kwargs["account_id"] == "acc_t"
+        return None
+
+    with patch(
+        "aios.workflows.run_sandbox.db_queries.get_environment_config_for_id",
+        new=missing,
+    ):
+        registry = _FakeRegistry()
+        await _drive(registry, {}, tool_input={"command": "x", "timeout_seconds": 1200})
+    assert registry.exec_calls[0]["timeout_seconds"] == get_settings().bash_default_timeout_seconds
 
 
 async def test_timeout_clamped_to_bash_ceiling() -> None:

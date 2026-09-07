@@ -15,6 +15,7 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aios.models.vaults import OAuthProviderApp
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 
 # Wall-clock cap on a single ``run_session_step`` call (the harness step
 # budget). Imported by ``aios.harness.loop`` as the job-level asyncio.wait_for
@@ -495,6 +496,7 @@ class Settings(BaseSettings):
     bash_default_timeout_seconds: int = Field(
         default=120,
         ge=1,
+        le=MAX_BASH_TIMEOUT_SECONDS,
         description="Default ceiling for a single bash tool call, in seconds. "
         "The agent can override per-call up to this maximum. A session bound "
         "to an environment with ``EnvironmentConfig.bash_timeout_seconds`` set "
@@ -1091,7 +1093,7 @@ class Settings(BaseSettings):
         "slots, so a sequential goal loop is unbounded by design. On exceed, "
         "``create_goal`` returns a clear tool error (no obligation opened). Matched "
         "to ``MAX_RENDERED_OBLIGATIONS`` so the open "
-        "self-goals always render as full lines in the tail block.",
+        "self-goals always render as full lines in the obligations reminder.",
     )
     workflow_runs_per_account_max: int = Field(
         default=100,
@@ -1312,6 +1314,43 @@ class Settings(BaseSettings):
                 f"otherwise a hung clone "
                 f"burns a whole user turn before the step-level cap fires. "
                 f"See issue #697."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _browser_call_timeout_covers_cold_open(self) -> Settings:
+        # The caller-facing 504 deadline must cover a COLD open: the worker
+        # runs the inner budgets (provision + takeover_open) to completion
+        # regardless of the submitter's wait, so a call_timeout tighter than
+        # that named floor 504s the caller while the worker still completes
+        # the open and inserts a viewerless grant that wedges the account's
+        # one-open-per-account browser plane until the grant-TTL reaper lapses.
+        # The "plus margin" the field description appends is deliberately left
+        # unspecified, so this rejects only clear-cut under-coverage of the
+        # named sum — it cannot invent the margin without contradicting the
+        # doc. The boundary case stays operator judgment.
+        #
+        # _BROWSER_EXEC_KILL_MARGIN_S mirrors aios.sandbox.browser.EXEC_KILL_MARGIN_S
+        # (kept here as a literal to avoid the circular import that would result
+        # from importing aios.sandbox.browser — which itself imports get_settings).
+        # The worker's driver_call wraps every takeover_open exec with
+        # timeout_s = takeover_open_timeout + EXEC_KILL_MARGIN_S, so the actual
+        # cold-open wall-clock budget is provision + takeover_open + that margin.
+        _BROWSER_EXEC_KILL_MARGIN_S = 5  # must stay in sync with browser.EXEC_KILL_MARGIN_S
+        named_floor = (
+            self.sandbox_browser_provision_timeout_seconds
+            + self.sandbox_browser_takeover_open_timeout_seconds
+            + _BROWSER_EXEC_KILL_MARGIN_S
+        )
+        if self.sandbox_browser_call_timeout_seconds <= named_floor:
+            raise ValueError(
+                f"AIOS_SANDBOX_BROWSER_CALL_TIMEOUT_SECONDS="
+                f"{self.sandbox_browser_call_timeout_seconds} must exceed the cold-open "
+                f"floor (provision {self.sandbox_browser_provision_timeout_seconds}s + "
+                f"takeover_open {self.sandbox_browser_takeover_open_timeout_seconds}s + "
+                f"exec_kill_margin {_BROWSER_EXEC_KILL_MARGIN_S}s = "
+                f"{named_floor}s) plus margin, otherwise every cold open 504s the "
+                f"caller while the worker completes it, leaving a viewerless grant."
             )
         return self
 
