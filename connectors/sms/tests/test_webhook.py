@@ -167,7 +167,8 @@ async def test_status_callback_unsigned_is_403(client: TestClient) -> None:
 
 async def test_queue_overflow_sheds_but_still_acks_200() -> None:
     """A full per-connection queue sheds the inbound but still acks 200 —
-    a dropped inbound is recoverable via Twilio retry; an OOM is not."""
+    the 200 is already sent so Twilio will NOT redeliver a shed inbound
+    (a deliberate loss/OOM trade, not a no-op)."""
     listener = WebhookListener(public_base_url=BASE)
     queue: InboundQueue = InboundQueue(maxsize=1)
     queue.put_nowait(  # pre-fill so the next put overflows
