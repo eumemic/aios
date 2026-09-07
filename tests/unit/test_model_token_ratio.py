@@ -87,7 +87,14 @@ class TestModelTokenClassRatios:
             )
 
         assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
-        assert logs == [
+        # The neutral coefficients are byte-identical to an under-sampled fit,
+        # so this warning is the only thing that tells an operator which of the
+        # two happened (issue #2401).  Filtered rather than compared against the
+        # whole capture so an unrelated future log site cannot make this fail
+        # for the wrong reason — but pinned to exactly one entry, because the
+        # single-flight leader logs once per fit and the herd it publishes to
+        # must stay silent.
+        assert [e for e in logs if e.get("event") == "calibration.fit_timeout"] == [
             {
                 "event": "calibration.fit_timeout",
                 "log_level": "warning",
@@ -96,8 +103,27 @@ class TestModelTokenClassRatios:
         ]
 
     @pytest.mark.asyncio
-    async def test_under_sampled_fit_does_not_report_timeout(self) -> None:
-        conn = _mock_conn([])
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            pytest.param([], id="no_rows"),
+            pytest.param(
+                _linear_rows({"text": 2.0, "tool_result": 1.5, "thinking": 3.0}, n=4),
+                id="below_min_samples",
+            ),
+        ],
+    )
+    async def test_under_sampled_fit_does_not_report_timeout(
+        self, rows: list[dict[str, Any]]
+    ) -> None:
+        """The other route to neutral coefficients must stay silent.
+
+        Both shapes of a legitimate under-sample — no usable spans at all, and
+        some spans below ``_MODEL_TOKEN_RATIO_MIN_SAMPLES`` — return the same
+        neutral dict as a timeout.  If either logged the timeout warning the
+        signal would distinguish nothing.
+        """
+        conn = _mock_conn(rows)
 
         with capture_logs() as logs:
             ratios = await model_token_class_ratios(
@@ -105,7 +131,7 @@ class TestModelTokenClassRatios:
             )
 
         assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
-        assert not any(entry.get("event") == "calibration.fit_timeout" for entry in logs)
+        assert not any(e.get("event") == "calibration.fit_timeout" for e in logs)
 
     @pytest.mark.asyncio
     async def test_concurrent_cold_fit_is_single_flight_per_model_bucket(self) -> None:

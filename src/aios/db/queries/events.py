@@ -574,6 +574,9 @@ async def model_token_class_ratio_fit(
 
     A statement timeout is also a neutral result: calibration is optional and
     must not turn database pressure into a failed product wake (issue #2244).
+    Its coefficients are byte-identical to a legitimately under-sampled fit,
+    so the ``calibration.fit_timeout`` warning emitted at the except site is
+    the ONLY runtime signal that separates the two (issue #2401).
     """
     del account_id
     try:
