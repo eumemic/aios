@@ -1,164 +1,178 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Uncorrelated review — eumemic-bot → local coding-agent harness (`98ccd9d5`)
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+Reviewer: Claude Opus 5, branch `eumbotcarev` (worktree `/workspace/aios-eumbotcarev`).
+Commit under review: `98ccd9d5` ("feat(ci): run eumemic-bot PR reviews via local coding-agent harness"),
+implemented by gpt-5.6-sol / Codex on `eumbotca`.
+Fixes committed locally as `71ef58c5`. Nothing pushed, no PR opened.
 
 ## Verdict
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+**The architecture is right and every structural requirement in TASK.md is met —
+but the default path did not work.** Codex, the harness behind the default
+`gpt-5.6-sol`, was pointed at the eumemic proxy with `OPENAI_BASE_URL`, which
+Codex ignores. Every review on the default model would have 401'd against the
+real OpenAI and landed in the "did not post" summary — the exact silent-miss
+failure this Action exists to prevent, now on the happy path instead of the edge.
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+That is fixed, along with four smaller but real defects. **Ready for PR after
+`71ef58c5`.**
+
+I verified the harness invocations empirically rather than by reading: all three
+CLIs (codex-cli 0.152.1, claude 2.1.263, pi 0.73.1) are installed in this
+environment, so each command was run against a local stand-in proxy that logs the
+request line, the `Authorization` header, and the body.
 
 ## Issues found
 
 ### Fatal
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+**1. Codex never reaches oai-proxy — the default model is dead on arrival.**
+`_agent_command` set `OPENAI_API_KEY` + `OPENAI_BASE_URL` and relied on Codex's
+built-in `openai` provider honouring the latter. It does not. Running the exact
+argv the launcher built:
+
+```
+ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket:
+      HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
+ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication
+       in header, url: https://api.openai.com/v1/responses
+```
+
+Note the second line: the built-in provider does not even send the key from
+`OPENAI_API_KEY`, because it expects `codex login` credentials under
+`CODEX_HOME`. The proxy host is never contacted. This is not a "might not work in
+CI" — it is reproducible offline, and it takes out the documented default.
+
+Fix: declare the proxy as a provider and select it —
+`-c model_provider=eumemic_oai_proxy` plus a `model_providers.eumemic_oai_proxy`
+table carrying `base_url`, `env_key="OPENAI_API_KEY"`, `wire_api="responses"`.
+Re-running the launcher-built argv against the stand-in proxy after the fix:
+
+```
+POST /v1/responses AUTH='Bearer <OAI_PROXY_API_KEY>'
+```
+
+The Claude Code and Pi paths were checked the same way and were **correct as
+written** — `ANTHROPIC_BASE_URL` is honoured, the generated `models.json` under
+`PI_CODING_AGENT_DIR` is picked up, `pi`'s `read,grep,find,ls,bash` are all real
+tool names, and both harnesses read the prompt from stdin. `codex exec`'s
+`--ephemeral`, `--output-last-message`, and trailing `-` are all real and behave
+as assumed. Nothing here was guessed wrong except the base-URL mechanism.
 
 ### Serious
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+**2. The installation token was handed to the agent.** `_agent_command` built the
+child environment with `os.environ.copy()`, so the eumemic-bot installation
+token in `GH_TOKEN` — which can comment and push as the bot — plus the Actions
+runtime tokens and all three proxy keys were inherited by a process that reads
+PR-authored files (`AGENTS.md`, `CLAUDE.md`, source) and runs shell commands. The
+`claude-*` and `grok-*` harnesses have unrestricted network. Fixed by
+constructing the child env as a filtered copy and handing back exactly the one
+proxy key the routed harness needs.
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+**3. The agent was never told what the PR base is.** The prompt said "Review the
+changes against the PR base using local git history" without naming a base ref or
+SHA. Nothing in the checkout identifies it: `ref` is the head SHA, HEAD is
+detached, and the repo's default branch is `master` while an agent guessing will
+reach for `origin/main`. The agent would have diffed against a guess or reviewed
+the whole tree — which quietly undoes the point of the change, since the previous
+review path's central defect (`b334ae63`, `REVIEW.md` before this rewrite) was
+also "the reviewer is looking at the wrong tree." Fixed: `BASE_SHA` comes from
+`pull_request.base.sha`, the prompt names an explicit `git diff <base>...<head>`
+range, and `_pin_checkout` requires the base commit locally, fetching it once if
+absent rather than letting the agent silently review nothing.
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+**4. A timed-out review logs nothing at all.** `subprocess.run(capture_output=True)`
+buffers for the full 15 minutes; on `TimeoutExpired` the original code discarded
+`exc.stdout`/`exc.stderr` and died. The single likeliest failure mode was the one
+that left an operator with an empty step log. Now the partial output is emitted
+before the `FATAL`.
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+**5. Artifact extraction took the first heading, not the last.** `### Code review`
+is a contract on the agent's *final message*. Codex satisfies that through its own
+`--output-last-message` file, but the Claude Code and Pi paths scrape stdout,
+which also carries tool activity — a `grep` for the heading, or a quoted earlier
+review, would have become the comment body from that point on. Switched to the
+last occurrence, which is equivalent for Codex and correct for the other two.
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+### Nits (fixed)
 
-### Minor (not fixed — flagged for the implementer's call)
+- All three harnesses were `npm install --global`-ed on every run regardless of
+  the routed model: ~3× the install time, and an unrelated publisher hiccup would
+  block every review. Now a `case` on `$REVIEW_MODEL` installs one package, and
+  an unroutable model fails the install step with a clear message instead of
+  reaching the launcher.
+- `config_dir.mkdir()` → `exist_ok=True`.
+- The workflow lost every explanatory comment in the rewrite, including the
+  "must never FAIL the PR check" rationale that explains why `continue-on-error`
+  and the summary step are load-bearing rather than sloppy. Restored and updated.
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+### Confirmed correct, no change needed
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+- The aios session path is genuinely gone: no `POST /v1/sessions`, no
+  `AIOS_API_KEY` / `AIOS_URL` / `DEV_REVIEW_AGENT_ID` / environment resolution
+  anywhere in the launcher or workflow. `infra/agents/dev-review.json` is left
+  alone, and a repo-wide grep shows no other caller was disturbed.
+- Prefix routing matches the Herdr contract exactly, `gpt-5.6-sol` is the default
+  in both the workflow (`vars.EUMEMIC_BOT_REVIEW_MODEL || 'gpt-5.6-sol'`) and
+  `DEFAULT_MODEL`.
+- Head pinning: checkout uses `pull_request.head.sha`, not the synthetic merge
+  commit, and the launcher independently re-verifies `HEAD`.
+- `continue-on-error` on all three steps, `always()` summary step keyed on all
+  three outcomes, `<!-- eumemic-bot-review:<sha> -->` marker appended and
+  verified against GitHub's echoed body.
+- Budget: 900 s launcher inside a 20 min job, comfortably under the ≤20 min the
+  task asked for, and ordered so the launcher's own FATAL fires before a runner
+  kill would strip `continue-on-error` and the summary.
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+## What I fixed
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+| SHA | Subject |
+|---|---|
+| `71ef58c5` | `fix(ci): route Codex through oai-proxy via provider config, not OPENAI_BASE_URL` |
 
-## Fixes applied
+Touching `scripts/eumemic_bot_review.py`, `.github/workflows/eumemic-bot-review.yml`,
+`docs/eumemic-bot-review.md`, `tests/unit/test_eumemic_bot_review.py`.
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
+## On the tests
 
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
+The original 11 were not tautologies — they exercised real behaviour — but they
+were shaped to the implementation and so could not have caught any of the five
+defects above. In particular `test_codex_command_uses_responses_proxy` asserted
+`env["OPENAI_BASE_URL"] == "https://oai-proxy.eumemic.ai/v1"`, which is exactly
+the assertion that passes while the feature is broken: it pins the variable
+Codex ignores.
 
-## Do the DONE's claims hold?
+The suite is now 24 tests, and I mutation-checked the ones that matter rather
+than trusting green. Each of these reintroduced defects fails at least one test:
+reverting Codex to `OPENAI_BASE_URL`; `env = dict(os.environ)`; first-occurrence
+artifact extraction; deleting `BASE_SHA` from the workflow; swallowing timeout
+output; installing all three harnesses unconditionally; dropping
+`continue-on-error` from the review step.
 
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
+Also added: a marker-verification-failure case (the silent miss the launcher
+exists to catch), missing-key-for-routed-family, missing-artifact, and
+`_pin_checkout` covering wrong-tree / fetch-the-base / base-unfetchable.
 
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
+Two tests were rewritten to patch a new `_git` helper rather than monkeypatching
+the shared `subprocess.run` global, which the old `test_main_posts_and_verifies_marker`
+did (with a hand-rolled save/restore around it).
 
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
+## Verification run
 
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
+- `uv run --frozen pytest -q tests/unit/test_eumemic_bot_review.py` — **24 passed**.
+- `uv run ruff check src tests scripts` — clean; `ruff format --check` clean.
+- `uv run mypy tests/unit/test_eumemic_bot_review.py` — clean (`scripts/` is
+  outside the repo's mypy scope; the launcher is `py_compile`-clean).
+- Live harness smokes against a local stand-in proxy: Codex, Claude Code and Pi
+  each driven with the launcher's own generated argv and environment; confirmed
+  the request reaches the configured base URL with the right bearer, the prompt
+  arrives as the user message, and `GH_TOKEN` is absent from the child env.
 
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
+Not verifiable here, and left for the first real run: that the eumemic proxies
+accept these exact wire shapes (Responses API for oai-proxy/xai-proxy,
+`x-api-key` for ant-proxy) and that `gpt-5.6-sol` is served under that name.
 
-## What I did not verify
+## Ready for PR
 
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+Yes, with `71ef58c5` included. `TASK.md` and `DONE.md` remain untracked.
