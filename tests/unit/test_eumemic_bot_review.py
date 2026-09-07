@@ -171,18 +171,23 @@ def test_review_budget_fits_under_the_job_timeout() -> None:
     )
 
 
-def test_the_dev_review_manifest_bounds_verification_too() -> None:
+def test_the_dev_review_manifest_bounds_verification_and_pins_the_head_too() -> None:
     """The launcher prompt binds only the foreground path.
 
     A workflow child gets no launcher prompt — its whole instruction set is the
-    committed ``dev-review`` manifest — so the verification bound has to live in
-    both or the expensive tool loop simply moves to the other caller.
+    committed ``dev-review`` manifest — so both the verification bound and the
+    head pin have to live there too. Otherwise the expensive tool loop can move
+    to the other caller or its focused tests can run against the default branch.
     """
     manifest = json.loads((_SCRIPT.parents[1] / "infra/agents/dev-review.json").read_text())
     system = manifest["system"]
 
     assert "do not run repository-wide" in system
     assert "exhaustive ad hoc benchmarks" in system
+    assert "/mnt/review starts on the default branch" in system
+    assert "before reading or running focused tests" in system
+    assert "check out the request head_sha" in system
+    assert "HEAD matches head_sha" in system
 
 
 def test_missing_artifact_gets_one_corrective_turn(monkeypatch: Any) -> None:
