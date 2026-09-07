@@ -15,6 +15,8 @@ The launcher asks the reviewer to keep verification proportional to the diff: fo
 
 The `github_repository` resource takes no ref, so the `/mnt/review` clone lands on the repository's **default branch**, not on the PR. The launcher prompt says so and tells the reviewer to check out `HEAD_SHA` there before reading or testing that tree — without it, the focused tests the bound sanctions would run against master and pass for the wrong reason.
 
+Both obligations — the verification bound and the head pin — are also written into the committed `infra/agents/dev-review.json` system prompt, not just into this launcher's prompt. A dev-pipeline workflow child runs the same agent with no launcher prompt at all, so a manifest that carried neither would simply move the unbounded tool loop, and its focused tests, to that caller. `tests/unit/test_eumemic_bot_review.py` pins both copies.
+
 ## Required repo config
 
 | Kind | Name | Notes |
