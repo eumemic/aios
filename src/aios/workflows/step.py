@@ -466,12 +466,20 @@ async def _run_workflow_step_body(
                         # Both register in the SHARED run_tools._INFLIGHT, so the
                         # has_inflight guard above is class-agnostic.
                         if tool_executes_class(cap_payload["tool_name"]) == "sandbox":
+                            pinned_timeout = cap_payload.get("resolved_timeout_seconds")
                             run_sandbox.launch_sandbox_task(
                                 pool,
                                 run,
                                 call_key=call_key,
                                 tool_name=cap_payload["tool_name"],
                                 tool_input=cap_payload.get("input"),
+                                resolved_timeout_seconds=(
+                                    pinned_timeout
+                                    if isinstance(pinned_timeout, int)
+                                    and not isinstance(pinned_timeout, bool)
+                                    and pinned_timeout > 0
+                                    else None
+                                ),
                             )
                         else:
                             run_tools.launch_tool_task(
@@ -553,7 +561,7 @@ async def _run_workflow_step_body(
     tools_to_launch: list[tuple[str, str, Any]] = []
     # Same shape + same post-commit launch discipline, for tool frontiers whose tool
     # runs in the run's sandbox (bash) rather than on the worker.
-    sandboxes_to_launch: list[tuple[str, str, Any]] = []
+    sandboxes_to_launch: list[tuple[str, str, Any, int]] = []
     # (call_key, spec) for call_llm frontiers opened this wake — the worker-side raw
     # inference task, launched post-commit like the tool launchers above (#1633).
     call_llm_to_launch: list[tuple[str, dict[str, Any]]] = []
@@ -862,6 +870,12 @@ async def _run_workflow_step_body(
                         error_kind="bad_tool_call",
                     )
                     return
+                tool_input = spec.get("input")
+                resolved_timeout_seconds: int | None = None
+                if tool_executes_class(tool_name) == "sandbox":
+                    resolved_timeout_seconds = await run_sandbox.resolve_bash_call_timeout(
+                        run, tool_input, conn=conn
+                    )
                 await wf_queries.append_run_event(
                     conn,
                     account_id=account_id,
@@ -871,7 +885,12 @@ async def _run_workflow_step_body(
                     payload={
                         "capability": "tool",
                         "tool_name": tool_name,
-                        "input": spec.get("input"),
+                        "input": tool_input,
+                        **(
+                            {"resolved_timeout_seconds": resolved_timeout_seconds}
+                            if resolved_timeout_seconds is not None
+                            else {}
+                        ),
                     },
                 )
                 # A context-ineligible tool is an authoring/runtime contract failure,
@@ -905,9 +924,12 @@ async def _run_workflow_step_body(
                 # The journaled payload is identical (bash rides the `tool`
                 # capability); only the launcher differs.
                 if tool_executes_class(tool_name) == "sandbox":
-                    sandboxes_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+                    assert resolved_timeout_seconds is not None
+                    sandboxes_to_launch.append(
+                        (cap.call_key, tool_name, tool_input, resolved_timeout_seconds)
+                    )
                 else:
-                    tools_to_launch.append((cap.call_key, tool_name, spec.get("input")))
+                    tools_to_launch.append((cap.call_key, tool_name, tool_input))
             elif cap.capability_id == "call_llm":
                 # Raw inference (#1633). Charges the run's call_llm meter, which the
                 # budget gate reads — so an exhausted budget refuses it here. Unlike
@@ -984,9 +1006,14 @@ async def _run_workflow_step_body(
         run_tools.launch_tool_task(
             pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
         )
-    for launch_key, launch_name, launch_input in sandboxes_to_launch:
+    for launch_key, launch_name, launch_input, resolved_timeout in sandboxes_to_launch:
         run_sandbox.launch_sandbox_task(
-            pool, run, call_key=launch_key, tool_name=launch_name, tool_input=launch_input
+            pool,
+            run,
+            call_key=launch_key,
+            tool_name=launch_name,
+            tool_input=launch_input,
+            resolved_timeout_seconds=resolved_timeout,
         )
     for launch_key, launch_spec in call_llm_to_launch:
         run_llm.launch_call_llm_task(pool, run, call_key=launch_key, spec=launch_spec)
