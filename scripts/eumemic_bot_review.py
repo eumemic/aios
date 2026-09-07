@@ -24,8 +24,11 @@ Env:
   AIOS_URL, AIOS_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, CLONE_URL
   AGENT_NAME (default: dev-review), AGENT_ID (optional)
   ENVIRONMENT_NAME (default: dev-pipeline-real), ENVIRONMENT_ID (optional)
-  REVIEW_TIMEOUT_SECONDS (default: 1200) — whole-review budget, shared by the
-    first turn and the corrective turn. Keep it under the job's timeout-minutes.
+  REVIEW_TIMEOUT_SECONDS (default: _REVIEW_SECONDS below) — whole-review budget,
+    shared by the first turn and the corrective turn. It must run out before the
+    job's timeout-minutes: this script's FATAL leaves the step's
+    continue-on-error to keep the check green and still write the "did not post"
+    job summary, whereas a runner kill takes both away.
 """
 
 from __future__ import annotations
@@ -49,6 +52,11 @@ ARTIFACT_HEADING = "### Code review"
 # before the server ever answers.
 _WAIT_SECONDS = 30
 _WAIT_HTTP_TIMEOUT = _WAIT_SECONDS * 2
+
+# Whole-review budget when REVIEW_TIMEOUT_SECONDS is unset. The workflow sets it
+# explicitly; keep the two in step (tests/unit/test_eumemic_bot_review.py pins
+# that, and that the job's timeout-minutes outlives budget + one final poll).
+_REVIEW_SECONDS = 2700
 
 
 def _die(msg: str, code: int = 1) -> NoReturn:
@@ -174,7 +182,8 @@ def _review_from_events(base: str, api_key: str, session_id: str) -> str | None:
 
 
 def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
-    deadline = time.monotonic() + int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "1200"))
+    budget = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
+    deadline = time.monotonic() + budget
     status = _wait_until_working_stops(base, api_key, session_id, deadline)
     review = _review_from_events(base, api_key, session_id)
     if review is not None:
