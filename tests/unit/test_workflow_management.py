@@ -339,6 +339,60 @@ class TestReturnShape:
         }
 
 
+class TestOutputModelForwarding:
+    """The agent-authoring builtins forward every schema-advertised body kwarg to the
+    service (F1). ``output_model`` (#1637) was parsed onto the arg model and exposed in
+    the model-facing schema but dropped from the service call — the service was invoked
+    with no ``output_model`` key at all (its default ``None`` applied). These pin the
+    forwarding for create + update, including the omitted-field passthrough that keeps
+    update's "None preserves current" contract symmetric with ``PUT /v1/workflows/{id}``."""
+
+    async def test_create_workflow_forwards_output_model(self, monkeypatch: Any) -> None:
+        mock_create = AsyncMock(return_value=_workflow(version=1))
+        monkeypatch.setattr("aios.services.workflows.create_workflow", mock_create)
+        await wm.create_workflow_handler(
+            "ses_1",
+            {
+                "name": "w",
+                "script": "async def main(input):\n    return 1\n",
+                "output_model": "anthropic/claude-opus-4-6",
+            },
+        )
+        assert mock_create.call_args.kwargs["output_model"] == "anthropic/claude-opus-4-6"
+
+    async def test_update_workflow_forwards_output_model(self, monkeypatch: Any) -> None:
+        mock_update = AsyncMock(return_value=_workflow(version=2))
+        monkeypatch.setattr("aios.services.workflows.update_workflow", mock_update)
+        await wm.update_workflow_handler(
+            "ses_1",
+            {
+                "workflow_id": "wf_1",
+                "version": 1,
+                "output_model": "anthropic/claude-opus-4-6",
+            },
+        )
+        assert mock_update.call_args.args[1] == "wf_1"
+        assert mock_update.call_args.kwargs["output_model"] == "anthropic/claude-opus-4-6"
+
+    async def test_create_workflow_forwards_none_when_output_model_omitted(
+        self, monkeypatch: Any
+    ) -> None:
+        mock_create = AsyncMock(return_value=_workflow(version=1))
+        monkeypatch.setattr("aios.services.workflows.create_workflow", mock_create)
+        await wm.create_workflow_handler(
+            "ses_1", {"name": "w", "script": "async def main(input):\n    return 1\n"}
+        )
+        assert mock_create.call_args.kwargs["output_model"] is None
+
+    async def test_update_workflow_forwards_none_when_output_model_omitted(
+        self, monkeypatch: Any
+    ) -> None:
+        mock_update = AsyncMock(return_value=_workflow(version=2))
+        monkeypatch.setattr("aios.services.workflows.update_workflow", mock_update)
+        await wm.update_workflow_handler("ses_1", {"workflow_id": "wf_1", "version": 1})
+        assert mock_update.call_args.kwargs["output_model"] is None
+
+
 class TestReadHandlers:
     """The five read-only builtins: full vs. lean return shapes + launcher scoping."""
 
