@@ -28,6 +28,7 @@ from aios.ids import (
     EVENT,
     make_id,
 )
+from aios.logging import get_logger
 from aios.models.events import (
     MODEL_VISIBLE_LIFECYCLE_EVENTS,
     REMINDER_EXCLUDE_SQL,
@@ -36,6 +37,8 @@ from aios.models.events import (
     is_errored_lifecycle_event,
     is_reminder_event,
 )
+
+log = get_logger(__name__)
 
 
 @runtime_checkable
@@ -609,6 +612,7 @@ async def model_token_class_ratio_fit(
     except asyncpg.exceptions.QueryCanceledError:
         # Calibration is optional. A neutral window is safer than turning a
         # busy database's statement timeout into a failed product wake.
+        log.warning("calibration.fit_timeout", model=model)
         return _neutral_class_targets(), 0
     return _fit_class_ratios(rows), len(rows)
 

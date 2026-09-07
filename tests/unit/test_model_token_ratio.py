@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
+from structlog.testing import capture_logs
 
 from aios.db.queries import (
     _clear_model_token_ratio_cache,
@@ -80,9 +81,31 @@ class TestModelTokenClassRatios:
             )
         )
 
-        ratios = await model_token_class_ratios(conn, "model-timeout", account_id="acc_test_stub")
+        with capture_logs() as logs:
+            ratios = await model_token_class_ratios(
+                conn, "model-timeout", account_id="acc_test_stub"
+            )
 
         assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
+        assert logs == [
+            {
+                "event": "calibration.fit_timeout",
+                "log_level": "warning",
+                "model": "model-timeout",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_under_sampled_fit_does_not_report_timeout(self) -> None:
+        conn = _mock_conn([])
+
+        with capture_logs() as logs:
+            ratios = await model_token_class_ratios(
+                conn, "model-under-sampled", account_id="acc_test_stub"
+            )
+
+        assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
+        assert not any(entry.get("event") == "calibration.fit_timeout" for entry in logs)
 
     @pytest.mark.asyncio
     async def test_concurrent_cold_fit_is_single_flight_per_model_bucket(self) -> None:
