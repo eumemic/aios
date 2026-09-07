@@ -217,6 +217,77 @@ async def test_add_memory_name_collision_rejected_single_attachment(
     assert len(rows) == 1  # no silent dual-mount
 
 
+# ── criterion 3b: rename then re-POST same store → 409, not 500 (PK guard) ────
+
+
+async def test_readd_same_store_renamed_raises_conflict(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+) -> None:
+    """Re-attaching a store whose parent was renamed between the original
+    attach and the re-POST bypasses the name-collision guard (snapshotted
+    ``name_at_attach`` ≠ the parent's current ``name``) and hits the
+    ``(session_id, memory_store_id)`` primary key. The PK's
+    ``asyncpg.UniqueViolationError`` must surface as a 4xx ``ConflictError``
+    — not the bare HTTP 500 of the pre-fix bug — and leave exactly one
+    attachment row (no dual-mount, no partial state).
+    """
+    pool, session_id, _crypto_box = env
+    store_id = await _make_store(pool, "orig")
+    await sessions_service.add_resource(
+        pool, session_id, _mem(store_id), crypto_box=_crypto_box, account_id=_ACCOUNT_ID
+    )
+    # Rename the parent store so the resolved name diverges from the
+    # snapshotted name_at_attach, bypassing the name-collision guard.
+    await memory_stores_service.update_store(pool, store_id, account_id=_ACCOUNT_ID, name="renamed")
+
+    with pytest.raises(ConflictError) as exc_info:
+        await sessions_service.add_resource(
+            pool, session_id, _mem(store_id), crypto_box=_crypto_box, account_id=_ACCOUNT_ID
+        )
+    assert "already attached to this session" in exc_info.value.message
+    assert exc_info.value.detail["memory_store_id"] == store_id
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM session_memory_stores WHERE session_id = $1 AND memory_store_id = $2",
+            session_id,
+            store_id,
+        )
+    assert len(rows) == 1  # rolled-back re-add left the original row — no dual-mount
+    assert rows[0]["name_at_attach"] == "orig"  # snapshot preserved; rename not propagated
+
+
+async def test_readd_same_store_unrenamed_raises_conflict(
+    env: tuple[asyncpg.Pool[Any], str, CryptoBox],
+) -> None:
+    """A plain re-POST of the same store WITHOUT an intervening rename keeps
+    the snapshot equal to the current name, so the name-collision guard
+    raises ``ConflictError`` before the INSERT ever runs. This is the
+    well-handled path; it must remain a 4xx and not regress once the PK
+    guard maps ``asyncpg.UniqueViolationError`` to ``ConflictError``.
+    """
+    pool, session_id, _crypto_box = env
+    store_id = await _make_store(pool, "dup-name")
+    await sessions_service.add_resource(
+        pool, session_id, _mem(store_id), crypto_box=_crypto_box, account_id=_ACCOUNT_ID
+    )
+
+    with pytest.raises(ConflictError) as exc_info:
+        await sessions_service.add_resource(
+            pool, session_id, _mem(store_id), crypto_box=_crypto_box, account_id=_ACCOUNT_ID
+        )
+    # The name-collision guard fired before the INSERT, not the PK guard.
+    assert exc_info.value.detail["conflicting_name"] == "dup-name"
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM session_memory_stores WHERE session_id = $1 AND memory_store_id = $2",
+            session_id,
+            store_id,
+        )
+    assert len(rows) == 1  # no silent dual-mount
+
+
 # ── criterion 5 (blocker-2): fill, delete a low rank, add → lowest-free rank ─
 
 
