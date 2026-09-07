@@ -80,9 +80,7 @@ class TestModelTokenClassRatios:
             )
         )
 
-        ratios = await model_token_class_ratios(
-            conn, "model-timeout", account_id="acc_test_stub"
-        )
+        ratios = await model_token_class_ratios(conn, "model-timeout", account_id="acc_test_stub")
 
         assert ratios == {c: 1.0 for c in CONTENT_CLASSES}
 
@@ -101,9 +99,7 @@ class TestModelTokenClassRatios:
         conn.fetch = AsyncMock(side_effect=_fetch)
         calls = [
             asyncio.create_task(
-                model_token_class_ratios(
-                    conn, "model-herd", k_bucket=2.0, account_id=f"acc_{i}"
-                )
+                model_token_class_ratios(conn, "model-herd", k_bucket=2.0, account_id=f"acc_{i}")
             )
             for i in range(8)
         ]
@@ -115,6 +111,78 @@ class TestModelTokenClassRatios:
         results = await asyncio.gather(*calls)
         assert all(result == results[0] for result in results)
         assert conn.fetch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_does_not_orphan_the_fit_on_its_connection(
+        self,
+    ) -> None:
+        """``conn`` is borrowed from the pool for ONE caller's lifetime.
+
+        If the cold fit outlived the coroutine that owns the connection (a
+        detached task, a shield), the pool would reset and re-hand a
+        connection with a query still in flight on it — asyncpg terminates
+        the connection at that point, failing both the fit's other waiters
+        and the next unrelated borrower.  So a cancelled caller must take
+        its own query down with it.
+        """
+        started = asyncio.Event()
+        query_cancelled = False
+
+        async def _fetch(*args: Any) -> list[dict[str, Any]]:
+            nonlocal query_cancelled
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                query_cancelled = True
+                raise
+            return []
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(side_effect=_fetch)
+        call = asyncio.create_task(
+            model_token_class_ratios(conn, "model-cancel", account_id="acc_test_stub")
+        )
+        await started.wait()
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert query_cancelled, "the fit kept running on a connection its caller released"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_leader_re_elects_the_next_waiter(self) -> None:
+        """A cancelled leader hands the fit to a waiter, on the WAITER's own
+        connection — never leaving followers waiting on a query issued over a
+        connection that has already gone back to the pool."""
+        rows = _linear_rows({"text": 2.0, "tool_result": 1.4, "thinking": 3.0}, n=20)
+        leader_started = asyncio.Event()
+
+        async def _hang(*args: Any) -> list[dict[str, Any]]:
+            leader_started.set()
+            await asyncio.sleep(60)
+            return rows
+
+        leader_conn = MagicMock()
+        leader_conn.fetch = AsyncMock(side_effect=_hang)
+        follower_conn = MagicMock()
+        follower_conn.fetch = AsyncMock(return_value=rows)
+
+        leader = asyncio.create_task(
+            model_token_class_ratios(leader_conn, "model-relay", account_id="acc_lead")
+        )
+        await leader_started.wait()
+        follower = asyncio.create_task(
+            model_token_class_ratios(follower_conn, "model-relay", account_id="acc_follow")
+        )
+        await asyncio.sleep(0)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        targets = await follower
+        assert follower_conn.fetch.await_count == 1
+        assert targets["text"] == pytest.approx(2.0, abs=0.15)
 
     @pytest.mark.asyncio
     async def test_below_min_samples_is_all_neutral(self) -> None:
