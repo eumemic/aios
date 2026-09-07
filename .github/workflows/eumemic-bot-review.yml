@@ -25,8 +25,11 @@ jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # The review turn owns REVIEW_TIMEOUT_SECONDS of this; the rest is
-    # checkout + token mint + the GitHub POST.
+    # Must outlive REVIEW_TIMEOUT_SECONDS plus the launcher's final long-poll
+    # (a poll issued just under the deadline holds the socket for up to 60s),
+    # plus checkout + token mint + the GitHub POST. A review that overruns has
+    # to hit the launcher's own FATAL, not this: continue-on-error then keeps
+    # the check green and still writes the "did not post" job summary below.
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
