@@ -81,6 +81,16 @@ class TestCreateSchemaBranches:
         assert set(branch["properties"]) == {"kind"}
         assert branch["additionalProperties"] is False
 
+    def test_cron_branch_exposes_optional_timezone(self) -> None:
+        # Create keeps ``timezone`` optional (omit / null = UTC) — the tool
+        # surface now lets an agent create a localized cron at all.
+        branch = _branch(TRIGGER_CREATE_PARAMETERS_SCHEMA, "source", "cron")
+        assert branch["required"] == ["kind", "schedule"]
+        assert "timezone" in branch["properties"]
+        assert branch["properties"]["timezone"]["type"] == ["string", "null"]
+        assert "default" not in branch["properties"]["timezone"]
+        assert branch["additionalProperties"] is False
+
 
 class TestUpdateSchemaReplaceSemantics:
     def test_run_completion_requires_statuses(self) -> None:
@@ -111,6 +121,17 @@ class TestUpdateSchemaReplaceSemantics:
         branch = _branch(TRIGGER_UPDATE_PARAMETERS_SCHEMA, "source", "external_event")
         assert branch["required"] == ["kind"]
         assert set(branch["properties"]) == {"kind"}
+        assert branch["additionalProperties"] is False
+
+    def test_cron_branch_requires_timezone(self) -> None:
+        # §2.2 Replace rule on the tool surface: a cron source-replace on
+        # update must re-send ``timezone`` (explicit null = UTC) — omission
+        # 422s at the jsonschema layer before the model is ever touched, so a
+        # tool-driven cron update cannot silently reset a stored non-UTC zone.
+        branch = _branch(TRIGGER_UPDATE_PARAMETERS_SCHEMA, "source", "cron")
+        assert branch["required"] == ["kind", "schedule", "timezone"]
+        assert branch["properties"]["timezone"]["type"] == ["string", "null"]
+        assert "default" not in branch["properties"]["timezone"]
         assert branch["additionalProperties"] is False
 
     def test_source_branches_include_external_event(self) -> None:

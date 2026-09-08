@@ -996,6 +996,45 @@ class TestHttpRequestHandler:
             f"traversal; captured={captured!r}"
         )
 
+    async def test_empty_path_does_not_match_single_segment_route(self, _stub_runtime: Any) -> None:
+        """Empty / root path bypass of a bare top-level ``*`` allowlist.
+
+        The route gate uses ``match_glob``, where ``*`` matches exactly one
+        path segment — and the bare server root (``""`` or ``"/"``) has zero
+        segments. An operator declares ``/*`` intending to grant access only to
+        first-level resources (``/devices``, ``/lights``, ...); the empty path
+        must NOT slip through that gate and dispatch to ``base_url/`` — the
+        same server-root destination the ``..`` dot-segment bypass reaches via
+        a different route.
+
+        Pre-fix symptom: ``path.strip("/").split("/")`` yields ``[""]`` (a
+        truthy one-element list) for the empty path, so a bare top-level ``*``
+        consumed the synthetic empty segment, the gate matched, and the worker
+        dispatched ``GET base_url/`` — exposing the unlisted root surface.
+        """
+        for path in ("", "/"):
+            agent = _agent(http_servers=[_server(routes=[_route("/*")])])
+            captured: dict[str, Any] = {}
+            stub = _make_stub_client(
+                response=httpx.Response(200, content=b""),
+                capture=captured,
+            )
+            with (
+                _patch_load_agent(agent),
+                _patch_resolve_auth(),
+                patch("aios.tools.http_request.httpx.AsyncClient", stub),
+                pytest.raises(ToolBail) as excinfo,
+            ):
+                await http_request_handler(
+                    "sess_x",
+                    {"server_ref": "hue", "path": path, "method": "GET"},
+                )
+            assert "does not match any enabled route" in excinfo.value.message
+            assert "url" not in captured, (
+                f"upstream request was dispatched to the bare server root via "
+                f"an empty path against a '/*' route; captured={captured!r}"
+            )
+
 
 # ── _do_http_request (owner-agnostic core; the session/run shared entry) ───────
 

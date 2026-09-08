@@ -23,6 +23,7 @@ from aios.cli.output import cyan, dim, print_error, print_json, print_success
 from aios.cli.profile import compute_profile, profile_to_dict, render_profile
 from aios.cli.runtime import get_state, run_or_die
 from aios.cli.tail_format import iter_formatted_events
+from aios.models.events import is_reminder_event, reminder_section
 from aios_sdk import raw_request, stream_session
 
 app = typer.Typer(name="sessions", help="Manage sessions.", no_args_is_help=True)
@@ -433,7 +434,10 @@ def _render_event_obj(obj: dict[str, Any]) -> None:
         role = data.get("role")
         content = data.get("content") or ""
         tool_calls = data.get("tool_calls") or []
-        if role == "user":
+        if role == "user" and is_reminder_event("message", data):
+            section = reminder_section("message", data) or "?"
+            sys.stdout.write(f"\n{dim(f'[{seq}]')} {dim(f'reminder[{section}]:')} {content}\n")
+        elif role == "user":
             sys.stdout.write(f"\n{dim(f'[{seq}]')} {cyan('user:')} {content}\n")
         elif role == "assistant":
             if content:

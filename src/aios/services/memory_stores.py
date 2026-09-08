@@ -450,6 +450,13 @@ async def add_one(
       ``/mnt/memory/<name>`` (#270 blocker-1).
     - Enforces ``MAX_STORES_PER_SESSION`` against ``len(current)+1``.
     - Inserts at the lowest free rank in ``0..MAX_STORES_PER_SESSION-1``.
+    - Re-attaching a store already attached to this session raises a 4xx
+      :class:`ConflictError`. The name guard above only fires when the
+      snapshotted ``name_at_attach`` still matches the parent's current
+      ``name``; a rename between attach and re-POST leaks past it, so the
+      ``(session_id, memory_store_id)`` primary key is the line of defense
+      and its :class:`asyncpg.UniqueViolationError` is mapped to a 4xx
+      (same convention as the github_repository sibling).
     """
     store = await queries.get_memory_store(
         conn, resource.memory_store_id, allow_archived=False, account_id=account_id
@@ -472,17 +479,26 @@ async def add_one(
         conn, session_id, account_id=account_id
     )
     rank = _lowest_free_rank(used_ranks, cap=MAX_STORES_PER_SESSION)
-    await queries.insert_session_memory_store(
-        conn,
-        session_id,
-        memory_store_id=resource.memory_store_id,
-        rank=rank,
-        access=resource.access,
-        instructions=resource.instructions,
-        name_at_attach=store.name,
-        description_at_attach=store.description,
-        account_id=account_id,
-    )
+    try:
+        await queries.insert_session_memory_store(
+            conn,
+            session_id,
+            memory_store_id=resource.memory_store_id,
+            rank=rank,
+            access=resource.access,
+            instructions=resource.instructions,
+            name_at_attach=store.name,
+            description_at_attach=store.description,
+            account_id=account_id,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ConflictError(
+            "memory store already attached to this session",
+            detail={
+                "session_id": session_id,
+                "memory_store_id": resource.memory_store_id,
+            },
+        ) from exc
     return MemoryStoreResourceEcho(
         memory_store_id=resource.memory_store_id,
         access=resource.access,
