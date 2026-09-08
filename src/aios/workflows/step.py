@@ -467,19 +467,44 @@ async def _run_workflow_step_body(
                         # has_inflight guard above is class-agnostic.
                         if tool_executes_class(cap_payload["tool_name"]) == "sandbox":
                             pinned_timeout = cap_payload.get("resolved_timeout_seconds")
+                            if (
+                                isinstance(pinned_timeout, int)
+                                and not isinstance(pinned_timeout, bool)
+                                and pinned_timeout > 0
+                            ):
+                                resolved = pinned_timeout
+                            else:
+                                # Legacy (pre-pin) call_started row. The re-drive exec
+                                # (run_sandbox._execute) resolves the run's environment
+                                # ceiling, but the needs-step sweep's legacy branch
+                                # derives its horizon from the worker-global default —
+                                # the ceiling the ORIGINAL exec used, not the env ceiling
+                                # the re-drive exec occupies. When the env ceiling exceeds
+                                # the global horizon (env > global + provisioning slack),
+                                # the sweep re-wakes a still-running re-driven exec every
+                                # tick; with no cross-worker inflight marker each wake on
+                                # another worker provisions a fresh container and re-execs
+                                # the command (a bounded duplicate storm). Resolve the
+                                # env ceiling once here, pin it into the row so the
+                                # sweep's pinned branch — whose horizon tracks that same
+                                # ceiling — takes over, and pass the same value to the
+                                # exec so the two halves cannot diverge.
+                                resolved = await run_sandbox.resolve_bash_call_timeout(
+                                    run, cap_payload.get("input"), conn=conn
+                                )
+                                await wf_queries.pin_call_started_timeout(
+                                    conn,
+                                    run_id=run_id,
+                                    call_key=call_key,
+                                    resolved_timeout_seconds=resolved,
+                                )
                             run_sandbox.launch_sandbox_task(
                                 pool,
                                 run,
                                 call_key=call_key,
                                 tool_name=cap_payload["tool_name"],
                                 tool_input=cap_payload.get("input"),
-                                resolved_timeout_seconds=(
-                                    pinned_timeout
-                                    if isinstance(pinned_timeout, int)
-                                    and not isinstance(pinned_timeout, bool)
-                                    and pinned_timeout > 0
-                                    else None
-                                ),
+                                resolved_timeout_seconds=resolved,
                             )
                         else:
                             run_tools.launch_tool_task(
