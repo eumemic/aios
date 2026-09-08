@@ -55,6 +55,9 @@ jobs:
           else:
               config = {}
           config.setdefault("runtimes", {})["runsc"] = {"path": "/usr/bin/runsc"}
+          # Image mounts provide the read-only operator tool root used to
+          # program netfilter inside the target runsc Sentry.
+          config.setdefault("features", {})["containerd-snapshotter"] = True
           daemon_json.write_text(json.dumps(config, separators=(",", ":")))
           # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}}
           PY
