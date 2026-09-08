@@ -47,13 +47,16 @@ class _FakeDocker:
     (``size``) cannot see. Absent ⇒ the chain costs exactly its view.
     """
 
-    commit_view: int | None
-    commit_chain: int | None
-
     def __init__(self) -> None:
         self.parent_image = "img_S1"
         self.size_rw = 1_000_000
         self.ephemeral_bytes = 0
+        # What ``commit`` materializes: the committed image's own view, and —
+        # when a test models a real base-relative chain — the accumulated layer
+        # bytes ``docker history`` reports for it. ``None`` ⇒ the fake's own
+        # defaults (view = size_rw + 100 KB; chain = exactly the view).
+        self.commit_view: int | None = None
+        self.commit_chain: int | None = None
         self.stream_filters: list[Any] = []
         self.container_labels: dict[str, str] = {}
         self.images: dict[str, dict[str, Any]] = {}
@@ -129,7 +132,9 @@ class _FakeDocker:
             tag = argv[-1]
             entry: dict[str, Any] = {
                 "id": "committed",
-                "size": getattr(self, "commit_view", None) or self.size_rw + 100_000,
+                "size": (
+                    self.commit_view if self.commit_view is not None else self.size_rw + 100_000
+                ),
                 "depth": 2,
                 "labels": dict(self.container_labels),
             }
@@ -137,9 +142,8 @@ class _FakeDocker:
             # models a real base-relative chain sets ``commit_chain`` so
             # ``docker history`` on the committed image reports the parent's
             # accumulated layer bytes plus that thin layer, not just its view.
-            commit_chain = getattr(self, "commit_chain", None)
-            if commit_chain is not None:
-                entry["chain"] = commit_chain
+            if self.commit_chain is not None:
+                entry["chain"] = self.commit_chain
             self.images[tag] = entry
             return 0, b"sha256:committed\n", b""
         raise AssertionError(f"unexpected docker cli: {argv}")
