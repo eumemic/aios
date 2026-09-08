@@ -153,6 +153,22 @@ def _extract_skill_metadata(
             detail={"directory": directory},
         )
 
+    # ``SKILL.md`` must sit at the top level of ``directory``. The system
+    # prompt advertises ``/workspace/skills/{directory}/SKILL.md`` and
+    # ``provision_skill_files`` writes the bundle there, both assuming the
+    # ``{directory}/SKILL.md`` shape the CLI's ``walk_skill_dir`` emits. A
+    # nested key like ``pkg/sub/SKILL.md`` still derives ``directory = "pkg"``
+    # (passing the single-segment check above) but the prefix-strip below
+    # would persist it as ``sub/SKILL.md``, so the advertised path would
+    # never exist and the model's on-demand ``read`` of the body would
+    # always fail. Reject at the upload boundary.
+    if skill_md_path != f"{directory}/SKILL.md":
+        raise ValidationError(
+            "SKILL.md must be at the top level of its directory "
+            f"(expected {directory!r}/SKILL.md); got {skill_md_path!r}",
+            detail={"path": skill_md_path, "directory": directory},
+        )
+
     name, description = parse_skill_md(files[skill_md_path])
 
     normalized: dict[str, str] = {}

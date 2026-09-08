@@ -6,6 +6,7 @@ is stubbed so tests don't touch Docker.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -323,4 +324,35 @@ class TestExecRaisedReconcileSuppression:
             await bash_handler("sess_01TEST", {"command": "true"})
 
         # reconcile was still attempted despite exec raising
+        mock_reconcile.assert_awaited_once()
+
+    async def test_cancelled_exec_shadowed_by_reconcile_exception(
+        self, stub_registry: _StubRegistry
+    ) -> None:
+        """exec is cancelled and reconcile then raises: the in-flight
+        ``CancelledError`` must propagate, not the reconcile exception.
+
+        ``asyncio.CancelledError`` is a ``BaseException`` (not ``Exception``)
+        since 3.8, so the outer guard must set ``exec_raised`` on cancel too —
+        otherwise the reconcile error shadows the cancellation and
+        ``_tool_lifecycle``'s clean ``error="cancelled"`` arm is bypassed.
+        """
+        exec_error = asyncio.CancelledError()
+        reconcile_error = RuntimeError("reconcile failed too")
+        stub_registry.exec.side_effect = exec_error
+
+        with patch(
+            "aios.tools.bash.reconcile_memory_mounts",
+            new_callable=AsyncMock,
+            side_effect=reconcile_error,
+        ) as mock_reconcile:
+            try:
+                await bash_handler("sess_01TEST", {"command": "true"})
+            except BaseException as exc:
+                assert isinstance(exc, asyncio.CancelledError), (
+                    f"expected CancelledError, got {type(exc).__name__}: {exc!r}"
+                )
+            else:
+                pytest.fail("expected an exception to propagate")
+
         mock_reconcile.assert_awaited_once()

@@ -11,16 +11,22 @@ invariant, and the deploy-on-merge Action's drift guards.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 from unittest import mock
+from urllib.parse import urlsplit
 
 import pytest
+import yaml
 
 from aios.models.agents import AgentCreate
 
@@ -469,6 +475,64 @@ def test_workflow_least_privilege_and_secret() -> None:
     assert re.search(r"permissions:\s*\n\s*contents:\s*read", text)
     assert "${{ secrets.AIOS_API_KEY }}" in text
     assert "AIOS_URL: https://api.aios.eumemic.ai" in text
+
+
+def _live_step_env() -> dict[str, str]:
+    """The env the reconcile step actually runs with: workflow-level ``env``
+    overlaid by the live step's own block, read from the parsed YAML (not a
+    substring slice, which would silently keep matching if a later step were
+    appended below this one)."""
+    doc = yaml.safe_load(_WORKFLOW_PATH.read_text())
+    steps = doc["jobs"]["reconcile"]["steps"]
+    (live,) = [s for s in steps if str(s.get("name", "")).startswith("Reconcile live agents")]
+    return {**doc.get("env", {}), **live["env"]}
+
+
+def test_live_step_inlines_no_real_key_material() -> None:
+    """The only secret in the live step is the out-of-band API key; the settings
+    the step inlines are provably void placeholders, not key material."""
+    env = _live_step_env()
+    assert env["AIOS_API_KEY"] == "${{ secrets.AIOS_API_KEY }}"
+    for name in ("AIOS_VAULT_KEY", "AIOS_EGRESS_CA_KEY"):
+        assert base64.b64decode(env[name], validate=True) == bytes(32), (
+            f"{name} must stay an all-zero placeholder — never real key material"
+        )
+    assert urlsplit(env["AIOS_DB_URL"]).hostname in {"localhost", "127.0.0.1"}
+
+
+def test_live_step_env_is_sufficient_to_validate_the_committed_manifests() -> None:
+    """The live step's env must carry every setting manifest validation reaches for.
+
+    ``mcp_servers[].url`` runs ``validate_outbound_target_url``, whose lazy
+    ``from aios.tools.url_safety import ...`` executes the EAGER ``aios.tools``
+    package ``__init__`` → ``aios.jobs.app``, whose module-level
+    ``App(connector=_build_connector())`` constructs the FULL ``Settings``. So a
+    step carrying only ``AIOS_URL`` + ``AIOS_API_KEY`` dies on the first manifest
+    with an MCP server (the FATAL that took master RED after #2399) even though
+    the reconciler itself never touches a vault, an egress CA, or the database.
+
+    The unit gate above cannot see this: ``tests/conftest.py`` seeds those three
+    vars for every unit test. So assert the property directly — run the real
+    ``load_manifests`` in a FRESH interpreter under EXACTLY the live step's env,
+    with every ambient ``AIOS_*`` stripped so no local export masks a missing one.
+    Drop any of the three settings from the workflow and this fails the way CI did.
+    """
+    script = textwrap.dedent(
+        f"""
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("ra", {str(_SCRIPT_PATH)!r})
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        manifests = module.load_manifests({str(_MANIFEST_DIR)!r})
+        if not manifests:
+            raise SystemExit("no committed manifests were loaded")
+        """
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("AIOS_")}
+    env |= {k: ("ci-placeholder" if "${{" in v else v) for k, v in _live_step_env().items()}
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_workflow_concurrency_serialises() -> None:
