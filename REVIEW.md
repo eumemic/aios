@@ -1,164 +1,225 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Review — runsc egress apply in the target Sentry (`6d7ae8e0`)
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+Uncorrelated review of the gVisor Validation green fix on branch `gvisorgrnrev`
+(same tip as the implementer branch). Scope per the review brief: the
+runsc-specific egress apply, the runc path staying unchanged, Limited staying
+fail-closed, the workflow's `perf` exclusion, test coverage of the new
+argv/exec path, and DONE.md's claims versus what the tests actually prove.
+Track G / Coolify and browser F4 were out of scope and not touched.
 
 ## Verdict
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+The **mechanism is right**. `docker exec` into the target container is the
+correct answer to #2310 / gvisor#170: two runsc containers sharing a Linux netns
+get separate Sentries, so a `--network container:` sidecar programs its own
+netstack and the target's tables stay empty. Rules have to be written from
+inside the target's Sentry, and `docker exec --privileged` is the only way to
+get `NET_ADMIN` there (`docker exec` has no `--cap-add`).
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+The **isolation claim as committed was not true**, and I fixed it. DONE.md
+states:
 
-## Issues found
+> Tenant changes persisted in the sandbox root therefore cannot replace the
+> binaries trusted to install or verify the rules.
 
-### Fatal
+As committed, four separate paths let the tenant do exactly that. All four are
+fixed on this branch; the claim now holds, and is pinned by an executing test
+rather than by prose.
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+The workflow change is correctly scoped. DONE.md does **not** overclaim
+greenness — it says plainly that local unit tests "does not prove the scheduled
+job green on a real runsc daemon", which is the honest position.
 
-### Serious
+One **pre-existing red test** shipped on `6d7ae8e0`; fixed (F5).
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+---
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+## Findings
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+### F1 — `awk`, `sort`, `head` ran from the tenant filesystem (serious)
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+`setup._RESOLVE_IPV4_FN` is
+`getent ahostsv4 "$1" | awk '{print $1}' | sort -u`, and `_nat_dnat_lines`
+runs `PROXY_IP=$(resolve_ipv4 ... | head -n1)`. The committed preamble shadowed
+only `iptables*`, `ip6tables*`, `getent` and `grep`, so `awk`, `sort` and `head`
+resolved through the tenant's `PATH` — inside the tenant's mount namespace,
+against a durable, tenant-writable root.
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+This is not a theoretical gap: `awk` chooses the addresses fed to
+`iptables -d`. A tenant `awk` emitting `0.0.0.0/0` turns the Limited
+allow-list into `-A OUTPUT -d 0.0.0.0/0 -p tcp --dport 443 -j ACCEPT` — a
+blanket egress bypass that still exits 0 and still passes the `-P OUTPUT DROP`
+read-back verify. The lockdown reports green while open.
 
-### Minor (not fixed — flagged for the implementer's call)
+**Fixed:** the shadow map covers every external command the generated scripts
+run, and `PATH` is repointed into the operator root so a *future* unshadowed
+command degrades to "not found" rather than "tenant binary".
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+### F2 — tenant-authored container env was inherited by the exec (serious)
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+`EnvironmentConfig.env` is a free-form `dict[str, str]` with no key validation,
+injected at `docker run --env`, and `docker exec` inherits the container's
+environment. Two families of injection followed:
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+* `LD_PRELOAD` / `LD_AUDIT` — passing `--library-path` to `ld.so` changes where
+  it *searches*; it does not stop it honouring these. Either one runs tenant
+  code inside the "operator-trusted" process.
+* `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `BASH_FUNC_*` — honoured by
+  `bash -c`. `BASH_FUNC_iptables%%` would replace the shadow function itself.
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+This hole is **new to the runsc path**: the runc sidecar is a fresh container
+built from the operator image with operator environment, so it never had it.
 
-## Fixes applied
+**Fixed:** the exec passes `--env` scrubs for the loader vars and pins `PATH`,
+and runs `bash -p` (privileged mode), which ignores `BASH_ENV`/`ENV`/
+`SHELLOPTS`/`BASHOPTS`/`CDPATH`/`GLOBIGNORE` and refuses `BASH_FUNC_*` import.
+`POSIXLY_CORRECT` is cleared separately: bash reads it at startup regardless of
+`-p`, and posix mode rejects the hyphenated `iptables-legacy` function name — a
+tenant-triggerable provisioning failure rather than a bypass, but still
+tenant-controlled behaviour.
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
+### F3 — two path families escaped the read-only mount (serious)
 
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
+Everything under `$OP` is only trustworthy if resolving it never leaves the
+mount. Two committed paths did not satisfy that:
 
-## Do the DONE's claims hold?
+* `$OP/usr/sbin/iptables`, `$OP/usr/sbin/ip6tables` (and `/usr/bin/awk`, once
+  shadowed) are **update-alternatives** symlinks to `/etc/alternatives/<name>`.
+  That target is **absolute**, so it resolves in the *tenant* root. Latent for
+  `iptables` today only because `_IPTABLES_BACKEND_SELECT` always prefers the
+  `-legacy` name; it would have become live the moment `awk` was shadowed
+  naively.
+* `$OP/lib64/ld-linux-x86-64.so.2` and `$OP/bin/bash` depend on the Debian
+  usr-merge symlinks (`/bin`, `/lib`, `/lib64`, `/sbin`) having *relative*
+  targets. True in bookworm, but that is a base-image property, not a
+  guarantee — a bump that made one absolute would silently redirect the loader
+  and the shell into the tenant root, with no test failing.
 
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
+**Fixed:** every shadowed path is now the real file under `/usr`
+(`/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2`, `/usr/bin/bash`,
+`iptables-legacy`, `mawk`), and two tests assert no `/etc/alternatives` target
+and no usr-merge-prefixed path can be reintroduced.
 
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
+### F4 — a missing operator root failed *open-ish*, not closed
 
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
+A container created before this path existed, or a daemon that ignores
+`--mount type=image`, has no operator root. The committed preamble would then
+fail with an opaque `ld.so` error whose exit status depends on which command
+happened to run first.
 
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
+**Fixed:** the preamble presence-checks the loader and every shadowed binary up
+front and exits `90` with a named message. `apply_network_lockdown` already
+fails closed on nonzero, so Limited provisioning refuses — the required
+behaviour. Pinned by
+`test_preamble_fails_closed_when_operator_root_is_missing`.
 
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
+### F5 — `6d7ae8e0` shipped a failing unit test
 
-## What I did not verify
+`tests/unit/test_gvisor_validation_workflow.py::test_gvisor_workflow_mirrors_docker_e2e_setup_and_runs_runsc_shard`
+pins the workflow's pytest invocation as an exact string. The commit changed
+`-m docker` to `-m 'docker and not perf'` and did not update the pin, so the
+test is red on `6d7ae8e0` (confirmed by checking out HEAD clean). DONE.md's
+"Local proof" ran only two files and so did not see it.
 
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+**Fixed:** pin updated to the new selector, plus an assertion that
+`continue-on-error` never appears — excluding the advisory mark must not become
+a licence to make docker failures non-fatal.
+
+### F6 — the `--mount type=image` requirement was undocumented and unprobed
+
+The runsc path now needs Docker Engine 28+ with the containerd image store
+(`features.containerd-snapshotter`). The workflow enables it; nothing else in
+the tree records that runsc has acquired a hard daemon dependency, and nothing
+verifies the daemon actually honoured the flag. On a runner that ignores it,
+every Limited provisioning fails deep in the E2E suite with an error that looks
+unrelated to the daemon config.
+
+**Fixed:** documented on `AIOS_SANDBOX_RUNTIME` in `config.py`, and the
+workflow now probes `docker run --mount type=image` immediately after the
+daemon restart, failing with a `::error::` that names the actual cause.
+
+### F7 — control flow around the runtime branch
+
+The committed code branched on `runtime == "runsc"`, then re-tested the same
+condition twice more after the branch (`if runtime and runtime != "runsc"`,
+`if runtime != "runsc"`) to finish assembling the non-runsc argv. Correct, but
+it left the runc argv split across three places.
+
+**Fixed:** one `if/else`; each branch builds its own complete argv.
+
+---
+
+## Behaviour changes worth an operator's attention (documented, not "fixed")
+
+* **`/etc/resolv.conf`.** Under runsc the script runs in the target's mount
+  namespace, so `setup._RESOLV_PREAMBLE` now rewrites the *sandbox's own*
+  `resolv.conf` instead of a throwaway sidecar's. It loses Docker's
+  `options ndots:0 edns0 trust-ad` line. This is net security-**positive** —
+  the allow-list is built from what `getent` returns, so a tenant-poisoned
+  `resolv.conf` would otherwise choose which addresses get an `ACCEPT` — and
+  lossless in practice on a user-defined network, where Docker writes the same
+  `127.0.0.11`. Now stated in the `run_netns_sidecar` docstring.
+* **`--privileged` is wider than `--cap-add NET_ADMIN`.** `docker exec` has no
+  `--cap-add`, so the exec gets the full capability set where the runc sidecar
+  got one capability. It is one ephemeral operator process, and the sandbox's
+  own processes still hold no `NET_ADMIN`, so the tenant-facing property is
+  unchanged — but it is a real widening of the operator surface and is now
+  called out in the docstring rather than left implicit.
+* **`image` is unused on the runsc path.** The operator root is whatever
+  `create()` mounted, which is `settings.docker_image` — deliberately the
+  operator image, not `spec.image`, so a browser or custom sandbox image still
+  gets operator-trusted tools. Every in-tree caller passes the same value, so
+  there is no live divergence; documented rather than changed.
+
+## Confirmed correct, no change made
+
+* **runc path untouched.** `create()` adds the mount only under
+  `spec.runtime == "runsc"`; `run_netns_sidecar`'s non-runsc branch is the same
+  `docker run --rm --network container:<id> --cap-add NET_ADMIN [--runtime rt]
+  <image> bash -c` it always was. Now pinned by two tests (one for a non-runsc
+  named runtime, one for `runtime=None`) — the committed change had converted
+  the only test covering that shape into a runsc test, leaving it uncovered.
+* **Workflow narrowing is by mark only.** `-m 'docker and not perf'` matches the
+  precedent in `code-validation.yml:627` verbatim. `perf` is a single class
+  (`TestAdvisoryScalingBackstop`, 3 tests, one file), documented NON-GATING
+  under #1661. Every `docker`-marked test still runs and still fails the job;
+  the job is not `continue-on-error`, and there is no standing skip. The
+  workflow now says *why*, as `code-validation.yml` does.
+* **Limited stays fail-closed.** No error suppression was added; the new
+  failure mode (F4) is an explicit nonzero exit.
+* **DONE.md does not overclaim greenness.** It explicitly disclaims proving the
+  scheduled job green and names `workflow_dispatch` as the real proof. Its
+  *isolation* claim was the overclaim, and that is now made true rather than
+  softened.
+
+## What I could not verify here
+
+No Docker daemon in this environment (`docker: command not found`), so
+everything below is unverified by execution and remains for the
+`workflow_dispatch` run:
+
+1. that `docker exec --privileged` actually confers `CAP_NET_ADMIN` inside a
+   runsc Sentry;
+2. that gVisor's netstack accepts the full generated ruleset — specifically
+   `-m conntrack --ctstate ESTABLISHED,RELATED` and nat-table `DNAT`;
+3. that the runner's Engine honours `--mount type=image` (the new probe answers
+   this in the first 30 seconds of the job rather than 20 minutes in).
+
+The task's "do not claim the scheduled job is green without a real runsc proof
+path" still stands: this review does not make that claim.
+
+## Changes
+
+| File | Change |
+|---|---|
+| `src/aios/sandbox/backends/docker.py` | Operator-root constants; `_runsc_operator_preamble()` with presence check + full command shadow set; env scrubs + `bash -p`; real `/usr` paths; single `if/else`; docstring |
+| `src/aios/config.py` | `AIOS_SANDBOX_RUNTIME=runsc` now documents the Engine 28 + containerd-image-store requirement |
+| `.github/workflows/gvisor-validation.yml` | Why `perf` is excluded; `--mount type=image` capability probe |
+| `tests/unit/sandbox/test_runsc_operator_shadow.py` | **New.** Executes the real generated scripts against a synthetic operator root and fails on any command bash resolves outside it; fail-closed and path-shape assertions |
+| `tests/unit/sandbox/test_docker_runtime_argv.py` | runsc exec shape; operator-binary/env-scrub assertions; restored non-runsc sidecar coverage; `create` omits the mount by default |
+| `tests/unit/test_gvisor_validation_workflow.py` | Pin updated to the new selector (F5); `continue-on-error` guard; image-mount probe assertion |
+
+`uv run mypy src tests`, `uv run ruff check src tests`,
+`uv run ruff format --check src tests`, and `uv run pytest tests/unit -q -n 4`
+(6107 passed) all pass. The worktree is clean apart from this file and the
+review commit; nothing is pushed and no PR is open.
