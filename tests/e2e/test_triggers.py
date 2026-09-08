@@ -40,6 +40,7 @@ from unittest import mock
 import asyncpg
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from aios.db import queries
 from aios.models.agents import ToolSpec
@@ -321,13 +322,100 @@ class TestServiceLayer:
             pool,
             sid,
             "p",
-            TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}}),
+            TriggerUpdate.model_validate(
+                {"source": {"kind": "cron", "schedule": "0 9 * * *", "timezone": None}}
+            ),
             account_id=account_id,
         )
         assert isinstance(updated.source, CronSource)
         assert updated.source.schedule == "0 9 * * *"
         assert updated.next_fire is not None
         assert updated.next_fire != before
+
+    async def test_update_cron_preserves_non_utc_timezone(
+        self, pool: Any, env_and_agent: tuple[str, str]
+    ) -> None:
+        """End-to-end regression for the silent-timezone-reset bug: a stored
+        non-UTC cron zone survives a cron source-replace that re-supplies it
+        (``next_fire`` stays the New-York-derived slot), an update omitting
+        ``timezone`` 422s at the model boundary (so the stored zone is NOT
+        silently reset to UTC), and an explicit ``null`` update flips the
+        stored zone to UTC (shifts ``next_fire``). Before the fix, the
+        omitting-timezone update persisted ``source_spec.timezone=null`` and
+        shifted ``next_fire`` to the UTC-derived slot — a 4-hour drift on EDT.
+        """
+        env_id, agent_id = env_and_agent
+        sid = await _create_session(pool, env_id, agent_id)
+        account_id = "acc_test_stub"
+
+        created = await trig_service.add_trigger(
+            pool,
+            sid,
+            TriggerCreate.model_validate(
+                {
+                    "name": "tz",
+                    "source": {
+                        "kind": "cron",
+                        "schedule": "0 9 * * *",
+                        "timezone": "America/New_York",
+                    },
+                    "action": {"kind": "sandbox_command", "command": "true"},
+                }
+            ),
+            account_id=account_id,
+        )
+        assert isinstance(created.source, CronSource)
+        assert created.source.timezone == "America/New_York"
+        ny_next = created.next_fire
+        assert ny_next is not None  # New-York-derived slot (09:00 EDT == 13:00Z on EDT dates)
+
+        # An update omitting `timezone` 422s at the model boundary — the
+        # stored non-UTC zone cannot be silently reset to UTC.
+        with pytest.raises(ValidationError, match="timezone"):
+            TriggerUpdate.model_validate({"source": {"kind": "cron", "schedule": "0 9 * * *"}})
+
+        # The stored row is untouched by the rejected update.
+        listed = await trig_service.list_triggers(pool, sid, account_id=account_id)
+        assert isinstance(listed[0].source, CronSource)
+        assert listed[0].source.timezone == "America/New_York"
+        assert listed[0].next_fire == ny_next
+
+        # Re-supplying the same zone preserves it (no reset); next_fire stays
+        # the same New-York-derived slot since the schedule is unchanged.
+        preserved = await trig_service.update_trigger(
+            pool,
+            sid,
+            "tz",
+            TriggerUpdate.model_validate(
+                {
+                    "source": {
+                        "kind": "cron",
+                        "schedule": "0 9 * * *",
+                        "timezone": "America/New_York",
+                    }
+                }
+            ),
+            account_id=account_id,
+        )
+        assert isinstance(preserved.source, CronSource)
+        assert preserved.source.timezone == "America/New_York"
+        assert preserved.next_fire == ny_next
+
+        # Explicit null is the deliberate in-band choice of UTC — flips the
+        # stored zone and shifts next_fire to the UTC-derived slot.
+        to_utc = await trig_service.update_trigger(
+            pool,
+            sid,
+            "tz",
+            TriggerUpdate.model_validate(
+                {"source": {"kind": "cron", "schedule": "0 9 * * *", "timezone": None}}
+            ),
+            account_id=account_id,
+        )
+        assert isinstance(to_utc.source, CronSource)
+        assert to_utc.source.timezone is None
+        assert to_utc.next_fire is not None
+        assert to_utc.next_fire != ny_next
 
     async def test_update_cron_to_one_shot_conversion(
         self, pool: Any, env_and_agent: tuple[str, str]
@@ -1087,6 +1175,38 @@ class TestHttp:
             json={"action": {"kind": "sandbox_command", "command": "echo x"}},
         )
         assert r.status_code == 422, r.text
+
+    async def test_partial_cron_source_update_omitting_timezone_rejected(
+        self, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]
+    ) -> None:
+        # §2.2 Replace rule on the source side: a cron source-replace on update
+        # must re-send ``timezone`` (explicit null = UTC). Omission must 422
+        # instead of silently resetting a stored non-UTC zone to UTC — the same
+        # rule that makes a partial sandbox_command action 422.
+        env_id, agent_id = env_and_agent
+        sid = await self._create_session_via_http(http_client, agent_id, env_id)
+        await http_client.post(
+            f"/v1/sessions/{sid}/triggers",
+            json={
+                "name": "tz",
+                "source": {
+                    "kind": "cron",
+                    "schedule": "0 9 * * *",
+                    "timezone": "America/New_York",
+                },
+                "action": {"kind": "sandbox_command", "command": "echo hi"},
+            },
+        )
+        r = await http_client.put(
+            f"/v1/sessions/{sid}/triggers/tz",
+            json={"source": {"kind": "cron", "schedule": "0 9 * * *"}},
+        )
+        assert r.status_code == 422, r.text
+        # The stored row is untouched (no silent reset of the non-UTC zone).
+        r = await http_client.get(f"/v1/sessions/{sid}/triggers")
+        assert r.status_code == 200, r.text
+        trig = next(t for t in r.json()["data"] if t["name"] == "tz")
+        assert trig["source"]["timezone"] == "America/New_York"
 
     async def test_create_with_initial_triggers(
         self, http_client: httpx.AsyncClient, env_and_agent: tuple[str, str]

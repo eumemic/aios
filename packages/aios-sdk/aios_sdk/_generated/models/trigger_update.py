@@ -8,7 +8,7 @@ from attrs import define as _attrs_define
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
-    from ..models.cron_source import CronSource
+    from ..models.cron_source_replace import CronSourceReplace
     from ..models.external_event_source import ExternalEventSource
     from ..models.one_shot_source import OneShotSource
     from ..models.run_completion_source_replace import RunCompletionSourceReplace
@@ -33,7 +33,7 @@ class TriggerUpdate:
     past-fire_at business rules are enforced in the service layer (§2.4).
 
         Attributes:
-            source (CronSource | ExternalEventSource | None | OneShotSource | RunCompletionSourceReplace | Unset):
+            source (CronSourceReplace | ExternalEventSource | None | OneShotSource | RunCompletionSourceReplace | Unset):
             action (None | SandboxCommandActionReplace | Unset | WakeOwnerAction | WakeSessionAction |
                 WorkflowActionReplace):
             enabled (bool | None | Unset):
@@ -41,7 +41,7 @@ class TriggerUpdate:
     """
 
     source: (
-        CronSource
+        CronSourceReplace
         | ExternalEventSource
         | None
         | OneShotSource
@@ -60,7 +60,7 @@ class TriggerUpdate:
     metadata: None | TriggerUpdateMetadataType0 | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
-        from ..models.cron_source import CronSource
+        from ..models.cron_source_replace import CronSourceReplace
         from ..models.external_event_source import ExternalEventSource
         from ..models.one_shot_source import OneShotSource
         from ..models.run_completion_source_replace import RunCompletionSourceReplace
@@ -73,7 +73,7 @@ class TriggerUpdate:
         source: dict[str, Any] | None | Unset
         if isinstance(self.source, Unset):
             source = UNSET
-        elif isinstance(self.source, CronSource):
+        elif isinstance(self.source, CronSourceReplace):
             source = self.source.to_dict()
         elif isinstance(self.source, OneShotSource):
             source = self.source.to_dict()
@@ -128,7 +128,7 @@ class TriggerUpdate:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
-        from ..models.cron_source import CronSource
+        from ..models.cron_source_replace import CronSourceReplace
         from ..models.external_event_source import ExternalEventSource
         from ..models.one_shot_source import OneShotSource
         from ..models.run_completion_source_replace import RunCompletionSourceReplace
@@ -143,7 +143,7 @@ class TriggerUpdate:
         def _parse_source(
             data: object,
         ) -> (
-            CronSource
+            CronSourceReplace
             | ExternalEventSource
             | None
             | OneShotSource
@@ -157,7 +157,7 @@ class TriggerUpdate:
             try:
                 if not isinstance(data, dict):
                     raise TypeError()
-                source_type_0_type_0 = CronSource.from_dict(data)
+                source_type_0_type_0 = CronSourceReplace.from_dict(data)
 
                 return source_type_0_type_0
             except (TypeError, ValueError, AttributeError, KeyError):
@@ -187,7 +187,7 @@ class TriggerUpdate:
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
             return cast(
-                CronSource
+                CronSourceReplace
                 | ExternalEventSource
                 | None
                 | OneShotSource

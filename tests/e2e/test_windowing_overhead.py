@@ -1,15 +1,15 @@
 """E2E regression: the full payload sent to the model must fit within
 the agent's ``window_max`` — including system prompt, tool-schema, and
-channels-tail-block overhead.
+channels-listing overhead.
 
 PR #165 established the full-payload invariant but only counted the
-system prompt + tool schemas.  The channels tail block
-(:func:`~aios.harness.channels.build_channels_tail_block`) is appended
-in :func:`~aios.harness.step_context.compose_step_context` AFTER
-windowing runs, so its size was leaking out of the budget too.  On JN
-(6 Signal bindings) that leak was ~1.5K provider tokens — enough to
-push the post-windowing prompt over ``window_max`` by the tail size.
-This file pins BOTH contributions (system+tools AND tail block) against
+system prompt + tool schemas.  The channels listing
+(:func:`~aios.harness.channels.render_channels_reminder`) is written by
+:func:`~aios.harness.step_context.compose_step_context` AFTER windowing
+runs, so its size was leaking out of the budget too.  On JN (6 Signal
+bindings) that leak was ~1.5K provider tokens — enough to push the
+post-windowing prompt over ``window_max`` by the listing's size. This
+file pins BOTH contributions (system+tools AND the listing) against
 regression.
 """
 
@@ -99,10 +99,11 @@ class TestWindowingOverhead:
 
     async def test_full_payload_fits_window_max_with_tail_block(self, harness: Harness) -> None:
         """Same invariant, but with channel bindings active so
-        :func:`~aios.harness.channels.build_channels_tail_block` emits
-        a non-trivial tail block appended after windowing.  Pre-fix the
-        tail's size was not subtracted from the window budget, so its
-        contents would push the send-time payload past ``window_max``.
+        :func:`~aios.harness.channels.render_channels_reminder` emits
+        a non-trivial listing the composer writes after windowing.
+        Pre-fix the listing's size was not subtracted from the window
+        budget, so its contents would push the send-time payload past
+        ``window_max``.
         """
         account_id = "acc_test_stub"  # PR 3 scaffolding
         system = (
@@ -124,10 +125,11 @@ class TestWindowingOverhead:
             tools=[ToolSpec(type=t) for t in ("bash", "read", "write", "edit", "glob", "grep")],
             description=None,
             metadata={},
-            # Snug window — the tail block's ~400 local tokens push past
-            # the cap if they aren't reserved during windowing.
-            window_min=3_500,
-            window_max=4_500,
+            # Snug window — the listing's reserve (~1.6k local tokens for six
+            # channels at their fattest preview) pushes past the cap if it
+            # isn't subtracted during windowing.
+            window_min=6_000,
+            window_max=8_000,
             account_id=account_id,
         )
         session = await sessions_service.create_session(
@@ -141,12 +143,12 @@ class TestWindowingOverhead:
 
         # Six channels with Signal-realistic address widths (UUID + base64
         # group id) — the on-wire size of JN's fan-out.  Short stub
-        # addresses undercount the tail block by ~3x and hide the bug.
+        # addresses undercount the listing by ~3x and hide the bug.
         # Bound channels are now derived from the event log's ``channel``
         # column (connector redesign #200 replaced the explicit
         # ``channel_bindings`` table with this derived view).  An inbound
         # stamped with ``metadata.channel`` lights up the channel for
-        # the tail block.
+        # the listing.
         addresses = [
             f"signal/test/{uuid}/base64groupid-{i:02d}-{'x' * 30}="
             for i, uuid in enumerate(f"{i:08d}-{i:04d}-{i:04d}-{i:04d}-{i:012d}" for i in range(6))
@@ -185,7 +187,7 @@ class TestWindowingOverhead:
         call = harness.model_calls[0]
         full_local = approx_tokens(call["messages"], tools=call.get("tools"))
 
-        # Sanity: a non-trivial tail block really did render.  Minimum
+        # Sanity: a non-trivial listing really did render.  Minimum
         # floor: header + 6 listing lines with Signal-width addresses
         # and preview clauses is >= 100 local tokens.
         tail_text = next(
@@ -196,10 +198,10 @@ class TestWindowingOverhead:
             ),
             None,
         )
-        assert tail_text is not None, "channels tail block not present — preconditions broken"
+        assert tail_text is not None, "channels listing not present — preconditions broken"
         tail_local = approx_tokens([{"role": "user", "content": tail_text}])
         assert tail_local >= 100, (
-            f"tail block only {tail_local} local tokens — not chunky enough "
+            f"listing only {tail_local} local tokens — not chunky enough "
             f"to exercise the bug path; test preconditions weak"
         )
 
