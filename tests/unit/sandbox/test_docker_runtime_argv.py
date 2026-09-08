@@ -74,6 +74,11 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     await DockerBackend().create(_spec(runtime="runsc"))
 
     assert _runtime_values(calls[0]) == ["runsc"]
+    mount = calls[0][calls[0].index("--mount") + 1]
+    assert mount == (
+        "type=image,src=ghcr.io/eumemic/aios-sandbox:latest,"
+        "dst=/run/aios-operator-root"
+    )
 
 
 async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,10 +100,12 @@ async def test_netns_sidecar_emits_runtime_when_passed(monkeypatch: pytest.Monke
         runtime="runsc",
     )
 
-    assert _runtime_values(calls[0]) == ["runsc"]
-    # The flag lands before the image (i.e. on the docker run options, not
-    # inside the in-container command).
-    assert calls[0].index("--runtime") < calls[0].index("aios-sandbox:test")
+    assert calls[0][:3] == ["docker", "exec", "--privileged"]
+    assert calls[0][3] == "sandbox123"
+    assert _runtime_values(calls[0]) == []
+    command = calls[0][-1]
+    assert "/run/aios-operator-root" in command
+    assert "operator_exec /usr/sbin/iptables-legacy" in command
 
 
 async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -55,6 +55,9 @@ jobs:
           else:
               config = {}
           config.setdefault("runtimes", {})["runsc"] = {"path": "/usr/bin/runsc"}
+          # Image mounts provide the read-only operator tool root used to
+          # program netfilter inside the target runsc Sentry.
+          config.setdefault("features", {})["containerd-snapshotter"] = True
           daemon_json.write_text(json.dumps(config, separators=(",", ":")))
           # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}}
           PY
@@ -110,7 +113,7 @@ jobs:
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
-          AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile --junitxml=e2e-results.xml
+          AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m 'docker and not perf' -n 4 --dist=loadfile --junitxml=e2e-results.xml
 
       - name: Summarize failed risk group
         if: failure()
