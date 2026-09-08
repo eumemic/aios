@@ -3364,6 +3364,11 @@ class SandboxRegistry:
             except Exception:
                 # One unavailable session/event writer must not prevent retries
                 # for other durable outbox entries. Leave this marker intact.
+                # Permanent undeliverables (the session was archived between
+                # set and emit) never reach here: the lister excludes archived
+                # rows, and ``_emit_pending_snapshot_reset_notice`` retires the
+                # marker on a claim miss instead of raising, so this swallow
+                # only covers transient writer failures — which SHOULD retry.
                 log.exception(
                     "sandbox.snapshot_reset_notice_retry_failed",
                     session_id=session_id,
@@ -3371,7 +3376,19 @@ class SandboxRegistry:
                 )
 
     async def _emit_pending_snapshot_reset_notice(self, session_id: str, reason: str) -> None:
-        """Atomically claim, append, and acknowledge one durable loss notice."""
+        """Atomically claim, append, and acknowledge one durable loss notice.
+
+        A ``False`` claim means another worker owns the row, already delivered
+        it, or the row no longer matches the deliverable predicate. The latter
+        happens when the session was archived between the durable outbox listing
+        and this claim: ``unscoped_deliver_pending_snapshot_reset_notice``
+        fences on ``archived_at IS NULL`` (mirroring ``append_event``) and
+        returns ``False`` rather than raising ``NotFoundError``. An archived
+        session can never consume a ``sandbox_fs_reset`` event, so the marker
+        is retired here instead of the flush retrying a permanent failure every
+        tick. A transient miss (row changed but still live) stays set for the
+        next flush to retry.
+        """
         from aios.harness import runtime
 
         pool = runtime.require_pool()
@@ -3383,9 +3400,22 @@ class SandboxRegistry:
                 # but never hold a pooled connection across non-DB I/O.
                 use_event_writer_seam = True
             else:
-                await queries.unscoped_deliver_pending_snapshot_reset_notice(
+                delivered = await queries.unscoped_deliver_pending_snapshot_reset_notice(
                     conn, session_id, expected_reason=reason
                 )
+                if not delivered:
+                    # The claim lost to a concurrent worker OR the row stopped
+                    # being deliverable. Only the archived terminal state is
+                    # permanent: retire it so the outbox stops retrying a
+                    # notice whose session can no longer accept the event.
+                    archived = await conn.fetchval(
+                        "SELECT (archived_at IS NOT NULL) FROM sessions WHERE id = $1",
+                        session_id,
+                    )
+                    if archived:
+                        await queries.unscoped_clear_pending_snapshot_reset_notice(
+                            conn, session_id, expected_reason=reason
+                        )
         if use_event_writer_seam:
             await self._append_fs_event(session_id, SANDBOX_FS_RESET_EVENT, {"reason": reason})
         # A false result means another worker owns or already delivered it.

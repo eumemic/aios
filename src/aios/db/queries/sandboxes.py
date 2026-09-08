@@ -267,12 +267,19 @@ async def unscoped_prepare_snapshot_reset_notice(
 async def unscoped_list_pending_snapshot_reset_notices(
     conn: asyncpg.Connection[Any], *, limit: int = 1000
 ) -> list[tuple[str, str]]:
-    """Return durable filesystem-loss outbox entries for retry."""
+    """Return durable filesystem-loss outbox entries for retry.
+
+    Archived sessions are excluded: ``append_event`` fences on
+    ``archived_at IS NULL`` and raises ``NotFoundError``, so a notice whose
+    session was archived between set and emit could never be consumed. Listing
+    it would only drive the flush into a permanent retry loop with no retire.
+    """
     rows = await conn.fetch(
         """SELECT id, snapshot_reset_pending_reason
              FROM sessions
             WHERE snapshot_reset_pending_reason IS NOT NULL
               AND snapshot_reset_pending_ready
+              AND archived_at IS NULL
             ORDER BY id
             LIMIT $1""",
         limit,
@@ -303,6 +310,13 @@ async def unscoped_deliver_pending_snapshot_reset_notice(
     The row lock with ``SKIP LOCKED`` makes concurrent GC workers race for a
     single claim.  Appending the event and clearing its marker share the outer
     transaction, so either both become visible or neither does.
+
+    The claim fences on ``archived_at IS NULL`` for the same reason
+    ``append_event`` does: a lifecycle event for an archived session is
+    silently dropped by ``find_sessions_needing_inference`` and would only
+    waste a sequence number. An archived row therefore returns ``False`` (no
+    claim) rather than raising ``NotFoundError`` from ``append_event``; the
+    caller retires such a marker instead of retrying the doomed delivery.
     """
     # Local import avoids the query-package re-export cycle during startup.
     from aios.db.queries.events import append_event
@@ -313,6 +327,7 @@ async def unscoped_deliver_pending_snapshot_reset_notice(
                  FROM sessions
                 WHERE id = $1 AND snapshot_reset_pending_reason = $2
                   AND snapshot_reset_pending_ready
+                  AND archived_at IS NULL
                   FOR UPDATE SKIP LOCKED""",
             session_id,
             expected_reason,
