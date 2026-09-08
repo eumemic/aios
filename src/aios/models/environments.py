@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from aios.actors import Actor
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 
 # ── networking config ─────────────────────────────────────────────────────────
 
@@ -165,6 +166,7 @@ class EnvironmentConfig(BaseModel):
     bash_timeout_seconds: int | None = Field(
         default=None,
         ge=1,
+        le=MAX_BASH_TIMEOUT_SECONDS,
         description=(
             "Ceiling, in seconds, for a single bash tool call in sessions "
             "bound to this environment. When unset, falls back to the "

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aios_connector_http import ManagementHandlerError
 
-from aios_whatsapp.connector import WhatsappConnector
+from aios_whatsapp.connector import WhatsappConnector, _WhatsappConnectionState
+from aios_whatsapp.daemon import WhatsappDaemon
 from aios_whatsapp.management import normalize_phone
 
 from .conftest import CONNECTION_ID, PHONE
@@ -345,18 +346,98 @@ async def test_state_lookup_matches_formatting_variants(
     connector: WhatsappConnector,
 ) -> None:
     """Operator-supplied external_account_id need only match the connection's
-    phone after normalization — formatting differences (spaces, dashes,
-    missing leading +) are tolerated."""
+    phone once digits are compared — formatting differences (spaces, dashes,
+    parens, dots, missing leading +) are all tolerated."""
     connector.state[CONNECTION_ID].daemon.start_pairing = (  # type: ignore[attr-defined]
         _async_return({"code": "2@code"})
     )
-    # PHONE is "+15551112222"; operator submits various equivalents.
-    for variant in ("+15551112222", "15551112222", "+1-555-111-2222", "+1 555 111 2222"):
+    # PHONE is "+15551112222"; operator submits various equivalents, including
+    # parens/dots which normalize_phone does NOT strip (digits-only lookup).
+    for variant in (
+        "+15551112222",
+        "15551112222",
+        "+1-555-111-2222",
+        "+1 555 111 2222",
+        "+1 (555) 111-2222",
+        "+1.555.111.2222",
+    ):
         result = await connector.startPairing(external_account_id=variant)
         assert result["code"] == "2@code"
         # The response echoes the operator's input verbatim, not the
         # canonical form — keeps the response shape diagnosable.
         assert result["external_account_id"] == variant
+
+
+@pytest.mark.parametrize(
+    "stored_formatted",
+    # serve_connection stores state.phone = normalize_phone(secrets["phone"]),
+    # which KEEPS parens/dots (normalize_phone strips only spaces/dashes).
+    # The reverse direction (canonical stored, formatted lookup) is already
+    # covered by test_state_lookup_matches_formatting_variants.
+    ["+1 (555) 111-2222", "+1.555.111.2222"],
+)
+async def test_state_lookup_stored_formatted_finds_live_connection(
+    connector: WhatsappConnector, stored_formatted: str
+) -> None:
+    """Regression: a phone stored in parens/dots form (connection-create time)
+    must be found when the management handler is invoked with the same number
+    in canonical form (management-call time).  Before the digits-only lookup,
+    _state_for_phone raised no_active_connection for a connection that was
+    present and actively serving."""
+    connector.state[CONNECTION_ID].phone = normalize_phone(stored_formatted)
+    connector.state[CONNECTION_ID].daemon.start_pairing = (  # type: ignore[attr-defined]
+        _async_return({"code": "2@code"})
+    )
+    result = await connector.startPairing(external_account_id=PHONE)
+    assert result == {"external_account_id": PHONE, "code": "2@code"}
+    connector.state[CONNECTION_ID].daemon.start_pairing.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "no_digit_id",
+    ["", "+()-. ()"],
+)
+async def test_state_lookup_no_digit_id_fails_closed(
+    connector: WhatsappConnector, no_digit_id: str
+) -> None:
+    """An external_account_id carrying no digits must never match a live
+    connection via the digits-only comparison — it fails closed with
+    no_active_connection rather than falsely resolving to a state whose stored
+    phone also strips to empty (degenerate input)."""
+    with pytest.raises(ManagementHandlerError) as ei:
+        await connector.startPairing(external_account_id=no_digit_id)
+    assert ei.value.payload == {
+        "status": "no_active_connection",
+        "external_account_id": no_digit_id,
+    }
+
+
+async def test_state_lookup_distinct_numbers_no_false_match(
+    connector: WhatsappConnector,
+) -> None:
+    """Two live connections carrying different numbers, each stored in a
+    different format, must each resolve ONLY to their own state — the
+    digits-only comparison must not bridge two distinct accounts."""
+    other_conn = "conn_other"
+    other_daemon = MagicMock(spec=WhatsappDaemon)
+    connector.state[other_conn] = _WhatsappConnectionState(
+        phone=normalize_phone("+1 (999) 888-7777"), daemon=other_daemon
+    )
+    other_daemon.start_pairing = _async_return({"code": "2@other"})  # type: ignore[attr-defined]
+    connector.state[CONNECTION_ID].daemon.start_pairing = (  # type: ignore[attr-defined]
+        _async_return({"code": "2@mine"})
+    )
+    # The fixture's CONNECTION_ID uses PHONE "+15551112222" (canonical); look
+    # it up in DOTS format — must resolve to CONNECTION_ID, never the
+    # parens-formatted other account.
+    result = await connector.startPairing(external_account_id="+1.555.111.2222")
+    assert result["code"] == "2@mine"
+    connector.state[CONNECTION_ID].daemon.start_pairing.assert_awaited_once()  # type: ignore[attr-defined]
+    other_daemon.start_pairing.assert_not_awaited()  # type: ignore[attr-defined]
+    # Look up the other account canonically — resolves to other_conn.
+    result = await connector.startPairing(external_account_id="+19998887777")
+    assert result["code"] == "2@other"
+    other_daemon.start_pairing.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 def _async_return(value: object) -> object:

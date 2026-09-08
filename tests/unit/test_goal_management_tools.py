@@ -123,6 +123,56 @@ async def test_create_goal_requires_output_schema() -> None:
         await invoke_builtin(_SELF, "create_goal", {"goal": "ship it"})
 
 
+# The minimal structural-invalidity shapes: the smallest class of schema typo — a
+# bogus `type` keyword, a non-object `properties`, a non-array `required`. Each is a
+# valid `dict[str, Any]` (so passes the tool-schema `dict` field + `_parse`) but is NOT
+# a valid JSON Schema, so the OPEN-time gate must reject it before persistence.
+_MALFORMED_SCHEMAS = [
+    pytest.param({"type": "ans"}, id="bogus-type-string"),
+    pytest.param({"type": 123}, id="bogus-type-int"),
+    pytest.param({"properties": "not_an_object"}, id="non-object-properties"),
+    pytest.param({"required": "done"}, id="non-array-required"),
+]
+
+
+@pytest.mark.parametrize("bad_schema", _MALFORMED_SCHEMAS)
+async def test_create_goal_rejects_malformed_output_schema(
+    monkeypatch: Any, bad_schema: dict[str, Any]
+) -> None:
+    """A malformed `output_schema` is rejected at OPEN time via `ToolBail` BEFORE it is
+    persisted on the request_opened edge — so it can never become an un-closable
+    completion contract (the CLOSE-time formatter would crash or mis-validate on it,
+    per-`(schema, value-shape)`). Mirrors the trusted workflow-authoring gate
+    (``step._reject_invalid_output_schema``) on the untrusted model-tool surface.
+    The bail is self-correctable (``ToolBail``, not an evicting exception), so the
+    model may retry with a fixed schema instead of opening an un-closable obligation.
+    """
+    inv = AsyncMock()
+    monkeypatch.setattr("aios.services.sessions.invoke", inv)
+    with pytest.raises(ToolBail, match="output_schema is not a valid JSON Schema"):
+        await invoke_builtin(_SELF, "create_goal", {"goal": "ship it", "output_schema": bad_schema})
+    # No edge opened: the persistence call never ran (rejected before `invoke`).
+    inv.assert_not_awaited()
+
+
+async def test_create_goal_valid_output_schema_still_opens_edge(monkeypatch: Any) -> None:
+    """Positive control: a well-formed `output_schema` sails through the OPEN-time
+    gate and still opens the self-goal edge — the gate does not regress the happy path.
+    """
+    _stub_open_obligations(monkeypatch, [])  # under cap
+    inv = AsyncMock(
+        return_value=TaskHandle(servicer_kind="session", servicer_id=_SELF, request_id="req_goal")
+    )
+    monkeypatch.setattr("aios.services.sessions.invoke", inv)
+
+    out = await invoke_builtin(_SELF, "create_goal", {"goal": "ship it", "output_schema": _SCHEMA})
+
+    assert out == {"goal_id": "req_goal", "goal": "ship it", "status": "open"}
+    inv.assert_awaited_once()
+    assert inv.await_args is not None
+    assert inv.await_args.kwargs["output_schema"] == _SCHEMA
+
+
 async def test_create_goal_opens_self_goal_edge(monkeypatch: Any) -> None:
     _stub_open_obligations(monkeypatch, [])  # no goals open yet → under cap
     inv = AsyncMock(

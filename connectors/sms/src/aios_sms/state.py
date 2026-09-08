@@ -32,8 +32,11 @@ class SmsConnectionState:
     the ``emit_inbound`` round-trip (design §3.2): the webhook handler
     enqueues + returns 200 immediately, and ``serve_connection`` drains.
     It is **bounded** (design §5.3): a full queue sheds rather than
-    growing unbounded, since a dropped inbound is recoverable via
-    Twilio's retry but an OOM is not.
+    growing unbounded. Note the ``200`` is already sent before
+    ``emit_inbound`` runs, so Twilio will NOT redeliver a shed (or
+    transport-dropped) inbound — the bound is a deliberate loss/OOM
+    trade, not "recoverable via Twilio retry"; the drain loop retries
+    transport errors in-process before dropping (``connector.py``).
     """
 
     connection_id: str

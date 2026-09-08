@@ -449,7 +449,14 @@ async def archive_child(
         )
     async with pool.acquire() as conn:
         archived = await queries.archive_account(conn, target_account_id)
-    assert archived is not None, "scope check just confirmed the account exists"
+    if archived is None:
+        # Scope check already eliminated the missing-row case; a no-row
+        # archive here means a concurrent purge hard-deleted the row
+        # between the scope check and this UPDATE (TOCTOU loss).
+        raise ConflictError(
+            f"account {target_account_id} was concurrently purged",
+            detail={"account_id": target_account_id},
+        )
     # When the row was already archived, ``archive_account`` returns it
     # unchanged. Callers see idempotent behavior.
     _ = target
