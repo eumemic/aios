@@ -1,176 +1,225 @@
-# Uncorrelated review — Actions control-plane strip + unit rewrite (`487ae3c2`)
+# Review — runsc egress apply in the target Sentry (`6d7ae8e0`)
 
-Reviewer: Claude Opus 5, branch `eumbotfcrev` (worktree `/workspace/aios-eumbotfcrev`).
-Commits under review: `f66485fb` ("fix: strip Actions runner file command paths") and
-`487ae3c2` ("fix: cover all Actions control env vars"), on top of `4ea7eefd`.
-Fixes committed locally as `2fd5e84f`. Nothing pushed, no PR opened.
+Uncorrelated review of the gVisor Validation green fix on branch `gvisorgrnrev`
+(same tip as the implementer branch). Scope per the review brief: the
+runsc-specific egress apply, the runc path staying unchanged, Limited staying
+fail-closed, the workflow's `perf` exclusion, test coverage of the new
+argv/exec path, and DONE.md's claims versus what the tests actually prove.
+Track G / Coolify and browser F4 were out of scope and not touched.
 
 ## Verdict
 
-**The diagnosis is right and the fix works — I reproduced the false-fail on the
-pre-fix tree and its absence after — but it shipped a formatting violation that
-CI's own lint job would have failed on the next push, and the requirement it was
-written to satisfy (the two new names in `_STRIPPED_ENV`) was not actually pinned
-by any test.** Both are fixed here, along with four smaller items. Ready for PR
-after `2fd5e84f`.
+The **mechanism is right**. `docker exec` into the target container is the
+correct answer to #2310 / gvisor#170: two runsc containers sharing a Linux netns
+get separate Sentries, so a `--network container:` sidecar programs its own
+netstack and the target's tables stay empty. Rules have to be written from
+inside the target's Sentry, and `docker exec --privileged` is the only way to
+get `NET_ADMIN` there (`docker exec` has no `--cap-add`).
 
-All six TASK.md / prompt checks pass on the reviewed tip; findings 1 and 2 are
-about how the change would have fared *next*, not about the behaviour it claims.
+The **isolation claim as committed was not true**, and I fixed it. DONE.md
+states:
 
-## Verification of the required points
+> Tenant changes persisted in the sandbox root therefore cannot replace the
+> binaries trusted to install or verify the rules.
 
-| # | Requirement | Result |
-|---|---|---|
-| 1 | `_STRIPPED_ENV` gains `GITHUB_STEP_SUMMARY`, `GITHUB_STATE` | ✅ `scripts/eumemic_bot_review.py:124-129` |
-| 2 | Child env unreachable for `file_commands` paths under any key, name-strip not weakened | ✅ value strip added; all five names still in the list |
-| 3 | Test uses an explicit runner-env dict, no ambient substring assertion | ✅ `os.environ` replaced wholesale |
-| 4 | Launcher still reads `GITHUB_OUTPUT` from parent | ✅ `_record_published` (`:510`) reads its own `os.environ`; test green |
-| 5 | `origin/master` is an ancestor; prior #2404 harness commits retained | ✅ all nine (`0e727e02`…`487ae3c2`) present |
-| 6 | DONE.md claims match reality | ✅ root cause and pytest count confirmed; validation section incomplete (finding 1) |
+As committed, four separate paths let the tenant do exactly that. All four are
+fixed on this branch; the claim now holds, and is pinned by an executing test
+rather than by prose.
 
-**Root cause reproduced, not assumed.** Checked the pre-fix tree (`4ea7eefd`) out
-into the worktree and ran the test under a simulated hosted-runner environment
-carrying `_runner_file_commands` paths under `GITHUB_STEP_SUMMARY`,
-`GITHUB_STATE`, and one unrelated key:
+The workflow change is correctly scoped. DONE.md does **not** overclaim
+greenness — it says plainly that local unit tests "does not prove the scheduled
+job green on a real runsc daemon", which is the honest position.
 
-```
-3 failed, 50 deselected      # 4ea7eefd, same ambient env
-58 passed                    # this tip + fixes, same ambient env
-```
+One **pre-existing red test** shipped on `6d7ae8e0`; fixed (F5).
 
-DONE.md's "4 passed" for the named `-k` selection is accurate.
+---
 
 ## Findings
 
-### Blocking
+### F1 — `awk`, `sort`, `head` ran from the tenant filesystem (serious)
 
-**1. `ruff format --check` fails on the rewritten test — CI's lint job would have
-gone red immediately.** `code-validation.yml:243` runs
-`ruff format --check src tests …`, which covers this file. The new set literal
-was written hand-wrapped:
+`setup._RESOLVE_IPV4_FN` is
+`getent ahostsv4 "$1" | awk '{print $1}' | sort -u`, and `_nat_dnat_lines`
+runs `PROXY_IP=$(resolve_ipv4 ... | head -n1)`. The committed preamble shadowed
+only `iptables*`, `ip6tables*`, `getent` and `grep`, so `awk`, `sort` and `head`
+resolved through the tenant's `PATH` — inside the tenant's mount namespace,
+against a durable, tenant-writable root.
 
-```python
-control_names = {
-    "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"
-}
-```
+This is not a theoretical gap: `awk` chooses the addresses fed to
+`iptables -d`. A tenant `awk` emitting `0.0.0.0/0` turns the Limited
+allow-list into `-A OUTPUT -d 0.0.0.0/0 -p tcp --dport 443 -j ACCEPT` — a
+blanket egress bypass that still exits 0 and still passes the `-P OUTPUT DROP`
+read-back verify. The lockdown reports green while open.
 
-`ruff format` wants one element per line with a magic trailing comma, so
-`--check` reported `Would reformat: tests/unit/test_eumemic_bot_review.py` on the
-reviewed tip. This is the same failure class the task exists to close — green
-`pytest` locally, red CI — one job over. DONE.md's validation section lists only
-the pytest run; CLAUDE.md requires mypy, ruff check *and* ruff format before
-every commit. Fixed, and `ruff check`/`ruff format --check` are now clean over
-all of `src tests`.
+**Fixed:** the shadow map covers every external command the generated scripts
+run, and `PATH` is repointed into the operator root so a *future* unshadowed
+command degrades to "not found" rather than "tenant binary".
 
-### Serious
+### F2 — tenant-authored container env was inherited by the exec (serious)
 
-**2. The name strip of `GITHUB_STEP_SUMMARY` / `GITHUB_STATE` — TASK.md item 1 —
-was not pinned by any test.** Deleting both names from `_STRIPPED_ENV` left the
-entire file green:
+`EnvironmentConfig.env` is a free-form `dict[str, str]` with no key validation,
+injected at `docker run --env`, and `docker exec` inherits the container's
+environment. Two families of injection followed:
 
-```
-3 passed, 50 deselected      # with both names deleted, before this fix
-```
+* `LD_PRELOAD` / `LD_AUDIT` — passing `--library-path` to `ld.so` changes where
+  it *searches*; it does not stop it honouring these. Either one runs tenant
+  code inside the "operator-trusted" process.
+* `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `BASH_FUNC_*` — honoured by
+  `bash -c`. `BASH_FUNC_iptables%%` would replace the shadow function itself.
 
-The reason is that the test's values for those two keys contain `file_commands`,
-so the *new value strip* removed them regardless of the name list. The two
-mechanisms were entangled, and the one the task was filed for was the one not
-under test. That matters because the value strip keys off `_runner_file_commands`
-— an undocumented internal of the runner's temp layout, not a contract. If GitHub
-renames that directory, the name list is the only cover left, and nothing would
-have caught its removal.
+This hole is **new to the runsc path**: the runc sidecar is a fresh container
+built from the operator image with operator environment, so it never had it.
 
-Fixed by splitting the mechanisms across two tests. New
-`test_control_variables_are_stripped_by_name_not_only_by_path` is parametrized
-over all five names and plants a value the marker cannot match
-(`/runner/_temp/control-plane-abc`), so only the name list can remove it. Both
-tests were mutation-checked: deleting the two names now fails 2 cases; deleting
-the value-strip clause fails 3.
+**Fixed:** the exec passes `--env` scrubs for the loader vars and pins `PATH`,
+and runs `bash -p` (privileged mode), which ignores `BASH_ENV`/`ENV`/
+`SHELLOPTS`/`BASHOPTS`/`CDPATH`/`GLOBIGNORE` and refuses `BASH_FUNC_*` import.
+`POSIXLY_CORRECT` is cleared separately: bash reads it at startup regardless of
+`-p`, and posix mode rejects the hyphenated `iptables-legacy` function name — a
+tenant-triggerable provisioning failure rather than a bypass, but still
+tenant-controlled behaviour.
 
-### Minor
+### F3 — two path families escaped the read-only mount (serious)
 
-**3. The stronger value assertion was dropped when it no longer had to be.** The
-rewrite replaced `assert not [v for v in env.values() if "file_commands" in v]`
-with a single `assert "RUNNER_TEMP_SUMMARY" not in env`. That assertion was only
-unsafe because it ran over the *ambient* environment; once `os.environ` is
-replaced wholesale with an explicit dict it is both ambient-proof and strictly
-stronger than naming one key. Restored, with a comment saying why it is safe here.
+Everything under `$OP` is only trustworthy if resolving it never leaves the
+mount. Two committed paths did not satisfy that:
 
-**4. Nothing pinned the filter's blast radius.** No test asserted that an ordinary
-inherited variable *survives* `_agent_command`. `PATH` is load-bearing — the child
-needs it to find `codex` / `claude` / `pi` at all — and a value filter that
-over-matched would be invisible to the unit suite while breaking every real run.
-Added `PATH` to the runner env and asserted it comes through unchanged.
+* `$OP/usr/sbin/iptables`, `$OP/usr/sbin/ip6tables` (and `/usr/bin/awk`, once
+  shadowed) are **update-alternatives** symlinks to `/etc/alternatives/<name>`.
+  That target is **absolute**, so it resolves in the *tenant* root. Latent for
+  `iptables` today only because `_IPTABLES_BACKEND_SELECT` always prefers the
+  `-legacy` name; it would have become live the moment `awk` was shadowed
+  naively.
+* `$OP/lib64/ld-linux-x86-64.so.2` and `$OP/bin/bash` depend on the Debian
+  usr-merge symlinks (`/bin`, `/lib`, `/lib64`, `/sbin`) having *relative*
+  targets. True in bookworm, but that is a base-image property, not a
+  guarantee — a bump that made one absolute would silently redirect the loader
+  and the shell into the tenant root, with no test failing.
 
-**5. `_CONTROL_PATH_MARKERS` carried a dead element.**
-`("file_commands", "_runner_file_commands")` — the second can never match without
-the first, which is a substring of it. Collapsed to a single
-`_CONTROL_PATH_MARKER` and dropped the `any()`, per CLAUDE.md's extreme-simplicity
-line.
+**Fixed:** every shadowed path is now the real file under `/usr`
+(`/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2`, `/usr/bin/bash`,
+`iptables-legacy`, `mawk`), and two tests assert no `/etc/alternatives` target
+and no usr-merge-prefixed path can be reintroduced.
 
-**6. The comment overclaimed the strip as containment.** "deny those paths
-wherever they occur" reads as though the agent can no longer reach the control
-files. It can: `RUNNER_TEMP` is still inherited, `_runner_file_commands` sits
-directly beneath it, and hosted runners default it to `/home/runner/work/_temp`,
-so `ls $RUNNER_TEMP/_runner_file_commands/` finds the UUID-named files without
-guessing. Left as defence in depth — stripping `RUNNER_TEMP` buys nothing against
-a predictable path — but the comment now says so, and points at the actual
-containment (`contents: read`, `persist-credentials: false`, both already in
-place). The rest of this file argues its security properties carefully; this line
-should not be the one that oversells.
+### F4 — a missing operator root failed *open-ish*, not closed
 
-**7. Documentation gaps around the two new variables.** The `_STRIPPED_ENV`
-comment block gives a per-variable rationale for `GITHUB_OUTPUT` / `GITHUB_ENV` /
-`GITHUB_PATH` and nothing for the two additions; the test docstring likewise. Both
-now cover `GITHUB_STATE` (mutates later steps of this job) and
-`GITHUB_STEP_SUMMARY` (the "did not post" net writes the operator's account of
-the run there, `eumemic-bot-review.yml:137-145` — an agent holding that path
-writes the second half of the same forgery). Also fixed a stale cross-reference
-to `test_stripping_github_output_does_not_break_the_signal`, which has been
-`…_the_publication_signal` since `4ea7eefd`.
+A container created before this path existed, or a daemon that ignores
+`--mount type=image`, has no operator root. The committed preamble would then
+fail with an opaque `ld.so` error whose exit status depends on which command
+happened to run first.
 
-## Checked and deliberately not changed
+**Fixed:** the preamble presence-checks the loader and every shadowed binary up
+front and exits `90` with a named message. `apply_network_lockdown` already
+fails closed on nonzero, so Limited provisioning refuses — the required
+behaviour. Pinned by
+`test_preamble_fails_closed_when_operator_root_is_missing`.
 
-- **`monkeypatch.setattr(reviewer.os, "environ", runner_env)`** swaps the real
-  `os.environ` for a plain dict process-wide for the test's duration — broader
-  than it looks. Kept: `_agent_command` is a pure call, monkeypatch restores it,
-  and full replacement is the only way to be genuinely ambient-proof, which is
-  the whole point of the rewrite.
-- **Stripping `GITHUB_STEP_SUMMARY` from the child does not break the safety
-  net's summary.** That step runs in its own runner shell with its own
-  environment (`eumemic-bot-review.yml:137`), not in the agent's — the same
-  argument that makes the `GITHUB_OUTPUT` strip free.
-- **`scripts/` is outside CI's ruff and mypy paths** (`code-validation.yml:242-246`
-  covers `src tests packages/… connectors/…`), so the launcher itself is
-  unlinted either way. Ran both against it by hand — clean. Widening the CI paths
-  to include `scripts/` is a real gap but belongs to its own change.
+### F5 — `6d7ae8e0` shipped a failing unit test
 
-## Commands run
+`tests/unit/test_gvisor_validation_workflow.py::test_gvisor_workflow_mirrors_docker_e2e_setup_and_runs_runsc_shard`
+pins the workflow's pytest invocation as an exact string. The commit changed
+`-m docker` to `-m 'docker and not perf'` and did not update the pin, so the
+test is red on `6d7ae8e0` (confirmed by checking out HEAD clean). DONE.md's
+"Local proof" ran only two files and so did not see it.
 
-```
-uv run pytest -q tests/unit/test_eumemic_bot_review.py            # 53 -> 58 passed
-uv run mypy tests/unit/test_eumemic_bot_review.py                 # clean
-uv run ruff check src tests && uv run ruff format --check src tests
-uv run bash scripts/verify_eumemic_bot_review_gate.sh             # ALL CHECKS PASSED
-```
+**Fixed:** pin updated to the new selector, plus an assertion that
+`continue-on-error` never appears — excluding the advisory mark must not become
+a licence to make docker failures non-fatal.
 
-The gate script is the sanctioned one-command re-verification from the previous
-round, and it still passes end to end: 58 unit tests, the GITHUB_OUTPUT mutant
-killed, the forged-`published=true` attack refused with the safety net still
-firing, and the honest agent still publishing.
+### F6 — the `--mount type=image` requirement was undocumented and unprobed
 
-Plus the pre-fix reproduction, the simulated-runner ambient run, and the three
-mutation checks quoted above.
+The runsc path now needs Docker Engine 28+ with the containerd image store
+(`features.containerd-snapshotter`). The workflow enables it; nothing else in
+the tree records that runsc has acquired a hard daemon dependency, and nothing
+verifies the daemon actually honoured the flag. On a runner that ignores it,
+every Limited provisioning fails deep in the E2E suite with an error that looks
+unrelated to the daemon config.
 
-**Full unit suite — two runs, and they do not agree.** `uv run pytest tests/unit
--q -n 4` gave `10 failed, 6178 passed` and then `2 failed, 6186 passed`, with
-*disjoint* failure sets (`test_attachment_staging`, `test_host_dir_reaper`,
-`test_image_resize`, `test_revocation_kinds_coverage` in the first;
-`test_invoke_session_tools`, `test_litellm_param_validation` in the second).
-Every one of them passes when its file is run on its own, so these are
-pre-existing ordering/parallelism flakes under xdist, not regressions: this
-branch changes no `src/` file, and none of the failing test files differ from
-`origin/master`. Reporting it because the numbers are real, not because it
-blocks this PR — but a suite whose failure set changes run to run is worth its
-own issue.
+**Fixed:** documented on `AIOS_SANDBOX_RUNTIME` in `config.py`, and the
+workflow now probes `docker run --mount type=image` immediately after the
+daemon restart, failing with a `::error::` that names the actual cause.
+
+### F7 — control flow around the runtime branch
+
+The committed code branched on `runtime == "runsc"`, then re-tested the same
+condition twice more after the branch (`if runtime and runtime != "runsc"`,
+`if runtime != "runsc"`) to finish assembling the non-runsc argv. Correct, but
+it left the runc argv split across three places.
+
+**Fixed:** one `if/else`; each branch builds its own complete argv.
+
+---
+
+## Behaviour changes worth an operator's attention (documented, not "fixed")
+
+* **`/etc/resolv.conf`.** Under runsc the script runs in the target's mount
+  namespace, so `setup._RESOLV_PREAMBLE` now rewrites the *sandbox's own*
+  `resolv.conf` instead of a throwaway sidecar's. It loses Docker's
+  `options ndots:0 edns0 trust-ad` line. This is net security-**positive** —
+  the allow-list is built from what `getent` returns, so a tenant-poisoned
+  `resolv.conf` would otherwise choose which addresses get an `ACCEPT` — and
+  lossless in practice on a user-defined network, where Docker writes the same
+  `127.0.0.11`. Now stated in the `run_netns_sidecar` docstring.
+* **`--privileged` is wider than `--cap-add NET_ADMIN`.** `docker exec` has no
+  `--cap-add`, so the exec gets the full capability set where the runc sidecar
+  got one capability. It is one ephemeral operator process, and the sandbox's
+  own processes still hold no `NET_ADMIN`, so the tenant-facing property is
+  unchanged — but it is a real widening of the operator surface and is now
+  called out in the docstring rather than left implicit.
+* **`image` is unused on the runsc path.** The operator root is whatever
+  `create()` mounted, which is `settings.docker_image` — deliberately the
+  operator image, not `spec.image`, so a browser or custom sandbox image still
+  gets operator-trusted tools. Every in-tree caller passes the same value, so
+  there is no live divergence; documented rather than changed.
+
+## Confirmed correct, no change made
+
+* **runc path untouched.** `create()` adds the mount only under
+  `spec.runtime == "runsc"`; `run_netns_sidecar`'s non-runsc branch is the same
+  `docker run --rm --network container:<id> --cap-add NET_ADMIN [--runtime rt]
+  <image> bash -c` it always was. Now pinned by two tests (one for a non-runsc
+  named runtime, one for `runtime=None`) — the committed change had converted
+  the only test covering that shape into a runsc test, leaving it uncovered.
+* **Workflow narrowing is by mark only.** `-m 'docker and not perf'` matches the
+  precedent in `code-validation.yml:627` verbatim. `perf` is a single class
+  (`TestAdvisoryScalingBackstop`, 3 tests, one file), documented NON-GATING
+  under #1661. Every `docker`-marked test still runs and still fails the job;
+  the job is not `continue-on-error`, and there is no standing skip. The
+  workflow now says *why*, as `code-validation.yml` does.
+* **Limited stays fail-closed.** No error suppression was added; the new
+  failure mode (F4) is an explicit nonzero exit.
+* **DONE.md does not overclaim greenness.** It explicitly disclaims proving the
+  scheduled job green and names `workflow_dispatch` as the real proof. Its
+  *isolation* claim was the overclaim, and that is now made true rather than
+  softened.
+
+## What I could not verify here
+
+No Docker daemon in this environment (`docker: command not found`), so
+everything below is unverified by execution and remains for the
+`workflow_dispatch` run:
+
+1. that `docker exec --privileged` actually confers `CAP_NET_ADMIN` inside a
+   runsc Sentry;
+2. that gVisor's netstack accepts the full generated ruleset — specifically
+   `-m conntrack --ctstate ESTABLISHED,RELATED` and nat-table `DNAT`;
+3. that the runner's Engine honours `--mount type=image` (the new probe answers
+   this in the first 30 seconds of the job rather than 20 minutes in).
+
+The task's "do not claim the scheduled job is green without a real runsc proof
+path" still stands: this review does not make that claim.
+
+## Changes
+
+| File | Change |
+|---|---|
+| `src/aios/sandbox/backends/docker.py` | Operator-root constants; `_runsc_operator_preamble()` with presence check + full command shadow set; env scrubs + `bash -p`; real `/usr` paths; single `if/else`; docstring |
+| `src/aios/config.py` | `AIOS_SANDBOX_RUNTIME=runsc` now documents the Engine 28 + containerd-image-store requirement |
+| `.github/workflows/gvisor-validation.yml` | Why `perf` is excluded; `--mount type=image` capability probe |
+| `tests/unit/sandbox/test_runsc_operator_shadow.py` | **New.** Executes the real generated scripts against a synthetic operator root and fails on any command bash resolves outside it; fail-closed and path-shape assertions |
+| `tests/unit/sandbox/test_docker_runtime_argv.py` | runsc exec shape; operator-binary/env-scrub assertions; restored non-runsc sidecar coverage; `create` omits the mount by default |
+| `tests/unit/test_gvisor_validation_workflow.py` | Pin updated to the new selector (F5); `continue-on-error` guard; image-mount probe assertion |
+
+`uv run mypy src tests`, `uv run ruff check src tests`,
+`uv run ruff format --check src tests`, and `uv run pytest tests/unit -q -n 4`
+(6107 passed) all pass. The worktree is clean apart from this file and the
+review commit; nothing is pushed and no PR is open.
