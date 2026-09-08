@@ -754,7 +754,9 @@ class DockerBackend:
         # then the corpse's parent IS the base and the base terms cancel. Fires
         # with no budget configured at all — the depth ceiling alone let
         # 96-layer chains run unbounded.
-        dead_history = added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view > 0
+        dead_history = (
+            added_chain > 0 and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
+        )
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds

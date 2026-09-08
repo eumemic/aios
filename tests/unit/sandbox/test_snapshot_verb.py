@@ -693,6 +693,27 @@ class TestBaseRelativeChainTriggers:
         assert fake_docker.pipelines
 
     @pytest.mark.asyncio
+    async def test_fully_dead_added_chain_flattens_with_no_budget(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """A write-then-delete session has no net view growth but a costly chain.
+
+        Clamping the added view at zero must not exempt this maximally dead
+        history from the budget-less ratio trigger.
+        """
+        self._base(fake_docker, view=1 * GB, chain=1 * GB)
+        self._parent_on_base(fake_docker, view=1 * GB, chain=11 * GB)
+        fake_docker.size_rw = 1_000_000
+
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+
+        assert out.kind == "flattened"
+        assert fake_docker.pipelines, "flatten must run export|import"
+        assert not _committed(fake_docker)
+
+    @pytest.mark.asyncio
     async def test_committed_unique_bytes_is_chain_denominated_like_the_gc_heal(
         self, fake_docker: _FakeDocker
     ) -> None:
