@@ -16,7 +16,10 @@
   budget-less trigger short of the depth ceiling. That ratio is measured
   base-relative, like the projected-unique figure beside it: a flatten can only
   reclaim history THIS session added, never the shared base's own interior
-  chain, which the flatten would copy forward verbatim. Measured over the whole
+  chain, which the flatten would copy forward verbatim. A session that writes
+  then deletes clamps its added view to zero, so the ratio's positivity guard is
+  on the added chain: a fully dead added chain is the strongest case to flatten,
+  not one exempt from the trigger. Measured over the whole
   chain instead, any base with the ordinary
   `apt-get install … && rm -rf /var/lib/apt/lists` shape would force a
   reclaim-nothing flatten on every session's first snapshot, every idle. The
