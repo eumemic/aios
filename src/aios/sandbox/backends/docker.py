@@ -84,6 +84,12 @@ _MANAGED_INSPECT_BATCH_SIZE = 100
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+# A runsc sandbox's netfilter lives in its Sentry, not in the Linux network
+# namespace Docker can join a second container to.  Mount the operator image
+# read-only so the runsc exec path below can use known-good networking tools
+# without trusting the durable, tenant-writable root filesystem.
+_RUNSC_OPERATOR_ROOT = "/run/aios-operator-root"
+
 
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
 # metadata calls on the blanket Docker CLI bound, but calibrate data work from
@@ -166,6 +172,14 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", spec.network_name or SANDBOX_NETWORK_NAME])
+
+        if spec.runtime == "runsc":
+            argv.extend(
+                [
+                    "--mount",
+                    f"type=image,src={get_settings().docker_image},dst={_RUNSC_OPERATOR_ROOT}",
+                ]
+            )
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
@@ -1106,7 +1120,7 @@ class DockerBackend:
         max_output_bytes: int,
         runtime: str | None = None,
     ) -> CommandResult:
-        """Apply/verify the network lockdown from an ephemeral operator-image sidecar.
+        """Apply/verify network rules with operator-image binaries.
 
         ``--network container:<id>`` shares the sandbox's netns; ``--cap-add
         NET_ADMIN`` lets the sidecar edit netfilter in that shared namespace;
@@ -1114,28 +1128,60 @@ class DockerBackend:
         the sandbox). No restrictive seccomp is applied — this is an
         operator-trusted, short-lived container, and iptables needs the
         syscalls the default profile permits. ``runtime`` (#1014) selects the
-        container runtime (e.g. ``runsc``) — passed by the caller, pinned to
-        the target sandbox's spec; the backend never reads ambient config.
+        container runtime — passed by the caller, pinned to the target
+        sandbox's spec; the backend never reads ambient runtime config.
+
+        runsc is different: Docker's netns-sharing sidecar gets a distinct
+        Sentry, so it cannot see the target's userspace netfilter. For runsc,
+        execute in the target Sentry with NET_ADMIN and load every executable
+        from the read-only operator-image mount added by :meth:`create`.
         """
-        argv = [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            f"container:{target_sandbox_id}",
-            "--cap-add",
-            "NET_ADMIN",
-        ]
-        if runtime:
-            argv.extend(["--runtime", runtime])
-        argv.extend(
-            [
-                image,
-                "bash",
+        if runtime == "runsc":
+            # A second runsc container gets a second Sentry/netstack even with
+            # ``--network container:``. Execute in the target Sentry instead.
+            # The mounted operator root is immutable; explicitly invoking its
+            # ELF loader also prevents a persisted tenant replacement of the
+            # target's loader from gaining control before the trusted shell.
+            operator_preamble = f"""
+OP={_RUNSC_OPERATOR_ROOT}
+LD="$OP/lib64/ld-linux-x86-64.so.2"
+LIB="$OP/lib/x86_64-linux-gnu:$OP/usr/lib/x86_64-linux-gnu"
+operator_exec() {{ "$LD" --library-path "$LIB" "$OP$1" "${{@:2}}"; }}
+iptables-legacy() {{ operator_exec /usr/sbin/iptables-legacy "$@"; }}
+iptables() {{ operator_exec /usr/sbin/iptables "$@"; }}
+ip6tables-legacy() {{ operator_exec /usr/sbin/ip6tables-legacy "$@"; }}
+ip6tables() {{ operator_exec /usr/sbin/ip6tables "$@"; }}
+getent() {{ operator_exec /usr/bin/getent "$@"; }}
+grep() {{ operator_exec /usr/bin/grep "$@"; }}
+export -f iptables-legacy iptables ip6tables-legacy ip6tables getent grep
+"""
+            argv = [
+                "docker",
+                "exec",
+                "--privileged",
+                target_sandbox_id,
+                f"{_RUNSC_OPERATOR_ROOT}/lib64/ld-linux-x86-64.so.2",
+                "--library-path",
+                f"{_RUNSC_OPERATOR_ROOT}/lib/x86_64-linux-gnu:"
+                f"{_RUNSC_OPERATOR_ROOT}/usr/lib/x86_64-linux-gnu",
+                f"{_RUNSC_OPERATOR_ROOT}/bin/bash",
                 "-c",
-                script,
+                operator_preamble + script,
             ]
-        )
+        else:
+            argv = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                f"container:{target_sandbox_id}",
+                "--cap-add",
+                "NET_ADMIN",
+            ]
+        if runtime and runtime != "runsc":
+            argv.extend(["--runtime", runtime])
+        if runtime != "runsc":
+            argv.extend([image, "bash", "-c", script])
         rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
             argv, timeout_s=float(timeout_seconds)
         )
