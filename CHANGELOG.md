@@ -11,10 +11,24 @@
   per-session budget nor the 200-layer depth ceiling could ever fire (zero
   `flattened` events in 24 h), and the pool reclaimer logged
   `reclaimed_bytes: 0` every tick against a budget it read as 28.6/60 GB used.
-  A flatten now also fires on `chain > 2 × view` — more than half the chain is
-  dead history — which is the one budget-less trigger short of the depth
-  ceiling. The flatten headroom gate still sizes on the view, since the export
-  writes content, not history.
+  A flatten now also fires on `added_chain > 2 × added_view` — more than half of
+  what the session added on top of its base is dead history — which is the one
+  budget-less trigger short of the depth ceiling. That ratio is measured
+  base-relative, like the projected-unique figure beside it: a flatten can only
+  reclaim history THIS session added, never the shared base's own interior
+  chain, which the flatten would copy forward verbatim. Measured over the whole
+  chain instead, any base with the ordinary
+  `apt-get install … && rm -rf /var/lib/apt/lists` shape would force a
+  reclaim-nothing flatten on every session's first snapshot, every idle. The
+  flatten headroom gate still sizes on the view, since the export writes
+  content, not history.
+
+- `sessions.snapshot_bytes` is now one quantity no matter which writer wrote it
+  last. The snapshot commit/flatten path recorded the `.Size` view while the GC
+  pointer-heal path recorded the on-disk chain cost, so the disk over-limit
+  notice — which gates on the commit-path figure — stayed unreachable for
+  exactly the superseded-history chains this work exists to catch. Both paths
+  are chain-denominated and base-relative now.
 
 - Vision capability now treats a missing LiteLLM catalog entry or absent
   `supports_vision` field as unknown and lets image consumers attempt safe
