@@ -1178,6 +1178,9 @@ async def list_run_ids_needing_step(
     agent_deadline_seconds: float,
     tool_stale_seconds: float,
     call_llm_stale_seconds: float,
+    bash_default_timeout_seconds: float,
+    sandbox_provisioning_slack_seconds: float,
+    max_bash_timeout_seconds: int,
 ) -> list[str]:
     """``id`` for every live run with something for a step to DO — the sweep
     predicate (#780). A parked run with nothing new is deliberately NOT matched
@@ -1229,7 +1232,43 @@ async def list_run_ids_needing_step(
                 AND cs.created_at < now() - make_interval(secs =>
                       CASE cs.payload->>'capability'
                         WHEN 'agent' THEN $1::float8
-                        WHEN 'tool' THEN $2::float8
+                        WHEN 'tool' THEN
+                          CASE WHEN cs.payload->>'tool_name' = 'bash' THEN
+                            GREATEST(
+                              300.0,
+                              COALESCE(
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'resolved_timeout_seconds') = 'number'
+                                   AND (cs.payload->>'resolved_timeout_seconds')::numeric > 0
+                                  THEN LEAST(
+                                    (cs.payload->>'resolved_timeout_seconds')::numeric,
+                                    $6::numeric
+                                  )::float8
+                                END,
+                                -- Compatibility for pre-pin call_started rows.
+                                -- Those calls were opened before environment-aware
+                                -- workflow bash existed: execution used the worker
+                                -- global ceiling, optionally shortened by a valid
+                                -- request. Do not project today's environment config
+                                -- semantics backward onto their recovery horizon.
+                                CASE
+                                  WHEN jsonb_typeof(cs.payload->'input'->'timeout_seconds') = 'number'
+                                   AND (cs.payload->'input'->>'timeout_seconds')::numeric > 0
+                                  THEN LEAST(
+                                    $4::numeric,
+                                    GREATEST(
+                                      1::numeric,
+                                      trunc(LEAST(
+                                        (cs.payload->'input'->>'timeout_seconds')::numeric,
+                                        $6::numeric
+                                      ))
+                                    )
+                                  )::float8
+                                  ELSE $4::float8
+                                END
+                              ) + $5::float8
+                            )
+                          ELSE $2::float8 END
                         WHEN 'call_llm' THEN $3::float8
                       END)
                 AND NOT EXISTS (
@@ -1241,8 +1280,58 @@ async def list_run_ids_needing_step(
         agent_deadline_seconds,
         tool_stale_seconds,
         call_llm_stale_seconds,
+        bash_default_timeout_seconds,
+        sandbox_provisioning_slack_seconds,
+        max_bash_timeout_seconds,
     )
     return [r["id"] for r in rows]
+
+
+async def pin_call_started_timeout(
+    conn: asyncpg.Connection[Any],
+    *,
+    run_id: str,
+    call_key: str,
+    resolved_timeout_seconds: int,
+) -> None:
+    """Pin the resolved bash timeout into a legacy (pre-pin) ``call_started`` row.
+
+    A ``call_started`` row opened before environment-aware workflow bash pinned its
+    ``resolved_timeout_seconds`` at open carries no pin, so the needs-step sweep's
+    legacy branch (:func:`list_run_ids_needing_step`) derives its re-dispatch horizon
+    from the worker-global ``bash_default_timeout_seconds`` — the ceiling the ORIGINAL
+    exec occupied. The cold re-dispatch's re-drive exec (``run_sandbox._execute``)
+    instead resolves the run's environment ceiling, which can far exceed the global
+    default. Pinning the env-derived value into the row on first re-drive routes
+    subsequent sweep ticks to the pinned branch, whose horizon tracks the same env
+    ceiling the re-drive exec occupies — restoring the sweep invariant that the
+    horizon MUST exceed the maximum wall-clock a live bash exec can occupy, so the
+    sweep never re-drives a still-running exec (the cross-worker duplicate storm
+    introduced when c85193b2 made the exec half environment-aware but left the sweep
+    half global for legacy rows).
+
+    Unconditional overwrite of the field: the caller calls this only for a row that
+    has no valid pin in its payload (the cold re-dispatch short-circuits on an
+    existing positive-int pin), so a re-pin on a repeated cold re-dispatch writes the
+    same value. The caller passes the same value directly to
+    ``launch_sandbox_task`` so the exec and the pin cannot diverge: a crashed pin
+    write aborts before the exec starts and re-pins on the next sweep wake, and a
+    committed pin survives a later step crash.
+    """
+    await conn.execute(
+        """
+        UPDATE wf_run_events
+           SET payload = jsonb_set(
+                payload,
+                '{resolved_timeout_seconds}',
+                to_jsonb($3::int)
+           )
+         WHERE run_id = $1 AND call_key = $2 AND type = 'call_started'
+        """,
+        run_id,
+        call_key,
+        resolved_timeout_seconds,
+    )
 
 
 async def signal_stale_suspended_runs(
