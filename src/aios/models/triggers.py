@@ -194,11 +194,28 @@ class ExternalEventSource(BaseModel):
     kind: Literal["external_event"] = "external_event"
 
 
+class CronSourceReplace(CronSource):
+    """Update-side variant (§2.2 Replace rule): ``timezone`` is REQUIRED, so a
+    partial cron source on update 422s instead of silently resetting a stored
+    non-UTC zone to UTC (a silent shift of every future fire time). ``null`` is
+    an explicit, in-band choice of UTC and must be sent deliberately — create
+    keeps the default for tool ergonomics, mirroring the
+    :class:`RunCompletionSourceReplace` / :class:`SandboxCommandActionReplace`
+    / :class:`WorkflowActionReplace` siblings."""
+
+    timezone: str | None = Field(
+        description=(
+            "IANA timezone name (e.g. 'America/New_York') the cron wall-clock "
+            "is interpreted in. Required on update — ``null`` explicitly means "
+            "UTC (no implicit default; send the complete object)."
+        ),
+    )
+
+
 class RunCompletionSourceReplace(RunCompletionSource):
     """Update-side variant (§2.2 Replace rule): ``statuses`` is REQUIRED, so a
     partial source on update 422s instead of silently resetting a narrowed
-    filter back to all-three. (The first SOURCE member with a defaulted field,
-    hence the first ``TriggerSourceReplace`` union.)"""
+    filter back to all-three."""
 
     statuses: list[RunTerminalStatus] = Field(min_length=1)
 
@@ -208,7 +225,7 @@ TriggerSource = Annotated[
     Field(discriminator="kind"),
 ]
 TriggerSourceReplace = Annotated[
-    CronSource | OneShotSource | RunCompletionSourceReplace | ExternalEventSource,
+    CronSourceReplace | OneShotSource | RunCompletionSourceReplace | ExternalEventSource,
     Field(discriminator="kind"),
 ]
 
