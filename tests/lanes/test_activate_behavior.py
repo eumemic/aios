@@ -25,9 +25,12 @@ import json
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, cast
 
+from pydantic import ValidationError
+
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
 from aios.models.common import ListResponse
 from aios.models.pagination import DEFAULT_PAGE_LIMIT, decode_cursor
+from aios.models.sessions import SessionUpdate
 
 
 def _lock(script: str = "S") -> dict[str, Any]:
@@ -196,6 +199,21 @@ class FakeWorld:
                 return _ok(self.sessions["s"])
             if method == "PUT" and path.startswith("/v1/sessions/") and "/triggers/" not in path:
                 self.session_updates.append(payload)
+                # Enforce the REAL SessionUpdate request contract (model_config
+                # extra="forbid") the router binds before any service runs, so a
+                # forbidden-key regression in the script's PUT body surfaces here
+                # as a 422 instead of being silently accepted into the fake
+                # store. ``SessionUpdate`` does not declare ``archive_when_idle``,
+                # so any payload carrying it (the original defect) is rejected.
+                try:
+                    SessionUpdate.model_validate(payload)
+                except ValidationError:
+                    return {
+                        "status": 422,
+                        "body": json.dumps(
+                            {"detail": "session update payload rejected by SessionUpdate"}
+                        ),
+                    }
                 sid = path.rsplit("/", 1)[1]
                 for sess in self.sessions.values():
                     if sess["id"] == sid:
@@ -588,15 +606,82 @@ class TestSessionIdentity:
         assert result["outcome"] == "failed"
         assert "environment_id" in result["error"]
 
-    def test_archive_when_idle_drift_is_reconciled(self) -> None:
-        """archive_when_idle drift must be detected, not silently accepted."""
+    def test_archive_when_idle_drift_is_reported_as_immutable_error(self) -> None:
+        """archive_when_idle is immutable after launch; drift surfaces a typed error, not a 422.
+
+        ``archive_when_idle`` is accepted at create (``SessionCreate``) but is
+        absent from ``SessionUpdate`` (model_config extra="forbid"), so a
+        convergence PUT carrying it would 422 before any service runs, and there
+        is no service pathway to apply it regardless. Drift on it is therefore
+        detected and reported as a typed "immutable field drift" error instead of
+        attempting the impossible reconciliation — failing is the correct
+        outcome; the fix is that it fails LOUDLY with a typed message rather than
+        poisoning the PUT body (the original bug) and 422ing.
+        """
         drifted = _sess("sess-lane", title="t", archive_when_idle=True)
         world = FakeWorld(seed_sessions=[drifted])
 
         result = world.activate()
 
+        assert _actions(result)["session"] == "error"
+        assert result["outcome"] == "failed"
+        assert "archive_when_idle" in result["error"]
+        assert "immutable field drift" in result["error"]
+        # No PUT was attempted: the live session keeps its launch value and no
+        # 422-producing body was sent on the wire.
+        assert world.sessions["sess-lane"]["archive_when_idle"] is True
+        assert world.session_updates == []
+
+    def test_vault_only_drift_is_reconciled_via_session_update(self) -> None:
+        """The functional fix: a vault rotation on an existing titled session converges.
+
+        ``vault_ids`` drift on an existing session whose title is unchanged
+        across lock versions is the surviving functional trigger for the update
+        branch (title churn routes to CREATE; see ``TestSessionIdentity``). The
+        PUT must succeed — the body must NOT carry the forbidden
+        ``archive_when_idle`` key — and the live session must end up with the
+        lock's ``vault_ids``.
+        """
+        drifted = _sess("sess-lane", title="t", vault_ids=["v-old"])
+        world = FakeWorld(seed_sessions=[drifted])
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated"
         assert _actions(result)["session"] == "updated"
-        assert world.sessions["sess-lane"]["archive_when_idle"] is False
+        assert world.sessions["sess-lane"]["vault_ids"] == []
+        # The PUT that went on the wire — the forbidden key is gone.
+        assert world.session_updates, "expected a session PUT"
+        assert "archive_when_idle" not in world.session_updates[0]
+
+    def test_session_update_body_conforms_to_session_update_model(self) -> None:
+        """Regression guard: the session PUT body must validate against SessionUpdate.
+
+        ``SessionUpdate`` is extra="forbid" and does NOT declare
+        ``archive_when_idle``; the real router binds the raw body to it before
+        any service runs. Validating the captured wire payload against the real
+        model catches any re-introduction of a forbidden key (the original 422
+        defect) directly, independent of the FakeWorld's own PUT-handler gate.
+        """
+        drifted = _sess("sess-lane", title="t", vault_ids=["v-old"])
+        world = FakeWorld(seed_sessions=[drifted])
+
+        world.activate()
+
+        assert world.session_updates, "expected a session PUT"
+        # The exact contract enforced at PUT /v1/sessions/{id}. If this raises,
+        # the script is sending a key the server rejects with 422.
+        SessionUpdate.model_validate(world.session_updates[0])
+
+    def test_no_drift_session_update_is_not_attempted(self) -> None:
+        """A matching session is left untouched: no spurious PUT, no 422 surface."""
+        aligned = _sess("sess-lane", title="t", vault_ids=[])
+        world = FakeWorld(seed_sessions=[aligned])
+
+        result = world.activate()
+
+        assert _actions(result)["session"] == "unchanged"
+        assert world.session_updates == []
 
 
 def _live_trigger(
