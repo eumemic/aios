@@ -60,6 +60,7 @@ from aios.harness.vision import (
     correct_image_mime_b64,
     inline_image_format,
     make_image_url_part,
+    supports_vision,
     text_marker,
 )
 from aios.harness.window import WindowOmission
@@ -1169,6 +1170,62 @@ def _clamp_oversize_image_data_urls(messages: list[dict[str, Any]]) -> None:
             messages[msg_idx] = {**msg, "content": new_content}
 
 
+def _strip_image_parts_for_non_vision_model(
+    messages: list[dict[str, Any]], *, model: str | None
+) -> None:
+    """Downgrade persisted ``image_url`` parts to a text marker when the
+    resolved ``model`` is explicitly known not to support vision.
+
+    Sibling pass to :func:`_clamp_oversize_image_data_urls` and
+    :func:`_correct_image_data_url_mimes`, called at the same place on every
+    ``build_messages``. The vision-capability mismatch has the same
+    replay-permanence shape as the oversize wedge: an ``image_url`` tool
+    result frozen in the event log (e.g. a ``browser_screenshot`` / ``read``
+    image result inlined because the tool handler keyed the gate on a raw
+    ``workflow:<id>`` binding string) is replayed verbatim on every wake, and
+    a text-only inner model 400s on it each time, latching the session
+    terminal ``errored`` with no retry/strip. This pass re-checks the resolved
+    model capability each build and rewrites any ``image_url`` part to an inert
+    text placeholder when ``supports_vision(model) is False``, so an
+    already-wedged session self-heals on its next build — the tool-handler
+    resolution fix prevents NEW wedges; this pass heals the backlog, the same
+    way :func:`_clamp_oversize_image_data_urls` heals the oversize backlog.
+
+    Unknown capability (``None``) is left untouched, matching the
+    optimistic-inline policy: a genuinely vision-capable uncatalogued model
+    keeps its inlined images, and only an explicit catalog ``False`` (or an
+    explicit :data:`aios.harness.vision._VISION_OVERRIDES` False) triggers the
+    downgrade. ``None`` is also the result for a ``workflow:`` binding whose
+    ``output_model`` could not be resolved — stripping a possibly-vision-capable
+    bound model's images there would silently lose them, so the conservative
+    leave-in-place matches the pre-fix posture (no worse than today).
+
+    Mutates by *replacing* part dicts with fresh copies — never in place —
+    matching the sibling passes' contract (the message list aliases the
+    immutable ``Event.data``; see ``TestEventDataImmutability``).
+    """
+    if not model:
+        return
+    if supports_vision(model) is not False:
+        return
+    for msg_idx, msg in enumerate(messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[Any] | None = None
+        for i, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            if new_content is None:
+                new_content = list(content)
+            new_content[i] = {
+                "type": "text",
+                "text": "[image omitted: the bound model does not support image input]",
+            }
+        if new_content is not None:
+            messages[msg_idx] = {**msg, "content": new_content}
+
+
 def _is_replayable_thinking_block(block: Any) -> bool:
     """Whether a persisted thinking block is safe to replay to the provider.
 
@@ -1756,6 +1813,7 @@ def build_messages(
 
     _correct_image_data_url_mimes(messages)
     _clamp_oversize_image_data_urls(messages)
+    _strip_image_parts_for_non_vision_model(messages, model=model)
 
     # Resolve the thinking-capability sniff through the shared provider-quirk
     # resolver in ``completion.py`` (consolidated from the prior inline
