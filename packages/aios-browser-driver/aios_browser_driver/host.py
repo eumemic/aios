@@ -611,16 +611,25 @@ class BrowserHost:
         page = entry.active_page if entry else None
         if page is None:
             return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"page": None})
-        url = page.url
-        origin, security = chrome_of(url)
-        jpeg = await page.screenshot(type="jpeg", quality=55, scale="css")
-        viewport = page.viewport_size or {"width": 0, "height": 0}
+        # Same posture as _status above: a lock-free control op degrades
+        # (TargetClosedError from a closing popup, a renderer crash, or the
+        # driver dying) rather than reaching handle's relaunch path — no boot
+        # rotation for a read-only poll. The next action, under the session
+        # lock, detects genuine driver death through handle's catch.
+        try:
+            url = page.url
+            origin, security = chrome_of(url)
+            jpeg = await page.screenshot(type="jpeg", quality=55, scale="css")
+            viewport = page.viewport_size or {"width": 0, "height": 0}
+            title = await page.title()
+        except Exception:
+            return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"page": None})
         return BrowserResponse(
             ok=True,
             boot=boot,
             epoch=epoch,
             url=url,
-            title=await page.title(),
+            title=title,
             data={
                 "page": {
                     "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
