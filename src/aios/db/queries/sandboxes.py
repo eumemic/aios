@@ -74,7 +74,19 @@ async def acquire_workspace_hierarchy_advisory_xact_locks(
 
 
 async def unscoped_workspace_path_is_live(conn: asyncpg.Connection[Any], path: str) -> bool:
-    """Targeted under-lock recheck for one already-normalized workspace path."""
+    """Targeted under-lock recheck for one already-normalized workspace path.
+
+    The probe is fed through :func:`normalized_workspace_path` (``os.path.realpath``)
+    and compared in SQL against the stored ``workspace_volume_path`` /
+    ``workspace_path`` columns. SQL cannot ``realpath`` a stored column, so this
+    relies on the stored-form contract that every live shared-path writer stores
+    the realpath-normalized form via :func:`normalized_workspace_path` — i.e. the
+    explicit/shared arms of ``create_session``, ``create_run``, and
+    ``clone_session``. A writer that stores a raw literal whose form differs
+    from its realpath (a ``..`` segment, or a ``workspace_root`` crossing a
+    symlink ancestor) would defeat every clause here and let the reaper delete a
+    directory a live row references; keep new shared-path writers normalized.
+    """
     normalized = normalized_workspace_path(path)
     return bool(
         await conn.fetchval(

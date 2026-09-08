@@ -58,12 +58,23 @@ def _populate(path: Path) -> Path:
 
 
 def _session_owned_dirs(root: Path, session_id: str = SESSION) -> list[Path]:
-    """The four directories a legitimate purge of ``session_id`` removes."""
+    """The six directories a legitimate purge of ``session_id`` removes.
+
+    Includes the per-session bind-mount sources added by af52d8ac (``_tmp``,
+    #2280) and db1ebfa4 (``_cache``, #2347): both are derived from
+    ``session_id`` alone, exclusively owned by this session, and registered
+    in ``purge_session_directories``'s candidate tuple right alongside
+    uploads/attachments/repos — so the legitimate-purge assertion must cover
+    them too. The earlier four-entry helper was blind to both mounts (the
+    cache blind spot is the bug under test).
+    """
     return [
         root / ACCOUNT / session_id,
         root / "_uploads" / session_id,
         root / "_attachments" / session_id,
         root / "_session_repos" / session_id,
+        root / "_tmp" / session_id,
+        root / "_cache" / session_id,
     ]
 
 
@@ -107,11 +118,21 @@ class TestRefusesUnownedTargets:
         assert (cross / "marker.txt").exists()
 
     def test_refuses_shared_reserved_roots(self, workspace_root: Path) -> None:
-        """``_uploads`` / ``_attachments`` hold EVERY session's subdir."""
-        for reserved in ("_uploads", "_attachments", "_session_repos", "_memory_stores"):
+        """A reserved root holds EVERY session's subdir — passing it as
+        ``workspace_path`` must be refused, never ``rmtree``-ing the shared tree."""
+        for reserved in (
+            "_uploads",
+            "_attachments",
+            "_session_repos",
+            "_tmp",
+            "_cache",
+            "_memory_stores",
+        ):
             shared = _populate(workspace_root / reserved / "sess_someone_else")
             purge_session_directories(SESSION, workspace_root / reserved, account_id=ACCOUNT)
-            assert (shared / "marker.txt").exists()
+            assert (shared / "marker.txt").exists(), (
+                f"shared {reserved} tree was destroyed by a workspace_path purge"
+            )
 
     def test_refuses_out_of_jail_path(self, workspace_root: Path, tmp_path: Path) -> None:
         outside = _populate(tmp_path.parent / f"outside_{tmp_path.name}")
@@ -145,14 +166,14 @@ class TestRefusesUnownedTargets:
     ) -> None:
         """An unowned ``workspace_path`` must not suppress the OTHER purges.
 
-        The uploads/attachments/repos dirs are derived from ``session_id``
+        The uploads/attachments/repos/tmp/cache dirs are derived from ``session_id``
         and are unambiguously this session's, whatever the workspace row
         says. Skipping is per-candidate: refusing the account root reclaims
         nothing less. An all-or-nothing refusal leaked these forever for
         precisely the sessions with an anomalous workspace row.
         """
-        _, uploads, attachments, repos = _session_owned_dirs(workspace_root)
-        for owned in (uploads, attachments, repos):
+        _ws, uploads, attachments, repos, tmp, cache = _session_owned_dirs(workspace_root)
+        for owned in (uploads, attachments, repos, tmp, cache):
             _populate(owned)
         account_root = _populate(workspace_root / ACCOUNT)
         sibling = _populate(account_root / "sess_other_live_session")
@@ -161,7 +182,7 @@ class TestRefusesUnownedTargets:
 
         assert sibling.exists(), "another session's workspace was destroyed"
         assert account_root.exists(), "the shared account root was rmtree'd"
-        for owned in (uploads, attachments, repos):
+        for owned in (uploads, attachments, repos, tmp, cache):
             assert not owned.exists(), f"{owned} is this session's own and must be reclaimed"
 
 
@@ -246,15 +267,27 @@ class TestPermitsLegitimatePurge:
         owned = _session_owned_dirs(workspace_root)
         for path in owned:
             _populate(path)
-        # Bystanders that must survive a legitimate purge.
+        # Bystanders that must survive a legitimate purge: another live
+        # session's workspace plus another session's per-session bind-mount
+        # sources (uploads, tmp, cache) prove the purge is scoped to THIS
+        # session alone — adding the _cache candidate must not sweep a
+        # sibling session's cache dir.
         sibling = _populate(workspace_root / ACCOUNT / "sess_sibling")
         other_uploads = _populate(workspace_root / "_uploads" / "sess_sibling")
+        other_tmp = _populate(workspace_root / "_tmp" / "sess_sibling")
+        other_cache = _populate(workspace_root / "_cache" / "sess_sibling")
 
         purge_session_directories(SESSION, owned[0], account_id=ACCOUNT)
 
         assert all(not path.exists() for path in owned), "legitimate purge did not delete"
         assert (sibling / "marker.txt").exists()
         assert (other_uploads / "marker.txt").exists()
+        assert (other_tmp / "marker.txt").exists(), (
+            "a sibling session's /tmp bind source was destroyed"
+        )
+        assert (other_cache / "marker.txt").exists(), (
+            "a sibling session's /root/.cache bind source was destroyed"
+        )
         assert (workspace_root / ACCOUNT).exists(), "account root must survive"
 
     def test_purges_legacy_pre_409_workspace_layout(self, workspace_root: Path) -> None:
