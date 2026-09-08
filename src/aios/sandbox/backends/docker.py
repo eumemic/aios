@@ -753,10 +753,11 @@ class DockerBackend:
         # force a reclaim-nothing flatten on every session's first snapshot —
         # then the corpse's parent IS the base and the base terms cancel. Fires
         # with no budget configured at all — the depth ceiling alone let
-        # 96-layer chains run unbounded.
-        dead_history = (
-            added_chain > 0 and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
-        )
+        # 96-layer chains run unbounded. The positivity guard sits on the CHAIN,
+        # never on the view: a write-then-delete session clamps its added view to
+        # zero while its added chain grows, and that is 100% dead history — the
+        # strongest case to flatten, not an exemption from the trigger.
+        dead_history = added_chain > 0 and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
