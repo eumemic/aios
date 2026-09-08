@@ -464,6 +464,22 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def image_chain_bytes(self, image: str) -> int:
+        """Return ``image``'s on-disk chain cost: the SUM of its layer sizes.
+
+        This is the figure every disk control must be enforced against
+        (#2349). ``image_size`` reports the current filesystem *view*, which
+        charges a byte once no matter how many superseded copies the interior
+        layers still hold — so a commit-per-idle-exit chain can occupy 20 GB
+        while reporting 6.6 GB, and both the flatten trigger and the pool
+        budget silently never fire.
+
+        Backends that cannot decompose a chain may return ``image_size``; the
+        contract is only that the answer is never LESS than the view. Raises
+        :class:`SandboxBackendError` on an absent image or unreachable daemon.
+        """
+        ...
+
     async def image_labels(self, image: str) -> dict[str, str] | None:
         """Return ``image``'s ``.Config.Labels``, or ``None`` if absent.
 

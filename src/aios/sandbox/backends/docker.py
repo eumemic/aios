@@ -84,6 +84,23 @@ _MANAGED_INSPECT_BATCH_SIZE = 100
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+# Dead-history trigger (#2349). ``docker image inspect .Size`` reports the
+# image's current filesystem VIEW; overlay keeps every superseded byte alive in
+# the interior layers, so a commit-per-idle-exit chain costs Σ(layer sizes) on
+# disk and only a flatten reclaims the difference. When the chain costs more
+# than this multiple of the view, more than half of what it occupies is dead
+# history and flattening pays for itself — independent of whether the
+# per-session budget is set at all. Observed on server-b: 6.6 GB view / 20.1 GB
+# chain, 9.0/25.5, 7.6/21.5 — three chains that could never trip a 12 GiB
+# view-based budget nor the depth ceiling, so none of them ever flattened.
+_CHAIN_DEAD_HISTORY_RATIO = 2.0
+
+# Chain costs are keyed by image id, which is content-addressed and therefore
+# immutable — a cached answer can never go stale, only irrelevant once the
+# image is removed. Bound the map so a long-lived worker cannot accumulate one
+# entry per image it has ever seen.
+_CHAIN_BYTES_CACHE_MAX = 512
+
 
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
 # metadata calls on the blanket Docker CLI bound, but calibrate data work from
@@ -141,6 +158,9 @@ class DockerBackend:
     def __init__(self) -> None:
         self._throughput_bytes_per_second = self._load_throughput()
         self._snapshot_timeout_attempts: dict[str, int] = {}
+        # image id → Σ layer bytes. Keyed by the content-addressed id, so an
+        # entry can never describe a different image than the one measured.
+        self._chain_bytes: dict[str, int] = {}
 
     @staticmethod
     def _load_throughput() -> float | None:
@@ -678,7 +698,7 @@ class DockerBackend:
             return SnapshotOutcome(
                 kind="skipped_stale",
                 image_id=tag_fields[0],
-                unique_bytes=await self._unique_bytes(tag_fields, base_ref),
+                unique_bytes=await self._unique_bytes(tag, tag_fields, base_ref),
                 depth=tag_fields[2],
             )
 
@@ -693,29 +713,57 @@ class DockerBackend:
             return SnapshotOutcome(
                 kind="skipped_empty",
                 image_id=tag_fields[0],
-                unique_bytes=await self._unique_bytes(tag_fields, base_ref),
+                unique_bytes=await self._unique_bytes(tag, tag_fields, base_ref),
                 depth=tag_fields[2],
             )
 
         # 6. Decide commit vs flatten. Depth is a soft performance backstop
         #    (no hard layer wall on the containerd store); the per-session
-        #    unique-bytes budget is the primary trigger.
+        #    budget and the dead-history ratio are the primary triggers.
+        #
+        #    Both budget triggers are measured on the CHAIN (Σ layer bytes),
+        #    not the image's ``.Size`` view (#2349). The view charges a byte
+        #    once no matter how many times it was superseded, so a
+        #    commit-per-idle-exit chain can hold 20 GB of overlay layers while
+        #    reporting 6.6 GB — under any budget an operator would set, forever,
+        #    which is exactly why nothing on server-b ever flattened.
+        base_chain = await self._image_chain_bytes_or_zero(base_ref)
         base_size = await self._image_size_or_zero(base_ref)
         parent_fields = await self._inspect_image_fields(parent_image)
         parent_size = parent_fields[1] if parent_fields else 0
         parent_depth = parent_fields[2] if parent_fields else 1
+        parent_chain = await self._image_chain_bytes_or_zero(parent_image) if parent_fields else 0
         rw = size_rw if size_rw is not None else 0
-        projected_unique = max(0, parent_size - base_size) + rw
+        # Everything the trigger reasons about is BASE-RELATIVE: a flatten can
+        # only reclaim (or duplicate) dead history in the layers THIS SESSION
+        # added on top of its shared base — never the base's own internal chain,
+        # which the flatten would copy forward verbatim (#2349, company#383 F1).
+        added_chain = max(0, parent_chain - base_chain)
+        added_view = max(0, parent_size - base_size)
+        projected_unique = added_chain + rw
         over_budget = (
             flatten_if_unique_bytes_over is not None
             and projected_unique > flatten_if_unique_bytes_over
         )
+        # Dead history: once the SESSION-ADDED chain costs more than K times the
+        # SESSION-ADDED view it presents, over half of what this session added
+        # is superseded bytes only a flatten can reclaim. Measured base-relative
+        # so a base whose OWN chain exceeds K times its own view (the ordinary
+        # ``apt-get install … && rm -rf /var/lib/apt/lists`` shape) does not
+        # force a reclaim-nothing flatten on every session's first snapshot —
+        # then the corpse's parent IS the base and the base terms cancel. Fires
+        # with no budget configured at all — the depth ceiling alone let
+        # 96-layer chains run unbounded. The positivity guard sits on the CHAIN,
+        # never on the view: a write-then-delete session clamps its added view to
+        # zero while its added chain grows, and that is 100% dead history — the
+        # strongest case to flatten, not an exemption from the trigger.
+        dead_history = added_chain > 0 and added_chain > _CHAIN_DEAD_HISTORY_RATIO * added_view
         retry_attempt = self._snapshot_timeout_attempts.get(sandbox_id, 0)
         snapshot_timeout_s = _snapshot_timeout_s(
             size_rw, retry_attempt=retry_attempt, size_walk_seconds=size_walk_seconds
         )
         settings = get_settings()
-        flattening = parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget
+        flattening = parent_depth + 1 >= _FLATTEN_DEPTH_CEILING or over_budget or dead_history
         if flattening:
             # A flatten writes a whole new standalone image before the old one
             # can be released, so it needs headroom for its own output. Subtract
@@ -797,7 +845,7 @@ class DockerBackend:
         return SnapshotOutcome(
             kind="committed",
             image_id=new[0],
-            unique_bytes=await self._unique_bytes(new, base_ref),
+            unique_bytes=await self._unique_bytes(tag, new, base_ref),
             depth=new[2],
         )
 
@@ -875,10 +923,18 @@ class DockerBackend:
             raise SandboxBackendError(f"flattened image {tag} not found after import")
         self._record_throughput(size_rw, elapsed)
         # A flattened image is standalone — it shares no layers with the base,
-        # so it is charged its FULL size (subtracting a base it doesn't share
+        # so it is charged its FULL chain cost (``_unique_bytes`` returns the
+        # whole chain for a flattened image; subtracting a base it doesn't share
         # would hide ~hundreds of MB from the accounting that must see the host
-        # filling).
-        return SnapshotOutcome(kind="flattened", image_id=new[0], unique_bytes=new[1], depth=new[2])
+        # filling). Denominating this in the on-disk chain — like the commit
+        # path and the GC pointer-heal — keeps sessions.snapshot_bytes one
+        # quantity no matter which writer wrote it last (company#383 F2).
+        return SnapshotOutcome(
+            kind="flattened",
+            image_id=new[0],
+            unique_bytes=await self._unique_bytes(tag, new, labels.get(BASE_IMAGE_LABEL_KEY)),
+            depth=new[2],
+        )
 
     async def list_managed_images(self, *, instance_id: str) -> list[ManagedImage]:
         """Enumerate managed images (incl. untagged residue) via ``docker images -a``.
@@ -1330,6 +1386,54 @@ class DockerBackend:
         labels = _labels_from_config_json(parts[3]) if len(parts) > 3 else {}
         return image_id, size, depth, labels
 
+    async def image_chain_bytes(self, image: str) -> int:
+        """Return Σ of ``image``'s layer sizes — what the chain costs ON DISK.
+
+        ``.Size`` is the current filesystem VIEW: a file written in layer 1 and
+        overwritten in layer 9 is counted once, even though overlay still holds
+        both copies. ``docker history`` reports each layer's own size, so the
+        sum is the storage the chain actually occupies and the only figure a
+        disk control can be enforced against (#2349).
+
+        Falls back to ``.Size`` when history is unreadable (a missing/errored
+        probe must not silently report a cheaper chain than the view we can
+        already prove); raises only when the image itself cannot be inspected.
+        """
+        fields = await self._inspect_image_fields(image)
+        if fields is None:
+            raise SandboxBackendError(f"image not found: {image}")
+        image_id, size, _depth, _labels = fields
+        cached = self._chain_bytes.get(image_id)
+        if cached is not None:
+            return cached
+        rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+            ["docker", "history", "--no-trunc", "--format", "{{.Size}}", image_id]
+        )
+        if rc != 0:
+            log.warning(
+                "sandbox.image_history_unavailable",
+                image_id=image_id[:19],
+                stderr=stderr_bytes.decode("utf-8", errors="replace").strip(),
+            )
+            return size
+        total = _sum_history_sizes(stdout_bytes.decode("utf-8", errors="replace"))
+        # The chain can never cost LESS than the view it presents; a parse that
+        # says otherwise (an unexpected history format) is not trusted downward.
+        chain = max(total, size)
+        if len(self._chain_bytes) >= _CHAIN_BYTES_CACHE_MAX:
+            self._chain_bytes.clear()
+        self._chain_bytes[image_id] = chain
+        return chain
+
+    async def _image_chain_bytes_or_zero(self, ref: str | None) -> int:
+        """Chain cost for accounting; 0 when the ref is unknown/absent."""
+        if not ref:
+            return 0
+        try:
+            return await self.image_chain_bytes(ref)
+        except SandboxBackendError:
+            return 0
+
     async def _image_size_or_zero(self, ref: str | None) -> int:
         """Base size for accounting; 0 when the base ref is unknown/absent.
 
@@ -1344,14 +1448,33 @@ class DockerBackend:
             return 0
 
     async def _unique_bytes(
-        self, image_fields: tuple[str, int, int, dict[str, str]], base_ref: str | None
+        self,
+        image_ref: str,
+        image_fields: tuple[str, int, int, dict[str, str]],
+        base_ref: str | None,
     ) -> int:
-        """Unique bytes for the accounting pointer: full size for a flattened
-        (standalone) image, else ``tag.Size - base.Size``."""
-        _image_id, size, _depth, labels = image_fields
+        """Unique bytes for the accounting pointer: the on-disk CHAIN cost
+        (base-relative), the SAME denomination the GC pointer-heal path
+        (:meth:`_unique_bytes_for_image` in the registry) and the pool budget
+        enforce against — NOT the ``.Size`` view (#2349, company#383 F2).
+
+        A flattened image is standalone, so it is charged its full chain cost;
+        any other image is charged its chain cost minus the shared base's chain
+        cost, exactly the ``max(0, parent_chain - base_chain) + rw`` figure the
+        flatten trigger projects. Recording the view here instead left the same
+        image reading 0-to-view bytes to this writer and the full chain to the
+        GC writer — the disk over-limit notice then never fired for precisely
+        the superseded-history chains this feature exists to catch.
+
+        ``image_chain_bytes`` reads ``docker history`` and clamps up to the
+        view, so it never reports below ``.Size`` and degrades to the view only
+        when history is unreadable."""
+        _image_id, _size, _depth, labels = image_fields
+        chain = await self._image_chain_bytes_or_zero(image_ref)
         if labels.get(FLATTENED_LABEL_KEY) == FLATTENED_LABEL_VALUE:
-            return size
-        return max(0, size - await self._image_size_or_zero(base_ref))
+            return chain
+        base_chain = await self._image_chain_bytes_or_zero(base_ref)
+        return max(0, chain - base_chain)
 
 
 # Shared with the registry's resume-time placeholder neutralization so the
@@ -1375,6 +1498,57 @@ def _parse_json_labels(raw: str) -> dict[str, str]:
     if not isinstance(parsed, dict):
         return {}
     return {str(k): str(v) for k, v in parsed.items()}
+
+
+def _sum_history_sizes(raw: str) -> int:
+    """Sum a ``docker history --format '{{.Size}}'`` payload.
+
+    Docker renders sizes human-readably (``1.13GB``, ``0B``, ``12.4kB``) —
+    ``{{.Size}}`` is the formatted field, not the raw byte count, on both the
+    overlay2 and containerd stores. Parse the unit rather than assuming digits,
+    and ignore any line that does not parse (a partially readable history still
+    yields a floor, and the caller clamps the result up to ``.Size``).
+    """
+    total = 0.0
+    for line in raw.splitlines():
+        parsed = _parse_docker_size(line.strip())
+        if parsed is not None:
+            total += parsed
+    return int(total)
+
+
+# Docker's size renderer is decimal SI (units.HumanSize): 1 kB == 1000 B.
+_SIZE_UNITS = {
+    "b": 1,
+    "kb": 1000,
+    "mb": 1000**2,
+    "gb": 1000**3,
+    "tb": 1000**4,
+    "pb": 1000**5,
+}
+
+
+def _parse_docker_size(value: str) -> float | None:
+    """Parse one human-readable Docker size (``0B``, ``1.13GB``) into bytes."""
+    if not value:
+        return None
+    digits = value.rstrip()
+    unit_start = len(digits)
+    while unit_start > 0 and not (
+        digits[unit_start - 1].isdigit() or digits[unit_start - 1] == "."
+    ):
+        unit_start -= 1
+    number, unit = digits[:unit_start].strip(), digits[unit_start:].strip().lower()
+    if not number:
+        return None
+    try:
+        magnitude = float(number)
+    except ValueError:
+        return None
+    multiplier = _SIZE_UNITS.get(unit or "b")
+    if multiplier is None:
+        return None
+    return magnitude * multiplier
 
 
 def _labels_from_config_json(raw: str) -> dict[str, str]:

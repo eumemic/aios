@@ -277,6 +277,26 @@ def _canonical_verdict(session_id: str, *, size_bytes: int) -> GcImageVerdict:
     )
 
 
+def _chain_verdict(
+    session_id: str, *, view_bytes: int, chain_bytes: int, archived: bool = False
+) -> GcImageVerdict:
+    """A canonical verdict whose image presents ``view_bytes`` but occupies
+    ``chain_bytes`` of overlay layers — the #2349 shape."""
+    verdict = _canonical_verdict(session_id, size_bytes=view_bytes)
+    return replace(
+        verdict,
+        image=replace(
+            verdict.image,
+            labels={
+                "aios.managed": "true",
+                "aios.instance_id": get_settings().instance_id,
+                "aios.session_id": session_id,
+            },
+        ),
+        reason="archived" if archived else "protected_live",
+    )
+
+
 def _patch_caps(monkeypatch: pytest.MonkeyPatch, caps: dict[str, int | None]) -> None:
     async def _resolve(_conn: Any, account_id: str) -> int | None:
         return caps.get(account_id)
@@ -928,3 +948,114 @@ async def test_docker_gc_row_locks_remove_and_exact_ref_clear(
         f"cas:{old_ref}",
         "transaction-exit",
     ]
+
+
+# ─── pool budget measures the chain, not the view (#2349) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_charges_on_disk_chain_bytes_not_the_size_view(
+    fake_pool: None,
+) -> None:
+    """The pool reclaimer read ``tag.Size - base.Size``, the current filesystem
+    VIEW. On server-b that reported 28.6 GB used against a 60 GB budget while
+    the tagged images held ~38 GB of unique layer bytes, so enforce mode logged
+    ``reclaimed_bytes: 0`` every tick: the budget was never reachable.
+
+    Same graph as the snapshot trigger: 6 GB of content in a 20 GB chain.
+    """
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    verdict = _chain_verdict("sess_fat", view_bytes=6 * 1000**3, chain_bytes=20 * 1000**3)
+    backend.image_chain_bytes_by_ref[verdict.image.image_id] = 20 * 1000**3
+    states = {"sess_fat": _acct_state("sess_fat", account_id="acct", days_dormant=30)}
+    registry._fresh_pool_candidate_state = AsyncMock(  # type: ignore[method-assign]
+        return_value=states["sess_fat"]
+    )
+
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 12 * 1024**3, get_settings().instance_id, dry_run=True
+    )
+
+    assert pressure.pool_used_bytes == 20 * 1000**3, "usage must be the on-disk chain"
+    # The view (6 GB) is under the 12 GiB budget; the chain is over it, so the
+    # budget is finally enforceable at all.
+    assert pressure.pressured
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_lru_reclaims_the_most_dormant_chain_first(fake_pool: None) -> None:
+    """With chain bytes in play the pass has real work to do; it must still
+    choose by LRU, taking the most dormant candidate before any fresher one."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    dormant = _chain_verdict("sess_dormant", view_bytes=6 * 1000**3, chain_bytes=20 * 1000**3)
+    recent = _chain_verdict("sess_recent", view_bytes=6 * 1000**3, chain_bytes=20 * 1000**3)
+    backend.image_chain_bytes_by_ref[dormant.image.image_id] = 20 * 1000**3
+    backend.image_chain_bytes_by_ref[recent.image.image_id] = 20 * 1000**3
+    states = {
+        "sess_dormant": _acct_state("sess_dormant", account_id="acct", days_dormant=90),
+        "sess_recent": _acct_state("sess_recent", account_id="acct", days_dormant=2),
+    }
+    registry._fresh_session_state = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda session_id: states[session_id]
+    )
+    reclaimed: list[str] = []
+
+    async def reclaim(verdict: GcImageVerdict, *_args: Any) -> bool:
+        reclaimed.append(cast(str, verdict.session_id))
+        return True
+
+    registry._reclaim_pool_candidate = AsyncMock(side_effect=reclaim)  # type: ignore[method-assign]
+
+    pressure = await registry._gc_pool_budget_pass(
+        [recent, dormant], states, 20 * 1000**3, get_settings().instance_id, dry_run=False
+    )
+
+    assert reclaimed == ["sess_dormant"]
+    assert pressure.pool_used_bytes == 20 * 1000**3
+
+
+@pytest.mark.asyncio
+async def test_pool_budget_subtracts_the_bases_chain_from_a_layered_image(
+    fake_pool: None,
+) -> None:
+    """A chain rooted on the shared base is charged only what it adds — both
+    sides of the subtraction measured the same way, or the base's own dead
+    history would be charged to every session that shares it."""
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend=backend)
+    verdict = _canonical_verdict("sess_x", size_bytes=6 * 1000**3)
+    verdict = replace(
+        verdict, image=replace(verdict.image, labels={"aios.base_image": "base:latest"})
+    )
+    backend.image_chain_bytes_by_ref[verdict.image.image_id] = 20 * 1000**3
+    backend.image_chain_bytes_by_ref["base:latest"] = 5 * 1000**3
+    states = {"sess_x": _acct_state("sess_x", account_id="acct", days_dormant=30)}
+    registry._fresh_pool_candidate_state = AsyncMock(return_value=states["sess_x"])  # type: ignore[method-assign]
+
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 1_000, get_settings().instance_id, dry_run=True
+    )
+
+    assert pressure.pool_used_bytes == 15 * 1000**3
+
+
+@pytest.mark.asyncio
+async def test_unreadable_chain_probe_degrades_to_the_view_and_keeps_reclaiming(
+    fake_pool: None,
+) -> None:
+    """An indeterminate chain probe must not fail the tick. Under-reporting
+    reclaims less than it could; raising would stop reclamation altogether,
+    which is the exact failure this change exists to end."""
+    backend = FakeBackend()  # no chain OR size entry ⇒ image_chain_bytes raises
+    registry = SandboxRegistry(backend=backend)
+    verdict = _chain_verdict("sess_x", view_bytes=6 * 1000**3, chain_bytes=20 * 1000**3)
+    states = {"sess_x": _acct_state("sess_x", account_id="acct", days_dormant=30)}
+    registry._fresh_pool_candidate_state = AsyncMock(return_value=states["sess_x"])  # type: ignore[method-assign]
+
+    pressure = await registry._gc_pool_budget_pass(
+        [verdict], states, 1_000, get_settings().instance_id, dry_run=True
+    )
+
+    assert pressure.pool_used_bytes == 6 * 1000**3  # the view, not a crash
