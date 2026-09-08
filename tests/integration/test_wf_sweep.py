@@ -341,6 +341,71 @@ async def test_legacy_bash_preserves_old_requested_timeout_clamp(
     assert run_id in await _needing(sweep_pool)
 
 
+async def test_legacy_bash_row_pinned_at_redispatch_widens_horizon_to_env_ceiling(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A legacy (no-pin) bash call_started row bound to a high-ceiling environment is
+    re-woken by the sweep's legacy branch at the worker-global horizon
+    (120 + 180 = 300s); the SAME row, once pinned to the environment ceiling (what
+    the cold re-dispatch does on first re-drive), is left alone until the pinned
+    horizon (env ceiling + provisioning slack).
+
+    This is the SQL-level heart of the fix: before the pin the sweep models a
+    global-ceiling execution (horizon 300s) while the re-drive exec runs at the env
+    ceiling (1800s) — so the sweep re-matches a still-running re-driven exec every
+    tick past 300s. The pin routes the sweep to the pinned branch, whose horizon
+    tracks the same env ceiling the re-drive exec occupies, restoring the
+    horizon-vs-exec invariant. The legacy branch (the original exec was
+    global-bound) remains correct for the FIRST re-wake; the pin switches the
+    sweep to the env-derived horizon for every subsequent tick.
+    """
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:legacy-pin#0",
+        "tool",
+        age_seconds=600,
+        payload_extra={"tool_name": "bash", "input": {"command": "true"}},
+    )
+    # No pin: the legacy branch fires once age exceeds the 300s global horizon — so
+    # a 600s-old row IS re-woken (the storm window: the re-driven exec occupies up to
+    # the 1800s env ceiling, but the sweep re-matches at 300s).
+    assert run_id in await _needing(sweep_pool)
+
+    # Pin the row to the env ceiling — exactly what step.py's cold re-dispatch does —
+    # and re-age it to 600s so the same row is compared at the same age.
+    async with sweep_pool.acquire() as conn:
+        await wf_queries.pin_call_started_timeout(
+            conn,
+            run_id=run_id,
+            call_key="sha:legacy-pin#0",
+            resolved_timeout_seconds=1800,
+        )
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 600) "
+            "WHERE run_id = $1 AND call_key = 'sha:legacy-pin#0' AND type = 'call_started'",
+            run_id,
+        )
+    # Pinned branch: horizon = 1800 + 180 = 1980s; age 600 < 1980 → the sweep leaves
+    # the still-running re-driven exec alone (no re-drive storm).
+    assert run_id not in await _needing(sweep_pool)
+
+    # Past the pinned horizon a genuinely-crashed re-drive is still recoverable.
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 2000) "
+            "WHERE run_id = $1 AND call_key = 'sha:legacy-pin#0' AND type = 'call_started'",
+            run_id,
+        )
+    assert run_id in await _needing(sweep_pool)
+
+
 async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:

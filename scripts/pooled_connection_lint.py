@@ -396,6 +396,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.list_wf_runs",
         "wf_queries.list_workflow_versions",
         "wf_queries.list_workflows",
+        "wf_queries.pin_call_started_timeout",
         "wf_queries.read_run_signal",
         "wf_queries.resolve_run_error",
         "wf_queries.run_children_usage",

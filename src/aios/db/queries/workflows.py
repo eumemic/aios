@@ -1287,6 +1287,53 @@ async def list_run_ids_needing_step(
     return [r["id"] for r in rows]
 
 
+async def pin_call_started_timeout(
+    conn: asyncpg.Connection[Any],
+    *,
+    run_id: str,
+    call_key: str,
+    resolved_timeout_seconds: int,
+) -> None:
+    """Pin the resolved bash timeout into a legacy (pre-pin) ``call_started`` row.
+
+    A ``call_started`` row opened before environment-aware workflow bash pinned its
+    ``resolved_timeout_seconds`` at open carries no pin, so the needs-step sweep's
+    legacy branch (:func:`list_run_ids_needing_step`) derives its re-dispatch horizon
+    from the worker-global ``bash_default_timeout_seconds`` — the ceiling the ORIGINAL
+    exec occupied. The cold re-dispatch's re-drive exec (``run_sandbox._execute``)
+    instead resolves the run's environment ceiling, which can far exceed the global
+    default. Pinning the env-derived value into the row on first re-drive routes
+    subsequent sweep ticks to the pinned branch, whose horizon tracks the same env
+    ceiling the re-drive exec occupies — restoring the sweep invariant that the
+    horizon MUST exceed the maximum wall-clock a live bash exec can occupy, so the
+    sweep never re-drives a still-running exec (the cross-worker duplicate storm
+    introduced when c85193b2 made the exec half environment-aware but left the sweep
+    half global for legacy rows).
+
+    Unconditional overwrite of the field: the caller calls this only for a row that
+    has no valid pin in its payload (the cold re-dispatch short-circuits on an
+    existing positive-int pin), so a re-pin on a repeated cold re-dispatch writes the
+    same value. The caller passes the same value directly to
+    ``launch_sandbox_task`` so the exec and the pin cannot diverge: a crashed pin
+    write aborts before the exec starts and re-pins on the next sweep wake, and a
+    committed pin survives a later step crash.
+    """
+    await conn.execute(
+        """
+        UPDATE wf_run_events
+           SET payload = jsonb_set(
+                payload,
+                '{resolved_timeout_seconds}',
+                to_jsonb($3::int)
+           )
+         WHERE run_id = $1 AND call_key = $2 AND type = 'call_started'
+        """,
+        run_id,
+        call_key,
+        resolved_timeout_seconds,
+    )
+
+
 async def signal_stale_suspended_runs(
     conn: asyncpg.Connection[Any], *, older_than_seconds: float
 ) -> list[str]:
