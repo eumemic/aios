@@ -785,16 +785,21 @@ def api_base_of(litellm_extra: dict[str, object] | None) -> str | None:
     """
     if not litellm_extra:
         return None
-    for key in ("api_base", "base_url", "url"):
-        raw = litellm_extra.get(key)
-        if isinstance(raw, str):
-            return raw
+    # In LiteLLM 1.96.2, ``_complete_watsonx_text`` resolves the top-level
+    # ``api_base``/``base_url``/``url`` first, then applies ``wx_credentials["url"]``
+    # (and the ``watsonx_credentials`` alias) afterwards — so the nested URL
+    # overrides any top-level value.  Check nested credentials first so the
+    # returned endpoint matches the one LiteLLM will actually use.
     for creds_key in ("wx_credentials", "watsonx_credentials"):
         creds = litellm_extra.get(creds_key)
         if isinstance(creds, dict):
             inner = creds.get("url")
             if isinstance(inner, str):
                 return inner
+    for key in ("api_base", "base_url", "url"):
+        raw = litellm_extra.get(key)
+        if isinstance(raw, str):
+            return raw
     return None
 
 
