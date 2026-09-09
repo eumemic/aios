@@ -53,6 +53,7 @@ def test_codex_routes_through_an_explicit_provider_not_openai_base_url(
     monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
     command, env = reviewer._agent_command("gpt-5.6-sol", tmp_path / "review.md")
     assert command[:4] == ["codex", "exec", "--model", "gpt-5.6-sol"]
+    assert command[command.index("--sandbox") + 1] == "danger-full-access"
     assert command[command.index("--output-last-message") + 1] == str(tmp_path / "review.md")
     overrides = [command[i + 1] for i, arg in enumerate(command) if arg == "-c"]
     provider = next(o.split("=", 1)[1] for o in overrides if o.startswith("model_provider="))
