@@ -3,9 +3,9 @@
 # created: the launcher runs the harness through the eumemic proxies, writes an
 # artifact, and exits before the workflow mints an App token. A separate process
 # then POSTs the `### Code review` comment and verifies it landed. Must never
-# FAIL the PR check: a harness or
-# proxy miss is ops, not a code defect — hence continue-on-error plus the job
-# summary below, which is what keeps a missing review visible instead of silent.
+# FAIL the PR check: a harness or proxy miss is ops, not a code defect — hence
+# continue-on-error plus the job summary below, which is what keeps a missing
+# review visible instead of silent.
 name: eumemic-bot review
 
 on:
@@ -41,34 +41,43 @@ jobs:
           fetch-depth: 0
 
       # Only the routed harness: installing all three triples the install time
-      # and lets an unrelated publisher hiccup block every review.
+      # and lets an unrelated publisher hiccup block every review. The `family`
+      # output also decides which single proxy secret the agent step is given.
       - name: Install the coding-agent harness
         id: harness
         continue-on-error: true
         run: |
           case "$REVIEW_MODEL" in
-            gpt-*)    package='@openai/codex' ;;
-            claude-*) package='@anthropic-ai/claude-code' ;;
-            grok-*)   package='@mariozechner/pi-coding-agent' ;;
+            gpt-*)    package='@openai/codex'; family='oai' ;;
+            claude-*) package='@anthropic-ai/claude-code'; family='ant' ;;
+            grok-*)   package='@mariozechner/pi-coding-agent'; family='xai' ;;
             *)
               echo "unsupported REVIEW_MODEL '$REVIEW_MODEL'" >&2
               exit 1
               ;;
           esac
+          echo "family=$family" >> "$GITHUB_OUTPUT"
           npm install --global "$package"
 
       # This process and all of its descendants run before an installation token
       # exists. In particular, there is no GH_TOKEN for an unsandboxed Codex to
       # recover through /proc/$PPID/environ. The launcher waits for the harness
       # before it writes the final artifact and exits.
+      #
+      # Only the routed family's proxy key is passed. The launcher strips the
+      # other two from the *child* environment, but unsetenv does not rewrite
+      # /proc/<pid>/environ, so a secret this step receives stays readable to
+      # the agent for the life of the process however the child is scrubbed.
+      # Whatever the agent must not hold has to be absent here, not removed
+      # later — which is the same reason the App token is minted below.
       - name: Run coding agent
         id: agent
         if: steps.harness.outcome == 'success'
         continue-on-error: true
         env:
-          OAI_PROXY_API_KEY: ${{ secrets.OAI_PROXY_API_KEY }}
-          ANT_PROXY_API_KEY: ${{ secrets.ANT_PROXY_API_KEY }}
-          XAI_PROXY_API_KEY: ${{ secrets.XAI_PROXY_API_KEY }}
+          OAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'oai' && secrets.OAI_PROXY_API_KEY || '' }}
+          ANT_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'ant' && secrets.ANT_PROXY_API_KEY || '' }}
+          XAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'xai' && secrets.XAI_PROXY_API_KEY || '' }}
           REVIEW_TIMEOUT_SECONDS: "900"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

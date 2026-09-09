@@ -377,6 +377,24 @@ def test_workflow_mints_only_after_agent_exits_and_never_gives_agent_gh_token() 
     assert publish["run"].endswith(" publish")
 
 
+def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
+    """A secret this step receives is readable from /proc for the whole run.
+
+    _STRIPPED_ENV keeps the unrouted keys out of the agent's own environment,
+    but unsetenv does not rewrite /proc/<pid>/environ, so an agent with a shell
+    reads them off the launcher regardless. The only place they can be withheld
+    is here.
+    """
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
+    install = next(step for step in steps if step.get("id") == "harness")["run"]
+    agent_env = next(step for step in steps if step.get("id") == "agent")["env"]
+    for family, name in (("oai", "OAI"), ("ant", "ANT"), ("xai", "XAI")):
+        assert f"family='{family}'" in install
+        value = agent_env[f"{name}_PROXY_API_KEY"]
+        assert f"steps.harness.outputs.family == '{family}'" in value
+        assert f"secrets.{name}_PROXY_API_KEY" in value
+
+
 def test_workflow_installs_the_harness_for_every_routed_prefix() -> None:
     job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
     install = next(step for step in job["steps"] if step.get("id") == "harness")["run"]
