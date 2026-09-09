@@ -1,8 +1,9 @@
 # eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
 # checkout and publish its artifact as the GitHub App. No aios session is
-# created: the launcher (scripts/eumemic_bot_review.py) runs the harness for the
-# routed model through the eumemic proxies, POSTs the `### Code review` comment
-# itself, and verifies it landed. Must never FAIL the PR check: a harness or
+# created: the launcher runs the harness through the eumemic proxies, writes an
+# artifact, and exits before the workflow mints an App token. A separate process
+# then POSTs the `### Code review` comment and verifies it landed. Must never
+# FAIL the PR check: a harness or
 # proxy miss is ops, not a code defect — hence continue-on-error plus the job
 # summary below, which is what keeps a missing review visible instead of silent.
 name: eumemic-bot review
@@ -56,26 +57,15 @@ jobs:
           esac
           npm install --global "$package"
 
-      - name: Mint eumemic-bot installation token
-        id: app
-        continue-on-error: true
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
-          private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
-          # No skip-token-revoke: the launcher POSTs and verifies ### Code review
-          # inside this job, so nothing needs the installation token once the job
-          # ends.
-
-      # The launcher strips GH_TOKEN and every unrouted proxy key from the
-      # agent's environment before exec — the agent reads PR-authored files and
-      # runs shell commands, so it must not hold a token that can write.
-      - name: Review and post as eumemic-bot
-        id: review
-        if: steps.harness.outcome == 'success' && steps.app.outcome == 'success'
+      # This process and all of its descendants run before an installation token
+      # exists. In particular, there is no GH_TOKEN for an unsandboxed Codex to
+      # recover through /proc/$PPID/environ. The launcher waits for the harness
+      # before it writes the final artifact and exits.
+      - name: Run coding agent
+        id: agent
+        if: steps.harness.outcome == 'success'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
           OAI_PROXY_API_KEY: ${{ secrets.OAI_PROXY_API_KEY }}
           ANT_PROXY_API_KEY: ${{ secrets.ANT_PROXY_API_KEY }}
           XAI_PROXY_API_KEY: ${{ secrets.XAI_PROXY_API_KEY }}
@@ -84,14 +74,36 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 scripts/eumemic_bot_review.py
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
+        run: python3 scripts/eumemic_bot_review.py agent
+
+      - name: Mint eumemic-bot installation token
+        id: app
+        if: steps.harness.outcome == 'success' && steps.agent.outcome == 'success'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
+          private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
+
+      - name: Post as eumemic-bot
+        id: publish
+        if: steps.app.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
+        run: python3 scripts/eumemic_bot_review.py publish
 
       # continue-on-error above keeps an ops miss from blocking merges. But a
       # silently green run is exactly how missing `### Code review` comments went
       # unnoticed, so a run that published nothing says so where a reader sees it
       # without opening logs.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.harness.outcome == 'failure' || steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
+        if: always() && (steps.harness.outcome == 'failure' || steps.agent.outcome == 'failure' || steps.app.outcome == 'failure' || steps.publish.outcome == 'failure')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
