@@ -1,34 +1,26 @@
-# Fixround: #2422 name-based interception breaks lockdown/DNAT verify on CI
+# aios#2410 merge-path fixround (botpost2410h)
 
-PR: https://github.com/eumemic/aios/pull/2422
-Branch: `trigswap2` tip `45a054aa`
-Failing run: https://github.com/eumemic/aios/actions/runs/34699377660 (e2e docker)
+PR: https://github.com/eumemic/aios/pull/2410
+Branch: `gvisorgrn` tip `96b7369f` — DIRTY/CONFLICTING vs master (~5 commits behind).
+Requester: AIOS Bot
 
-## Root errors (empty recorder / KeyError stdout are symptoms of provision abort)
-1. Limited: `SandboxBackendError: network lockdown verification failed … OUTPUT policy is not DROP after apply`
-2. Unrestricted: `SandboxBackendError: secret-egress DNAT verification failed … nat OUTPUT carries no DNAT rule after apply`
-
-FAILED tests include:
-- test_trigger_swap_fires_under_limited / unrestricted_dnat_only
-- test_run_swap_fires_under_limited / unrestricted_dnat_only
-- test_run_bash_env_var_placeholder_round_trip
-- test_placeholder_visible_in_container_secret_absent
-
-Leave #2421 closed. Do not reopen IPv6/`-4` as the master clear.
-
-## Goal
-Make name-based credential interception (#2042 rebase) actually apply + verify on CI so Limited DROP and Unrestricted/Limited DNAT chokepoint rules land. Both trigger-swap legs AND the run-origin placeholder/swap e2e must go green.
-
-## Investigate
-- Why does `apply_network_lockdown` / `apply_secret_egress_dnat` leave filter OUTPUT not DROP or nat without DNAT? (apply script abort early — proxy alias resolve miss, `dns_port` missing, iptables backend, `-I` DNS DNAT vs Docker 127.0.0.11, sentinel `169.254.53.53` conflicting with link-local/metadata rules, verify grep mismatch vs `iptables -S` output, credential_dns not bound so provision refuses incorrectly, etc.)
-- Prefer fixing the product apply/verify path so the chokepoint is real; do not weaken fail-closed verification.
-- Rebase onto latest origin/master if behind; push is Shepherd’s job.
-
-## Constraints
-- No Track G / Coolify / merge / push
-- PR-only; continue on `trigswap2` (update #2422)
-- Docker may be absent locally — unit tests for script generation + any integration you can run; CI is oracle for docker e2e
-- DONE.md with evidence-backed root cause of the verify failure
+## Do
+1. **Rebase onto current origin/master** so the PR is mergeable/clean.
+2. **Fix real e2e fail**: layer `/etc/resolv.conf` present but **empty** after `COPY --link`.
+   Signature: https://github.com/eumemic/aios/actions/runs/34666903810/job/103480557877
+   `tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`
+   — `docker cp` from never-started container finds no `nameserver 127.0.0.11`.
+   Prior `COPY --link` (tip `96b7369f`) did **not** clear it. Either make the bake survive docker-cp from a never-started container naming `127.0.0.11`, **or** if same-path bake to `/etc/resolv.conf` is dead under BuildKit, bake to a non-special path and fix the runsc operator/chroot read path so `getent` still sees the embedded DNS (Dockerfile comments already note this escape hatch).
+3. **Resolve or fail-closed** eumemic-bot finding: `src/aios/sandbox/backends/docker.py` hardcodes
+   `_RUNSC_OPERATOR_LOADER = "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"` and
+   `_RUNSC_OPERATOR_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu"` — select loader/lib paths per image arch, **or refuse runsc on arm64**.
 
 ## Success
-New tip on #2422 expected to clear the lockdown/DNAT verify failures and the listed e2e tests.
+- PR mergeable/clean
+- e2e (docker) green on the image-contract resolv test (and no regress of gVisor / review-harness work)
+- Fresh ### Code review with no blocking findings (CI/bot after push)
+- pr_only — do not merge; do not push (Shepherd pushes); no Track G
+- DONE.md with root cause of empty resolv + arch fix choice
+
+## Notes
+Keep the two-job eumemic-bot publish isolation and other #2410 security work intact through the rebase.

@@ -1,154 +1,68 @@
 #!/usr/bin/env python3
-"""Run a proxy-backed coding agent locally and publish its review as eumemic-bot.
+"""Run an aios dev-review session and publish its GitHub review artifact.
 
-Used by .github/workflows/eumemic-bot-review.yml. The workflow checks out the PR
-head, installs the harness for the routed model, and hands in a short-lived
-eumemic-bot installation token as GH_TOKEN.
+Used by .github/workflows/eumemic-bot-review.yml. The workflow hands in a
+short-lived eumemic-bot installation token as GH_TOKEN.
 
-The launcher owns publication: it runs the agent against the pinned checkout,
-extracts the final `### Code review` artifact, POSTs it as eumemic-bot, and
-verifies GitHub stored the run-specific marker. A review that never reached
-GitHub fails loudly here rather than vanishing.
+The launcher owns publication: it waits for the session to stop working, reads
+the `### Code review` artifact off the event log, POSTs it as eumemic-bot,
+verifies GitHub stored it, and only then archives the session. The session
+itself never posts — a review that never reached GitHub now fails loudly here
+instead of vanishing with a self-archiving session.
 
-Publication is gated on EVIDENCE OF INSPECTION, not on the agent's exit status.
-`codex` exits 0 when its sandbox blocks every command, so a zero exit says only
-that the process ended — not that the agent read a byte of the diff. The agent
-must echo the full sha256 of `git diff base...head`, which the launcher
-recomputes; a mismatch or a missing line is a distinct, loud, never-publishable
-state (NO_EVIDENCE_EXIT_CODE), because the alternative is an
-authoritative-sounding "LGTM" from a reviewer that inspected nothing.
+Resolution order for the reviewer agent:
+  1. AGENT_ID if set
+  2. exact name match for AGENT_NAME (default: dev-review)
+  3. fail with the names visible to this API key (account-scoped)
 
-The digest is the ONLY accepting channel. The line count is echoed for legible
-diagnostics but cannot authorise publication: it is public at the PR's `.diff`
-URL, so it never distinguished a real read from a network fetch.
-
-Because the sandbox is off (the only mode that executes on a hosted runner),
-the agent's environment is also stripped of the Actions control files
-(GITHUB_OUTPUT/ENV/PATH), not just of credentials — otherwise the agent could
-forge `published=true` and silence the workflow's own missing-review detector.
+Resolution order for the sandbox environment (required by POST /v1/sessions):
+  1. ENVIRONMENT_ID if set
+  2. exact name match for ENVIRONMENT_NAME (default: dev-pipeline-real)
+  3. fail with the names visible to this API key (account-scoped)
 
 Env:
-  GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, BASE_SHA
-  REVIEW_MODEL (default: DEFAULT_MODEL below) — routed by prefix to a harness
-  REVIEW_SANDBOX_MODE (default: DEFAULT_SANDBOX below) — codex sandbox policy
-  REVIEW_TIMEOUT_SECONDS (default: _REVIEW_SECONDS below) — agent wall clock. It
-    must run out before the job's timeout-minutes: this script's FATAL leaves the
-    step's continue-on-error to keep the check green and still write the
-    "did not post" job summary, whereas a runner kill takes both away.
-  One proxy key for the routed family (see _agent_command).
+  AIOS_URL, AIOS_API_KEY, GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, CLONE_URL
+  AGENT_NAME (default: dev-review), AGENT_ID (optional)
+  ENVIRONMENT_NAME (default: dev-pipeline-real), ENVIRONMENT_ID (optional)
+  REVIEW_TIMEOUT_SECONDS (default: _REVIEW_SECONDS below) — whole-review budget,
+    shared by the first turn and the corrective turn. It must run out before the
+    job's timeout-minutes: this script's FATAL leaves the step's
+    continue-on-error to keep the check green and still write the "did not post"
+    job summary, whereas a runner kill takes both away.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
-import subprocess
 import sys
-import tempfile
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from pathlib import Path
-from typing import IO, NoReturn
+from typing import Any, NoReturn
+
+AGENT_NAME = os.environ.get("AGENT_NAME", "dev-review")
+ENVIRONMENT_NAME = os.environ.get("ENVIRONMENT_NAME", "dev-pipeline-real")
 
 ARTIFACT_HEADING = "### Code review"
-DEFAULT_MODEL = "gpt-5.6-sol"
-_REVIEW_SECONDS = 900
-
-# A verdict is only publishable when the agent proved it read the diff. The
-# proof is a line the agent can only produce by running the diff command in the
-# checkout: the launcher computes the same digest itself and compares. Nothing
-# derivable from the prompt alone counts — the expected values are deliberately
-# NOT in the prompt, only the recipe for deriving them.
-EVIDENCE_TEMPLATE = "<!-- inspected: lines=<N> sha256=<HEX> -->"
-# The FULL 64-hex digest, not a prefix. A prefix shortens the only
-# high-entropy channel, and the width itself is load-bearing: a mutant
-# widening this bound survived the suite once already.
-_EVIDENCE_RE = re.compile(
-    r"<!--\s*inspected:\s*lines=(\d+)\s+sha256=([0-9a-fA-F]{64})\s*-->", re.IGNORECASE
-)
-# "The agent inspected nothing" is NOT an ordinary failure: codex exits 0 when
-# its sandbox blocks every command, so this is the state that used to publish an
-# authoritative-sounding verdict off a zero-byte read. Distinct exit code,
-# distinct banner, never publishable.
-NO_EVIDENCE_EXIT_CODE = 3
-NO_EVIDENCE_BANNER = "NO EVIDENCE OF INSPECTION — refusing to publish a verdict"
-
-SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
-DEFAULT_SANDBOX = "read-only"
-
-# This channel is advisory by construction: the workflow sets continue-on-error
-# on every step, so the PR check is green whether the verdict is LGTM or
-# "BLOCKING". The banner says so in the comment, because an unqualified
-# "### Code review" reads as an authoritative gate that does not exist.
-ADVISORY_BANNER = (
-    "**Advisory automated review — non-blocking.** This check never fails the PR; "
-    "a green check means the harness ran, not that the code is approved. Findings below "
-    "are input to a human reviewer, not a merge gate."
-)
-
-OAI_PROXY_URL = "https://oai-proxy.eumemic.ai/v1"
-ANT_PROXY_URL = "https://ant-proxy.eumemic.ai"
-XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
-
-# The agent reads PR-authored files (source, AGENTS.md, CLAUDE.md) and can run
-# shell commands, so it must not inherit anything that grants write access. The
-# installation token in particular can comment and push as eumemic-bot. Each
-# harness gets back exactly the one proxy key it needs and nothing else.
-#
-# This list is not only about SECRETS. Since the sandbox is off
-# (danger-full-access — the only mode that executes on a hosted runner), the
-# agent has a real shell, so the Actions CONTROL PLANE is attack surface too:
-#
-#   GITHUB_OUTPUT — the input to the workflow's "did not post" safety net. An
-#     agent that appends `published=true` and then emits no evidence gets the
-#     launcher to refuse publication (exit 3, nothing posted) while the net
-#     reads `published == 'true'` and stays silent: green run, no review, no
-#     warning. That is precisely the silent failure this launcher exists to
-#     close, so leaving the path in the child env hands the agent the ability
-#     to forge the detector's own input.
-#   GITHUB_ENV / GITHUB_PATH / GITHUB_STATE — writes there mutate later steps
-#     of this job (env, PATH, and the action's own saved state).
-#   GITHUB_STEP_SUMMARY — the job summary a human reads when the safety net
-#     fires. An agent that can append there writes the operator's account of
-#     what happened, which is the second half of the same forgery.
-#
-# Stripping these from the CHILD is functionally free: _record_published reads
-# GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched.
-_STRIPPED_ENV = (
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "ACTIONS_RUNTIME_TOKEN",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-    "GITHUB_OUTPUT",
-    "GITHUB_ENV",
-    "GITHUB_PATH",
-    "GITHUB_STEP_SUMMARY",
-    "GITHUB_STATE",
-    "OAI_PROXY_API_KEY",
-    "ANT_PROXY_API_KEY",
-    "XAI_PROXY_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "XAI_API_KEY",
-)
-
-# The runner also hands out ``_runner_file_commands/*`` paths under keys that
-# are not part of the documented GITHUB_* set, so the name list above is not a
-# complete cover. Drop any inherited variable whose VALUE points into that
-# directory as well. This is defence in depth, not a boundary: the directory
-# itself stays reachable through RUNNER_TEMP (and its hosted-runner default
-# location), so the real containment is the workflow's `contents: read` token
-# scope, not this filter.
-_CONTROL_PATH_MARKER = "file_commands"
-
 REVIEW_SCOPE = (
     "Keep verification proportional to the changed code. Use focused tests for affected "
     "behavior, but do not run repository-wide test, lint, format, or type-check suites; CI "
-    "already runs those. Do not modify the checkout or post to GitHub."
+    "already runs those. Do not build exhaustive ad hoc benchmarks or repeat expensive checks "
+    "reported by an earlier eumemic-bot review when the substantive PR diff is unchanged."
 )
+
+# Long-poll window for GET /v1/sessions/{id}/wait (server caps it at 60). The
+# socket deadline must OUTLIVE it, or every poll dies on a client read timeout
+# before the server ever answers.
+_WAIT_SECONDS = 30
+_WAIT_HTTP_TIMEOUT = _WAIT_SECONDS * 2
+
+# Whole-review budget when REVIEW_TIMEOUT_SECONDS is unset. The workflow sets it
+# explicitly; keep the two in step (tests/unit/test_eumemic_bot_review.py pins
+# that, and that the job's timeout-minutes outlives budget + one final poll).
+_REVIEW_SECONDS = 2700
 
 
 def _die(msg: str, code: int = 1) -> NoReturn:
@@ -156,348 +70,63 @@ def _die(msg: str, code: int = 1) -> NoReturn:
     raise SystemExit(code)
 
 
+def _skip(msg: str) -> NoReturn:
+    print(f"SKIP: {msg}", file=sys.stderr)
+    raise SystemExit(0)
+
+
 def _env(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
+    val = os.environ.get(name, "").strip()
+    if not val:
         _die(f"{name} is not set")
-    return value
+    return val
 
 
-def _emit(text: str | None, stream: IO[str]) -> None:
-    if text:
-        print(text, file=stream, end="" if text.endswith("\n") else "\n")
-
-
-def _git(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], text=True, capture_output=True, check=False)
-
-
-def _artifact_in(text: str) -> str | None:
-    """Return the artifact starting at the LAST `### Code review` heading.
-
-    The heading is a contract on the agent's *final* message. Codex hands that
-    message over in its own file, but the Claude Code and Pi paths read stdout,
-    which also carries tool activity — an earlier mention (a grep hit on this
-    file, a quoted prior review) must not become the comment body.
-    """
-    lines = text.splitlines()
-    for index in range(len(lines) - 1, -1, -1):
-        if lines[index].strip() == ARTIFACT_HEADING:
-            return "\n".join([lines[index].lstrip(), *lines[index + 1 :]]).strip()
-    return None
-
-
-def model_kind(model: str) -> str:
-    if model.startswith("gpt-"):
-        return "codex"
-    if model.startswith("claude-"):
-        return "claude"
-    if model.startswith("grok-"):
-        return "pi"
-    _die(f"unsupported REVIEW_MODEL {model!r}; expected gpt-*, claude-*, or grok-*")
-
-
-def _proxy_key(primary: str, fallback: str) -> str:
-    value = os.environ.get(primary, "").strip() or os.environ.get(fallback, "").strip()
-    if not value:
-        _die(f"{primary} (or {fallback}) is not set")
-    return value
-
-
-def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str, str]]:
-    """Build the harness command and its proxy environment."""
-    kind = model_kind(model)
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in _STRIPPED_ENV and _CONTROL_PATH_MARKER not in v.lower()
-    }
-    if kind == "codex":
-        key = _proxy_key("OAI_PROXY_API_KEY", "OPENAI_API_KEY")
-        env["OPENAI_API_KEY"] = key
-        # Codex ignores OPENAI_BASE_URL: the built-in `openai` provider pins
-        # api.openai.com and its own auth, so an env-var-only setup silently
-        # 401s against the real OpenAI. Routing through the proxy requires
-        # declaring a provider and selecting it.
-        provider = "eumemic_oai_proxy"
-        return (
-            [
-                "codex",
-                "exec",
-                "--model",
-                model,
-                "--sandbox",
-                _sandbox_mode(),
-                "--ephemeral",
-                "-c",
-                f"model_provider={provider}",
-                "-c",
-                f'model_providers.{provider}={{name="eumemic oai-proxy",'
-                f'base_url="{OAI_PROXY_URL}",env_key="OPENAI_API_KEY",wire_api="responses"}}',
-                "--output-last-message",
-                str(artifact_path),
-                "-",
-            ],
-            env,
-        )
-    if kind == "claude":
-        key = _proxy_key("ANT_PROXY_API_KEY", "ANTHROPIC_API_KEY")
-        env.update(ANTHROPIC_API_KEY=key, ANTHROPIC_BASE_URL=ANT_PROXY_URL)
-        return (
-            [
-                "claude",
-                "--print",
-                "--model",
-                model,
-                "--output-format",
-                "text",
-                "--no-session-persistence",
-                "--allowedTools",
-                "Read,Glob,Grep,Bash",
-                "-",
-            ],
-            env,
-        )
-
-    key = _proxy_key("XAI_PROXY_API_KEY", "XAI_API_KEY")
-    config_dir = artifact_path.parent / "pi-config"
-    config_dir.mkdir(exist_ok=True)
-    (config_dir / "models.json").write_text(
-        json.dumps(
-            {
-                "providers": {
-                    "xai-proxy": {
-                        "name": "xAI (eumemic proxy)",
-                        "baseUrl": XAI_PROXY_URL,
-                        "api": "openai-responses",
-                        "apiKey": key,
-                        "authHeader": True,
-                        "models": [
-                            {
-                                "id": model,
-                                "name": model,
-                                "reasoning": True,
-                                "input": ["text"],
-                                "contextWindow": 256000,
-                                "maxTokens": 16384,
-                            }
-                        ],
-                    }
-                }
-            }
-        )
-    )
-    env.update(XAI_API_KEY=key, PI_CODING_AGENT_DIR=str(config_dir))
-    return (
-        [
-            "pi",
-            "--print",
-            "--no-session",
-            "--no-extensions",
-            "--no-skills",
-            "--provider",
-            "xai-proxy",
-            "--model",
-            model,
-            "--tools",
-            "read,grep,find,ls,bash",
-            "--",
-        ],
-        env,
-    )
-
-
-def _sandbox_mode() -> str:
-    """Sandbox policy for the codex harness.
-
-    Codex ships its own bubblewrap and `read-only` needs namespaces the GitHub
-    runner refuses: every command dies with
-    `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` — and codex
-    still exits 0, which is how a review that read nothing got published. The
-    runner is already an ephemeral single-use VM, and the launcher strips every
-    writable credential from the agent env before exec, so the second sandbox
-    layer buys little and cost us the entire review. Overridable for hosts where
-    bwrap does work.
-    """
-    mode = os.environ.get("REVIEW_SANDBOX_MODE", "").strip() or DEFAULT_SANDBOX
-    if mode not in SANDBOX_MODES:
-        _die(
-            f"unsupported REVIEW_SANDBOX_MODE {mode!r}; expected one of {', '.join(SANDBOX_MODES)}"
-        )
-    return mode
-
-
-def diff_evidence(base_sha: str, head_sha: str) -> tuple[int, str]:
-    """Return (line count, sha256) of `git diff base...head`, computed locally.
-
-    This is the value the agent has to reproduce. It is deliberately never put
-    in the prompt — only the recipe for deriving it — so an agent whose shell is
-    dead cannot emit it, and neither can one that guessed.
-    """
-    result = subprocess.run(
-        ["git", "--no-pager", "diff", f"{base_sha}...{head_sha}"],
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode:
-        _die(
-            f"could not compute the diff for {base_sha}...{head_sha}: {result.stderr.decode(errors='replace')[:300]}"
-        )
-    raw = result.stdout
-    if not raw.strip():
-        _die(f"`git diff {base_sha}...{head_sha}` is empty; there is nothing to review")
-    return raw.count(b"\n"), hashlib.sha256(raw).hexdigest()
-
-
-def _die_without_evidence(detail: str) -> NoReturn:
-    """The loud, distinct, never-publishable state.
-
-    Separate exit code and banner from an ordinary FATAL because this is the
-    exact condition that used to sail through as a green, authoritative verdict.
-    """
-    print(f"FATAL: {NO_EVIDENCE_BANNER}: {detail}", file=sys.stderr)
-    print(f"::error title={NO_EVIDENCE_BANNER}::{detail}", file=sys.stdout)
-    raise SystemExit(NO_EVIDENCE_EXIT_CODE)
-
-
-def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> None:
-    """Refuse to publish unless the artifact proves the agent read the diff.
-
-    THE DIGEST IS THE ONLY ACCEPTING CHANNEL, and it must match in full.
-
-    An earlier revision also accepted a matching line count on its own,
-    documented as "derivable only by running the diff in the checkout". That
-    was FALSE: `https://github.com/<org>/<repo>/pull/<n>.diff` is public and
-    carries the identical line count with no checkout access at all (measured
-    on this PR: 2243 on both, different bytes so different digests). An agent
-    whose shell is dead but whose network is live — the exact blocked-agent
-    state this gate exists to catch — could obtain the count and pair it with
-    64 arbitrary hex characters. The low-entropy half of an OR is the strength
-    of the whole OR.
-
-    The line count is still parsed and still reported on a mismatch, because it
-    makes the diagnostic legible; it just cannot authorise publication.
-
-    Requiring the full digest does not reintroduce the brittleness the OR was
-    guarding against: `sha256sum` output is a stable 64-hex string, whereas
-    `wc -l` was the channel prone to benign formatting drift.
-
-    Note for future mutation runs: replacing the `==` below with
-    `expected_digest.startswith(claimed_digest)` is an EQUIVALENT MUTANT and no
-    test can kill it. `_EVIDENCE_RE` admits exactly 64 hex characters and
-    `expected_digest` is a sha256 hexdigest, so both operands are always the
-    same length, where `startswith` and `==` coincide. A survivor there is
-    expected, not a gap.
-
-    THE EQUIVALENCE IS ENTIRELY CONDITIONAL ON THE REGEX. An earlier version of
-    this note claimed `==` "does not depend on the regex for its safety"; that
-    is backwards. It is precisely the `{64}` bound in `_EVIDENCE_RE` that forces
-    the two operands to the same length. Widen that bound and `startswith`
-    stops being equivalent and becomes a live PREFIX-ACCEPTANCE vulnerability:
-    a one-character digest would be accepted as proof of inspection, which is
-    the exact fail-open this gate exists to prevent. `==` is kept because it
-    states the intent directly AND stays correct even if the regex is loosened.
-    `test_evidence_regex_will_not_even_match_a_short_digest` is the COUPLING
-    GUARD for that dependency — it is what makes this equivalence argument
-    true, so it must not be deleted as redundant.
-    """
-    expected_lines, expected_digest = expected
-    match = _EVIDENCE_RE.search(artifact)
-    if match is None:
-        _die_without_evidence(
-            f"the agent's `{ARTIFACT_HEADING}` carries no well-formed `{EVIDENCE_TEMPLATE}` line "
-            "(the sha256 must be all 64 hex characters), so nothing shows it read the diff. "
-            "Its verdict is not publishable."
-        )
-    claimed_lines = int(match.group(1))
-    claimed_digest = match.group(2).lower()
-    if claimed_digest == expected_digest.lower():
-        return
-    _die_without_evidence(
-        f"inspection evidence does not match the diff: agent claimed lines={claimed_lines} "
-        f"sha256={claimed_digest}, launcher computed lines={expected_lines} "
-        f"sha256={expected_digest}. Its verdict is not publishable."
-    )
-
-
-def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
-    return (
-        f"Review pull request {repo}#{pr_number}. The checkout is pinned to PR head "
-        f"{head_sha} and the PR base is {base_sha}, both present locally. The changes under "
-        f"review are exactly `git diff {base_sha}...{head_sha}` — read that range first and "
-        f"do not review code outside it except as context. Report only actionable "
-        f"correctness, security, or regression findings, with file and line references. If "
-        f"there are none, say so briefly. Your final response must start exactly with "
-        f"`{ARTIFACT_HEADING}`.\n\n"
-        f"MANDATORY PROOF OF INSPECTION. Run exactly:\n"
-        f"  git --no-pager diff {base_sha}...{head_sha} | wc -l\n"
-        f"  git --no-pager diff {base_sha}...{head_sha} | sha256sum\n"
-        f"and end your final response with a line of the form\n"
-        f"  {EVIDENCE_TEMPLATE}\n"
-        f"substituting the real values you observed. Quote the sha256 IN FULL — all 64 hex "
-        f"characters, not an abbreviation: the digest is the channel that authorises "
-        f"publication, and an abbreviated or malformed one is refused. Do NOT guess, infer, or "
-        f"fabricate the values: the launcher recomputes the digest and refuses to publish any "
-        f"review whose digest does not match exactly. The line count alone will NOT do — it is "
-        f"published at the PR's .diff URL and so proves nothing about what you read. "
-        f"If your shell cannot run those commands, say so plainly and DO NOT emit an "
-        f"evidence line and DO NOT render a verdict — an unverifiable review is worse than "
-        f"none. {REVIEW_SCOPE}"
-    )
-
-
-def run_agent(
-    model: str, prompt: str, timeout: int, evidence: tuple[int, str] | None = None
-) -> str:
-    with tempfile.TemporaryDirectory(prefix="eumemic-review-") as temp:
-        artifact_path = Path(temp) / "last-message.md"
-        command, env = _agent_command(model, artifact_path)
-        try:
-            result = subprocess.run(
-                command,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                env=env,
-                timeout=timeout,
-                check=False,
-            )
-        except FileNotFoundError:
-            _die(f"{command[0]} is not installed")
-        except subprocess.TimeoutExpired as exc:
-            # capture_output buffers everything until the process ends, so a
-            # timeout is exactly the run whose log would otherwise be empty.
-            _emit(exc.stdout if isinstance(exc.stdout, str) else None, sys.stdout)
-            _emit(exc.stderr if isinstance(exc.stderr, str) else None, sys.stderr)
-            _die(f"{model} review exceeded {timeout} seconds")
-        _emit(result.stdout, sys.stdout)
-        _emit(result.stderr, sys.stderr)
-        if result.returncode:
-            _die(f"{command[0]} exited with status {result.returncode}")
-        output = artifact_path.read_text() if artifact_path.exists() else result.stdout
-        artifact = _artifact_in(output)
-        if artifact is None:
-            _die(f"{model} returned no `{ARTIFACT_HEADING}` artifact")
-        # Exit 0 proves only that the harness process ended. It does NOT prove the
-        # agent could read anything: codex exits 0 when bubblewrap blocks every
-        # command. The evidence check is what separates a review from a fluent
-        # guess, so it gates publication independently of the exit status.
-        if evidence is not None:
-            require_inspection_evidence(artifact, evidence)
-        return artifact
+def _request(
+    method: str,
+    url: str,
+    api_key: str,
+    body: dict | None = None,
+    timeout: float = 30,
+    retry_timeout: bool = False,
+) -> dict:
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:800]
+        _die(f"{method} {url} returned {exc.code}: {detail}")
+    except TimeoutError as exc:
+        # A read timeout commonly surfaces as a bare TimeoutError. ``/wait``
+        # opts into handling it at the long-poll/deadline layer.
+        if retry_timeout:
+            raise
+        _die(f"{method} {url} failed: {exc}")
+    except urllib.error.URLError as exc:
+        # Some urllib handlers wrap the same socket timeout in URLError.
+        if retry_timeout and isinstance(exc.reason, TimeoutError):
+            raise TimeoutError(str(exc)) from exc
+        _die(f"{method} {url} failed: {exc}")
 
 
 def _github_request(method: str, url: str, token: str, body: dict | None = None) -> dict:
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, method=method)
-    request.add_header("Authorization", f"Bearer {token}")
-    request.add_header("Accept", "application/vnd.github+json")
-    request.add_header("X-GitHub-Api-Version", "2022-11-28")
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
     if body is not None:
-        request.add_header("Content-Type", "application/json")
+        req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read().decode()
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:800]
@@ -506,70 +135,256 @@ def _github_request(method: str, url: str, token: str, body: dict | None = None)
         _die(f"{method} {url} failed: {exc}")
 
 
-def _pin_checkout(head_sha: str, base_sha: str) -> None:
-    """Fail unless the working tree is the PR head and the base is reachable.
+def _wait_until_working_stops(base: str, api_key: str, session_id: str, deadline: float) -> str:
+    """Block until the session is no longer ``active``; return its status.
 
-    Both halves are load-bearing. A review of the wrong tree is worse than no
-    review, and the prompt names an explicit `base...head` range, so the base
-    commit has to be an object the agent can actually diff against.
+    ``GET /wait`` is the right primitive: it long-polls, returns the moment new
+    events land (so the status read happens milliseconds after the final
+    assistant message), and reports the derived session status. ``GET /await``
+    is NOT — it resolves on ``last_reacted_seq >= watermark``, and the model's
+    very first tool-call turn already satisfies that, long before the review
+    exists.
     """
-    actual_head = _git("rev-parse", "HEAD").stdout.strip()
-    if not actual_head.startswith(head_sha):
-        _die(f"checkout HEAD {actual_head or 'unknown'} does not match PR head {head_sha}")
-    if _git("cat-file", "-e", f"{base_sha}^{{commit}}").returncode:
-        fetched = _git("fetch", "--no-tags", "--quiet", "origin", base_sha)
-        if fetched.returncode or _git("cat-file", "-e", f"{base_sha}^{{commit}}").returncode:
-            _die(f"PR base {base_sha} is missing from the checkout: {fetched.stderr.strip()[:300]}")
+    after = 0
+    while time.monotonic() < deadline:
+        query = urllib.parse.urlencode({"after": after, "timeout": _WAIT_SECONDS})
+        url = f"{base}/v1/sessions/{session_id}/wait?{query}"
+        try:
+            payload = _request(
+                "GET",
+                url,
+                api_key,
+                timeout=_WAIT_HTTP_TIMEOUT,
+                retry_timeout=True,
+            )
+        except TimeoutError as exc:
+            print(f"WARN: GET {url} timed out; retrying: {exc}", file=sys.stderr)
+            continue
+        after = payload.get("next_after", after)
+        status = payload.get("session_status")
+        if status != "active":
+            return str(status)
+    # The final assistant message can already be durable even when the status
+    # long-poll never returned. Let the caller inspect events before deciding
+    # that the timed-out review failed.
+    return "active"
 
 
-def _record_published(comment_url: str) -> None:
-    """Emit `published=true` on GITHUB_OUTPUT, only on a verified publication."""
-    output_path = os.environ.get("GITHUB_OUTPUT", "").strip()
-    if not output_path:
-        return
+def _message_text(content: Any) -> str:
+    """Assistant content is a plain string, or content-part blocks on providers
+    that emit them (mirrors ``aios.cli.tail_format._as_text``)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return ""
+
+
+def _artifact_in(text: str) -> str | None:
+    """The artifact is the heading line and everything after it, or None."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(ARTIFACT_HEADING):
+            # The comment body must OPEN with the heading, so drop any lead-in
+            # lines and the heading line's own indent; the rest is verbatim.
+            return "\n".join([line.lstrip(), *lines[i + 1 :]]).strip()
+    return None
+
+
+def _review_from_events(base: str, api_key: str, session_id: str) -> str | None:
+    query = urllib.parse.urlencode({"dir": "backward", "kind": "message", "limit": "100"})
+    payload = _request("GET", f"{base}/v1/sessions/{session_id}/events?{query}", api_key)
+    # ``dir=backward`` pages newest-first, so the first hit is the latest artifact.
+    for event in payload.get("data", []):
+        data = event.get("data", {})
+        if data.get("role") != "assistant":
+            continue
+        artifact = _artifact_in(_message_text(data.get("content")))
+        if artifact is not None:
+            return artifact
+    return None
+
+
+def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
+    budget = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
+    deadline = time.monotonic() + budget
+    status = _wait_until_working_stops(base, api_key, session_id, deadline)
+    review = _review_from_events(base, api_key, session_id)
+    if review is not None:
+        return review
+    if status == "active":
+        _die(
+            f"session {session_id} was still working after the review timeout "
+            f"without a `{ARTIFACT_HEADING}` artifact"
+        )
+    if status == "archived":
+        _die(f"session {session_id} was archived without a `{ARTIFACT_HEADING}` artifact")
+
+    # One corrective turn handles a model that followed the dev-review workflow-child
+    # contract and attempted the unavailable `return` tool in this foreground session.
+    _request(
+        "POST",
+        f"{base}/v1/sessions/{session_id}/messages",
+        api_key,
+        {
+            "content": (
+                "The GitHub publisher needs your review as a normal assistant message now. "
+                "Do not call `return` or any posting tool. Reply with the complete artifact, "
+                f"starting exactly with `{ARTIFACT_HEADING}`."
+            )
+        },
+    )
+    status = _wait_until_working_stops(base, api_key, session_id, deadline)
+    review = _review_from_events(base, api_key, session_id)
+    if review is None:
+        _die(f"session {session_id} went {status} without a `{ARTIFACT_HEADING}` artifact")
+    return review
+
+
+def _archive(base: str, api_key: str, session_id: str) -> None:
+    """Reclaim the session on every exit path.
+
+    ``archive_when_idle`` can no longer do it — the session must outlive its own
+    idleness so the launcher can read the artifact — so the launcher owns the
+    reclaim, including when publishing failed. Never masks the original failure.
+    """
     try:
-        with open(output_path, "a", encoding="utf-8") as handle:
-            handle.write("published=true\n")
-            handle.write(f"comment_url={comment_url}\n")
-    except OSError as exc:  # pragma: no cover - runner filesystem fault
-        print(f"warning: could not record publication: {exc}", file=sys.stderr)
+        _request("POST", f"{base}/v1/sessions/{session_id}/archive", api_key)
+    except SystemExit:
+        print(f"WARN: session {session_id} was left unarchived", file=sys.stderr)
+
+
+def _list_agents(base: str, api_key: str, name: str | None = None) -> list[dict]:
+    q = {"limit": "50"}
+    if name:
+        q["name"] = name
+    url = f"{base}/v1/agents?{urllib.parse.urlencode(q)}"
+    payload = _request("GET", url, api_key)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        _die(f"GET /v1/agents missing data: {json.dumps(payload)[:400]}")
+    return rows
+
+
+def _list_environments(base: str, api_key: str) -> list[dict]:
+    url = f"{base}/v1/environments?{urllib.parse.urlencode({'limit': '100'})}"
+    payload = _request("GET", url, api_key)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        _die(f"GET /v1/environments missing data: {json.dumps(payload)[:400]}")
+    return rows
+
+
+def resolve_agent(base: str, api_key: str) -> str:
+    pinned = os.environ.get("AGENT_ID", "").strip()
+    if pinned:
+        return pinned
+    exact = [r for r in _list_agents(base, api_key, AGENT_NAME) if r.get("name") == AGENT_NAME]
+    if len(exact) == 1:
+        return str(exact[0]["id"])
+    visible = [f"{r.get('name')}:{r.get('id')}" for r in _list_agents(base, api_key)]
+    _skip(
+        f"no live agent named {AGENT_NAME!r} on this API key's account "
+        f"(visible: {visible or 'none'}). Set DEV_REVIEW_AGENT_ID to a reviewer on this account."
+    )
+
+
+def resolve_environment(base: str, api_key: str) -> str:
+    pinned = os.environ.get("ENVIRONMENT_ID", "").strip()
+    if pinned:
+        return pinned
+    exact = [r for r in _list_environments(base, api_key) if r.get("name") == ENVIRONMENT_NAME]
+    if len(exact) == 1:
+        return str(exact[0]["id"])
+    visible = [f"{r.get('name')}:{r.get('id')}" for r in _list_environments(base, api_key)]
+    _die(
+        f"no environment named {ENVIRONMENT_NAME!r} on this API key's account "
+        f"(visible: {visible or 'none'}). Set ENVIRONMENT_ID."
+    )
 
 
 def main() -> None:
+    base = _env("AIOS_URL").rstrip("/")
+    api_key = _env("AIOS_API_KEY")
     token = _env("GH_TOKEN")
     repo = _env("REPO")
     pr_number = _env("PR_NUMBER")
     head_sha = _env("HEAD_SHA")
-    base_sha = _env("BASE_SHA")
-    model = os.environ.get("REVIEW_MODEL", "").strip() or DEFAULT_MODEL
-    timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
-    _pin_checkout(head_sha, base_sha)
-    evidence = diff_evidence(base_sha, head_sha)
+    clone_url = _env("CLONE_URL")
+
+    agent_id = resolve_agent(base, api_key)
+    environment_id = resolve_environment(base, api_key)
+    prompt = (
+        f"Review pull request {repo}#{pr_number} at {head_sha}. "
+        f"The repository is cloned at /mnt/review, but that clone is on the default branch, "
+        f"not on this PR: check out {head_sha} there (fetch the PR head ref first) and confirm "
+        f"`git -C /mnt/review rev-parse HEAD` matches it before you read or test code from that "
+        f"tree. "
+        f"Fetch the PR diff via the github http_request server "
+        f"(GET /repos/{repo}/pulls/{pr_number} and /repos/{repo}/pulls/{pr_number}/files). "
+        f"If http_request is unauthorized, use GH_TOKEN from the environment with gh or curl. "
+        f"This is a foreground session, so the `return` tool is unavailable. Do not post to "
+        f"GitHub yourself. Reply as a normal assistant message with the complete review artifact; "
+        f"its first line must be exactly `{ARTIFACT_HEADING}`. The launcher will post and verify "
+        f"it. {REVIEW_SCOPE}"
+    )
+    body = {
+        "agent_id": agent_id,
+        "environment_id": environment_id,
+        "title": f"eumemic-bot review {repo}#{pr_number}",
+        # The launcher archives — see _archive. Self-reclaim would race the read
+        # of the artifact the launcher is about to publish.
+        "archive_when_idle": False,
+        "initial_message": prompt,
+        "env": {"GH_TOKEN": token, "GH_REPO": repo, "PR_NUMBER": pr_number},
+        "resources": [
+            {
+                "type": "github_repository",
+                "url": clone_url,
+                "mount_path": "/mnt/review",
+                "authorization_token": token,
+                "git_user_name": "eumemic-bot[bot]",
+                "git_user_email": "4752589+eumemic-bot[bot]@users.noreply.github.com",
+            }
+        ],
+        "metadata": {
+            "source": "eumemic-bot-review",
+            "repo": repo,
+            "pr_number": pr_number,
+            "head_sha": head_sha,
+        },
+    }
+    session = _request("POST", f"{base}/v1/sessions", api_key, body)
+    sid = session.get("id")
+    if not sid:
+        _die(f"create session returned no id: {json.dumps(session)[:400]}")
     print(
-        f"reviewing {repo}#{pr_number}@{head_sha} against {base_sha} with {model} "
-        f"({model_kind(model)}); diff is {evidence[0]} lines, sha256 {evidence[1]}"
+        f"started session {sid} on agent {agent_id} env {environment_id} "
+        f"for {repo}#{pr_number}@{head_sha}"
     )
-    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout, evidence)
-    marker = f"<!-- eumemic-bot-review:{head_sha} -->"
-    body = f"{ADVISORY_BANNER}\n\n{review}"
-    if marker not in body:
-        body = f"{body}\n\n{marker}"
-    comment = _github_request(
-        "POST",
-        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
-        token,
-        {"body": body},
-    )
-    comment_url = comment.get("html_url")
-    if not comment_url or marker not in str(comment.get("body", "")):
-        _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
-    # Positive publication signal for the workflow's safety net. The net must key
-    # on "did a genuine review land?" — the real miss exited 0 with the step
-    # outcome 'success', so a net keyed on step outcome was skipped precisely
-    # when it was needed. This line is written only after GitHub echoed the
-    # marker back, so its ABSENCE is the fact the net reads.
-    _record_published(comment_url)
-    print(f"posted and verified {ARTIFACT_HEADING}: {comment_url}")
+    try:
+        review = _ask_for_review_artifact(base, api_key, str(sid))
+        marker = f"<!-- eumemic-bot-review:{head_sha} -->"
+        if marker not in review:
+            review = f"{review}\n\n{marker}"
+        comment = _github_request(
+            "POST",
+            f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
+            token,
+            {"body": review},
+        )
+        comment_url = comment.get("html_url")
+        # The marker round-trip proves GitHub stored THIS run's artifact; exact
+        # body equality would also fail on any server-side normalization.
+        if not comment_url or marker not in _message_text(comment.get("body")):
+            _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
+        print(f"posted and verified {ARTIFACT_HEADING}: {comment_url}")
+    finally:
+        _archive(base, api_key, str(sid))
 
 
 if __name__ == "__main__":
