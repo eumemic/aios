@@ -1,26 +1,33 @@
 # Done
 
-Ported the #2404 local coding-agent review harness onto the existing gVisor branch without changing or dropping its product commits.
+The eumemic-bot review workflow now mints its GitHub App installation token only after the coding agent has exited.
 
 ## Commits
 
-- `e7f73af7` — port the local coding-agent harness, workflow, documentation, and unit tests
-- `a3a969ef` — route Codex through oai-proxy using an explicit Responses API provider
-- `a65dcbb2` — strip `OPENAI_BASE_URL` from the agent subprocess environment
-- `2a008bdb` — run Codex with `--sandbox danger-full-access` on GitHub Actions
+- `27faf31a` — split the review launcher and workflow into agent and publish phases, with token minting between them
 
-The original gVisor commits remain in history: `789174bc`, `ffef992c`, `2fa61ffe`, and `bf061a6c`.
+The existing gVisor and coding-harness commits remain in history, including `789174bc`, `ffef992c`, `e7f73af7`, `a3a969ef`, `a65dcbb2`, and `2a008bdb`.
 
-## Sandbox argv
+## Mint-after-agent enforcement
 
-The Codex command changed from `codex exec ... --sandbox read-only ...` to `codex exec ... --sandbox danger-full-access ...`. This avoids the bubblewrap loopback setup that GitHub-hosted runners reject. The ephemeral publisher job continues to strip GitHub and Actions credentials from the coding-agent subprocess; Claude and Pi routing is unchanged.
+The workflow runs `eumemic_bot_review.py agent` with routed proxy keys and no `GH_TOKEN`. This mode rejects a set `GH_TOKEN`, pins the checkout, removes the persisted checkout credential, launches the existing coding harness (including Codex with `--sandbox danger-full-access`), waits for it to exit, and only then writes the `### Code review` artifact into the workspace.
+
+After that step has completed successfully, `actions/create-github-app-token` mints the eumemic-bot installation token. A separate `eumemic_bot_review.py publish` process receives `GH_TOKEN`, reads the completed artifact, posts it, and verifies the run-specific marker. The publish process never launches a coding agent.
 
 ## Verification
 
 ```text
 $ uv run pytest -q tests/unit/test_eumemic_bot_review.py
-........................                                                 [100%]
-24 passed in 7.90s
+29 passed
+
+$ uv run pytest tests/unit -q
+6156 passed, 4 warnings in 133.33s
+
+$ uv run ruff check scripts/eumemic_bot_review.py tests/unit/test_eumemic_bot_review.py
+All checks passed!
+
+$ uv run ruff format --check scripts/eumemic_bot_review.py tests/unit/test_eumemic_bot_review.py
+2 files already formatted
 ```
 
-After Shepherd force-pushes this branch to `gvisorgrn`, the review Action should run the new harness on the new HEAD and post a verified `### Code review` comment as `eumemic-bot`.
+No push was performed.
