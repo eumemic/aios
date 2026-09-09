@@ -7,8 +7,11 @@ skipping publication.
 
 from __future__ import annotations
 
+import email.message
 import importlib.util
+import io
 import json
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,45 @@ _JOB_OVERHEAD_SECONDS = 120
 
 def _assistant(content: Any) -> dict[str, Any]:
     return {"kind": "message", "data": {"role": "assistant", "content": content}}
+
+
+class _Response:
+    """Minimal stand-in for the ``urlopen`` context manager."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._raw = json.dumps(payload).encode()
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._raw
+
+
+def _urlopen(*outcomes: Any) -> Any:
+    """A ``urlopen`` stand-in: each call raises its outcome or returns it as JSON."""
+    remaining = iter(outcomes)
+
+    def urlopen(req: Any, timeout: float | None = None) -> _Response:
+        outcome = next(remaining)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _Response(outcome)
+
+    return urlopen
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://aios.test/v1/x",
+        code,
+        "Server Error",
+        email.message.Message(),
+        io.BytesIO(b"boom"),
+    )
 
 
 def test_review_from_events_reads_the_list_envelope(monkeypatch: Any) -> None:
@@ -100,16 +142,95 @@ def test_wait_polls_until_the_session_stops_working(monkeypatch: Any) -> None:
     ]
 
 
-def test_wait_retries_a_read_timeout(monkeypatch: Any, capsys: Any) -> None:
-    polls = iter(
-        [
+@pytest.mark.parametrize(
+    "raised",
+    [
+        # The response phase raises a bare TimeoutError: the shape that killed
+        # run 34243703484 ("The read operation timed out").
+        pytest.param(TimeoutError("The read operation timed out"), id="bare-read-timeout"),
+        # urllib's own handler wraps a connect/send timeout in URLError instead.
+        pytest.param(urllib.error.URLError(TimeoutError("timed out")), id="urlerror-wrapped"),
+    ],
+)
+def test_request_reraises_a_transport_timeout_only_when_asked(
+    monkeypatch: Any, raised: BaseException
+) -> None:
+    """``retry_timeout`` is what makes the long-poll retry reachable at all.
+
+    ``_wait_until_working_stops`` can only catch a ``TimeoutError`` that
+    ``_request`` actually raises. Without the opt-in, ``_request`` calls
+    ``_die`` and the loop's ``except`` never runs, so pin both halves here --
+    a wait-loop test that stubs ``_request`` cannot see this regression.
+    """
+    monkeypatch.setattr(reviewer.urllib.request, "urlopen", _urlopen(raised))
+    with pytest.raises(TimeoutError):
+        reviewer._request("GET", "https://aios.test/v1/x", "key", retry_timeout=True)
+
+    # Every other caller keeps the old fail-hard behavior.
+    monkeypatch.setattr(reviewer.urllib.request, "urlopen", _urlopen(raised))
+    with pytest.raises(SystemExit) as exc:
+        reviewer._request("GET", "https://aios.test/v1/x", "key")
+    assert exc.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        pytest.param(_http_error(500), id="http-5xx"),
+        pytest.param(_http_error(401), id="http-4xx"),
+        pytest.param(urllib.error.URLError(ConnectionRefusedError("refused")), id="refused"),
+    ],
+)
+def test_request_keeps_non_timeout_failures_fatal_under_retry_timeout(
+    monkeypatch: Any, raised: BaseException
+) -> None:
+    """Only a transport timeout is retryable. A 401 or a refused connection will
+    not fix itself by polling again, so the opt-in must not widen to them."""
+    monkeypatch.setattr(reviewer.urllib.request, "urlopen", _urlopen(raised))
+
+    with pytest.raises(SystemExit) as exc:
+        reviewer._request("GET", "https://aios.test/v1/x", "key", retry_timeout=True)
+    assert exc.value.code == 1
+
+
+def test_wait_survives_timeouts_through_the_real_request_path(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """The whole chain, with only the socket stubbed: both timeout shapes are
+    warned about and polled through, and the run still reaches a real status."""
+    monkeypatch.setattr(
+        reviewer.urllib.request,
+        "urlopen",
+        _urlopen(
             TimeoutError("The read operation timed out"),
-            {"session_status": "idle", "next_after": 3},
-        ]
+            {"session_status": "active", "next_after": 7},
+            urllib.error.URLError(TimeoutError("timed out")),
+            {"session_status": "idle", "next_after": 9},
+        ),
     )
 
-    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        result = next(polls)
+    status = reviewer._wait_until_working_stops(
+        "https://aios.test", "key", "sess_1", reviewer.time.monotonic() + 60
+    )
+
+    assert status == "idle"
+    assert capsys.readouterr().err.count("WARN: GET") == 2
+
+
+def test_wait_retries_a_read_timeout(monkeypatch: Any, capsys: Any) -> None:
+    """A timed-out poll observed no events, so the retry re-asks from the same
+    ``after``. Advancing the cursor there would skip the very turn being waited
+    for -- the artifact itself."""
+    polls: list[dict[str, Any] | BaseException] = [
+        TimeoutError("The read operation timed out"),
+        {"session_status": "idle", "next_after": 3},
+    ]
+    remaining = iter(polls)
+    urls: list[str] = []
+
+    def request(method: str, url: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        urls.append(url)
+        result = next(remaining)
         if isinstance(result, BaseException):
             raise result
         return result
@@ -122,7 +243,29 @@ def test_wait_retries_a_read_timeout(monkeypatch: Any, capsys: Any) -> None:
         )
         == "idle"
     )
+    assert [u.split("?")[1] for u in urls] == ["after=0&timeout=30", "after=0&timeout=30"]
     assert "WARN: GET https://aios.test/v1/sessions/sess_1/wait?" in capsys.readouterr().err
+
+
+def test_wait_returns_active_when_the_deadline_passes(monkeypatch: Any) -> None:
+    """A blown deadline is no longer fatal *here*.
+
+    It used to ``_die`` inside the wait, which is what threw away an artifact
+    the session had already produced. The decision now belongs to the caller,
+    which gets to read the event log first.
+    """
+
+    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("the deadline had already passed; no poll should be issued")
+
+    monkeypatch.setattr(reviewer, "_request", request)
+
+    assert (
+        reviewer._wait_until_working_stops(
+            "https://aios.test", "key", "sess_1", reviewer.time.monotonic() - 1
+        )
+        == "active"
+    )
 
 
 def test_deadline_still_publishes_an_existing_artifact(monkeypatch: Any) -> None:
@@ -130,6 +273,24 @@ def test_deadline_still_publishes_an_existing_artifact(monkeypatch: Any) -> None
     monkeypatch.setattr(reviewer, "_review_from_events", lambda *args: _ARTIFACT)
 
     assert reviewer._ask_for_review_artifact("https://aios.test", "key", "sess_1") == _ARTIFACT
+
+
+def test_deadline_without_an_artifact_is_fatal_and_skips_the_corrective_turn(
+    monkeypatch: Any,
+) -> None:
+    """The budget is already spent, so there is nothing left to spend on a
+    corrective turn: a timed-out session with no artifact fails loudly."""
+    monkeypatch.setattr(reviewer, "_wait_until_working_stops", lambda *args: "active")
+    monkeypatch.setattr(reviewer, "_review_from_events", lambda *args: None)
+
+    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a session that outran the budget must not be prompted again")
+
+    monkeypatch.setattr(reviewer, "_request", request)
+
+    with pytest.raises(SystemExit) as exc:
+        reviewer._ask_for_review_artifact("https://aios.test", "key", "sess_1")
+    assert exc.value.code == 1
 
 
 def test_launcher_matches_the_committed_api_contract() -> None:
@@ -377,3 +538,34 @@ def test_main_fails_when_github_does_not_confirm(monkeypatch: Any, launcher_env:
 
     assert exc.value.code == 1
     assert api.calls[-1] == "POST /v1/sessions/sess_1/archive"
+
+
+def test_a_failed_archive_does_not_undo_a_published_review(
+    monkeypatch: Any, launcher_env: None, capsys: Any
+) -> None:
+    """Reclaim is best-effort; publication is the job.
+
+    The archive POST runs in ``main``'s ``finally``, after the comment is on the
+    PR and verified. A transport failure there must stay a WARN and leave the
+    process exit 0 -- a non-zero exit would trip the workflow's "did not post"
+    summary for a review that did, in fact, post.
+    """
+    api = _Api({"data": [_assistant(_ARTIFACT)]})
+
+    def request(
+        method: str, url: str, api_key: str, body: dict[str, Any] | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        if url.endswith("/archive"):
+            reviewer._die(f"POST {url} failed: The read operation timed out")
+        return api.request(method, url, api_key, body, **kwargs)
+
+    monkeypatch.setattr(reviewer, "_request", request)
+    monkeypatch.setattr(reviewer, "_github_request", api.github)
+
+    reviewer.main()
+
+    out = capsys.readouterr()
+    assert api.posted_body is not None
+    assert api.posted_body.startswith("### Code review")
+    assert "posted and verified ### Code review" in out.out
+    assert "was left unarchived" in out.err
