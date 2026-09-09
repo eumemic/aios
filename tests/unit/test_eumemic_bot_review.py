@@ -216,6 +216,46 @@ def test_pin_checkout_fails_when_the_base_cannot_be_fetched(monkeypatch: Any) ->
         reviewer._pin_checkout("abc123", "base456")
 
 
+def test_persisted_push_credential_is_unset_before_the_agent_runs(monkeypatch: Any) -> None:
+    """actions/checkout stores the workflow token in .git/config, out of env reach."""
+    calls: list[tuple[str, ...]] = []
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if "--get-regexp" in args:
+            return _ok("http.https://github.com/.extraheader\n")
+        return _ok()
+
+    monkeypatch.setattr(reviewer, "_git", git)
+    reviewer._drop_persisted_git_credentials()
+    assert ("config", "--local", "--unset-all", "http.https://github.com/.extraheader") in calls
+
+
+def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
+    monkeypatch: Any,
+) -> None:
+    """Ordering is the point: _pin_checkout may fetch, the agent must not be able to."""
+    _review_env(monkeypatch)
+    order: list[str] = []
+
+    def scrub() -> None:
+        order.append("scrub")
+
+    def agent(*args: Any) -> str:
+        order.append("agent")
+        return "### Code review\n\nPass."
+
+    monkeypatch.setattr(reviewer, "_drop_persisted_git_credentials", scrub)
+    monkeypatch.setattr(reviewer, "run_agent", agent)
+    monkeypatch.setattr(
+        reviewer,
+        "_github_request",
+        lambda method, url, token, body: {"html_url": "https://github.test/c/1", **body},
+    )
+    reviewer.main()
+    assert order == ["scrub", "agent"]
+
+
 def _review_env(monkeypatch: Any) -> None:
     for key, value in {
         "GH_TOKEN": "token",
@@ -226,7 +266,9 @@ def _review_env(monkeypatch: Any) -> None:
         "REVIEW_MODEL": "gpt-5.6-sol",
     }.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.setattr(reviewer, "_git", lambda *args: _ok("abc123full\n"))
+    monkeypatch.setattr(
+        reviewer, "_git", lambda *args: _ok("abc123full\n" if args[0] == "rev-parse" else "")
+    )
 
 
 def test_main_posts_and_verifies_marker(monkeypatch: Any, capsys: Any) -> None:

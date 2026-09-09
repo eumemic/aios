@@ -31,7 +31,7 @@ The launcher also accepts the conventional `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 - **Claude Code** honours `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` directly.
 - **Pi** gets a generated `models.json` in a throwaway `PI_CODING_AGENT_DIR` declaring an `xai-proxy` provider, selected with `--provider xai-proxy`.
 
-The agent subprocess never inherits `GH_TOKEN`, `GITHUB_TOKEN`, the Actions runtime tokens, or any proxy key outside the routed family — it reads PR-authored files (including `AGENTS.md` / `CLAUDE.md`) and runs shell commands, so it must not hold a credential that can write.
+The agent subprocess never inherits `GH_TOKEN`, `GITHUB_TOKEN`, the Actions runtime tokens, or any proxy key outside the routed family — it reads PR-authored files (including `AGENTS.md` / `CLAUDE.md`) and runs shell commands, so it must not hold a credential that can write. Environment stripping is not enough on its own: `actions/checkout` persists the workflow token as an `http.*.extraheader` in `.git/config`, so the launcher unsets that header once it has finished pinning the checkout and before it starts the agent.
 
 ## Scope and failure behaviour
 

@@ -30,7 +30,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import IO, NoReturn
+from typing import IO, Any, NoReturn
 
 ARTIFACT_HEADING = "### Code review"
 DEFAULT_MODEL = "gpt-5.6-sol"
@@ -44,6 +44,8 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 # shell commands, so it must not inherit anything that grants write access. The
 # installation token in particular can comment and push as eumemic-bot. Each
 # harness gets back exactly the one proxy key it needs and nothing else.
+# Credentials that live in files rather than the environment are handled
+# separately by _drop_persisted_git_credentials.
 _STRIPPED_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -265,7 +267,9 @@ def run_agent(model: str, prompt: str, timeout: int) -> str:
         return artifact
 
 
-def _github_request(method: str, url: str, token: str, body: dict | None = None) -> dict:
+def _github_request(
+    method: str, url: str, token: str, body: dict[str, Any] | None = None
+) -> dict[str, Any]:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=data, method=method)
     request.add_header("Authorization", f"Bearer {token}")
@@ -300,6 +304,21 @@ def _pin_checkout(head_sha: str, base_sha: str) -> None:
             _die(f"PR base {base_sha} is missing from the checkout: {fetched.stderr.strip()[:300]}")
 
 
+def _drop_persisted_git_credentials() -> None:
+    """Remove the checkout's stored push credential before the agent runs.
+
+    `actions/checkout` persists the workflow token as an `http.*.extraheader`
+    in .git/config. It lives in a file, so stripping GH_TOKEN and friends from
+    the agent's environment does not reach it, and the agent has a shell and
+    (on the codex route, which runs unsandboxed) a network. `_pin_checkout` is
+    the only thing that needs the credential, so it goes as soon as that
+    returns.
+    """
+    listed = _git("config", "--local", "--name-only", "--get-regexp", r"http\..+\.extraheader")
+    for key in listed.stdout.split():
+        _git("config", "--local", "--unset-all", key)
+
+
 def main() -> None:
     token = _env("GH_TOKEN")
     repo = _env("REPO")
@@ -309,6 +328,7 @@ def main() -> None:
     model = os.environ.get("REVIEW_MODEL", "").strip() or DEFAULT_MODEL
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
     _pin_checkout(head_sha, base_sha)
+    _drop_persisted_git_credentials()
     print(
         f"reviewing {repo}#{pr_number}@{head_sha} against {base_sha} with {model} "
         f"({model_kind(model)})"
