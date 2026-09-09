@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Run a proxy-backed coding agent locally and publish its review as eumemic-bot.
+"""Run a proxy-backed coding agent, then separately publish as eumemic-bot.
 
 Used by .github/workflows/eumemic-bot-review.yml. The workflow checks out the PR
-head, installs the harness for the routed model, and hands in a short-lived
-eumemic-bot installation token as GH_TOKEN.
+head and installs the harness for the routed model. The workflow invokes this
+launcher in two separate phases: ``agent`` writes the review artifact without
+an installation token anywhere in its process tree, then ``publish`` receives
+the freshly minted token after the agent has exited.
 
-The launcher owns publication: it runs the agent against the pinned checkout,
-extracts the final `### Code review` artifact, POSTs it as eumemic-bot, and
-verifies GitHub stored the run-specific marker. A review that never reached
-GitHub fails loudly here rather than vanishing.
+The publish phase POSTs the artifact as eumemic-bot and verifies GitHub stored
+the run-specific marker. A review that never reached GitHub fails loudly here
+rather than vanishing.
 
 Env:
-  GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, BASE_SHA
+  REVIEW_ARTIFACT_PATH, REPO, PR_NUMBER, HEAD_SHA
+  BASE_SHA (agent phase only), GH_TOKEN (publish phase only)
   REVIEW_MODEL (default: DEFAULT_MODEL below) — routed by prefix to a harness
   REVIEW_TIMEOUT_SECONDS (default: _REVIEW_SECONDS below) — agent wall clock. It
     must run out before the job's timeout-minutes: this script's FATAL leaves the
@@ -319,12 +321,15 @@ def _drop_persisted_git_credentials() -> None:
         _git("config", "--local", "--unset-all", key)
 
 
-def main() -> None:
-    token = _env("GH_TOKEN")
+def run_agent_phase() -> None:
+    """Run and wait for the untrusted agent, then persist its final artifact."""
+    if os.environ.get("GH_TOKEN", "").strip():
+        _die("GH_TOKEN must not be set during the agent phase")
     repo = _env("REPO")
     pr_number = _env("PR_NUMBER")
     head_sha = _env("HEAD_SHA")
     base_sha = _env("BASE_SHA")
+    artifact_path = Path(_env("REVIEW_ARTIFACT_PATH"))
     model = os.environ.get("REVIEW_MODEL", "").strip() or DEFAULT_MODEL
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
     _pin_checkout(head_sha, base_sha)
@@ -334,6 +339,24 @@ def main() -> None:
         f"({model_kind(model)})"
     )
     review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout)
+    artifact_path.write_text(review + "\n")
+    print(f"wrote {ARTIFACT_HEADING} artifact to {artifact_path}")
+
+
+def run_publish_phase() -> None:
+    """Publish a completed artifact; this process never launches an agent."""
+    token = _env("GH_TOKEN")
+    repo = _env("REPO")
+    pr_number = _env("PR_NUMBER")
+    head_sha = _env("HEAD_SHA")
+    artifact_path = Path(_env("REVIEW_ARTIFACT_PATH"))
+    try:
+        review = artifact_path.read_text()
+    except OSError as exc:
+        _die(f"cannot read review artifact {artifact_path}: {exc}")
+    review = _artifact_in(review) or _die(
+        f"review artifact contains no `{ARTIFACT_HEADING}` heading"
+    )
     marker = f"<!-- eumemic-bot-review:{head_sha} -->"
     if marker not in review:
         review = f"{review}\n\n{marker}"
@@ -347,6 +370,15 @@ def main() -> None:
     if not comment_url or marker not in str(comment.get("body", "")):
         _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
     print(f"posted and verified {ARTIFACT_HEADING}: {comment_url}")
+
+
+def main() -> None:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"agent", "publish"}:
+        _die(f"usage: {Path(sys.argv[0]).name} agent|publish", code=2)
+    if sys.argv[1] == "agent":
+        run_agent_phase()
+    else:
+        run_publish_phase()
 
 
 if __name__ == "__main__":
