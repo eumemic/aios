@@ -46,8 +46,15 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 # shell commands, so it must not inherit anything that grants write access. The
 # installation token in particular can comment and push as eumemic-bot. Each
 # harness gets back exactly the one proxy key it needs and nothing else.
-# Credentials that live in files rather than the environment are handled
-# separately by _drop_persisted_git_credentials.
+#
+# This list is defence in depth, never the guarantee: an agent that has a shell
+# as this user can read /proc/$PPID/environ, which still holds every variable
+# this process was exec'd with (unsetenv does not rewrite that mapping). Any
+# secret the agent must not reach therefore has to be absent from *this*
+# process — which is why the workflow mints the App token only after the agent
+# has exited and passes only the routed family's proxy key. Credentials that
+# live in files rather than the environment are handled separately by
+# _drop_persisted_git_credentials.
 _STRIPPED_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
