@@ -100,6 +100,38 @@ def test_wait_polls_until_the_session_stops_working(monkeypatch: Any) -> None:
     ]
 
 
+def test_wait_retries_a_read_timeout(monkeypatch: Any, capsys: Any) -> None:
+    polls = iter(
+        [
+            TimeoutError("The read operation timed out"),
+            {"session_status": "idle", "next_after": 3},
+        ]
+    )
+
+    def request(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = next(polls)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(reviewer, "_request", request)
+
+    assert (
+        reviewer._wait_until_working_stops(
+            "https://aios.test", "key", "sess_1", reviewer.time.monotonic() + 60
+        )
+        == "idle"
+    )
+    assert "WARN: GET https://aios.test/v1/sessions/sess_1/wait?" in capsys.readouterr().err
+
+
+def test_deadline_still_publishes_an_existing_artifact(monkeypatch: Any) -> None:
+    monkeypatch.setattr(reviewer, "_wait_until_working_stops", lambda *args: "active")
+    monkeypatch.setattr(reviewer, "_review_from_events", lambda *args: _ARTIFACT)
+
+    assert reviewer._ask_for_review_artifact("https://aios.test", "key", "sess_1") == _ARTIFACT
+
+
 def test_launcher_matches_the_committed_api_contract() -> None:
     """Pin the launcher's request/response shapes to ``openapi.json``.
 

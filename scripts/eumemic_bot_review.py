@@ -83,7 +83,12 @@ def _env(name: str) -> str:
 
 
 def _request(
-    method: str, url: str, api_key: str, body: dict | None = None, timeout: float = 30
+    method: str,
+    url: str,
+    api_key: str,
+    body: dict | None = None,
+    timeout: float = 30,
+    retry_timeout: bool = False,
 ) -> dict:
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method)
@@ -98,8 +103,16 @@ def _request(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:800]
         _die(f"{method} {url} returned {exc.code}: {detail}")
-    except (urllib.error.URLError, TimeoutError) as exc:
-        # A read timeout surfaces as a bare TimeoutError, not a URLError.
+    except TimeoutError as exc:
+        # A read timeout commonly surfaces as a bare TimeoutError. ``/wait``
+        # opts into handling it at the long-poll/deadline layer.
+        if retry_timeout:
+            raise
+        _die(f"{method} {url} failed: {exc}")
+    except urllib.error.URLError as exc:
+        # Some urllib handlers wrap the same socket timeout in URLError.
+        if retry_timeout and isinstance(exc.reason, TimeoutError):
+            raise TimeoutError(str(exc)) from exc
         _die(f"{method} {url} failed: {exc}")
 
 
@@ -135,17 +148,26 @@ def _wait_until_working_stops(base: str, api_key: str, session_id: str, deadline
     after = 0
     while time.monotonic() < deadline:
         query = urllib.parse.urlencode({"after": after, "timeout": _WAIT_SECONDS})
-        payload = _request(
-            "GET",
-            f"{base}/v1/sessions/{session_id}/wait?{query}",
-            api_key,
-            timeout=_WAIT_HTTP_TIMEOUT,
-        )
+        url = f"{base}/v1/sessions/{session_id}/wait?{query}"
+        try:
+            payload = _request(
+                "GET",
+                url,
+                api_key,
+                timeout=_WAIT_HTTP_TIMEOUT,
+                retry_timeout=True,
+            )
+        except TimeoutError as exc:
+            print(f"WARN: GET {url} timed out; retrying: {exc}", file=sys.stderr)
+            continue
         after = payload.get("next_after", after)
         status = payload.get("session_status")
         if status != "active":
             return str(status)
-    _die(f"session {session_id} was still working after the review timeout")
+    # The final assistant message can already be durable even when the status
+    # long-poll never returned. Let the caller inspect events before deciding
+    # that the timed-out review failed.
+    return "active"
 
 
 def _message_text(content: Any) -> str:
@@ -194,6 +216,11 @@ def _ask_for_review_artifact(base: str, api_key: str, session_id: str) -> str:
     review = _review_from_events(base, api_key, session_id)
     if review is not None:
         return review
+    if status == "active":
+        _die(
+            f"session {session_id} was still working after the review timeout "
+            f"without a `{ARTIFACT_HEADING}` artifact"
+        )
     if status == "archived":
         _die(f"session {session_id} was archived without a `{ARTIFACT_HEADING}` artifact")
 
