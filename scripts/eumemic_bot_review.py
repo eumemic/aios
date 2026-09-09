@@ -137,7 +137,10 @@ def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str
                 "--model",
                 model,
                 "--sandbox",
-                "read-only",
+                # GitHub-hosted runners do not permit bubblewrap to configure
+                # its loopback interface. The job is ephemeral and trusted;
+                # credentials are still stripped from the agent environment.
+                "danger-full-access",
                 "--ephemeral",
                 "-c",
                 f"model_provider={provider}",
