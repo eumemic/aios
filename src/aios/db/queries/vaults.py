@@ -745,15 +745,22 @@ async def resolve_vault_credential(
     ``session_vaults`` join.  ``auth_type`` is written only through the
     ``AuthType``-typed ``insert`` writer (single-sourced from the Literal,
     #1081), so the cast on the way out is exhaustively safe.
+
+    The ``vaults`` join + ``v.archived_at IS NULL`` is defense-in-depth
+    mirroring :func:`resolve_session_credential`: an archived vault must not
+    surface a credential even if one became active in it through a path other
+    than the service-layer write gate (a future insert path, direct SQL, or
+    the OAuth post-refresh reread in ``mcp/client.py``).
     """
     row = await conn.fetchrow(
         """
-        SELECT ciphertext, nonce, auth_type
-          FROM vault_credentials
-         WHERE vault_id = $1
-           AND target_url = $2
-           AND archived_at IS NULL
-           AND account_id = $3
+        SELECT vc.ciphertext, vc.nonce, vc.auth_type
+          FROM vault_credentials vc
+          JOIN vaults v ON v.id = vc.vault_id AND v.archived_at IS NULL
+         WHERE vc.vault_id = $1
+           AND vc.target_url = $2
+           AND vc.archived_at IS NULL
+           AND vc.account_id = $3
          LIMIT 1
         """,
         vault_id,

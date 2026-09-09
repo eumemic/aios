@@ -685,3 +685,130 @@ async def test_archived_vault_resurrection_closed_e2e(
             await queries.resolve_session_credential(conn, session_id, target_url, account_id=ACC)
             is None
         )
+
+
+# ─── defense-in-depth: resolve_vault_credential (specific-vault path) ────────
+
+
+async def test_resolve_vault_credential_none_for_archived_vault_via_direct_sql(
+    pool_fixture: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    """``resolve_vault_credential`` returns None when the parent vault is archived.
+
+    This is the specific-vault lookup called directly (not through
+    ``session_vaults``) — used by the OAuth post-refresh reread in
+    ``mcp/client.py``.  Pre-fix the query filtered only on
+    ``vault_credentials.archived_at IS NULL``, not on ``vaults.archived_at``,
+    so a credential inserted directly into an archived vault (bypassing the
+    write gate) was returned.  Post-fix a ``JOIN vaults … AND v.archived_at IS
+    NULL`` is added, making the behaviour identical to the session/run resolvers.
+    """
+    pool = pool_fixture
+    target_url = "https://vault-direct.example.com/api"
+    vault = await vaults_service.create_vault(
+        pool, account_id=ACC, display_name="vault-direct-sql-vault", metadata={}
+    )
+    await vaults_service.archive_vault(pool, vault.id, account_id=ACC)
+
+    # Bypass the service-layer guard: insert an active credential directly.
+    subkey = crypto_box.derive_account_subkey(ACC)
+    blob = subkey.encrypt_dict({"token": "vault-direct-resurrection-token"})
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO vault_credentials "
+            "(id, vault_id, display_name, target_url, auth_type, ciphertext, nonce, "
+            "metadata, account_id) "
+            "VALUES ($1, $2, NULL, $3, 'bearer_header', $4, $5, '{}'::jsonb, $6)",
+            make_id(VAULT_CREDENTIAL),
+            vault.id,
+            target_url,
+            blob.ciphertext,
+            blob.nonce,
+            ACC,
+        )
+
+    async with pool.acquire() as conn:
+        result = await queries.resolve_vault_credential(
+            conn, vault_id=vault.id, target_url=target_url, account_id=ACC
+        )
+    assert result is None
+
+
+async def test_resolve_vault_credential_none_for_archived_vault_oauth2_refresh(
+    pool_fixture: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    """``resolve_vault_credential`` returns None for an oauth2_refresh credential
+    in an archived vault — the exact shape used by the post-refresh reread in
+    ``mcp/client.py:514``.
+
+    The OAuth refresh path calls ``resolve_vault_credential`` after writing a
+    new token to re-read the updated blob.  If the parent vault is archived, it
+    must still return None — the credential must not be surfaced through the
+    post-refresh reread even when the credential row itself is active.
+    """
+    pool = pool_fixture
+    target_url = "https://vault-oauth.example.com/token"
+    vault = await vaults_service.create_vault(
+        pool, account_id=ACC, display_name="vault-oauth-archived", metadata={}
+    )
+    await vaults_service.archive_vault(pool, vault.id, account_id=ACC)
+
+    # Directly insert an active oauth2_refresh credential (bypassing write gate).
+    subkey = crypto_box.derive_account_subkey(ACC)
+    blob = subkey.encrypt_dict({"access_token": "stale-token", "refresh_token": "rt"})
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO vault_credentials "
+            "(id, vault_id, display_name, target_url, auth_type, ciphertext, nonce, "
+            "metadata, account_id) "
+            "VALUES ($1, $2, NULL, $3, 'oauth2_refresh', $4, $5, '{}'::jsonb, $6)",
+            make_id(VAULT_CREDENTIAL),
+            vault.id,
+            target_url,
+            blob.ciphertext,
+            blob.nonce,
+            ACC,
+        )
+
+    async with pool.acquire() as conn:
+        result = await queries.resolve_vault_credential(
+            conn, vault_id=vault.id, target_url=target_url, account_id=ACC
+        )
+    assert result is None
+
+
+async def test_resolve_vault_credential_active_vault_resolves(
+    pool_fixture: asyncpg.Pool[Any], crypto_box: CryptoBox
+) -> None:
+    """Positive control: ``resolve_vault_credential`` still returns the credential
+    when the parent vault is active.
+
+    Without this, the None assertions above would pass if the function returned
+    None unconditionally.
+    """
+    pool = pool_fixture
+    target_url = "https://vault-active.example.com/api"
+    vault = await vaults_service.create_vault(
+        pool, account_id=ACC, display_name="vault-active-vault", metadata={}
+    )
+    await vaults_service.create_vault_credential(
+        pool,
+        crypto_box,
+        account_id=ACC,
+        vault_id=vault.id,
+        body=VaultCredentialCreate(
+            target_url=target_url,
+            auth_type="bearer_header",
+            token=SecretStr("live-vault-token"),
+        ),
+    )
+
+    async with pool.acquire() as conn:
+        result = await queries.resolve_vault_credential(
+            conn, vault_id=vault.id, target_url=target_url, account_id=ACC
+        )
+    assert result is not None
+    blob, auth_type = result
+    assert auth_type == "bearer_header"
+    payload = json.loads(crypto_box.derive_account_subkey(ACC).decrypt(blob))
+    assert payload["token"] == "live-vault-token"
