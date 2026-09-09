@@ -18,10 +18,10 @@ After that step has completed successfully, `actions/create-github-app-token` mi
 
 ```text
 $ uv run pytest -q tests/unit/test_eumemic_bot_review.py
-29 passed
+30 passed
 
-$ uv run pytest tests/unit -q
-6156 passed, 4 warnings in 133.33s
+$ uv run pytest tests/unit -q -n 4
+6157 passed, 9 warnings in 52.90s
 
 $ uv run ruff check scripts/eumemic_bot_review.py tests/unit/test_eumemic_bot_review.py
 All checks passed!
@@ -29,5 +29,7 @@ All checks passed!
 $ uv run ruff format --check scripts/eumemic_bot_review.py tests/unit/test_eumemic_bot_review.py
 2 files already formatted
 ```
+
+The uncorrelated review on `botpost2410drev` applied two follow-up fixes (routed-only proxy secret in the agent step; docs rewritten for the two-phase flow) and one added test — hence the counts above. See REVIEW.md.
 
 No push was performed.
