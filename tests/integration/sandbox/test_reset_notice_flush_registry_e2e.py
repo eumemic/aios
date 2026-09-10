@@ -30,7 +30,7 @@ entry points:
 from __future__ import annotations
 
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import Mock
 
 import asyncpg
 import pytest
@@ -104,7 +104,7 @@ async def test_registry_flush_excludes_archived_and_sync_emit_retires_marker(
         # The retry-failed log fires only when emit RAISES into the flush's broad
         # ``except Exception``. Post-fix the lister excludes the archived row, so
         # emit is never called for it and the log MUST NOT fire across two ticks.
-        retry_failed = AsyncMock()
+        retry_failed = Mock()
         monkeypatch.setattr("aios.sandbox.registry.log.exception", retry_failed, raising=False)
 
         async with pool.acquire() as conn:
@@ -117,7 +117,7 @@ async def test_registry_flush_excludes_archived_and_sync_emit_retires_marker(
         await registry._flush_pending_snapshot_reset_notices()  # tick 1
         await registry._flush_pending_snapshot_reset_notices()  # tick 2
 
-        retry_failed.assert_not_awaited()
+        retry_failed.assert_not_called()
         async with pool.acquire() as conn:
             # No delivery was attempted, so the marker is still armed — but it is
             # inert (excluded from the lister, so no further retry).

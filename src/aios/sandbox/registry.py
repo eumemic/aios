@@ -3408,10 +3408,7 @@ class SandboxRegistry:
                     # being deliverable. Only the archived terminal state is
                     # permanent: retire it so the outbox stops retrying a
                     # notice whose session can no longer accept the event.
-                    archived = await conn.fetchval(
-                        "SELECT (archived_at IS NOT NULL) FROM sessions WHERE id = $1",
-                        session_id,
-                    )
+                    archived = await queries.unscoped_session_is_archived(conn, session_id)
                     if archived:
                         await queries.unscoped_clear_pending_snapshot_reset_notice(
                             conn, session_id, expected_reason=reason
