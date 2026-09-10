@@ -132,8 +132,10 @@ _RUNSC_OPERATOR_COMMANDS: dict[str, str] = {
 # loader-injection vars must be cleared: ``--library-path`` overrides where
 # ld.so SEARCHES but does not stop it honouring ``LD_PRELOAD`` / ``LD_AUDIT``,
 # either of which would run tenant code inside the operator shell. ``PATH`` is
-# repointed at the operator root so an unshadowed command cannot resolve to a
-# tenant binary, and ``POSIXLY_CORRECT`` is cleared because bash reads it at
+# pinned to the post-chroot operator directories (the exec chroots into
+# :data:`_RUNSC_OPERATOR_ROOT` first, so these ARE the operator image's) rather
+# than inherited, so an unshadowed command cannot resolve to a tenant binary,
+# and ``POSIXLY_CORRECT`` is cleared because bash reads it at
 # startup regardless of ``-p`` and posix mode rejects the hyphenated
 # ``iptables-legacy`` function name (a tenant-triggerable provision failure).
 # ``bash -p`` covers the rest of the bash-startup surface: ``BASH_ENV``,
@@ -144,7 +146,7 @@ _RUNSC_OPERATOR_EXEC_ENV: tuple[tuple[str, str], ...] = (
     ("LD_AUDIT", ""),
     ("LD_LIBRARY_PATH", ""),
     ("POSIXLY_CORRECT", ""),
-    ("PATH", f"{_RUNSC_OPERATOR_ROOT}/usr/sbin:{_RUNSC_OPERATOR_ROOT}/usr/bin"),
+    ("PATH", "/usr/sbin:/usr/bin"),
 )
 
 
@@ -1246,13 +1248,17 @@ class DockerBackend:
         :meth:`create` mounted (``settings.docker_image``), which is the same
         image every in-tree caller passes here.
 
-        NOTE (runsc only): the caller's script runs in the target's MOUNT
-        namespace too, so ``setup._RESOLV_PREAMBLE`` rewrites the sandbox's own
-        ``/etc/resolv.conf`` to the embedded resolver rather than a throwaway
-        sidecar's. That is deliberate — the allow-list is built from what
-        ``getent`` returns, so a tenant-poisoned ``resolv.conf`` would otherwise
-        choose which addresses get an ACCEPT rule — and lossless in practice on
-        a user-defined network, where Docker writes the same nameserver.
+        NOTE (runsc only): the chroot also decides which ``/etc/resolv.conf``
+        ``getent`` reads — the operator image's, not the tenant's. That is the
+        property we want (the allow-list is built from what ``getent`` returns,
+        so a tenant-poisoned ``resolv.conf`` would otherwise choose which
+        addresses get an ACCEPT rule), but it means ``setup._RESOLV_PREAMBLE``
+        no longer has anywhere to write: the operator root is a read-only image
+        mount, so its ``printf`` fails and is swallowed by ``|| true``. The
+        nameserver therefore has to be in the image already —
+        ``docker/sandbox-resolv.conf``, COPYed to ``/etc/resolv.conf``, holding
+        the same embedded-resolver address the preamble writes. Without it
+        every host resolves to nothing and Limited egress blackholes.
         """
         if runtime == "runsc":
             argv = ["docker", "exec", "--privileged"]

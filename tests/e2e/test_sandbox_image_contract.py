@@ -11,11 +11,13 @@ no Postgres, no async. They require only a Docker daemon.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import platform
 import re
 import subprocess
+import tarfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -146,6 +148,110 @@ def test_busybox_chroot_is_from_the_static_package(pulled_image: str) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert r.stdout == "ii ", r.stdout
+
+
+# -- the privileged runsc operator chain ---------------------------------------
+#
+# ``DockerBackend.run_netns_sidecar`` execs this exact chain into the target
+# Sentry with ``--privileged``.  Every path in it is spelled absolutely in
+# ``src/aios/sandbox/backends/docker.py`` (``_RUNSC_OPERATOR_*``) and resolved
+# inside the operator image, so a base-image bump that relocates any link in
+# the chain breaks provisioning at run time with an opaque ``exec`` failure.
+# Duplicated here rather than imported: this module stays free of aios package
+# imports (see the module docstring), and ``test_docker_runtime_argv.py`` pins
+# the argv against the constants from the other side.
+_OPERATOR_CHAIN = (
+    "/usr/bin/busybox",
+    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/usr/bin/bash",
+)
+
+
+@pytest.mark.parametrize("path", _OPERATOR_CHAIN)
+def test_operator_chain_binary_at_absolute_path(pulled_image: str, path: str) -> None:
+    """Each link of the privileged exec chain must be executable at its exact
+    path — the exec never consults PATH for these (``/usr/bin/tail`` above is
+    the same argument for the image CMD)."""
+    r = _docker_run(pulled_image, "test", "-x", path)
+    assert r.returncode == 0, f"{path} is not executable in the image: {r.stderr}"
+
+
+def test_busybox_ships_the_chroot_applet(pulled_image: str) -> None:
+    """busybox-static is compiled with a configurable applet list; the runsc
+    exec calls exactly one applet, and a build without it would leave the
+    tenant's ``/etc/ld.so.preload`` in force under ``--privileged``."""
+    r = _docker_run(pulled_image, "/usr/bin/busybox", "--list")
+    assert r.returncode == 0, r.stderr
+    assert "chroot" in r.stdout.split(), "busybox in this image has no chroot applet"
+
+
+def test_operator_chain_executes_end_to_end(pulled_image: str) -> None:
+    """Run the real chain (chroot → trusted loader → ``bash -p``) once.
+
+    ``/`` stands in for the operator mount — under runsc the chroot target is
+    ``_RUNSC_OPERATOR_ROOT``, which IS this image. That substitution keeps the
+    test runnable without a runsc daemon (the gVisor suite is a weekly cron)
+    while still proving the four pieces compose: the static applet, the
+    loader's ``--library-path`` form, privileged bash, and its ``-c`` script.
+    """
+    r = _docker_run(
+        pulled_image,
+        "/usr/bin/busybox",
+        "chroot",
+        "/",
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "--library-path",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/bin/bash",
+        "-p",
+        "-c",
+        "getent --version >/dev/null && echo operator-ok",
+    )
+    assert r.returncode == 0, f"operator chain failed: {r.stdout}{r.stderr}"
+    assert r.stdout.strip() == "operator-ok"
+
+
+def test_image_layer_carries_the_embedded_dns_resolver(pulled_image: str) -> None:
+    """``/etc/resolv.conf`` must exist IN THE LAYER, naming 127.0.0.11.
+
+    Read through ``docker cp`` from a created-but-never-started container: a
+    running container has Docker's own resolv.conf bind-mounted over the path,
+    which is exactly why a missing baked file is invisible until a runsc
+    provision blackholes. The chrooted runsc exec sees the layer, cannot write
+    to it (the operator mount is read-only, so ``setup._RESOLV_PREAMBLE`` is a
+    no-op there), and ``getent`` silently falls back to 127.0.0.1 without it —
+    which empties the Limited allow-list.
+    """
+    created = subprocess.run(
+        ["docker", "create", pulled_image],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert created.returncode == 0, f"docker create failed: {created.stderr}"
+    container = created.stdout.strip()
+    try:
+        copied = subprocess.run(
+            ["docker", "cp", f"{container}:/etc/resolv.conf", "-"],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        assert copied.returncode == 0, (
+            "/etc/resolv.conf is absent from the image layer — the runsc operator "
+            f"chroot would have no resolver: {copied.stderr.decode(errors='replace')}"
+        )
+        with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as tar:
+            member = tar.extractfile("resolv.conf")
+            assert member is not None
+            baked = member.read().decode()
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60)
+
+    # Keep in step with ``aios.sandbox.setup._EMBEDDED_DNS_ADDRESS``;
+    # ``tests/unit/sandbox/test_sandbox_resolv_conf.py`` pins the source pair.
+    assert re.findall(r"(?m)^\s*nameserver\s+(\S+)\s*$", baked) == ["127.0.0.11"], baked
 
 
 def test_tail_at_absolute_path(pulled_image: str) -> None:

@@ -97,6 +97,24 @@ ENV HOME=/root
 # somehow lapses.
 ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
 
+# Resolver config baked into the image LAYER. Two consumers read it; a
+# running sandbox is not one of them (Docker bind-mounts its own resolv.conf
+# over this path for every container it manages networking for):
+#
+#   * the netns-joining lockdown sidecar -- Docker writes no resolv.conf for
+#     ``--network container:<id>``, so it inherits this file;
+#   * the runsc egress exec, which chroots into this image mounted READ-ONLY
+#     at ``_RUNSC_OPERATOR_ROOT`` (``sandbox/backends/docker.py``). Nothing can
+#     write a resolver into a read-only mount, so ``getent`` there depends on
+#     this file existing -- without it glibc falls back to 127.0.0.1, no host
+#     resolves, and the Limited allow-list comes out empty.
+#
+# COPY, not RUN: Docker mounts /etc/resolv.conf over the build sandbox too, so
+# a RUN redirect writes to the mount and never reaches the layer.
+#
+# MUST come after every RUN above -- apt needs the daemon's resolver, not this.
+COPY docker/sandbox-resolv.conf /etc/resolv.conf
+
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The
 # directory is created empty on the host on first provision.
