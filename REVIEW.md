@@ -1,157 +1,101 @@
-# Uncorrelated review — `botpost2410e` tip `63cff5f5` (aios#2410)
+# Uncorrelated review — `botpost2410f` tip `a8da0ea8` (aios#2410)
 
-**Verdict: changes requested — 2 High findings, both fixed on this review
-branch (`botpost2410erev`, tip `b2f0ce4f`).**
+**Verdict: changes requested — 1 High, 1 Medium, both fixed on this review
+branch (`botpost2410frev`, tip `a3a7612e`).**
 
-Both properties TASK.md asks for are *structurally* right at `63cff5f5`: the
-publisher is extracted from `github.event.pull_request.base.sha`, and the
-privileged runsc exec enters the read-only operator image through a static
-BusyBox `chroot` before any dynamic loader starts. Neither was carried far
-enough. Finding 1 leaves a working path for PR-authored code to run inside the
-process holding `GH_TOKEN` — the exact property the change exists to establish.
-Finding 2 is not a security regression but a functional one: the chroot silently
-took DNS with it, and nothing in unit tests or PR CI would have caught it.
+The design TASK.md asks for is right, and it is the right design: the
+chicken/egg is genuinely broken (there is no base-SHA Python left to execute),
+and the `mktemp` race is closed by a boundary rather than by a better temp
+name. Both properties are structural now, not argued.
+
+What it does not do is post. `actions/upload-artifact` has excluded
+dot-prefixed files by default since v4.4, and the one file crossing the new job
+boundary is `.eumemic-bot-review.md` — so the upload matches nothing,
+`if-no-files-found: error` fails it, and `publish` downloads nothing. The
+isolation is real and the review still never reaches the PR. That is the same
+silent-miss shape this workflow has now failed on three ways running, and it
+would have shipped green.
 
 ## Scope
 
-Verified against TASK.md items 1–4. Not reviewed: Track G (excluded). Nothing
-was pushed, merged, or opened as a PR. Docker is unavailable in this workspace,
-so image-contract tests were reasoned about and written but not executed.
+Verified against TASK.md items 1–5. Not reviewed: Track G (excluded). Nothing
+was pushed, merged, or opened as a PR.
 
 ---
 
-## F1 (High) — the staged publisher could still import PR-authored code
+## F1 (High) — the review artifact is a hidden file, so it is never uploaded
 
-`.github/workflows/eumemic-bot-review.yml` at `63cff5f5` staged the publisher
-to a fixed path and ran it plainly:
+`.github/workflows/eumemic-bot-review.yml` at `a8da0ea8`:
 
 ```yaml
-git show "$BASE_SHA:scripts/eumemic_bot_review.py" > "$TRUSTED_PUBLISHER_PATH"   # ${{ runner.temp }}/eumemic_bot_review.py
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
 ...
-run: python3 "$TRUSTED_PUBLISHER_PATH" publish
+      - uses: actions/upload-artifact@v4
+        with:
+          path: .eumemic-bot-review.md
+          if-no-files-found: error
 ```
 
-TASK.md's acceptable fix is explicit that the property covers "`scripts/eumemic_bot_review.py`
-**and any module it imports** for publish". Three ways the head still reaches
-that process:
+From the action's own v4 README: *"With `v4.4` and later, hidden files are
+excluded by default"*, and *"Hidden files are defined as any file beginning
+with `.`"*. `@v4` is a floating major tag, so every run resolves to v4.4+.
 
-1. **`sys.path[0]`.** CPython puts the *script's own directory* first on
-   `sys.path`. That directory is `RUNNER_TEMP`, which the agent step — earlier,
-   unsandboxed, `danger-full-access`, PR-authored prompt — can write. A
-   `json.py` (or `subprocess.py`, `urllib/`) left there is imported by the
-   publisher, inside the process holding `GH_TOKEN`. Confirmed by running
-   CPython, not inferred.
-2. **`PYTHONPATH`.** Same outcome via a line appended to `$GITHUB_ENV`, which
-   the agent step can also write; the publish step inherits it.
-3. **The fixed destination.** `> "$TRUSTED_PUBLISHER_PATH"` opens whatever is
-   at that path. The agent knows the name in advance and can pre-create a
-   symlink or FIFO there.
+The chain then fails end to end, quietly at each link:
 
-Staging from base bought nothing against any of these: the token-holding
-process still ends up executing bytes the PR author chose.
+1. the upload pattern matches zero files;
+2. `if-no-files-found: error` fails the step — which is `continue-on-error`,
+   so the job stays green;
+3. `publish` runs, `download-artifact` finds nothing, the mint is skipped;
+4. the run summary says "did not post" and the check is green.
 
-**Fixed** in `e0ba994a`:
+This was invisible to every gate. The single-job predecessor read the file off
+the same runner's disk, where the dot prefix meant nothing; the property only
+became load-bearing when the file started crossing a job boundary in this
+commit. `tests/unit/test_eumemic_bot_review.py` asserted
+`upload["with"]["path"] == ".eumemic-bot-review.md"` — pinning the defect. It
+is the only dot-prefixed upload in the repository, so the sibling in
+`code-validation.yml` offered no counter-example either.
 
-- stage into `dir="$(mktemp -d "${RUNNER_TEMP}/trusted-publisher.XXXXXXXX")"`
-  and export `path=` as a step output. `mktemp -d` fails rather than reuse an
-  existing path, so a staged file is one that step wrote;
-- run `python3 -I "$TRUSTED_PUBLISHER_PATH" publish`. Isolated mode drops both
-  the script directory and `PYTHONPATH` from `sys.path`;
-- a new unit test pins the whole shape (`mktemp -d`, the `$GITHUB_OUTPUT`
-  hand-off, the exact `-I` argv), so this cannot regress to the plain form.
+**Fixed** in `a3a7612e`: `include-hidden-files: true`. Chosen over renaming the
+file because the input states the intent where a reader of the upload step will
+look, and the dot prefix is what the launcher, the docs and the publisher's
+read path already agree on. The action's warning about that input concerns
+directory sweeps picking up `.env`-shaped files; this is a single explicit
+file, so there is nothing to sweep.
 
-The prior round's REVIEW.md argued against a `RUNNER_TEMP` copy because that
-directory "is writable by the same agent, so adding one would buy false
-assurance". That reasoning is why the fixed path shipped; it is right about the
-directory and wrong about the conclusion — the answer is to stop trusting the
-directory (`mktemp -d` + `-I`), not to stop staging.
+`test_upload_opts_into_the_hidden_artifact_filename` pins the launcher's write
+path, the upload path and the publisher's read path as **one chain** — both
+halves are silent when wrong, and the second (`review/` + basename) had no
+coverage at all — and requires the input only while the basename starts with
+`.`, so a later rename to a non-hidden name stays valid without it. Confirmed
+the test fails against `a8da0ea8`'s workflow, not just passes against the fix.
 
-`docs/eumemic-bot-review.md` claimed the residual surface was closed. It is
-not, and the doc now says so plainly: the agent shares a runner with the
-publish step, so `$GITHUB_PATH` can still shadow `python3`/`git`, runner
-binaries can be overwritten outright, and only a separate identity or container
-closes that.
+## F2 (Medium) — `always()` fires the "did not post" summary on superseded runs
 
-## F2 (High) — the chroot broke DNS for every runsc egress provision
-
-`4c359ef0` is correct about `/etc/ld.so.preload`. But `chroot` changes which
-`/etc/resolv.conf` glibc reads, and that file is load-bearing on this path.
-
-`setup._RESOLV_PREAMBLE` is prepended to both the Limited lockdown apply script
-and the Unrestricted DNAT-only script:
-
-```python
-f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\n' > /etc/resolv.conf 2>/dev/null || true\n"
+```yaml
+  publish:
+    needs: agent
+    if: ${{ always() && !github.event.pull_request.draft }}
 ```
 
-Post-chroot the target is the operator image mounted read-only (`--mount
-type=image,...` in `create()`), so the write fails and `|| true` discards the
-failure. `getent ahostsv4` then reads the *image's* `/etc/resolv.conf` — which
-the image never had: Docker masks that path at runtime, and a `RUN` redirect
-writes to the build-time mount, never to the layer. glibc's no-resolv.conf
-fallback is 127.0.0.1, and nothing serves DNS there inside the sandbox netns.
+`always()` is true when the run is **cancelled**, and this workflow sets
+`cancel-in-progress: true`. So every push that supersedes an in-flight run
+starts `publish` on a fresh runner, finds no artifact, and writes
+`### eumemic-bot review did not post` to that run's summary.
 
-Consequences, in the code's own terms:
+Not a security issue — a signal-quality one, and the signal is the whole point
+of the step. The workflow's own comment says a run that published nothing
+"says so where a reader sees it without opening logs"; a marker that also fires
+for every superseded push is one a reader learns to skip. This is a regression
+from the single-job shape, where a cancelled run simply took the summary step
+with it.
 
-- Limited: `resolve_ipv4` returns nothing for every allowed host → an empty
-  allow-list under `-P OUTPUT DROP`. Fails *closed*, so not a bypass, but every
-  Limited sandbox on runsc is an egress blackhole.
-- Unrestricted: `PROXY_IP=$(resolve_ipv4 <alias> | head -n1)` is empty → the
-  secret-egress DNAT is skipped.
-
-Why nothing caught it: `test_runsc_operator_shadow.py` runs the real scripts but
-rewrites `/etc/resolv.conf` to `tmp_path` and does not model the chroot, and
-`gvisor-validation.yml` — the only place the runsc egress path executes — is
-`workflow_dispatch` plus a weekly `cron: 37 9 * * 2`. This would have shipped
-green and surfaced as "gVisor sandboxes have no network".
-
-**Fixed** in `b2f0ce4f`: `docker/sandbox-resolv.conf` (`nameserver
-127.0.0.11`), COPYed to `/etc/resolv.conf` after the last `RUN` step. COPY
-because RUN cannot reach the layer; last because the `apt-get` steps need the
-daemon's resolver, not the netns-local one.
-
-This is the better property, not just a repair. Before, the sidecar *overwrote*
-a tenant-controlled file and hoped to win the race; now the resolver the
-allow-list is derived from is trusted image content that the tenant cannot
-reach at all — which is the same argument the chroot itself rests on.
-
-### F2a (Medium, folded into the same commit) — dangling operator `PATH`
-
-`_RUNSC_OPERATOR_EXEC_ENV` still set
-
-```python
-("PATH", f"{_RUNSC_OPERATOR_ROOT}/usr/sbin:{_RUNSC_OPERATOR_ROOT}/usr/bin"),
-```
-
-which resolves to nothing once the exec is rooted *inside* that mount. The
-comment beside it promises that a command `_RUNSC_OPERATOR_COMMANDS` forgets
-"degrades to *operator binary under the tenant's loader*, never to *tenant
-binary*" — with a dangling `PATH` it degrades to "command not found" instead,
-turning a silent-but-safe miss into a provision failure. Now `/usr/sbin:/usr/bin`,
-which post-chroot *are* the operator image's. The argv unit test was pinning
-the broken value and now pins the correct one with the reasoning inline.
-
-### Tests added for F2
-
-Both regressions were outside every gate on PR CI, so:
-
-- `tests/unit/sandbox/test_sandbox_resolv_conf.py` — the baked nameserver must
-  equal `setup._EMBEDDED_DNS_ADDRESS`; the Dockerfile must reach it by `COPY`
-  (not `RUN`) and after every `RUN`.
-- `tests/e2e/test_sandbox_image_contract.py` — read `/etc/resolv.conf` out of
-  the *layer* via `docker cp` from a created-but-unstarted container (a running
-  one has Docker's own file bind-mounted over it, which is exactly why the gap
-  was invisible); assert BusyBox ships the `chroot` applet (it is a
-  compile-time applet list, and a build without it would leave tenant
-  `ld.so.preload` in force under `--privileged`); pin each link of the exec
-  chain at its absolute path; and execute the real chroot → loader →
-  `bash -p` chain once, with `/` standing in for the operator mount so it runs
-  without a runsc daemon.
-- `docker/sandbox-resolv.conf` added to the `sandbox_changed` CI filter and to
-  `build-sandbox.yml`'s push trigger — otherwise a change to it would pull a
-  stale `:smoked` image and leave the published image stale. Both are pinned by
-  `tests/unit/test_detect_filter_sync.py`, whose `bin/tool` test is now
-  parametrized over every file the Dockerfile COPYs.
+**Fixed** in `a3a7612e`: `!cancelled()`, which is GitHub's documented form for
+"run unless the run was cancelled" and still overrides the default
+`needs`-failed skip — so a *failed* agent job (including a `timeout-minutes`
+kill, which is a job failure, not a run cancellation) still reaches the
+summary. Pinned in `test_workflow_never_fails_the_pr_check_on_an_ops_miss`
+alongside the existing step-level `always()`, which is correct and unchanged.
 
 ---
 
@@ -159,33 +103,44 @@ Both regressions were outside every gate on PR CI, so:
 
 | # | Requirement | Verdict |
 |---|---|---|
-| 1 | Publisher from trusted base when `GH_TOKEN` present; staging failure blocks the mint and is reported; agent phase may use PR head | **Was incomplete** (imports + fixed path) → now holds. Mint is gated on `steps.publisher.outcome == 'success'`; the summary step lists `publisher` among the failures it reports; the agent step still runs `python3 scripts/eumemic_bot_review.py agent` from the head checkout, as allowed. |
-| 2 | Privileged runsc exec ignores tenant loader config; operator-root / `bash -p` / library-path design preserved; unit test pins argv | **Holds.** BusyBox is static (`busybox-static`, `ii`-pinned in the contract test) so the tenant loader and `/etc/ld.so.preload` never run; `chroot` is Full Support in gVisor and the applet is present in Debian bookworm's `busybox-static`. `test_docker_runtime_argv.py` pins the seven-token chain. The chroot's *side effects* were the defect (F2/F2a), not the mechanism. |
-| 3 | Branch keeps prior #2410 / gVisor / harness / mint-after-agent history; `origin/master` is an ancestor | **Holds.** `origin/master`, `8bfa17f3`, `63cff5f5`, `d1da0cd9`, `27faf31a`, `e7f73af7`, `789174bc`, `ffef992c` are all ancestors of `HEAD`; 20 commits ahead of `origin/master`; no rebase needed. |
-| 4 | DONE.md claims match reality | **Was accurate for what it claimed** — both shas exist, both ancestry claims check out, and `48 passed` reproduced exactly at `63cff5f5`. Rewritten here for the new work (49 / 6161, plus the residual it previously did not mention). |
+| 1 | Job A `agent` has no App token / `GH_TOKEN`, uploads only the markdown; Job B `publish` `needs: agent`, fresh runner, downloads only that, mints there, runs no PR-head/base Python | **Holds.** No `EUMEMIC_BOT_PRIVATE_KEY`, `create-github-app-token` or `GH_TOKEN` anywhere in `jobs.agent` (asserted over *every* step, not just the agent step); `jobs.publish` has no `actions/checkout` and its only `run:` is inline shell. The launcher additionally refuses to start the agent phase if `GH_TOKEN` is set, and still drops the checkout's persisted `http.*.extraheader` before the agent runs. |
+| 2 | Publisher is not "base SHA Python"; works without master having `publish`; POSTs as eumemic-bot, verifies, keeps continue-on-error + summary | **Holds.** Inline `gh api --method POST` with the markdown passed as a jq-built JSON body — never through the shell, so agent-authored markdown cannot inject. Verification is stricter than the Python it replaced: `html_url` **and** the run-specific marker **and** `user.login == "eumemic-bot[bot]"` (the old path did not check the author). All four steps stay `continue-on-error`. Nothing in the trust path depends on master's script. |
+| 3 | Broken `git show $BASE_SHA:…` + same-runner `mktemp` removed; docs and tests updated | **Holds.** `assert "git show" not in text` and `assert "mktemp" not in text` cover the whole workflow file, so neither can come back. `docs/eumemic-bot-review.md` is rewritten to the two-job flow and states the boundary in the terms that make it true (filesystem, PATH, processes and `/proc` do not cross runners). |
+| 4 | Coding-agent routing, mint-after-agent, gVisor fixes, chroot/BusyBox work retained; `origin/master` an ancestor | **Holds.** All three prefixes still route and install singly, and only the routed proxy secret reaches the agent step. `4c359ef0` (chroot before the privileged loader), `f23cea3a` (`docker/sandbox-resolv.conf`) and the corrected operator `PATH` are all present and unmodified. `origin/master` (`01f76bb8`) is an ancestor of `HEAD`; no rebase needed. |
+| 5 | DONE.md claims match reality | **Accurate.** `99466c28`, `01f76bb8`, `a9aa9e53` all exist and are what it says they are; the ancestry claim checks out; `32 passed` reproduced exactly at `a8da0ea8`. It is now 33, and DONE.md predates F1/F2. |
 
-## What I did not verify
+## Notes, not findings
 
-- No Docker daemon in this workspace: the four new image-contract tests and the
-  existing ones skip (`51 skipped`). They are the only check that
-  `/etc/resolv.conf` actually lands in the layer, and CI is where that runs.
-- The runsc path itself needs `gvisor-validation.yml`, which is cron-only. The
-  DNS defect above is reasoned from the code and from Docker's documented
-  resolv.conf behaviour, not observed on a live Sentry.
-- **Recommendation for a follow-up (not done here, out of scope):** the reason
-  both F2 and F2a could ship is that the only executable check of the runsc
-  operator path runs weekly. A PR that touches `sandbox/backends/docker.py` or
-  the sandbox Dockerfile should trigger `gvisor-validation.yml`, not wait for
-  Tuesday.
+- **Job rename is safe.** `review` became `agent` + `publish`, which changes the
+  reported check names. `master`'s required contexts are
+  `detect, lint, unit, integration, e2e (docker), e2e (non-docker)` — this
+  workflow is not among them, as its "must never FAIL the PR check" stance
+  requires. Checked against the live branch-protection settings, not assumed.
+- **The agent still controls the artifact's contents,** and always did; that is
+  the design. What changed is that the bytes are now only ever *data* to the
+  token-holding process. Worth stating plainly because it is the one thing the
+  job split does **not** buy: an agent that can reach `ACTIONS_RUNTIME_TOKEN`
+  off the runner could upload the artifact itself, and would gain nothing —
+  same markdown, same JSON body, no reachable token.
+- **`run_publish_phase` in `scripts/eumemic_bot_review.py` is now dead in the
+  Action path** and labelled "legacy … for manual compatibility". TASK.md
+  explicitly permits leaving it unused, so I left it; against CLAUDE.md's
+  "don't deprecate, delete" it is a shim, and it keeps a second, differently
+  behaved implementation of the publish contract (it does not check the comment
+  author) one wiring mistake away from a token-holding step. Worth deleting in a
+  follow-up, not on a review branch.
+- **Comment growth is unchanged:** every `synchronize` posts a new comment
+  rather than updating the previous one. Pre-existing, out of scope, and
+  arguably correct given the per-SHA marker.
 
 ## Local results
 
 ```text
-$ uv run pytest -q tests/unit/test_eumemic_bot_review.py tests/unit/sandbox/test_docker_runtime_argv.py tests/unit/sandbox/test_runsc_operator_shadow.py
-49 passed
+$ uv run pytest -q tests/unit/test_eumemic_bot_review.py
+33 passed
 
 $ uv run pytest tests/unit -q -n 4
-6161 passed, 9 warnings in 51.27s
+6163 passed, 10 warnings in 92.34s
 
 $ uv run ruff check src tests && uv run ruff format --check src tests
 All checks passed! / 1091 files already formatted
@@ -193,3 +148,5 @@ All checks passed! / 1091 files already formatted
 $ uv run mypy src tests
 Success: no issues found in 1091 source files
 ```
+
+Not pushed, not merged, no PR opened.
