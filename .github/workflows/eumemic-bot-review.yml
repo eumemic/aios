@@ -85,6 +85,13 @@ jobs:
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
         run: python3 scripts/eumemic_bot_review.py agent
 
+      # ``include-hidden-files`` is load-bearing, not tidiness: since v4.4 the
+      # action skips anything whose name starts with a dot, and the launcher
+      # writes `.eumemic-bot-review.md`. Without it the upload matches nothing,
+      # `if-no-files-found: error` fails the step, and publish has nothing to
+      # download — a silent "no review" of exactly the kind this workflow keeps
+      # failing on. A single explicit file, so there is no directory sweep that
+      # could pull in an unintended dotfile.
       - name: Upload review artifact
         id: artifact
         if: steps.agent.outcome == 'success'
@@ -93,12 +100,19 @@ jobs:
         with:
           name: eumemic-bot-review
           path: .eumemic-bot-review.md
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
   publish:
     needs: agent
-    if: ${{ always() && !github.event.pull_request.draft }}
+    # ``!cancelled()`` rather than ``always()``: the job must still run when the
+    # agent job failed — that is precisely when the "did not post" summary has
+    # to be written — but a run superseded by cancel-in-progress published
+    # nothing because it was replaced, not because anything missed. Under
+    # ``always()`` every superseded push emitted the summary, which is how a
+    # real miss stops standing out.
+    if: ${{ !cancelled() && !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
