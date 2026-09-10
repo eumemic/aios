@@ -2,17 +2,15 @@
 
 On each non-draft pull request, [the workflow](../.github/workflows/eumemic-bot-review.yml) checks out the PR head and runs a coding agent directly on the GitHub Actions runner. It does not create an aios `dev-review` session.
 
-The run is split into two launcher invocations with a trusted-publisher staging
-step and the token mint between them:
+The run is split across two jobs and therefore two fresh runners:
 
 1. `eumemic_bot_review.py agent` runs the harness and writes the agent's final `### Code review` artifact to `REVIEW_ARTIFACT_PATH`. No installation token exists yet.
-2. `git show <base-sha>:scripts/eumemic_bot_review.py` stages the publisher from
-   the trusted PR base commit into a fresh `mktemp -d` directory under
-   `RUNNER_TEMP`, and exports its path as a step output.
-3. `actions/create-github-app-token` mints one, but only if both earlier steps succeeded.
-4. The staged base-branch publisher — a different process, which never launches
-   a harness — runs under `python3 -I` and POSTs that artifact, verifying GitHub
-   returned the run-specific `<!-- eumemic-bot-review:<sha> -->` marker.
+2. The agent job uploads only that markdown file as a workflow artifact.
+3. The `publish` job starts on a fresh runner, downloads the artifact, and only
+   then uses `actions/create-github-app-token` to mint an installation token.
+4. Inline workflow shell uses `gh api` to POST the markdown as JSON. It verifies
+   the returned comment URL, run-specific `<!-- eumemic-bot-review:<sha> -->`
+   marker, and `eumemic-bot[bot]` login.
 
 The default model is `gpt-5.6-sol`. Set the repository variable `EUMEMIC_BOT_REVIEW_MODEL` to select a model; routing is by prefix:
 
@@ -39,7 +37,7 @@ The launcher also accepts the conventional `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 ## How each harness reaches its proxy
 
-- **Codex** is pointed at oai-proxy with an explicit provider (`-c model_provider=…` plus a `model_providers.…` table with `wire_api="responses"`), *not* `OPENAI_BASE_URL`. Codex's built-in `openai` provider pins `api.openai.com` and its own auth and ignores that variable, so an env-var-only setup silently 401s against the real OpenAI instead of using the proxy. It runs with `--sandbox danger-full-access`: GitHub-hosted runners reject the bubblewrap loopback setup used by Codex's `read-only` sandbox, while this trusted publisher job runs on an ephemeral runner that holds no installation token while the agent runs (see below).
+- **Codex** is pointed at oai-proxy with an explicit provider (`-c model_provider=…` plus a `model_providers.…` table with `wire_api="responses"`), *not* `OPENAI_BASE_URL`. Codex's built-in `openai` provider pins `api.openai.com` and its own auth and ignores that variable, so an env-var-only setup silently 401s against the real OpenAI instead of using the proxy. It runs with `--sandbox danger-full-access`: GitHub-hosted runners reject the bubblewrap loopback setup used by Codex's `read-only` sandbox, while the separate publisher runner holds the installation token (see below).
 - **Claude Code** honours `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` directly.
 - **Pi** gets a generated `models.json` in a throwaway `PI_CODING_AGENT_DIR` declaring an `xai-proxy` provider, selected with `--provider xai-proxy`.
 
@@ -49,37 +47,21 @@ The agent reads PR-authored files (including `AGENTS.md` / `CLAUDE.md`), runs sh
 
 Stripping the child environment (`_STRIPPED_ENV`) does not achieve that by itself. `unsetenv` does not rewrite `/proc/<pid>/environ`, so an agent running as the same OS user can read every variable the launcher was started with off `/proc/$PPID/environ` no matter how the child env is scrubbed. A secret is only withheld from the agent if the *step* never receives it. Hence:
 
-- The installation token is minted **after** the agent step has completed, so `GH_TOKEN` is never in the agent phase's process tree. The agent phase additionally refuses to start if `GH_TOKEN` is set, so the ordering cannot silently regress.
+- The installation token is minted **in a separate job and fresh runner** after the agent job has completed, so `GH_TOKEN` and the App private key never exist on the agent's runner. The agent phase additionally refuses to start if `GH_TOKEN` is set.
 - The agent step is given **only the routed family's** proxy secret, selected by the `family` output of the harness-install step; the other two arrive as empty strings.
 - Credentials in files are out of reach of both: `actions/checkout` persists the workflow token as an `http.*.extraheader` in `.git/config`, so the launcher unsets that header once it has finished pinning the checkout and before it starts the agent.
-- The code that runs *with* the token is not PR-authored. `actions/checkout`
-  leaves the PR head in the workspace, so before the mint the workflow extracts
-  `scripts/eumemic_bot_review.py` from `pull_request.base.sha` and the
-  token-bearing step executes that copy. Two details make the copy worth
-  anything: it is staged into a directory `mktemp -d` creates *after* the agent
-  exited (a fixed `RUNNER_TEMP` name could have been pre-created as a symlink or
-  FIFO), and it runs under `python3 -I`, so neither a module dropped beside it
-  nor a `PYTHONPATH` line appended to `$GITHUB_ENV` can be imported into the
-  process holding `GH_TOKEN`. Staging failure gates the mint.
-
-Residual, accepted: `--sandbox danger-full-access` (needed because GitHub-hosted
-runners reject Codex's bubblewrap loopback setup) leaves an agent that chose to
-be hostile in control of the runner it shares — as the runner user, with
-passwordless `sudo` on GitHub-hosted runners. The measures above remove the
-*checkout* from the token's trust path; they do not make a hostile agent
-harmless. It can still write `$GITHUB_PATH` to shadow `python3` or `git` for a
-later step, replace those binaries outright, or scrape the runner worker for
-`EUMEMIC_BOT_PRIVATE_KEY`. Nothing placed on a filesystem it controls closes
-that; the sound fix is running the agent under a separate identity or
-container, which is deliberately not attempted here. What bounds it instead:
-the job is ephemeral, `pull_request` from forks receives no secrets (so the
-agent's input is collaborator-authored), and `permissions: contents: read`
-bounds the workflow token.
+- The token-bearing job does not check out the repository or execute Python
+  from either the PR head or its base SHA. The publisher is the inline `gh api`
+  logic pinned in the workflow revision GitHub is running. The markdown is the
+  only cross-job input and is treated strictly as data. This job boundary also
+  removes the same-runner `mktemp` replacement race: filesystem changes, PATH
+  poisoning, processes, and `/proc` access from the agent runner do not cross to
+  the publisher runner.
 
 ## Scope and failure behaviour
 
 Checkout uses `pull_request.head.sha` with full history. The launcher refuses to run if local `HEAD` does not match `HEAD_SHA`, and requires `BASE_SHA` (`pull_request.base.sha`) to be present locally — fetching it once if it is not — because the prompt hands the agent an explicit `git diff <base>...<head>` range rather than letting it guess the base branch.
 
-Reviews instruct the agent not to modify the checkout and ask for focused verification only, not repository-wide suites. Review execution has a 15-minute budget inside a 20-minute job; the launcher's own timeout fires first so its `FATAL` (not a runner kill) ends the step. Failures remain `continue-on-error`; when the harness install, the agent, trusted-publisher staging, token mint, or publish step fails, the job summary records that no comment was posted.
+Reviews instruct the agent not to modify the checkout and ask for focused verification only, not repository-wide suites. Review execution has a 15-minute budget inside a 20-minute job; the launcher's own timeout fires first so its `FATAL` (not a runner kill) ends the step. Failures remain operationally non-blocking; when artifact transfer, token mint, or publishing fails, the publish job summary records that no comment was posted.
 
 The existing `infra/agents/dev-review.json` remains available to other callers but is not part of this Action path. Jarbot still uses the old session path until it is ported separately.

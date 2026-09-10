@@ -338,7 +338,7 @@ def test_publish_phase_fails_when_github_does_not_echo_the_marker(
 def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:
     text = _WORKFLOW.read_text()
     workflow = yaml.safe_load(text)
-    job = workflow["jobs"]["review"]
+    job = workflow["jobs"]["agent"]
     checkout = job["steps"][0]["with"]
     agent = next(step for step in job["steps"] if step.get("id") == "agent")
     assert checkout["ref"] == "${{ github.event.pull_request.head.sha }}"
@@ -356,53 +356,56 @@ def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:
 
 
 def test_workflow_never_fails_the_pr_check_on_an_ops_miss() -> None:
-    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
-    steps = {step["id"]: step for step in job["steps"] if "id" in step}
-    assert all(
-        steps[name]["continue-on-error"]
-        for name in ("harness", "agent", "publisher", "app", "publish")
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    agent_steps = {step["id"]: step for step in jobs["agent"]["steps"] if "id" in step}
+    publish_steps = {step["id"]: step for step in jobs["publish"]["steps"] if "id" in step}
+    assert all(agent_steps[name]["continue-on-error"] for name in ("harness", "agent", "artifact"))
+    assert all(publish_steps[name]["continue-on-error"] for name in ("artifact", "app", "publish"))
+    summary = next(
+        step for step in jobs["publish"]["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", "")
     )
-    summary = next(step for step in job["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
     assert summary["if"].startswith("always()")
-    for name in ("harness", "agent", "publisher", "app", "publish"):
-        assert f"steps.{name}.outcome == 'failure'" in summary["if"]
+    assert "needs.agent.result != 'success'" in summary["if"]
+    for name in ("artifact", "app", "publish"):
+        assert f"steps.{name}.outcome != 'success'" in summary["if"]
 
 
 def test_workflow_mints_only_after_agent_exits_and_never_gives_agent_gh_token() -> None:
-    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
-    positions = {step.get("id"): index for index, step in enumerate(steps)}
-    assert positions["agent"] < positions["publisher"] < positions["app"] < positions["publish"]
-    agent = steps[positions["agent"]]
-    publish = steps[positions["publish"]]
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    agent_steps = jobs["agent"]["steps"]
+    publish_steps = jobs["publish"]["steps"]
+    agent = next(step for step in agent_steps if step.get("id") == "agent")
+    publish = next(step for step in publish_steps if step.get("id") == "publish")
     assert "GH_TOKEN" not in agent.get("env", {})
     assert agent["run"].endswith(" agent")
+    assert jobs["publish"]["needs"] == "agent"
     assert publish["env"]["GH_TOKEN"] == "${{ steps.app.outputs.token }}"
-    assert publish["run"].endswith(' "$TRUSTED_PUBLISHER_PATH" publish')
-    publisher = steps[positions["publisher"]]
-    assert publisher["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
-    assert publisher["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
-    assert 'git show "$BASE_SHA:scripts/eumemic_bot_review.py"' in publisher["run"]
-    assert "GH_TOKEN" not in publisher.get("env", {})
+    assert all("GH_TOKEN" not in step.get("env", {}) for step in agent_steps)
 
 
-def test_publish_executes_only_the_staged_base_publisher_and_nothing_beside_it() -> None:
-    """The staged copy is trusted; the directory it sits in is not.
+def test_publish_is_a_fresh_job_that_executes_no_repository_code() -> None:
+    text = _WORKFLOW.read_text()
+    jobs = yaml.safe_load(text)["jobs"]
+    publish = jobs["publish"]
+    steps = publish["steps"]
+    assert publish["needs"] == "agent"
+    assert not any(step.get("uses", "").startswith("actions/checkout") for step in steps)
+    run = next(step for step in steps if step.get("id") == "publish")["run"]
+    assert "gh api --method POST" in run
+    assert '(.user.login == "eumemic-bot[bot]")' in run
+    assert "git show" not in text
+    assert "mktemp" not in text
+    assert "eumemic_bot_review.py" not in run
 
-    Staging from base only moves the attack one directory over unless both
-    halves hold: the file has to land somewhere the agent could not pre-create
-    (it ran first, with an unsandboxed shell on the same runner), and CPython
-    has to be told not to import from next to it. Without ``-I``, sys.path[0]
-    is the staged file's own directory and PYTHONPATH is honoured, so a planted
-    ``json.py`` — or a PYTHONPATH line the agent appended to $GITHUB_ENV — runs
-    PR-authored code in the process that holds GH_TOKEN.
-    """
-    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
-    publisher = next(step for step in steps if step.get("id") == "publisher")
-    publish = next(step for step in steps if step.get("id") == "publish")
-    assert "mktemp -d" in publisher["run"]
-    assert 'echo "path=$dir/eumemic_bot_review.py" >> "$GITHUB_OUTPUT"' in publisher["run"]
-    assert publish["env"]["TRUSTED_PUBLISHER_PATH"] == "${{ steps.publisher.outputs.path }}"
-    assert publish["run"] == 'python3 -I "$TRUSTED_PUBLISHER_PATH" publish'
+
+def test_jobs_transfer_only_the_markdown_review_artifact() -> None:
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    upload = next(step for step in jobs["agent"]["steps"] if step.get("id") == "artifact")
+    download = next(step for step in jobs["publish"]["steps"] if step.get("id") == "artifact")
+    assert upload["uses"] == "actions/upload-artifact@v4"
+    assert upload["with"]["path"] == ".eumemic-bot-review.md"
+    assert download["uses"] == "actions/download-artifact@v4"
+    assert download["with"]["name"] == upload["with"]["name"]
 
 
 def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
@@ -413,7 +416,7 @@ def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
     reads them off the launcher regardless. The only place they can be withheld
     is here.
     """
-    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["agent"]["steps"]
     install = next(step for step in steps if step.get("id") == "harness")["run"]
     agent_env = next(step for step in steps if step.get("id") == "agent")["env"]
     for family, name in (("oai", "OAI"), ("ant", "ANT"), ("xai", "XAI")):
@@ -424,7 +427,7 @@ def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
 
 
 def test_workflow_installs_the_harness_for_every_routed_prefix() -> None:
-    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["agent"]
     install = next(step for step in job["steps"] if step.get("id") == "harness")["run"]
     assert "@openai/codex" in install
     assert "@anthropic-ai/claude-code" in install

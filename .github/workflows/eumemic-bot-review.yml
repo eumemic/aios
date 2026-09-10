@@ -1,10 +1,8 @@
 # eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
-# checkout and publish its artifact as the GitHub App. The publisher itself is
-# staged from the trusted base commit, never executed from the PR-head tree. No
-# aios session is created: the launcher runs the harness through the eumemic
-# proxies, writes an artifact, and exits before the workflow mints an App token.
-# A separate process then POSTs the `### Code review` comment and verifies it
-# landed. Must never FAIL the PR check: a harness or proxy miss is ops, not a
+# checkout and publish its artifact as the GitHub App. A separate job on a fresh
+# runner downloads only the markdown artifact, mints the token, then uses gh to
+# POST it; no PR or base-branch code runs with the token. No aios session is
+# created. Must never FAIL the PR check: a harness or proxy miss is ops, not a
 # code defect — hence continue-on-error plus the job summary below, which is
 # what keeps a missing review visible instead of silent.
 name: eumemic-bot review
@@ -24,11 +22,11 @@ env:
   REVIEW_MODEL: ${{ vars.EUMEMIC_BOT_REVIEW_MODEL || 'gpt-5.6-sol' }}
 
 jobs:
-  review:
+  agent:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # Outlives REVIEW_TIMEOUT_SECONDS plus checkout, npm install, token mint and
-    # the GitHub POST. A review that overruns has to hit the launcher's own
+    # Outlives REVIEW_TIMEOUT_SECONDS plus checkout and npm install. A review
+    # that overruns has to hit the launcher's own
     # FATAL, not this: continue-on-error then keeps the check green and still
     # writes the "did not post" job summary, whereas a runner kill takes both.
     timeout-minutes: 20
@@ -87,30 +85,37 @@ jobs:
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
         run: python3 scripts/eumemic_bot_review.py agent
 
-      # The checkout is the untrusted PR head. Stage the publisher from the
-      # event's trusted base commit before a writable installation token exists;
-      # the publish step below must never execute PR-authored Python with it.
-      #
-      # Into a directory this step creates, not a fixed name under
-      # ``runner.temp``: the agent ran before it and could otherwise have left
-      # a symlink or FIFO at the destination for the redirect to open. mktemp
-      # fails rather than reuse an existing path, so a staged file is one this
-      # step wrote.
-      - name: Stage trusted base-branch publisher
-        id: publisher
+      - name: Upload review artifact
+        id: artifact
+        if: steps.agent.outcome == 'success'
         continue-on-error: true
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          # Ignore any replacement refs a hostile agent left in the PR checkout.
-          GIT_NO_REPLACE_OBJECTS: "1"
-        run: |
-          dir="$(mktemp -d "${RUNNER_TEMP}/trusted-publisher.XXXXXXXX")"
-          git show "$BASE_SHA:scripts/eumemic_bot_review.py" > "$dir/eumemic_bot_review.py"
-          echo "path=$dir/eumemic_bot_review.py" >> "$GITHUB_OUTPUT"
+        uses: actions/upload-artifact@v4
+        with:
+          name: eumemic-bot-review
+          path: .eumemic-bot-review.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: agent
+    if: ${{ always() && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # This is a fresh runner with no PR checkout. The only agent-controlled
+      # input transferred across the job boundary is markdown, which is passed
+      # to GitHub as JSON data and never executed.
+      - name: Download review artifact
+        id: artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: eumemic-bot-review
+          path: review
 
       - name: Mint eumemic-bot installation token
         id: app
-        if: steps.harness.outcome == 'success' && steps.agent.outcome == 'success' && steps.publisher.outcome == 'success'
+        if: steps.artifact.outcome == 'success'
         continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
@@ -126,22 +131,25 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
-          TRUSTED_PUBLISHER_PATH: ${{ steps.publisher.outputs.path }}
-        # ``-I`` (isolated) is load-bearing, not tidiness: without it CPython
-        # puts the script's own directory first on sys.path and honours
-        # PYTHONPATH, so a `json.py` dropped next to the staged file — or a
-        # PYTHONPATH line appended to $GITHUB_ENV — would run PR-authored code
-        # inside the process holding GH_TOKEN, which is the whole thing staging
-        # from base exists to prevent.
-        run: python3 -I "$TRUSTED_PUBLISHER_PATH" publish
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/review/.eumemic-bot-review.md
+        run: |
+          grep -q '^### Code review$' "$REVIEW_ARTIFACT_PATH"
+          marker="<!-- eumemic-bot-review:${HEAD_SHA} -->"
+          jq -Rs --arg marker "$marker" '{body: (. + "\n\n" + $marker)}' \
+            "$REVIEW_ARTIFACT_PATH" > "$RUNNER_TEMP/review-request.json"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --input "$RUNNER_TEMP/review-request.json" > "$RUNNER_TEMP/review-response.json"
+          jq -e --arg marker "$marker" \
+            '.html_url and (.body | contains($marker)) and (.user.login == "eumemic-bot[bot]")' \
+            "$RUNNER_TEMP/review-response.json"
+          echo "posted and verified ### Code review: $(jq -r .html_url "$RUNNER_TEMP/review-response.json")"
 
       # continue-on-error above keeps an ops miss from blocking merges. But a
       # silently green run is exactly how missing `### Code review` comments went
       # unnoticed, so a run that published nothing says so where a reader sees it
       # without opening logs.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.harness.outcome == 'failure' || steps.agent.outcome == 'failure' || steps.publisher.outcome == 'failure' || steps.app.outcome == 'failure' || steps.publish.outcome == 'failure')
+        if: always() && (needs.agent.result != 'success' || steps.artifact.outcome != 'success' || steps.app.outcome != 'success' || steps.publish.outcome != 'success')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
