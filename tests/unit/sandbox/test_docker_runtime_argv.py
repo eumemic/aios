@@ -175,7 +175,10 @@ async def test_netns_sidecar_runsc_runs_only_operator_image_binaries(
     assert "LD_PRELOAD=" in envs
     assert "LD_AUDIT=" in envs
     assert "LD_LIBRARY_PATH=" in envs
-    assert f"PATH={root}/usr/sbin:{root}/usr/bin" in envs
+    # Post-chroot, ``/usr/{s,}bin`` ARE the operator image's: a command the
+    # preamble forgot degrades to an operator binary, never a tenant one. The
+    # pre-chroot ``{root}/...`` spelling would resolve to nothing at all.
+    assert "PATH=/usr/sbin:/usr/bin" in envs
     script = argv[-1]
     assert script.endswith("echo hi")
     assert "OP=" in script

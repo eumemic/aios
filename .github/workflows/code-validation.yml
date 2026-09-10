@@ -101,7 +101,8 @@ jobs:
           fi
 
           # Sandbox image inputs: exactly what ``docker/Dockerfile.sandbox``
-          # is built from — itself plus the ``bin/tool`` binary it COPYs.
+          # is built from — itself plus the two files it COPYs, the
+          # ``bin/tool`` binary and the baked ``sandbox-resolv.conf``.
           # When none changed, the ``e2e`` job can pull
           # ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
           # ``build-sandbox.yml`` after its smoke test passes) instead of
@@ -112,7 +113,7 @@ jobs:
           # baked into either image), so a browser-only PR must not force a
           # sandbox rebuild.  ``tests/unit/test_detect_filter_sync.py`` pins
           # both image filters.
-          if echo "$changed" | grep -qE '^docker/Dockerfile\.sandbox$|^bin/tool$'; then
+          if echo "$changed" | grep -qE '^docker/Dockerfile\.sandbox$|^docker/sandbox-resolv\.conf$|^bin/tool$'; then
             echo "Sandbox inputs changed — rebuilding image."
             echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
           else
