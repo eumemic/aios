@@ -358,23 +358,31 @@ def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:
 def test_workflow_never_fails_the_pr_check_on_an_ops_miss() -> None:
     job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
     steps = {step["id"]: step for step in job["steps"] if "id" in step}
-    assert all(steps[name]["continue-on-error"] for name in ("harness", "agent", "app", "publish"))
+    assert all(
+        steps[name]["continue-on-error"]
+        for name in ("harness", "agent", "publisher", "app", "publish")
+    )
     summary = next(step for step in job["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
     assert summary["if"].startswith("always()")
-    for name in ("harness", "agent", "app", "publish"):
+    for name in ("harness", "agent", "publisher", "app", "publish"):
         assert f"steps.{name}.outcome == 'failure'" in summary["if"]
 
 
 def test_workflow_mints_only_after_agent_exits_and_never_gives_agent_gh_token() -> None:
     steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
     positions = {step.get("id"): index for index, step in enumerate(steps)}
-    assert positions["agent"] < positions["app"] < positions["publish"]
+    assert positions["agent"] < positions["publisher"] < positions["app"] < positions["publish"]
     agent = steps[positions["agent"]]
     publish = steps[positions["publish"]]
     assert "GH_TOKEN" not in agent.get("env", {})
     assert agent["run"].endswith(" agent")
     assert publish["env"]["GH_TOKEN"] == "${{ steps.app.outputs.token }}"
-    assert publish["run"].endswith(" publish")
+    assert publish["run"] == 'python3 "$TRUSTED_PUBLISHER_PATH" publish'
+    publisher = steps[positions["publisher"]]
+    assert publisher["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    assert publisher["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert 'git show "$BASE_SHA:scripts/eumemic_bot_review.py"' in publisher["run"]
+    assert "GH_TOKEN" not in publisher.get("env", {})
 
 
 def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:

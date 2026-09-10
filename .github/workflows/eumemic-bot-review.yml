@@ -1,5 +1,7 @@
 # eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
-# checkout and publish its artifact as the GitHub App. No aios session is
+# checkout and publish its artifact as the GitHub App. The publisher itself is
+# staged from the trusted base commit, never executed from the PR-head tree.
+# No aios session is
 # created: the launcher runs the harness through the eumemic proxies, writes an
 # artifact, and exits before the workflow mints an App token. A separate process
 # then POSTs the `### Code review` comment and verifies it landed. Must never
@@ -86,9 +88,22 @@ jobs:
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
         run: python3 scripts/eumemic_bot_review.py agent
 
+      # The checkout is the untrusted PR head. Stage the publisher from the
+      # event's trusted base commit before a writable installation token exists;
+      # the publish step below must never execute PR-authored Python with it.
+      - name: Stage trusted base-branch publisher
+        id: publisher
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Ignore any replacement refs a hostile agent left in the PR checkout.
+          GIT_NO_REPLACE_OBJECTS: "1"
+          TRUSTED_PUBLISHER_PATH: ${{ runner.temp }}/eumemic_bot_review.py
+        run: git show "$BASE_SHA:scripts/eumemic_bot_review.py" > "$TRUSTED_PUBLISHER_PATH"
+
       - name: Mint eumemic-bot installation token
         id: app
-        if: steps.harness.outcome == 'success' && steps.agent.outcome == 'success'
+        if: steps.harness.outcome == 'success' && steps.agent.outcome == 'success' && steps.publisher.outcome == 'success'
         continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
@@ -105,14 +120,15 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
-        run: python3 scripts/eumemic_bot_review.py publish
+          TRUSTED_PUBLISHER_PATH: ${{ runner.temp }}/eumemic_bot_review.py
+        run: python3 "$TRUSTED_PUBLISHER_PATH" publish
 
       # continue-on-error above keeps an ops miss from blocking merges. But a
       # silently green run is exactly how missing `### Code review` comments went
       # unnoticed, so a run that published nothing says so where a reader sees it
       # without opening logs.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.harness.outcome == 'failure' || steps.agent.outcome == 'failure' || steps.app.outcome == 'failure' || steps.publish.outcome == 'failure')
+        if: always() && (steps.harness.outcome == 'failure' || steps.agent.outcome == 'failure' || steps.publisher.outcome == 'failure' || steps.app.outcome == 'failure' || steps.publish.outcome == 'failure')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
