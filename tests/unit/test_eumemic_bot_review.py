@@ -377,12 +377,32 @@ def test_workflow_mints_only_after_agent_exits_and_never_gives_agent_gh_token() 
     assert "GH_TOKEN" not in agent.get("env", {})
     assert agent["run"].endswith(" agent")
     assert publish["env"]["GH_TOKEN"] == "${{ steps.app.outputs.token }}"
-    assert publish["run"] == 'python3 "$TRUSTED_PUBLISHER_PATH" publish'
+    assert publish["run"].endswith(' "$TRUSTED_PUBLISHER_PATH" publish')
     publisher = steps[positions["publisher"]]
     assert publisher["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert publisher["env"]["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert 'git show "$BASE_SHA:scripts/eumemic_bot_review.py"' in publisher["run"]
     assert "GH_TOKEN" not in publisher.get("env", {})
+
+
+def test_publish_executes_only_the_staged_base_publisher_and_nothing_beside_it() -> None:
+    """The staged copy is trusted; the directory it sits in is not.
+
+    Staging from base only moves the attack one directory over unless both
+    halves hold: the file has to land somewhere the agent could not pre-create
+    (it ran first, with an unsandboxed shell on the same runner), and CPython
+    has to be told not to import from next to it. Without ``-I``, sys.path[0]
+    is the staged file's own directory and PYTHONPATH is honoured, so a planted
+    ``json.py`` — or a PYTHONPATH line the agent appended to $GITHUB_ENV — runs
+    PR-authored code in the process that holds GH_TOKEN.
+    """
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]["steps"]
+    publisher = next(step for step in steps if step.get("id") == "publisher")
+    publish = next(step for step in steps if step.get("id") == "publish")
+    assert "mktemp -d" in publisher["run"]
+    assert 'echo "path=$dir/eumemic_bot_review.py" >> "$GITHUB_OUTPUT"' in publisher["run"]
+    assert publish["env"]["TRUSTED_PUBLISHER_PATH"] == "${{ steps.publisher.outputs.path }}"
+    assert publish["run"] == 'python3 -I "$TRUSTED_PUBLISHER_PATH" publish'
 
 
 def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
