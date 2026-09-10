@@ -106,6 +106,7 @@ _RUNSC_OPERATOR_ROOT = "/run/aios-operator-root"
 _RUNSC_OPERATOR_LOADER = "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
 _RUNSC_OPERATOR_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu"
 _RUNSC_OPERATOR_SHELL = "/usr/bin/bash"
+_RUNSC_OPERATOR_CHROOT = "/usr/bin/busybox"
 
 # Shell command name -> operator-image path, for every external command the
 # egress scripts in ``aios.sandbox.setup`` invoke. Anything NOT listed here
@@ -147,7 +148,7 @@ _RUNSC_OPERATOR_EXEC_ENV: tuple[tuple[str, str], ...] = (
 )
 
 
-def _runsc_operator_preamble() -> str:
+def _runsc_operator_preamble(operator_root: str = _RUNSC_OPERATOR_ROOT) -> str:
     """Shell prologue binding every external command to the operator image.
 
     Prepended to the caller's egress script on the runsc exec path. Each name
@@ -166,7 +167,7 @@ def _runsc_operator_preamble() -> str:
     """
     paths = sorted(set(_RUNSC_OPERATOR_COMMANDS.values()))
     lines = [
-        f"OP={_RUNSC_OPERATOR_ROOT}",
+        f"OP={operator_root}",
         "IFS=$' \\t\\n'",
         f'LD="$OP{_RUNSC_OPERATOR_LOADER}"',
         f'LIB="$OP{_RUNSC_OPERATOR_LIBRARY_PATH}"',
@@ -1234,8 +1235,9 @@ class DockerBackend:
         the full capability set to this one ephemeral operator process, while
         the sandbox's own processes still hold no ``NET_ADMIN`` and cannot touch
         netfilter. Trust does NOT come from the container being trusted — it
-        comes from every executable being loaded out of the read-only operator
-        image mounted by :meth:`create`, with the environment scrubbed
+        comes from a static chroot entering the read-only operator image before
+        its dynamic loader starts, and every executable being loaded from that
+        root, with the environment scrubbed
         (:data:`_RUNSC_OPERATOR_EXEC_ENV`) and the shell in privileged mode
         (``bash -p``) so tenant-authored container env cannot inject code into
         it. See :func:`_runsc_operator_preamble`.
@@ -1259,15 +1261,21 @@ class DockerBackend:
             argv.extend(
                 [
                     target_sandbox_id,
-                    # Invoke the operator loader explicitly: the kernel resolves
-                    # a binary's baked-in interpreter against the TENANT root.
-                    f"{_RUNSC_OPERATOR_ROOT}{_RUNSC_OPERATOR_LOADER}",
+                    # The first process is static, so tenant ld.so and
+                    # /etc/ld.so.preload never run. Only after chrooting into
+                    # the read-only operator image do we start its loader.
+                    f"{_RUNSC_OPERATOR_ROOT}{_RUNSC_OPERATOR_CHROOT}",
+                    "chroot",
+                    _RUNSC_OPERATOR_ROOT,
+                    _RUNSC_OPERATOR_LOADER,
                     "--library-path",
-                    f"{_RUNSC_OPERATOR_ROOT}{_RUNSC_OPERATOR_LIBRARY_PATH}",
-                    f"{_RUNSC_OPERATOR_ROOT}{_RUNSC_OPERATOR_SHELL}",
+                    _RUNSC_OPERATOR_LIBRARY_PATH,
+                    _RUNSC_OPERATOR_SHELL,
                     "-p",
                     "-c",
-                    _runsc_operator_preamble() + script,
+                    # We are already rooted inside the operator image here, so
+                    # its absolute paths need no mount-point prefix.
+                    _runsc_operator_preamble("") + script,
                 ]
             )
         else:
