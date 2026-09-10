@@ -13,9 +13,10 @@ generated surface so a regen-only PR can never take the docs-only skip path:
   exactly their image's build inputs and nothing of the other's, so a PR
   touching one image never forces a rebuild of the other and never pulls a
   stale ``:smoked`` for its own.
-- ``.github/workflows/build-sandbox.yml`` triggers on ``bin/tool`` changes,
-  because ``docker/Dockerfile.sandbox`` COPYs that binary into the image — a
-  tool-only master push must rebuild the image, not silently skip it.
+- ``.github/workflows/build-sandbox.yml`` triggers on every file
+  ``docker/Dockerfile.sandbox`` COPYs into the image (``bin/tool``,
+  ``docker/sandbox-resolv.conf``) — a push touching only one of them must
+  rebuild the image, not silently skip it.
 """
 
 from __future__ import annotations
@@ -95,11 +96,12 @@ def test_detect_filter_matches_all_generated_artifacts() -> None:
 def test_sandbox_image_filter_matches_exactly_its_inputs() -> None:
     """``sandbox_changed`` gates pull-``:smoked``-vs-rebuild for the SANDBOX
     image; it must match exactly that image's build inputs
-    (``docker/Dockerfile.sandbox`` + the COPYed ``bin/tool``) and must NOT
+    (``docker/Dockerfile.sandbox`` + the COPYed ``bin/tool`` and
+    ``docker/sandbox-resolv.conf``) and must NOT
     match the browser image's inputs — a browser-only PR pulling the
     pre-built sandbox image is the point of the tightening."""
     pattern = _filter_regex("sandbox_changed")
-    for path in ("docker/Dockerfile.sandbox", "bin/tool"):
+    for path in ("docker/Dockerfile.sandbox", "docker/sandbox-resolv.conf", "bin/tool"):
         assert re.search(pattern, path), f"sandbox input {path!r} escapes the sandbox filter"
     for path in ("docker/Dockerfile.browser", "docker/seccomp-browser.json", ".dockerignore"):
         assert not re.search(pattern, path), (
@@ -140,7 +142,12 @@ def test_browser_image_filter_matches_exactly_its_inputs() -> None:
         "browser_changed filter's tests/ exclusion is now unsound; re-align both"
     )
     driver_tests = _ls_files("packages/aios-browser-driver/tests/")
-    non_inputs = ["docker/Dockerfile.sandbox", "bin/tool", *driver_tests]
+    non_inputs = [
+        "docker/Dockerfile.sandbox",
+        "docker/sandbox-resolv.conf",
+        "bin/tool",
+        *driver_tests,
+    ]
     over_matched = [p for p in non_inputs if re.search(pattern, p)]
     assert not over_matched, (
         f"path(s) that cannot change the browser image match the browser filter — "
@@ -156,6 +163,7 @@ def test_image_filter_inputs_all_reach_run_checks() -> None:
     run_checks = _filter_regex("run_checks")
     inputs = [
         "docker/Dockerfile.sandbox",
+        "docker/sandbox-resolv.conf",
         "bin/tool",
         "docker/Dockerfile.browser",
         "src/aios/sandbox/browser_protocol.py",
@@ -193,16 +201,23 @@ def test_build_browser_image_triggers_on_its_inputs() -> None:
         )
 
 
-def test_build_sandbox_triggers_on_bin_tool() -> None:
-    """build-sandbox.yml must list bin/tool in its on.push.paths trigger.
+@pytest.mark.parametrize("copied", ["bin/tool", "docker/sandbox-resolv.conf"])
+def test_build_sandbox_triggers_on_every_copied_file(copied: str) -> None:
+    """build-sandbox.yml must list every COPYed file in its on.push.paths.
 
-    docker/Dockerfile.sandbox COPYs bin/tool into the image at build time.
-    A master push that updates only bin/tool must therefore trigger a sandbox
-    rebuild — otherwise the published image silently ships a stale binary.
+    docker/Dockerfile.sandbox COPYs these into the image at build time. A
+    master push that updates only one of them must therefore trigger a sandbox
+    rebuild — otherwise the published image silently ships a stale copy.
     """
+    dockerfile = (_REPO_ROOT / "docker" / "Dockerfile.sandbox").read_text()
+    assert re.search(rf"(?m)^COPY {re.escape(copied)}\s", dockerfile), (
+        f"{copied!r} is no longer COPYed by docker/Dockerfile.sandbox — drop it from "
+        "this parametrization (and from the build trigger) rather than pinning a "
+        "path the image does not consume"
+    )
     workflow = (_REPO_ROOT / ".github" / "workflows" / "build-sandbox.yml").read_text()
-    assert re.search(r"(?m)^\s*-\s*bin/tool\s*$", workflow), (
-        "bin/tool is not listed in the on.push.paths trigger of build-sandbox.yml.\n"
-        "Add '- bin/tool' to the paths list so a tool-only push rebuilds the sandbox image.\n"
-        "(docker/Dockerfile.sandbox line 63: COPY bin/tool /usr/local/bin/tool)"
+    assert re.search(rf"(?m)^\s*-\s*{re.escape(copied)}\s*$", workflow), (
+        f"{copied!r} is not listed in the on.push.paths trigger of build-sandbox.yml.\n"
+        f"Add '- {copied}' to the paths list so a push touching only it rebuilds the "
+        "sandbox image."
     )

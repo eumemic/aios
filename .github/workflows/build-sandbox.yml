@@ -7,9 +7,9 @@ name: Build aios-sandbox image
 #
 # Triggers:
 # - Push to master that touches the sandbox Dockerfile (or this workflow)
-# - Push to master that touches ``bin/tool`` — the Dockerfile COPYs it in
-#   (line 63: ``COPY bin/tool /usr/local/bin/tool``) so a tool-only push
-#   must rebuild the image
+# - Push to master that touches ``bin/tool`` or ``docker/sandbox-resolv.conf``
+#   — the Dockerfile COPYs both in, so a push touching only one of them must
+#   rebuild the image
 # - Manual ``workflow_dispatch`` for force rebuilds
 #
 # Tags published: ``latest`` (always tracks master) + ``sha-<short>`` for
@@ -25,6 +25,7 @@ on:
     branches: [master]
     paths:
       - docker/Dockerfile.sandbox
+      - docker/sandbox-resolv.conf
       - .github/workflows/build-sandbox.yml
       - bin/tool
   workflow_dispatch:
