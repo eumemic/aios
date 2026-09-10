@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -368,6 +368,11 @@ def test_workflow_never_fails_the_pr_check_on_an_ops_miss() -> None:
     assert "needs.agent.result != 'success'" in summary["if"]
     for name in ("artifact", "app", "publish"):
         assert f"steps.{name}.outcome != 'success'" in summary["if"]
+    # The summary only means something if it is rare. `always()` on the job
+    # would also fire it for every run superseded by cancel-in-progress, which
+    # published nothing because it was replaced — not because anything missed.
+    # `!cancelled()` still runs the job when the agent job outright failed.
+    assert jobs["publish"]["if"].startswith("${{ !cancelled() &&")
 
 
 def test_workflow_mints_only_after_agent_exits_and_never_gives_agent_gh_token() -> None:
@@ -406,6 +411,35 @@ def test_jobs_transfer_only_the_markdown_review_artifact() -> None:
     assert upload["with"]["path"] == ".eumemic-bot-review.md"
     assert download["uses"] == "actions/download-artifact@v4"
     assert download["with"]["name"] == upload["with"]["name"]
+
+
+def test_upload_opts_into_the_hidden_artifact_filename() -> None:
+    """upload-artifact drops dot-prefixed paths unless told otherwise.
+
+    Since v4.4 the action skips "any file beginning with `.`", and the launcher
+    writes `.eumemic-bot-review.md`. The pattern then matches nothing,
+    `if-no-files-found: error` fails the upload, and the publish job has no
+    artifact to download — the review silently never posts, which is the exact
+    failure this workflow keeps producing. Asserted conditionally so a rename
+    to a non-hidden name stays valid without the input.
+    """
+    jobs = yaml.safe_load(_WORKFLOW.read_text())["jobs"]
+    agent_env = next(step for step in jobs["agent"]["steps"] if step.get("id") == "agent")["env"]
+    upload = next(step for step in jobs["agent"]["steps"] if step.get("id") == "artifact")["with"]
+    download = next(step for step in jobs["publish"]["steps"] if step.get("id") == "artifact")[
+        "with"
+    ]
+    publish_env = next(step for step in jobs["publish"]["steps"] if step.get("id") == "publish")[
+        "env"
+    ]
+    # What the launcher writes is what gets uploaded, and what the publisher
+    # reads is where the download lands. Both halves are silent when wrong.
+    assert agent_env["REVIEW_ARTIFACT_PATH"].endswith(f"/{upload['path']}")
+    assert publish_env["REVIEW_ARTIFACT_PATH"].endswith(
+        f"/{download['path']}/{PurePosixPath(upload['path']).name}"
+    )
+    if PurePosixPath(upload["path"]).name.startswith("."):
+        assert upload["include-hidden-files"] is True
 
 
 def test_workflow_gives_the_agent_step_only_the_routed_proxy_secret() -> None:
