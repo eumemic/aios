@@ -306,10 +306,11 @@ async def unscoped_session_is_archived(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> bool | None:
     """Return whether the session is archived, or ``None`` if it does not exist."""
-    return await conn.fetchval(
+    result: bool | None = await conn.fetchval(
         "SELECT (archived_at IS NOT NULL) FROM sessions WHERE id = $1",
         session_id,
     )
+    return result
 
 
 async def unscoped_deliver_pending_snapshot_reset_notice(
