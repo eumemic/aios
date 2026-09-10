@@ -611,11 +611,17 @@ class BrowserHost:
         page = entry.active_page if entry else None
         if page is None:
             return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"page": None})
-        # Same posture as _status above: a lock-free control op degrades
-        # (TargetClosedError from a closing popup, a renderer crash, or the
-        # driver dying) rather than reaching handle's relaunch path — no boot
-        # rotation for a read-only poll. The next action, under the session
-        # lock, detects genuine driver death through handle's catch.
+        # A lock-free control op degrades (returns ok + page: None) when the
+        # page raises TargetClosedError, rather than reaching handle's relaunch
+        # path — no boot rotation for a read-only poll on a closing popup or
+        # renderer crash. However, driver-process death must remain visible:
+        # unlike _status (whose _signed_in_hosts() call touches the context
+        # unconditionally), _peek has no natural context-level touch, so on
+        # the error path we probe the context explicitly. If the context is
+        # also dead, TargetClosedError propagates to handle's except arm and
+        # triggers a relaunch — the module invariant that driver death is never
+        # masked by a read-only poll. A live context means this is page-scoped
+        # (popup close, renderer crash): degrade silently.
         try:
             url = page.url
             origin, security = chrome_of(url)
@@ -623,6 +629,10 @@ class BrowserHost:
             viewport = page.viewport_size or {"width": 0, "height": 0}
             title = await page.title()
         except Exception:
+            # Probe context liveness: raises TargetClosedError → driver dead →
+            # propagates to handle → relaunch. Succeeds → page-scoped loss →
+            # degrade.
+            await self._require_context().cookies()
             return BrowserResponse(ok=True, boot=boot, epoch=epoch, data={"page": None})
         return BrowserResponse(
             ok=True,

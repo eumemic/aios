@@ -28,15 +28,22 @@ from aios_browser_driver.host import BrowserHost, PageEntry
 from playwright._impl._errors import TargetClosedError
 
 
+_MSG = "Target page, context or browser has been closed"
+
+
 def _make_host(tmp_path: Path) -> BrowserHost:
     # ``handle`` awaits ``_ready`` before dispatching; ``start()`` would set it
     # AND launch Chromium — the control-op route needs only the gate open, so
     # we never start, we just open the gate. The workspace subdirs match the
     # real fixture so no incidental path access trips.
+    # A live _FakeContext stands in for a healthy playwright context so that
+    # _peek's context-liveness probe (on the error path) correctly sees the
+    # driver as alive and degrades rather than relaunching.
     for sub in ("profile", "frames", "shots", "downloads", "input"):
         (tmp_path / sub).mkdir(parents=True, exist_ok=True)
     h = BrowserHost(workspace=tmp_path)
     h._ready.set()
+    h._context = _FakeContext()  # type: ignore[assignment]
     return h
 
 
@@ -109,12 +116,14 @@ class _FakeContext:
         return []
 
 
-class _DeadContext:
-    """A fake context whose ``new_page`` fails — stands in for driver-process
-    death on the next action's ``_ensure_entry`` recreate."""
+class _DeadDriverContext:
+    """The playwright driver subprocess is gone: every context call raises."""
+
+    async def cookies(self) -> list[Any]:
+        raise TargetClosedError(_MSG)
 
     async def new_page(self) -> Any:
-        raise TargetClosedError("the browser went away")
+        raise TargetClosedError(_MSG)
 
 
 @pytest.mark.parametrize("fail_at", ["url", "screenshot", "viewport", "title"])
@@ -180,7 +189,7 @@ async def test_driver_death_relaunches_on_the_next_action_not_on_peek(
 
     # Drop the entry so _ensure_entry recreates it; the dead context makes that
     # recreate raise TargetClosedError — driver death on the next action.
-    host._context = _DeadContext()  # type: ignore[assignment]
+    host._context = _DeadDriverContext()  # type: ignore[assignment]
     host._entries.pop("s1", None)
 
     async def _noop_launch(self: BrowserHost) -> None:
@@ -200,3 +209,33 @@ async def test_driver_death_relaunches_on_the_next_action_not_on_peek(
     with contextlib.suppress(Exception):
         await host._relaunch_task
     assert host.boot != boot_before
+
+
+async def test_driver_death_is_not_masked_by_peek_only_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # host.py's module docstring: driver-process death must reach a relaunch
+    # (which then fails to launch and resolves failed(), crashing the daemon
+    # visibly) — "a crash-looping container beats a live one that answers
+    # nothing". The product's sidebar polls peek against an idle session, so a
+    # peek-only workload must not be able to hide a dead driver indefinitely.
+    # _peek's context-liveness probe distinguishes driver death from page death:
+    # when cookies() raises TargetClosedError the error propagates to handle's
+    # except arm and triggers a relaunch, returning ok=False.
+    async def _noop_launch(self: BrowserHost) -> None:
+        return None
+
+    monkeypatch.setattr(BrowserHost, "_launch", _noop_launch)
+    host = _make_host(tmp_path)
+    host._context = _DeadDriverContext()  # type: ignore[assignment]
+    # The page object itself survives driver death in playwright: is_closed()
+    # still answers False, every read raises TargetClosedError.
+    _install(host, _DyingPage(fail_at="screenshot"))
+
+    resp = await _peek(host)
+
+    assert not resp.ok or host._relaunch_task is not None, (
+        f"peek-only polling masks a dead driver forever: ok={resp.ok} "
+        f"data={resp.data} relaunch={host._relaunch_task} — indistinguishable "
+        "from a healthy host with nothing to show"
+    )
