@@ -118,9 +118,7 @@ async def test_netns_sidecar_runsc_execs_into_the_target_sentry(
     assert "run" not in argv
     assert _runtime_values(argv) == []
     assert "aios-sandbox:test" not in argv
-    assert argv[argv.index("sandbox123") + 1 :][:1] == [
-        "/run/aios-operator-root/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
-    ]
+    assert argv[argv.index("sandbox123") + 1 :][:1] == ["/run/aios-operator-root/usr/bin/busybox"]
 
 
 async def test_netns_sidecar_runsc_runs_only_operator_image_binaries(
@@ -155,7 +153,17 @@ async def test_netns_sidecar_runsc_runs_only_operator_image_binaries(
 
     argv = calls[0]
     root = "/run/aios-operator-root"
-    assert argv[-4:-2] == [f"{root}/usr/bin/bash", "-p"], (
+    target = argv.index("sandbox123")
+    assert argv[target + 1 : target + 8] == [
+        f"{root}/usr/bin/busybox",
+        "chroot",
+        root,
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "--library-path",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/bin/bash",
+    ], "a static chroot must hide tenant /etc/ld.so.preload before the loader starts"
+    assert argv[-4:-2] == ["/usr/bin/bash", "-p"], (
         "the operator shell must come from the mount and run privileged: "
         "bash -p ignores BASH_ENV/ENV/SHELLOPTS/BASHOPTS and refuses to import "
         "BASH_FUNC_* functions from the tenant-authored container environment"
@@ -170,6 +178,7 @@ async def test_netns_sidecar_runsc_runs_only_operator_image_binaries(
     assert f"PATH={root}/usr/sbin:{root}/usr/bin" in envs
     script = argv[-1]
     assert script.endswith("echo hi")
+    assert "OP=" in script
     assert "operator_exec /usr/sbin/iptables-legacy" in script
 
 

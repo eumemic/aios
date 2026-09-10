@@ -94,6 +94,7 @@ def _docker_run(
     "binary",
     [
         "bash",
+        "busybox",  # static chroot shields privileged runsc exec from tenant ld.so.preload
         "python3",
         "python3.13",
         "rg",  # ripgrep -- required by the glob and grep tools
@@ -132,6 +133,19 @@ def test_binary_available(pulled_image: str, binary: str) -> None:
     """
     r = _docker_run(pulled_image, "which", binary)
     assert r.returncode == 0, f"{binary!r} not found: {r.stderr}"
+
+
+def test_busybox_chroot_is_from_the_static_package(pulled_image: str) -> None:
+    """The first privileged runsc executable must not need the tenant loader."""
+    r = _docker_run(
+        pulled_image,
+        "dpkg-query",
+        "--show",
+        "--showformat=${db:Status-Abbrev}",
+        "busybox-static",
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "ii ", r.stdout
 
 
 def test_tail_at_absolute_path(pulled_image: str) -> None:
