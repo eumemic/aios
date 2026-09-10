@@ -6,6 +6,10 @@ The run is split across two jobs and therefore two fresh runners:
 
 1. `eumemic_bot_review.py agent` runs the harness and writes the agent's final `### Code review` artifact to `REVIEW_ARTIFACT_PATH`. No installation token exists yet.
 2. The agent job uploads only that markdown file as a workflow artifact.
+   The artifact name is dot-prefixed, so the upload sets
+   `include-hidden-files: true` — `actions/upload-artifact` skips hidden
+   files by default and would otherwise fail the upload with
+   `if-no-files-found: error`, leaving `publish` nothing to download.
 3. The `publish` job starts on a fresh runner, downloads the artifact, and only
    then uses `actions/create-github-app-token` to mint an installation token.
 4. Inline workflow shell uses `gh api` to POST the markdown as JSON. It verifies
