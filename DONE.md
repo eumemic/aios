@@ -30,3 +30,17 @@
 - `git diff --check` — passed.
 
 No push, merge, or Track G action was performed.
+
+## Review-branch follow-up (`botpost2410frev`)
+
+- Review commit: `a3a7612e` — `include-hidden-files: true` on the upload
+  (`actions/upload-artifact` has skipped dot-prefixed paths since v4.4, so
+  `.eumemic-bot-review.md` was never uploaded and `publish` had nothing to
+  download), and `!cancelled()` in place of `always()` on the publish job so
+  runs superseded by `cancel-in-progress` stop emitting the "did not post"
+  summary.
+- Re-verified at that tip: `uv run pytest -q tests/unit/test_eumemic_bot_review.py`
+  — 33 passed; `uv run pytest tests/unit -q -n 4` — 6163 passed;
+  `uv run ruff check src tests` / `--format --check` — clean;
+  `uv run mypy src tests` — clean.
+- Findings and reasoning: `REVIEW.md`.
