@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Run a proxy-backed coding agent, then separately publish as eumemic-bot.
+"""Run a proxy-backed coding agent and write its review artifact.
 
 Used by .github/workflows/eumemic-bot-review.yml. The workflow checks out the PR
-head and installs the harness for the routed model. The workflow invokes this
-launcher in two separate phases: ``agent`` writes the review artifact without
-an installation token anywhere in its process tree, then ``publish`` receives
-the freshly minted token after the agent has exited.
-
-The publish phase POSTs the artifact as eumemic-bot and verifies GitHub stored
-the run-specific marker. A review that never reached GitHub fails loudly here
-rather than vanishing.
+head and installs the harness for the routed model. Its ``agent`` phase writes
+the review artifact without an installation token anywhere on its runner. A
+separate workflow job publishes with inline ``gh api`` logic and never checks
+out or executes this PR-head script. The legacy ``publish`` phase remains for
+manual compatibility but is not part of the Action's trust path.
 
 Env:
   REVIEW_ARTIFACT_PATH, REPO, PR_NUMBER, HEAD_SHA
