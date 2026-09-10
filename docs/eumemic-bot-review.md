@@ -6,12 +6,13 @@ The run is split into two launcher invocations with a trusted-publisher staging
 step and the token mint between them:
 
 1. `eumemic_bot_review.py agent` runs the harness and writes the agent's final `### Code review` artifact to `REVIEW_ARTIFACT_PATH`. No installation token exists yet.
-2. `git show <base-sha>:scripts/eumemic_bot_review.py` stages the publisher in
-   the runner's temporary directory from the trusted PR base commit.
+2. `git show <base-sha>:scripts/eumemic_bot_review.py` stages the publisher from
+   the trusted PR base commit into a fresh `mktemp -d` directory under
+   `RUNNER_TEMP`, and exports its path as a step output.
 3. `actions/create-github-app-token` mints one, but only if both earlier steps succeeded.
 4. The staged base-branch publisher — a different process, which never launches
-   a harness — POSTs that artifact and verifies GitHub returned the run-specific
-   `<!-- eumemic-bot-review:<sha> -->` marker.
+   a harness — runs under `python3 -I` and POSTs that artifact, verifying GitHub
+   returned the run-specific `<!-- eumemic-bot-review:<sha> -->` marker.
 
 The default model is `gpt-5.6-sol`. Set the repository variable `EUMEMIC_BOT_REVIEW_MODEL` to select a model; routing is by prefix:
 
@@ -51,14 +52,29 @@ Stripping the child environment (`_STRIPPED_ENV`) does not achieve that by itsel
 - The installation token is minted **after** the agent step has completed, so `GH_TOKEN` is never in the agent phase's process tree. The agent phase additionally refuses to start if `GH_TOKEN` is set, so the ordering cannot silently regress.
 - The agent step is given **only the routed family's** proxy secret, selected by the `family` output of the harness-install step; the other two arrive as empty strings.
 - Credentials in files are out of reach of both: `actions/checkout` persists the workflow token as an `http.*.extraheader` in `.git/config`, so the launcher unsets that header once it has finished pinning the checkout and before it starts the agent.
+- The code that runs *with* the token is not PR-authored. `actions/checkout`
+  leaves the PR head in the workspace, so before the mint the workflow extracts
+  `scripts/eumemic_bot_review.py` from `pull_request.base.sha` and the
+  token-bearing step executes that copy. Two details make the copy worth
+  anything: it is staged into a directory `mktemp -d` creates *after* the agent
+  exited (a fixed `RUNNER_TEMP` name could have been pre-created as a symlink or
+  FIFO), and it runs under `python3 -I`, so neither a module dropped beside it
+  nor a `PYTHONPATH` line appended to `$GITHUB_ENV` can be imported into the
+  process holding `GH_TOKEN`. Staging failure gates the mint.
 
 Residual, accepted: `--sandbox danger-full-access` (needed because GitHub-hosted
 runners reject Codex's bubblewrap loopback setup) leaves an agent that chose to
-be hostile able to tamper with the runner it shares. The privileged publisher
-is not part of that mutable checkout: before minting the token, the workflow
-extracts it from `pull_request.base.sha` into `runner.temp`, and the token-bearing
-step executes that path. The job is ephemeral, `pull_request` from forks
-receives no secrets, and `permissions: contents: read` bounds the workflow token.
+be hostile in control of the runner it shares — as the runner user, with
+passwordless `sudo` on GitHub-hosted runners. The measures above remove the
+*checkout* from the token's trust path; they do not make a hostile agent
+harmless. It can still write `$GITHUB_PATH` to shadow `python3` or `git` for a
+later step, replace those binaries outright, or scrape the runner worker for
+`EUMEMIC_BOT_PRIVATE_KEY`. Nothing placed on a filesystem it controls closes
+that; the sound fix is running the agent under a separate identity or
+container, which is deliberately not attempted here. What bounds it instead:
+the job is ephemeral, `pull_request` from forks receives no secrets (so the
+agent's input is collaborator-authored), and `permissions: contents: read`
+bounds the workflow token.
 
 ## Scope and failure behaviour
 
