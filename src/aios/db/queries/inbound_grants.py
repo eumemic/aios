@@ -101,6 +101,11 @@ async def approve_inbound_grant(
                        WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
                          AND status = 'revoked'
                   )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM inbound_grants
+                       WHERE connection_id = $1 AND chat_id = $2 AND account_id = $3
+                         AND status = 'active'
+                  )
                RETURNING *
            ), granted AS (
                SELECT * FROM promoted UNION ALL SELECT * FROM inserted
