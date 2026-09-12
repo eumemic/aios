@@ -900,6 +900,25 @@ _RESOLV_PREAMBLE = (
 )
 
 
+# ``iptables -S`` does not echo the apply command back: it re-prints each rule
+# through iptables' own formatter, and that formatter's spelling varies by
+# backend and version. Two normalizations bite the read-back verify below:
+#
+#   * a single host address comes back ``/32``-canonicalized on most backends
+#     (``-d 169.254.53.53`` applied → ``-d 169.254.53.53/32`` printed), and
+#   * a ``--dport`` match is printed with the protocol match module it
+#     implicitly loaded (``-p tcp --dport 53`` applied → ``-p tcp -m tcp
+#     --dport 53`` printed).
+#
+# A verify grep written against the APPLY spelling therefore never matches the
+# READ-BACK spelling — it fails on a correctly-installed ruleset, aborting the
+# provision with the verify's (static) error text. These EREs tolerate both
+# spellings of each field while still requiring every semantic field of the
+# rule, so the read-back stays fail-closed. Same convention as
+# ``registry.py``'s ``_EGRESS_RULE_RE``, which parses the same output.
+_SENTINEL_RE = CREDENTIAL_SENTINEL_IP.replace(".", r"\.") + "(/32)?"
+
+
 # Read-back assertion that the default OUTPUT policy is DROP — proves the
 # lockdown actually took effect in the shared netns, not just that the apply
 # script exited 0.
@@ -932,6 +951,13 @@ def build_lockdown_verify_script(
     provision instead of downgrading it silently. (This subsumes #984: a host
     that resolves to zero IPs is no longer even relevant, because no rule is
     keyed on a resolution any more.)
+
+    Those four greps match the spelling ``iptables -S`` *prints*, which is not
+    the spelling the apply script *wrote* (#2422) — see ``_SENTINEL_RE``. A
+    grep written against the apply spelling fails on a correctly installed
+    chokepoint, and because the callers' error text is static ("OUTPUT policy
+    is not DROP", "nat OUTPUT carries no DNAT rule") it mis-reports which
+    assertion failed.
 
     Under DNAT-only (``assert_drop=False``) the caller always passes a
     non-empty ``dnat_hosts`` — it only runs when there are credentials — so the
@@ -971,27 +997,26 @@ def build_lockdown_verify_script(
             "printf '%s\\n' \"$v6_output\" | grep -qx -- '-P OUTPUT DROP'; fi"
         )
     if dnat_hosts:
-        # Read back the THREE rules that make the name-based chokepoint real
+        # Read back the FOUR rules that make the name-based chokepoint real
         # (#2042). Asserting only "some DNAT exists" would pass on a ruleset
         # that intercepts DNS but never redirects the sentinel (or vice versa)
         # — i.e. green verify while credential egress is unprotected. Each is
         # independently fatal under ``set -e``.
+        # Each grep is an ERE (``-qE``) matching the READ-BACK spelling of the
+        # rule, not the apply spelling — see ``_SENTINEL_RE`` above for why the
+        # two differ and why matching the apply spelling fails on a correctly
+        # installed chokepoint.
         lines.append(
-            # iptables -S formats an address as either the bare host address
-            # or an explicit /32, depending on the backend/version.  Accept
-            # both spellings; requiring the rule's semantic fields still
-            # keeps this verify fail-closed.
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT' || "
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}/32.*--dport 443 -j DNAT'"
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
         )
-        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'")
-        lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'")
         lines.append(
-            f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT' || "
-            f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}/32.*-j REJECT'"
+            "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p udp( -m udp)? --dport 53 -j DNAT'"
         )
+        lines.append(
+            "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'"
+        )
+        lines.append(f"\"$IPT\" -S OUTPUT | grep -qE -- '-d {_SENTINEL_RE} -j REJECT'")
     return "\n".join(lines)
 
 
