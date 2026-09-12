@@ -1,11 +1,86 @@
 # Done
 
-Root cause: trigger fires provision the owning session through the same registry path, but the old credential interception was keyed to the IPv4 addresses returned by one `getent ahostsv4` sample. `api.github.com` rotates addresses and can return an unsampled A record on the curl re-resolution. Limited mode dropped that flow; Unrestricted mode allowed it to bypass the proxy, so the recorder stayed empty. This is not an IPv6-only failure.
+## Root cause (evidence-backed)
 
-Evidence: `src/aios/sandbox/setup.py` documented the live #2042 residual, including the exact Limited/Unrestricted behavior. The trigger runner calls `get_or_provision(..., pool=pool)`, and session provisioning builds the credential proxy from the bound vaults; the missing guarantee was name-based interception in the sandbox DNS path.
+Credential-host interception was keyed on **sampled IP addresses**, not on the
+name. `_nat_dnat_lines` in `src/aios/sandbox/setup.py` generated one
+nat-OUTPUT DNAT per address that the provisioning sidecar's single
+`getent ahostsv4` happened to return. `api.github.com` serves a ~60s-TTL
+rotating pool and answers with only a subset per query, so that set is a
+*sample*, not the pool — an address nobody sampled is the ordinary case.
 
-Fix: integrated the #2042 product implementation. Each credential proxy now owns a worker-controlled DNS resolver that answers credential names with sentinel `169.254.53.53`; sandbox DNS is redirected to it, and the sentinel is DNATed to the secret-egress proxy. This removes A-record sampling/re-resolution bypasses for both Limited and Unrestricted trigger fires and fails closed if resolver/DNAT setup or verification is incomplete. Added the compatibility `is_run_owner_id` helper required by the current tree.
+This is not a hypothesis: master's own `setup.py` carried it as a **documented
+KNOWN RESIDUAL** (eumemic/aios#2042) stating the exact two-mode behavior the
+two red legs show —
 
-Verification: `uv run pytest -q tests/unit/sandbox/test_credential_dns.py tests/unit/test_networking.py` — **130 passed**. Docker trigger e2e was not run locally.
+* **Limited** falls through to the terminal `-P OUTPUT DROP`: the flow is
+  dropped, the request fails, the recorder stays empty.
+* **Unrestricted** keeps filter policy `ACCEPT`: the flow egresses *directly*
+  to the real upstream carrying the literal `AIOS_SECRET_PLACEHOLDER_*`, never
+  reaching the proxy, so neither the swap nor the #331 fail-loud fence runs.
 
-No push performed.
+The residual was pinned behaviourally by `TestCredentialHostEgressVerdict`
+(`tests/unit/test_networking.py`), whose docstring names its own failure as
+"the acceptance signal for #2042, not a regression".
+
+**Why trigger-origin is redder than run-origin** (TASK item 4): there is no
+trigger-specific provision path — `run_trigger_step`
+(`src/aios/harness/trigger_runner.py:580`) calls the same
+`sandbox_registry.get_or_provision(...)`, so both legs share one chokepoint.
+The asymmetry is timing, not code: the run test curls promptly after provision,
+while a trigger must first become due and be dispatched, so far more of the
+~60s TTL has elapsed and a rotated, unsampled address is much likelier. The
+generic DNAT was never sound; the trigger leg just samples the race later.
+
+**Not an IPv6/`-4` failure.** The IPv6-only story stays rejected. It is also
+now moot rather than merely unproven: the resolver answers AAAA/HTTPS/SVCB for
+a credential name with **NODATA** (`credential_dns.py:answer`), so the sandbox
+cannot obtain an IPv6 address or an `ipv4hint` for a credential host at all.
+That is strictly stronger than curl `-4`, which is why no `-4` hygiene is
+carried here.
+
+## Fix
+
+Name-based interception (#2042) **rebased onto current master**, not applied
+wholesale. Each credential proxy owns a worker-controlled resolver
+(`src/aios/sandbox/credential_dns.py`) seeded from `_allowed_hosts` — the same
+frozenset that gates leaf minting, so policy has one source. It answers every
+credential name with the fixed non-routable sentinel `169.254.53.53` and never
+forwards those names; everything else is forwarded verbatim. All sandbox `:53`
+(udp+tcp) is DNATed to it with `-I` at the top of nat OUTPUT so no in-netns
+resolver — including Docker's embedded 127.0.0.11 — answers first. The netns
+then carries exactly one credential rule, keyed on our own constant. An address
+nobody sampled cannot bypass the proxy because the name can no longer resolve
+to it inside the sandbox. Both modes install a byte-identical chokepoint.
+
+Fail-closed throughout: the sentinel routes nowhere (a broken DNAT denies
+rather than leaks); non-:443 sentinel traffic is REJECTed; a resolver that
+cannot bind fails proxy start and the provision; a proxy-alias DNS miss is
+`exit 1` instead of silently skipping the nat block; the read-back verify
+asserts all four chokepoint rules; and the registry refuses a DNAT target
+without a resolver port rather than falling back to any address-keyed shape.
+The refresh sweep never ADDS a per-address credential DNAT again (that was the
+sampling machinery) — it only retires legacy ones from pre-#2042 sessions, and
+it can never retire the chokepoint itself: the sentinel is excluded from the
+delete set by construction. Without that exclusion the sweep was one aged-out
+pin away from deleting the only credential rule (in-sandbox DNS answers every
+credential name with the sentinel, so the stamp's read-back pins it, and the
+legacy delete shape is byte-identical to the provisioned rule) with nothing
+left to re-add it.
+
+Master behavior preserved across the rebase: the #2365 SSRF absolute-form
+request-target check, the #2113 ClientHello passthrough, #2309 browser
+deny-internal egress, the #2276/#2274 browser control plane, #2331 snapshot
+pool-budget LRU reclaim, #2411 snapshot-reset retirement, the #2104/#2124
+fail-closed egress inventory, and the #2193 provision report (credential hosts
+now report INSTALLED unconditionally — coverage is complete by construction).
+
+## Verification
+
+* `uv run mypy src tests` — clean, 1098 files.
+* `uv run ruff check src tests` / `ruff format --check` — clean.
+* `uv run pytest tests/unit -q` — 6173 passed.
+* Docker is unavailable in this environment, so the two trigger e2e legs were
+  not run locally; CI is the oracle. Both collect.
+
+No push, no PR.

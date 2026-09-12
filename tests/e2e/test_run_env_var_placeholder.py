@@ -66,11 +66,17 @@ _SCRIPT = f"""async def main(input):
     return await tool('bash', {{"command": 'printf "%s" "${_SECRET_NAME}"'}})
 """
 
-# Swap-firing credential host. Must be DNS-resolvable inside the sandbox so the
-# DNAT sidecar can pin a ``-d <ip>`` rule on it (the chokepoint that routes the
-# request to the proxy); the proxy's *upstream* hop is then redirected to the
-# in-process recorder (see ``redirect_secret_egress_upstream``), so no traffic
-# ever actually reaches the real host.
+# Swap-firing credential host. Interception is keyed on the NAME (#2042): the
+# worker-controlled resolver answers this name with the sentinel
+# ``169.254.53.53`` and never forwards it, and the sandbox's :53 is DNATed to
+# that resolver — so the sandbox never learns a real address for this host and
+# the sentinel's :443 is DNATed to the proxy. Real resolvability is therefore
+# NOT required of this host, and no ``-d <ip>`` rule is pinned for it; the
+# proxy's *upstream* hop is then redirected to the in-process recorder (see
+# ``redirect_secret_egress_upstream``), so no traffic ever reaches the real
+# host. A real name is kept deliberately: a host that resolves for real is the
+# honest exercise of the chokepoint, and it is exactly the rotating-pool case
+# that the old address-sampled DNAT failed on.
 _SWAP_HOST = "api.github.com"
 _SWAP_SECRET = "ghp_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # A run script that drives a real outbound HTTPS request carrying the

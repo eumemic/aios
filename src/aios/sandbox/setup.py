@@ -44,6 +44,7 @@ the registry and the orchestrator backend-agnostic.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -54,6 +55,41 @@ from aios.sandbox.egress_ca import CA_CERT_SANDBOX_PATH, get_egress_ca
 from aios.sandbox.env_keys import PATH_ENV_KEY
 
 log = get_logger("aios.sandbox.setup")
+
+
+@dataclass(frozen=True)
+class HostSkip:
+    host: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class EgressProvisionResult:
+    hosts_installed: tuple[str, ...] = ()
+    hosts_skipped: tuple[HostSkip, ...] = ()
+
+
+_EGRESS_INSTALLED_PREFIX = "AIOS_EGRESS_INSTALLED "
+_EGRESS_SKIPPED_PREFIX = "AIOS_EGRESS_SKIPPED "
+
+
+def _parse_egress_provision_result(stdout: str) -> EgressProvisionResult:
+    installed: set[str] = set()
+    skipped: dict[str, HostSkip] = {}
+    for line in stdout.splitlines():
+        if line.startswith(_EGRESS_INSTALLED_PREFIX):
+            host = line.removeprefix(_EGRESS_INSTALLED_PREFIX)
+            installed.add(host)
+            skipped.pop(host, None)
+        elif line.startswith(_EGRESS_SKIPPED_PREFIX):
+            value = line.removeprefix(_EGRESS_SKIPPED_PREFIX)
+            host, reason = value.split("\t", 1)
+            if host not in installed:
+                skipped[host] = HostSkip(host=host, reason=reason)
+    return EgressProvisionResult(
+        hosts_installed=tuple(sorted(installed)),
+        hosts_skipped=tuple(skipped[host] for host in sorted(skipped)),
+    )
 
 
 # Hardcoded absolute system PATH because docker --env doesn't expand $PATH;
@@ -400,6 +436,13 @@ def _nat_dnat_lines(
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
         f'-j DNAT --to-destination "$PROXY_IP:{proxy_port}"',
     ]
+    # #2193 provision report. Under name-based interception coverage is
+    # complete by construction — the one sentinel rule covers every credential
+    # name — so each host is INSTALLED unconditionally. There is no per-host
+    # skip left to report: the only way this block fails is the proxy-alias
+    # miss above, which now exits nonzero and aborts the provision outright.
+    for host in sorted(dnat_hosts):
+        lines.append(f"echo '{_EGRESS_INSTALLED_PREFIX}{host}'")
     if filter_accepts:
         lines.extend(
             [
@@ -427,6 +470,40 @@ def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
     for host in sorted(set(hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
     return _RESOLV_PREAMBLE + "\n".join(lines)
+
+
+def egress_unread_hosts(
+    *,
+    new_ips: dict[str, set[str]],
+    credential_hosts: set[str],
+    limited_hosts: set[str],
+) -> list[str]:
+    """In-scope hosts ABSENT from ``new_ips`` — i.e. hosts whose IPs were not read.
+
+    Absence and presence-with-an-empty-set are DIFFERENT facts: the first is
+    "could not be read", the second is "read, and this host genuinely owns
+    nothing". Only the second may drive a deletion.
+
+    Exposed (rather than inlined into :func:`build_egress_refresh_script`) so
+    the CALLER can act on the same signal the builder acts on. The builder can
+    only decline to emit deletes; it cannot stop the caller from advancing its
+    ``pinned`` bookkeeping past IPs whose rules were deliberately left
+    installed. Both layers must read the identical predicate or the two
+    disagree — which is how a refusal to delete silently becomes "the rule is
+    installed and nothing remembers it exists".
+
+    NOTE ON REACHABILITY (measured, not assumed): with today's sole in-tree
+    caller this returns ``[]`` unconditionally — ``_seed_pinned_from_installed``
+    writes a key for EVERY in-scope host and ``_merge_egress_resolutions`` only
+    ever copies/``setdefault``s that dict, never deletes a key, and carries an
+    unread host forward at its last-good pins (``if not fresh: continue``). A
+    20k-tick randomized simulation of the merge (resolve failures, empty
+    resolves, rotations, whole-sidecar failure) produced zero non-empty
+    results. **Keep-last-good upstream is the actual live protection**; this
+    predicate is defence-in-depth on a public helper whose contract would
+    otherwise turn a missing key into a delete.
+    """
+    return sorted((credential_hosts | limited_hosts) - set(new_ips))
 
 
 def build_egress_refresh_script(
@@ -473,26 +550,68 @@ def build_egress_refresh_script(
         return f'"$IPT"{table_flag} -D OUTPUT {rule} 2>/dev/null || true'
 
     proxy_ip, proxy_port = dnat_target
-    # Legacy per-address credential DNAT shape, kept ONLY as a delete target:
-    # a session provisioned before #2042 (or a snapshot resumed across the
-    # upgrade) can still carry these, and the sweep should retire them. Nothing
-    # here ever ADDS one.
+    # Legacy per-address credential DNAT shape, kept ONLY as a delete target
+    # (#2042): a session provisioned before name-based interception — or a
+    # snapshot resumed across the upgrade — can still carry these, so the sweep
+    # retires them as they age out. Byte-identical to the shape those sessions
+    # installed so -D matches exactly. Nothing here ever ADDS one.
     legacy_dnat_tail = f"-p tcp --dport 443 -j DNAT --to-destination {proxy_ip}:{proxy_port}"
+
+    def _category_ips(host_ips: dict[str, set[str]], hosts: set[str]) -> set[str]:
+        return set().union(*(host_ips.get(host, set()) for host in hosts))
+
+    # FAIL CLOSED on an incomplete inventory. An in-scope host ABSENT from
+    # ``new_ips`` is a host whose IPs could not be READ; a host present with an
+    # empty set is a host that genuinely owns NONE. Those are different facts,
+    # and conflating them (``.get(host, set())``) drops the unread host's live
+    # IPs into the ``old - new`` difference — so one transient/partial resolve
+    # would DELETE firewall rules that are still in force. Deletions are
+    # therefore refused entirely while any in-scope host is unread; adds are
+    # unaffected because an add only ever widens what is already permitted.
+    #
+    # The SAME predicate is read by the caller (``_merge_egress_resolutions``),
+    # which must also hold its ``pinned`` bookkeeping when it fires — see
+    # :func:`egress_unread_hosts`.
+    unread_hosts = egress_unread_hosts(
+        new_ips=new_ips, credential_hosts=credential_hosts, limited_hosts=limited_hosts
+    )
+
+    old_credential_ips = _category_ips(old_ips, credential_hosts)
+    new_credential_ips = _category_ips(new_ips, credential_hosts)
+    old_limited_ips = _category_ips(old_ips, limited_hosts)
+    new_limited_ips = _category_ips(new_ips, limited_hosts)
+
     lines = ["set -e", _IPTABLES_BACKEND_SELECT]
-    for host in sorted(new_ips):
-        added = new_ips[host] - old_ips.get(host, set())
-        for ip in sorted(added):
-            if host in limited_hosts:
-                lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
-    for host in sorted(old_ips):
-        removed = old_ips[host] - new_ips.get(host, set())
-        for ip in sorted(removed):
-            if host in credential_hosts:
-                lines.append(_delete(" -t nat", f"-d {ip} {legacy_dnat_tail}"))
-            if host in limited_hosts:
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
-                lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    for ip in sorted(new_limited_ips - old_limited_ips):
+        lines.append(_add("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_add("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
+    # No credential DNAT add. Per-address DNAT churn — one rule per newly
+    # sampled IP, dropped again when the address ages out — IS the sampling
+    # machinery that let an unsampled address fail open (#2042). Interception
+    # is keyed on the name now (one sentinel rule installed at provision), so
+    # re-adding these here would quietly restore an IP-keyed variant of it.
+    if unread_hosts:
+        # Surfaced, not silent: the emitted script itself records why no
+        # delete pass ran, so an operator reading the sidecar script sees the
+        # refusal rather than an unexplained absence of deletions.
+        lines.append(
+            "# egress refresh: deletions REFUSED — incomplete host inventory "
+            f"(unread: {' '.join(unread_hosts)})"
+        )
+        return "\n".join(lines)
+    # The sentinel is NEVER a delete target. Inside the sandbox every
+    # credential name resolves to it, so the stamp's read-back attributes the
+    # one provisioned sentinel DNAT to the credential hosts and it lands in
+    # ``pinned`` like any other address — and ``legacy_dnat_tail`` is
+    # byte-identical to that rule, so a single tick whose resolve came back
+    # without it would age the chokepoint out and delete it, with nothing here
+    # ever adding it back. Excluding it by construction means no sweep can
+    # retire name-based interception (#2042).
+    for ip in sorted(old_credential_ips - new_credential_ips - {CREDENTIAL_SENTINEL_IP}):
+        lines.append(_delete(" -t nat", f"-d {ip} {legacy_dnat_tail}"))
+    for ip in sorted(old_limited_ips - new_limited_ips):
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 80 -j ACCEPT"))
+        lines.append(_delete("", f"-d {ip} -p tcp --dport 443 -j ACCEPT"))
     return "\n".join(lines)
 
 
@@ -586,7 +705,12 @@ def build_iptables_script(
     for host in sorted(allowed_hosts):
         lines.append("")
         lines.append(f"# Allow {host}")
-        lines.append(f"for ip in $(resolve_ipv4 {host}); do")
+        lines.append(f"ips=$(resolve_ipv4 {host})")
+        lines.append(
+            f"if [ -z \"$ips\" ]; then printf '%s\\t%s\\n' '{_EGRESS_SKIPPED_PREFIX}{host}' 'no IPv4 address'; "
+            f"else echo '{_EGRESS_INSTALLED_PREFIX}{host}'; fi"
+        )
+        lines.append("for ip in $ips; do")
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 80 -j ACCEPT')
         lines.append('  "$IPT" -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT')
         lines.append("done")
@@ -675,6 +799,85 @@ def build_secret_egress_dnat_script(
             # filter policy stays ACCEPT so general egress remains open.
         ]
     )
+
+
+# The internal / link-local / metadata / CGNAT destination ranges a browser
+# container is denied outbound (jarbot#106). A deliberately NARROW, targeted L3
+# subset for the SSRF / credential-theft threat — NOT the full internal-IP
+# predicate in ``aios.tools.url_safety`` (which also blocks multicast, reserved,
+# and TEST-NET; those are non-SSRF and unroutable from this isolated bridge, so
+# they are intentionally omitted rather than carried as near-dead rules).
+# Link-local 169.254.0.0/16 covers the cloud-metadata endpoint (169.254.169.254);
+# the three RFC1918 blocks cover every private network INCLUDING the docker
+# bridge gateway (so "reach the host via the gateway" is already denied — no
+# separate gateway rule); 100.64.0.0/10 is CGNAT, which ``ipaddress`` does NOT
+# fold into ``is_private``, so it must be listed explicitly. 127.0.0.0/8 is
+# deliberately ABSENT: the container's embedded DNS resolver is 127.0.0.11
+# (netns-local loopback) and the browser needs it to resolve the public web.
+# This is a DESTINATION-IP filter: an internal service reachable on a PUBLIC IP
+# is not covered here and must rely on its own auth (e.g. the API bearer key).
+# IPv4-only: ``ensure_browser_network`` enforces the ``aios-browser`` network is
+# ``--ipv6=false`` (hard-failing otherwise), so a browser container gets no v6
+# address or route and v6 egress is impossible — no v6 rules needed.
+_BROWSER_DENY_INTERNAL_CIDRS = (
+    "169.254.0.0/16",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+)
+
+
+def build_browser_deny_internal_script() -> str:
+    """Build the L3 deny-internal egress script for a browser container.
+
+    The browser renders UNTRUSTED web content, so — unlike the session/run
+    lockdown, which is a default-DROP allow-list (:func:`build_iptables_script`)
+    — general (public) egress must stay OPEN. This is the default-ACCEPT sibling
+    of :func:`build_secret_egress_dnat_script`: it leaves the filter OUTPUT
+    policy at ``ACCEPT`` (NO ``-P OUTPUT DROP``) and only appends targeted
+    ``DROP`` rules for the ranges in :data:`_BROWSER_DENY_INTERNAL_CIDRS`. That
+    closes cloud-metadata theft (169.254.169.254) and internal-service SSRF at
+    L3 — on the resolved *destination IP*, so it holds against the DNS rebinding
+    the driver's userspace navigate guard (navigate-time, hostname-based) cannot
+    catch — while leaving the public web reachable.
+
+    Only the filter OUTPUT chain is flushed (for idempotent re-apply); the nat
+    table is untouched. No ``_RESOLV_PREAMBLE``: the rules are static CIDRs, so
+    nothing resolves a hostname.
+    """
+    lines = [
+        "set -e",
+        "",
+        _IPTABLES_BACKEND_SELECT,
+        "",
+        "# Clear filter OUTPUT (empty on the fresh container this always runs on),",
+        "# leave the policy at ACCEPT (general egress stays open), do NOT touch nat.",
+        '"$IPT" -F OUTPUT',
+        "",
+        "# Deny egress to the internal / link-local / metadata / CGNAT ranges; every",
+        "# other destination (the public web) stays allowed by the ACCEPT policy.",
+    ]
+    lines += [f'"$IPT" -A OUTPUT -d {cidr} -j DROP' for cidr in _BROWSER_DENY_INTERNAL_CIDRS]
+    return "\n".join(lines)
+
+
+def build_browser_deny_internal_verify_script() -> str:
+    """Read-back verify that every deny-internal DROP rule actually landed.
+
+    Proof the rules took effect in the shared netns, not merely that the apply
+    script exited 0 — the browser's analog of the ``-P OUTPUT DROP`` read-back
+    in :func:`build_lockdown_verify_script`. ``set -e`` makes each missing-rule
+    grep independently fatal. There is NO policy assertion: the deny-internal
+    path deliberately leaves the filter policy at ``ACCEPT``. ``grep -F`` so the
+    CIDR dots/slash are matched literally, not as a regexp.
+    """
+    lines = ["set -e", _IPTABLES_BACKEND_SELECT]
+    lines += [
+        f"\"$IPT\" -S OUTPUT | grep -qF -- '-d {cidr} -j DROP'"
+        for cidr in _BROWSER_DENY_INTERNAL_CIDRS
+    ]
+    return "\n".join(lines)
 
 
 # Docker's embedded DNS, served inside every user-defined-network netns (the
@@ -793,7 +996,7 @@ async def apply_network_lockdown(
     dnat_target: tuple[str, int] | None = None,
     dns_port: int | None = None,
     runtime: str | None = None,
-) -> None:
+) -> EgressProvisionResult:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
 
     Called after package installation so ``pip install`` etc. can reach
@@ -908,6 +1111,7 @@ async def apply_network_lockdown(
         extra_host_port_count=len(extra_host_ports),
         dnat_host_count=len(dnat_hosts),
     )
+    return _parse_egress_provision_result(result.stdout)
 
 
 async def apply_secret_egress_dnat(
@@ -918,8 +1122,8 @@ async def apply_secret_egress_dnat(
     dnat_target: tuple[str, int],
     dns_port: int,
     runtime: str | None = None,
-) -> None:
-    """Install the name-based credential chokepoint in an OPEN-egress sandbox.
+) -> EgressProvisionResult:
+    """Install the name-based credential chokepoint in an OPEN-egress sandbox (#1153).
 
     The Unrestricted sibling of :func:`apply_network_lockdown` (#1153): for an
     Unrestricted (or no-networking-config) environment that nonetheless carries
@@ -1015,3 +1219,83 @@ async def apply_secret_egress_dnat(
         owner_id=handle.owner_id,
         dnat_host_count=len(dnat_hosts),
     )
+    return _parse_egress_provision_result(result.stdout)
+
+
+async def apply_browser_deny_internal(backend: SandboxBackend, handle: SandboxHandle) -> None:
+    """Apply + verify a browser container's L3 deny-internal egress (jarbot#106).
+
+    Called right after the browser container is created. Runs the same
+    operator-image netns sidecar as :func:`apply_network_lockdown` — the browser
+    container itself holds no ``NET_ADMIN``, so root-in-container can neither
+    flush nor poison the rules — but applies
+    :func:`build_browser_deny_internal_script` (default-ACCEPT + targeted DROP)
+    and verifies every DROP rule landed (there is no DROP *policy* to assert).
+
+    Deliberately NOT factored into a shared helper with the session/run egress
+    orchestrators (matching the :func:`apply_secret_egress_dnat` precedent): the
+    browser path carries its own ``sandbox.browser_egress_*`` log events so an
+    operator alert never mis-attributes a browser-plane egress failure to a
+    session networking-policy violation.
+
+    Takes NO ``runtime``: a browser is provisioned only under the default
+    container runtime — the registry rejects a custom runtime before create,
+    because this netns-sidecar iptables path does not initialize under runsc's
+    netstack — so the sidecar always runs under the default runtime too.
+
+    **Fails closed**: on a sidecar infra error, a nonzero apply, or a failed
+    read-back verify, :class:`SandboxBackendError` propagates and the registry
+    tears the just-created container down rather than handing back a browser
+    whose untrusted web content can reach the cloud-metadata endpoint or
+    internal services.
+    """
+    settings = get_settings()
+    try:
+        result = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_browser_deny_internal_script(),
+            timeout_seconds=30,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.browser_egress_sidecar_error", owner_id=handle.owner_id)
+        raise
+
+    if result.exit_code != 0:
+        log.warning(
+            "sandbox.browser_egress_failed",
+            owner_id=handle.owner_id,
+            exit_code=result.exit_code,
+            stderr=result.stderr[:500],
+        )
+        raise SandboxBackendError(
+            f"browser deny-internal egress failed (exit {result.exit_code}) for "
+            f"{handle.owner_id}; refusing to run a browser whose untrusted web content "
+            f"can reach internal/metadata endpoints"
+        )
+
+    try:
+        verify = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings.docker_image,
+            script=build_browser_deny_internal_verify_script(),
+            timeout_seconds=15,
+            max_output_bytes=settings.bash_max_output_bytes,
+        )
+    except SandboxBackendError:
+        log.warning("sandbox.browser_egress_verify_error", owner_id=handle.owner_id)
+        raise
+    if verify.exit_code != 0:
+        log.warning(
+            "sandbox.browser_egress_verify_failed",
+            owner_id=handle.owner_id,
+            exit_code=verify.exit_code,
+        )
+        raise SandboxBackendError(
+            f"browser deny-internal egress verification failed for {handle.owner_id}: "
+            "an internal-range DROP rule is missing after apply; refusing to run a "
+            "browser with unverified egress isolation"
+        )
+
+    log.info("sandbox.browser_egress_applied", owner_id=handle.owner_id)

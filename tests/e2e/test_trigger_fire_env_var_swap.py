@@ -68,10 +68,14 @@ pytestmark = pytest.mark.docker
 
 _ACCOUNT_ID = "acc_test_stub"
 _SECRET_NAME = "GITHUB_TOKEN"
-# DNS-resolvable inside the sandbox so the DNAT sidecar can pin a ``-d <ip>``
-# rule on it (the chokepoint that routes the request to the proxy); the proxy's
-# *upstream* hop is then redirected to the in-process recorder, so no traffic
-# ever actually reaches the real host.
+# Interception is keyed on the NAME (#2042): the worker-controlled resolver
+# answers this name with the sentinel ``169.254.53.53`` and never forwards it,
+# the sandbox's :53 is DNATed to that resolver, and the sentinel's :443 is
+# DNATed to the proxy. So no ``-d <ip>`` rule is pinned for this host and the
+# sandbox never learns a real address for it — which is what makes this leg
+# deterministic rather than dependent on what DNS happened to return. The
+# proxy's *upstream* hop is then redirected to the in-process recorder, so no
+# traffic ever actually reaches the real host.
 _SWAP_HOST = "api.github.com"
 _SWAP_SECRET = "ghp_TRIGGER_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 
