@@ -977,12 +977,21 @@ def build_lockdown_verify_script(
         # — i.e. green verify while credential egress is unprotected. Each is
         # independently fatal under ``set -e``.
         lines.append(
+            # iptables -S formats an address as either the bare host address
+            # or an explicit /32, depending on the backend/version.  Accept
+            # both spellings; requiring the rule's semantic fields still
+            # keeps this verify fail-closed.
             '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT' || "
+            '"$IPT" -t nat -S OUTPUT | grep -q -- '
+            f"'-d {CREDENTIAL_SENTINEL_IP}/32.*--dport 443 -j DNAT'"
         )
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'")
         lines.append("\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'")
-        lines.append(f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'")
+        lines.append(
+            f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT' || "
+            f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}/32.*-j REJECT'"
+        )
     return "\n".join(lines)
 
 

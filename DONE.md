@@ -84,3 +84,14 @@ now report INSTALLED unconditionally — coverage is complete by construction).
   not run locally; CI is the oracle. Both collect.
 
 No push, no PR.
+
+## #2422 CI verify follow-up
+
+The read-back verifier now accepts both forms emitted by `iptables -S` for the
+sentinel address (`169.254.53.53` and `169.254.53.53/32`).  Some CI backends
+canonicalize the apply rule to `/32`, so the previous exact bare-address grep
+reported a missing DNAT/REJECT despite successful installation; Limited then
+surfaced this as the misleading OUTPUT-DROP verification error.  DNS (UDP/TCP),
+sentinel HTTPS DNAT, and sentinel REJECT checks remain independent and
+fail-closed.  `python3 -m compileall` and `git diff --check` pass; pytest and
+Docker are unavailable locally.
