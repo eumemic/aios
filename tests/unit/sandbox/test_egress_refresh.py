@@ -102,13 +102,50 @@ def test_refresh_script_adds_before_deleting_and_never_flushes() -> None:
         old_ips={"api.github.com": {"1.1.1.1"}},
         new_ips={"api.github.com": {"2.2.2.2"}},
         credential_hosts={"api.github.com"},
-        limited_hosts=set(),
+        limited_hosts={"api.github.com"},
         dnat_target=_PROXY,
     )
     assert "iptables-restore" not in script
     assert "-F OUTPUT" not in script
     assert script.index("2.2.2.2") < script.index("1.1.1.1")
-    assert "--dport 443 -j DNAT --to-destination 172.18.0.2:49152" in script
+
+
+def test_credential_hosts_get_no_per_address_dnat_adds() -> None:
+    """#2042: the sweep must never ADD an address-keyed credential DNAT.
+
+    Per-address DNAT churn — one rule per newly-sampled IP, dropped again when
+    the address ages out — IS the sampling machinery that made an unsampled
+    address fail open. Interception is keyed on the name now (a single sentinel
+    rule installed at provision), so re-adding these here would quietly restore
+    an IP-keyed variant of the same defect.
+    """
+    script = build_egress_refresh_script(
+        old_ips={},
+        new_ips={"api.github.com": {"2.2.2.2"}},
+        credential_hosts={"api.github.com"},
+        limited_hosts=set(),
+        dnat_target=_PROXY,
+    )
+    assert "-A OUTPUT" not in script
+    assert "DNAT" not in script
+
+
+def test_legacy_per_address_dnat_is_still_retired() -> None:
+    """Sessions provisioned before #2042 can still carry per-address credential
+    DNATs; the sweep must delete them as they age out (delete-only, never add).
+    """
+    script = build_egress_refresh_script(
+        old_ips={"api.github.com": {"1.1.1.1"}},
+        new_ips={"api.github.com": set()},
+        credential_hosts={"api.github.com"},
+        limited_hosts=set(),
+        dnat_target=_PROXY,
+    )
+    assert (
+        '"$IPT" -t nat -D OUTPUT -d 1.1.1.1 -p tcp --dport 443 '
+        f"-j DNAT --to-destination {_PROXY[0]}:{_PROXY[1]} 2>/dev/null || true" in script
+    )
+    assert " -A OUTPUT " not in script
 
 
 def test_refresh_script_keeps_rules_pinned_by_another_host() -> None:
@@ -270,13 +307,12 @@ async def test_blackhole_recovery_swaps_dnat_and_limited_accept_rules() -> None:
     )
     registry._egress_states["sess_X"] = state
 
-    # Tick 1: the new IP appears → its rules are installed immediately.
+    # Tick 1: the new IP appears → its filter rules are installed immediately.
+    # NO credential DNAT is added: since #2042 that interception is keyed on
+    # the name (one sentinel rule), not on whatever DNS just returned.
     await registry._merge_egress_resolutions("sess_X", {host: {"2.2.2.2"}})
     add_script = _sidecar_scripts(backend)[-1]
-    assert (
-        '"$IPT" -t nat -A OUTPUT -d 2.2.2.2 -p tcp --dport 443 '
-        f"-j DNAT --to-destination {_PROXY[0]}:{_PROXY[1]}" in add_script
-    )
+    assert "-A OUTPUT -d 2.2.2.2 -p tcp --dport 443 -j DNAT" not in add_script
     assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 80 -j ACCEPT' in add_script
     assert '"$IPT" -A OUTPUT -d 2.2.2.2 -p tcp --dport 443 -j ACCEPT' in add_script
     assert "-D OUTPUT" not in add_script  # stale IP survives the union window
@@ -342,10 +378,6 @@ async def test_failed_refresh_keeps_pinned_and_retry_converges_without_duplicate
     assert retry == first
     # The retried adds are -C-guarded (no duplicate accumulation) and the
     # retried delete tolerates the rule already being gone.
-    assert (
-        '"$IPT" -t nat -C OUTPUT -d 2.2.2.2 -p tcp --dport 443 '
-        f"-j DNAT --to-destination {_PROXY[0]}:{_PROXY[1]} 2>/dev/null || " in retry
-    )
     assert "-D OUTPUT -d 1.1.1.1" in retry
     assert retry.count("|| true") == retry.count("-D OUTPUT")
     assert state.pinned == {host: {"2.2.2.2": 0}}  # advanced on success
@@ -482,9 +514,14 @@ async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_hos
     registry = SandboxRegistry(backend)
     registry._handles["sess_X"] = make_handle(session_id="sess_X")
     # ``b.example`` is in scope but has NO key — the unread shape.
+    # ``a.example`` is also a LIMITED host: since #2042 a credential host gets
+    # no per-address rule of its own (interception is keyed on the name), so
+    # the limited ACCEPT is the only per-address add shape left to observe —
+    # and a credential host under Limited networking is always in
+    # ``allowed_hosts`` anyway, so this is the ordinary configuration.
     state = _state(
         credential_hosts=frozenset({"a.example", "b.example"}),
-        limited_hosts=frozenset(),
+        limited_hosts=frozenset({"a.example"}),
         pinned={"a.example": {"1.1.1.1": 0}},
     )
     registry._egress_states["sess_X"] = state
@@ -496,6 +533,8 @@ async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_hos
     script = _sidecar_scripts(backend)[-1]
     # Adds still apply (an add only widens what is already permitted)...
     assert "-A OUTPUT -d 2.2.2.2" in script
+    # ...and no credential DNAT was added for it (#2042: never per-address).
+    assert "DNAT" not in script
     # ...but nothing is deleted, and the script exits 0 all the same.
     assert "-D OUTPUT" not in script
     # The caller must NOT bank that exit-0 as a completed delta.

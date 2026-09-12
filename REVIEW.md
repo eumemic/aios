@@ -1,164 +1,178 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Uncorrelated review of implementer tip `ed19d9d4` (#2422)
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+**Verdict: FAIL** (as submitted). The implementer's stated root cause is wrong and
+the patch is a provable no-op; the real defect was adjacent and untouched. Fixed
+on this branch (`trigswap3rev`).
 
-## Verdict
+## Verdict on the implementer's claim
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+> "`build_lockdown_verify_script` exact-matched sentinel `169.254.53.53`, but some
+> CI `iptables -S` backends canonicalize to `169.254.53.53/32`, so DNAT/REJECT
+> looked missing."
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+**Not true, and the change fixes nothing.** The two greps in question were
 
-## Issues found
+```
+-d 169.254.53.53.*--dport 443 -j DNAT
+-d 169.254.53.53.*-j REJECT
+```
 
-### Fatal
+They are not exact matches — the `.*` immediately after the address already spans
+a `/32` suffix. Both spellings matched before `ed19d9d4` and both match after:
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+```
+$ printf -- '-A OUTPUT -d 169.254.53.53/32 -p tcp -m tcp --dport 443 -j DNAT --to-destination 172.17.0.5:9443\n' \
+    | grep -q -- '-d 169.254.53.53.*--dport 443 -j DNAT' && echo MATCHES
+MATCHES
+```
 
-### Serious
+The commit added a `|| <same grep with /32>` fallback to each — dead alternation
+that doubles the sidecar's `iptables` invocations and leaves a comment asserting
+a cause that isn't the cause. CI behaviour is unchanged by it.
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+## Issue 1 (blocker, root cause) — the `:53` DNAT greps can never match
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+`iptables -S` does not echo the apply command back; it re-prints each rule through
+iptables' own formatter, which renders a `--dport` match together with the
+protocol match module the parser implicitly loaded:
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+```
+applied:  "$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:5353"
+printed:  -A OUTPUT -p udp -m udp --dport 53 -j DNAT --to-destination 172.17.0.5:5353
+                           ^^^^^^  inserted by the formatter
+```
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+The two DNS assertions were written against the **apply** spelling and carry no
+`.*`:
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+```
+"$IPT" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'
+```
 
-### Minor (not fixed — flagged for the implementer's call)
+so they match **no backend, ever** — not a CI-specific canonicalization, a
+universal one. Under `set -e` that aborts the verify sidecar, so *every*
+credentialed provision failed its read-back while the apply exited 0.
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+This explains the reported symptoms exactly, including why the two legs report
+different causes for one failed grep: both callers' error strings are static.
+`apply_network_lockdown` (`setup.py:1137`) says "OUTPUT policy is not DROP after
+apply" and `apply_secret_egress_dnat` (`setup.py:1247`) says "nat OUTPUT carries
+no DNAT rule after apply" *regardless of which assertion failed*. TASK.md's two
+root errors are the verification messages, not the apply messages — which already
+pins the failure to the read-back rather than to the apply, the proxy alias,
+`dns_port`, or `credential_dns` binding.
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+Corroboration in-tree that this is the real read-back format (so this is not
+inference from memory): `registry.py:165` `_EGRESS_RULE_RE` parses the same
+`iptables -S OUTPUT` output and already carries `(?:/32)?` **and** `(?: -m tcp)?`;
+every captured fixture in `tests/unit/sandbox/test_egress_refresh*.py` is of the
+form `-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 -j ACCEPT`.
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+**Fix applied** (`src/aios/sandbox/setup.py`): all four chokepoint assertions are
+now EREs matching the read-back spelling, tolerant of both renderings of each
+varying field and still requiring every semantic field of the rule. The dead `||`
+fallbacks are removed.
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+```
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-d 169\.254\.53\.53(/32)? -p tcp( -m tcp)? --dport 443 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-p udp( -m udp)? --dport 53 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'
+"$IPT" -S OUTPUT        | grep -qE -- '-d 169\.254\.53\.53(/32)? -j REJECT'
+```
 
-## Fixes applied
+The sentinel-address dots are now escaped (they were unescaped wildcards before),
+and the `:443` DNAT grep is *tighter* than what it replaces: `.*` between the
+address and `--dport` is now the specific `-p tcp( -m tcp)?`.
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
+## Issue 2 (why this shipped) — the verify unit test never ran the nat greps
 
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
+`TestBuildLockdownVerifyScript._run_verify` built a fake `iptables` that emitted
+`-A OUTPUT -j DNAT --to-destination 1.2.3.4:443` for any `-t nat` call and a bare
+policy line for filter — and every caller passed the default `dnat_hosts=()`, so
+the four nat/filter greps were only ever asserted as **substrings of the generated
+script**, never executed against realistic output. A test that pins the grep text
+cannot catch a grep that doesn't match reality.
 
-## Do the DONE's claims hold?
+**Fix applied** (`tests/unit/test_networking.py`): `_run_verify` now renders the
+real chokepoint as `iptables -S` prints it, parametrized over both backend
+spellings (`canonical` = `/32` + `-m tcp`/`-m udp`; `bare` = neither), with an
+`omit` hook to drop individual rules and an `assert_drop` passthrough for the
+Unrestricted leg. New tests:
 
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
+- `test_full_chokepoint_passes_against_real_iptables_s_output[canonical|bare]`
+- `test_dnat_only_full_chokepoint_passes[canonical|bare]`
+- `test_each_missing_chokepoint_rule_fails_closed[dns_udp|dns_tcp|sentinel_dnat|sentinel_reject]`
+- `test_v4_drop_absent_fails_with_chokepoint_installed`
 
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
+Checked against `ed19d9d4`: the `canonical` variants **fail** (exit 1) and the
+`bare` variants pass — precisely isolating the `-m udp`/`-m tcp` rendering as the
+defect and confirming the `/32` story was never it. All pass after the fix.
 
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
+## Confirmed still fail-closed (review item 3)
 
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
+- Limited `-P OUTPUT DROP` read-back (`grep -qx`) and the guarded v6 DROP are
+  untouched; `set -e` still first line on all three script shapes.
+- `test_each_missing_chokepoint_rule_fails_closed` proves dropping **any one** of
+  the four rules (DNS udp, DNS tcp, sentinel `:443` DNAT, sentinel REJECT) still
+  fails the verify — the widened patterns did not loosen into "some DNAT exists".
+- `test_v4_drop_absent_fails_with_chokepoint_installed` proves a fully-present
+  chokepoint does not mask a missing DROP.
+- No cross-table false positive: the filter chain's `-p udp -m udp --dport 53 -j
+  ACCEPT` does not satisfy the nat `-j DNAT` grep (verified against a realistic
+  captured ruleset).
+- `assert_drop=False` still omits the DROP/v6 assertions and keeps all four nat
+  assertions; `dnat_hosts=()` still emits no nat reference at all.
 
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
+## Scope (review items 4, 5)
 
-## What I did not verify
+Minimal and #2422-only: one function's grep patterns plus its test. No IPv6/`-4`
+hygiene reopened; no `credential_dns`, `_nat_dnat_lines`, apply-script, registry,
+refresh-sweep, or e2e change. #2421 untouched. `_EGRESS_RULE_RE` and
+`build_egress_refresh_script` were audited for the same defect — they are already
+spelling-tolerant and have no read-back grep, so nothing to change there. The
+browser deny-internal verify uses `grep -qF` on true CIDR prefixes (`/16`, `/8`,
+…), which iptables prints verbatim — unaffected. Not pushed, no PR.
 
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+## Leftover risk
+
+1. **CI is still the oracle.** Docker is unavailable here, so the e2e legs are
+   unrun locally. The claim is that the read-back now matches what `iptables -S`
+   prints; if a provision still fails, the next thing to read is the verify
+   sidecar's stderr, *not* the caller's static error text — see Issue 1.
+2. **Only the first failure is visible.** Because the callers' messages are
+   static and `set -e` aborts on the first failed assertion, a future verify
+   failure will again mis-report its cause. Surfacing the failing assertion
+   (e.g. `set -x`, or the sidecar's stderr in the `SandboxBackendError`) would
+   have turned this fixround into a log read. Deliberately left out of scope —
+   it changes error plumbing on both callers.
+3. **The DNAT targets are not verified.** The read-back proves a `:53` DNAT and a
+   sentinel `:443` DNAT exist, not that they point at *this session's* resolver
+   port / proxy port. Pre-existing (the `:443` assertion never checked its target
+   either); closing it means threading `dns_port`/`proxy_port` into
+   `build_lockdown_verify_script`. Low value in-netns — nothing else installs a
+   nat OUTPUT DNAT there — but it is the remaining gap between "a chokepoint
+   landed" and "our chokepoint landed".
+4. **Pre-existing xdist flakiness**, unrelated to this change:
+   `tests/unit` under `-n 4` intermittently fails/errors in
+   `test_jobs_app_layering.py` and `tests/unit/sandbox/test_secret_egress_proxy.py`.
+   Reproduced on the unmodified tip `ed19d9d4` (6172 passed + 1 unrelated error);
+   all pass serially.
+
+## Verification run
+
+- `uv run mypy src tests` → Success, 1098 files.
+- `uv run ruff check src tests` → All checks passed; `ruff format --check` clean.
+- `uv run pytest tests/unit -q -n 4` → 6181 passed (+9 new), 1 pre-existing flake.
+- `uv run pytest tests/unit/test_networking.py -q` → 138 passed.
+- New tests run against `ed19d9d4`'s `setup.py` → 3 failed (reproduces CI).
+
+## Final HEAD
+
+Branch `trigswap3rev`, two commits on top of `ed19d9d4`:
+
+- `5cfbe61b` — `fix(sandbox): match the read-back spelling in lockdown/DNAT verify (#2422)`
+  (the product + test change; this is the commit CI should be read against)
+- the commit carrying this REVIEW.md, which is the branch tip
+
+REVIEW_DONE
