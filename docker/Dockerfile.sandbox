@@ -110,10 +110,12 @@ ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
 #     resolves, and the Limited allow-list comes out empty.
 #
 # COPY, not RUN: Docker mounts /etc/resolv.conf over the build sandbox too, so
-# a RUN redirect writes to the mount and never reaches the layer.
+# a RUN redirect writes to the mount and never reaches the layer. ``--link``
+# is important here: BuildKit otherwise treats this daemon-managed path as a
+# build-time mount and can omit the copied bytes from the resulting layer.
 #
 # MUST come after every RUN above -- apt needs the daemon's resolver, not this.
-COPY docker/sandbox-resolv.conf /etc/resolv.conf
+COPY --link docker/sandbox-resolv.conf /etc/resolv.conf
 
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The
