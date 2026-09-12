@@ -1,26 +1,34 @@
-# Follow-up: make trigger-swap e2e actually green (beyond #2421 `-4`)
+# Fixround: #2422 name-based interception breaks lockdown/DNAT verify on CI
 
-PR #2421 (https://github.com/eumemic/aios/pull/2421, tip `81563e78`) only adds curl `-4` hygiene. Uncorrelated review **rejected** the IPv6-as-MASTER-RED root cause and documented the #2042 A-record subset / re-resolve miss. `-4` alone is expected **not** to clear MASTER RED.
+PR: https://github.com/eumemic/aios/pull/2422
+Branch: `trigswap2` tip `45a054aa`
+Failing run: https://github.com/eumemic/aios/actions/runs/34699377660 (e2e docker)
 
-## Your job
-Land the durable fix so both legs go green on Code Validation:
-- `tests/e2e/test_trigger_fire_env_var_swap.py::test_trigger_swap_fires_under_unrestricted_dnat_only`
-- `tests/e2e/test_trigger_fire_env_var_swap.py::test_trigger_swap_fires_under_limited`
+## Root errors (empty recorder / KeyError stdout are symptoms of provision abort)
+1. Limited: `SandboxBackendError: network lockdown verification failed … OUTPUT policy is not DROP after apply`
+2. Unrestricted: `SandboxBackendError: secret-egress DNAT verification failed … nat OUTPUT carries no DNAT rule after apply`
 
-Base: **origin/master** (fetch tip). Optionally cherry-pick / rebase onto `#2421`’s `-4` if still useful as hygiene — or supersede `#2421` with one PR that actually fixes RED.
+FAILED tests include:
+- test_trigger_swap_fires_under_limited / unrestricted_dnat_only
+- test_run_swap_fires_under_limited / unrestricted_dnat_only
+- test_run_bash_env_var_placeholder_round_trip
+- test_placeholder_visible_in_container_secret_absent
 
-## Investigate carefully (do not rubber-stamp either story)
-1. `#2042` already shipped **name-based** credential-host interception (`credential_dns` + sentinel `169.254.53.53`). If that path is live for Unrestricted+Limited session provision used by `run_trigger_step`, A-subset re-resolve should already be impossible for `api.github.com`. Prove whether credential DNS / name DNAT is actually installed on the trigger-fire sandbox path.
-2. If name-based path is broken/missing for trigger fires (or Unrestricted skips DNS redirect), **fix the product path** — that is the durable fix. Prefer that over weakening the e2e with `--resolve` (the test deliberately avoids `--resolve` to exercise the real chokepoint; see comments in the file and `test_run_env_var_placeholder.py`).
-3. If the product path is correct and the only gap is IPv6 AAAA bypass of IPv4-only DNAT, keep/strengthen `-4` (or equivalent) and prove it; update comments to match evidence.
-4. Compare: did `test_run_env_var_placeholder.py` Unrestricted/Limited legs still pass on the failing Code Validation run? If run-origin passes and trigger-origin fails, the bug is in the trigger fire / provision seam, not generic DNAT.
+Leave #2421 closed. Do not reopen IPv6/`-4` as the master clear.
+
+## Goal
+Make name-based credential interception (#2042 rebase) actually apply + verify on CI so Limited DROP and Unrestricted/Limited DNAT chokepoint rules land. Both trigger-swap legs AND the run-origin placeholder/swap e2e must go green.
+
+## Investigate
+- Why does `apply_network_lockdown` / `apply_secret_egress_dnat` leave filter OUTPUT not DROP or nat without DNAT? (apply script abort early — proxy alias resolve miss, `dns_port` missing, iptables backend, `-I` DNS DNAT vs Docker 127.0.0.11, sentinel `169.254.53.53` conflicting with link-local/metadata rules, verify grep mismatch vs `iptables -S` output, credential_dns not bound so provision refuses incorrectly, etc.)
+- Prefer fixing the product apply/verify path so the chokepoint is real; do not weaken fail-closed verification.
+- Rebase onto latest origin/master if behind; push is Shepherd’s job.
 
 ## Constraints
 - No Track G / Coolify / merge / push
-- PR-only; Shepherd pushes
-- Do not weaken secret-egress / MitM / DNAT security
-- Docker may be absent — unit/integration you can run; CI is oracle for docker e2e
-- DONE.md with evidence-backed root cause (not the discarded false IPv6-only story unless you re-prove it)
+- PR-only; continue on `trigswap2` (update #2422)
+- Docker may be absent locally — unit tests for script generation + any integration you can run; CI is oracle for docker e2e
+- DONE.md with evidence-backed root cause of the verify failure
 
 ## Success
-Open PR (or update) whose tip is expected to make those two e2e tests green.
+New tip on #2422 expected to clear the lockdown/DNAT verify failures and the listed e2e tests.
