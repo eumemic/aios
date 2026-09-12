@@ -55,7 +55,27 @@ class ResolveResult(NamedTuple):
 async def _session_is_archived(
     pool: asyncpg.Pool[Any], session_id: str, *, account_id: str
 ) -> bool:
-    """Return ``True`` iff ``session_id`` exists for ``account_id`` and is archived.
+    """Return ``True`` iff ``session_id`` is not routable for ``account_id``.
+
+    A routable target is a live (non-archived) session row owned by this
+    account. ``True`` therefore covers two "not routable" cases that share
+    the same downstream consequence (``append_event``'s account-scoped seq
+    allocation matches zero rows → ``NotFoundError`` → ``SESSION_MISSING``):
+
+    * the session row does not exist for this ``account_id`` — the
+      cross-account case ``reparent_connection`` (PR #696) produces when
+      it rewrites child rows' ``account_id`` to the destination while
+      their ``session_id`` keeps pointing at a source-account session
+      (sessions are account-scoped and are not reparented); and
+    * the session exists and has been archived (the case PR #541
+      hardened against).
+
+    Treating the 0-row (cross-account) case as "not live" — same as
+    archived — surfaces the ``DETACHED`` terminal signal the reparent
+    docstring already says is the expected outcome when a child points at
+    the source account, instead of a generic ``SESSION_MISSING`` the
+    docstring's risk model does not name. This is the read-time tenancy
+    re-check the carry-over tests credit the resolver with performing.
 
     Shared by the tier-1 ledger and tier-3 single_session checks so both
     surfaces refuse to route inbounds to a session ``append_event``
@@ -63,12 +83,12 @@ async def _session_is_archived(
     ``DETACHED`` → 422 cascade rationale.
     """
     async with pool.acquire() as conn:
-        archived_at = await conn.fetchval(
+        row = await conn.fetchrow(
             "SELECT archived_at FROM sessions WHERE id = $1 AND account_id = $2",
             session_id,
             account_id,
         )
-    return archived_at is not None
+    return row is None or row["archived_at"] is not None
 
 
 async def resolve_target_session(
