@@ -82,7 +82,12 @@ _SWAP_SECRET = "ghp_TRIGGER_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # chokepoint. The body is written to /tmp (never stdout) so the recorder's
 # echo, not the swapped header, is all that could surface in the audit trail.
 _SWAP_COMMAND = (
-    f"curl -sS --max-time 25 -o /tmp/body "
+    # The sandbox's credential-host DNAT is intentionally IPv4-only.  Without
+    # ``-4`` curl may prefer an AAAA answer for api.github.com and connect over
+    # IPv6, bypassing the DNAT chokepoint entirely (the trigger then records a
+    # successful command with no request at our redirected upstream).  Pin the
+    # client family here; IPv6 policy is covered by the networking tests.
+    f"curl -4 -sS --max-time 25 -o /tmp/body "
     f'-H "Authorization: Bearer ${_SECRET_NAME}" '
     f"https://{_SWAP_HOST}/trigger-swap-probe"
 )
