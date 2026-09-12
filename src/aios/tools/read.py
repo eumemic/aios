@@ -226,6 +226,18 @@ async def _read_image(
 ) -> ToolResult:
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
+    # Resolve a ``workflow:<id>`` binding to its declared ``output_model``
+    # before the vision gate — symmetric with the loop's capability gates
+    # (``_resolve_capability_model`` in loop.py). ``get_session_model`` returns
+    # the raw binding string verbatim, and ``supports_vision("workflow:…")``
+    # calls ``litellm.get_model_info`` which raises → ``None`` → the
+    # ``is False`` gate falls through and inlines the image, wedging any
+    # session whose inner model is text-only (the inlined ``image_url`` part
+    # is frozen in the event log and 400s on every replay wake). Function-local
+    # import: a top-level import would cycle (read → loop → tools → read).
+    from aios.harness.loop import _resolve_capability_model
+
+    model = await _resolve_capability_model(pool, model, account_id=account_id)
 
     host_path = resolve_to_host_path(session_id, path, workspace_path=handle.workspace_path)
     if host_path is not None:

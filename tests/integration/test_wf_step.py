@@ -5142,6 +5142,119 @@ async def test_bash_crash_path_at_least_once(
     assert run is not None and run.status == "completed"
 
 
+# (c-double) ────────────────────────────────────────────────────────────────────
+async def test_bash_legacy_row_pinned_on_redispatch_aligns_sweep_horizon_with_exec(
+    wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],
+) -> None:
+    """A legacy (pre-pin) call_started row whose worker crashed without a signal is
+    PINNED on the cold re-dispatch so the needs-step sweep's pinned branch — whose
+    horizon tracks the run environment ceiling the re-drive exec occupies — takes
+    over. Without the pin the sweep's legacy branch derives its horizon from the
+    worker-global default (120 + 180 = 300s) while the re-drive exec runs at the
+    environment ceiling (1800s), so the sweep re-wakes a still-running re-driven
+    exec every tick past 300s (the cross-worker duplicate storm); the pin switches
+    the sweep to the 1800 + 180 = 1980s horizon so the in-flight re-drive is left
+    alone. The exec and the pin agree on the env ceiling, so the two halves of
+    c85193b2 (env-aware exec + global sweep) no longer diverge.
+    """
+    pool, backend = wf_sandbox_runtime
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_wf' AND account_id = 'acc_wf'"
+        )
+    block = asyncio.Event()  # hold the exec in-flight so the sweep's row is stale-but-live
+    entered = asyncio.Event()
+    exec_calls: list[dict[str, Any]] = []  # each exec's kwargs (timeout_seconds)
+
+    async def _blocked(_handle: Any, _command: str, **kwargs: Any) -> CommandResult:
+        exec_calls.append(kwargs)
+        entered.set()
+        await block.wait()
+        return CommandResult(exit_code=0, stdout="", stderr="", timed_out=False, truncated=False)
+
+    # No ``timeout_seconds`` request → resolved == run environment ceiling (1800).
+    script = "async def main(input):\n    return await tool('bash', {'command': 'sleep long'})\n"
+    run_id = await _make_tool_run(
+        pool, script, tools=[ToolSpec(type="bash")], name="wt-bash-legacy-pin"
+    )
+    with mock.patch.object(backend, "exec", new=_blocked):
+        # Wake 1: drive to the bash frontier and park; launch the task (blocks in exec).
+        await run_workflow_step(run_id)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert len(exec_calls) == 1
+        # Simulate a hard worker crash: cancel the in-flight task + drop the registry
+        # map, leaving the call_started row with NO signal (the crash signature).
+        for task in list(run_tools._INFLIGHT.values()):
+            task.cancel()
+        await asyncio.gather(*list(run_tools._INFLIGHT.values()), return_exceptions=True)
+        run_tools._INFLIGHT.clear()
+        # Strip the pin to simulate a pre-c85193b2 (legacy) call_started row: the new
+        # code pins at open, so remove resolved_timeout_seconds to model the row an
+        # old worker journaled before the rolling deploy.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wf_run_events SET payload = payload - 'resolved_timeout_seconds' "
+                "WHERE run_id = $1 AND type = 'call_started'",
+                run_id,
+            )
+        started = await _call_starteds(pool, run_id)
+        assert len(started) == 1
+        assert "resolved_timeout_seconds" not in started[0].payload
+        async with pool.acquire() as conn:
+            assert await wf_queries.read_run_signal(conn, run_id, started[0].call_key) is None
+
+        # Wake 2 (the sweep re-wake): cold re-dispatch — the harvest resolves the env
+        # ceiling (1800), PINS it into the legacy row, and re-launches the exec at
+        # that ceiling. The exec blocks again (held in-flight so the row stays
+        # signal-less — the live re-drive the sweep must not re-drive).
+        entered.clear()
+        await run_workflow_step(run_id)
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert len(exec_calls) == 2  # the original + exactly one re-drive (no storm)
+
+    # The legacy row is now PINNED to the run environment ceiling and the re-drive
+    # exec ran at that same ceiling — the two halves agree (the fix).
+    started = await _call_starteds(pool, run_id)
+    assert len(started) == 1  # no double-open
+    assert started[0].payload["resolved_timeout_seconds"] == 1800
+    assert exec_calls[-1]["timeout_seconds"] == 1800
+
+    # COUPLED horizon-vs-exec: with the pin, the sweep's pinned branch derives the
+    # horizon from the env ceiling (1800 + 180 = 1980s). Age the in-flight row into
+    # the OLD legacy-storm window — past the 300s global horizon but well within the
+    # 1980s pinned horizon — and the sweep must NOT re-wake: the still-running
+    # re-driven exec is left alone. Before the fix the legacy branch matched here,
+    # re-driving the still-running exec every tick (the duplicate storm).
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 600) "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+    assert run_id not in await _needing(pool)
+
+    # Past the pinned horizon the sweep MUST re-wake — a re-drive that genuinely
+    # crashed (no signal after the env ceiling + slack) is recoverable.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 2000) "
+            "WHERE run_id = $1 AND type = 'call_started'",
+            run_id,
+        )
+    assert run_id in await _needing(pool)
+
+    # Release the in-flight re-drive so the run completes cleanly (no leaked task).
+    block.set()
+    await _drain_sandbox_tasks()
+    backend.next_result = CommandResult(
+        exit_code=0, stdout="ok", stderr="", timed_out=False, truncated=False
+    )
+    await run_workflow_step(run_id)
+    run = await _get_run(pool, run_id)
+    assert run is not None and run.status == "completed"
+
+
 # (c-prime) ─────────────────────────────────────────────────────────────────────
 async def test_bash_completed_call_not_reexeced_on_nonterminal_redrive(
     wf_sandbox_runtime: tuple[asyncpg.Pool[Any], FakeBackend],

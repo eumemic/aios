@@ -418,7 +418,11 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
 
     Reuses the ``read`` tool's image ladder verbatim: vision gate → format
     gate → downsample → data-URI part. A model explicitly known not to support
-    vision gets text; unknown capability is optimistically allowed.
+    vision gets text; unknown capability is optimistically allowed. The vision
+    gate keys on the RESOLVED model — a ``workflow:<id>`` binding is resolved
+    to its declared ``output_model`` first (symmetric with the loop's
+    ``_resolve_capability_model``), so a bound text-only inner model degrades
+    to a text marker instead of inlining an ``image_url`` part it would 400 on.
     """
     from aios.sandbox.volumes import browser_plane_dir, read_plane_file
 
@@ -439,6 +443,18 @@ async def browser_screenshot_handler(session_id: str, arguments: dict[str, Any])
 
     pool = runtime.require_pool()
     model = await sessions_service.get_session_model(pool, session_id, account_id=account_id)
+    # Resolve a ``workflow:<id>`` binding to its declared ``output_model``
+    # before the vision gate — symmetric with the loop's capability gates
+    # (``_resolve_capability_model`` in loop.py). ``get_session_model`` returns
+    # the raw binding string verbatim, and ``supports_vision("workflow:…")``
+    # calls ``litellm.get_model_info`` which raises → ``None`` → the
+    # ``is False`` gate falls through and inlines the screenshot, wedging any
+    # session whose inner model is text-only (the inlined ``image_url`` part
+    # is frozen in the event log and 400s on every replay wake). Function-local
+    # import: a top-level import would cycle (browser → loop → tools → browser).
+    from aios.harness.loop import _resolve_capability_model
+
+    model = await _resolve_capability_model(pool, model, account_id=account_id)
     metadata = _browser_metadata("browser_screenshot", response)
     header = f"Screenshot: {os.path.basename(response.shot_path)}"
 

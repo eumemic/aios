@@ -20,6 +20,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import vision
+from aios.harness.model_binding import effective_capability_model
 from aios.sandbox.browser import BrowserUnavailableError
 from aios.sandbox.browser_protocol import BrowserError, BrowserResponse
 from aios.sandbox.spec import BrowserImageUnconfiguredError
@@ -354,6 +355,144 @@ class TestScreenshot:
         result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
         assert isinstance(result.content, str)
         assert "does not support image input" in result.content
+
+    async def test_workflow_binding_with_text_only_inner_model_degrades_to_text(
+        self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``workflow:<id>`` binding resolved to a text-only ``output_model``
+        degrades the screenshot to a text marker — NOT an inlined ``image_url``
+        part the inner model would 400 on every replay wake.
+
+        Pre-fix the handler keyed the vision gate on the raw ``workflow:`` string
+        (``get_session_model`` returns it verbatim); ``supports_vision`` →
+        ``litellm.get_model_info`` raises → ``None`` → the ``is False`` gate
+        fell through and inlined the image, wedging every workflow-bound session
+        whose inner model was text-only. The handler must resolve the binding
+        to its declared ``output_model`` first (symmetric with the loop's
+        ``_resolve_capability_model``), so a catalogued text-only inner model
+        correctly degrades.
+        """
+        monkeypatch.setattr(
+            sessions_service,
+            "get_session_model",
+            AsyncMock(return_value="workflow:wf_text_only"),
+        )
+
+        resolved: dict[str, Any] = {}
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            resolved["called_with"] = model
+            return effective_capability_model(model, output_model="model/text")
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        (plane / "shot.png").write_bytes(valid_png_bytes())
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+
+        result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+        # The resolver was handed the raw binding string (not a pre-resolved one).
+        assert resolved["called_with"] == "workflow:wf_text_only"
+        assert isinstance(result.content, str), (
+            f"text-only workflow binding must degrade to a marker; got {result.content!r}"
+        )
+        assert "does not support image input" in result.content
+        assert "workflow:" not in result.content  # the resolved model name is shown
+
+    async def test_workflow_binding_with_vision_inner_model_inlines(
+        self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``workflow:<id>`` binding resolved to a vision-capable
+        ``output_model`` inlines the screenshot — the resolution must not
+        over-degrade a vision-capable bound model."""
+        monkeypatch.setattr(
+            sessions_service,
+            "get_session_model",
+            AsyncMock(return_value="workflow:wf_vision"),
+        )
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            return effective_capability_model(model, output_model="model/vision")
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        payload = valid_png_bytes()
+        (plane / "shot.png").write_bytes(payload)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+
+        result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+        assert isinstance(result.content, list)
+        assert result.content[1] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
+        }
+
+    async def test_workflow_binding_with_unresolved_output_model_inlines_optimistically(
+        self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``workflow:<id>`` binding whose lookup yields no ``output_model``
+        falls back to the raw ``workflow:`` string → ``supports_vision`` returns
+        ``None`` → the optimistic-inline policy inlines (unknown is not False).
+
+        This is the safe no-worse-than-pre-#1637 posture: a binding we cannot
+        resolve is left as the opaque string, which ``supports_vision`` reports
+        as unknown, and the post-551ce0fd ``is False`` gate inlines. The
+        build-time safety net leaves ``None`` untouched too, so a genuinely
+        vision-capable but unresolved bound model is not silently stripped.
+        """
+        monkeypatch.setattr(
+            sessions_service,
+            "get_session_model",
+            AsyncMock(return_value="workflow:wf_unresolved"),
+        )
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            return effective_capability_model(model, output_model=None)
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        payload = valid_png_bytes()
+        (plane / "shot.png").write_bytes(payload)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+
+        result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+        assert isinstance(result.content, list), (
+            f"unresolved workflow binding should optimistically inline; got {result.content!r}"
+        )
+        assert result.content[1]["type"] == "image_url"
+
+    async def test_raw_model_skips_workflow_resolution_unchanged(
+        self, seams: dict[str, Any], plane: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw provider model passes through ``_resolve_capability_model``
+        verbatim (no DB read) — the resolver is a no-op for non-``workflow:``
+        models, so the common case is unaffected and the gate keys on the
+        agent's own model as before."""
+        monkeypatch.setattr(
+            sessions_service,
+            "get_session_model",
+            AsyncMock(return_value="model/vision"),
+        )
+
+        resolved: dict[str, Any] = {}
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            resolved["called_with"] = model
+            return model  # passthrough for a raw provider model
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        payload = valid_png_bytes()
+        (plane / "shot.png").write_bytes(payload)
+        seams["driver"].return_value = _response(shot_path="shots/shot.png")
+
+        result = await browser_mod.browser_screenshot_handler(_SESSION_ID, {})
+
+        assert resolved["called_with"] == "model/vision"
+        assert isinstance(result.content, list)
+        assert result.content[1]["type"] == "image_url"
 
     async def test_hostile_shot_path_is_refused(self, seams: dict[str, Any], plane: Path) -> None:
         seams["driver"].return_value = _response(shot_path="../../../etc/passwd")

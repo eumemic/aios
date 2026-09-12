@@ -31,6 +31,7 @@ from aios.harness.context import (
 from aios.harness.reminders import reminder_event_data
 from aios.harness.window import WindowOmission
 from aios.models.events import Event, ReminderSection
+from tests.helpers.images import valid_png_bytes
 from tests.support import assert_message_prefix
 
 
@@ -2955,6 +2956,232 @@ class TestEventDataImmutability:
         assert out_url.startswith("data:image/jpeg;base64,"), (
             f"renderer should have corrected png → jpeg in the output, got {out_url[:50]}"
         )
+
+
+class TestVisionCapabilityReplayPass:
+    """``_strip_image_parts_for_non_vision_model`` — the build-time safety net
+    that self-heals sessions wedged by a persisted ``image_url`` tool result a
+    text-only inner model 400s on every replay. Sibling to the oversize clamp
+    pass (``_clamp_oversize_image_data_urls``); same replay-permanence shape
+    (an immutable tool_result part, replayed verbatim every wake), same
+    "replace part dicts with fresh copies, never mutate in place" contract
+    (the message list aliases the immutable ``Event.data``).
+
+    The tool-handler trigger fix (resolving ``workflow:<id>`` before the
+    vision gate in ``browser_screenshot_handler`` / ``_read_image``) prevents
+    NEW wedges; this pass heals the BACKLOG the same way the clamp pass heals
+    the pre-#1616 oversize backlog.
+    """
+
+    def _image_tool_result_event(self, seq: int, call_id: str, png: bytes, label: str) -> Event:
+        import base64 as _b64
+
+        url = f"data:image/png;base64,{_b64.b64encode(png).decode()}"
+        return Event(
+            id=f"evt_{seq}",
+            session_id="sess_01TEST",
+            seq=seq,
+            kind="message",
+            data={
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": [
+                    {"type": "text", "text": f"Image: {label}"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            },
+            created_at=datetime.now(tz=UTC),
+            orig_channel=None,
+            focal_channel_at_arrival=None,
+        )
+
+    def test_text_only_model_strips_persisted_tool_result_image(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A persisted ``browser_screenshot``/``read`` ``image_url`` tool
+        result, replayed against a build whose resolved model is text-only,
+        is downgraded to a text marker so the inner model stops 400-ing on
+        every wake — self-healing an already-wedged session on the next build."""
+        import copy
+
+        from aios.harness import vision
+
+        monkeypatch.setitem(vision._VISION_OVERRIDES, "model/text", False)
+        png = valid_png_bytes()
+        events = [
+            _evt(1, "user", content="show"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            self._image_tool_result_event(3, "a", png, "shot.png"),
+        ]
+        snapshot = copy.deepcopy([e.data for e in events])
+
+        msgs = build_messages(events, system_prompt=None, model="model/text").messages
+
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        # The image_url part was downgraded to an inert text marker.
+        assert all(p.get("type") != "image_url" for p in tool_msg["content"]), (
+            "text-only model must not receive a replayed image_url part"
+        )
+        assert any("does not support image input" in p.get("text", "") for p in tool_msg["content"])
+        # Sibling text part + list structure preserved.
+        assert tool_msg["content"][0] == {"type": "text", "text": "Image: shot.png"}
+        # Immutability: the source event log is pristine (the pass replaces
+        # part dicts in the message list, never in the aliasing Event.data).
+        assert [e.data for e in events] == snapshot, (
+            "build_messages mutated event.data — the vision strip pass rewrote "
+            "the tool event's image_url part in place"
+        )
+
+    def test_vision_model_keeps_persisted_tool_result_image(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A vision-capable model keeps the replayed ``image_url`` part — the
+        pass only acts on an explicit ``supports_vision is False``."""
+        from aios.harness import vision
+
+        monkeypatch.setitem(vision._VISION_OVERRIDES, "model/vision", True)
+        png = valid_png_bytes()
+        import base64 as _b64
+
+        url = f"data:image/png;base64,{_b64.b64encode(png).decode()}"
+        events = [
+            _evt(1, "user", content="show"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="browser_screenshot")]),
+            self._image_tool_result_event(3, "a", png, "shot.png"),
+        ]
+        msgs = build_messages(events, system_prompt=None, model="model/vision").messages
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        url_parts = [p for p in tool_msg["content"] if p.get("type") == "image_url"]
+        assert len(url_parts) == 1
+        assert url_parts[0]["image_url"]["url"] == url
+
+    def test_unknown_model_keeps_persisted_tool_result_image(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown-capability model (``supports_vision`` → ``None``) keeps
+        the replayed ``image_url`` part — the optimistic-inline policy leaves
+        ``None`` untouched, so a genuinely vision-capable uncatalogued model
+        is not silently stripped."""
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        png = valid_png_bytes()
+        events = [
+            _evt(1, "user", content="show"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            self._image_tool_result_event(3, "a", png, "shot.png"),
+        ]
+        msgs = build_messages(events, system_prompt=None, model="future/model").messages
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        assert any(p.get("type") == "image_url" for p in tool_msg["content"]), (
+            "unknown model must keep the replayed image (optimistic inline)"
+        )
+
+    def test_no_model_leaves_images_untouched(self) -> None:
+        """``build_messages`` with no model (the append-time / preview path)
+        leaves replayed ``image_url`` parts in place — the pass short-circuits
+        on ``model is None``, matching the conservative no-model posture."""
+        png = valid_png_bytes()
+        events = [
+            _evt(1, "user", content="show"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            self._image_tool_result_event(3, "a", png, "shot.png"),
+        ]
+        msgs = build_messages(events, system_prompt=None).messages
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        assert any(p.get("type") == "image_url" for p in tool_msg["content"])
+
+    def test_text_only_model_strips_image_url_in_any_role(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A text-only model must not receive an ``image_url`` part in ANY
+        role — a user-message injection (e.g. a blind-spot splice of a
+        tool_result list content) is stripped too, since the model 400s on
+        the part regardless of where it sits."""
+        import base64 as _b64
+
+        from aios.harness import vision
+
+        monkeypatch.setitem(vision._VISION_OVERRIDES, "model/text", False)
+        png = valid_png_bytes()
+        url = f"data:image/png;base64,{_b64.b64encode(png).decode()}"
+        # A user-role message carrying an image_url part (the blind-spot
+        # injection shape — see test_blind_spot_injection_multimodal_list_content).
+        events = [
+            _evt(1, "user", content="show"),
+            Event(
+                id="evt_2",
+                session_id="sess_01TEST",
+                seq=2,
+                kind="message",
+                data={
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "[Tool result: read completed]"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None, model="model/text").messages
+        for m in msgs:
+            content = m.get("content")
+            if isinstance(content, list):
+                assert all(p.get("type") != "image_url" for p in content), (
+                    f"text-only model must not receive image_url in role={m.get('role')!r}"
+                )
+
+    def test_text_only_model_strips_multiple_images_preserves_other_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multiple ``image_url`` parts in one message are all stripped, while
+        non-image parts (text) are preserved in order — list shape is intact,
+        only the image parts are swapped for markers."""
+        import base64 as _b64
+
+        from aios.harness import vision
+
+        monkeypatch.setitem(vision._VISION_OVERRIDES, "model/text", False)
+        png = valid_png_bytes()
+        url = f"data:image/png;base64,{_b64.b64encode(png).decode()}"
+        events = [
+            _evt(1, "user", content="show both"),
+            _evt(2, "assistant", tool_calls=[_tc("a", name="read")]),
+            Event(
+                id="evt_3",
+                session_id="sess_01TEST",
+                seq=3,
+                kind="message",
+                data={
+                    "role": "tool",
+                    "tool_call_id": "a",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                        {"type": "text", "text": "middle"},
+                        {"type": "image_url", "image_url": {"url": url}},
+                        {"type": "text", "text": "last"},
+                    ],
+                },
+                created_at=datetime.now(tz=UTC),
+                orig_channel=None,
+                focal_channel_at_arrival=None,
+            ),
+        ]
+        msgs = build_messages(events, system_prompt=None, model="model/text").messages
+        tool_msg = next(m for m in msgs if m.get("role") == "tool")
+        content = tool_msg["content"]
+        assert [p.get("type") for p in content] == ["text", "text", "text", "text", "text"]
+        assert content[0]["text"] == "first"
+        assert content[2]["text"] == "middle"
+        assert content[4]["text"] == "last"
+        # Both image parts became markers.
+        assert "does not support image input" in content[1]["text"]
+        assert "does not support image input" in content[3]["text"]
 
 
 class TestPoisonEventQuarantine:
