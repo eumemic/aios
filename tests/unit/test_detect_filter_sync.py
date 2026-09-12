@@ -210,7 +210,10 @@ def test_build_sandbox_triggers_on_every_copied_file(copied: str) -> None:
     rebuild — otherwise the published image silently ships a stale copy.
     """
     dockerfile = (_REPO_ROOT / "docker" / "Dockerfile.sandbox").read_text()
-    assert re.search(rf"(?m)^COPY {re.escape(copied)}\s", dockerfile), (
+    # ``--flag``s are tolerated between the instruction and its source: the
+    # resolver COPY carries ``--link``. What this pins is the source path, not
+    # the flags — a flag-sensitive pattern makes adding one look like a removal.
+    assert re.search(rf"(?m)^COPY (?:--\S+ )*{re.escape(copied)}\s", dockerfile), (
         f"{copied!r} is no longer COPYed by docker/Dockerfile.sandbox — drop it from "
         "this parametrization (and from the build trigger) rather than pinning a "
         "path the image does not consume"

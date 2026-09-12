@@ -110,9 +110,31 @@ ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
 #     resolves, and the Limited allow-list comes out empty.
 #
 # COPY, not RUN: Docker mounts /etc/resolv.conf over the build sandbox too, so
-# a RUN redirect writes to the mount and never reaches the layer. ``--link``
-# is important here: BuildKit otherwise treats this daemon-managed path as a
-# build-time mount and can omit the copied bytes from the resulting layer.
+# a RUN redirect writes to the mount and never reaches the layer.
+#
+# ``--link`` because a PLAIN COPY here -- already after every RUN -- was
+# OBSERVED to come out empty: the image contract below read a freshly
+# BuildKit-built image through ``docker cp`` and got a 0-byte
+# /etc/resolv.conf (aios#2410). BuildKit special-cases this path as a build
+# mount (moby/buildkit#1267) and the copied bytes did not survive into the
+# committed layer. ``--link`` builds the file as a standalone layer over
+# scratch and merges it on top, so the bytes are never written through the
+# parent snapshot that carries the mount placeholder.
+#
+# That last sentence is a HYPOTHESIS, not a verified mechanism: --link is not
+# a documented remedy for this path, and the only thing that can decide it is
+# ``tests/e2e/test_sandbox_image_contract.py::
+# test_image_layer_carries_the_embedded_dns_resolver``, which needs a Docker
+# daemon. No unit test can tell a surviving layer from a stripped one -- the
+# unit pins below check the instruction, not its result. If that e2e is still
+# red, the same-path bake is dead and the resolver has to reach the chrooted
+# operator some other way; a non-special path alone does NOT do it, because
+# glibc reads /etc/resolv.conf and nothing else.
+#
+# --link needs a Dockerfile frontend that supports it (BuildKit >= 0.10,
+# i.e. Docker >= 23). There is deliberately no ``# syntax=`` pin on this file,
+# so an older daemon fails the build loudly on the unknown flag rather than
+# silently shipping an empty resolver.
 #
 # MUST come after every RUN above -- apt needs the daemon's resolver, not this.
 COPY --link docker/sandbox-resolv.conf /etc/resolv.conf
