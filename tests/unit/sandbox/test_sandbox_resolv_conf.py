@@ -13,6 +13,14 @@ Limited networking yields an empty allow-list (total egress blackhole) while
 Unrestricted silently skips the secret-egress DNAT. Neither failure is visible
 without a live runsc daemon, and the runsc e2e suite runs on a weekly cron —
 so the invariant is pinned here instead.
+
+SCOPE: these are source-level pins — the baked file's content and the Dockerfile
+instruction that bakes it. They cannot see the built image, so they cannot tell
+a resolver that survived into the layer from one BuildKit stripped (aios#2410).
+``tests/e2e/test_sandbox_image_contract.py::
+test_image_layer_carries_the_embedded_dns_resolver`` is the only oracle for
+that, and it needs a Docker daemon. Do not "fix" a red e2e by relaxing anything
+here.
 """
 
 from __future__ import annotations
@@ -47,21 +55,35 @@ def test_baked_nameserver_is_the_embedded_dns_address() -> None:
 
 
 def test_dockerfile_copies_the_resolver_after_every_run_step() -> None:
-    """COPY (not RUN), using a linked layer, and last.
+    """COPY (not RUN), ``--link``, and last.
 
     Docker mounts its own ``/etc/resolv.conf`` over the build sandbox, so a
     ``RUN`` redirect writes to the mount and never reaches the layer — COPY is
     the only way to bake one. And the COPY has to come after the ``apt-get``
     steps: those need the daemon's resolver, not the netns-local one.
+
+    ``--link`` is pinned because a plain COPY in exactly this position was
+    observed to land a 0-byte file in the built image (aios#2410); the linked
+    layer is built over scratch and merged on top rather than written through
+    the parent snapshot that carries BuildKit's mount placeholder. Pinning the
+    flag keeps a well-meaning "simplify" from silently reintroducing the empty
+    resolver — but it pins the INSTRUCTION, not the resulting layer. See the
+    module docstring.
     """
     lines = _DOCKERFILE.read_text().splitlines()
+    # Match on the DESTINATION, not on the flags: a plain ``COPY`` to this path
+    # is the exact regression being pinned, so it has to be found and then
+    # rejected by name — not silently missed by a flag-sensitive pattern.
     copies = [
         i
         for i, line in enumerate(lines)
-        if re.match(r"^COPY --link \S+ /etc/resolv\.conf\s*$", line)
+        if re.match(r"^COPY (?:--\S+ )*\S+ /etc/resolv\.conf\s*$", line)
     ]
     assert len(copies) == 1, "expected exactly one COPY of /etc/resolv.conf in Dockerfile.sandbox"
-    assert lines[copies[0]] == "COPY --link docker/sandbox-resolv.conf /etc/resolv.conf"
+    assert lines[copies[0]] == "COPY --link docker/sandbox-resolv.conf /etc/resolv.conf", (
+        "the resolver COPY must keep ``--link``; a plain COPY to /etc/resolv.conf "
+        "lands a 0-byte file in the built image (aios#2410)"
+    )
 
     runs = [i for i, line in enumerate(lines) if line.startswith("RUN ")]
     assert runs and copies[0] > max(runs), (

@@ -251,7 +251,18 @@ def test_image_layer_carries_the_embedded_dns_resolver(pulled_image: str) -> Non
 
     # Keep in step with ``aios.sandbox.setup._EMBEDDED_DNS_ADDRESS``;
     # ``tests/unit/sandbox/test_sandbox_resolv_conf.py`` pins the source pair.
-    assert re.findall(r"(?m)^\s*nameserver\s+(\S+)\s*$", baked) == ["127.0.0.11"], baked
+    #
+    # A file that is PRESENT but carries no nameserver is the aios#2410 shape:
+    # BuildKit special-cases this path as a build mount and leaves the 0-byte
+    # placeholder in the layer instead of the COPYed bytes. The Dockerfile
+    # answers that with ``COPY --link``; if this still reads empty, --link did
+    # not survive either and the same-path bake is dead. Baking to a
+    # non-special path does NOT rescue it on its own — glibc reads
+    # /etc/resolv.conf and nothing else, so the fix then has to be on the
+    # operator read path, not in the Dockerfile.
+    assert re.findall(r"(?m)^\s*nameserver\s+(\S+)\s*$", baked) == ["127.0.0.11"], (
+        f"/etc/resolv.conf is in the layer but does not name the embedded resolver: {baked!r}"
+    )
 
 
 def test_tail_at_absolute_path(pulled_image: str) -> None:

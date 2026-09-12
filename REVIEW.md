@@ -1,152 +1,133 @@
-# Uncorrelated review — `botpost2410f` tip `a8da0ea8` (aios#2410)
+# Uncorrelated review — `botpost2410g` tip `0b0effc9` (aios#2410)
 
-**Verdict: changes requested — 1 High, 1 Medium, both fixed on this review
-branch (`botpost2410frev`, tip `a3a7612e`).**
+**Verdict: changes requested — 1 High, 1 High/Medium, 2 Low. The High and the
+High/Medium are fixed on this review branch (`botpost2410grev`); the Lows are
+recorded below, one fixed in comment form, one left as noted.**
 
-The design TASK.md asks for is right, and it is the right design: the
-chicken/egg is genuinely broken (there is no base-SHA Python left to execute),
-and the `mktemp` race is closed by a boundary rather than by a better temp
-name. Both properties are structural now, not argued.
+The bake path the implementer chose is the right *shape*. Every alternative
+route dies on the same fact: glibc reads `_PATH_RESCONF` = `/etc/resolv.conf`
+and nothing else, there is no env override, and the runsc operator root is
+mounted READ-ONLY so `setup._RESOLV_PREAMBLE`'s `printf … || true` is a
+guaranteed no-op there. TASK.md's advisory direction — bake to a non-special
+path and reach it via symlink/bind/operator read path — cannot deliver the
+required property from the Dockerfile alone. A same-path bake is the only
+Dockerfile-level shape that can work, so `COPY --link` stays.
 
-What it does not do is post. `actions/upload-artifact` has excluded
-dot-prefixed files by default since v4.4, and the one file crossing the new job
-boundary is `.eumemic-bot-review.md` — so the upload matches nothing,
-`if-no-files-found: error` fails it, and `publish` downloads nothing. The
-isolation is real and the review still never reaches the PR. That is the same
-silent-miss shape this workflow has now failed on three ways running, and it
-would have shipped green.
-
-## Scope
-
-Verified against TASK.md items 1–5. Not reviewed: Track G (excluded). Nothing
-was pushed, merged, or opened as a PR.
+What the branch got wrong is everything around it: it ships red, and it asserts
+as established fact a mechanism nobody has verified.
 
 ---
 
-## F1 (High) — the review artifact is a hidden file, so it is never uploaded
+## F1 (High) — the branch is red on the unit shard
 
-`.github/workflows/eumemic-bot-review.yml` at `a8da0ea8`:
+`tests/unit/test_detect_filter_sync.py::test_build_sandbox_triggers_on_every_copied_file[docker/sandbox-resolv.conf]`
+fails on `0b0effc9`:
 
-```yaml
-          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
-...
-      - uses: actions/upload-artifact@v4
-        with:
-          path: .eumemic-bot-review.md
-          if-no-files-found: error
+```
+assert None
+ +  where None = re.search('(?m)^COPY docker/sandbox\-resolv\.conf\s', '# aios sandbox base image...')
+AssertionError: 'docker/sandbox-resolv.conf' is no longer COPYed by docker/Dockerfile.sandbox — drop it
+from this parametrization (and from the build trigger) rather than pinning a path the image does not consume
 ```
 
-From the action's own v4 README: *"With `v4.4` and later, hidden files are
-excluded by default"*, and *"Hidden files are defined as any file beginning
-with `.`"*. `@v4` is a floating major tag, so every run resolves to v4.4+.
+The pattern anchors `^COPY <path>` with no room for flags, so `COPY --link …`
+reads to it as a removal. This is a plain CI-red regression: the unit shard
+fails long before the e2e that the change exists to turn green. It was missed
+because DONE.md's verification is `pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py`
+— a single file, which cannot see a drift check living two directories away.
+CLAUDE.md asks for `uv run pytest tests/unit -q` before a commit.
 
-The chain then fails end to end, quietly at each link:
+**Fixed** — widened to `^COPY (?:--\S+ )*<path>\s`, with a comment saying the
+pin is on the *source path*, not on the flags.
 
-1. the upload pattern matches zero files;
-2. `if-no-files-found: error` fails the step — which is `continue-on-error`,
-   so the job stays green;
-3. `publish` runs, `download-artifact` finds nothing, the mint is skipped;
-4. the run summary says "did not post" and the check is green.
+## F2 (High/Medium) — a hypothesis asserted as a root cause
 
-This was invisible to every gate. The single-job predecessor read the file off
-the same runner's disk, where the dot prefix meant nothing; the property only
-became load-bearing when the file started crossing a job boundary in this
-commit. `tests/unit/test_eumemic_bot_review.py` asserted
-`upload["with"]["path"] == ".eumemic-bot-review.md"` — pinning the defect. It
-is the only dot-prefixed upload in the repository, so the sibling in
-`code-validation.yml` offered no counter-example either.
+DONE.md and the Dockerfile comment both state flatly that "BuildKit treats
+`/etc/resolv.conf` as a daemon-managed build mount, so a plain `COPY` can be
+absent from the committed image layer", and that `--link` "forces the resolver
+bytes into a linked image layer".
 
-**Fixed** in `a3a7612e`: `include-hidden-files: true`. Chosen over renaming the
-file because the input states the intent where a reader of the upload step will
-look, and the dot prefix is what the launcher, the docs and the publisher's
-read path already agree on. The action's warning about that input concerns
-directory sweeps picking up `.env`-shaped files; this is a single explicit
-file, so there is nothing to sweep.
+The first half is a real phenomenon (moby/buildkit#1267, still open) but the
+documented mechanism is a *RUN-time* bind mount of `/etc/resolv.conf` and
+`/etc/hosts` into build containers — and this COPY already sits after every
+`RUN`, which is precisely why the plain COPY was expected to work. The second
+half has no support at all: no upstream source lists `--link` as a remedy for
+this path. The external workarounds that are documented are "write it at
+runtime" or "use a non-special path" — neither available here (see the preamble
+above).
 
-`test_upload_opts_into_the_hidden_artifact_filename` pins the launcher's write
-path, the upload path and the publisher's read path as **one chain** — both
-halves are silent when wrong, and the second (`review/` + basename) had no
-coverage at all — and requires the input only while the basename starts with
-`.`, so a later rename to a non-hidden name stays valid without it. Confirmed
-the test fails against `a8da0ea8`'s workflow, not just passes against the fix.
+`--link` may well work; the mergeop shape is a plausible way around a
+placeholder in the parent snapshot. But it is a **bet**, and nothing on this
+branch can settle it: the unit pins read the Dockerfile text, and no source-level
+test can tell a surviving layer from a stripped one. The only oracle is
+`tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`,
+which needs a Docker daemon — unavailable in this checkout and unrun by the
+implementer (that caveat in DONE.md is truthful).
 
-## F2 (Medium) — `always()` fires the "did not post" summary on superseded runs
+Shipping an unverified bet is acceptable here; shipping it labelled as a
+diagnosed root cause is not, because the next person to read that comment will
+not know there is anything left to check.
 
-```yaml
-  publish:
-    needs: agent
-    if: ${{ always() && !github.event.pull_request.draft }}
-```
+**Fixed** — the Dockerfile comment now separates OBSERVED (a freshly built
+image read back through `docker cp` had a 0-byte `/etc/resolv.conf`) from
+HYPOTHESIS (the `--link` mergeop mechanism), names the e2e as the sole oracle,
+and says what to conclude if it stays red: the same-path bake is dead and the
+resolver has to reach the chrooted operator on the read path instead — a
+non-special path on its own does *not* do it. DONE.md is rewritten to the same
+standard. The resolver unit module gained a SCOPE paragraph stating it cannot
+see the built image and that a red e2e must never be "fixed" by relaxing
+anything there, and the e2e assertion now fails with a sentence instead of
+`[] == ['127.0.0.11']`.
 
-`always()` is true when the run is **cancelled**, and this workflow sets
-`cancel-in-progress: true`. So every push that supersedes an in-flight run
-starts `publish` on a fresh runner, finds no artifact, and writes
-`### eumemic-bot review did not post` to that run's summary.
+## F3 (Low) — `--link` raises the minimum builder, silently
 
-Not a security issue — a signal-quality one, and the signal is the whole point
-of the step. The workflow's own comment says a run that published nothing
-"says so where a reader sees it without opening logs"; a marker that also fires
-for every superseded push is one a reader learns to skip. This is a regression
-from the single-job shape, where a cancelled run simply took the summary step
-with it.
+`COPY --link` needs a Dockerfile frontend with mergeop support: BuildKit >= 0.10,
+i.e. Docker >= 23. The file carries no `# syntax=` pin. That turns out to be the
+*right* configuration — without a pin, an older daemon rejects the unknown flag
+and fails the build loudly, rather than parsing it away and shipping an empty
+resolver. Adding a `# syntax=docker/dockerfile:1.x` line would make the flag
+work on older daemons and is tempting; it would also remove the loud failure.
 
-**Fixed** in `a3a7612e`: `!cancelled()`, which is GitHub's documented form for
-"run unless the run was cancelled" and still overrides the default
-`needs`-failed skip — so a *failed* agent job (including a `timeout-minutes`
-kill, which is a job failure, not a run cancellation) still reaches the
-summary. Pinned in `test_workflow_never_fails_the_pr_check_on_an_ops_miss`
-alongside the existing step-level `always()`, which is correct and unchanged.
+**Fixed in comment form** — the requirement and the deliberate absence of the
+pin are now written down in the Dockerfile, so the next person doesn't "helpfully"
+add one.
+
+## F4 (Low, pre-existing) — `Dockerfile.sandbox` advertises a command that does not exist
+
+Line 22 offers `uv run python -m aios build-image` as the local-dev shortcut.
+There is no `build-image` command anywhere in `src/`. Out of the blast radius of
+this fix and left alone; noted so it can be deleted (per "don't deprecate,
+delete") in a pass that owns that file's header.
 
 ---
 
-## Checklist verdicts
+## Items that verify clean
 
-| # | Requirement | Verdict |
-|---|---|---|
-| 1 | Job A `agent` has no App token / `GH_TOKEN`, uploads only the markdown; Job B `publish` `needs: agent`, fresh runner, downloads only that, mints there, runs no PR-head/base Python | **Holds.** No `EUMEMIC_BOT_PRIVATE_KEY`, `create-github-app-token` or `GH_TOKEN` anywhere in `jobs.agent` (asserted over *every* step, not just the agent step); `jobs.publish` has no `actions/checkout` and its only `run:` is inline shell. The launcher additionally refuses to start the agent phase if `GH_TOKEN` is set, and still drops the checkout's persisted `http.*.extraheader` before the agent runs. |
-| 2 | Publisher is not "base SHA Python"; works without master having `publish`; POSTs as eumemic-bot, verifies, keeps continue-on-error + summary | **Holds.** Inline `gh api --method POST` with the markdown passed as a jq-built JSON body — never through the shell, so agent-authored markdown cannot inject. Verification is stricter than the Python it replaced: `html_url` **and** the run-specific marker **and** `user.login == "eumemic-bot[bot]"` (the old path did not check the author). All four steps stay `continue-on-error`. Nothing in the trust path depends on master's script. |
-| 3 | Broken `git show $BASE_SHA:…` + same-runner `mktemp` removed; docs and tests updated | **Holds.** `assert "git show" not in text` and `assert "mktemp" not in text` cover the whole workflow file, so neither can come back. `docs/eumemic-bot-review.md` is rewritten to the two-job flow and states the boundary in the terms that make it true (filesystem, PATH, processes and `/proc` do not cross runners). |
-| 4 | Coding-agent routing, mint-after-agent, gVisor fixes, chroot/BusyBox work retained; `origin/master` an ancestor | **Holds.** All three prefixes still route and install singly, and only the routed proxy secret reaches the agent step. `4c359ef0` (chroot before the privileged loader), `f23cea3a` (`docker/sandbox-resolv.conf`) and the corrected operator `PATH` are all present and unmodified. `origin/master` (`01f76bb8`) is an ancestor of `HEAD`; no rebase needed. |
-| 5 | DONE.md claims match reality | **Accurate.** `99466c28`, `01f76bb8`, `a9aa9e53` all exist and are what it says they are; the ancestry claim checks out; `32 passed` reproduced exactly at `a8da0ea8`. It is now 33, and DONE.md predates F1/F2. |
+- **Isolation** — untouched. No change to `_RUNSC_OPERATOR_ROOT`, the chroot
+  chain, the read-only operator mount, or the Limited-networking lockdown. The
+  fix is one Dockerfile flag plus comments and tests. This is the smallest
+  honest fix available given F2's constraint.
+- **Test integrity (review item 3)** — no test was weakened. The resolver pin
+  was *strengthened*: it now matches on the destination path, so a plain
+  `COPY … /etc/resolv.conf` is found and rejected by name rather than silently
+  missed. The e2e contract is unchanged in what it asserts.
+- **Ancestry and retention (review item 4)** — `origin/master` (`abe20173`) is
+  an ancestor of HEAD, 28 commits ahead. `17ef3de9` (chroot before the
+  privileged runsc loader), `538ab985` (the original resolver bake) and the full
+  review-harness series are all present.
+- **DONE.md's Docker caveat (review item 5)** — truthful; `docker` is genuinely
+  absent here. Its "2 passed" was also literally true, which is exactly why it
+  was misleading: it is the report of a command narrow enough to miss F1.
 
-## Notes, not findings
+## Verification run here
 
-- **Job rename is safe.** `review` became `agent` + `publish`, which changes the
-  reported check names. `master`'s required contexts are
-  `detect, lint, unit, integration, e2e (docker), e2e (non-docker)` — this
-  workflow is not among them, as its "must never FAIL the PR check" stance
-  requires. Checked against the live branch-protection settings, not assumed.
-- **The agent still controls the artifact's contents,** and always did; that is
-  the design. What changed is that the bytes are now only ever *data* to the
-  token-holding process. Worth stating plainly because it is the one thing the
-  job split does **not** buy: an agent that can reach `ACTIONS_RUNTIME_TOKEN`
-  off the runner could upload the artifact itself, and would gain nothing —
-  same markdown, same JSON body, no reachable token.
-- **`run_publish_phase` in `scripts/eumemic_bot_review.py` is now dead in the
-  Action path** and labelled "legacy … for manual compatibility". TASK.md
-  explicitly permits leaving it unused, so I left it; against CLAUDE.md's
-  "don't deprecate, delete" it is a shim, and it keeps a second, differently
-  behaved implementation of the publish contract (it does not check the comment
-  author) one wiring mistake away from a token-holding step. Worth deleting in a
-  follow-up, not on a review branch.
-- **Comment growth is unchanged:** every `synchronize` posts a new comment
-  rather than updating the previous one. Pre-existing, out of scope, and
-  arguably correct given the per-SHA marker.
-
-## Local results
-
-```text
-$ uv run pytest -q tests/unit/test_eumemic_bot_review.py
-33 passed
-
-$ uv run pytest tests/unit -q -n 4
-6163 passed, 10 warnings in 92.34s
-
-$ uv run ruff check src tests && uv run ruff format --check src tests
-All checks passed! / 1091 files already formatted
-
-$ uv run mypy src tests
-Success: no issues found in 1091 source files
+```
+uv run pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py \
+               tests/unit/test_detect_filter_sync.py \
+               tests/unit/sandbox/test_docker_runtime_argv.py \
+               tests/unit/test_gvisor_validation_workflow.py    # 24 passed
+uv run ruff check / ruff format --check / uv run mypy  (touched files)  # clean
 ```
 
-Not pushed, not merged, no PR opened.
+The e2e image contract was **not** run — no Docker daemon here. Whether this
+branch actually fixes aios#2410 is still open, and only that test can close it.
