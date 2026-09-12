@@ -1,176 +1,162 @@
-# Uncorrelated review — Actions control-plane strip + unit rewrite (`487ae3c2`)
+# Uncorrelated review — trigger-swap DNAT e2e legs
 
-Reviewer: Claude Opus 5, branch `eumbotfcrev` (worktree `/workspace/aios-eumbotfcrev`).
-Commits under review: `f66485fb` ("fix: strip Actions runner file command paths") and
-`487ae3c2` ("fix: cover all Actions control env vars"), on top of `4ea7eefd`.
-Fixes committed locally as `2fd5e84f`. Nothing pushed, no PR opened.
+- **Branch:** `trigswap2rev` (worktree `/workspace/aios-trigswap2rev`)
+- **Reviewed tip:** `6fe45254` (on `9441ef39`, both on master tip `0b07495e`)
+- **Verdict: fail** — the reviewed tip was a wholesale revert of master, not an
+  integration. The *diagnosis* it claims is correct and is kept; the delivery
+  destroyed thirteen shipped master behaviors and left the tree unable to
+  typecheck or even collect its unit tests. Fixed on this branch.
+- **Final code HEAD:** `197c9c45` — all review fixes. `HEAD` is the
+  commit that adds this file on top of it (a commit cannot carry its own
+  sha); `git log --oneline -1` prints it.
+- Not pushed; no PR opened; still on `trigswap2rev`.
 
-## Verdict
+## What the tip actually did
 
-**The diagnosis is right and the fix works — I reproduced the false-fail on the
-pre-fix tree and its absence after — but it shipped a formatting violation that
-CI's own lint job would have failed on the next push, and the requirement it was
-written to satisfy (the two new names in `_STRIPPED_ENV`) was not actually pinned
-by any test.** Both are fixed here, along with four smaller items. Ready for PR
-after `2fd5e84f`.
+`9441ef39` applied the July-2026 #2042 PR tip as a **whole-file replacement**
+onto `0b07495e`. Evidence, all from the reviewed tip:
 
-All six TASK.md / prompt checks pass on the reviewed tip; findings 1 and 2 are
-about how the change would have fared *next*, not about the behaviour it claims.
+| file | tip's diff vs master | true #2042 delta |
+| --- | --- | --- |
+| `src/aios/sandbox/registry.py` | 126 insertions / **1148 deletions** | 40 / 5 |
+| `src/aios/sandbox/secret_egress_proxy.py` | 29 / **289** | 29 / 1 |
+| `src/aios/sandbox/setup.py` | rewritten | +410 / −313 |
+| `tests/unit/test_networking.py` | master suites deleted | additive |
 
-## Verification of the required points
+Behaviors deleted by the revert (each verified restored at grep parity after
+the rebase): #2365 SSRF absolute-form request-target rejection; #2113
+ClientHello raw dispatcher + `_relay_unrecognized_sni` passthrough; #2276/#2274
+account-browser substrate and control plane; #2309 browser L3 deny-internal
+egress; #2331 snapshot pool-budget LRU reclaim; #2411 snapshot-reset
+retirement; #2104/#2124 `egress_unread_hosts` fail-closed inventory; #2193
+typed egress-provision lifecycle events; `sandbox_owner_kind()`'s callers.
 
-| # | Requirement | Result |
-|---|---|---|
-| 1 | `_STRIPPED_ENV` gains `GITHUB_STEP_SUMMARY`, `GITHUB_STATE` | ✅ `scripts/eumemic_bot_review.py:124-129` |
-| 2 | Child env unreachable for `file_commands` paths under any key, name-strip not weakened | ✅ value strip added; all five names still in the list |
-| 3 | Test uses an explicit runner-env dict, no ambient substring assertion | ✅ `os.environ` replaced wholesale |
-| 4 | Launcher still reads `GITHUB_OUTPUT` from parent | ✅ `_record_published` (`:510`) reads its own `os.environ`; test green |
-| 5 | `origin/master` is an ancestor; prior #2404 harness commits retained | ✅ all nine (`0e727e02`…`487ae3c2`) present |
-| 6 | DONE.md claims match reality | ✅ root cause and pytest count confirmed; validation section incomplete (finding 1) |
+Consequences at the reviewed tip:
 
-**Root cause reproduced, not assumed.** Checked the pre-fix tree (`4ea7eefd`) out
-into the worktree and ran the test under a simulated hosted-runner environment
-carrying `_runner_file_commands` paths under `GITHUB_STEP_SUMMARY`,
-`GITHUB_STATE`, and one unrelated key:
+- `uv run mypy src` — **8 errors** (`spec.py:798,942` unexpected
+  `networking_mode`/`owner_id`; `browser.py:71` missing
+  `get_or_provision_browser`; `browser_control.py:286,287,501` missing
+  `owner_lock`/`release_browser`/`touch_browser`).
+- `uv run pytest tests/unit` — **could not collect**:
+  `ImportError: cannot import name 'egress_unread_hosts' from
+  'aios.sandbox.setup'` (`tests/unit/sandbox/test_egress_refresh.py:26`).
 
-```
-3 failed, 50 deselected      # 4ea7eefd, same ambient env
-58 passed                    # this tip + fixes, same ambient env
-```
+So "unit 130 passed on two test files" in the tip's DONE.md was true only of
+those two files; the tree as a whole did not run.
 
-DONE.md's "4 passed" for the named `-k` selection is accurate.
+## TASK verification items
 
-## Findings
+1. **Is #2042's name-based path already on origin/master?** **No** — the task's
+   premise is false. `src/aios/sandbox/credential_dns.py` does not exist on
+   `origin/master`, and master's `_nat_dnat_lines` generated one DNAT per
+   sampled address. Integrating it is therefore the right move, not redundant.
+   Master's own `setup.py` carried the defect as a **documented KNOWN
+   RESIDUAL** naming exactly the two failure modes the red legs show, and
+   `TestCredentialHostEgressVerdict` pinned it behaviourally ("the acceptance
+   signal for #2042, not a regression"). The implementer's root cause is
+   **confirmed**, not rubber-stamped.
+2. **Does the fix install credential DNS + sentinel DNAT on the trigger path,
+   fail-closed?** Yes. There is no trigger-specific provision path:
+   `run_trigger_step` (`src/aios/harness/trigger_runner.py:580`) calls the same
+   `sandbox_registry.get_or_provision(...)`, which reaches `_apply_egress_rules`
+   → `apply_network_lockdown` (Limited) or `apply_secret_egress_dnat`
+   (Unrestricted). Both emit the byte-identical `_nat_dnat_lines` block. I
+   rendered the generated scripts for both modes plus the read-back verify and
+   audited them rule by rule. Fail-closed: resolver bind failure fails proxy
+   `start()` and the provision; a proxy-alias DNS miss is `exit 1` rather than a
+   skipped nat block; non-`:443` sentinel traffic is REJECTed; the sentinel is
+   non-routable, so a broken DNAT denies rather than leaks; the registry
+   *refuses* a DNAT target with no resolver port instead of falling back to any
+   address-keyed shape. Resolver host set and DNAT host set both derive from the
+   same `cred.allowed_hosts`, so intercepted names and TLS-terminated names
+   cannot drift.
+3. **IPv6 / `-4` story.** Not revived. It is now *moot* rather than merely
+   unproven: the resolver answers AAAA/HTTPS/SVCB for a credential name with
+   **NODATA**, so the sandbox cannot obtain an IPv6 address or an `ipv4hint`
+   for a credential host at all — strictly stronger than curl `-4`. No `-4`
+   hygiene is carried.
+4. **Run-origin vs trigger-origin.** Same code path (item 2), so the asymmetry
+   is *timing*: `test_run_env_var_placeholder.py` curls promptly after
+   provision, while a trigger must first become due and be dispatched, so much
+   more of the ~60s TTL has elapsed and a rotated, unsampled address is far
+   likelier. The address-keyed DNAT was never sound; the trigger leg just
+   samples the race later.
+5. **Hygiene.** Branch is 3 ahead / **0 behind** `origin/master`. The tip's
+   DONE.md shas/files matched the commits, but its *claims* did not match the
+   tree (above). `is_run_owner_id` was **not** real or needed: at `6fe45254` its
+   only callers were in the *reverted* `registry.py`; under a correct rebase it
+   is dead code (master discriminates with `sandbox_owner_kind()`, per the
+   CLAUDE.md "kind, never a boolean flag" rule). Removed — `src/aios/ids.py` is
+   now byte-identical to master.
 
-### Blocking
+## Second finding: the sweep could retire the chokepoint
 
-**1. `ruff format --check` fails on the rewritten test — CI's lint job would have
-gone red immediately.** `code-validation.yml:243` runs
-`ruff format --check src tests …`, which covers this file. The new set literal
-was written hand-wrapped:
+Found while auditing the rebased refresh sweep — a fail-open hole in #2042
+itself, not in the rebase:
 
-```python
-control_names = {
-    "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"
-}
-```
+In-sandbox DNS answers every credential name with the sentinel, so
+`_stamp_egress_state`'s rule read-back sees the one provisioned sentinel DNAT,
+and `_seed_pinned_from_installed` pins it like any other address.
+`build_egress_refresh_script`'s `legacy_dnat_tail` delete is **byte-identical**
+to that provisioned rule, and since #2042 nothing ever *adds* a credential
+DNAT. One tick whose resolve came back without the sentinel would therefore
+age the pin out and **permanently delete name-based interception** — under
+Unrestricted that is direct egress carrying the literal placeholder, i.e. the
+original defect reintroduced by the fix's own maintenance path.
 
-`ruff format` wants one element per line with a magic trailing comma, so
-`--check` reported `Would reformat: tests/unit/test_eumemic_bot_review.py` on the
-reviewed tip. This is the same failure class the task exists to close — green
-`pytest` locally, red CI — one job over. DONE.md's validation section lists only
-the pytest run; CLAUDE.md requires mypy, ruff check *and* ruff format before
-every commit. Fixed, and `ruff check`/`ruff format --check` are now clean over
-all of `src tests`.
+Fixed by excluding `CREDENTIAL_SENTINEL_IP` from the delete set by
+construction, covered by
+`test_live_refresh_never_retires_the_credential_sentinel_dnat`, which drives
+the pin all the way to eviction (verified load-bearing: the test fails with the
+guard reverted).
 
-### Serious
+## Fixes applied on this branch (`197c9c45`)
 
-**2. The name strip of `GITHUB_STEP_SUMMARY` / `GITHUB_STATE` — TASK.md item 1 —
-was not pinned by any test.** Deleting both names from `_STRIPPED_ENV` left the
-entire file green:
+- Located the true #2042 base (`d4644691`, #2041) and did a real 3-way rebase:
+  `git checkout origin/master -- <files>` + `git diff d4644691 6fe45254 |
+  git apply -3`, resolving eight conflicts by hand. Net diff vs master is now
+  additive (1755 / 330); `registry.py` is 46 changed lines, not 1274.
+- Conflict resolutions kept master's side wherever the two disagreed: #2193
+  report rows re-added inside the sentinel block (INSTALLED unconditionally —
+  coverage is complete by construction, no per-host skip remains); master's
+  fail-closed `egress_unread_hosts` inventory kept in the refresh builder with
+  only the credential *add* removed; `apply_secret_egress_dnat` keeps master's
+  `EgressProvisionResult` return; the proxy's `start()` keeps #2113's raw
+  dispatcher and starts the resolver first (fatal on failure).
+- Sentinel excluded from the refresh delete set (above).
+- Removed dead `is_run_owner_id`.
+- Retargeted the two master tests whose only observed "add" was the removed
+  per-address credential DNAT (`test_egress_refresh.py`,
+  `test_egress_refresh_live_path.py`) onto the limited-host ACCEPT shape that
+  remains, preserving each test's stated subject.
+- Replaced two stale e2e comments that described the old `-d <ip>` pinning
+  (`tests/e2e/test_trigger_fire_env_var_swap.py`,
+  `tests/e2e/test_run_env_var_placeholder.py`). `_SWAP_HOST = api.github.com`
+  and the `--resolve`-free curl are deliberately unchanged: the honest
+  chokepoint exercise is the point, and no e2e weakening was used.
+- Rewrote DONE.md to the evidence-backed root cause.
 
-```
-3 passed, 50 deselected      # with both names deleted, before this fix
-```
+## Gates
 
-The reason is that the test's values for those two keys contain `file_commands`,
-so the *new value strip* removed them regardless of the name list. The two
-mechanisms were entangled, and the one the task was filed for was the one not
-under test. That matters because the value strip keys off `_runner_file_commands`
-— an undocumented internal of the runner's temp layout, not a contract. If GitHub
-renames that directory, the name list is the only cover left, and nothing would
-have caught its removal.
+- `uv run mypy src tests` — `Success: no issues found in 1098 source files`.
+- `uv run ruff check src tests` — `All checks passed!`;
+  `ruff format --check` — `1098 files already formatted`.
+- `uv run pytest tests/unit -q` — **6173 passed**, 0 failed (123s).
+- openapi/SDK snapshot invariants unaffected (no API-layer change); their
+  tests pass.
+- Docker is unavailable in this environment, so
+  `test_trigger_swap_fires_under_unrestricted_dnat_only` and
+  `test_trigger_swap_fires_under_limited` were **not run locally**; both
+  collect, and Code Validation is the oracle. Expected-green rests on the
+  argument in item 2, not on a local run.
 
-Fixed by splitting the mechanisms across two tests. New
-`test_control_variables_are_stripped_by_name_not_only_by_path` is parametrized
-over all five names and plants a value the marker cannot match
-(`/runner/_temp/control-plane-abc`), so only the name list can remove it. Both
-tests were mutation-checked: deleting the two names now fails 2 cases; deleting
-the value-strip clause fails 3.
+## Residual risk
 
-### Minor
-
-**3. The stronger value assertion was dropped when it no longer had to be.** The
-rewrite replaced `assert not [v for v in env.values() if "file_commands" in v]`
-with a single `assert "RUNNER_TEMP_SUMMARY" not in env`. That assertion was only
-unsafe because it ran over the *ambient* environment; once `os.environ` is
-replaced wholesale with an explicit dict it is both ambient-proof and strictly
-stronger than naming one key. Restored, with a comment saying why it is safe here.
-
-**4. Nothing pinned the filter's blast radius.** No test asserted that an ordinary
-inherited variable *survives* `_agent_command`. `PATH` is load-bearing — the child
-needs it to find `codex` / `claude` / `pi` at all — and a value filter that
-over-matched would be invisible to the unit suite while breaking every real run.
-Added `PATH` to the runner env and asserted it comes through unchanged.
-
-**5. `_CONTROL_PATH_MARKERS` carried a dead element.**
-`("file_commands", "_runner_file_commands")` — the second can never match without
-the first, which is a substring of it. Collapsed to a single
-`_CONTROL_PATH_MARKER` and dropped the `any()`, per CLAUDE.md's extreme-simplicity
-line.
-
-**6. The comment overclaimed the strip as containment.** "deny those paths
-wherever they occur" reads as though the agent can no longer reach the control
-files. It can: `RUNNER_TEMP` is still inherited, `_runner_file_commands` sits
-directly beneath it, and hosted runners default it to `/home/runner/work/_temp`,
-so `ls $RUNNER_TEMP/_runner_file_commands/` finds the UUID-named files without
-guessing. Left as defence in depth — stripping `RUNNER_TEMP` buys nothing against
-a predictable path — but the comment now says so, and points at the actual
-containment (`contents: read`, `persist-credentials: false`, both already in
-place). The rest of this file argues its security properties carefully; this line
-should not be the one that oversells.
-
-**7. Documentation gaps around the two new variables.** The `_STRIPPED_ENV`
-comment block gives a per-variable rationale for `GITHUB_OUTPUT` / `GITHUB_ENV` /
-`GITHUB_PATH` and nothing for the two additions; the test docstring likewise. Both
-now cover `GITHUB_STATE` (mutates later steps of this job) and
-`GITHUB_STEP_SUMMARY` (the "did not post" net writes the operator's account of
-the run there, `eumemic-bot-review.yml:137-145` — an agent holding that path
-writes the second half of the same forgery). Also fixed a stale cross-reference
-to `test_stripping_github_output_does_not_break_the_signal`, which has been
-`…_the_publication_signal` since `4ea7eefd`.
-
-## Checked and deliberately not changed
-
-- **`monkeypatch.setattr(reviewer.os, "environ", runner_env)`** swaps the real
-  `os.environ` for a plain dict process-wide for the test's duration — broader
-  than it looks. Kept: `_agent_command` is a pure call, monkeypatch restores it,
-  and full replacement is the only way to be genuinely ambient-proof, which is
-  the whole point of the rewrite.
-- **Stripping `GITHUB_STEP_SUMMARY` from the child does not break the safety
-  net's summary.** That step runs in its own runner shell with its own
-  environment (`eumemic-bot-review.yml:137`), not in the agent's — the same
-  argument that makes the `GITHUB_OUTPUT` strip free.
-- **`scripts/` is outside CI's ruff and mypy paths** (`code-validation.yml:242-246`
-  covers `src tests packages/… connectors/…`), so the launcher itself is
-  unlinted either way. Ran both against it by hand — clean. Widening the CI paths
-  to include `scripts/` is a real gap but belongs to its own change.
-
-## Commands run
-
-```
-uv run pytest -q tests/unit/test_eumemic_bot_review.py            # 53 -> 58 passed
-uv run mypy tests/unit/test_eumemic_bot_review.py                 # clean
-uv run ruff check src tests && uv run ruff format --check src tests
-uv run bash scripts/verify_eumemic_bot_review_gate.sh             # ALL CHECKS PASSED
-```
-
-The gate script is the sanctioned one-command re-verification from the previous
-round, and it still passes end to end: 58 unit tests, the GITHUB_OUTPUT mutant
-killed, the forged-`published=true` attack refused with the safety net still
-firing, and the honest agent still publishing.
-
-Plus the pre-fix reproduction, the simulated-runner ambient run, and the three
-mutation checks quoted above.
-
-**Full unit suite — two runs, and they do not agree.** `uv run pytest tests/unit
--q -n 4` gave `10 failed, 6178 passed` and then `2 failed, 6186 passed`, with
-*disjoint* failure sets (`test_attachment_staging`, `test_host_dir_reaper`,
-`test_image_resize`, `test_revocation_kinds_coverage` in the first;
-`test_invoke_session_tools`, `test_litellm_param_validation` in the second).
-Every one of them passes when its file is run on its own, so these are
-pre-existing ordering/parallelism flakes under xdist, not regressions: this
-branch changes no `src/` file, and none of the failing test files differ from
-`origin/master`. Reporting it because the numbers are real, not because it
-blocks this PR — but a suite whose failure set changes run to run is worth its
-own issue.
+The chokepoint now depends on DNS interception rather than on address samples.
+If the `-I` DNS DNAT rules were ever absent while the sandbox ran, a credential
+name would resolve to a real address and — under Unrestricted — egress direct.
+That is checked at provision by the read-back verify (all four chokepoint rules
+asserted) and is no longer reachable through the refresh sweep after the fix
+above, but it is the one invariant the design now rests on and is worth an
+explicit eye in review of any future change to `_nat_dnat_lines` or
+`build_lockdown_verify_script`.
