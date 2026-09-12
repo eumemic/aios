@@ -879,6 +879,7 @@ def purge_session_directories(
         (session_attachments_dir(session_id), (session_attachments_dir(session_id),)),
         (session_repos_root(session_id), (session_repos_root(session_id),)),
         (session_tmp_dir(session_id), (session_tmp_dir(session_id),)),
+        (session_cache_dir(session_id), (session_cache_dir(session_id),)),
     )
     # Prove EVERY target before deleting ANY of them. A prove-as-you-go loop
     # would already have rmtree'd the earlier directories by the time a later

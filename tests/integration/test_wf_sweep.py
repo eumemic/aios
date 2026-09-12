@@ -20,6 +20,7 @@ import pytest
 from aios.db.pool import create_pool
 from aios.db.queries import workflows as wf_queries
 from aios.models.workflows import WfRunSignalKind, WfRunStatus
+from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 from aios.workflows.determinism import HOST_SEMANTICS_EPOCH
 from aios.workflows.sweep import wake_runs_needing_step
 
@@ -85,7 +86,13 @@ async def _make_run(pool: asyncpg.Pool[Any], *, status: WfRunStatus = "suspended
 
 
 async def _call_started(
-    pool: asyncpg.Pool[Any], run_id: str, call_key: str, capability: str, *, age_seconds: float = 0
+    pool: asyncpg.Pool[Any],
+    run_id: str,
+    call_key: str,
+    capability: str,
+    *,
+    age_seconds: float = 0,
+    payload_extra: dict[str, Any] | None = None,
 ) -> None:
     async with pool.acquire() as conn:
         await wf_queries.append_run_event(
@@ -94,7 +101,7 @@ async def _call_started(
             run_id=run_id,
             type="call_started",
             call_key=call_key,
-            payload={"capability": capability},
+            payload={"capability": capability, **(payload_extra or {})},
         )
         if age_seconds:
             await conn.execute(
@@ -132,6 +139,9 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
             agent_deadline_seconds=AGENT_DEADLINE,
             tool_stale_seconds=TOOL_STALE,
             call_llm_stale_seconds=CALL_LLM_STALE,
+            bash_default_timeout_seconds=120,
+            sandbox_provisioning_slack_seconds=180,
+            max_bash_timeout_seconds=3_155_760_000,
         )
     return set(ids)
 
@@ -218,6 +228,184 @@ async def test_inflight_call_llm_wakes_past_stale_horizon(
     assert run_id not in await _needing(pool)
 
 
+async def test_long_run_bash_uses_its_pinned_horizon_after_environment_lowered(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A live call keeps its dispatch-time deadline if the environment is lowered."""
+    run_id = await _make_run(sweep_pool)
+    payload = {
+        "tool_name": "bash",
+        "input": {"command": "sleep 150", "timeout_seconds": 1200},
+        "resolved_timeout_seconds": 1200,
+    }
+    await _call_started(
+        sweep_pool, run_id, "sha:long#0", "tool", age_seconds=1300, payload_extra=payload
+    )
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 120}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
+    assert run_id not in await _needing(sweep_pool)  # pinned 1200 + 180 provisioning slack
+    await _call_started(
+        sweep_pool, run_id, "sha:long#1", "tool", age_seconds=1400, payload_extra=payload
+    )
+    assert run_id in await _needing(sweep_pool)
+
+
+@pytest.mark.parametrize(
+    ("pinned_timeout", "age_seconds", "should_wake"),
+    [
+        (MAX_BASH_TIMEOUT_SECONDS - 1, MAX_BASH_TIMEOUT_SECONDS + 178, False),
+        (MAX_BASH_TIMEOUT_SECONDS - 1, MAX_BASH_TIMEOUT_SECONDS + 180, True),
+        (MAX_BASH_TIMEOUT_SECONDS, MAX_BASH_TIMEOUT_SECONDS + 179, False),
+        (MAX_BASH_TIMEOUT_SECONDS, MAX_BASH_TIMEOUT_SECONDS + 181, True),
+        (MAX_BASH_TIMEOUT_SECONDS + 10_000, MAX_BASH_TIMEOUT_SECONDS + 179, False),
+        (MAX_BASH_TIMEOUT_SECONDS + 10_000, MAX_BASH_TIMEOUT_SECONDS + 181, True),
+    ],
+)
+async def test_pinned_timeout_sweep_uses_shared_bound_for_new_and_legacy_metadata(
+    sweep_pool: asyncpg.Pool[Any],
+    pinned_timeout: int,
+    age_seconds: float,
+    should_wake: bool,
+) -> None:
+    """Pins at either side of the bound and legacy oversized pins share one deadline."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        f"sha:bound#{pinned_timeout}-{age_seconds}",
+        "tool",
+        age_seconds=age_seconds,
+        payload_extra={
+            "tool_name": "bash",
+            "input": {"command": "true"},
+            "resolved_timeout_seconds": pinned_timeout,
+        },
+    )
+    assert (run_id in await _needing(sweep_pool)) is should_wake
+
+
+@pytest.mark.parametrize(
+    "environment_config",
+    [
+        {"bash_timeout_seconds": 1_200},  # valid today, but unused by old execution
+        {"bash_timeout_seconds": MAX_BASH_TIMEOUT_SECONDS + 1},
+        {"bash_timeout_seconds": 120.5},
+        {"bash_timeout_seconds": "120"},
+        {"bash_timeout_seconds": True},
+        {"bash_timeout_seconds": 0},
+        {"bash_timeout_seconds": -1},
+        {"bash_timeout_seconds": 120, "snapshot_budget_bytes": "malformed"},
+    ],
+)
+async def test_legacy_bash_uses_old_global_ceiling_despite_environment_config(
+    sweep_pool: asyncpg.Pool[Any], environment_config: dict[str, Any]
+) -> None:
+    """Pre-pin calls used the global ceiling; environment JSON cannot extend recovery."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:legacy-env#0",
+        "tool",
+        age_seconds=301,
+        payload_extra={"tool_name": "bash", "input": {"command": "true"}},
+    )
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = $1::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'",
+            environment_config,
+        )
+    assert run_id in await _needing(sweep_pool)
+
+
+async def test_legacy_bash_preserves_old_requested_timeout_clamp(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A pre-pin request shorter than the old global ceiling retains that deadline."""
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:legacy-request#0",
+        "tool",
+        age_seconds=301,
+        payload_extra={
+            "tool_name": "bash",
+            "input": {"command": "true", "timeout_seconds": 1.9},
+        },
+    )
+    assert run_id in await _needing(sweep_pool)
+
+
+async def test_legacy_bash_row_pinned_at_redispatch_widens_horizon_to_env_ceiling(
+    sweep_pool: asyncpg.Pool[Any],
+) -> None:
+    """A legacy (no-pin) bash call_started row bound to a high-ceiling environment is
+    re-woken by the sweep's legacy branch at the worker-global horizon
+    (120 + 180 = 300s); the SAME row, once pinned to the environment ceiling (what
+    the cold re-dispatch does on first re-drive), is left alone until the pinned
+    horizon (env ceiling + provisioning slack).
+
+    This is the SQL-level heart of the fix: before the pin the sweep models a
+    global-ceiling execution (horizon 300s) while the re-drive exec runs at the env
+    ceiling (1800s) — so the sweep re-matches a still-running re-driven exec every
+    tick past 300s. The pin routes the sweep to the pinned branch, whose horizon
+    tracks the same env ceiling the re-drive exec occupies, restoring the
+    horizon-vs-exec invariant. The legacy branch (the original exec was
+    global-bound) remains correct for the FIRST re-wake; the pin switches the
+    sweep to the env-derived horizon for every subsequent tick.
+    """
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE environments SET config = '{\"bash_timeout_seconds\": 1800}'::jsonb "
+            "WHERE id = 'env_sw' AND account_id = 'acc_sw'"
+        )
+    run_id = await _make_run(sweep_pool)
+    await _call_started(
+        sweep_pool,
+        run_id,
+        "sha:legacy-pin#0",
+        "tool",
+        age_seconds=600,
+        payload_extra={"tool_name": "bash", "input": {"command": "true"}},
+    )
+    # No pin: the legacy branch fires once age exceeds the 300s global horizon — so
+    # a 600s-old row IS re-woken (the storm window: the re-driven exec occupies up to
+    # the 1800s env ceiling, but the sweep re-matches at 300s).
+    assert run_id in await _needing(sweep_pool)
+
+    # Pin the row to the env ceiling — exactly what step.py's cold re-dispatch does —
+    # and re-age it to 600s so the same row is compared at the same age.
+    async with sweep_pool.acquire() as conn:
+        await wf_queries.pin_call_started_timeout(
+            conn,
+            run_id=run_id,
+            call_key="sha:legacy-pin#0",
+            resolved_timeout_seconds=1800,
+        )
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 600) "
+            "WHERE run_id = $1 AND call_key = 'sha:legacy-pin#0' AND type = 'call_started'",
+            run_id,
+        )
+    # Pinned branch: horizon = 1800 + 180 = 1980s; age 600 < 1980 → the sweep leaves
+    # the still-running re-driven exec alone (no re-drive storm).
+    assert run_id not in await _needing(sweep_pool)
+
+    # Past the pinned horizon a genuinely-crashed re-drive is still recoverable.
+    async with sweep_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE wf_run_events SET created_at = now() - make_interval(secs => 2000) "
+            "WHERE run_id = $1 AND call_key = 'sha:legacy-pin#0' AND type = 'call_started'",
+            run_id,
+        )
+    assert run_id in await _needing(sweep_pool)
+
+
 async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
     sweep_pool: asyncpg.Pool[Any],
 ) -> None:
@@ -241,6 +429,9 @@ async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
                 agent_deadline_seconds=AGENT_DEADLINE,
                 tool_stale_seconds=horizon,
                 call_llm_stale_seconds=CALL_LLM_STALE,
+                bash_default_timeout_seconds=120,
+                sandbox_provisioning_slack_seconds=180,
+                max_bash_timeout_seconds=3_155_760_000,
             )
         return set(ids)
 

@@ -7,6 +7,7 @@ asyncpg, same conventions as the rest of the package.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
@@ -27,12 +28,17 @@ from aios.ids import (
     EVENT,
     make_id,
 )
+from aios.logging import get_logger
 from aios.models.events import (
     MODEL_VISIBLE_LIFECYCLE_EVENTS,
+    REMINDER_EXCLUDE_SQL,
     Event,
     EventKind,
     is_errored_lifecycle_event,
+    is_reminder_event,
 )
+
+log = get_logger(__name__)
 
 
 @runtime_checkable
@@ -74,15 +80,64 @@ def _row_to_event(row: asyncpg.Record) -> Event:
     )
 
 
-async def _latest_cumulative_tokens(conn: asyncpg.Connection[Any], session_id: str) -> int | None:
-    """Fetch the cumulative_tokens value of the most recent message event."""
-    val: int | None = await conn.fetchval(
-        "SELECT cumulative_tokens FROM events "
+_STIMULUS_ROW_SQL = f"AND role <> 'assistant' AND {REMINDER_EXCLUDE_SQL.format(col='data')} "
+
+
+async def _latest_cumulative_tokens(
+    conn: asyncpg.Connection[Any], session_id: str, *, stimulus_only: bool = False
+) -> int | None:
+    """Fetch the cumulative_tokens value of the most recent message event.
+
+    ``stimulus_only`` narrows it to the RENDERABLE ANCHOR of the most recent
+    STIMULUS — a non-assistant row that is not a harness-authored reminder.
+    The windower's retain-the-tail clamp keys on that anchor, not on the
+    newest message: durable reminder rows are appended AFTER the stimulus and
+    BEFORE the model call, so on a failed attempt (context overflow retry with
+    ``window_min=0``, a provider error, a deadline) they are the newest rows.
+    Clamping to the newest *message* would retain a reminder and evict the
+    unanswered stimulus — the retry would then succeed on a reminder-only
+    prompt and the session would idle with the stimulus never answered. A
+    tool-result stimulus renders only with its issuing assistant in the slate
+    (``_prune_orphans`` drops it otherwise, while the watermark still
+    advances), so its anchor is that assistant's ``cumulative_tokens``.
+    """
+    if not stimulus_only:
+        val: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+        )
+        return val
+    row = await conn.fetchrow(
+        "SELECT cumulative_tokens, role, data->>'tool_call_id' AS tool_call_id FROM events "
         "WHERE session_id = $1 AND kind = 'message' "
+        f"{_STIMULUS_ROW_SQL}"
         "AND cumulative_tokens IS NOT NULL "
         "ORDER BY seq DESC LIMIT 1",
         session_id,
     )
+    if row is None:
+        return None
+    if row["role"] == "tool" and isinstance(row["tool_call_id"], str) and row["tool_call_id"]:
+        # Same predicates as ``_lookup_tool_parent_channel`` (the
+        # ``events_assistant_tool_calls_idx`` partial index, reverse-seq walk).
+        anchor: int | None = await conn.fetchval(
+            "SELECT cumulative_tokens FROM events "
+            "WHERE session_id = $1 AND kind = 'message' "
+            "  AND data->>'role' = 'assistant' "
+            "  AND data ? 'tool_calls' "
+            "  AND data->'tool_calls' @> jsonb_build_array("
+            "    jsonb_build_object('id', $2::text)) "
+            "  AND cumulative_tokens IS NOT NULL "
+            "ORDER BY seq DESC LIMIT 1",
+            session_id,
+            row["tool_call_id"],
+        )
+        if anchor is not None:
+            return anchor
+    val = row["cumulative_tokens"]
     return val
 
 
@@ -273,16 +328,61 @@ _WINDOW_FLOOR_MAX_FRACTION = 0.75
 
 _model_token_ratio_cache: dict[tuple[str, float], tuple[float, dict[str, float]]] = {}
 
+# Single-flight gate for the cold fit, one per cache key (issue #2244).  A
+# LOCK, deliberately not a shared ``asyncio.Task``: ``conn`` is borrowed from
+# the pool for the duration of ONE caller.  A fit task that outlives its caller
+# keeps issuing on a connection the pool has already reset and handed to
+# somebody else — asyncpg detects the in-flight operation during release,
+# terminates the connection, and every other waiter on that shared task dies
+# with it (plus the unrelated borrower).  Holding a lock instead keeps every
+# query on the connection of the coroutine that owns it, and a cancelled leader
+# simply hands the fit to the next waiter.  Same key space as the cache above,
+# so this adds no new unbounded growth.
+_model_token_ratio_fit_locks: dict[tuple[str, float], asyncio.Lock] = {}
+
 
 def _clear_model_token_ratio_cache() -> None:
     """Clear the process-local token-ratio cache for tests."""
     _model_token_ratio_cache.clear()
+    _model_token_ratio_fit_locks.clear()
 
 
-def _neutral_class_ratios() -> dict[str, float]:
+def _neutral_class_targets() -> dict[str, float]:
     """The all-1.0 coefficient dict — reduces the windower to today's
     byte-identical model-neutral behavior (issue #1609 acceptance #5)."""
     return {c: 1.0 for c in CONTENT_CLASSES}
+
+
+def _cached_class_targets(cache_key: tuple[str, float]) -> dict[str, float] | None:
+    """The live cache entry for ``cache_key``, evicting it once expired."""
+    cached = _model_token_ratio_cache.get(cache_key)
+    if cached is None:
+        return None
+    expires_at, targets = cached
+    if expires_at > time.monotonic():
+        return dict(targets)
+    del _model_token_ratio_cache[cache_key]
+    return None
+
+
+async def _fit_and_cache_class_targets(
+    conn: asyncpg.Connection[Any],
+    model: str,
+    *,
+    account_id: str,
+    cache_key: tuple[str, float],
+) -> dict[str, float]:
+    """Run one cold fit and publish its cache entry before completing."""
+    fitted, n_samples = await model_token_class_ratio_fit(conn, model, account_id=account_id)
+    now = time.monotonic()
+    if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
+        targets = _neutral_class_targets()
+        ttl = _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS
+    else:
+        targets = fitted
+        ttl = _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS
+    _model_token_ratio_cache[cache_key] = (now + ttl, targets)
+    return dict(targets)
 
 
 def _solve_ridge(
@@ -397,10 +497,12 @@ async def model_token_class_ratios(
     they accumulate (same contract as #160).
 
     Mature fits are cached 60 s; below-threshold neutral results are cached
-    10 s to bound the activation lag.  ``k_bucket`` partitions the cache so
-    callers using different calibration bucket widths do not share fitted
-    results.  The per-class fit's stability comes from the ridge regularizer,
-    not bucket quantization.
+    10 s to bound the activation lag. Cold fits are single-flight per
+    ``(model, k_bucket)`` so concurrent post-restart wakes share one bounded
+    query. ``k_bucket`` partitions both the cache and in-flight work so callers
+    using different calibration bucket widths do not share fitted results. The
+    per-class fit's stability comes from the ridge regularizer, not bucket
+    quantization.
 
     ``model`` is the raw model string (``agent.model``) — NO
     NORMALIZATION; the same string must appear at stamp and query time.
@@ -431,29 +533,27 @@ async def model_token_class_ratios(
         raise ValueError("k_bucket must be positive")
 
     cache_key = (model, k_bucket)
-    now = time.monotonic()
-    cached = _model_token_ratio_cache.get(cache_key)
+    cached = _cached_class_targets(cache_key)
     if cached is not None:
-        expires_at, ratios = cached
-        if expires_at > now:
-            return dict(ratios)
-        del _model_token_ratio_cache[cache_key]
+        return cached
 
-    fitted, n_samples = await model_token_class_ratio_fit(conn, model, account_id=account_id)
-
-    if n_samples < _MODEL_TOKEN_RATIO_MIN_SAMPLES or fitted is None:
-        neutral = _neutral_class_ratios()
-        _model_token_ratio_cache[cache_key] = (
-            now + _MODEL_TOKEN_RATIO_BELOW_THRESHOLD_CACHE_TTL_SECONDS,
-            neutral,
+    # A restart can put many wakes for the same model on this cold-cache path
+    # at once.  Serialize them on ``_model_token_ratio_fit_locks`` so exactly
+    # one runs the bounded scan; the rest wake to the cache entry it publishes
+    # (including the 10 s neutral entry a statement timeout leaves behind, so
+    # a slow database is scanned once per herd, not once per wake).
+    lock = _model_token_ratio_fit_locks.get(cache_key)
+    if lock is None:
+        lock = _model_token_ratio_fit_locks[cache_key] = asyncio.Lock()
+    async with lock:
+        # The leader published while we waited — or was cancelled, in which
+        # case this caller becomes the leader and fits on its own connection.
+        cached = _cached_class_targets(cache_key)
+        if cached is not None:
+            return cached
+        return await _fit_and_cache_class_targets(
+            conn, model, account_id=account_id, cache_key=cache_key
         )
-        return dict(neutral)
-
-    _model_token_ratio_cache[cache_key] = (
-        now + _MODEL_TOKEN_RATIO_CACHE_TTL_SECONDS,
-        fitted,
-    )
-    return dict(fitted)
 
 
 async def model_token_class_ratio_fit(
@@ -471,40 +571,52 @@ async def model_token_class_ratio_fit(
     provider-native), so mixing baselines in one fit would poison the
     coefficients.  After a baseline bump the fit self-heals: it returns the
     neutral fallback until enough current-baseline spans accumulate.
+
+    A statement timeout is also a neutral result: calibration is optional and
+    must not turn database pressure into a failed product wake (issue #2244).
+    Its coefficients are byte-identical to a legitimately under-sampled fit,
+    so the ``calibration.fit_timeout`` warning emitted at the except site is
+    the ONLY runtime signal that separates the two (issue #2401).
     """
     del account_id
-    rows = await conn.fetch(
-        """
-        SELECT
-            (data->'model_usage'->>'input_tokens')::float AS it,
-            data->'local_tokens_by_class'                 AS by_class
-        FROM events
-        WHERE kind = 'span'
-          AND data->>'event' = 'model_request_end'
-          AND (data->>'is_error')::boolean = false
-          AND data->>'model' = $1
-          AND (data->>'token_baseline_v')::smallint = $3
-          AND data ? 'local_tokens'
-          AND data ? 'local_tokens_by_class'
-          AND data ? 'model'
-          AND (data->'model_usage') ? 'input_tokens'
-          AND (data->'model_usage'->>'input_tokens') IS NOT NULL
-          -- Regex gates make the casts defensive against future malformed or
-          -- non-integral JSON values (e.g. "150.5").
-          AND (data->'model_usage'->>'input_tokens') ~ '^[0-9]+$'
-          AND (data->'model_usage'->>'input_tokens')::numeric > 0
-          AND (data->>'local_tokens') ~ '^[0-9]+$'
-          AND (data->>'local_tokens')::numeric > 0
-        -- Bound the scan to the globally most recent N spans (issue #1711).
-        -- seq is session-local, so created_at must lead across sessions.
-        -- MIN_SAMPLES is still checked below the fetch.
-        ORDER BY created_at DESC, session_id DESC, seq DESC
-        LIMIT $2
-        """,
-        model,
-        _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
-        TOKEN_BASELINE_CURRENT,
-    )
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT
+                (data->'model_usage'->>'input_tokens')::float AS it,
+                data->'local_tokens_by_class'                 AS by_class
+            FROM events
+            WHERE kind = 'span'
+              AND data->>'event' = 'model_request_end'
+              AND (data->>'is_error')::boolean = false
+              AND data->>'model' = $1
+              AND (data->>'token_baseline_v')::smallint = $3
+              AND data ? 'local_tokens'
+              AND data ? 'local_tokens_by_class'
+              AND data ? 'model'
+              AND (data->'model_usage') ? 'input_tokens'
+              AND (data->'model_usage'->>'input_tokens') IS NOT NULL
+              -- Regex gates make the casts defensive against future malformed or
+              -- non-integral JSON values (e.g. "150.5").
+              AND (data->'model_usage'->>'input_tokens') ~ '^[0-9]+$'
+              AND (data->'model_usage'->>'input_tokens')::numeric > 0
+              AND (data->>'local_tokens') ~ '^[0-9]+$'
+              AND (data->>'local_tokens')::numeric > 0
+            -- Bound the scan to the globally most recent N spans (issue #1711).
+            -- seq is session-local, so created_at must lead across sessions.
+            -- MIN_SAMPLES is still checked below the fetch.
+            ORDER BY created_at DESC, session_id DESC, seq DESC
+            LIMIT $2
+            """,
+            model,
+            _MODEL_TOKEN_RATIO_SAMPLE_LIMIT,
+            TOKEN_BASELINE_CURRENT,
+        )
+    except asyncpg.exceptions.QueryCanceledError:
+        # Calibration is optional. A neutral window is safer than turning a
+        # busy database's statement timeout into a failed product wake.
+        log.warning("calibration.fit_timeout", model=model)
+        return _neutral_class_targets(), 0
     return _fit_class_ratios(rows), len(rows)
 
 
@@ -566,7 +678,7 @@ async def calibration_telemetry(conn: asyncpg.Connection[Any]) -> dict[str, dict
         coefficients, fitted_n = await model_token_class_ratio_fit(
             conn, model, account_id="telemetry"
         )
-        effective = coefficients or _neutral_class_ratios()
+        effective = coefficients or _neutral_class_targets()
         composition = {c: float(row[f"mass_{c}"]) for c in CONTENT_CLASSES}
         result[model] = {
             "fitted_r_eff": blended_r_eff(effective, composition),
@@ -627,7 +739,7 @@ def _fit_class_ratios(rows: list[Any]) -> dict[str, float] | None:
     if coefs is None:
         return None
 
-    out = _neutral_class_ratios()
+    out = _neutral_class_targets()
     for idx, j in enumerate(active):
         c = coefs[idx]
         # Clamp to the physical range; the windower divides by the blend.
@@ -1312,9 +1424,11 @@ async def precompute_event_append(
     delta = delta_v1 = delta_v2 = 0
     if kind == "message":
         pre_focal: str | None = None
-        if data.get("role") == "user":
+        if data.get("role") == "user" and not is_reminder_event(kind, data):
             # USER token count needs the focal channel to render the as-sent
-            # form.  This pre-read is OUTSIDE any transaction; a concurrent
+            # form (a reminder row renders bare — no focal, no envelope — so
+            # its price needs no pre-read).  This pre-read is OUTSIDE any
+            # transaction; a concurrent
             # ``switch_channel`` committing before the lock can make it stale
             # (bounded drift — see ``append_event``'s docstring).  The STORED
             # stamp is always the locked RETURNING value, unaffected by this read.
@@ -1475,7 +1589,12 @@ async def append_event(
     # so an errored session recovers automatically once a user message lands
     # (its seq exceeds the latest error lifecycle event — see
     # ``_SESSION_ERRORED_EXPR``), and the sweep stops skipping it (#39, #353).
-    is_user_message = kind == "message" and role == "user"
+    # A harness-authored reminder row (``is_reminder_event``) is a user-role
+    # message the model reads but not a stimulus: it must neither bump the
+    # interaction time / clear the error latch nor look like something the
+    # assistant has yet to react to.
+    is_reminder = is_reminder_event(kind, data)
+    is_user_message = kind == "message" and role == "user" and not is_reminder
     # A *stimulus* is any message the assistant must react to: user OR tool
     # (role <> 'assistant'). ``last_stimulus_seq`` tracks its max seq and drives
     # the active predicate. This is deliberately broader than ``is_user_message``
@@ -1485,7 +1604,7 @@ async def append_event(
     # Every tool result is a stimulus: the session wakes and the model gets a
     # turn to react to any tool completion (including a ``signal_send`` delivery
     # ack), restoring the standard agentic loop (tool call → result → continue).
-    is_stimulus = kind == "message" and role != "assistant"
+    is_stimulus = kind == "message" and role != "assistant" and not is_reminder
     # ``is_errored_lifecycle_event`` reads the SAME constant the error latch
     # writes (``harness/loop.py:_latch_errored_turn``). The read is off the JSONB
     # ``data`` (type ``Any``), which cannot bind to the write literal — see the
@@ -1666,7 +1785,10 @@ async def append_event(
             effective_delta = precomputed.delta_for(token_baseline_v)
             prev = await _latest_cumulative_state(conn, session_id)
             cum_tokens = (prev.tokens or 0) + effective_delta
-            counts_as_message = role in ("user", "assistant")
+            # Reminder rows are user-role but not conversation: the head
+            # omission marker reports ``cumulative_messages`` as "messages
+            # omitted", which must not count the harness's own bookkeeping.
+            counts_as_message = role in ("user", "assistant") and not is_reminder
             cum_messages = (prev.messages or 0) + (1 if counts_as_message else 0)
             cls = _message_content_class(role, data)
             if image_aware:
@@ -2799,10 +2921,14 @@ async def read_windowed_events(
     # while the omission complement still matches every row. That pairing
     # (empty events + a non-None omission) crashes ``build_messages``, which
     # reads ``events[0].created_at`` to anchor the omission marker and relies
-    # on the inverse invariant. Clamp so the most recent event always survives
-    # (its ``cumulative_tokens == total``) — the
-    # retain-the-tail-even-when-oversized guarantee.
-    drop = min(drop, total - 1)
+    # on the inverse invariant. Clamp so the most recent STIMULUS always
+    # survives — the retain-the-tail-even-when-oversized guarantee. The newest
+    # message row may be a durable reminder written before a failed attempt
+    # (see ``_latest_cumulative_tokens``); keying on it would evict the
+    # unanswered stimulus behind it. Falls back to the newest message when
+    # the log holds no stimulus row at all.
+    stimulus_cum = await _latest_cumulative_tokens(conn, session_id, stimulus_only=True)
+    drop = min(drop, (stimulus_cum if stimulus_cum is not None else total) - 1)
 
     # Bounded range scan: messages past the boundary, plus the FS-loss
     # notices past the dropped-message prefix. Bare call (not via ``queries``)
@@ -2845,7 +2971,8 @@ async def read_windowed_events(
         # index cond, and only for the un-backfilled tail (transient across a
         # rolling deploy), so it never re-introduces the O(session-size) term.
         omitted_messages = await conn.fetchval(
-            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant')) "
+            "SELECT count(*) FILTER (WHERE role IN ('user', 'assistant') "
+            f"AND {REMINDER_EXCLUDE_SQL.format(col='data')}) "
             "FROM events "
             "WHERE session_id = $1 AND account_id = $3 AND kind = 'message' "
             "AND cumulative_tokens <= $2",

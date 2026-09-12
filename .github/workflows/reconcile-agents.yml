@@ -67,4 +67,17 @@ jobs:
         env:
           # Provisioned out-of-band by the maintainer; NEVER inline a key.
           AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
+          # Inert placeholders, NOT key material: all-zero keys and a loopback DSN
+          # (pinned as such by test_live_step_inlines_no_real_key_material).
+          # AgentCreate's mcp_servers[].url validator imports aios.tools.url_safety,
+          # and that runs the EAGER aios.tools package __init__ -> aios.jobs.app,
+          # whose module-level App(connector=...) constructs the FULL Settings. So a
+          # step carrying only AIOS_URL + AIOS_API_KEY dies validating the first
+          # manifest with an MCP server, even though reconciliation never decrypts
+          # vault data, signs an egress certificate, or opens a DB connection.
+          # (Deleting these needs url_safety lifted out of the aios.tools package,
+          # so the leaf classifier imports without the tool graph behind it.)
+          AIOS_VAULT_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          AIOS_EGRESS_CA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          AIOS_DB_URL: postgresql://unused:unused@localhost:5432/unused
         run: uv run python scripts/reconcile_agents.py

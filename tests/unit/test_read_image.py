@@ -15,6 +15,7 @@ import pytest
 
 from aios.config import get_settings
 from aios.harness import runtime, vision
+from aios.harness.model_binding import effective_capability_model
 from aios.sandbox.backends.base import CommandResult, SandboxHandle
 from aios.sandbox.volumes import session_attachments_dir, workspace_dir_for
 from aios.tools.read import read_handler
@@ -380,6 +381,105 @@ class TestImageBranch:
         assert isinstance(result.content, str)
         assert "Mind vision support: no" in result.content
         assert result.is_error is False
+
+    async def test_workflow_binding_with_text_only_inner_model_degrades_to_text(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``workflow:<id>`` binding resolved to a text-only ``output_model``
+        degrades the image to a text marker — NOT an inlined ``image_url`` part
+        the inner model would 400 on every replay wake.
+
+        Pre-fix ``_read_image`` keyed the vision gate on the raw ``workflow:``
+        string from ``get_session_model``; ``supports_vision`` →
+        ``litellm.get_model_info`` raises → ``None`` → the ``is False`` gate
+        fell through and inlined the image, wedging every workflow-bound session
+        whose inner model was text-only. The handler must resolve the binding
+        to its declared ``output_model`` first (symmetric with the loop's
+        ``_resolve_capability_model``).
+        """
+        stub_get_session_model.value = "workflow:wf_text_only"
+
+        resolved: dict[str, Any] = {}
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            resolved["called_with"] = model
+            return effective_capability_model(model, output_model="model/text")
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        _stage_workspace_image("sess_01TEST", "screenshot.png", valid_png_bytes())
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/screenshot.png"})
+
+        assert resolved["called_with"] == "workflow:wf_text_only"
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, str), (
+            f"text-only workflow binding must degrade to a marker; got {result.content!r}"
+        )
+        assert "Mind vision support: no" in result.content
+        assert result.is_error is False
+
+    async def test_workflow_binding_with_vision_inner_model_inlines(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``workflow:<id>`` binding resolved to a vision-capable
+        ``output_model`` inlines the image — the resolution must not
+        over-degrade a vision-capable bound model."""
+        stub_get_session_model.value = "workflow:wf_vision"
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            return effective_capability_model(model, output_model="model/vision")
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        payload = valid_png_bytes()
+        _stage_workspace_image("sess_01TEST", "shot.png", payload)
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/shot.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list)
+        assert result.content[1] == {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{base64.b64encode(payload).decode()}"},
+        }
+
+    async def test_workflow_binding_with_unresolved_output_model_inlines_optimistically(
+        self,
+        temp_workspace_root: Path,
+        stub_runtime: Any,
+        stub_get_session_model: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A ``workflow:<id>`` binding whose lookup yields no ``output_model``
+        falls back to the raw ``workflow:`` string → ``None`` → optimistic
+        inline (unknown is not False). No worse than the pre-#1637 posture."""
+        stub_get_session_model.value = "workflow:wf_unresolved"
+
+        async def fake_resolve(_pool: Any, model: str, *, account_id: str) -> str:
+            return effective_capability_model(model, output_model=None)
+
+        monkeypatch.setattr("aios.harness.loop._resolve_capability_model", fake_resolve)
+        monkeypatch.setattr(
+            "litellm.get_model_info",
+            lambda _model: (_ for _ in ()).throw(Exception("unknown model")),
+        )
+        payload = valid_png_bytes()
+        _stage_workspace_image("sess_01TEST", "shot.png", payload)
+
+        result = await read_handler("sess_01TEST", {"path": "/workspace/shot.png"})
+
+        assert isinstance(result, ToolResult)
+        assert isinstance(result.content, list), (
+            f"unresolved workflow binding should optimistically inline; got {result.content!r}"
+        )
+        assert result.content[1]["type"] == "image_url"
 
     async def test_oversize_image_blocked_with_explanatory_text(
         self,

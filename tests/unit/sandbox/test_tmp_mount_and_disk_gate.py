@@ -269,7 +269,6 @@ def _settings_with(**overrides: object) -> object:
         "sandbox_snapshot_timeout_floor_seconds",
         "sandbox_snapshot_timeout_retry_multiplier",
         "sandbox_snapshot_timeout_retry_cap",
-        "sandbox_snapshot_throughput_state_path",
         "sandbox_docker_cli_timeout_seconds",
         "sandbox_disk_stat_path",
     ):

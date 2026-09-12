@@ -47,9 +47,9 @@ resolved-by-#1516 by the seat/chairman.
 The mechanism (unchanged)
 -------------------------
 The *gating* already exists and works — an open awaited obligation drives the
-quiescence-guard nudge / ``no_return`` loop (``db/queries/sessions.py`` +
-``harness/context.py`` ``_agent_owes_response``) and renders in the "Open
-obligations" tail block (``harness/obligations.py``). The ONLY way to open a
+quiescence-guard nudge / ``no_return`` loop (``db/queries/sessions.py``) and
+renders in the durable "Open obligations" reminder row (``harness/obligations.py``
++ ``harness/reminders.py``). The ONLY way to open a
 self-goal used to be the cryptic ``call_session(session_id=<its own id>, input=…)``
 awaited self-call (#1414) — undiscoverable, awkward, easy to forget; ``create_goal``
 is the explicit, first-class surface over that SAME mechanism (it does NOT reinvent
@@ -85,7 +85,7 @@ from aios.db import queries
 from aios.harness import runtime
 from aios.models.sessions import Obligation
 from aios.services import sessions as sessions_service
-from aios.tools.invoke import ToolBail
+from aios.tools.invoke import ToolBail, validate_output_schema_or_bail
 from aios.tools.registry import ToolResult, registry
 
 # ─── argument models ─────────────────────────────────────────────────────────
@@ -160,6 +160,12 @@ async def create_goal_handler(
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = _parse(_CreateGoalArgs, arguments)
+    # OPEN-time schema-validity gate (#1513): a malformed output_schema is an
+    # un-closable completion contract — reject it here via ToolBail (the
+    # self-correctable, non-evicting channel) BEFORE it is persisted on the
+    # request_opened edge, rather than letting the CLOSE-time formatter
+    # crash/mis-validate on it. Mirrors step._reject_invalid_output_schema.
+    validate_output_schema_or_bail(args.output_schema)
 
     # Admission cap: count THIS session's currently-open self-goals (concurrency,
     # not a lifetime budget — closing a goal with return/error frees slots).
@@ -179,7 +185,7 @@ async def create_goal_handler(
         )
 
     # The goal text becomes the request input (the definition-of-done preview the
-    # tail block renders); the REQUIRED output_schema becomes the completion contract,
+    # reminder row renders); the REQUIRED output_schema becomes the completion contract,
     # persisted on the same request_opened frame the way call_* carry output_schema
     # (#1512) — `return` validates its value against it servicer-side.
     goal_input: dict[str, Any] = {"goal": args.goal}
