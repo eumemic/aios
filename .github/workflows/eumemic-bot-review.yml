@@ -1,10 +1,10 @@
-# eumemic-bot PR reviews — run the live aios reviewer and publish its artifact
-# as the GitHub App. The launcher (scripts/eumemic_bot_review.py) waits for the
-# session, POSTs the `### Code review` comment itself, and verifies it landed
-# before archiving, so the job outlives the review rather than firing and
-# forgetting. Must never FAIL the PR check: aios account/agent misses are ops,
-# not a code defect. The job is named "aios-review" so it does not collide with
-# other "review" required checks.
+# eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
+# checkout and publish its artifact as the GitHub App. No aios session is
+# created: the launcher (scripts/eumemic_bot_review.py) runs the harness for the
+# routed model through the eumemic proxies, POSTs the `### Code review` comment
+# itself, and verifies it landed. Must never FAIL the PR check: a harness or
+# proxy miss is ops, not a code defect — hence continue-on-error plus the job
+# summary below, which is what keeps a missing review visible instead of silent.
 name: eumemic-bot review
 
 on:
@@ -19,20 +19,42 @@ permissions:
   contents: read
 
 env:
-  AIOS_URL: https://api.aios.eumemic.ai
+  REVIEW_MODEL: ${{ vars.EUMEMIC_BOT_REVIEW_MODEL || 'gpt-5.6-sol' }}
 
 jobs:
   review:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # Must outlive REVIEW_TIMEOUT_SECONDS plus the launcher's final long-poll
-    # (a poll issued just under the deadline holds the socket for up to 60s),
-    # plus checkout + token mint + the GitHub POST. A review that overruns has
-    # to hit the launcher's own FATAL, not this: continue-on-error then keeps
-    # the check green and still writes the "did not post" job summary below.
-    timeout-minutes: 50
+    # Outlives REVIEW_TIMEOUT_SECONDS plus checkout, npm install, token mint and
+    # the GitHub POST. A review that overruns has to hit the launcher's own
+    # FATAL, not this: continue-on-error then keeps the check green and still
+    # writes the "did not post" job summary, whereas a runner kill takes both.
+    timeout-minutes: 20
     steps:
+      # Explicit head SHA, not the synthetic merge commit: the agent reviews the
+      # tree the PR actually proposes. fetch-depth 0 brings the base history the
+      # launcher hands the agent as the `base...head` range.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Only the routed harness: installing all three triples the install time
+      # and lets an unrelated publisher hiccup block every review.
+      - name: Install the coding-agent harness
+        id: harness
+        continue-on-error: true
+        run: |
+          case "$REVIEW_MODEL" in
+            gpt-*)    package='@openai/codex' ;;
+            claude-*) package='@anthropic-ai/claude-code' ;;
+            grok-*)   package='@mariozechner/pi-coding-agent' ;;
+            *)
+              echo "unsupported REVIEW_MODEL '$REVIEW_MODEL'" >&2
+              exit 1
+              ;;
+          esac
+          npm install --global "$package"
 
       - name: Mint eumemic-bot installation token
         id: app
@@ -43,30 +65,33 @@ jobs:
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
           # No skip-token-revoke: the launcher POSTs and verifies ### Code review
           # inside this job, so nothing needs the installation token once the job
-          # ends. The action's post-step revoke runs after every step, so it can
-          # no longer 401 the publisher the way it did when the session posted.
+          # ends.
 
+      # The launcher strips GH_TOKEN and every unrouted proxy key from the
+      # agent's environment before exec — the agent reads PR-authored files and
+      # runs shell commands, so it must not hold a token that can write.
       - name: Review and post as eumemic-bot
         id: review
-        if: steps.app.outcome == 'success'
+        if: steps.harness.outcome == 'success' && steps.app.outcome == 'success'
         continue-on-error: true
         env:
-          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
-          AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REVIEW_TIMEOUT_SECONDS: "2700"
+          OAI_PROXY_API_KEY: ${{ secrets.OAI_PROXY_API_KEY }}
+          ANT_PROXY_API_KEY: ${{ secrets.ANT_PROXY_API_KEY }}
+          XAI_PROXY_API_KEY: ${{ secrets.XAI_PROXY_API_KEY }}
+          REVIEW_TIMEOUT_SECONDS: "900"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CLONE_URL: ${{ github.event.pull_request.head.repo.clone_url }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/eumemic_bot_review.py
 
-      # continue-on-error above keeps an ops miss (live agent down, API
-      # unreachable) from blocking merges. But a silently green run is exactly
-      # how the missing `### Code review` comments went unnoticed, so a run that
-      # published nothing says so where a reader sees it without opening logs.
+      # continue-on-error above keeps an ops miss from blocking merges. But a
+      # silently green run is exactly how missing `### Code review` comments went
+      # unnoticed, so a run that published nothing says so where a reader sees it
+      # without opening logs.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
+        if: always() && (steps.harness.outcome == 'failure' || steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
