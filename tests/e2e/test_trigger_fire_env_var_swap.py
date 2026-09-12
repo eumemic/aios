@@ -82,11 +82,19 @@ _SWAP_SECRET = "ghp_TRIGGER_SWAP_FIRED_REAL_SECRET_DO_NOT_LEAK"
 # chokepoint. The body is written to /tmp (never stdout) so the recorder's
 # echo, not the swapped header, is all that could surface in the audit trail.
 _SWAP_COMMAND = (
-    # The sandbox's credential-host DNAT is intentionally IPv4-only.  Without
-    # ``-4`` curl may prefer an AAAA answer for api.github.com and connect over
-    # IPv6, bypassing the DNAT chokepoint entirely (the trigger then records a
-    # successful command with no request at our redirected upstream).  Pin the
-    # client family here; IPv6 policy is covered by the networking tests.
+    # ``-4`` pins the client address family to the chokepoint's: every rule the
+    # sidecar emits is IPv4 (``resolve_ipv4`` / ``getent ahostsv4`` in
+    # ``sandbox/setup.py``) and the secret-egress proxy binds the IPv4 worker
+    # alias, so an IPv6 connection would match no DNAT. This is a STANDING
+    # GUARD, not the fix for an observed failure: ``api.github.com`` publishes
+    # no AAAA today and the ``aios-sandbox`` bridge is created ``--ipv6=false``,
+    # so there is no v6 path to take — but a future AAAA rollout would route the
+    # placeholder around the proxy under Unrestricted, silently. The
+    # empty-recorder flake this module has shown in CI is the #2042 DNS-sampling
+    # residual documented in ``sandbox/setup.py``: the sidecar pins only the
+    # addresses its one ``getent`` sampled, curl re-resolves at fire time, and a
+    # rotating pool can hand it an address no DNAT covers (Unrestricted then
+    # egresses DIRECT, Limited DROPs — either way the recorder sees nothing).
     f"curl -4 -sS --max-time 25 -o /tmp/body "
     f'-H "Authorization: Bearer ${_SECRET_NAME}" '
     f"https://{_SWAP_HOST}/trigger-swap-probe"
