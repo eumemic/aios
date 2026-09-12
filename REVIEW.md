@@ -1,162 +1,178 @@
-# Uncorrelated review — trigger-swap DNAT e2e legs
+# Uncorrelated review of implementer tip `ed19d9d4` (#2422)
 
-- **Branch:** `trigswap2rev` (worktree `/workspace/aios-trigswap2rev`)
-- **Reviewed tip:** `6fe45254` (on `9441ef39`, both on master tip `0b07495e`)
-- **Verdict: fail** — the reviewed tip was a wholesale revert of master, not an
-  integration. The *diagnosis* it claims is correct and is kept; the delivery
-  destroyed thirteen shipped master behaviors and left the tree unable to
-  typecheck or even collect its unit tests. Fixed on this branch.
-- **Final code HEAD:** `197c9c45` — all review fixes. `HEAD` is the
-  commit that adds this file on top of it (a commit cannot carry its own
-  sha); `git log --oneline -1` prints it.
-- Not pushed; no PR opened; still on `trigswap2rev`.
+**Verdict: FAIL** (as submitted). The implementer's stated root cause is wrong and
+the patch is a provable no-op; the real defect was adjacent and untouched. Fixed
+on this branch (`trigswap3rev`).
 
-## What the tip actually did
+## Verdict on the implementer's claim
 
-`9441ef39` applied the July-2026 #2042 PR tip as a **whole-file replacement**
-onto `0b07495e`. Evidence, all from the reviewed tip:
+> "`build_lockdown_verify_script` exact-matched sentinel `169.254.53.53`, but some
+> CI `iptables -S` backends canonicalize to `169.254.53.53/32`, so DNAT/REJECT
+> looked missing."
 
-| file | tip's diff vs master | true #2042 delta |
-| --- | --- | --- |
-| `src/aios/sandbox/registry.py` | 126 insertions / **1148 deletions** | 40 / 5 |
-| `src/aios/sandbox/secret_egress_proxy.py` | 29 / **289** | 29 / 1 |
-| `src/aios/sandbox/setup.py` | rewritten | +410 / −313 |
-| `tests/unit/test_networking.py` | master suites deleted | additive |
+**Not true, and the change fixes nothing.** The two greps in question were
 
-Behaviors deleted by the revert (each verified restored at grep parity after
-the rebase): #2365 SSRF absolute-form request-target rejection; #2113
-ClientHello raw dispatcher + `_relay_unrecognized_sni` passthrough; #2276/#2274
-account-browser substrate and control plane; #2309 browser L3 deny-internal
-egress; #2331 snapshot pool-budget LRU reclaim; #2411 snapshot-reset
-retirement; #2104/#2124 `egress_unread_hosts` fail-closed inventory; #2193
-typed egress-provision lifecycle events; `sandbox_owner_kind()`'s callers.
+```
+-d 169.254.53.53.*--dport 443 -j DNAT
+-d 169.254.53.53.*-j REJECT
+```
 
-Consequences at the reviewed tip:
+They are not exact matches — the `.*` immediately after the address already spans
+a `/32` suffix. Both spellings matched before `ed19d9d4` and both match after:
 
-- `uv run mypy src` — **8 errors** (`spec.py:798,942` unexpected
-  `networking_mode`/`owner_id`; `browser.py:71` missing
-  `get_or_provision_browser`; `browser_control.py:286,287,501` missing
-  `owner_lock`/`release_browser`/`touch_browser`).
-- `uv run pytest tests/unit` — **could not collect**:
-  `ImportError: cannot import name 'egress_unread_hosts' from
-  'aios.sandbox.setup'` (`tests/unit/sandbox/test_egress_refresh.py:26`).
+```
+$ printf -- '-A OUTPUT -d 169.254.53.53/32 -p tcp -m tcp --dport 443 -j DNAT --to-destination 172.17.0.5:9443\n' \
+    | grep -q -- '-d 169.254.53.53.*--dport 443 -j DNAT' && echo MATCHES
+MATCHES
+```
 
-So "unit 130 passed on two test files" in the tip's DONE.md was true only of
-those two files; the tree as a whole did not run.
+The commit added a `|| <same grep with /32>` fallback to each — dead alternation
+that doubles the sidecar's `iptables` invocations and leaves a comment asserting
+a cause that isn't the cause. CI behaviour is unchanged by it.
 
-## TASK verification items
+## Issue 1 (blocker, root cause) — the `:53` DNAT greps can never match
 
-1. **Is #2042's name-based path already on origin/master?** **No** — the task's
-   premise is false. `src/aios/sandbox/credential_dns.py` does not exist on
-   `origin/master`, and master's `_nat_dnat_lines` generated one DNAT per
-   sampled address. Integrating it is therefore the right move, not redundant.
-   Master's own `setup.py` carried the defect as a **documented KNOWN
-   RESIDUAL** naming exactly the two failure modes the red legs show, and
-   `TestCredentialHostEgressVerdict` pinned it behaviourally ("the acceptance
-   signal for #2042, not a regression"). The implementer's root cause is
-   **confirmed**, not rubber-stamped.
-2. **Does the fix install credential DNS + sentinel DNAT on the trigger path,
-   fail-closed?** Yes. There is no trigger-specific provision path:
-   `run_trigger_step` (`src/aios/harness/trigger_runner.py:580`) calls the same
-   `sandbox_registry.get_or_provision(...)`, which reaches `_apply_egress_rules`
-   → `apply_network_lockdown` (Limited) or `apply_secret_egress_dnat`
-   (Unrestricted). Both emit the byte-identical `_nat_dnat_lines` block. I
-   rendered the generated scripts for both modes plus the read-back verify and
-   audited them rule by rule. Fail-closed: resolver bind failure fails proxy
-   `start()` and the provision; a proxy-alias DNS miss is `exit 1` rather than a
-   skipped nat block; non-`:443` sentinel traffic is REJECTed; the sentinel is
-   non-routable, so a broken DNAT denies rather than leaks; the registry
-   *refuses* a DNAT target with no resolver port instead of falling back to any
-   address-keyed shape. Resolver host set and DNAT host set both derive from the
-   same `cred.allowed_hosts`, so intercepted names and TLS-terminated names
-   cannot drift.
-3. **IPv6 / `-4` story.** Not revived. It is now *moot* rather than merely
-   unproven: the resolver answers AAAA/HTTPS/SVCB for a credential name with
-   **NODATA**, so the sandbox cannot obtain an IPv6 address or an `ipv4hint`
-   for a credential host at all — strictly stronger than curl `-4`. No `-4`
-   hygiene is carried.
-4. **Run-origin vs trigger-origin.** Same code path (item 2), so the asymmetry
-   is *timing*: `test_run_env_var_placeholder.py` curls promptly after
-   provision, while a trigger must first become due and be dispatched, so much
-   more of the ~60s TTL has elapsed and a rotated, unsampled address is far
-   likelier. The address-keyed DNAT was never sound; the trigger leg just
-   samples the race later.
-5. **Hygiene.** Branch is 3 ahead / **0 behind** `origin/master`. The tip's
-   DONE.md shas/files matched the commits, but its *claims* did not match the
-   tree (above). `is_run_owner_id` was **not** real or needed: at `6fe45254` its
-   only callers were in the *reverted* `registry.py`; under a correct rebase it
-   is dead code (master discriminates with `sandbox_owner_kind()`, per the
-   CLAUDE.md "kind, never a boolean flag" rule). Removed — `src/aios/ids.py` is
-   now byte-identical to master.
+`iptables -S` does not echo the apply command back; it re-prints each rule through
+iptables' own formatter, which renders a `--dport` match together with the
+protocol match module the parser implicitly loaded:
 
-## Second finding: the sweep could retire the chokepoint
+```
+applied:  "$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:5353"
+printed:  -A OUTPUT -p udp -m udp --dport 53 -j DNAT --to-destination 172.17.0.5:5353
+                           ^^^^^^  inserted by the formatter
+```
 
-Found while auditing the rebased refresh sweep — a fail-open hole in #2042
-itself, not in the rebase:
+The two DNS assertions were written against the **apply** spelling and carry no
+`.*`:
 
-In-sandbox DNS answers every credential name with the sentinel, so
-`_stamp_egress_state`'s rule read-back sees the one provisioned sentinel DNAT,
-and `_seed_pinned_from_installed` pins it like any other address.
-`build_egress_refresh_script`'s `legacy_dnat_tail` delete is **byte-identical**
-to that provisioned rule, and since #2042 nothing ever *adds* a credential
-DNAT. One tick whose resolve came back without the sentinel would therefore
-age the pin out and **permanently delete name-based interception** — under
-Unrestricted that is direct egress carrying the literal placeholder, i.e. the
-original defect reintroduced by the fix's own maintenance path.
+```
+"$IPT" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'
+```
 
-Fixed by excluding `CREDENTIAL_SENTINEL_IP` from the delete set by
-construction, covered by
-`test_live_refresh_never_retires_the_credential_sentinel_dnat`, which drives
-the pin all the way to eviction (verified load-bearing: the test fails with the
-guard reverted).
+so they match **no backend, ever** — not a CI-specific canonicalization, a
+universal one. Under `set -e` that aborts the verify sidecar, so *every*
+credentialed provision failed its read-back while the apply exited 0.
 
-## Fixes applied on this branch (`197c9c45`)
+This explains the reported symptoms exactly, including why the two legs report
+different causes for one failed grep: both callers' error strings are static.
+`apply_network_lockdown` (`setup.py:1137`) says "OUTPUT policy is not DROP after
+apply" and `apply_secret_egress_dnat` (`setup.py:1247`) says "nat OUTPUT carries
+no DNAT rule after apply" *regardless of which assertion failed*. TASK.md's two
+root errors are the verification messages, not the apply messages — which already
+pins the failure to the read-back rather than to the apply, the proxy alias,
+`dns_port`, or `credential_dns` binding.
 
-- Located the true #2042 base (`d4644691`, #2041) and did a real 3-way rebase:
-  `git checkout origin/master -- <files>` + `git diff d4644691 6fe45254 |
-  git apply -3`, resolving eight conflicts by hand. Net diff vs master is now
-  additive (1755 / 330); `registry.py` is 46 changed lines, not 1274.
-- Conflict resolutions kept master's side wherever the two disagreed: #2193
-  report rows re-added inside the sentinel block (INSTALLED unconditionally —
-  coverage is complete by construction, no per-host skip remains); master's
-  fail-closed `egress_unread_hosts` inventory kept in the refresh builder with
-  only the credential *add* removed; `apply_secret_egress_dnat` keeps master's
-  `EgressProvisionResult` return; the proxy's `start()` keeps #2113's raw
-  dispatcher and starts the resolver first (fatal on failure).
-- Sentinel excluded from the refresh delete set (above).
-- Removed dead `is_run_owner_id`.
-- Retargeted the two master tests whose only observed "add" was the removed
-  per-address credential DNAT (`test_egress_refresh.py`,
-  `test_egress_refresh_live_path.py`) onto the limited-host ACCEPT shape that
-  remains, preserving each test's stated subject.
-- Replaced two stale e2e comments that described the old `-d <ip>` pinning
-  (`tests/e2e/test_trigger_fire_env_var_swap.py`,
-  `tests/e2e/test_run_env_var_placeholder.py`). `_SWAP_HOST = api.github.com`
-  and the `--resolve`-free curl are deliberately unchanged: the honest
-  chokepoint exercise is the point, and no e2e weakening was used.
-- Rewrote DONE.md to the evidence-backed root cause.
+Corroboration in-tree that this is the real read-back format (so this is not
+inference from memory): `registry.py:165` `_EGRESS_RULE_RE` parses the same
+`iptables -S OUTPUT` output and already carries `(?:/32)?` **and** `(?: -m tcp)?`;
+every captured fixture in `tests/unit/sandbox/test_egress_refresh*.py` is of the
+form `-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 -j ACCEPT`.
 
-## Gates
+**Fix applied** (`src/aios/sandbox/setup.py`): all four chokepoint assertions are
+now EREs matching the read-back spelling, tolerant of both renderings of each
+varying field and still requiring every semantic field of the rule. The dead `||`
+fallbacks are removed.
 
-- `uv run mypy src tests` — `Success: no issues found in 1098 source files`.
-- `uv run ruff check src tests` — `All checks passed!`;
-  `ruff format --check` — `1098 files already formatted`.
-- `uv run pytest tests/unit -q` — **6173 passed**, 0 failed (123s).
-- openapi/SDK snapshot invariants unaffected (no API-layer change); their
-  tests pass.
-- Docker is unavailable in this environment, so
-  `test_trigger_swap_fires_under_unrestricted_dnat_only` and
-  `test_trigger_swap_fires_under_limited` were **not run locally**; both
-  collect, and Code Validation is the oracle. Expected-green rests on the
-  argument in item 2, not on a local run.
+```
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-d 169\.254\.53\.53(/32)? -p tcp( -m tcp)? --dport 443 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-p udp( -m udp)? --dport 53 -j DNAT'
+"$IPT" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'
+"$IPT" -S OUTPUT        | grep -qE -- '-d 169\.254\.53\.53(/32)? -j REJECT'
+```
 
-## Residual risk
+The sentinel-address dots are now escaped (they were unescaped wildcards before),
+and the `:443` DNAT grep is *tighter* than what it replaces: `.*` between the
+address and `--dport` is now the specific `-p tcp( -m tcp)?`.
 
-The chokepoint now depends on DNS interception rather than on address samples.
-If the `-I` DNS DNAT rules were ever absent while the sandbox ran, a credential
-name would resolve to a real address and — under Unrestricted — egress direct.
-That is checked at provision by the read-back verify (all four chokepoint rules
-asserted) and is no longer reachable through the refresh sweep after the fix
-above, but it is the one invariant the design now rests on and is worth an
-explicit eye in review of any future change to `_nat_dnat_lines` or
-`build_lockdown_verify_script`.
+## Issue 2 (why this shipped) — the verify unit test never ran the nat greps
+
+`TestBuildLockdownVerifyScript._run_verify` built a fake `iptables` that emitted
+`-A OUTPUT -j DNAT --to-destination 1.2.3.4:443` for any `-t nat` call and a bare
+policy line for filter — and every caller passed the default `dnat_hosts=()`, so
+the four nat/filter greps were only ever asserted as **substrings of the generated
+script**, never executed against realistic output. A test that pins the grep text
+cannot catch a grep that doesn't match reality.
+
+**Fix applied** (`tests/unit/test_networking.py`): `_run_verify` now renders the
+real chokepoint as `iptables -S` prints it, parametrized over both backend
+spellings (`canonical` = `/32` + `-m tcp`/`-m udp`; `bare` = neither), with an
+`omit` hook to drop individual rules and an `assert_drop` passthrough for the
+Unrestricted leg. New tests:
+
+- `test_full_chokepoint_passes_against_real_iptables_s_output[canonical|bare]`
+- `test_dnat_only_full_chokepoint_passes[canonical|bare]`
+- `test_each_missing_chokepoint_rule_fails_closed[dns_udp|dns_tcp|sentinel_dnat|sentinel_reject]`
+- `test_v4_drop_absent_fails_with_chokepoint_installed`
+
+Checked against `ed19d9d4`: the `canonical` variants **fail** (exit 1) and the
+`bare` variants pass — precisely isolating the `-m udp`/`-m tcp` rendering as the
+defect and confirming the `/32` story was never it. All pass after the fix.
+
+## Confirmed still fail-closed (review item 3)
+
+- Limited `-P OUTPUT DROP` read-back (`grep -qx`) and the guarded v6 DROP are
+  untouched; `set -e` still first line on all three script shapes.
+- `test_each_missing_chokepoint_rule_fails_closed` proves dropping **any one** of
+  the four rules (DNS udp, DNS tcp, sentinel `:443` DNAT, sentinel REJECT) still
+  fails the verify — the widened patterns did not loosen into "some DNAT exists".
+- `test_v4_drop_absent_fails_with_chokepoint_installed` proves a fully-present
+  chokepoint does not mask a missing DROP.
+- No cross-table false positive: the filter chain's `-p udp -m udp --dport 53 -j
+  ACCEPT` does not satisfy the nat `-j DNAT` grep (verified against a realistic
+  captured ruleset).
+- `assert_drop=False` still omits the DROP/v6 assertions and keeps all four nat
+  assertions; `dnat_hosts=()` still emits no nat reference at all.
+
+## Scope (review items 4, 5)
+
+Minimal and #2422-only: one function's grep patterns plus its test. No IPv6/`-4`
+hygiene reopened; no `credential_dns`, `_nat_dnat_lines`, apply-script, registry,
+refresh-sweep, or e2e change. #2421 untouched. `_EGRESS_RULE_RE` and
+`build_egress_refresh_script` were audited for the same defect — they are already
+spelling-tolerant and have no read-back grep, so nothing to change there. The
+browser deny-internal verify uses `grep -qF` on true CIDR prefixes (`/16`, `/8`,
+…), which iptables prints verbatim — unaffected. Not pushed, no PR.
+
+## Leftover risk
+
+1. **CI is still the oracle.** Docker is unavailable here, so the e2e legs are
+   unrun locally. The claim is that the read-back now matches what `iptables -S`
+   prints; if a provision still fails, the next thing to read is the verify
+   sidecar's stderr, *not* the caller's static error text — see Issue 1.
+2. **Only the first failure is visible.** Because the callers' messages are
+   static and `set -e` aborts on the first failed assertion, a future verify
+   failure will again mis-report its cause. Surfacing the failing assertion
+   (e.g. `set -x`, or the sidecar's stderr in the `SandboxBackendError`) would
+   have turned this fixround into a log read. Deliberately left out of scope —
+   it changes error plumbing on both callers.
+3. **The DNAT targets are not verified.** The read-back proves a `:53` DNAT and a
+   sentinel `:443` DNAT exist, not that they point at *this session's* resolver
+   port / proxy port. Pre-existing (the `:443` assertion never checked its target
+   either); closing it means threading `dns_port`/`proxy_port` into
+   `build_lockdown_verify_script`. Low value in-netns — nothing else installs a
+   nat OUTPUT DNAT there — but it is the remaining gap between "a chokepoint
+   landed" and "our chokepoint landed".
+4. **Pre-existing xdist flakiness**, unrelated to this change:
+   `tests/unit` under `-n 4` intermittently fails/errors in
+   `test_jobs_app_layering.py` and `tests/unit/sandbox/test_secret_egress_proxy.py`.
+   Reproduced on the unmodified tip `ed19d9d4` (6172 passed + 1 unrelated error);
+   all pass serially.
+
+## Verification run
+
+- `uv run mypy src tests` → Success, 1098 files.
+- `uv run ruff check src tests` → All checks passed; `ruff format --check` clean.
+- `uv run pytest tests/unit -q -n 4` → 6181 passed (+9 new), 1 pre-existing flake.
+- `uv run pytest tests/unit/test_networking.py -q` → 138 passed.
+- New tests run against `ed19d9d4`'s `setup.py` → 3 failed (reproduces CI).
+
+## Final HEAD
+
+Branch `trigswap3rev`, two commits on top of `ed19d9d4`:
+
+- `5cfbe61b` — `fix(sandbox): match the read-back spelling in lockdown/DNAT verify (#2422)`
+  (the product + test change; this is the commit CI should be read against)
+- the commit carrying this REVIEW.md, which is the branch tip
+
+REVIEW_DONE
