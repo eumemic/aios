@@ -112,6 +112,10 @@ class _FakeConn:
         if "cumulative_text_mass" in sql:
             # ``_retained_class_mass`` latest-row per-class mass seek.
             return self.mass_row
+        if "tool_call_id" in sql:
+            # The retain-the-newest-stimulus anchor seek: no stimulus row
+            # here, so the clamp falls back to the newest message.
+            return None
         return self.ratio_row
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
@@ -461,7 +465,7 @@ async def test_overhead_clamp_never_drops_entire_window(
     # mean) and the omission boundary row present here (matches every row);
     # its ``cumulative_messages`` seek returns a count.
     async def _fetchrow(sql: str, *args: Any) -> dict[str, Any] | None:
-        if "cumulative_text_mass" in sql:
+        if "cumulative_text_mass" in sql or "tool_call_id" in sql:
             return None
         return {"cumulative_messages": 7, "created_at": _BEGAN_AT}
 

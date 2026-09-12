@@ -42,7 +42,7 @@ from aios.models.agents import (
     is_mcp_tool_name,
 )
 from aios.models.attenuation import Surface, surface_of
-from aios.models.events import Event, EventKind
+from aios.models.events import REMINDER_METADATA_KEY, Event, EventKind
 from aios.models.memory_stores import MemoryStoreResource
 from aios.models.sessions import (
     MAX_USER_MESSAGE_CHARS,
@@ -1451,6 +1451,16 @@ async def append_user_message(
             f"(got {len(content):,}); split into multiple messages",
             detail={"max_chars": MAX_USER_MESSAGE_CHARS, "got_chars": len(content)},
         )
+    if metadata is not None and REMINDER_METADATA_KEY in metadata:
+        # Reserved for harness-authored reminder rows, which ``append_event``
+        # treats as non-stimulus: a caller-minted one would be a user message
+        # that never wakes the session. Enforced here — the one writer behind
+        # every externally-sourced user message (POST /messages, the initial
+        # message on create, invoke/tell, the connector inbound) — rather than
+        # per ingress. Harness reminders go through ``append_event`` directly.
+        raise ValidationError(
+            f"metadata.{REMINDER_METADATA_KEY} is reserved for harness-authored reminder rows"
+        )
     data: dict[str, Any] = {"role": "user", "content": content}
     if metadata:
         data["metadata"] = metadata
@@ -2602,6 +2612,15 @@ async def clone_session(
     """Clone a session — see :func:`queries.clone_session`."""
     if workspace_path is not None:
         validate_workspace_path(workspace_path, account_id)
+        # Store the realpath-normalized form, matching the sibling shared-path
+        # writers (``create_session``'s shared child, ``create_run``'s shared
+        # arm). The workspace reaper's under-lock recheck
+        # (``unscoped_workspace_path_is_live``) compares an ``os.path.realpath``
+        # probe against the stored column in SQL, so a stored literal whose
+        # form differs from its realpath (a ``..`` segment, or an
+        # ``AIOS_WORKSPACE_ROOT`` crossing a symlink ancestor) would defeat the
+        # recheck and let the reaper delete a directory a live clone references.
+        workspace_path = queries.normalized_workspace_path(workspace_path)
     async with pool.acquire() as conn, conn.transaction():
         shared_path = workspace_path or await queries.get_session_workspace_path(
             conn, parent_session_id, account_id=account_id
