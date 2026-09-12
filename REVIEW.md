@@ -1,164 +1,171 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Uncorrelated review — trigger-swap DNAT e2e (`a57622ac`)
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+Reviewer: Claude Opus 5, branch `trigswaprev` (worktree `/workspace/aios-trigswaprev`).
+Under review: `4d2d6661` (`test(e2e): force IPv4 for trigger secret-egress swap`)
+and `a57622ac` (DONE.md). Correction committed as `7da362e5`. Nothing pushed, no
+PR opened.
 
-## Verdict
+## Verdict: **fail**
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+The fix does not fix the failure. The diagnosis is on the wrong layer, and the
+`-4` flag it motivates is inert against the reported signature: `api.github.com`
+publishes no AAAA record, the sandbox bridge has no IPv6 at all, and the Limited
+leg carries an explicit `ip6tables -P OUTPUT DROP` — so there is no IPv6 path for
+curl to have taken on either leg. MASTER RED will still be red.
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+The change is not *harmful* — pinning the client address family matches the
+IPv4-only chokepoint and is defensible hygiene — so I kept it rather than
+reverting. What I removed is the false claim attached to it, in both the source
+comment and DONE.md, because a confidently-wrong root cause left in the tree
+costs the next implementer more than the flake does.
 
-## Issues found
+## Findings
 
 ### Fatal
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+**1. The IPv6 root cause is factually impossible; `-4` cannot change any
+observable behaviour on either leg.**
+
+Three independent disproofs, any one sufficient:
+
+* **There is no AAAA to prefer.** `getent ahosts api.github.com` returns only
+  the IPv4 address. Method validated against a control on the same resolver:
+  `getent ahosts google.com` does return a real `2607:f8b0:…` AAAA, so the
+  resolver is not stripping v6. `github.com` likewise has no AAAA. curl cannot
+  prefer an answer that does not exist.
+* **There is no v6 route out.** The `aios-sandbox` bridge is created
+  `--ipv6=false` (`src/aios/sandbox/network.py:61`), so the container holds no
+  global IPv6 address. Even a hypothetical AAAA would fail `connect()` and fall
+  back to IPv4 within happy-eyeballs — it could not reach a real upstream and
+  silently drain the recorder.
+* **The Limited leg is doubly covered.** `_IP6TABLES_LOCKDOWN_LINES`
+  (`src/aios/sandbox/setup.py`) applies `ip6tables -P OUTPUT DROP` on the
+  Limited path. A v6 bypass therefore cannot explain
+  `test_trigger_swap_fires_under_limited` being red — yet TASK.md reports
+  exactly that leg red on `ae70600b`. The claimed single root cause does not
+  cover half the evidence it is offered for.
+
+Corroborating: the run-origin sibling `tests/e2e/test_run_env_var_placeholder.py:82`
+issues the **identical** curl (same host, same `--resolve`-free resolution, no
+`-4`) and is green on the same runs. A deterministic address-family preference
+would take it down too, and would fail 100% of the time rather than flaking.
 
 ### Serious
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+**2. The actual root cause is already documented in-tree and was not consulted.**
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+TASK.md names the family (`#2019 / #2250 / #2300 / #2042`). `#2042` is the
+"KNOWN RESIDUAL" block above `_nat_dnat_lines` in `src/aios/sandbox/setup.py`,
+which describes this exact failure in the repo's own words: the sidecar installs
+one `-d <ip>` DNAT per address a **single** `getent ahostsv4` happened to return,
+and "a rotating pool — api.github.com serves a ~60s-TTL set and returns only a
+SUBSET per query — means that set is a SAMPLE, not the pool."
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+curl re-resolves at fire time, seconds after the sidecar sampled. On a miss:
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+* **Unrestricted** — filter policy stays ACCEPT, no DNAT matches, the request
+  egresses **DIRECT** to the real host. Recorder empty, curl exits 0, audit `ok`.
+* **Limited** — no DNAT and no per-host ACCEPT, so it falls through to
+  `-P OUTPUT DROP`. Recorder empty, curl times out.
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+Both terminate at `assert len(recorder.requests) == 1` with `[]` — the reported
+signature, on both legs. This is pinned behaviourally by
+`TestCredentialHostEgressVerdict` (`tests/unit/test_networking.py:1250`), whose
+`_verdict()` returns `direct` / `blocked` for exactly this unsampled-address
+case. It also explains the shape of the evidence the IPv6 story cannot: a
+per-run coin flip, with Unrestricted red on `127d8453` and Limited red on
+`ae70600b`.
 
-### Minor (not fixed — flagged for the implementer's call)
+The egress-refresh loop that would re-pin rotated addresses (`#1950`,
+`794285d3`) is started by the **worker** (`src/aios/harness/worker.py:590`); the
+e2e drives `run_trigger_step` directly with no worker, so nothing corrects the
+sample mid-test.
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+**3. DONE.md's verification claim was wrong and understated what was runnable.**
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+DONE.md stated "`pytest` and `python` commands are not installed" and that
+verification was limited to bytecode compilation. In this same worktree
+`uv run pytest tests/unit/test_networking.py -q` passes 121 tests in 8s, and
+`uv run mypy src tests` / `ruff check` / `ruff format --check` all run. Only
+Docker is genuinely absent. The three pre-commit checks CLAUDE.md mandates were
+available and were not run.
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+### Ruled out during review (recorded so the next pass need not redo it)
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+* **`#2365` SSRF authority-rebind (`b3cdc118`)** — TASK.md lists it as a
+  candidate. The guard rejects only non-origin-form request-targets
+  (`secret_egress_proxy.py:897`); `curl https://host/trigger-swap-probe` sends
+  origin-form. Not implicated.
+* **Vault bound after session creation.** `_provision_swap_session_and_trigger`
+  calls `set_session_vaults` *after* `docker_harness.start()`, which would strand
+  the sandbox without credential DNAT if `start()` provisioned eagerly. It does
+  not — `tests/e2e/harness.py:397` only writes agent/session/message rows, and
+  provisioning happens lazily inside the fire. Ordering is correct.
+* **Proxy instance shared across tests.** `SecretEgressProxy` is constructed
+  per-provision (`src/aios/sandbox/spec.py:798`, `:942`), not a worker-wide
+  singleton, so the function-scoped `monkeypatch` of `__init__` cannot be
+  outrun by a sibling module's proxy.
+* **Unrestricted DNAT wiring.** `_apply_egress_rules`
+  (`src/aios/sandbox/registry.py:1045`) installs the DNAT-only script for
+  Unrestricted-with-credentials. No deterministic gap.
 
-## Fixes applied
+## What I changed, and what I deliberately did not
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
+Committed as `7da362e5`:
 
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
+* Rewrote the `_SWAP_COMMAND` comment to state that `-4` is a **standing guard**
+  — the DNAT is IPv4-only by design (`resolve_ipv4` / `getent ahostsv4`), so a
+  future AAAA rollout on a credential host would route the placeholder around the
+  proxy under Unrestricted — and not a fix for the observed flake, whose cause it
+  now names.
+* Rewrote DONE.md to report the branch honestly as *not fixed*, with the
+  disproof, the real cause, and corrected verification claims.
 
-## Do the DONE's claims hold?
+I did **not** attempt the real fix. Removing the public-DNS dependency means
+either making the container address the exact IP the sidecar pinned (which needs
+the installed DNAT read back — `_read_installed_egress_rules` is private and the
+`/sessions/:id/egress` surface exposes no IPs) or swapping the credential host
+for a netns-deterministic name. Both are test redesigns whose failure modes live
+entirely inside Docker, which is absent here. Landing one blind would risk
+converting a ~10% flake into a 100% failure, which is a worse outcome than a red
+CI with an accurate diagnosis. Recommendation for the next pass, in order of
+preference:
 
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
+1. Provision the sandbox before creating the trigger, read the installed DNAT
+   address, and build the command with `--resolve <host>:443:<that ip>`. This
+   removes only the DNS nondeterminism: the nat-OUTPUT DNAT is still what moves
+   the packet to the proxy, so a genuinely broken DNAT still leaves the recorder
+   empty and the test still fails. It does not weaken secret-egress, MitM, or
+   DNAT properties.
+2. Failing that, retarget `_SWAP_HOST` at a name that resolves deterministically
+   inside the sandbox netns, accepting that the test then no longer exercises a
+   real internet credential host.
 
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
+The underlying product hole is `#2042` itself (name-based interception); that is
+explicitly a larger change and out of scope here.
 
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
+## Review checklist
 
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
+| TASK.md item | Result |
+| --- | --- |
+| 1. Diagnosis matches code/path reality | **No** — wrong layer; disproved three ways |
+| 2. `-4` is the smallest durable fix | **No** — inert; it masks nothing, but fixes nothing |
+| 2b. Weakens secret-egress / MitM / DNAT? | No — security properties untouched |
+| 3. Both legs covered by the change | Covered, but the change is a no-op on both |
+| 3b. Run-origin swap e2e compared | Yes — identical curl without `-4`, green; contradicts the diagnosis |
+| 4. Branch not behind origin/master | Yes — 2 ahead, 0 behind `0b07495e` before review commits |
+| 4b. DONE.md shas/files match reality | Shas yes; root cause and verification claims no — corrected |
 
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
+## Verification run for this review
 
-## What I did not verify
+`uv run mypy src tests` (Success, 1096 files), `uv run ruff check src tests`
+(passed), `uv run ruff format --check src tests` (clean),
+`uv run pytest tests/unit/test_networking.py -q` (121 passed), and
+`pytest tests/e2e/test_trigger_fire_env_var_swap.py --collect-only` (2 tests).
+Docker is absent, so the e2e legs remain CI-only.
 
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+## Final HEAD
+
+Branch `trigswaprev`, 4 commits ahead of `origin/master` @ `0b07495e`, 0 behind.
+HEAD is the commit adding this REVIEW.md; the last code-bearing commit is
+`7da362e5`. `4d2d6661` and `a57622ac` are the changes under review.
