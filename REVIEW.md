@@ -1,164 +1,162 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Uncorrelated review — trigger-swap DNAT e2e legs
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+- **Branch:** `trigswap2rev` (worktree `/workspace/aios-trigswap2rev`)
+- **Reviewed tip:** `6fe45254` (on `9441ef39`, both on master tip `0b07495e`)
+- **Verdict: fail** — the reviewed tip was a wholesale revert of master, not an
+  integration. The *diagnosis* it claims is correct and is kept; the delivery
+  destroyed thirteen shipped master behaviors and left the tree unable to
+  typecheck or even collect its unit tests. Fixed on this branch.
+- **Final code HEAD:** `197c9c45` — all review fixes. `HEAD` is the
+  commit that adds this file on top of it (a commit cannot carry its own
+  sha); `git log --oneline -1` prints it.
+- Not pushed; no PR opened; still on `trigswap2rev`.
 
-## Verdict
+## What the tip actually did
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+`9441ef39` applied the July-2026 #2042 PR tip as a **whole-file replacement**
+onto `0b07495e`. Evidence, all from the reviewed tip:
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+| file | tip's diff vs master | true #2042 delta |
+| --- | --- | --- |
+| `src/aios/sandbox/registry.py` | 126 insertions / **1148 deletions** | 40 / 5 |
+| `src/aios/sandbox/secret_egress_proxy.py` | 29 / **289** | 29 / 1 |
+| `src/aios/sandbox/setup.py` | rewritten | +410 / −313 |
+| `tests/unit/test_networking.py` | master suites deleted | additive |
 
-## Issues found
+Behaviors deleted by the revert (each verified restored at grep parity after
+the rebase): #2365 SSRF absolute-form request-target rejection; #2113
+ClientHello raw dispatcher + `_relay_unrecognized_sni` passthrough; #2276/#2274
+account-browser substrate and control plane; #2309 browser L3 deny-internal
+egress; #2331 snapshot pool-budget LRU reclaim; #2411 snapshot-reset
+retirement; #2104/#2124 `egress_unread_hosts` fail-closed inventory; #2193
+typed egress-provision lifecycle events; `sandbox_owner_kind()`'s callers.
 
-### Fatal
+Consequences at the reviewed tip:
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+- `uv run mypy src` — **8 errors** (`spec.py:798,942` unexpected
+  `networking_mode`/`owner_id`; `browser.py:71` missing
+  `get_or_provision_browser`; `browser_control.py:286,287,501` missing
+  `owner_lock`/`release_browser`/`touch_browser`).
+- `uv run pytest tests/unit` — **could not collect**:
+  `ImportError: cannot import name 'egress_unread_hosts' from
+  'aios.sandbox.setup'` (`tests/unit/sandbox/test_egress_refresh.py:26`).
 
-### Serious
+So "unit 130 passed on two test files" in the tip's DONE.md was true only of
+those two files; the tree as a whole did not run.
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+## TASK verification items
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+1. **Is #2042's name-based path already on origin/master?** **No** — the task's
+   premise is false. `src/aios/sandbox/credential_dns.py` does not exist on
+   `origin/master`, and master's `_nat_dnat_lines` generated one DNAT per
+   sampled address. Integrating it is therefore the right move, not redundant.
+   Master's own `setup.py` carried the defect as a **documented KNOWN
+   RESIDUAL** naming exactly the two failure modes the red legs show, and
+   `TestCredentialHostEgressVerdict` pinned it behaviourally ("the acceptance
+   signal for #2042, not a regression"). The implementer's root cause is
+   **confirmed**, not rubber-stamped.
+2. **Does the fix install credential DNS + sentinel DNAT on the trigger path,
+   fail-closed?** Yes. There is no trigger-specific provision path:
+   `run_trigger_step` (`src/aios/harness/trigger_runner.py:580`) calls the same
+   `sandbox_registry.get_or_provision(...)`, which reaches `_apply_egress_rules`
+   → `apply_network_lockdown` (Limited) or `apply_secret_egress_dnat`
+   (Unrestricted). Both emit the byte-identical `_nat_dnat_lines` block. I
+   rendered the generated scripts for both modes plus the read-back verify and
+   audited them rule by rule. Fail-closed: resolver bind failure fails proxy
+   `start()` and the provision; a proxy-alias DNS miss is `exit 1` rather than a
+   skipped nat block; non-`:443` sentinel traffic is REJECTed; the sentinel is
+   non-routable, so a broken DNAT denies rather than leaks; the registry
+   *refuses* a DNAT target with no resolver port instead of falling back to any
+   address-keyed shape. Resolver host set and DNAT host set both derive from the
+   same `cred.allowed_hosts`, so intercepted names and TLS-terminated names
+   cannot drift.
+3. **IPv6 / `-4` story.** Not revived. It is now *moot* rather than merely
+   unproven: the resolver answers AAAA/HTTPS/SVCB for a credential name with
+   **NODATA**, so the sandbox cannot obtain an IPv6 address or an `ipv4hint`
+   for a credential host at all — strictly stronger than curl `-4`. No `-4`
+   hygiene is carried.
+4. **Run-origin vs trigger-origin.** Same code path (item 2), so the asymmetry
+   is *timing*: `test_run_env_var_placeholder.py` curls promptly after
+   provision, while a trigger must first become due and be dispatched, so much
+   more of the ~60s TTL has elapsed and a rotated, unsampled address is far
+   likelier. The address-keyed DNAT was never sound; the trigger leg just
+   samples the race later.
+5. **Hygiene.** Branch is 3 ahead / **0 behind** `origin/master`. The tip's
+   DONE.md shas/files matched the commits, but its *claims* did not match the
+   tree (above). `is_run_owner_id` was **not** real or needed: at `6fe45254` its
+   only callers were in the *reverted* `registry.py`; under a correct rebase it
+   is dead code (master discriminates with `sandbox_owner_kind()`, per the
+   CLAUDE.md "kind, never a boolean flag" rule). Removed — `src/aios/ids.py` is
+   now byte-identical to master.
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+## Second finding: the sweep could retire the chokepoint
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+Found while auditing the rebased refresh sweep — a fail-open hole in #2042
+itself, not in the rebase:
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+In-sandbox DNS answers every credential name with the sentinel, so
+`_stamp_egress_state`'s rule read-back sees the one provisioned sentinel DNAT,
+and `_seed_pinned_from_installed` pins it like any other address.
+`build_egress_refresh_script`'s `legacy_dnat_tail` delete is **byte-identical**
+to that provisioned rule, and since #2042 nothing ever *adds* a credential
+DNAT. One tick whose resolve came back without the sentinel would therefore
+age the pin out and **permanently delete name-based interception** — under
+Unrestricted that is direct egress carrying the literal placeholder, i.e. the
+original defect reintroduced by the fix's own maintenance path.
 
-### Minor (not fixed — flagged for the implementer's call)
+Fixed by excluding `CREDENTIAL_SENTINEL_IP` from the delete set by
+construction, covered by
+`test_live_refresh_never_retires_the_credential_sentinel_dnat`, which drives
+the pin all the way to eviction (verified load-bearing: the test fails with the
+guard reverted).
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+## Fixes applied on this branch (`197c9c45`)
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+- Located the true #2042 base (`d4644691`, #2041) and did a real 3-way rebase:
+  `git checkout origin/master -- <files>` + `git diff d4644691 6fe45254 |
+  git apply -3`, resolving eight conflicts by hand. Net diff vs master is now
+  additive (1755 / 330); `registry.py` is 46 changed lines, not 1274.
+- Conflict resolutions kept master's side wherever the two disagreed: #2193
+  report rows re-added inside the sentinel block (INSTALLED unconditionally —
+  coverage is complete by construction, no per-host skip remains); master's
+  fail-closed `egress_unread_hosts` inventory kept in the refresh builder with
+  only the credential *add* removed; `apply_secret_egress_dnat` keeps master's
+  `EgressProvisionResult` return; the proxy's `start()` keeps #2113's raw
+  dispatcher and starts the resolver first (fatal on failure).
+- Sentinel excluded from the refresh delete set (above).
+- Removed dead `is_run_owner_id`.
+- Retargeted the two master tests whose only observed "add" was the removed
+  per-address credential DNAT (`test_egress_refresh.py`,
+  `test_egress_refresh_live_path.py`) onto the limited-host ACCEPT shape that
+  remains, preserving each test's stated subject.
+- Replaced two stale e2e comments that described the old `-d <ip>` pinning
+  (`tests/e2e/test_trigger_fire_env_var_swap.py`,
+  `tests/e2e/test_run_env_var_placeholder.py`). `_SWAP_HOST = api.github.com`
+  and the `--resolve`-free curl are deliberately unchanged: the honest
+  chokepoint exercise is the point, and no e2e weakening was used.
+- Rewrote DONE.md to the evidence-backed root cause.
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+## Gates
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+- `uv run mypy src tests` — `Success: no issues found in 1098 source files`.
+- `uv run ruff check src tests` — `All checks passed!`;
+  `ruff format --check` — `1098 files already formatted`.
+- `uv run pytest tests/unit -q` — **6173 passed**, 0 failed (123s).
+- openapi/SDK snapshot invariants unaffected (no API-layer change); their
+  tests pass.
+- Docker is unavailable in this environment, so
+  `test_trigger_swap_fires_under_unrestricted_dnat_only` and
+  `test_trigger_swap_fires_under_limited` were **not run locally**; both
+  collect, and Code Validation is the oracle. Expected-green rests on the
+  argument in item 2, not on a local run.
 
-## Fixes applied
+## Residual risk
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
-
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
-
-## Do the DONE's claims hold?
-
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
-
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
-
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
-
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
-
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
-
-## What I did not verify
-
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+The chokepoint now depends on DNS interception rather than on address samples.
+If the `-I` DNS DNAT rules were ever absent while the sandbox ran, a credential
+name would resolve to a real address and — under Unrestricted — egress direct.
+That is checked at provision by the read-back verify (all four chokepoint rules
+asserted) and is no longer reachable through the refresh sweep after the fix
+above, but it is the one invariant the design now rests on and is worth an
+explicit eye in review of any future change to `_nat_dnat_lines` or
+`build_lockdown_verify_script`.
