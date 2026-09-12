@@ -47,7 +47,7 @@ def test_baked_nameserver_is_the_embedded_dns_address() -> None:
 
 
 def test_dockerfile_copies_the_resolver_after_every_run_step() -> None:
-    """COPY (not RUN), and last.
+    """COPY (not RUN), using a linked layer, and last.
 
     Docker mounts its own ``/etc/resolv.conf`` over the build sandbox, so a
     ``RUN`` redirect writes to the mount and never reaches the layer — COPY is
@@ -56,10 +56,12 @@ def test_dockerfile_copies_the_resolver_after_every_run_step() -> None:
     """
     lines = _DOCKERFILE.read_text().splitlines()
     copies = [
-        i for i, line in enumerate(lines) if re.match(r"^COPY \S+ /etc/resolv\.conf\s*$", line)
+        i
+        for i, line in enumerate(lines)
+        if re.match(r"^COPY --link \S+ /etc/resolv\.conf\s*$", line)
     ]
     assert len(copies) == 1, "expected exactly one COPY of /etc/resolv.conf in Dockerfile.sandbox"
-    assert lines[copies[0]] == "COPY docker/sandbox-resolv.conf /etc/resolv.conf"
+    assert lines[copies[0]] == "COPY --link docker/sandbox-resolv.conf /etc/resolv.conf"
 
     runs = [i for i, line in enumerate(lines) if line.startswith("RUN ")]
     assert runs and copies[0] > max(runs), (
