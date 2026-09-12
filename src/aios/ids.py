@@ -194,3 +194,8 @@ def servicer_kind(value: str) -> Literal["session", "run"]:
     if prefix == SESSION:
         return "session"
     raise ValueError(f"{value!r} is not a servicer id (expected a session or run id)")
+
+
+def is_run_owner_id(value: str) -> bool:
+    """Return whether an id names a workflow-run sandbox owner."""
+    return value.startswith(f"{WORKFLOW_RUN}_")
