@@ -85,13 +85,60 @@ now report INSTALLED unconditionally — coverage is complete by construction).
 
 No push, no PR.
 
-## #2422 CI verify follow-up
+## #2422 CI verify follow-up (corrected)
 
-The read-back verifier now accepts both forms emitted by `iptables -S` for the
-sentinel address (`169.254.53.53` and `169.254.53.53/32`).  Some CI backends
-canonicalize the apply rule to `/32`, so the previous exact bare-address grep
-reported a missing DNAT/REJECT despite successful installation; Limited then
-surfaced this as the misleading OUTPUT-DROP verification error.  DNS (UDP/TCP),
-sentinel HTTPS DNAT, and sentinel REJECT checks remain independent and
-fail-closed.  `python3 -m compileall` and `git diff --check` pass; pytest and
-Docker are unavailable locally.
+**First attempt (`ed19d9d4`) named the wrong cause and was a no-op.** It
+widened the two sentinel greps to also accept a `/32`-canonicalized address —
+but those greps are `-d 169.254.53.53.*--dport 443 -j DNAT` and
+`-d 169.254.53.53.*-j REJECT`, and the `.*` already spans `/32`. Both spellings
+matched before the change and after it; nothing about CI behaviour moved.
+
+**Actual cause.** `iptables -S` does not echo the apply command back — it
+re-prints each rule through iptables' own formatter, which renders a `--dport`
+match together with the protocol match module the parser implicitly loaded:
+
+```
+applied:  "$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination …
+printed:  -A OUTPUT -p udp -m udp --dport 53 -j DNAT --to-destination 172.17.0.5:5353
+                           ^^^^^^
+```
+
+The two `:53` DNAT assertions were written against the *apply* spelling
+(`'-p udp --dport 53 -j DNAT'`, no `.*`), so they could **never** match a
+correctly installed chokepoint on any backend. Under `set -e` that aborts the
+verify sidecar, so every credentialed provision failed its read-back — Limited
+and Unrestricted alike. The callers' error text is static, which is why the two
+red legs *reported* different causes for the same failed grep:
+`apply_network_lockdown` says "OUTPUT policy is not DROP after apply" and
+`apply_secret_egress_dnat` says "nat OUTPUT carries no DNAT rule after apply",
+regardless of which assertion actually failed. That accounts for both root
+errors in TASK.md and for all four listed e2e tests (both trigger-swap legs and
+both run-origin legs), while the apply itself exited 0 — consistent with the
+logs showing the *verification* message, not the apply message.
+
+In-tree corroboration that this is the real read-back format: `registry.py`'s
+`_EGRESS_RULE_RE` — which parses the same `iptables -S OUTPUT` output — already
+carries `(?:/32)?` and `(?: -m tcp)?`, and the captured fixtures in
+`tests/unit/sandbox/test_egress_refresh*.py` are all of the form
+`-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 -j ACCEPT`.
+
+**Fix.** All four chokepoint assertions are now EREs (`grep -qE`) matching the
+read-back spelling and tolerating both renderings of each varying field —
+`(/32)?` on the sentinel address, `( -m tcp)?` / `( -m udp)?` on the protocol
+match — while still requiring every semantic field of the rule. The redundant
+`||` fallbacks from `ed19d9d4` are removed. Fail-closed is unchanged: dropping
+any one of the four rules still fails the verify.
+
+**Test gap closed.** This shipped because `TestBuildLockdownVerifyScript`'s fake
+`iptables` emitted `-A OUTPUT -j DNAT --to-destination 1.2.3.4:443` and was only
+ever invoked with `dnat_hosts=()`, so no test ran the nat greps against realistic
+output. `_run_verify` now renders the real chokepoint in both backend spellings
+and can omit individual rules; new tests assert both spellings verify green on
+both the Limited and DNAT-only legs, and that omitting any one of the four rules
+still fails closed. They fail against `ed19d9d4` in the `canonical` spelling —
+i.e. they reproduce the CI failure — and pass after the fix.
+
+`uv run mypy src tests` clean (1098 files); `ruff check` / `ruff format --check`
+clean; `uv run pytest tests/unit -q` 6181 passed (one pre-existing xdist-only
+flake in `test_jobs_app_layering.py`, which also flakes on the unmodified tip).
+Docker is unavailable locally, so the e2e legs remain CI's to confirm.

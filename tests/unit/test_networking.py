@@ -41,6 +41,11 @@ from aios.sandbox.setup import (
 )
 from tests.helpers.sandbox import FakeBackend, make_handle
 
+# How ``iptables -S`` PRINTS the sentinel address back: bare on some
+# backends, ``/32``-canonicalized on others. The verify greps must tolerate
+# both (#2422), so the tests pin that ERE rather than the apply spelling.
+_SENTINEL_RE = CREDENTIAL_SENTINEL_IP.replace(".", r"\.") + "(/32)?"
+
 # ── model validation ──────────────────────────────────────────────────────────
 
 
@@ -673,12 +678,16 @@ class TestBuildLockdownVerifyScript:
         """
         script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
         assert (
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
         ) in script
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'" in script
-        assert "\"$IPT\" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'" in script
-        assert f"\"$IPT\" -S OUTPUT | grep -q -- '-d {CREDENTIAL_SENTINEL_IP}.*-j REJECT'" in script
+        assert (
+            "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p udp( -m udp)? --dport 53 -j DNAT'"
+        ) in script
+        assert (
+            "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'"
+        ) in script
+        assert f"\"$IPT\" -S OUTPUT | grep -qE -- '-d {_SENTINEL_RE} -j REJECT'" in script
         # The filter-table DROP assertion is still present.
         assert "OUTPUT DROP" in script
 
@@ -742,8 +751,8 @@ class TestBuildLockdownVerifyScript:
         assert "OUTPUT DROP" not in script
         assert "IP6T" not in script
         assert (
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
         ) in script
 
     def test_assert_drop_true_is_default(self) -> None:
@@ -766,7 +775,16 @@ class TestBuildLockdownVerifyScript:
         ):
             assert script.splitlines()[0] == "set -e"
 
-    def _run_verify(self, *, v4_policy: str, v6_mode: str, dnat_hosts: Sequence[str] = ()) -> int:
+    def _run_verify(
+        self,
+        *,
+        v4_policy: str,
+        v6_mode: str,
+        dnat_hosts: Sequence[str] = (),
+        spelling: str = "canonical",
+        omit: Sequence[str] = (),
+        assert_drop: bool = True,
+    ) -> int:
         """Run the generated verify script under ``bash -c`` (exactly as the
         sidecar does — no ``-e`` on the call) against fake legacy
         binaries, returning its exit code.
@@ -774,15 +792,46 @@ class TestBuildLockdownVerifyScript:
         ``v4_policy``/``v6_mode`` are the ``-S OUTPUT`` policies the fakes report
         (``"DROP"``/``"ACCEPT"``); ``v6_mode="unavailable"`` makes ``ip6tables-S
         OUTPUT`` fail to initialize (the no-``ip6_tables``-module / CI case).
+
+        When ``dnat_hosts`` is non-empty the fakes emit a REAL ``iptables -S``
+        rendering of the installed chokepoint (#2422) — not the apply spelling.
+        ``spelling`` picks which backend rendering to emit (``"canonical"``:
+        ``/32`` + ``-m tcp``/``-m udp``; ``"bare"``: neither); ``omit`` names
+        chokepoint rules to leave out so a missing rule can be shown to fail.
         """
-        script = build_lockdown_verify_script(dnat_hosts=dnat_hosts)
+        script = build_lockdown_verify_script(dnat_hosts=dnat_hosts, assert_drop=assert_drop)
         bindir = tempfile.mkdtemp()
+        sentinel = CREDENTIAL_SENTINEL_IP + ("/32" if spelling == "canonical" else "")
+        m_tcp = " -m tcp" if spelling == "canonical" else ""
+        m_udp = " -m udp" if spelling == "canonical" else ""
+        nat_rules = {
+            "dns_udp": f"-A OUTPUT -p udp{m_udp} --dport 53 -j DNAT --to-destination 172.17.0.5:5353",
+            "dns_tcp": f"-A OUTPUT -p tcp{m_tcp} --dport 53 -j DNAT --to-destination 172.17.0.5:5353",
+            "sentinel_dnat": (
+                f"-A OUTPUT -d {sentinel} -p tcp{m_tcp} --dport 443 "
+                "-j DNAT --to-destination 172.17.0.5:49152"
+            ),
+        }
+        filter_rules = {
+            "sentinel_reject": (
+                f"-A OUTPUT -d {sentinel} -j REJECT --reject-with icmp-port-unreachable"
+            ),
+        }
+        nat_out = "\n".join(
+            ["-P OUTPUT ACCEPT"] + [r for k, r in nat_rules.items() if k not in omit]
+        )
+        filter_out = "\n".join(
+            [f"-P OUTPUT {v4_policy}"] + [r for k, r in filter_rules.items() if k not in omit]
+        )
         v4 = (
-            f"#!/usr/bin/env bash\n"
-            f"if [ \"$1\" = '-S' ] && [ \"$2\" = 'OUTPUT' ]; then echo '-P OUTPUT {v4_policy}'; exit 0; fi\n"
-            f"# nat -S OUTPUT carries a DNAT rule so the nat assertion (if any) passes\n"
-            f"if [ \"$1\" = '-t' ] && [ \"$2\" = 'nat' ]; then echo '-A OUTPUT -j DNAT --to-destination 1.2.3.4:443'; exit 0; fi\n"
-            f"exit 0\n"
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = '-t' ] && [ \"$2\" = 'nat' ]; then\n"
+            f"cat <<'NATEOF'\n{nat_out}\nNATEOF\n"
+            "exit 0; fi\n"
+            "if [ \"$1\" = '-S' ] && [ \"$2\" = 'OUTPUT' ]; then\n"
+            f"cat <<'FILTEOF'\n{filter_out}\nFILTEOF\n"
+            "exit 0; fi\n"
+            "exit 0\n"
         )
         if v6_mode == "unavailable":
             v6_body = "echo \"ip6tables: can't initialize table 'filter'\" >&2; exit 3;"
@@ -827,6 +876,72 @@ class TestBuildLockdownVerifyScript:
 
     def test_both_drop_present_passes(self) -> None:
         assert self._run_verify(v4_policy="DROP", v6_mode="DROP") == 0
+
+    # ── the verify greps must match what ``iptables -S`` PRINTS (#2422) ───────
+
+    @pytest.mark.parametrize("spelling", ["canonical", "bare"])
+    def test_full_chokepoint_passes_against_real_iptables_s_output(self, spelling: str) -> None:
+        """REGRESSION (#2422): the read-back greps ran against the spelling the
+        APPLY script wrote, not the spelling ``iptables -S`` prints back.
+
+        ``iptables`` re-prints a rule through its own formatter: ``-p udp
+        --dport 53`` comes back as ``-p udp -m udp --dport 53`` and a host
+        address comes back ``/32``-canonicalized. The ``:53`` DNAT greps
+        (``'-p udp --dport 53 -j DNAT'``) could therefore NEVER match a
+        correctly installed chokepoint, so every credentialed provision — both
+        Limited and Unrestricted — failed its read-back verify and aborted. The
+        callers' error text is static, so Limited mis-reported it as "OUTPUT
+        policy is not DROP" and Unrestricted as "nat OUTPUT carries no DNAT
+        rule". Both backend spellings must verify GREEN.
+        """
+        assert (
+            self._run_verify(
+                v4_policy="DROP",
+                v6_mode="DROP",
+                dnat_hosts=["api.secret.com"],
+                spelling=spelling,
+            )
+            == 0
+        )
+
+    @pytest.mark.parametrize("spelling", ["canonical", "bare"])
+    def test_dnat_only_full_chokepoint_passes(self, spelling: str) -> None:
+        """The Unrestricted (``assert_drop=False``) leg verifies the same four
+        chokepoint rules against the same read-back spellings, with the filter
+        policy left at ACCEPT and no v6 DROP."""
+        assert (
+            self._run_verify(
+                v4_policy="ACCEPT",
+                v6_mode="ACCEPT",
+                dnat_hosts=["api.secret.com"],
+                spelling=spelling,
+                assert_drop=False,
+            )
+            == 0
+        )
+
+    @pytest.mark.parametrize("missing", ["dns_udp", "dns_tcp", "sentinel_dnat", "sentinel_reject"])
+    def test_each_missing_chokepoint_rule_fails_closed(self, missing: str) -> None:
+        """Still fail-closed: dropping ANY ONE of the four chokepoint rules from
+        the read-back fails the verify. Tolerating both print spellings must not
+        have loosened the greps into passing a half-installed chokepoint — a
+        green verify over unprotected credential egress is the exact failure
+        mode #2042's read-back exists to kill."""
+        assert (
+            self._run_verify(
+                v4_policy="DROP",
+                v6_mode="DROP",
+                dnat_hosts=["api.secret.com"],
+                omit=[missing],
+            )
+            != 0
+        )
+
+    def test_v4_drop_absent_fails_with_chokepoint_installed(self) -> None:
+        """The DROP assertion is not masked by a fully-present chokepoint."""
+        assert (
+            self._run_verify(v4_policy="ACCEPT", v6_mode="DROP", dnat_hosts=["api.secret.com"]) != 0
+        )
 
 
 # ── docker backend translates network policy to docker run argv ────────────────
@@ -1096,8 +1211,8 @@ class TestApplyNetworkLockdown:
         # #984 + #2042: with dnat_hosts present the read-back verify asserts
         # every rule of the chokepoint — a partial install fails closed.
         assert (
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
         ) in verify_script
 
     @pytest.mark.asyncio
@@ -1281,8 +1396,8 @@ class TestApplySecretEgressDnat:
         assert "-P OUTPUT DROP" not in apply_script
         # The verify asserts the chokepoint landed but NOT a DROP policy.
         assert (
-            '"$IPT" -t nat -S OUTPUT | grep -q -- '
-            f"'-d {CREDENTIAL_SENTINEL_IP}.*--dport 443 -j DNAT'"
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
         ) in verify_script
         assert "OUTPUT DROP" not in verify_script
 
