@@ -151,6 +151,7 @@ async def test_identity_match_serves_and_registers_listener(
         assert state.bot_user_id == BOT_USER_ID
         assert len(socket.socket_mode_request_listeners) == 1
         socket.connect.assert_awaited()
+        assert connector._connections[CONNECTION_ID].serve_status == "serving"
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

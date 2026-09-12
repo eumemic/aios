@@ -193,7 +193,7 @@ class SlackConnector(HttpConnector):
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(
-                    self._run_socket(state),
+                    self._run_socket(connection_id, state),
                     name=f"slack-socket-{connection_id}",
                 )
                 tg.create_task(
@@ -242,7 +242,7 @@ class SlackConnector(HttpConnector):
 
         state.socket_client.socket_mode_request_listeners.append(on_request)
 
-    async def _run_socket(self, state: _SlackConnectionState) -> None:
+    async def _run_socket(self, connection_id: str, state: _SlackConnectionState) -> None:
         """Open the Socket-Mode connection and keep the task alive.
 
         ``connect()`` establishes the WebSocket and returns once the
@@ -252,6 +252,9 @@ class SlackConnector(HttpConnector):
         into ``serve_connection``'s ``finally`` which closes the client.
         """
         await state.socket_client.connect()
+        # ``connect`` returns only after Socket Mode's receiver is running.
+        # Keep the heartbeat fail-closed until that concrete receive path exists.
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()
 
     async def _drain_queue(self, connection_id: str, state: _SlackConnectionState) -> None:
