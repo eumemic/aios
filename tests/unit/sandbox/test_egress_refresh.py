@@ -514,9 +514,14 @@ async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_hos
     registry = SandboxRegistry(backend)
     registry._handles["sess_X"] = make_handle(session_id="sess_X")
     # ``b.example`` is in scope but has NO key — the unread shape.
+    # ``a.example`` is also a LIMITED host: since #2042 a credential host gets
+    # no per-address rule of its own (interception is keyed on the name), so
+    # the limited ACCEPT is the only per-address add shape left to observe —
+    # and a credential host under Limited networking is always in
+    # ``allowed_hosts`` anyway, so this is the ordinary configuration.
     state = _state(
         credential_hosts=frozenset({"a.example", "b.example"}),
-        limited_hosts=frozenset(),
+        limited_hosts=frozenset({"a.example"}),
         pinned={"a.example": {"1.1.1.1": 0}},
     )
     registry._egress_states["sess_X"] = state
@@ -528,6 +533,8 @@ async def test_merge_holds_pinned_and_warns_when_inventory_omits_an_in_scope_hos
     script = _sidecar_scripts(backend)[-1]
     # Adds still apply (an add only widens what is already permitted)...
     assert "-A OUTPUT -d 2.2.2.2" in script
+    # ...and no credential DNAT was added for it (#2042: never per-address).
+    assert "DNAT" not in script
     # ...but nothing is deleted, and the script exits 0 all the same.
     assert "-D OUTPUT" not in script
     # The caller must NOT bank that exit-0 as a completed delta.
