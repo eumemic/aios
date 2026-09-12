@@ -351,7 +351,12 @@ class Settings(BaseSettings):
         description="Optional Docker container runtime for sandboxes and their "
         "network-lockdown sidecars. Unset (or Docker's configured default, normally "
         "runc) preserves local/CI behavior; set AIOS_SANDBOX_RUNTIME=runsc to run "
-        "containers under gVisor where the host has runsc installed.",
+        "containers under gVisor where the host has runsc installed. 'runsc' has an "
+        "extra DAEMON requirement beyond runsc itself: egress rules must be installed "
+        "from inside the target Sentry (#2310), which needs the read-only operator "
+        "tool root DockerBackend.create mounts with --mount type=image — Docker "
+        "Engine 28+ with features.containerd-snapshotter enabled. Without it, "
+        "Limited sandboxes fail to provision (fail-closed, not open).",
     )
     # ── Account browser containers ("the computer", jarbot#106 Phase 1) ────
     sandbox_browser_image: str = Field(

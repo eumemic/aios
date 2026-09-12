@@ -1,164 +1,133 @@
-# Uncorrelated review — dev-review verification bound (`9b6a9286`)
+# Uncorrelated review — `botpost2410g` tip `0b0effc9` (aios#2410)
 
-Reviewer: Claude Opus 5, branch `reviewspdrev` (worktree `/workspace/aios-reviewspdrev`).
-Commit under review: `9b6a9286` ("fix(ci): bound dev-review verification scope").
-Fixes committed locally as `8485af35` and `0a95da3e`. Nothing pushed, no PR opened.
+**Verdict: changes requested — 1 High, 1 High/Medium, 2 Low. The High and the
+High/Medium are fixed on this review branch (`botpost2410grev`); the Lows are
+recorded below, one fixed in comment form, one left as noted.**
 
-## Verdict
+The bake path the implementer chose is the right *shape*. Every alternative
+route dies on the same fact: glibc reads `_PATH_RESCONF` = `/etc/resolv.conf`
+and nothing else, there is no env override, and the runsc operator root is
+mounted READ-ONLY so `setup._RESOLV_PREAMBLE`'s `printf … || true` is a
+guaranteed no-op there. TASK.md's advisory direction — bake to a non-special
+path and reach it via symlink/bind/operator read path — cannot deliver the
+required property from the Dockerfile alone. A same-path bake is the only
+Dockerfile-level shape that can work, so `COPY --link` stays.
 
-**The diagnosis is sound and the fix is the right shape — a prompt bound, not a
-timeout raise or a machinery rewrite — but it shipped with one material hole and
-a test that could not fail.** Both are fixed on this branch. Land after those two
-commits.
+What the branch got wrong is everything around it: it ships red, and it asserts
+as established fact a mechanism nobody has verified.
 
-The hole is not in what the bound forbids; it is in what the bound now
-*sanctions*. By elevating "focused tests for affected behavior" to the reviewer's
-principal form of verification, the change makes it load-bearing that the tree
-the reviewer tests is the PR. It is not: `/mnt/review` is a clone of the
-repository's **default branch**. That was tolerable while verification was
-unbounded and diffuse; it is not tolerable once focused tests are the whole
-verification budget, because a focused test run against master exercises the
-unchanged code and passes for the wrong reason. A fast review that silently
-verifies the wrong tree is a worse outcome than the 30-minute review it replaced.
+---
 
-## Issues found
+## F1 (High) — the branch is red on the unit shard
 
-### Fatal
+`tests/unit/test_detect_filter_sync.py::test_build_sandbox_triggers_on_every_copied_file[docker/sandbox-resolv.conf]`
+fails on `0b0effc9`:
 
-None. Publication, soft-fail, archive, timeout ordering, tool grants, and clone
-access are untouched by `9b6a9286` — verified against the diff. The change cannot
-regress the "green Action, no comment" class the launcher exists to prevent.
+```
+assert None
+ +  where None = re.search('(?m)^COPY docker/sandbox\-resolv\.conf\s', '# aios sandbox base image...')
+AssertionError: 'docker/sandbox-resolv.conf' is no longer COPYed by docker/Dockerfile.sandbox — drop it
+from this parametrization (and from the build trigger) rather than pinning a path the image does not consume
+```
 
-### Serious
+The pattern anchors `^COPY <path>` with no room for flags, so `COPY --link …`
+reads to it as a removal. This is a plain CI-red regression: the unit shard
+fails long before the e2e that the change exists to turn green. It was missed
+because DONE.md's verification is `pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py`
+— a single file, which cannot see a drift check living two directories away.
+CLAUDE.md asks for `uv run pytest tests/unit -q` before a commit.
 
-1. **The reviewer's clone is on the default branch, not the PR — and the prompt
-   implied otherwise.** `GithubRepositoryResource`
-   (`src/aios/models/github_repositories.py:41`) has **no ref/branch/sha field**,
-   and `attach_session_repo` (`src/aios/sandbox/github_clone.py:290`) issues a
-   plain `git clone --reference <cache> --dissociate <url> <dest>` — default
-   branch HEAD, no checkout of anything else anywhere in the provisioning path
-   (`grep -rn "head_sha\|checkout" src/aios/sandbox/` finds only a docstring).
-   The launcher passes `CLONE_URL = head.repo.clone_url`, which for the ordinary
-   same-repo PR is `eumemic/aios` — i.e. **master**. The prompt said only "The
-   repository is cloned at /mnt/review", which any reader takes to mean the PR is
-   checked out there.
+**Fixed** — widened to `^COPY (?:--\S+ )*<path>\s`, with a comment saying the
+pin is on the *source path*, not on the flags.
 
-   Corroboration that this is live, not theoretical: the DONE's own evidence for
-   PR #2362 reports the reviewer running "a base-code mutation run" — base code
-   is exactly what a default-branch clone hands it.
+## F2 (High/Medium) — a hypothesis asserted as a root cause
 
-   Fixed in `8485af35`: the prompt now states the clone is on the default branch,
-   names `head_sha` as the commit to reach, and gives the reviewer a check it can
-   run itself (`git -C /mnt/review rev-parse HEAD`). Fetch mechanics are left to
-   the model — `origin` is already the per-session git proxy, so `git fetch` works
-   from inside the sandbox, and per CLAUDE.md the model handles that failure
-   itself rather than the launcher scripting it.
+DONE.md and the Dockerfile comment both state flatly that "BuildKit treats
+`/etc/resolv.conf` as a daemon-managed build mount, so a plain `COPY` can be
+absent from the committed image layer", and that `--link` "forces the resolver
+bytes into a linked image layer".
 
-2. **The new test asserts the constant's own words, so it cannot fail.**
-   `test_review_scope_avoids_repeating_ci_and_exhaustive_work` read
-   `reviewer.REVIEW_SCOPE` and asserted substrings of the literal it was written
-   from. Delete `{REVIEW_SCOPE}` from the f-string in `main()` and the bound stops
-   existing while the test stays green — a constant nothing sends is not a bound.
-   Nothing pinned the `infra/agents/dev-review.json` half either, and that half is
-   the *only* instruction a workflow child ever sees, so dropping it silently
-   relocates the expensive tool loop to the other caller rather than removing it.
+The first half is a real phenomenon (moby/buildkit#1267, still open) but the
+documented mechanism is a *RUN-time* bind mount of `/etc/resolv.conf` and
+`/etc/hosts` into build containers — and this COPY already sits after every
+`RUN`, which is precisely why the plain COPY was expected to work. The second
+half has no support at all: no upstream source lists `--link` as a remedy for
+this path. The external workarounds that are documented are "write it at
+runtime" or "use a non-special path" — neither available here (see the preamble
+above).
 
-   Fixed in `0a95da3e`: `_Api` now records the `POST /v1/sessions` body, one test
-   asserts the bound and the head-checkout instruction against the
-   `initial_message` the launcher actually sends, and a second holds the same
-   bound in the committed manifest.
+`--link` may well work; the mergeop shape is a plausible way around a
+placeholder in the parent snapshot. But it is a **bet**, and nothing on this
+branch can settle it: the unit pins read the Dockerfile text, and no source-level
+test can tell a surviving layer from a stripped one. The only oracle is
+`tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`,
+which needs a Docker daemon — unavailable in this checkout and unrun by the
+implementer (that caveat in DONE.md is truthful).
 
-### Minor (not fixed — flagged for the implementer's call)
+Shipping an unverified bet is acceptable here; shipping it labelled as a
+diagnosed root cause is not, because the next person to read that comment will
+not know there is anything left to check.
 
-3. **The "unchanged substantive diff" clause is unactionable on the launcher
-   path.** It tells the reviewer not to repeat expensive checks "reported by an
-   earlier eumemic-bot review", but the launcher prompt passes **no comments**.
-   The manifest's request contract names `{repo, pr_number, head_sha, comments}`;
-   the launcher supplies repo/pr/sha and nothing else. The clause therefore only
-   binds if the model volunteers a `GET /repos/{repo}/issues/{n}/comments` — which
-   the http_server allowlist permits, but nothing directs. If it *does* volunteer
-   it, it pulls prior full review artifacts into context, which is itself a
-   non-trivial token cost. Either pass the comments or drop the clause; leaving it
-   inert is the one option that buys nothing. I did not change it because both
-   directions are product calls, not defects.
+**Fixed** — the Dockerfile comment now separates OBSERVED (a freshly built
+image read back through `docker cp` had a 0-byte `/etc/resolv.conf`) from
+HYPOTHESIS (the `--link` mergeop mechanism), names the e2e as the sole oracle,
+and says what to conclude if it stays red: the same-path bake is dead and the
+resolver has to reach the chrooted operator on the read path instead — a
+non-special path on its own does *not* do it. DONE.md is rewritten to the same
+standard. The resolver unit module gained a SCOPE paragraph stating it cannot
+see the built image and that a red e2e must never be "fixed" by relaxing
+anything there, and the e2e assertion now fails with a sentence instead of
+`[] == ['127.0.0.11']`.
 
-4. **Repo-wide lint/type-check is forbidden; scoped lint/type-check is not
-   explicitly permitted.** The bound says "focused tests" but offers no scoped
-   counterpart for mypy/ruff, so a literal reader drops type-checking entirely.
-   Low impact in practice — this repo's mypy is invoked whole-package
-   (`uv run mypy src tests packages/...`), so a genuinely "scoped" run is not
-   really on offer — but the asymmetry is worth a word if the prompt is revised.
+## F3 (Low) — `--link` raises the minimum builder, silently
 
-5. **`uv sync --dev` is the floor under "focused tests".** The bound removes the
-   repo-wide *suites*, not the dependency install that running any test at all in
-   a fresh sandbox requires. Expect that fixed cost to survive. This is context
-   for reading the first post-fix run, not a defect.
+`COPY --link` needs a Dockerfile frontend with mergeop support: BuildKit >= 0.10,
+i.e. Docker >= 23. The file carries no `# syntax=` pin. That turns out to be the
+*right* configuration — without a pin, an older daemon rejects the unknown flag
+and fails the build loudly, rather than parsing it away and shipping an empty
+resolver. Adding a `# syntax=docker/dockerfile:1.x` line would make the flag
+work on older daemons and is tempting; it would also remove the loud failure.
 
-6. **~30s of tail slop in the launcher's poll (pre-existing, immaterial).**
-   `wait_for_events` (`src/aios/api/routers/sessions.py:1130`) returns the moment
-   events past `after` exist, so the DONE is right that the 30s is a long-poll
-   maximum and not a sleep. One wrinkle: `session_status` is read from the same
-   response, so if the final assistant event lands a beat before the step flips
-   the session out of `active`, one further poll can burn its full 30s. Bounded
-   and irrelevant against 10–30 minutes; noted only so it is not mistaken for a
-   regression when the post-fix timings come in.
+**Fixed in comment form** — the requirement and the deliberate absence of the
+pin are now written down in the Dockerfile, so the next person doesn't "helpfully"
+add one.
 
-## Fixes applied
+## F4 (Low, pre-existing) — `Dockerfile.sandbox` advertises a command that does not exist
 
-| SHA | Commit | Files |
-|---|---|---|
-| `8485af35` | `fix(ci): point the reviewer's clone at the PR head` | `scripts/eumemic_bot_review.py`, `docs/eumemic-bot-review.md` |
-| `0a95da3e` | `test(ci): pin the review bound to the prompt and the manifest` | `tests/unit/test_eumemic_bot_review.py` |
+Line 22 offers `uv run python -m aios build-image` as the local-dev shortcut.
+There is no `build-image` command anywhere in `src/`. Out of the blast radius of
+this fix and left alone; noted so it can be deleted (per "don't deprecate,
+delete") in a pass that owns that file's header.
 
-Checks after both: `uv run pytest tests/unit/test_eumemic_bot_review.py -q` — 13
-passed; full `uv run pytest tests/unit -q -n 4` — 6073 passed; `ruff check` /
-`ruff format --check` clean on the touched paths; `mypy tests/unit/...` clean.
-(`mypy scripts/` reports pre-existing bare-`dict` generics also present on
-`origin/master`; `scripts/` is not in CI's mypy target, so it is out of scope.)
+---
 
-## Do the DONE's claims hold?
+## Items that verify clean
 
-**Root cause — holds, with one caveat about provenance.** "The dominant
-wall-clock cost is the review model's self-directed tool loop" is consistent with
-everything I can check in-repo: the launcher prompt genuinely placed no bound on
-verification, the manifest genuinely encouraged deeper inspection via the clone,
-and the reviewer genuinely has `bash` plus a full working tree. I could **not**
-independently re-verify the GitHub run timings (#2371/#2380/#2362) from this
-checkout — no network to the Actions API, and the DONE itself notes the older
-logs have expired. I take the timing evidence as reported. The mechanism stands
-on its own, and the "base-code mutation run" detail in the cited artifact turned
-out to be an independent tell for issue 1 above.
+- **Isolation** — untouched. No change to `_RUNSC_OPERATOR_ROOT`, the chroot
+  chain, the read-only operator mount, or the Limited-networking lockdown. The
+  fix is one Dockerfile flag plus comments and tests. This is the smallest
+  honest fix available given F2's constraint.
+- **Test integrity (review item 3)** — no test was weakened. The resolver pin
+  was *strengthened*: it now matches on the destination path, so a plain
+  `COPY … /etc/resolv.conf` is found and rejected by name rather than silently
+  missed. The e2e contract is unchanged in what it asserts.
+- **Ancestry and retention (review item 4)** — `origin/master` (`abe20173`) is
+  an ancestor of HEAD, 28 commits ahead. `17ef3de9` (chroot before the
+  privileged runsc loader), `538ab985` (the original resolver bake) and the full
+  review-harness series are all present.
+- **DONE.md's Docker caveat (review item 5)** — truthful; `docker` is genuinely
+  absent here. Its "2 passed" was also literally true, which is exactly why it
+  was misleading: it is the report of a command narrow enough to miss F1.
 
-**"Checkout, token mint, publication, archive, and the long-poll are not material"
-— holds.** The long-poll half I verified directly in the endpoint code (see
-minor 6). The publication path is a single POST plus a marker round-trip.
+## Verification run here
 
-**"Publication, soft-fail behavior, timeouts, clone access, tools, and targeted
-bug-catching verification are unchanged" — holds** for the first five, verified
-against `git diff origin/master...HEAD`. The sixth ("targeted bug-catching
-verification unchanged") is the claim that did **not** hold as landed: targeted
-verification against a master tree is not targeted verification of the PR. It
-holds after `8485af35`.
+```
+uv run pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py \
+               tests/unit/test_detect_filter_sync.py \
+               tests/unit/sandbox/test_docker_runtime_argv.py \
+               tests/unit/test_gvisor_validation_workflow.py    # 24 passed
+uv run ruff check / ruff format --check / uv run mypy  (touched files)  # clean
+```
 
-**"53 passed" and "`git diff --check` clean" — reproduced** at `9b6a9286`.
-
-**"No post-fix live timing exists; do not claim a precise old/new number" —
-holds, and is the right call.** Nothing in this branch licenses a speedup figure
-before the first live run. Read that run for two things, not one: the elapsed
-time, and whether the artifact shows the reviewer actually reached `head_sha` in
-`/mnt/review`.
-
-## What I did not verify
-
-- Live behaviour of the reviewer under the new prompt. Prompt bounds are
-  probabilistic; only a real run shows whether the model honours them, and
-  whether it honours the checkout instruction in particular.
-- That `git fetch origin pull/<n>/head` specifically succeeds through the
-  per-session git proxy. The proxy is documented to forward smart-HTTP fetch with
-  auth injected, and the prompt deliberately does not prescribe the mechanics, so
-  a model that finds one route blocked can take another — but this is the one
-  step of `8485af35` that wants confirmation from the first live run.
-- Fork PRs. `CLONE_URL` is the *head* repo, so on a fork the clone is the fork's
-  default branch and `pull/<n>/head` does not exist there; `head_sha` does. The
-  prompt asks for the SHA rather than a ref, which is the right shape for both
-  cases, but no fork PR has exercised it.
+The e2e image contract was **not** run — no Docker daemon here. Whether this
+branch actually fixes aios#2410 is still open, and only that test can close it.

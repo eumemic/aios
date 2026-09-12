@@ -55,11 +55,25 @@ jobs:
           else:
               config = {}
           config.setdefault("runtimes", {})["runsc"] = {"path": "/usr/bin/runsc"}
+          # Image mounts provide the read-only operator tool root used to
+          # program netfilter inside the target runsc Sentry.
+          config.setdefault("features", {})["containerd-snapshotter"] = True
           daemon_json.write_text(json.dumps(config, separators=(",", ":")))
           # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}}
           PY
           sudo systemctl restart docker
           docker run --runtime=runsc --rm alpine echo ok
+          # The runsc egress path installs netfilter from inside the target
+          # Sentry using binaries from a read-only image mount, so prove the
+          # daemon actually honours --mount type=image here.  Without this the
+          # capability is only asserted by the daemon.json edit above, and a
+          # runner whose Engine ignores it would fail every Limited
+          # provisioning deep inside the suite with an unrelated-looking error.
+          docker run --rm --mount "type=image,src=alpine,dst=/mnt/operator-root" \
+            alpine test -x /mnt/operator-root/bin/busybox || {
+            echo "::error::daemon does not support --mount type=image (needs Engine 28+ with the containerd image store); the runsc egress path cannot work"
+            exit 1
+          }
 
       - uses: actions/checkout@v4
 
@@ -107,10 +121,19 @@ jobs:
         # 16 GB since 2024 — the old ``-n 2`` here predates that spec).
         # Each worker amortizes its own testcontainer-Postgres + Docker
         # setup over ~55 tests.
+        #
+        # ``-m 'docker and not perf'``: the ``perf`` mark is the ADVISORY
+        # wall-clock scaling backstop (#1661), excluded here for the same
+        # reason it is excluded from the gating run in ``code-validation.yml``
+        # — shared-runner jitter can exceed its ratio threshold on work that
+        # is genuinely O(1), and gVisor's syscall interception widens that
+        # jitter further.  This narrows the selection by MARK only: every
+        # ``docker``-marked test still runs and still fails the job, so a real
+        # runsc regression stays red.
         env:
           AIOS_DOCKER_IMAGE: aios-sandbox:ci
         run: |
-          AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile --junitxml=e2e-results.xml
+          AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m 'docker and not perf' -n 4 --dist=loadfile --junitxml=e2e-results.xml
 
       - name: Summarize failed risk group
         if: failure()

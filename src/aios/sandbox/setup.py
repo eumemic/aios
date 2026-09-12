@@ -808,19 +808,27 @@ def build_browser_deny_internal_verify_script() -> str:
 
 # Docker's embedded DNS, served inside every user-defined-network netns (the
 # sandbox runs on the ``aios-sandbox`` user-defined bridge). The lockdown
-# sidecar joins that netns but inherits the operator image's (typically empty)
-# ``/etc/resolv.conf`` — Docker does NOT manage resolv.conf for a
-# netns-joining container — so the sidecar script points itself at the
-# embedded resolver before ``getent`` resolves the allowed hosts. A DNS miss
-# fails CLOSED (the host gets no ACCEPT rule → blocked), never a bypass.
+# sidecar joins that netns, but Docker does NOT manage resolv.conf for a
+# netns-joining container, so the sidecar has to find the embedded resolver
+# itself before ``getent`` resolves the allowed hosts. A DNS miss fails CLOSED
+# (the host gets no ACCEPT rule → blocked), never a bypass.
+#
+# This address is also baked into the sandbox image at ``/etc/resolv.conf``
+# (``docker/sandbox-resolv.conf``) — the runsc path chroots into that image
+# READ-ONLY, where the preamble below cannot write. Keep the two in step;
+# ``tests/unit/sandbox/test_sandbox_resolv_conf.py`` pins the pair.
 _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 
 
 # Point the netns-joining sidecar at the embedded resolver before any
-# ``getent`` runs (Docker doesn't manage resolv.conf for a netns-joining
-# container). Prepended to BOTH the Limited lockdown apply script and the
+# ``getent`` runs. Prepended to BOTH the Limited lockdown apply script and the
 # Unrestricted DNAT-only apply script (#1153) so credential / allowed-host
 # resolution works the same way in either mode.
+#
+# Best-effort by design: on the runc path this writes the sidecar container's
+# own file, while under runsc the script runs chrooted into the read-only
+# operator image and the write fails. Both end up at the same nameserver —
+# there because the image ships it — which is why the failure is tolerated.
 _RESOLV_PREAMBLE = (
     f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
 )

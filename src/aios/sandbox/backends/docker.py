@@ -84,6 +84,107 @@ _MANAGED_INSPECT_BATCH_SIZE = 100
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+# A runsc sandbox's netfilter lives in its Sentry, not in the Linux network
+# namespace Docker can join a second container to.  Mount the operator image
+# read-only so the runsc exec path below can use known-good networking tools
+# without trusting the durable, tenant-writable root filesystem.
+_RUNSC_OPERATOR_ROOT = "/run/aios-operator-root"
+
+# Every path below is the REAL file in the operator image, deliberately NOT the
+# conventional name. The egress exec runs in the TENANT's mount namespace, so a
+# path is only trustworthy if resolving it never leaves ``_RUNSC_OPERATOR_ROOT``:
+#
+#   * ``/bin``, ``/lib``, ``/lib64``, ``/sbin`` are usr-merge symlinks whose
+#     targets happen to be RELATIVE today -- a base-image bump that made any of
+#     them absolute would silently redirect into the tenant root.
+#   * ``/usr/bin/awk``, ``/usr/sbin/iptables`` and ``/usr/sbin/ip6tables`` are
+#     update-alternatives symlinks pointing at ``/etc/alternatives/<name>``,
+#     which IS absolute -- following one lands on a tenant-writable file. So awk
+#     resolves to its real provider (mawk), and the unsuffixed iptables names
+#     map to the legacy binaries: gVisor's netstack implements only the legacy
+#     netfilter ABI, so the nft alternative could never work under runsc anyway.
+_RUNSC_OPERATOR_LOADER = "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+_RUNSC_OPERATOR_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu"
+_RUNSC_OPERATOR_SHELL = "/usr/bin/bash"
+_RUNSC_OPERATOR_CHROOT = "/usr/bin/busybox"
+
+# Shell command name -> operator-image path, for every external command the
+# egress scripts in ``aios.sandbox.setup`` invoke. Anything NOT listed here
+# resolves through ``PATH``, which the exec pins to the operator root -- so a
+# forgotten entry degrades to "operator binary under the tenant's loader",
+# never to "tenant binary". ``test_runsc_operator_shadow.py`` fails when a
+# script grows a command this map does not cover.
+_RUNSC_OPERATOR_COMMANDS: dict[str, str] = {
+    "iptables-legacy": "/usr/sbin/iptables-legacy",
+    "ip6tables-legacy": "/usr/sbin/ip6tables-legacy",
+    "iptables": "/usr/sbin/iptables-legacy",
+    "ip6tables": "/usr/sbin/ip6tables-legacy",
+    "getent": "/usr/bin/getent",
+    "grep": "/usr/bin/grep",
+    "awk": "/usr/bin/mawk",
+    "sort": "/usr/bin/sort",
+    "head": "/usr/bin/head",
+}
+
+# Environment the ``docker exec`` overrides. The container's own environment is
+# tenant-authored (``EnvironmentConfig.env`` is a free-form ``dict[str, str]``
+# injected with ``docker run --env``) and ``docker exec`` inherits it, so the
+# loader-injection vars must be cleared: ``--library-path`` overrides where
+# ld.so SEARCHES but does not stop it honouring ``LD_PRELOAD`` / ``LD_AUDIT``,
+# either of which would run tenant code inside the operator shell. ``PATH`` is
+# pinned to the post-chroot operator directories (the exec chroots into
+# :data:`_RUNSC_OPERATOR_ROOT` first, so these ARE the operator image's) rather
+# than inherited, so an unshadowed command cannot resolve to a tenant binary,
+# and ``POSIXLY_CORRECT`` is cleared because bash reads it at
+# startup regardless of ``-p`` and posix mode rejects the hyphenated
+# ``iptables-legacy`` function name (a tenant-triggerable provision failure).
+# ``bash -p`` covers the rest of the bash-startup surface: ``BASH_ENV``,
+# ``ENV``, ``SHELLOPTS``, ``BASHOPTS``, ``CDPATH``, ``GLOBIGNORE`` and
+# ``BASH_FUNC_*`` function import are all ignored in privileged mode.
+_RUNSC_OPERATOR_EXEC_ENV: tuple[tuple[str, str], ...] = (
+    ("LD_PRELOAD", ""),
+    ("LD_AUDIT", ""),
+    ("LD_LIBRARY_PATH", ""),
+    ("POSIXLY_CORRECT", ""),
+    ("PATH", "/usr/sbin:/usr/bin"),
+)
+
+
+def _runsc_operator_preamble(operator_root: str = _RUNSC_OPERATOR_ROOT) -> str:
+    """Shell prologue binding every external command to the operator image.
+
+    Prepended to the caller's egress script on the runsc exec path. Each name
+    becomes a shell function that invokes the operator image's ELF loader
+    explicitly -- the kernel would otherwise resolve a binary's baked-in
+    interpreter (``/lib64/ld-linux-x86-64.so.2``) against the TENANT root, so a
+    persisted, poisoned loader would take control before the operator binary's
+    own ``main``. Functions, not aliases, so they apply in a non-interactive
+    shell and survive into ``$(...)`` subshells and pipelines.
+
+    The presence check runs first: a missing operator root (an image-mount-less
+    daemon, or a container created before this path existed) then fails closed
+    with a named error instead of an opaque ld.so message. ``IFS`` is pinned
+    because bash honours an inherited ``IFS`` and every script splits resolver
+    output on it.
+    """
+    paths = sorted(set(_RUNSC_OPERATOR_COMMANDS.values()))
+    lines = [
+        f"OP={operator_root}",
+        "IFS=$' \\t\\n'",
+        f'LD="$OP{_RUNSC_OPERATOR_LOADER}"',
+        f'LIB="$OP{_RUNSC_OPERATOR_LIBRARY_PATH}"',
+        'for _p in "$LD" ' + " ".join(f'"$OP{path}"' for path in paths) + "; do",
+        '  [ -x "$_p" ] || { echo "aios: operator tool root incomplete: $_p" >&2; exit 90; }',
+        "done",
+        'operator_exec() { "$LD" --library-path "$LIB" "$OP$1" "${@:2}"; }',
+        *(
+            f'{name}() {{ operator_exec {path} "$@"; }}'
+            for name, path in _RUNSC_OPERATOR_COMMANDS.items()
+        ),
+        "export -f operator_exec " + " ".join(_RUNSC_OPERATOR_COMMANDS),
+    ]
+    return "\n".join(lines) + "\n"
+
 
 # Snapshot operations legitimately scale with the corpse writable layer. Keep
 # metadata calls on the blanket Docker CLI bound, but calibrate data work from
@@ -166,6 +267,14 @@ class DockerBackend:
             argv.extend(["--label", f"{key}={value}"])
 
         argv.extend(["--network", spec.network_name or SANDBOX_NETWORK_NAME])
+
+        if spec.runtime == "runsc":
+            argv.extend(
+                [
+                    "--mount",
+                    f"type=image,src={get_settings().docker_image},dst={_RUNSC_OPERATOR_ROOT}",
+                ]
+            )
 
         # NB: the sandbox is NOT granted ``--cap-add NET_ADMIN`` (durable
         # session sandboxes, §5.8). The Limited-policy iptables lockdown is
@@ -1106,36 +1215,88 @@ class DockerBackend:
         max_output_bytes: int,
         runtime: str | None = None,
     ) -> CommandResult:
-        """Apply/verify the network lockdown from an ephemeral operator-image sidecar.
+        """Apply/verify network rules with operator-trusted binaries.
 
-        ``--network container:<id>`` shares the sandbox's netns; ``--cap-add
-        NET_ADMIN`` lets the sidecar edit netfilter in that shared namespace;
-        ``--rm`` removes it on exit (the rules persist in the netns, held by
-        the sandbox). No restrictive seccomp is applied — this is an
-        operator-trusted, short-lived container, and iptables needs the
-        syscalls the default profile permits. ``runtime`` (#1014) selects the
-        container runtime (e.g. ``runsc``) — passed by the caller, pinned to
-        the target sandbox's spec; the backend never reads ambient config.
+        Two shapes, selected by ``runtime`` (#1014 — passed by the caller,
+        pinned to the target sandbox's spec; the backend never reads ambient
+        runtime config):
+
+        **Default / runc.** ``docker run --rm --network container:<id>`` shares
+        the sandbox's netns; ``--cap-add NET_ADMIN`` lets the sidecar edit
+        netfilter in that shared namespace; ``--rm`` removes it on exit (the
+        rules persist in the netns, held by the sandbox). No restrictive seccomp
+        is applied — this is an operator-trusted, short-lived container, and
+        iptables needs the syscalls the default profile permits.
+
+        **runsc.** That shape does not work: two runsc containers sharing a
+        Linux netns get separate Sentries, so the sidecar programs its OWN
+        netstack and the target's tables stay empty (#2310, gvisor#170). The
+        rules have to be installed from inside the target Sentry, so this
+        ``docker exec``s there instead. ``--privileged`` is the only way to give
+        an exec ``NET_ADMIN`` (``docker exec`` has no ``--cap-add``); it grants
+        the full capability set to this one ephemeral operator process, while
+        the sandbox's own processes still hold no ``NET_ADMIN`` and cannot touch
+        netfilter. Trust does NOT come from the container being trusted — it
+        comes from a static chroot entering the read-only operator image before
+        its dynamic loader starts, and every executable being loaded from that
+        root, with the environment scrubbed
+        (:data:`_RUNSC_OPERATOR_EXEC_ENV`) and the shell in privileged mode
+        (``bash -p``) so tenant-authored container env cannot inject code into
+        it. See :func:`_runsc_operator_preamble`.
+
+        ``image`` is unused on the runsc path: the operator root is whatever
+        :meth:`create` mounted (``settings.docker_image``), which is the same
+        image every in-tree caller passes here.
+
+        NOTE (runsc only): the chroot also decides which ``/etc/resolv.conf``
+        ``getent`` reads — the operator image's, not the tenant's. That is the
+        property we want (the allow-list is built from what ``getent`` returns,
+        so a tenant-poisoned ``resolv.conf`` would otherwise choose which
+        addresses get an ACCEPT rule), but it means ``setup._RESOLV_PREAMBLE``
+        no longer has anywhere to write: the operator root is a read-only image
+        mount, so its ``printf`` fails and is swallowed by ``|| true``. The
+        nameserver therefore has to be in the image already —
+        ``docker/sandbox-resolv.conf``, COPYed to ``/etc/resolv.conf``, holding
+        the same embedded-resolver address the preamble writes. Without it
+        every host resolves to nothing and Limited egress blackholes.
         """
-        argv = [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            f"container:{target_sandbox_id}",
-            "--cap-add",
-            "NET_ADMIN",
-        ]
-        if runtime:
-            argv.extend(["--runtime", runtime])
-        argv.extend(
-            [
-                image,
-                "bash",
-                "-c",
-                script,
+        if runtime == "runsc":
+            argv = ["docker", "exec", "--privileged"]
+            for key, value in _RUNSC_OPERATOR_EXEC_ENV:
+                argv.extend(["--env", f"{key}={value}"])
+            argv.extend(
+                [
+                    target_sandbox_id,
+                    # The first process is static, so tenant ld.so and
+                    # /etc/ld.so.preload never run. Only after chrooting into
+                    # the read-only operator image do we start its loader.
+                    f"{_RUNSC_OPERATOR_ROOT}{_RUNSC_OPERATOR_CHROOT}",
+                    "chroot",
+                    _RUNSC_OPERATOR_ROOT,
+                    _RUNSC_OPERATOR_LOADER,
+                    "--library-path",
+                    _RUNSC_OPERATOR_LIBRARY_PATH,
+                    _RUNSC_OPERATOR_SHELL,
+                    "-p",
+                    "-c",
+                    # We are already rooted inside the operator image here, so
+                    # its absolute paths need no mount-point prefix.
+                    _runsc_operator_preamble("") + script,
+                ]
+            )
+        else:
+            argv = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                f"container:{target_sandbox_id}",
+                "--cap-add",
+                "NET_ADMIN",
             ]
-        )
+            if runtime:
+                argv.extend(["--runtime", runtime])
+            argv.extend([image, "bash", "-c", script])
         rc, stdout_bytes, stderr_bytes, timed_out = await run_subprocess_with_timeout(
             argv, timeout_s=float(timeout_seconds)
         )

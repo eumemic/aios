@@ -46,10 +46,34 @@ def test_gvisor_workflow_mirrors_docker_e2e_setup_and_runs_runsc_shard() -> None
     ]:
         assert snippet in workflow
 
+    # ``perf`` is the ADVISORY wall-clock scaling backstop (#1661); excluding it
+    # matches ``code-validation.yml``'s gating run. Pinned as an exact string so
+    # the exclusion cannot quietly grow into ``not docker_slow``-style selectors
+    # that would hide real runsc failures — the only narrowing permitted here is
+    # by MARK, and only of the advisory one.
     assert (
-        "AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile --junitxml=e2e-results.xml"
-        in workflow
+        "AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m 'docker and not perf' "
+        "-n 4 --dist=loadfile --junitxml=e2e-results.xml" in workflow
     )
+    assert "continue-on-error" not in workflow, (
+        "the runsc shard must stay gating: excluding the advisory perf mark is "
+        "not a licence to make docker failures non-fatal"
+    )
+
+
+def test_gvisor_workflow_proves_the_daemon_supports_the_operator_image_mount() -> None:
+    """The runsc egress path needs ``--mount type=image`` (Engine 28 + containerd store).
+
+    Netfilter must be programmed from inside the target Sentry (#2310), using
+    binaries from a read-only operator image mount. If the runner's daemon
+    ignores the ``containerd-snapshotter`` feature flag, every Limited
+    provisioning fails deep in the suite with an unrelated-looking error, so the
+    capability is probed directly right after the daemon restart.
+    """
+    workflow = _workflow_text()
+
+    assert '"containerd-snapshotter"' in workflow
+    assert '--mount "type=image,src=alpine,dst=/mnt/operator-root"' in workflow
 
 
 def test_gvisor_workflow_groups_junit_failures_by_risk_in_summary() -> None:

@@ -1,10 +1,10 @@
-# eumemic-bot PR reviews — run the live aios reviewer and publish its artifact
-# as the GitHub App. The launcher (scripts/eumemic_bot_review.py) waits for the
-# session, POSTs the `### Code review` comment itself, and verifies it landed
-# before archiving, so the job outlives the review rather than firing and
-# forgetting. Must never FAIL the PR check: aios account/agent misses are ops,
-# not a code defect. The job is named "aios-review" so it does not collide with
-# other "review" required checks.
+# eumemic-bot PR reviews — run a coding agent on the runner against the PR-head
+# checkout and publish its artifact as the GitHub App. A separate job on a fresh
+# runner downloads only the markdown artifact, mints the token, then uses gh to
+# POST it; no PR or base-branch code runs with the token. No aios session is
+# created. Must never FAIL the PR check: a harness or proxy miss is ops, not a
+# code defect — hence continue-on-error plus the job summary below, which is
+# what keeps a missing review visible instead of silent.
 name: eumemic-bot review
 
 on:
@@ -19,54 +19,151 @@ permissions:
   contents: read
 
 env:
-  AIOS_URL: https://api.aios.eumemic.ai
+  REVIEW_MODEL: ${{ vars.EUMEMIC_BOT_REVIEW_MODEL || 'gpt-5.6-sol' }}
 
 jobs:
-  review:
+  agent:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    # Must outlive REVIEW_TIMEOUT_SECONDS plus the launcher's final long-poll
-    # (a poll issued just under the deadline holds the socket for up to 60s),
-    # plus checkout + token mint + the GitHub POST. A review that overruns has
-    # to hit the launcher's own FATAL, not this: continue-on-error then keeps
-    # the check green and still writes the "did not post" job summary below.
-    timeout-minutes: 50
+    # Outlives REVIEW_TIMEOUT_SECONDS plus checkout and npm install. A review
+    # that overruns has to hit the launcher's own
+    # FATAL, not this: continue-on-error then keeps the check green and still
+    # writes the "did not post" job summary, whereas a runner kill takes both.
+    timeout-minutes: 20
     steps:
+      # Explicit head SHA, not the synthetic merge commit: the agent reviews the
+      # tree the PR actually proposes. fetch-depth 0 brings the base history the
+      # launcher hands the agent as the `base...head` range.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Only the routed harness: installing all three triples the install time
+      # and lets an unrelated publisher hiccup block every review. The `family`
+      # output also decides which single proxy secret the agent step is given.
+      - name: Install the coding-agent harness
+        id: harness
+        continue-on-error: true
+        run: |
+          case "$REVIEW_MODEL" in
+            gpt-*)    package='@openai/codex'; family='oai' ;;
+            claude-*) package='@anthropic-ai/claude-code'; family='ant' ;;
+            grok-*)   package='@mariozechner/pi-coding-agent'; family='xai' ;;
+            *)
+              echo "unsupported REVIEW_MODEL '$REVIEW_MODEL'" >&2
+              exit 1
+              ;;
+          esac
+          echo "family=$family" >> "$GITHUB_OUTPUT"
+          npm install --global "$package"
+
+      # This process and all of its descendants run before an installation token
+      # exists. In particular, there is no GH_TOKEN for an unsandboxed Codex to
+      # recover through /proc/$PPID/environ. The launcher waits for the harness
+      # before it writes the final artifact and exits.
+      #
+      # Only the routed family's proxy key is passed. The launcher strips the
+      # other two from the *child* environment, but unsetenv does not rewrite
+      # /proc/<pid>/environ, so a secret this step receives stays readable to
+      # the agent for the life of the process however the child is scrubbed.
+      # Whatever the agent must not hold has to be absent here, not removed
+      # later — which is the same reason the App token is minted below.
+      - name: Run coding agent
+        id: agent
+        if: steps.harness.outcome == 'success'
+        continue-on-error: true
+        env:
+          OAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'oai' && secrets.OAI_PROXY_API_KEY || '' }}
+          ANT_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'ant' && secrets.ANT_PROXY_API_KEY || '' }}
+          XAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'xai' && secrets.XAI_PROXY_API_KEY || '' }}
+          REVIEW_TIMEOUT_SECONDS: "900"
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
+        run: python3 scripts/eumemic_bot_review.py agent
+
+      # ``include-hidden-files`` is load-bearing, not tidiness: since v4.4 the
+      # action skips anything whose name starts with a dot, and the launcher
+      # writes `.eumemic-bot-review.md`. Without it the upload matches nothing,
+      # `if-no-files-found: error` fails the step, and publish has nothing to
+      # download — a silent "no review" of exactly the kind this workflow keeps
+      # failing on. A single explicit file, so there is no directory sweep that
+      # could pull in an unintended dotfile.
+      - name: Upload review artifact
+        id: artifact
+        if: steps.agent.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: eumemic-bot-review
+          path: .eumemic-bot-review.md
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: agent
+    # ``!cancelled()`` rather than ``always()``: the job must still run when the
+    # agent job failed — that is precisely when the "did not post" summary has
+    # to be written — but a run superseded by cancel-in-progress published
+    # nothing because it was replaced, not because anything missed. Under
+    # ``always()`` every superseded push emitted the summary, which is how a
+    # real miss stops standing out.
+    if: ${{ !cancelled() && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # This is a fresh runner with no PR checkout. The only agent-controlled
+      # input transferred across the job boundary is markdown, which is passed
+      # to GitHub as JSON data and never executed.
+      - name: Download review artifact
+        id: artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: eumemic-bot-review
+          path: review
 
       - name: Mint eumemic-bot installation token
         id: app
+        if: steps.artifact.outcome == 'success'
         continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.EUMEMIC_BOT_APP_ID }}
           private-key: ${{ secrets.EUMEMIC_BOT_PRIVATE_KEY }}
-          # No skip-token-revoke: the launcher POSTs and verifies ### Code review
-          # inside this job, so nothing needs the installation token once the job
-          # ends. The action's post-step revoke runs after every step, so it can
-          # no longer 401 the publisher the way it did when the session posted.
 
-      - name: Review and post as eumemic-bot
-        id: review
+      - name: Post as eumemic-bot
+        id: publish
         if: steps.app.outcome == 'success'
         continue-on-error: true
         env:
-          AIOS_API_KEY: ${{ secrets.AIOS_API_KEY }}
-          AGENT_ID: ${{ secrets.DEV_REVIEW_AGENT_ID }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REVIEW_TIMEOUT_SECONDS: "2700"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CLONE_URL: ${{ github.event.pull_request.head.repo.clone_url }}
-        run: python3 scripts/eumemic_bot_review.py
+          REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/review/.eumemic-bot-review.md
+        run: |
+          grep -q '^### Code review$' "$REVIEW_ARTIFACT_PATH"
+          marker="<!-- eumemic-bot-review:${HEAD_SHA} -->"
+          jq -Rs --arg marker "$marker" '{body: (. + "\n\n" + $marker)}' \
+            "$REVIEW_ARTIFACT_PATH" > "$RUNNER_TEMP/review-request.json"
+          gh api --method POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --input "$RUNNER_TEMP/review-request.json" > "$RUNNER_TEMP/review-response.json"
+          jq -e --arg marker "$marker" \
+            '.html_url and (.body | contains($marker)) and (.user.login == "eumemic-bot[bot]")' \
+            "$RUNNER_TEMP/review-response.json"
+          echo "posted and verified ### Code review: $(jq -r .html_url "$RUNNER_TEMP/review-response.json")"
 
-      # continue-on-error above keeps an ops miss (live agent down, API
-      # unreachable) from blocking merges. But a silently green run is exactly
-      # how the missing `### Code review` comments went unnoticed, so a run that
-      # published nothing says so where a reader sees it without opening logs.
+      # continue-on-error above keeps an ops miss from blocking merges. But a
+      # silently green run is exactly how missing `### Code review` comments went
+      # unnoticed, so a run that published nothing says so where a reader sees it
+      # without opening logs.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
+        if: always() && (needs.agent.result != 'success' || steps.artifact.outcome != 'success' || steps.app.outcome != 'success' || steps.publish.outcome != 'success')
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
           echo "No \`### Code review\` comment was published for this run. See the step log." \
