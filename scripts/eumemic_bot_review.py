@@ -13,10 +13,19 @@ GitHub fails loudly here rather than vanishing.
 Publication is gated on EVIDENCE OF INSPECTION, not on the agent's exit status.
 `codex` exits 0 when its sandbox blocks every command, so a zero exit says only
 that the process ended — not that the agent read a byte of the diff. The agent
-must echo the line count and sha256 of `git diff base...head`, which the
-launcher recomputes; a mismatch or a missing line is a distinct, loud,
-never-publishable state (NO_EVIDENCE_EXIT_CODE), because the alternative is an
+must echo the full sha256 of `git diff base...head`, which the launcher
+recomputes; a mismatch or a missing line is a distinct, loud, never-publishable
+state (NO_EVIDENCE_EXIT_CODE), because the alternative is an
 authoritative-sounding "LGTM" from a reviewer that inspected nothing.
+
+The digest is the ONLY accepting channel. The line count is echoed for legible
+diagnostics but cannot authorise publication: it is public at the PR's `.diff`
+URL, so it never distinguished a real read from a network fetch.
+
+Because the sandbox is off (the only mode that executes on a hosted runner),
+the agent's environment is also stripped of the Actions control files
+(GITHUB_OUTPUT/ENV/PATH), not just of credentials — otherwise the agent could
+forge `published=true` and silence the workflow's own missing-review detector.
 
 Env:
   GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, BASE_SHA
@@ -53,8 +62,11 @@ _REVIEW_SECONDS = 900
 # derivable from the prompt alone counts — the expected values are deliberately
 # NOT in the prompt, only the recipe for deriving them.
 EVIDENCE_TEMPLATE = "<!-- inspected: lines=<N> sha256=<HEX> -->"
+# The FULL 64-hex digest, not a prefix. A prefix shortens the only
+# high-entropy channel, and the width itself is load-bearing: a mutant
+# widening this bound survived the suite once already.
 _EVIDENCE_RE = re.compile(
-    r"<!--\s*inspected:\s*lines=(\d+)\s+sha256=([0-9a-fA-F]{16,64})\s*-->", re.IGNORECASE
+    r"<!--\s*inspected:\s*lines=(\d+)\s+sha256=([0-9a-fA-F]{64})\s*-->", re.IGNORECASE
 )
 # "The agent inspected nothing" is NOT an ordinary failure: codex exits 0 when
 # its sandbox blocks every command, so this is the state that used to publish an
@@ -84,11 +96,30 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 # shell commands, so it must not inherit anything that grants write access. The
 # installation token in particular can comment and push as eumemic-bot. Each
 # harness gets back exactly the one proxy key it needs and nothing else.
+#
+# This list is not only about SECRETS. Since the sandbox is off
+# (danger-full-access — the only mode that executes on a hosted runner), the
+# agent has a real shell, so the Actions CONTROL PLANE is attack surface too:
+#
+#   GITHUB_OUTPUT — the input to the workflow's "did not post" safety net. An
+#     agent that appends `published=true` and then emits no evidence gets the
+#     launcher to refuse publication (exit 3, nothing posted) while the net
+#     reads `published == 'true'` and stays silent: green run, no review, no
+#     warning. That is precisely the silent failure this launcher exists to
+#     close, so leaving the path in the child env hands the agent the ability
+#     to forge the detector's own input.
+#   GITHUB_ENV / GITHUB_PATH — writes there mutate later steps of this job.
+#
+# Stripping these from the CHILD is functionally free: _record_published reads
+# GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched.
 _STRIPPED_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "ACTIONS_RUNTIME_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "GITHUB_OUTPUT",
+    "GITHUB_ENV",
+    "GITHUB_PATH",
     "OAI_PROXY_API_KEY",
     "ANT_PROXY_API_KEY",
     "XAI_PROXY_API_KEY",
@@ -313,23 +344,44 @@ def _die_without_evidence(detail: str) -> NoReturn:
 def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> None:
     """Refuse to publish unless the artifact proves the agent read the diff.
 
-    Accepts a match on EITHER channel. Both are derivable only by running the
-    diff in the checkout, so either one rules out a blocked agent; requiring
-    both would turn a benign formatting difference in one into a suppressed
-    genuine review.
+    THE DIGEST IS THE ONLY ACCEPTING CHANNEL, and it must match in full.
+
+    An earlier revision also accepted a matching line count on its own,
+    documented as "derivable only by running the diff in the checkout". That
+    was FALSE: `https://github.com/<org>/<repo>/pull/<n>.diff` is public and
+    carries the identical line count with no checkout access at all (measured
+    on this PR: 2243 on both, different bytes so different digests). An agent
+    whose shell is dead but whose network is live — the exact blocked-agent
+    state this gate exists to catch — could obtain the count and pair it with
+    64 arbitrary hex characters. The low-entropy half of an OR is the strength
+    of the whole OR.
+
+    The line count is still parsed and still reported on a mismatch, because it
+    makes the diagnostic legible; it just cannot authorise publication.
+
+    Requiring the full digest does not reintroduce the brittleness the OR was
+    guarding against: `sha256sum` output is a stable 64-hex string, whereas
+    `wc -l` was the channel prone to benign formatting drift.
+
+    Note for future mutation runs: replacing the `==` below with
+    `expected_digest.startswith(claimed_digest)` is an EQUIVALENT MUTANT and no
+    test can kill it. `_EVIDENCE_RE` admits exactly 64 hex characters and
+    `expected_digest` is a sha256 hexdigest, so both operands are always the
+    same length, where `startswith` and `==` coincide. `==` is kept because it
+    states the intent directly and does not depend on the regex for its
+    safety — but a survivor there is expected, not a gap.
     """
     expected_lines, expected_digest = expected
     match = _EVIDENCE_RE.search(artifact)
     if match is None:
         _die_without_evidence(
-            f"the agent's `{ARTIFACT_HEADING}` carries no `{EVIDENCE_TEMPLATE}` line, so nothing "
-            "shows it read the diff. Its verdict is not publishable."
+            f"the agent's `{ARTIFACT_HEADING}` carries no well-formed `{EVIDENCE_TEMPLATE}` line "
+            "(the sha256 must be all 64 hex characters), so nothing shows it read the diff. "
+            "Its verdict is not publishable."
         )
     claimed_lines = int(match.group(1))
     claimed_digest = match.group(2).lower()
-    if claimed_lines == expected_lines:
-        return
-    if expected_digest.startswith(claimed_digest):
+    if claimed_digest == expected_digest.lower():
         return
     _die_without_evidence(
         f"inspection evidence does not match the diff: agent claimed lines={claimed_lines} "
@@ -352,9 +404,13 @@ def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
         f"  git --no-pager diff {base_sha}...{head_sha} | sha256sum\n"
         f"and end your final response with a line of the form\n"
         f"  {EVIDENCE_TEMPLATE}\n"
-        f"substituting the real values you observed. Do NOT guess, infer, or fabricate them: "
-        f"the launcher recomputes both and refuses to publish any review whose values do not "
-        f"match. If your shell cannot run those commands, say so plainly and DO NOT emit an "
+        f"substituting the real values you observed. Quote the sha256 IN FULL — all 64 hex "
+        f"characters, not an abbreviation: the digest is the channel that authorises "
+        f"publication, and an abbreviated or malformed one is refused. Do NOT guess, infer, or "
+        f"fabricate the values: the launcher recomputes the digest and refuses to publish any "
+        f"review whose digest does not match exactly. The line count alone will NOT do — it is "
+        f"published at the PR's .diff URL and so proves nothing about what you read. "
+        f"If your shell cannot run those commands, say so plainly and DO NOT emit an "
         f"evidence line and DO NOT render a verdict — an unverifiable review is worse than "
         f"none. {REVIEW_SCOPE}"
     )

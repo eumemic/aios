@@ -112,6 +112,75 @@ def test_agent_env_drops_the_install_token_and_unrouted_keys(
     assert kept in env
 
 
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "claude-opus-5", "grok-4.6"])
+def test_agent_cannot_reach_the_actions_control_files(
+    monkeypatch: Any, clean_env: None, tmp_path: Path, model: str
+) -> None:
+    """The agent must not inherit the Actions control plane.
+
+    `$GITHUB_OUTPUT` is the INPUT to the safety net that detects a missing
+    review. Under `danger-full-access` the agent has a real shell, so an
+    inherited path lets it `echo published=true >> $GITHUB_OUTPUT`: the
+    launcher then refuses to publish (exit 3, nothing posted) but the
+    workflow's `steps.review.outputs.published != 'true'` net does NOT fire.
+    Green run, no review, no warning — the exact silent failure this whole
+    mechanism exists to close, reachable BY the reviewed code's agent.
+
+    `$GITHUB_ENV` and `$GITHUB_PATH` are the same class: writes there mutate
+    later steps of this job.
+
+    Stripping them from the CHILD costs nothing: `_record_published` reads
+    GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched —
+    asserted directly in test_stripping_github_output_does_not_break_the_signal.
+    """
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "oai")
+    monkeypatch.setenv("ANT_PROXY_API_KEY", "ant")
+    monkeypatch.setenv("XAI_PROXY_API_KEY", "xai")
+    monkeypatch.setenv("GITHUB_OUTPUT", "/runner/file_commands/set_output_abc")
+    monkeypatch.setenv("GITHUB_ENV", "/runner/file_commands/set_env_abc")
+    monkeypatch.setenv("GITHUB_PATH", "/runner/file_commands/add_path_abc")
+    _, env = reviewer._agent_command(model, tmp_path / "review.md")
+    assert not {"GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH"} & set(env)
+    # Not merely absent by name — the path must not survive under any key.
+    assert not [v for v in env.values() if "file_commands" in v]
+
+
+def test_stripping_github_output_does_not_break_the_publication_signal(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Verified, not assumed: the launcher reads GITHUB_OUTPUT from its OWN env.
+
+    This is the functional check behind the strip. `_record_published` never
+    consults the child env, so removing the var from the agent's environment
+    cannot break the net's positive signal.
+    """
+    output = tmp_path / "gh-output"
+    output.write_text("")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "oai")
+    _, env = reviewer._agent_command("gpt-5.6-sol", tmp_path / "review.md")
+    assert "GITHUB_OUTPUT" not in env  # gone from the child
+    reviewer._record_published("https://github.test/c/1")  # still works in the parent
+    assert "published=true" in output.read_text()
+
+
+def test_checkout_does_not_leave_a_git_credential_on_disk() -> None:
+    """Env stripping does not reach `.git/config`.
+
+    actions/checkout defaults `persist-credentials: true`, which writes
+    `http.https://github.com/.extraheader` — HTTP basic auth carrying the
+    workflow GITHUB_TOKEN — into the checkout on disk. The launcher strips
+    credentials from the agent's ENV, but an unsandboxed agent just runs
+    `cat .git/config`. Bounded here by `contents: read` on a public repo, but
+    "strips every writable credential" is only true if this is off.
+    """
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    checkout = next(
+        step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/checkout")
+    )
+    assert checkout["with"]["persist-credentials"] is False
+
+
 def test_prompt_pins_the_reviewed_range_to_base_and_head() -> None:
     prompt = reviewer._prompt("eumemic/aios", "7", "headsha", "basesha")
     assert "git diff basesha...headsha" in prompt
@@ -250,6 +319,45 @@ def test_main_posts_and_verifies_marker(monkeypatch: Any, capsys: Any) -> None:
     reviewer.main()
     assert "<!-- eumemic-bot-review:abc123 -->" in posted["body"]
     assert "posted and verified" in capsys.readouterr().out
+
+
+def test_main_pins_the_checkout_before_reviewing_anything(monkeypatch: Any) -> None:
+    """Reviewing the WRONG TREE is the one failure worse than no review.
+
+    The reviewer's mutant that deleted the `_pin_checkout(...)` call from
+    `main()` SURVIVED all 44 tests: every pin test called the function
+    directly, none asserted main invokes it. A verdict rendered against an
+    unpinned tree is authoritative and about different code.
+
+    Pinning must also happen BEFORE the agent runs, not after — a review of the
+    wrong tree that is later detected has already burned the run.
+    """
+    _review_env(monkeypatch)
+    calls: list[tuple[str, str]] = []
+    order: list[str] = []
+
+    def pin(head: str, base: str) -> None:
+        calls.append((head, base))
+        order.append("pin")
+
+    monkeypatch.setattr(reviewer, "_pin_checkout", pin)
+
+    def agent(*a: Any, **k: Any) -> str:
+        order.append("agent")
+        return "### Code review\n\nPass."
+
+    monkeypatch.setattr(reviewer, "run_agent", agent)
+    monkeypatch.setattr(
+        reviewer,
+        "_github_request",
+        lambda method, url, token, body: {
+            "html_url": "https://github.test/c/1",
+            "body": body["body"],
+        },
+    )
+    reviewer.main()
+    assert calls == [("abc123", "base456")], "main() did not pin the checkout to the PR head"
+    assert order == ["pin", "agent"], "the tree must be pinned before the agent reviews it"
 
 
 def test_main_fails_when_github_does_not_echo_the_marker(monkeypatch: Any) -> None:
@@ -423,18 +531,74 @@ def test_a_genuinely_inspected_review_publishes_whatever_its_verdict(
     assert verdict in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
 
 
-def test_evidence_accepts_a_matching_line_count_alone(monkeypatch: Any, clean_env: None) -> None:
-    """Either channel suffices; both are derivable only by running the diff."""
+def test_a_matching_line_count_alone_is_NOT_evidence(monkeypatch: Any, clean_env: None) -> None:
+    """The line count is public: it does NOT prove the agent read the checkout.
+
+    Measured on this very PR: `https://github.com/eumemic/aios/pull/2404.diff`
+    has the identical 2243 line count with zero checkout access (different
+    bytes, so a different digest). An agent with network but no working shell —
+    exactly the blocked-agent state this gate exists to catch — can obtain it.
+    So the count is a low-entropy, independently-obtainable integer and cannot
+    be an accepting channel on its own. Only the digest is sound.
+
+    This test previously asserted the OPPOSITE (`..._accepts_a_matching_line_
+    count_alone`); it codified the weakness as intended behaviour.
+    """
     monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
     artifact = "### Code review\n\nOK.\n\n<!-- inspected: lines=137 sha256=" + "c" * 64 + " -->"
     monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
-    assert reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
 
 
-def test_evidence_accepts_an_abbreviated_digest(monkeypatch: Any, clean_env: None) -> None:
-    reviewer.require_inspection_evidence(
-        "### Code review\n\n<!-- inspected: lines=0 sha256=aaaaaaaaaaaaaaaa -->", _DIFF_EVIDENCE
+def test_the_published_diff_line_count_paired_with_a_forged_digest_is_refused() -> None:
+    """The concrete attack, with this PR's real numbers."""
+    public_line_count = 2243  # from pull/2404.diff, fetched without any checkout
+    real = (2243, "085b04f85930cebf3d476a4905763f2c6d1ede92e9d2c1a060fe254d499dfd3b")
+    artifact = f"### Code review\n\nLGTM.\n\n<!-- inspected: lines={public_line_count} sha256={'f' * 64} -->"
+    with pytest.raises(SystemExit) as exc:
+        reviewer.require_inspection_evidence(artifact, real)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_an_abbreviated_digest_is_refused(monkeypatch: Any, clean_env: None) -> None:
+    """A 16-hex prefix is guessable-ish and was accepted; require all 64."""
+    with pytest.raises(SystemExit) as exc:
+        reviewer.require_inspection_evidence(
+            "### Code review\n\n<!-- inspected: lines=137 sha256=aaaaaaaaaaaaaaaa -->",
+            _DIFF_EVIDENCE,
+        )
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_the_full_digest_is_what_publishes(monkeypatch: Any, clean_env: None) -> None:
+    """The permit half: the sound channel still lets a real review through.
+
+    A guard only ever seen refusing is indistinguishable from one that refuses
+    everything, so the accepting case is asserted alongside every refusal.
+    """
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    # Deliberately a WRONG line count with the RIGHT digest: the digest alone
+    # must suffice, so a benign `wc -l` formatting difference cannot suppress a
+    # genuine review.
+    artifact = (
+        "### Code review\n\nReal finding.\n\n<!-- inspected: lines=999 sha256=" + "a" * 64 + " -->"
     )
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    assert "Real finding." in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+
+
+def test_evidence_regex_will_not_even_match_a_short_digest() -> None:
+    """Defence in depth: the pattern itself pins the full 64-hex width.
+
+    The reviewer's mutant that widened this (64 -> 1) SURVIVED the old suite.
+    """
+    assert reviewer._EVIDENCE_RE.search("<!-- inspected: lines=1 sha256=" + "a" * 64 + " -->")
+    for short in ("a" * 16, "a" * 63, "a" * 8):
+        assert not reviewer._EVIDENCE_RE.search(f"<!-- inspected: lines=1 sha256={short} -->"), (
+            f"regex matched a {len(short)}-char digest; the width is the guard"
+        )
 
 
 def test_main_refuses_to_post_when_the_agent_shows_no_inspection(monkeypatch: Any) -> None:
