@@ -139,6 +139,10 @@ def test_agent_cannot_reach_the_actions_control_files(
     monkeypatch.setenv("GITHUB_OUTPUT", "/runner/file_commands/set_output_abc")
     monkeypatch.setenv("GITHUB_ENV", "/runner/file_commands/set_env_abc")
     monkeypatch.setenv("GITHUB_PATH", "/runner/file_commands/add_path_abc")
+    # Actions itself may place runner control paths under unrelated keys.
+    monkeypatch.setenv(
+        "GITHUB_STEP_SUMMARY", "/home/runner/work/_temp/_runner_file_commands/step_summary_abc"
+    )
     _, env = reviewer._agent_command(model, tmp_path / "review.md")
     assert not {"GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH"} & set(env)
     # Not merely absent by name — the path must not survive under any key.

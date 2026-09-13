@@ -129,6 +129,12 @@ _STRIPPED_ENV = (
     "XAI_API_KEY",
 )
 
+# GitHub Actions exposes additional control-plane paths (for example
+# ``_runner_file_commands/step_summary_*``) under unrelated environment keys.
+# Since the agent runs with a real shell, deny those paths wherever they occur,
+# not only when carried by the well-known GITHUB_* variable names.
+_CONTROL_PATH_MARKERS = ("file_commands", "_runner_file_commands")
+
 REVIEW_SCOPE = (
     "Keep verification proportional to the changed code. Use focused tests for affected "
     "behavior, but do not run repository-wide test, lint, format, or type-check suites; CI "
@@ -192,7 +198,12 @@ def _proxy_key(primary: str, fallback: str) -> str:
 def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str, str]]:
     """Build the harness command and its proxy environment."""
     kind = model_kind(model)
-    env = {k: v for k, v in os.environ.items() if k not in _STRIPPED_ENV}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _STRIPPED_ENV
+        and not any(marker in v.lower() for marker in _CONTROL_PATH_MARKERS)
+    }
     if kind == "codex":
         key = _proxy_key("OAI_PROXY_API_KEY", "OPENAI_API_KEY")
         env["OPENAI_API_KEY"] = key
