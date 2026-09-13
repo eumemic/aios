@@ -5,6 +5,15 @@
 # itself, and verifies it landed. Must never FAIL the PR check: a harness or
 # proxy miss is ops, not a code defect — hence continue-on-error plus the job
 # summary below, which is what keeps a missing review visible instead of silent.
+#
+# ADVISORY BY CONSTRUCTION. continue-on-error means the check is green whether
+# the verdict is LGTM or BLOCKING, so the published comment says so in its first
+# line (ADVISORY_BANNER in the launcher). A green check here means the harness
+# ran; it never means the code was approved.
+#
+# The launcher additionally refuses to publish any verdict that carries no proof
+# the agent read the diff — `codex` exits 0 when its sandbox blocks every
+# command, so exit status alone cannot tell a review from a fluent guess.
 name: eumemic-bot review
 
 on:
@@ -55,6 +64,11 @@ jobs:
               ;;
           esac
           npm install --global "$package"
+          # NOTE: `apt-get install bubblewrap` does NOT fix the sandbox fault.
+          # Measured against codex-cli 0.154.0: codex invokes its OWN vendored
+          # bwrap (codex-resources/bwrap), never the one on PATH — a fake bwrap
+          # planted first in PATH is never executed. So the distro package is
+          # inert here. The fix is the sandbox MODE; see REVIEW_SANDBOX_MODE.
 
       - name: Mint eumemic-bot installation token
         id: app
@@ -80,6 +94,16 @@ jobs:
           ANT_PROXY_API_KEY: ${{ secrets.ANT_PROXY_API_KEY }}
           XAI_PROXY_API_KEY: ${{ secrets.XAI_PROXY_API_KEY }}
           REVIEW_TIMEOUT_SECONDS: "900"
+          # Measured, not assumed (codex-cli 0.154.0, `codex sandbox` probe):
+          #   read-only        -> bwrap fails, ZERO commands execute, codex exits 0
+          #   workspace-write  -> bwrap fails, ZERO commands execute, codex exits 0
+          #   danger-full-access -> executes; the diff is actually read
+          # Both sandboxed modes go through the same vendored bwrap, so switching
+          # to workspace-write would NOT have fixed anything. The isolation that
+          # matters here is the runner itself (ephemeral single-use VM) plus the
+          # launcher stripping every writable credential from the agent env
+          # before exec — the agent holds one proxy key and no GH token.
+          REVIEW_SANDBOX_MODE: ${{ vars.EUMEMIC_BOT_REVIEW_SANDBOX_MODE || 'danger-full-access' }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -90,9 +114,20 @@ jobs:
       # silently green run is exactly how missing `### Code review` comments went
       # unnoticed, so a run that published nothing says so where a reader sees it
       # without opening logs.
+      #
+      # Keyed on "was a genuine review published?", NOT on step outcome. In the
+      # real miss (run 34196306433) the agent read zero bytes, the launcher
+      # published anyway, the review step outcome was 'success' — and this net
+      # was SKIPPED, in the one instance it existed for. `published` is written
+      # by the launcher only after GitHub echoes the marker back, so its absence
+      # is the fact, whatever any step's exit status says.
       - name: Note an unpublished review in the run summary
-        if: always() && (steps.harness.outcome == 'failure' || steps.app.outcome == 'failure' || steps.review.outcome == 'failure')
+        if: always() && steps.review.outputs.published != 'true'
         run: |
           echo "### eumemic-bot review did not post" >> "$GITHUB_STEP_SUMMARY"
-          echo "No \`### Code review\` comment was published for this run. See the step log." \
+          echo "No verified \`### Code review\` comment was published for this run." \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "This includes the case where the agent ran, exited 0, and produced no" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "evidence it read the diff — that is refused, never published. See the step log." \
             >> "$GITHUB_STEP_SUMMARY"

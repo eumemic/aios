@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import subprocess
 from pathlib import Path
@@ -215,6 +216,9 @@ def test_pin_checkout_fails_when_the_base_cannot_be_fetched(monkeypatch: Any) ->
         reviewer._pin_checkout("abc123", "base456")
 
 
+_DIFF_EVIDENCE = (137, "a" * 64)
+
+
 def _review_env(monkeypatch: Any) -> None:
     for key, value in {
         "GH_TOKEN": "token",
@@ -226,11 +230,15 @@ def _review_env(monkeypatch: Any) -> None:
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(reviewer, "_git", lambda *args: _ok("abc123full\n"))
+    # The real `git diff base...head` cannot run against fixture SHAs. Stubbing
+    # it keeps these tests about publication, not about diff computation —
+    # which test_diff_evidence_is_computed_from_the_real_diff covers directly.
+    monkeypatch.setattr(reviewer, "diff_evidence", lambda *args: _DIFF_EVIDENCE)
 
 
 def test_main_posts_and_verifies_marker(monkeypatch: Any, capsys: Any) -> None:
     _review_env(monkeypatch)
-    monkeypatch.setattr(reviewer, "run_agent", lambda *args: "### Code review\n\nPass.")
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: "### Code review\n\nPass.")
     posted: dict[str, str] = {}
 
     def github(method: str, url: str, token: str, body: dict[str, str]) -> dict[str, str]:
@@ -247,7 +255,7 @@ def test_main_posts_and_verifies_marker(monkeypatch: Any, capsys: Any) -> None:
 def test_main_fails_when_github_does_not_echo_the_marker(monkeypatch: Any) -> None:
     """An unverified post is the silent-miss failure this launcher exists to catch."""
     _review_env(monkeypatch)
-    monkeypatch.setattr(reviewer, "run_agent", lambda *args: "### Code review\n\nPass.")
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: "### Code review\n\nPass.")
     monkeypatch.setattr(
         reviewer,
         "_github_request",
@@ -278,13 +286,335 @@ def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:
 
 
 def test_workflow_never_fails_the_pr_check_on_an_ops_miss() -> None:
+    """The channel stays advisory: an ops miss must not block a merge.
+
+    Retained deliberately. What changed is the WORDING, not the policy — since
+    the check cannot go red on a bad verdict, the comment now says so in its
+    first line instead of rendering an unqualified authoritative heading.
+    """
     job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
     steps = {step["id"]: step for step in job["steps"] if "id" in step}
     assert all(steps[name]["continue-on-error"] for name in ("harness", "app", "review"))
     summary = next(step for step in job["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
     assert summary["if"].startswith("always()")
-    for name in ("harness", "app", "review"):
-        assert f"steps.{name}.outcome == 'failure'" in summary["if"]
+
+
+def test_published_comment_is_labelled_advisory_not_an_authoritative_gate(
+    monkeypatch: Any,
+) -> None:
+    """An unqualified `### Code review` reads as a merge gate that does not exist.
+
+    continue-on-error means green regardless of verdict, so the body must say
+    non-blocking. This is the wording half of the advisory decision; the gate
+    half is the inspection-evidence refusal.
+    """
+    _review_env(monkeypatch)
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: "### Code review\n\nPass.")
+    posted: dict[str, str] = {}
+    monkeypatch.setattr(
+        reviewer,
+        "_github_request",
+        lambda method, url, token, body: (
+            posted.update(body),
+            {"html_url": "https://github.test/c/1", "body": body["body"]},
+        )[1],
+    )
+    reviewer.main()
+    body = posted["body"]
+    assert reviewer.ADVISORY_BANNER in body
+    assert "non-blocking" in body.lower()
+    # The banner has to precede the verdict, or a reader skims the heading first.
+    assert body.index(reviewer.ADVISORY_BANNER) < body.index("### Code review")
+
+
+# --------------------------------------------------------------------------
+# Publication gating: exit status is NOT evidence the agent reviewed anything.
+# `codex` exits 0 when bubblewrap blocks every command (run 34196306433), so
+# these are the two states that must never reach GitHub.
+# --------------------------------------------------------------------------
+
+
+def _agent_returning(stdout: str, returncode: int = 0) -> Any:
+    def run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], returncode, stdout, "")
+
+    return run
+
+
+def _good_artifact(lines: int = 137, digest: str = "a" * 64) -> str:
+    return (
+        f"### Code review\n\nA real finding.\n\n<!-- inspected: lines={lines} sha256={digest} -->"
+    )
+
+
+def test_agent_exiting_nonzero_must_not_post(monkeypatch: Any, clean_env: None) -> None:
+    """A crashed agent's output is not a review, however well-formed it looks."""
+    monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(_good_artifact(), 1))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code != 0
+
+
+def test_agent_exiting_zero_having_run_no_commands_must_not_post(
+    monkeypatch: Any, clean_env: None
+) -> None:
+    """The production failure, exactly: exit 0, polished verdict, zero bytes read.
+
+    The real run emitted a confession; the dangerous variant is the polite one,
+    so this asserts on the LGTM shape. Nothing about exit status distinguishes
+    them — only the absent evidence line does.
+    """
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    lgtm = "### Code review\n\nNo actionable findings in this range. LGTM."
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(lgtm, 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_no_evidence_is_a_distinct_loud_state_not_an_ordinary_failure(
+    monkeypatch: Any, clean_env: None, capsys: Any
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    bwrap = (
+        "### Code review\n\nUnable to complete the review: every read-only shell command "
+        "failed with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`."
+    )
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(bwrap, 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    assert exc.value.code != 1  # distinct from every other FATAL
+    captured = capsys.readouterr()
+    assert reviewer.NO_EVIDENCE_BANNER in captured.err
+    assert "::error" in captured.out  # surfaces in the Actions UI, not just stderr
+
+
+def test_fabricated_inspection_evidence_must_not_post(monkeypatch: Any, clean_env: None) -> None:
+    """A guessed evidence line is not evidence; the launcher recomputes both."""
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    monkeypatch.setattr(
+        reviewer.subprocess, "run", _agent_returning(_good_artifact(999, "b" * 64), 0)
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "No actionable findings. LGTM.",
+        "BLOCKING: this must not merge — unguarded SQL interpolation at src/x.py:12.",
+    ],
+)
+def test_a_genuinely_inspected_review_publishes_whatever_its_verdict(
+    monkeypatch: Any, clean_env: None, verdict: str
+) -> None:
+    """Three-way discrimination: the gate is on INSPECTION, never on the verdict.
+
+    A guard only ever seen refusing is indistinguishable from one that refuses
+    everything, so PASS and FAIL verdicts both have to get through.
+    """
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    artifact = f"### Code review\n\n{verdict}\n\n<!-- inspected: lines=137 sha256={'a' * 64} -->"
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    assert verdict in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+
+
+def test_evidence_accepts_a_matching_line_count_alone(monkeypatch: Any, clean_env: None) -> None:
+    """Either channel suffices; both are derivable only by running the diff."""
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    artifact = "### Code review\n\nOK.\n\n<!-- inspected: lines=137 sha256=" + "c" * 64 + " -->"
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    assert reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+
+
+def test_evidence_accepts_an_abbreviated_digest(monkeypatch: Any, clean_env: None) -> None:
+    reviewer.require_inspection_evidence(
+        "### Code review\n\n<!-- inspected: lines=0 sha256=aaaaaaaaaaaaaaaa -->", _DIFF_EVIDENCE
+    )
+
+
+def test_main_refuses_to_post_when_the_agent_shows_no_inspection(monkeypatch: Any) -> None:
+    """End to end: the refusal reaches main, so nothing is POSTed."""
+    _review_env(monkeypatch)
+    monkeypatch.setattr(reviewer, "diff_evidence", lambda *a: _DIFF_EVIDENCE)
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        _agent_returning("### Code review\n\nLGTM, nothing to flag.", 0),
+    )
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+
+    def must_not_post(*args: Any, **kwargs: Any) -> dict[str, str]:
+        raise AssertionError("posted a review with no evidence of inspection")
+
+    monkeypatch.setattr(reviewer, "_github_request", must_not_post)
+    with pytest.raises(SystemExit) as exc:
+        reviewer.main()
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_prompt_demands_evidence_derivable_only_from_the_diff() -> None:
+    prompt = reviewer._prompt("eumemic/aios", "7", "headsha", "basesha")
+    assert "sha256sum" in prompt
+    assert "wc -l" in prompt
+    assert reviewer.EVIDENCE_TEMPLATE in prompt
+    # The expected values must NOT be in the prompt, or a blocked agent can
+    # parrot them back and the evidence proves nothing.
+    assert "137" not in prompt
+
+
+def test_diff_evidence_is_computed_from_the_real_diff(monkeypatch: Any) -> None:
+    """The launcher-side half must be derived, not trusted from the agent."""
+    payload = b"diff --git a/x b/x\n+one\n+two\n"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        assert command[:3] == ["git", "--no-pager", "diff"]
+        assert command[3] == "base456...abc123"
+        return subprocess.CompletedProcess(command, 0, payload, b"")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", run)
+    lines, digest = reviewer.diff_evidence("base456", "abc123")
+    assert lines == 3
+    assert digest == hashlib.sha256(payload).hexdigest()
+
+
+def test_diff_evidence_refuses_an_empty_diff(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, b"   \n", b""),
+    )
+    with pytest.raises(SystemExit):
+        reviewer.diff_evidence("base456", "abc123")
+
+
+def test_workflow_safety_net_keys_on_publication_not_step_outcome() -> None:
+    """The net was SKIPPED in the one real miss: the step outcome was 'success'.
+
+    So it must not key on step outcome at all — a review that exits 0 having
+    read nothing is exactly the case where outcome-keying fails.
+    """
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    summary = next(step for step in job["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
+    condition = summary["if"]
+    assert condition.startswith("always()")
+    assert "steps.review.outputs.published != 'true'" in condition
+    assert "outcome == 'failure'" not in condition
+
+
+def test_safety_net_also_fires_when_the_review_step_never_ran() -> None:
+    """Harness/token failure skips the review step; outputs are then empty.
+
+    `!= 'true'` covers skipped, failed and "ran but refused" alike — the net
+    must not depend on the step having produced any outcome at all.
+    """
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    summary = next(step for step in job["steps"] if "GITHUB_STEP_SUMMARY" in step.get("run", ""))
+    review = next(step for step in job["steps"] if step.get("id") == "review")
+    # The review step is conditional, so "skipped" is a reachable state.
+    assert "if" in review
+    assert summary["if"] == "always() && steps.review.outputs.published != 'true'"
+
+
+def test_launcher_signals_publication_only_after_github_confirms(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """`published=true` is the net's input, so it must mean a VERIFIED post."""
+    output = tmp_path / "gh-output"
+    output.write_text("")
+    _review_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: "### Code review\n\nPass.")
+    monkeypatch.setattr(
+        reviewer,
+        "_github_request",
+        lambda method, url, token, body: {
+            "html_url": "https://github.test/c/1",
+            "body": body["body"],
+        },
+    )
+    reviewer.main()
+    assert "published=true" in output.read_text()
+
+
+def test_launcher_does_not_signal_publication_when_the_marker_is_not_echoed(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    output = tmp_path / "gh-output"
+    output.write_text("")
+    _review_env(monkeypatch)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setattr(reviewer, "run_agent", lambda *a, **k: "### Code review\n\nPass.")
+    monkeypatch.setattr(
+        reviewer,
+        "_github_request",
+        lambda *a, **k: {"html_url": "https://github.test/c/1", "body": "truncated"},
+    )
+    with pytest.raises(SystemExit):
+        reviewer.main()
+    assert "published=true" not in output.read_text()
+
+
+def test_workflow_selects_a_sandbox_mode_that_can_actually_execute() -> None:
+    """The environment fix must be a mode that RUNS, not merely a mode that is set.
+
+    Measured against codex-cli 0.154.0 with the `codex sandbox` probe: both
+    `read-only` and `workspace-write` route through codex's vendored bwrap and
+    fail with "No permissions to create a new namespace" — zero commands
+    execute and codex still exits 0. Only `danger-full-access` executes. An
+    earlier draft of this fix selected `workspace-write`; this assertion is
+    what caught that it would have changed nothing.
+
+    Deliberately NOT satisfied by `apt-get install bubblewrap`: codex invokes
+    its own vendored bwrap and never the one on PATH (verified by planting a
+    fake bwrap first in PATH — it is never executed), so the distro package is
+    inert.
+    """
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    review = next(step for step in job["steps"] if step.get("id") == "review")
+    mode_expr = review["env"].get("REVIEW_SANDBOX_MODE", "")
+    assert mode_expr, "no sandbox mode selected; the default read-only executes nothing"
+    # The effective default (the `||` fallback) is what runs when the repo
+    # variable is unset, which is the state that shipped the broken run.
+    assert "danger-full-access" in mode_expr, (
+        f"sandbox mode {mode_expr!r} routes through the vendored bwrap and executes "
+        "nothing on a hosted runner"
+    )
+    assert "workspace-write" not in mode_expr
+
+
+def test_workflow_does_not_rely_on_apt_installed_bubblewrap() -> None:
+    """Pins the measured fact that the obvious remedy is inert.
+
+    codex uses its vendored bwrap regardless of PATH, so installing the distro
+    package would look like a fix and change nothing. If someone adds it back
+    believing it fixes the sandbox, this fails and points at the measurement.
+    """
+    job = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["review"]
+    install = next(step for step in job["steps"] if step.get("id") == "harness")["run"]
+    installs = [
+        line
+        for line in install.splitlines()
+        if "bubblewrap" in line and not line.strip().startswith("#")
+    ]
+    assert not installs, f"apt-installed bubblewrap is inert for codex: {installs}"
+
+
+def test_sandbox_mode_is_configurable_and_validated(monkeypatch: Any, clean_env: None) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    monkeypatch.delenv("REVIEW_SANDBOX_MODE", raising=False)
+    command, _ = reviewer._agent_command("gpt-5.6-sol", Path("/tmp/a.md"))
+    assert command[command.index("--sandbox") + 1] == reviewer.DEFAULT_SANDBOX
+    monkeypatch.setenv("REVIEW_SANDBOX_MODE", "workspace-write")
+    command, _ = reviewer._agent_command("gpt-5.6-sol", Path("/tmp/a.md"))
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    monkeypatch.setenv("REVIEW_SANDBOX_MODE", "no-such-mode")
+    with pytest.raises(SystemExit):
+        reviewer._agent_command("gpt-5.6-sol", Path("/tmp/a.md"))
 
 
 def test_workflow_installs_the_harness_for_every_routed_prefix() -> None:

@@ -10,9 +10,18 @@ extracts the final `### Code review` artifact, POSTs it as eumemic-bot, and
 verifies GitHub stored the run-specific marker. A review that never reached
 GitHub fails loudly here rather than vanishing.
 
+Publication is gated on EVIDENCE OF INSPECTION, not on the agent's exit status.
+`codex` exits 0 when its sandbox blocks every command, so a zero exit says only
+that the process ended — not that the agent read a byte of the diff. The agent
+must echo the line count and sha256 of `git diff base...head`, which the
+launcher recomputes; a mismatch or a missing line is a distinct, loud,
+never-publishable state (NO_EVIDENCE_EXIT_CODE), because the alternative is an
+authoritative-sounding "LGTM" from a reviewer that inspected nothing.
+
 Env:
   GH_TOKEN, REPO, PR_NUMBER, HEAD_SHA, BASE_SHA
   REVIEW_MODEL (default: DEFAULT_MODEL below) — routed by prefix to a harness
+  REVIEW_SANDBOX_MODE (default: DEFAULT_SANDBOX below) — codex sandbox policy
   REVIEW_TIMEOUT_SECONDS (default: _REVIEW_SECONDS below) — agent wall clock. It
     must run out before the job's timeout-minutes: this script's FATAL leaves the
     step's continue-on-error to keep the check green and still write the
@@ -22,8 +31,10 @@ Env:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +46,35 @@ from typing import IO, NoReturn
 ARTIFACT_HEADING = "### Code review"
 DEFAULT_MODEL = "gpt-5.6-sol"
 _REVIEW_SECONDS = 900
+
+# A verdict is only publishable when the agent proved it read the diff. The
+# proof is a line the agent can only produce by running the diff command in the
+# checkout: the launcher computes the same digest itself and compares. Nothing
+# derivable from the prompt alone counts — the expected values are deliberately
+# NOT in the prompt, only the recipe for deriving them.
+EVIDENCE_TEMPLATE = "<!-- inspected: lines=<N> sha256=<HEX> -->"
+_EVIDENCE_RE = re.compile(
+    r"<!--\s*inspected:\s*lines=(\d+)\s+sha256=([0-9a-fA-F]{16,64})\s*-->", re.IGNORECASE
+)
+# "The agent inspected nothing" is NOT an ordinary failure: codex exits 0 when
+# its sandbox blocks every command, so this is the state that used to publish an
+# authoritative-sounding verdict off a zero-byte read. Distinct exit code,
+# distinct banner, never publishable.
+NO_EVIDENCE_EXIT_CODE = 3
+NO_EVIDENCE_BANNER = "NO EVIDENCE OF INSPECTION — refusing to publish a verdict"
+
+SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+DEFAULT_SANDBOX = "read-only"
+
+# This channel is advisory by construction: the workflow sets continue-on-error
+# on every step, so the PR check is green whether the verdict is LGTM or
+# "BLOCKING". The banner says so in the comment, because an unqualified
+# "### Code review" reads as an authoritative gate that does not exist.
+ADVISORY_BANNER = (
+    "**Advisory automated review — non-blocking.** This check never fails the PR; "
+    "a green check means the harness ran, not that the code is approved. Findings below "
+    "are input to a human reviewer, not a merge gate."
+)
 
 OAI_PROXY_URL = "https://oai-proxy.eumemic.ai/v1"
 ANT_PROXY_URL = "https://ant-proxy.eumemic.ai"
@@ -137,7 +177,7 @@ def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str
                 "--model",
                 model,
                 "--sandbox",
-                "read-only",
+                _sandbox_mode(),
                 "--ephemeral",
                 "-c",
                 f"model_provider={provider}",
@@ -217,6 +257,87 @@ def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str
     )
 
 
+def _sandbox_mode() -> str:
+    """Sandbox policy for the codex harness.
+
+    Codex ships its own bubblewrap and `read-only` needs namespaces the GitHub
+    runner refuses: every command dies with
+    `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` — and codex
+    still exits 0, which is how a review that read nothing got published. The
+    runner is already an ephemeral single-use VM, and the launcher strips every
+    writable credential from the agent env before exec, so the second sandbox
+    layer buys little and cost us the entire review. Overridable for hosts where
+    bwrap does work.
+    """
+    mode = os.environ.get("REVIEW_SANDBOX_MODE", "").strip() or DEFAULT_SANDBOX
+    if mode not in SANDBOX_MODES:
+        _die(
+            f"unsupported REVIEW_SANDBOX_MODE {mode!r}; expected one of {', '.join(SANDBOX_MODES)}"
+        )
+    return mode
+
+
+def diff_evidence(base_sha: str, head_sha: str) -> tuple[int, str]:
+    """Return (line count, sha256) of `git diff base...head`, computed locally.
+
+    This is the value the agent has to reproduce. It is deliberately never put
+    in the prompt — only the recipe for deriving it — so an agent whose shell is
+    dead cannot emit it, and neither can one that guessed.
+    """
+    result = subprocess.run(
+        ["git", "--no-pager", "diff", f"{base_sha}...{head_sha}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        _die(
+            f"could not compute the diff for {base_sha}...{head_sha}: {result.stderr.decode(errors='replace')[:300]}"
+        )
+    raw = result.stdout
+    if not raw.strip():
+        _die(f"`git diff {base_sha}...{head_sha}` is empty; there is nothing to review")
+    return raw.count(b"\n"), hashlib.sha256(raw).hexdigest()
+
+
+def _die_without_evidence(detail: str) -> NoReturn:
+    """The loud, distinct, never-publishable state.
+
+    Separate exit code and banner from an ordinary FATAL because this is the
+    exact condition that used to sail through as a green, authoritative verdict.
+    """
+    print(f"FATAL: {NO_EVIDENCE_BANNER}: {detail}", file=sys.stderr)
+    print(f"::error title={NO_EVIDENCE_BANNER}::{detail}", file=sys.stdout)
+    raise SystemExit(NO_EVIDENCE_EXIT_CODE)
+
+
+def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> None:
+    """Refuse to publish unless the artifact proves the agent read the diff.
+
+    Accepts a match on EITHER channel. Both are derivable only by running the
+    diff in the checkout, so either one rules out a blocked agent; requiring
+    both would turn a benign formatting difference in one into a suppressed
+    genuine review.
+    """
+    expected_lines, expected_digest = expected
+    match = _EVIDENCE_RE.search(artifact)
+    if match is None:
+        _die_without_evidence(
+            f"the agent's `{ARTIFACT_HEADING}` carries no `{EVIDENCE_TEMPLATE}` line, so nothing "
+            "shows it read the diff. Its verdict is not publishable."
+        )
+    claimed_lines = int(match.group(1))
+    claimed_digest = match.group(2).lower()
+    if claimed_lines == expected_lines:
+        return
+    if expected_digest.startswith(claimed_digest):
+        return
+    _die_without_evidence(
+        f"inspection evidence does not match the diff: agent claimed lines={claimed_lines} "
+        f"sha256={claimed_digest}, launcher computed lines={expected_lines} "
+        f"sha256={expected_digest}. Its verdict is not publishable."
+    )
+
+
 def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
     return (
         f"Review pull request {repo}#{pr_number}. The checkout is pinned to PR head "
@@ -225,11 +346,23 @@ def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
         f"do not review code outside it except as context. Report only actionable "
         f"correctness, security, or regression findings, with file and line references. If "
         f"there are none, say so briefly. Your final response must start exactly with "
-        f"`{ARTIFACT_HEADING}`. {REVIEW_SCOPE}"
+        f"`{ARTIFACT_HEADING}`.\n\n"
+        f"MANDATORY PROOF OF INSPECTION. Run exactly:\n"
+        f"  git --no-pager diff {base_sha}...{head_sha} | wc -l\n"
+        f"  git --no-pager diff {base_sha}...{head_sha} | sha256sum\n"
+        f"and end your final response with a line of the form\n"
+        f"  {EVIDENCE_TEMPLATE}\n"
+        f"substituting the real values you observed. Do NOT guess, infer, or fabricate them: "
+        f"the launcher recomputes both and refuses to publish any review whose values do not "
+        f"match. If your shell cannot run those commands, say so plainly and DO NOT emit an "
+        f"evidence line and DO NOT render a verdict — an unverifiable review is worse than "
+        f"none. {REVIEW_SCOPE}"
     )
 
 
-def run_agent(model: str, prompt: str, timeout: int) -> str:
+def run_agent(
+    model: str, prompt: str, timeout: int, evidence: tuple[int, str] | None = None
+) -> str:
     with tempfile.TemporaryDirectory(prefix="eumemic-review-") as temp:
         artifact_path = Path(temp) / "last-message.md"
         command, env = _agent_command(model, artifact_path)
@@ -259,6 +392,12 @@ def run_agent(model: str, prompt: str, timeout: int) -> str:
         artifact = _artifact_in(output)
         if artifact is None:
             _die(f"{model} returned no `{ARTIFACT_HEADING}` artifact")
+        # Exit 0 proves only that the harness process ended. It does NOT prove the
+        # agent could read anything: codex exits 0 when bubblewrap blocks every
+        # command. The evidence check is what separates a review from a fluent
+        # guess, so it gates publication independently of the exit status.
+        if evidence is not None:
+            require_inspection_evidence(artifact, evidence)
         return artifact
 
 
@@ -297,6 +436,19 @@ def _pin_checkout(head_sha: str, base_sha: str) -> None:
             _die(f"PR base {base_sha} is missing from the checkout: {fetched.stderr.strip()[:300]}")
 
 
+def _record_published(comment_url: str) -> None:
+    """Emit `published=true` on GITHUB_OUTPUT, only on a verified publication."""
+    output_path = os.environ.get("GITHUB_OUTPUT", "").strip()
+    if not output_path:
+        return
+    try:
+        with open(output_path, "a", encoding="utf-8") as handle:
+            handle.write("published=true\n")
+            handle.write(f"comment_url={comment_url}\n")
+    except OSError as exc:  # pragma: no cover - runner filesystem fault
+        print(f"warning: could not record publication: {exc}", file=sys.stderr)
+
+
 def main() -> None:
     token = _env("GH_TOKEN")
     repo = _env("REPO")
@@ -306,23 +458,31 @@ def main() -> None:
     model = os.environ.get("REVIEW_MODEL", "").strip() or DEFAULT_MODEL
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
     _pin_checkout(head_sha, base_sha)
+    evidence = diff_evidence(base_sha, head_sha)
     print(
         f"reviewing {repo}#{pr_number}@{head_sha} against {base_sha} with {model} "
-        f"({model_kind(model)})"
+        f"({model_kind(model)}); diff is {evidence[0]} lines, sha256 {evidence[1]}"
     )
-    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout)
+    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout, evidence)
     marker = f"<!-- eumemic-bot-review:{head_sha} -->"
-    if marker not in review:
-        review = f"{review}\n\n{marker}"
+    body = f"{ADVISORY_BANNER}\n\n{review}"
+    if marker not in body:
+        body = f"{body}\n\n{marker}"
     comment = _github_request(
         "POST",
         f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments",
         token,
-        {"body": review},
+        {"body": body},
     )
     comment_url = comment.get("html_url")
     if not comment_url or marker not in str(comment.get("body", "")):
         _die(f"GitHub did not confirm the review comment: {json.dumps(comment)[:400]}")
+    # Positive publication signal for the workflow's safety net. The net must key
+    # on "did a genuine review land?" — the real miss exited 0 with the step
+    # outcome 'success', so a net keyed on step outcome was skipped precisely
+    # when it was needed. This line is written only after GitHub echoed the
+    # marker back, so its ABSENCE is the fact the net reads.
+    _record_published(comment_url)
     print(f"posted and verified {ARTIFACT_HEADING}: {comment_url}")
 
 
