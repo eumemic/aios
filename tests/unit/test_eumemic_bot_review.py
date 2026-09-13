@@ -126,32 +126,73 @@ def test_agent_cannot_reach_the_actions_control_files(
     Green run, no review, no warning — the exact silent failure this whole
     mechanism exists to close, reachable BY the reviewed code's agent.
 
-    `$GITHUB_ENV` and `$GITHUB_PATH` are the same class: writes there mutate
-    later steps of this job.
+    `$GITHUB_ENV`, `$GITHUB_PATH`, `$GITHUB_STATE` and `$GITHUB_STEP_SUMMARY`
+    are the same class: writes there mutate later steps of this job, or the
+    job summary a human reads when the net does fire.
+
+    The runner also exposes `_runner_file_commands/*` paths under keys outside
+    the documented GITHUB_* set, so the value strip is asserted too — but only
+    over an EXPLICIT runner env. Asserting `"file_commands" in v` over the
+    ambient environment false-fails on a real runner, whose own control paths
+    are present regardless of what this function does.
 
     Stripping them from the CHILD costs nothing: `_record_published` reads
     GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched —
-    asserted directly in test_stripping_github_output_does_not_break_the_signal.
+    asserted directly in
+    test_stripping_github_output_does_not_break_the_publication_signal.
     """
     runner_env = {
         "OAI_PROXY_API_KEY": "oai",
         "ANT_PROXY_API_KEY": "ant",
         "XAI_PROXY_API_KEY": "xai",
-        "GITHUB_OUTPUT": "/runner/file_commands/set_output_abc",
-        "GITHUB_ENV": "/runner/file_commands/set_env_abc",
-        "GITHUB_PATH": "/runner/file_commands/add_path_abc",
-        "GITHUB_STEP_SUMMARY": "/runner/file_commands/step_summary_abc",
-        "GITHUB_STATE": "/runner/file_commands/state_abc",
-        # Actions may also expose a control path under an unrelated key.
-        "RUNNER_TEMP_SUMMARY": "/runner/_runner_file_commands/step_summary_abc",
+        "GITHUB_OUTPUT": "/runner/_temp/_runner_file_commands/set_output_abc",
+        "GITHUB_ENV": "/runner/_temp/_runner_file_commands/set_env_abc",
+        "GITHUB_PATH": "/runner/_temp/_runner_file_commands/add_path_abc",
+        "GITHUB_STEP_SUMMARY": "/runner/_temp/_runner_file_commands/step_summary_abc",
+        "GITHUB_STATE": "/runner/_temp/_runner_file_commands/save_state_abc",
+        # Actions also exposes a control path under keys outside the GITHUB_*
+        # set; the name list alone does not cover those.
+        "RUNNER_TEMP_SUMMARY": "/runner/_temp/_runner_file_commands/artifacts_abc",
+        # An ordinary inherited variable, to pin the filter's blast radius:
+        # the child still needs PATH to find its harness binary at all.
+        "PATH": "/usr/local/bin:/usr/bin",
     }
     monkeypatch.setattr(reviewer.os, "environ", runner_env)
     _, env = reviewer._agent_command(model, tmp_path / "review.md")
-    control_names = {
-        "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"
-    }
-    assert not control_names & set(env)
-    assert "RUNNER_TEMP_SUMMARY" not in env
+    assert not {
+        "GITHUB_OUTPUT",
+        "GITHUB_ENV",
+        "GITHUB_PATH",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_STATE",
+    } & set(env)
+    # Not merely absent by name — no key may carry the path. Safe to assert
+    # over every value here because os.environ IS runner_env for this call.
+    assert not [v for v in env.values() if "file_commands" in v]
+    assert env["PATH"] == "/usr/local/bin:/usr/bin"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"],
+)
+def test_control_variables_are_stripped_by_name_not_only_by_path(
+    monkeypatch: Any, clean_env: None, tmp_path: Path, name: str
+) -> None:
+    """Each control variable is covered by the NAME list on its own.
+
+    The value strip keys off `_runner_file_commands`, an undocumented internal
+    of the runner's layout. If that directory is ever renamed the name list is
+    the only remaining cover, so it is pinned here with a value the value strip
+    cannot match — drop a name from `_STRIPPED_ENV` and this fails.
+    """
+    monkeypatch.setattr(
+        reviewer.os,
+        "environ",
+        {"OAI_PROXY_API_KEY": "oai", name: "/runner/_temp/control-plane-abc"},
+    )
+    _, env = reviewer._agent_command("gpt-5.6-sol", tmp_path / "review.md")
+    assert name not in env
 
 
 def test_stripping_github_output_does_not_break_the_publication_signal(

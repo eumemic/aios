@@ -108,7 +108,11 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 #     warning. That is precisely the silent failure this launcher exists to
 #     close, so leaving the path in the child env hands the agent the ability
 #     to forge the detector's own input.
-#   GITHUB_ENV / GITHUB_PATH — writes there mutate later steps of this job.
+#   GITHUB_ENV / GITHUB_PATH / GITHUB_STATE — writes there mutate later steps
+#     of this job (env, PATH, and the action's own saved state).
+#   GITHUB_STEP_SUMMARY — the job summary a human reads when the safety net
+#     fires. An agent that can append there writes the operator's account of
+#     what happened, which is the second half of the same forgery.
 #
 # Stripping these from the CHILD is functionally free: _record_published reads
 # GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched.
@@ -131,11 +135,14 @@ _STRIPPED_ENV = (
     "XAI_API_KEY",
 )
 
-# GitHub Actions exposes additional control-plane paths (for example
-# ``_runner_file_commands/step_summary_*``) under unrelated environment keys.
-# Since the agent runs with a real shell, deny those paths wherever they occur,
-# not only when carried by the well-known GITHUB_* variable names.
-_CONTROL_PATH_MARKERS = ("file_commands", "_runner_file_commands")
+# The runner also hands out ``_runner_file_commands/*`` paths under keys that
+# are not part of the documented GITHUB_* set, so the name list above is not a
+# complete cover. Drop any inherited variable whose VALUE points into that
+# directory as well. This is defence in depth, not a boundary: the directory
+# itself stays reachable through RUNNER_TEMP (and its hosted-runner default
+# location), so the real containment is the workflow's `contents: read` token
+# scope, not this filter.
+_CONTROL_PATH_MARKER = "file_commands"
 
 REVIEW_SCOPE = (
     "Keep verification proportional to the changed code. Use focused tests for affected "
@@ -203,8 +210,7 @@ def _agent_command(model: str, artifact_path: Path) -> tuple[list[str], dict[str
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in _STRIPPED_ENV
-        and not any(marker in v.lower() for marker in _CONTROL_PATH_MARKERS)
+        if k not in _STRIPPED_ENV and _CONTROL_PATH_MARKER not in v.lower()
     }
     if kind == "codex":
         key = _proxy_key("OAI_PROXY_API_KEY", "OPENAI_API_KEY")
