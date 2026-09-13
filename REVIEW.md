@@ -1,178 +1,176 @@
-# Uncorrelated review — eumemic-bot → local coding-agent harness (`98ccd9d5`)
+# Uncorrelated review — Actions control-plane strip + unit rewrite (`487ae3c2`)
 
-Reviewer: Claude Opus 5, branch `eumbotcarev` (worktree `/workspace/aios-eumbotcarev`).
-Commit under review: `98ccd9d5` ("feat(ci): run eumemic-bot PR reviews via local coding-agent harness"),
-implemented by gpt-5.6-sol / Codex on `eumbotca`.
-Fixes committed locally as `71ef58c5`. Nothing pushed, no PR opened.
+Reviewer: Claude Opus 5, branch `eumbotfcrev` (worktree `/workspace/aios-eumbotfcrev`).
+Commits under review: `f66485fb` ("fix: strip Actions runner file command paths") and
+`487ae3c2` ("fix: cover all Actions control env vars"), on top of `4ea7eefd`.
+Fixes committed locally as `2fd5e84f`. Nothing pushed, no PR opened.
 
 ## Verdict
 
-**The architecture is right and every structural requirement in TASK.md is met —
-but the default path did not work.** Codex, the harness behind the default
-`gpt-5.6-sol`, was pointed at the eumemic proxy with `OPENAI_BASE_URL`, which
-Codex ignores. Every review on the default model would have 401'd against the
-real OpenAI and landed in the "did not post" summary — the exact silent-miss
-failure this Action exists to prevent, now on the happy path instead of the edge.
+**The diagnosis is right and the fix works — I reproduced the false-fail on the
+pre-fix tree and its absence after — but it shipped a formatting violation that
+CI's own lint job would have failed on the next push, and the requirement it was
+written to satisfy (the two new names in `_STRIPPED_ENV`) was not actually pinned
+by any test.** Both are fixed here, along with four smaller items. Ready for PR
+after `2fd5e84f`.
 
-That is fixed, along with four smaller but real defects. **Ready for PR after
-`71ef58c5`.**
+All six TASK.md / prompt checks pass on the reviewed tip; findings 1 and 2 are
+about how the change would have fared *next*, not about the behaviour it claims.
 
-I verified the harness invocations empirically rather than by reading: all three
-CLIs (codex-cli 0.152.1, claude 2.1.263, pi 0.73.1) are installed in this
-environment, so each command was run against a local stand-in proxy that logs the
-request line, the `Authorization` header, and the body.
+## Verification of the required points
 
-## Issues found
+| # | Requirement | Result |
+|---|---|---|
+| 1 | `_STRIPPED_ENV` gains `GITHUB_STEP_SUMMARY`, `GITHUB_STATE` | ✅ `scripts/eumemic_bot_review.py:124-129` |
+| 2 | Child env unreachable for `file_commands` paths under any key, name-strip not weakened | ✅ value strip added; all five names still in the list |
+| 3 | Test uses an explicit runner-env dict, no ambient substring assertion | ✅ `os.environ` replaced wholesale |
+| 4 | Launcher still reads `GITHUB_OUTPUT` from parent | ✅ `_record_published` (`:510`) reads its own `os.environ`; test green |
+| 5 | `origin/master` is an ancestor; prior #2404 harness commits retained | ✅ all nine (`0e727e02`…`487ae3c2`) present |
+| 6 | DONE.md claims match reality | ✅ root cause and pytest count confirmed; validation section incomplete (finding 1) |
 
-### Fatal
-
-**1. Codex never reaches oai-proxy — the default model is dead on arrival.**
-`_agent_command` set `OPENAI_API_KEY` + `OPENAI_BASE_URL` and relied on Codex's
-built-in `openai` provider honouring the latter. It does not. Running the exact
-argv the launcher built:
-
-```
-ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket:
-      HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses
-ERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication
-       in header, url: https://api.openai.com/v1/responses
-```
-
-Note the second line: the built-in provider does not even send the key from
-`OPENAI_API_KEY`, because it expects `codex login` credentials under
-`CODEX_HOME`. The proxy host is never contacted. This is not a "might not work in
-CI" — it is reproducible offline, and it takes out the documented default.
-
-Fix: declare the proxy as a provider and select it —
-`-c model_provider=eumemic_oai_proxy` plus a `model_providers.eumemic_oai_proxy`
-table carrying `base_url`, `env_key="OPENAI_API_KEY"`, `wire_api="responses"`.
-Re-running the launcher-built argv against the stand-in proxy after the fix:
+**Root cause reproduced, not assumed.** Checked the pre-fix tree (`4ea7eefd`) out
+into the worktree and ran the test under a simulated hosted-runner environment
+carrying `_runner_file_commands` paths under `GITHUB_STEP_SUMMARY`,
+`GITHUB_STATE`, and one unrelated key:
 
 ```
-POST /v1/responses AUTH='Bearer <OAI_PROXY_API_KEY>'
+3 failed, 50 deselected      # 4ea7eefd, same ambient env
+58 passed                    # this tip + fixes, same ambient env
 ```
 
-The Claude Code and Pi paths were checked the same way and were **correct as
-written** — `ANTHROPIC_BASE_URL` is honoured, the generated `models.json` under
-`PI_CODING_AGENT_DIR` is picked up, `pi`'s `read,grep,find,ls,bash` are all real
-tool names, and both harnesses read the prompt from stdin. `codex exec`'s
-`--ephemeral`, `--output-last-message`, and trailing `-` are all real and behave
-as assumed. Nothing here was guessed wrong except the base-URL mechanism.
+DONE.md's "4 passed" for the named `-k` selection is accurate.
+
+## Findings
+
+### Blocking
+
+**1. `ruff format --check` fails on the rewritten test — CI's lint job would have
+gone red immediately.** `code-validation.yml:243` runs
+`ruff format --check src tests …`, which covers this file. The new set literal
+was written hand-wrapped:
+
+```python
+control_names = {
+    "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"
+}
+```
+
+`ruff format` wants one element per line with a magic trailing comma, so
+`--check` reported `Would reformat: tests/unit/test_eumemic_bot_review.py` on the
+reviewed tip. This is the same failure class the task exists to close — green
+`pytest` locally, red CI — one job over. DONE.md's validation section lists only
+the pytest run; CLAUDE.md requires mypy, ruff check *and* ruff format before
+every commit. Fixed, and `ruff check`/`ruff format --check` are now clean over
+all of `src tests`.
 
 ### Serious
 
-**2. The installation token was handed to the agent.** `_agent_command` built the
-child environment with `os.environ.copy()`, so the eumemic-bot installation
-token in `GH_TOKEN` — which can comment and push as the bot — plus the Actions
-runtime tokens and all three proxy keys were inherited by a process that reads
-PR-authored files (`AGENTS.md`, `CLAUDE.md`, source) and runs shell commands. The
-`claude-*` and `grok-*` harnesses have unrestricted network. Fixed by
-constructing the child env as a filtered copy and handing back exactly the one
-proxy key the routed harness needs.
+**2. The name strip of `GITHUB_STEP_SUMMARY` / `GITHUB_STATE` — TASK.md item 1 —
+was not pinned by any test.** Deleting both names from `_STRIPPED_ENV` left the
+entire file green:
 
-**3. The agent was never told what the PR base is.** The prompt said "Review the
-changes against the PR base using local git history" without naming a base ref or
-SHA. Nothing in the checkout identifies it: `ref` is the head SHA, HEAD is
-detached, and the repo's default branch is `master` while an agent guessing will
-reach for `origin/main`. The agent would have diffed against a guess or reviewed
-the whole tree — which quietly undoes the point of the change, since the previous
-review path's central defect (`b334ae63`, `REVIEW.md` before this rewrite) was
-also "the reviewer is looking at the wrong tree." Fixed: `BASE_SHA` comes from
-`pull_request.base.sha`, the prompt names an explicit `git diff <base>...<head>`
-range, and `_pin_checkout` requires the base commit locally, fetching it once if
-absent rather than letting the agent silently review nothing.
+```
+3 passed, 50 deselected      # with both names deleted, before this fix
+```
 
-**4. A timed-out review logs nothing at all.** `subprocess.run(capture_output=True)`
-buffers for the full 15 minutes; on `TimeoutExpired` the original code discarded
-`exc.stdout`/`exc.stderr` and died. The single likeliest failure mode was the one
-that left an operator with an empty step log. Now the partial output is emitted
-before the `FATAL`.
+The reason is that the test's values for those two keys contain `file_commands`,
+so the *new value strip* removed them regardless of the name list. The two
+mechanisms were entangled, and the one the task was filed for was the one not
+under test. That matters because the value strip keys off `_runner_file_commands`
+— an undocumented internal of the runner's temp layout, not a contract. If GitHub
+renames that directory, the name list is the only cover left, and nothing would
+have caught its removal.
 
-**5. Artifact extraction took the first heading, not the last.** `### Code review`
-is a contract on the agent's *final message*. Codex satisfies that through its own
-`--output-last-message` file, but the Claude Code and Pi paths scrape stdout,
-which also carries tool activity — a `grep` for the heading, or a quoted earlier
-review, would have become the comment body from that point on. Switched to the
-last occurrence, which is equivalent for Codex and correct for the other two.
+Fixed by splitting the mechanisms across two tests. New
+`test_control_variables_are_stripped_by_name_not_only_by_path` is parametrized
+over all five names and plants a value the marker cannot match
+(`/runner/_temp/control-plane-abc`), so only the name list can remove it. Both
+tests were mutation-checked: deleting the two names now fails 2 cases; deleting
+the value-strip clause fails 3.
 
-### Nits (fixed)
+### Minor
 
-- All three harnesses were `npm install --global`-ed on every run regardless of
-  the routed model: ~3× the install time, and an unrelated publisher hiccup would
-  block every review. Now a `case` on `$REVIEW_MODEL` installs one package, and
-  an unroutable model fails the install step with a clear message instead of
-  reaching the launcher.
-- `config_dir.mkdir()` → `exist_ok=True`.
-- The workflow lost every explanatory comment in the rewrite, including the
-  "must never FAIL the PR check" rationale that explains why `continue-on-error`
-  and the summary step are load-bearing rather than sloppy. Restored and updated.
+**3. The stronger value assertion was dropped when it no longer had to be.** The
+rewrite replaced `assert not [v for v in env.values() if "file_commands" in v]`
+with a single `assert "RUNNER_TEMP_SUMMARY" not in env`. That assertion was only
+unsafe because it ran over the *ambient* environment; once `os.environ` is
+replaced wholesale with an explicit dict it is both ambient-proof and strictly
+stronger than naming one key. Restored, with a comment saying why it is safe here.
 
-### Confirmed correct, no change needed
+**4. Nothing pinned the filter's blast radius.** No test asserted that an ordinary
+inherited variable *survives* `_agent_command`. `PATH` is load-bearing — the child
+needs it to find `codex` / `claude` / `pi` at all — and a value filter that
+over-matched would be invisible to the unit suite while breaking every real run.
+Added `PATH` to the runner env and asserted it comes through unchanged.
 
-- The aios session path is genuinely gone: no `POST /v1/sessions`, no
-  `AIOS_API_KEY` / `AIOS_URL` / `DEV_REVIEW_AGENT_ID` / environment resolution
-  anywhere in the launcher or workflow. `infra/agents/dev-review.json` is left
-  alone, and a repo-wide grep shows no other caller was disturbed.
-- Prefix routing matches the Herdr contract exactly, `gpt-5.6-sol` is the default
-  in both the workflow (`vars.EUMEMIC_BOT_REVIEW_MODEL || 'gpt-5.6-sol'`) and
-  `DEFAULT_MODEL`.
-- Head pinning: checkout uses `pull_request.head.sha`, not the synthetic merge
-  commit, and the launcher independently re-verifies `HEAD`.
-- `continue-on-error` on all three steps, `always()` summary step keyed on all
-  three outcomes, `<!-- eumemic-bot-review:<sha> -->` marker appended and
-  verified against GitHub's echoed body.
-- Budget: 900 s launcher inside a 20 min job, comfortably under the ≤20 min the
-  task asked for, and ordered so the launcher's own FATAL fires before a runner
-  kill would strip `continue-on-error` and the summary.
+**5. `_CONTROL_PATH_MARKERS` carried a dead element.**
+`("file_commands", "_runner_file_commands")` — the second can never match without
+the first, which is a substring of it. Collapsed to a single
+`_CONTROL_PATH_MARKER` and dropped the `any()`, per CLAUDE.md's extreme-simplicity
+line.
 
-## What I fixed
+**6. The comment overclaimed the strip as containment.** "deny those paths
+wherever they occur" reads as though the agent can no longer reach the control
+files. It can: `RUNNER_TEMP` is still inherited, `_runner_file_commands` sits
+directly beneath it, and hosted runners default it to `/home/runner/work/_temp`,
+so `ls $RUNNER_TEMP/_runner_file_commands/` finds the UUID-named files without
+guessing. Left as defence in depth — stripping `RUNNER_TEMP` buys nothing against
+a predictable path — but the comment now says so, and points at the actual
+containment (`contents: read`, `persist-credentials: false`, both already in
+place). The rest of this file argues its security properties carefully; this line
+should not be the one that oversells.
 
-| SHA | Subject |
-|---|---|
-| `71ef58c5` | `fix(ci): route Codex through oai-proxy via provider config, not OPENAI_BASE_URL` |
+**7. Documentation gaps around the two new variables.** The `_STRIPPED_ENV`
+comment block gives a per-variable rationale for `GITHUB_OUTPUT` / `GITHUB_ENV` /
+`GITHUB_PATH` and nothing for the two additions; the test docstring likewise. Both
+now cover `GITHUB_STATE` (mutates later steps of this job) and
+`GITHUB_STEP_SUMMARY` (the "did not post" net writes the operator's account of
+the run there, `eumemic-bot-review.yml:137-145` — an agent holding that path
+writes the second half of the same forgery). Also fixed a stale cross-reference
+to `test_stripping_github_output_does_not_break_the_signal`, which has been
+`…_the_publication_signal` since `4ea7eefd`.
 
-Touching `scripts/eumemic_bot_review.py`, `.github/workflows/eumemic-bot-review.yml`,
-`docs/eumemic-bot-review.md`, `tests/unit/test_eumemic_bot_review.py`.
+## Checked and deliberately not changed
 
-## On the tests
+- **`monkeypatch.setattr(reviewer.os, "environ", runner_env)`** swaps the real
+  `os.environ` for a plain dict process-wide for the test's duration — broader
+  than it looks. Kept: `_agent_command` is a pure call, monkeypatch restores it,
+  and full replacement is the only way to be genuinely ambient-proof, which is
+  the whole point of the rewrite.
+- **Stripping `GITHUB_STEP_SUMMARY` from the child does not break the safety
+  net's summary.** That step runs in its own runner shell with its own
+  environment (`eumemic-bot-review.yml:137`), not in the agent's — the same
+  argument that makes the `GITHUB_OUTPUT` strip free.
+- **`scripts/` is outside CI's ruff and mypy paths** (`code-validation.yml:242-246`
+  covers `src tests packages/… connectors/…`), so the launcher itself is
+  unlinted either way. Ran both against it by hand — clean. Widening the CI paths
+  to include `scripts/` is a real gap but belongs to its own change.
 
-The original 11 were not tautologies — they exercised real behaviour — but they
-were shaped to the implementation and so could not have caught any of the five
-defects above. In particular `test_codex_command_uses_responses_proxy` asserted
-`env["OPENAI_BASE_URL"] == "https://oai-proxy.eumemic.ai/v1"`, which is exactly
-the assertion that passes while the feature is broken: it pins the variable
-Codex ignores.
+## Commands run
 
-The suite is now 24 tests, and I mutation-checked the ones that matter rather
-than trusting green. Each of these reintroduced defects fails at least one test:
-reverting Codex to `OPENAI_BASE_URL`; `env = dict(os.environ)`; first-occurrence
-artifact extraction; deleting `BASE_SHA` from the workflow; swallowing timeout
-output; installing all three harnesses unconditionally; dropping
-`continue-on-error` from the review step.
+```
+uv run pytest -q tests/unit/test_eumemic_bot_review.py            # 53 -> 58 passed
+uv run mypy tests/unit/test_eumemic_bot_review.py                 # clean
+uv run ruff check src tests && uv run ruff format --check src tests
+uv run bash scripts/verify_eumemic_bot_review_gate.sh             # ALL CHECKS PASSED
+```
 
-Also added: a marker-verification-failure case (the silent miss the launcher
-exists to catch), missing-key-for-routed-family, missing-artifact, and
-`_pin_checkout` covering wrong-tree / fetch-the-base / base-unfetchable.
+The gate script is the sanctioned one-command re-verification from the previous
+round, and it still passes end to end: 58 unit tests, the GITHUB_OUTPUT mutant
+killed, the forged-`published=true` attack refused with the safety net still
+firing, and the honest agent still publishing.
 
-Two tests were rewritten to patch a new `_git` helper rather than monkeypatching
-the shared `subprocess.run` global, which the old `test_main_posts_and_verifies_marker`
-did (with a hand-rolled save/restore around it).
+Plus the pre-fix reproduction, the simulated-runner ambient run, and the three
+mutation checks quoted above.
 
-## Verification run
-
-- `uv run --frozen pytest -q tests/unit/test_eumemic_bot_review.py` — **24 passed**.
-- `uv run ruff check src tests scripts` — clean; `ruff format --check` clean.
-- `uv run mypy tests/unit/test_eumemic_bot_review.py` — clean (`scripts/` is
-  outside the repo's mypy scope; the launcher is `py_compile`-clean).
-- Live harness smokes against a local stand-in proxy: Codex, Claude Code and Pi
-  each driven with the launcher's own generated argv and environment; confirmed
-  the request reaches the configured base URL with the right bearer, the prompt
-  arrives as the user message, and `GH_TOKEN` is absent from the child env.
-
-Not verifiable here, and left for the first real run: that the eumemic proxies
-accept these exact wire shapes (Responses API for oai-proxy/xai-proxy,
-`x-api-key` for ant-proxy) and that `gpt-5.6-sol` is served under that name.
-
-## Ready for PR
-
-Yes, with `71ef58c5` included. `TASK.md` and `DONE.md` remain untracked.
+**Full unit suite — two runs, and they do not agree.** `uv run pytest tests/unit
+-q -n 4` gave `10 failed, 6178 passed` and then `2 failed, 6186 passed`, with
+*disjoint* failure sets (`test_attachment_staging`, `test_host_dir_reaper`,
+`test_image_resize`, `test_revocation_kinds_coverage` in the first;
+`test_invoke_session_tools`, `test_litellm_param_validation` in the second).
+Every one of them passes when its file is run on its own, so these are
+pre-existing ordering/parallelism flakes under xdist, not regressions: this
+branch changes no `src/` file, and none of the failing test files differ from
+`origin/master`. Reporting it because the numbers are real, not because it
+blocks this PR — but a suite whose failure set changes run to run is worth its
+own issue.
