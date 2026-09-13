@@ -386,9 +386,20 @@ def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> Non
     `expected_digest.startswith(claimed_digest)` is an EQUIVALENT MUTANT and no
     test can kill it. `_EVIDENCE_RE` admits exactly 64 hex characters and
     `expected_digest` is a sha256 hexdigest, so both operands are always the
-    same length, where `startswith` and `==` coincide. `==` is kept because it
-    states the intent directly and does not depend on the regex for its
-    safety — but a survivor there is expected, not a gap.
+    same length, where `startswith` and `==` coincide. A survivor there is
+    expected, not a gap.
+
+    THE EQUIVALENCE IS ENTIRELY CONDITIONAL ON THE REGEX. An earlier version of
+    this note claimed `==` "does not depend on the regex for its safety"; that
+    is backwards. It is precisely the `{64}` bound in `_EVIDENCE_RE` that forces
+    the two operands to the same length. Widen that bound and `startswith`
+    stops being equivalent and becomes a live PREFIX-ACCEPTANCE vulnerability:
+    a one-character digest would be accepted as proof of inspection, which is
+    the exact fail-open this gate exists to prevent. `==` is kept because it
+    states the intent directly AND stays correct even if the regex is loosened.
+    `test_evidence_regex_will_not_even_match_a_short_digest` is the COUPLING
+    GUARD for that dependency — it is what makes this equivalence argument
+    true, so it must not be deleted as redundant.
     """
     expected_lines, expected_digest = expected
     match = _EVIDENCE_RE.search(artifact)

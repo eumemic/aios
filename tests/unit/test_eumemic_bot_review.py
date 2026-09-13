@@ -640,15 +640,35 @@ def test_the_full_digest_is_what_publishes(monkeypatch: Any, clean_env: None) ->
 
 
 def test_evidence_regex_will_not_even_match_a_short_digest() -> None:
-    """Defence in depth: the pattern itself pins the full 64-hex width.
+    """COUPLING GUARD for the `==` / `startswith` equivalent-mutant argument.
 
-    The reviewer's mutant that widened this (64 -> 1) SURVIVED the old suite.
+    Not merely defence in depth. `require_inspection_evidence` documents that
+    mutating `claimed_digest == expected_digest` into
+    `expected_digest.startswith(claimed_digest)` is an EQUIVALENT mutant and
+    may be left unkilled. That argument is TRUE ONLY WHILE THIS TEST PASSES:
+    the equivalence rests entirely on `_EVIDENCE_RE` pinning exactly 64 hex, so
+    both operands are the same length. Widen the bound and `startswith` becomes
+    a live prefix-acceptance vulnerability that would admit a 1-character
+    digest as proof of inspection.
+
+    So this is the test that licenses ignoring that survivor. Deleting it as
+    redundant silently converts an accepted equivalent mutant into an unguarded
+    fail-open. The reviewer's mutant widening this (64 -> 1) SURVIVED the old
+    suite, which is why the width is asserted directly.
     """
     assert reviewer._EVIDENCE_RE.search("<!-- inspected: lines=1 sha256=" + "a" * 64 + " -->")
     for short in ("a" * 16, "a" * 63, "a" * 8):
         assert not reviewer._EVIDENCE_RE.search(f"<!-- inspected: lines=1 sha256={short} -->"), (
             f"regex matched a {len(short)}-char digest; the width is the guard"
         )
+    # The equivalence argument in require_inspection_evidence's docstring is
+    # only sound while the regex cannot admit a SHORTER operand than the real
+    # digest. Pin that directly: a prefix must never be accepted as the whole.
+    expected = hashlib.sha256(b"some diff").hexdigest()
+    artifact = f"### Code review\n\n<!-- inspected: lines=1 sha256={expected[:8]} -->"
+    with pytest.raises(SystemExit) as exc:
+        reviewer.require_inspection_evidence(artifact, (1, expected))
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
 
 
 def test_main_refuses_to_post_when_the_agent_shows_no_inspection(monkeypatch: Any) -> None:

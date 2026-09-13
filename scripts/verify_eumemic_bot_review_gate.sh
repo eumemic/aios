@@ -38,24 +38,94 @@ else
   rm -rf "$ISO"
 fi
 
-step "2. mutant: GITHUB_OUTPUT restored to the agent env (must KILL a test)"
+# A kill must be ATTRIBUTED, not inferred from pytest being unhappy.
+#
+# The previous version treated ANY nonzero pytest exit as "MUTANT KILLED". A
+# reviewer hit that for real: with pyyaml missing, collection died and this
+# script printed "MUTANT KILLED — the strip is genuinely guarded" having run
+# ZERO tests. That is the same fail-open shape this whole PR exists to remove,
+# sitting inside the tool that certifies the fix. A kill now requires the
+# NAMED test to be reported failed, and a collection error is INCONCLUSIVE
+# (which fails the run) rather than a pass.
+assert_killed() {  # $1 = tree, $2 = expected failing test, $3 = label
+  local out rc
+  out="$(cd "$1" && python3 -m pytest tests/unit/test_eumemic_bot_review.py \
+        -q -p no:cacheprovider 2>&1)"; rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "MUTANT SURVIVED ($3) — the suite is green with the fix reverted"; FAIL=1; return
+  fi
+  if grep -qiE 'error(s)? during collection|INTERNALERROR|ModuleNotFoundError' <<<"$out"; then
+    echo "INCONCLUSIVE ($3) — pytest never COLLECTED, so nothing was verified:"
+    grep -iE 'ModuleNotFoundError|error' <<<"$out" | sed 's/^/    /' | head -3
+    FAIL=1; return
+  fi
+  if grep -q "FAILED tests/unit/test_eumemic_bot_review.py::$2" <<<"$out"; then
+    echo "MUTANT KILLED ($3) — $2 failed, as required"
+  else
+    echo "WRONG FAILURE ($3) — expected $2 to fail; it failed for another reason:"
+    grep -E '^(FAILED|ERROR)' <<<"$out" | sed 's/^/    /' | head -5
+    FAIL=1
+  fi
+}
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/scripts" "$TMP/tests/unit" "$TMP/.github/workflows"
-cp scripts/eumemic_bot_review.py "$TMP/scripts/"
-cp tests/unit/test_eumemic_bot_review.py "$TMP/tests/unit/"
-cp .github/workflows/eumemic-bot-review.yml "$TMP/.github/workflows/"
-python3 - "$TMP/scripts/eumemic_bot_review.py" <<'PY'
+mk_tree() {  # $1 = dest
+  mkdir -p "$1/scripts" "$1/tests/unit" "$1/.github/workflows"
+  cp scripts/eumemic_bot_review.py "$1/scripts/"
+  cp tests/unit/test_eumemic_bot_review.py "$1/tests/unit/"
+  cp .github/workflows/eumemic-bot-review.yml "$1/.github/workflows/"
+}
+
+step "2. mutants: each control var removed from the strip (must KILL a named test)"
+# All five, not just the one we were attacked through: the round-2 strip covered
+# three of five, and no mutant existed for the missing two, so nothing caught it.
+for VAR in GITHUB_OUTPUT GITHUB_ENV GITHUB_PATH GITHUB_STEP_SUMMARY GITHUB_STATE; do
+  D="$TMP/strip-$VAR"; mk_tree "$D"
+  python3 - "$D/scripts/eumemic_bot_review.py" "$VAR" <<'PY'
+import sys
+p, var = sys.argv[1], sys.argv[2]
+text = open(p).read()
+needle = f'    "{var}",\n'
+assert needle in text, f"{var} is not in _STRIPPED_ENV at all — the fix is gone"
+open(p, "w").write(text.replace(needle, "", 1))
+PY
+  assert_killed "$D" "test_control_variables_are_stripped_by_name_not_only_by_path" \
+    "$VAR removed from the name list"
+done
+
+# The value-based strip is a separate guard; break it independently.
+D="$TMP/no-path-filter"; mk_tree "$D"
+python3 - "$D/scripts/eumemic_bot_review.py" <<'PY'
 import sys
 p = sys.argv[1]
 text = open(p).read()
-needle = '    "GITHUB_OUTPUT",\n'
-assert needle in text, "GITHUB_OUTPUT is not stripped at all — the fix is gone"
+needle = " and _CONTROL_PATH_MARKER not in v.lower()"
+assert needle in text, "the control-path value filter is gone"
 open(p, "w").write(text.replace(needle, "", 1))
 PY
-if (cd "$TMP" && python3 -m pytest tests/unit/test_eumemic_bot_review.py -q -p no:cacheprovider >/dev/null 2>&1); then
-  echo "MUTANT SURVIVED — no test distinguishes the stripped env from the unstripped one"; FAIL=1
+assert_killed "$D" "test_agent_cannot_reach_the_actions_control_files" \
+  "path-value filter removed"
+
+# The coupling guard that licenses the `==`/startswith equivalent mutant.
+D="$TMP/wide-regex"; mk_tree "$D"
+python3 - "$D/scripts/eumemic_bot_review.py" <<'PY'
+import sys
+p = sys.argv[1]
+text = open(p).read()
+assert "{64}" in text, "the evidence regex no longer pins 64 hex"
+open(p, "w").write(text.replace("{64}", "{1,64}", 1))
+PY
+assert_killed "$D" "test_evidence_regex_will_not_even_match_a_short_digest" \
+  "evidence regex widened to admit a short digest"
+
+step "2b. self-check: a collection error must NOT be counted as a kill"
+D="$TMP/broken-collect"; mk_tree "$D"
+printf '\nimport nonexistent_module_xyz\n' >> "$D/tests/unit/test_eumemic_bot_review.py"
+SELF="$(FAIL=0; assert_killed "$D" "test_agent_cannot_reach_the_actions_control_files" "self-check" 2>&1)"
+if grep -q INCONCLUSIVE <<<"$SELF"; then
+  echo "OK — a collection error reports INCONCLUSIVE, not 'MUTANT KILLED'"
 else
-  echo "MUTANT KILLED — the strip is genuinely guarded"
+  echo "BROKEN — the kill-check still fails open on a collection error: $SELF"; FAIL=1
 fi
 
 step "3+4. forged-\$GITHUB_OUTPUT attack, then the honest agent, through the REAL launcher"
@@ -65,6 +135,12 @@ mkdir -p "$ATK/bin"
 cat >"$ATK/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${GITHUB_OUTPUT:-}" ] && { echo "published=true" >> "$GITHUB_OUTPUT"; echo "AGENT-SAW-GITHUB_OUTPUT" >&2; }
+# Round 3: the net's OUTPUT channel, not just its input. The "did not post"
+# warning is written to $GITHUB_STEP_SUMMARY, so a writable handle there lets
+# the agent forge a "review posted" banner over the operator's own account of
+# what happened. $GITHUB_STATE survives into the job's post-steps.
+[ -n "${GITHUB_STEP_SUMMARY:-}" ] && { echo "### eumemic-bot review posted :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"; echo "AGENT-SAW-GITHUB_STEP_SUMMARY" >&2; }
+[ -n "${GITHUB_STATE:-}" ] && { echo "forged=1" >> "$GITHUB_STATE"; echo "AGENT-SAW-GITHUB_STATE" >&2; }
 out=""; while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && out="$2"; shift; done
 cat >/dev/null
 printf '### Code review\n\nNo actionable findings. LGTM.\n' > "$out"
@@ -98,8 +174,10 @@ sed "s#https://api.github.com#http://127.0.0.1:$PORT#" scripts/eumemic_bot_revie
 H_SHA="$(git rev-parse HEAD)"; B_SHA="$(git rev-parse HEAD~1)"
 run_case() {  # $1 = agent binary name
   GHO="$ATK/gho.$1"; : >"$GHO"; : >"$POSTED"
+  SUMMARY="$ATK/summary.$1"; : >"$SUMMARY"
   cp "$ATK/bin/$1" "$ATK/bin/codex_run"; mv "$ATK/bin/codex_run" "$ATK/bin/codex"
   PATH="$ATK/bin:$PATH" GITHUB_OUTPUT="$GHO" GITHUB_ENV="$ATK/env" GITHUB_PATH="$ATK/path" \
+  GITHUB_STEP_SUMMARY="$SUMMARY" GITHUB_STATE="$ATK/state" \
   GH_TOKEN=tok OAI_PROXY_API_KEY=key REPO=eumemic/aios PR_NUMBER=0 \
   HEAD_SHA="$H_SHA" BASE_SHA="$B_SHA" REVIEW_MODEL=gpt-5.6-sol \
   REVIEW_SANDBOX_MODE=danger-full-access \
@@ -109,9 +187,21 @@ run_case() {  # $1 = agent binary name
 RC="$(run_case codex)"
 echo "attack: launcher exit=$RC posted=$([ -s "$POSTED" ] && echo YES || echo NO) GITHUB_OUTPUT='$(tr -d '\n' <"$ATK/gho.codex")'"
 if grep -q AGENT-SAW-GITHUB_OUTPUT "$ATK/err.codex" || grep -q published=true "$ATK/gho.codex"; then
-  echo "  VULNERABLE — the agent forged the safety net's input"; FAIL=1
+  echo "  VULNERABLE (input) — the agent forged the safety net's input"; FAIL=1
 else
-  echo "  SAFE — agent blind to GITHUB_OUTPUT, net still fires"
+  echo "  SAFE (input) — agent blind to GITHUB_OUTPUT, net still fires"
+fi
+# The net's OUTPUT channel: the warning a human actually reads.
+if grep -q AGENT-SAW-GITHUB_STEP_SUMMARY "$ATK/err.codex" || \
+   grep -q "review posted" "$ATK/summary.codex"; then
+  echo "  VULNERABLE (output) — the agent forged the 'did not post' warning's own channel"; FAIL=1
+else
+  echo "  SAFE (output) — agent blind to GITHUB_STEP_SUMMARY, the warning cannot be overwritten"
+fi
+if grep -q AGENT-SAW-GITHUB_STATE "$ATK/err.codex" || [ -s "$ATK/state" ]; then
+  echo "  VULNERABLE (state) — the agent reached GITHUB_STATE, which survives into post-steps"; FAIL=1
+else
+  echo "  SAFE (state) — agent blind to GITHUB_STATE"
 fi
 RC="$(run_case codex-honest)"
 echo "honest: launcher exit=$RC posted=$([ -s "$POSTED" ] && echo YES || echo NO) GITHUB_OUTPUT='$(tr -d '\n' <"$ATK/gho.codex-honest")'"
