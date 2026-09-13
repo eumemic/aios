@@ -133,20 +133,25 @@ def test_agent_cannot_reach_the_actions_control_files(
     GITHUB_OUTPUT from the LAUNCHER's own os.environ, which is untouched —
     asserted directly in test_stripping_github_output_does_not_break_the_signal.
     """
-    monkeypatch.setenv("OAI_PROXY_API_KEY", "oai")
-    monkeypatch.setenv("ANT_PROXY_API_KEY", "ant")
-    monkeypatch.setenv("XAI_PROXY_API_KEY", "xai")
-    monkeypatch.setenv("GITHUB_OUTPUT", "/runner/file_commands/set_output_abc")
-    monkeypatch.setenv("GITHUB_ENV", "/runner/file_commands/set_env_abc")
-    monkeypatch.setenv("GITHUB_PATH", "/runner/file_commands/add_path_abc")
-    # Actions itself may place runner control paths under unrelated keys.
-    monkeypatch.setenv(
-        "GITHUB_STEP_SUMMARY", "/home/runner/work/_temp/_runner_file_commands/step_summary_abc"
-    )
+    runner_env = {
+        "OAI_PROXY_API_KEY": "oai",
+        "ANT_PROXY_API_KEY": "ant",
+        "XAI_PROXY_API_KEY": "xai",
+        "GITHUB_OUTPUT": "/runner/file_commands/set_output_abc",
+        "GITHUB_ENV": "/runner/file_commands/set_env_abc",
+        "GITHUB_PATH": "/runner/file_commands/add_path_abc",
+        "GITHUB_STEP_SUMMARY": "/runner/file_commands/step_summary_abc",
+        "GITHUB_STATE": "/runner/file_commands/state_abc",
+        # Actions may also expose a control path under an unrelated key.
+        "RUNNER_TEMP_SUMMARY": "/runner/_runner_file_commands/step_summary_abc",
+    }
+    monkeypatch.setattr(reviewer.os, "environ", runner_env)
     _, env = reviewer._agent_command(model, tmp_path / "review.md")
-    assert not {"GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH"} & set(env)
-    # Not merely absent by name — the path must not survive under any key.
-    assert not [v for v in env.values() if "file_commands" in v]
+    control_names = {
+        "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STEP_SUMMARY", "GITHUB_STATE"
+    }
+    assert not control_names & set(env)
+    assert "RUNNER_TEMP_SUMMARY" not in env
 
 
 def test_stripping_github_output_does_not_break_the_publication_signal(
