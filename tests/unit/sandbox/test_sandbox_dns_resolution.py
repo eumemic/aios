@@ -116,7 +116,7 @@ _BUSYBOX_STUB = (
     "    exit 1;;\n"
     "esac\n"
     "printf 'Server:\\t\\t%s\\nAddress:\\t%s:53\\n\\nName:\\t%s\\n"
-    'Address: 203.0.113.7\\nAddress: 2001:db8::1\\nAddress: 198.51.100.9\\n\' "$3" "$3" "$2"\n'
+    'Address: 127.0.0.11\\nAddress: 203.0.113.7\\nAddress: 2001:db8::1\\nAddress: 198.51.100.9\\n\' "$3" "$3" "$2"\n'
 )
 
 
