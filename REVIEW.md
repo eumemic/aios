@@ -1,178 +1,179 @@
-# Uncorrelated review of implementer tip `ed19d9d4` (#2422)
+# Uncorrelated review — implementer tip `3daa40cd` (eumemic/aios#2422)
 
-**Verdict: FAIL** (as submitted). The implementer's stated root cause is wrong and
-the patch is a provable no-op; the real defect was adjacent and untouched. Fixed
-on this branch (`trigswap3rev`).
+Maker ≠ checker. Implementer: gpt-5.6-sol on `trigswap4`. Reviewer:
+claude-opus-5 on `trigswap4rev`. Scope: the new tip **only**
+(`3daa40cd` — *fix(sandbox): route redirected credential DNS replies*), against
+the previously reviewed tip `8f07930b`.
 
-## Verdict on the implementer's claim
+## Verdict
 
-> "`build_lockdown_verify_script` exact-matched sentinel `169.254.53.53`, but some
-> CI `iptables -S` backends canonicalize to `169.254.53.53/32`, so DNAT/REJECT
-> looked missing."
+**FAIL as submitted.** The commit is correct as far as it goes but is
+**necessary-and-not-sufficient**: it repairs the DNS *request* direction and
+leaves the *reply* direction still dropped by the kernel, so all four functional
+swap legs would have stayed red with the **identical** symptom
+(`HTTP_STATUS=000` / empty recorder) — i.e. the fixround would have burned
+another CI cycle reporting no change.
 
-**Not true, and the change fixes nothing.** The two greps in question were
+Fixes applied on this branch (see *What I changed*). After them I judge the tip
+**ready for Shepherd to force-push**, with the explicit caveat that Docker is
+unavailable in both workspaces, so **CI remains the only oracle** for the four
+legs. No e2e result is claimed here.
 
-```
--d 169.254.53.53.*--dport 443 -j DNAT
--d 169.254.53.53.*-j REJECT
-```
+## What the commit gets right (each claim audited)
 
-They are not exact matches — the `.*` immediately after the address already spans
-a `/32` suffix. Both spellings matched before `ed19d9d4` and both match after:
+| Claim | Verdict | Evidence |
+|---|---|---|
+| MASQUERADE is correctly scoped | **Holds** | `_CREDENTIAL_DNS_SNAT` carries only `-d "$PROXY_IP" -p {udp,tcp} --dport {dns_port} -j MASQUERADE`. It cannot catch general egress: the destination is the resolved proxy alias and the port is this session's ephemeral resolver port. |
+| Idempotent | **Holds** | `-N … 2>/dev/null \|\| -F …` (create-or-empty) and `-C POSTROUTING -j … 2>/dev/null \|\| -I POSTROUTING -j …` (link-if-absent). A reprovision cannot accumulate duplicates and cannot fail under `set -e`. |
+| Safe on reprovision — does not wipe Docker's POSTROUTING | **Holds** | `build_iptables_script` flushes only `-F OUTPUT` and `-t nat -F OUTPUT`. `nat POSTROUTING` is never flushed; only the **private** chain is (`-F AIOS_CRED_DNS_SNAT`). Docker's `DOCKER_POSTROUTING` link and libnetwork's embedded-resolver SNAT survive. |
+| Verify uses the read-back spelling, not the apply spelling | **Holds** | New greps are `-qE` and tolerate the implicit match module: `'-p {proto}( -m {proto})? --dport {dns_port} -j MASQUERADE'`. The chain-link grep `'-j AIOS_CRED_DNS_SNAT'` is spelling-invariant. Consistent with `registry._EGRESS_RULE_RE`'s `(?: -m tcp)?` / `(?:/32)?` precedent. |
+| Verify fails closed on a missing chain | **Holds** | `iptables -t nat -S AIOS_CRED_DNS_SNAT` exits non-zero when the chain is absent, and the script is `set -e`. |
+| `dns_port` is now mandatory when `dnat_hosts` is non-empty | **Holds** | `ValueError` in `build_lockdown_verify_script`; both call sites (`apply_network_lockdown`, `apply_secret_egress_dnat`) pass it. |
+| No regression of `8f07930b` | **Holds** | The four pre-existing chokepoint greps are untouched; their spelling-tolerance tests still pass. |
 
-```
-$ printf -- '-A OUTPUT -d 169.254.53.53/32 -p tcp -m tcp --dport 443 -j DNAT --to-destination 172.17.0.5:9443\n' \
-    | grep -q -- '-d 169.254.53.53.*--dport 443 -j DNAT' && echo MATCHES
-MATCHES
-```
+Root-cause narrative in `DONE.md` is also correct for the request direction: with
+`/etc/resolv.conf` pointing at Docker's embedded resolver (`127.0.0.11`), the
+kernel selects `127.0.0.1` as the source **before** nat OUTPUT rewrites the
+destination, and `nf_ip_route_me_harder` re-routes with `FLOWI_FLAG_ANYSRC`,
+so the packet leaves on `eth0` still carrying a `127/8` source and is discarded
+as a **martian source** on the bridge. MASQUERADE is the right repair for that.
 
-The commit added a `|| <same grep with /32>` fallback to each — dead alternation
-that doubles the sidecar's `iptables` invocations and leaves a comment asserting
-a cause that isn't the cause. CI behaviour is unchanged by it.
+## The hole: the reply is still dropped (why all four legs stay red)
 
-## Issue 1 (blocker, root cause) — the `:53` DNAT greps can never match
+The commit fixes only the request. Trace the reply:
 
-`iptables -S` does not echo the apply command back; it re-prints each rule through
-iptables' own formatter, which renders a `--dport` match together with the
-protocol match module the parser implicitly loaded:
+1. Request leaves as `172.17.0.x:sport → worker:dns_port` (post-MASQUERADE).
+   conntrack's original tuple still records the **pre-NAT** source `127.0.0.1`.
+2. The worker resolver answers. The reply arrives on the sandbox's `eth0`.
+3. `nat PREROUTING` reverses the SNAT — the **destination** becomes
+   `127.0.0.1` — and this happens **before** the input routing decision
+   (`nf_nat_ipv4_pre_routing` runs at `NF_INET_PRE_ROUTING`).
+4. `ip_route_input_slow` then evaluates a **loopback destination on a
+   non-loopback in-device**:
 
-```
-applied:  "$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:5353"
-printed:  -A OUTPUT -p udp -m udp --dport 53 -j DNAT --to-destination 172.17.0.5:5353
-                           ^^^^^^  inserted by the formatter
-```
+   ```c
+   if (ipv4_is_loopback(daddr)) {
+           if (!IN_DEV_NET_ROUTE_LOCALNET(in_dev, net))
+                   goto martian_destination;
+   }
+   ```
 
-The two DNS assertions were written against the **apply** spelling and carry no
-`.*`:
+   `net.ipv4.conf.*.route_localnet` defaults to **0** and Docker never sets it
+   inside a container netns — libnetwork's
+   `daemon/libnetwork/resolver_unix.go` (which installs `DOCKER_OUTPUT` /
+   `DOCKER_POSTROUTING` in the container netns) contains no `route_localnet`
+   write; moby only sets it host-side for published-port DNAT.
 
-```
-"$IPT" -t nat -S OUTPUT | grep -q -- '-p udp --dport 53 -j DNAT'
-"$IPT" -t nat -S OUTPUT | grep -q -- '-p tcp --dport 53 -j DNAT'
-```
+So the answer is silently discarded, the credential lookup times out, curl
+exhausts its 25 s bound, and the observable symptom after `3daa40cd` is
+**byte-identical** to the symptom before it. Both apply and read-back verify
+stay green throughout — exactly the "green verify, red functional leg" shape
+this fixround already burned three commits on.
 
-so they match **no backend, ever** — not a CI-specific canonicalization, a
-universal one. Under `set -e` that aborts the verify sidecar, so *every*
-credentialed provision failed its read-back while the apply exited 0.
+The sysctl **cannot** be set from the lockdown sidecar: `run_netns_sidecar`
+starts an unprivileged container (`--cap-add NET_ADMIN` only), where `/proc/sys`
+is a read-only mount, and Docker refuses `--sysctl net.*` for a container that
+shares another container's netns. The sandbox's own `docker run` is the only
+place it can be applied.
 
-This explains the reported symptoms exactly, including why the two legs report
-different causes for one failed grep: both callers' error strings are static.
-`apply_network_lockdown` (`setup.py:1137`) says "OUTPUT policy is not DROP after
-apply" and `apply_secret_egress_dnat` (`setup.py:1247`) says "nat OUTPUT carries
-no DNAT rule after apply" *regardless of which assertion failed*. TASK.md's two
-root errors are the verification messages, not the apply messages — which already
-pins the failure to the read-back rather than to the apply, the proxy alias,
-`dns_port`, or `credential_dns` binding.
+## What I changed (on `trigswap4rev`)
 
-Corroboration in-tree that this is the real read-back format (so this is not
-inference from memory): `registry.py:165` `_EGRESS_RULE_RE` parses the same
-`iptables -S OUTPUT` output and already carries `(?:/32)?` **and** `(?: -m tcp)?`;
-every captured fixture in `tests/unit/sandbox/test_egress_refresh*.py` is of the
-form `-A OUTPUT -d 1.1.1.1/32 -p tcp -m tcp --dport 443 -j ACCEPT`.
+1. **`SandboxSpec.route_localnet` (`backends/base.py`) + `--sysctl
+   net.ipv4.conf.all.route_localnet=1` (`backends/docker.py`).** The completing
+   half of the transport fix. `all.*` is enough: the kernel's
+   `IN_DEV_NET_ROUTE_LOCALNET` is an OR over `all` and the device.
+2. **Gated on credentials, not unconditional (`sandbox/spec.py`):**
+   `route_localnet=bool(env_var_credentials)` — true for exactly the sessions
+   that install the chokepoint. It is keyed on the **same** value that feeds the
+   mount snapshot's `VAULT_CREDENTIAL` tuples, so attaching or detaching a
+   credential already recycles the sandbox; the sysctl and the chokepoint
+   cannot drift apart. The browser spec (no credentials) keeps the default
+   `False`.
+3. **Filter INPUT guard (`setup._nat_dnat_lines`), paying for the sysctl.**
+   `route_localnet=1` also makes this netns's `127.0.0.0/8` reachable from the
+   `aios-sandbox` bridge, whose ICC is **on** (`network.py` passes only
+   `--ipv6=false`; only `aios-browser` sets `enable_icc=false`) — a sibling
+   sandbox with `CAP_NET_RAW` could address a loopback service directly. So the
+   same sidecar run installs, idempotently:
 
-**Fix applied** (`src/aios/sandbox/setup.py`): all four chokepoint assertions are
-now EREs matching the read-back spelling, tolerant of both renderings of each
-varying field and still requiring every semantic field of the rule. The dead `||`
-fallbacks are removed.
+   ```
+   "$IPT" -C INPUT '!' -i lo -d 127.0.0.0/8 -m conntrack --ctstate NEW -j DROP 2>/dev/null || \
+   "$IPT" -A INPUT '!' -i lo -d 127.0.0.0/8 -m conntrack --ctstate NEW -j DROP
+   ```
 
-```
-"$IPT" -t nat -S OUTPUT | grep -qE -- '-d 169\.254\.53\.53(/32)? -p tcp( -m tcp)? --dport 443 -j DNAT'
-"$IPT" -t nat -S OUTPUT | grep -qE -- '-p udp( -m udp)? --dport 53 -j DNAT'
-"$IPT" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'
-"$IPT" -S OUTPUT        | grep -qE -- '-d 169\.254\.53\.53(/32)? -j REJECT'
-```
+   `--ctstate NEW` is load-bearing: the redirected DNS answer is **ESTABLISHED**
+   by the time it reaches filter INPUT (conntrack runs in PREROUTING; nat's
+   `LOCAL_IN` source rewrite runs *after* filter), so a blanket DROP would kill
+   the very flow the sysctl exists to allow. `-m conntrack` is already a
+   dependency of the Limited script, and both sidecars run the same operator
+   image. `-C`/`-A` because INPUT is never flushed.
 
-The sentinel-address dots are now escaped (they were unescaped wildcards before),
-and the `:443` DNAT grep is *tighter* than what it replaces: `.*` between the
-address and `--dport` is now the specific `-p tcp( -m tcp)?`.
+   **Deliberately NOT added to the read-back verify.** It is defence-in-depth,
+   not part of the chokepoint, and this branch has already spent three commits
+   (`adaeb155`, `b8054a4c`, `3daa40cd`) on read-back spelling. An unvalidated
+   new grep converts a hardening rule into a total provision outage; the
+   asymmetry is not worth it. Its presence is pinned by unit tests on the
+   emitted script instead.
+4. **Fail-closed matrix extended (`tests/unit/test_networking.py`).** The commit
+   added three new chokepoint rules but left
+   `test_each_missing_chokepoint_rule_fails_closed` parametrized over the old
+   four, so none of the new verify greps had a fail-closed test.
+   Now eight: `dns_udp`, `dns_tcp`, `dns_snat_chain`, `dns_snat_jump`,
+   `dns_udp_snat`, `dns_tcp_snat`, `sentinel_dnat`, `sentinel_reject`.
+5. **`_run_verify`'s fake `iptables` made per-chain.** It answered *any*
+   `-t nat …` invocation with the whole nat blob, so `-S POSTROUTING` and
+   `-S AIOS_CRED_DNS_SNAT` were indistinguishable and a grep aimed at one chain
+   could be satisfied by a rule in another. It now filters by chain and exits 1
+   for a chain that does not exist — which is what makes the new
+   `dns_snat_chain` case a real test.
+6. **New tests:** `--sysctl` present iff `route_localnet` (both networking
+   modes); the INPUT guard emitted by both `build_iptables_script` and
+   `build_secret_egress_dnat_script`; `route_localnet` tracks
+   `env_var_credentials` through `build_spec_from_session`.
 
-## Issue 2 (why this shipped) — the verify unit test never ran the nat greps
+## Validation (local; Docker unavailable — no e2e result is claimed)
 
-`TestBuildLockdownVerifyScript._run_verify` built a fake `iptables` that emitted
-`-A OUTPUT -j DNAT --to-destination 1.2.3.4:443` for any `-t nat` call and a bare
-policy line for filter — and every caller passed the default `dnat_hosts=()`, so
-the four nat/filter greps were only ever asserted as **substrings of the generated
-script**, never executed against realistic output. A test that pins the grep text
-cannot catch a grep that doesn't match reality.
+* `uv run mypy src tests` — clean, 1098 files.
+* `uv run ruff check src tests` / `ruff format --check src tests` — clean.
+* `uv run pytest tests/unit -q -n 4` — **6238 passed**.
+* Targeted: `test_networking.py`, `sandbox/test_credential_dns.py`,
+  `sandbox/test_egress_refresh.py`, `sandbox/test_egress_refresh_live_path.py`,
+  `sandbox/test_spec_env_var_credentials.py`, `test_sandbox_spec.py`,
+  `sandbox/test_docker_runtime_argv.py`, `sandbox/test_docker_seccomp_argv.py`
+  — 233 passed.
+* Generated scripts were rendered and `bash -n`-checked (the `'!'` quoting in
+  the INPUT guard is shell-safe).
 
-**Fix applied** (`tests/unit/test_networking.py`): `_run_verify` now renders the
-real chokepoint as `iptables -S` prints it, parametrized over both backend
-spellings (`canonical` = `/32` + `-m tcp`/`-m udp`; `bare` = neither), with an
-`omit` hook to drop individual rules and an `assert_drop` passthrough for the
-Unrestricted leg. New tests:
+**Not verified locally, by construction:** kernel/netfilter behaviour. There is
+no Docker daemon and no `unshare -n` permission in this workspace, so the
+martian-destination claim rests on the kernel source semantics quoted above plus
+the moby source read, not on an observation. That is the same epistemic status
+as the implementer's own root cause.
 
-- `test_full_chokepoint_passes_against_real_iptables_s_output[canonical|bare]`
-- `test_dnat_only_full_chokepoint_passes[canonical|bare]`
-- `test_each_missing_chokepoint_rule_fails_closed[dns_udp|dns_tcp|sentinel_dnat|sentinel_reject]`
-- `test_v4_drop_absent_fails_with_chokepoint_installed`
+## Residual risks CI must settle
 
-Checked against `ed19d9d4`: the `canonical` variants **fail** (exit 1) and the
-`bare` variants pass — precisely isolating the `-m udp`/`-m tcp` rendering as the
-defect and confirming the `/32` story was never it. All pass after the fix.
+1. **gVisor.** `runsc` does not implement `route_localnet`
+   (google/gvisor#14625 is still open), so under `AIOS_SANDBOX_RUNTIME=runsc`
+   the credential chokepoint cannot work at all. This is **pre-existing** — the
+   design has depended on NATing a loopback flow since `3daa40cd` — and it does
+   not block the four legs, because `settings.sandbox_runtime` defaults to
+   `None` (runc) in CI. It is *not* a startup hazard: `runsc/boot/loader.go`
+   reads only `fs.nr_open` from `linux.sysctl` and ignores unknown keys, so the
+   flag is inert rather than fatal there. Worth its own issue.
+2. **Interception still swallows Docker's embedded name resolution.** All `:53`
+   is redirected to the worker resolver, which forwards unknown names to the
+   worker's upstream and knows nothing of Docker container names — so
+   in-sandbox resolution of `aios-worker` / the proxy alias does not work. This
+   predates the tip (it arrived with the `-I OUTPUT -p udp --dport 53` rule) and
+   nothing in this fixround makes it worse; flagging it, not fixing it here.
 
-## Confirmed still fail-closed (review item 3)
+## Shepherd readiness
 
-- Limited `-P OUTPUT DROP` read-back (`grep -qx`) and the guarded v6 DROP are
-  untouched; `set -e` still first line on all three script shapes.
-- `test_each_missing_chokepoint_rule_fails_closed` proves dropping **any one** of
-  the four rules (DNS udp, DNS tcp, sentinel `:443` DNAT, sentinel REJECT) still
-  fails the verify — the widened patterns did not loosen into "some DNAT exists".
-- `test_v4_drop_absent_fails_with_chokepoint_installed` proves a fully-present
-  chokepoint does not mask a missing DROP.
-- No cross-table false positive: the filter chain's `-p udp -m udp --dport 53 -j
-  ACCEPT` does not satisfy the nat `-j DNAT` grep (verified against a realistic
-  captured ruleset).
-- `assert_drop=False` still omits the DROP/v6 assertions and keeps all four nat
-  assertions; `dnat_hosts=()` still emits no nat reference at all.
+**Ready to force-push `trigswap4rev` onto the PR branch** and ready for an
+eumemic-bot published review, on the understanding that the four e2e(docker)
+legs are unverified locally in both workspaces and CI is the decision point. If
+the legs are still red after this, the next thing to instrument is the reply
+path directly (`conntrack -L` plus `iptables -t nat -L -v -n` counters inside
+the sandbox netns), not another verify-grep change.
 
-## Scope (review items 4, 5)
-
-Minimal and #2422-only: one function's grep patterns plus its test. No IPv6/`-4`
-hygiene reopened; no `credential_dns`, `_nat_dnat_lines`, apply-script, registry,
-refresh-sweep, or e2e change. #2421 untouched. `_EGRESS_RULE_RE` and
-`build_egress_refresh_script` were audited for the same defect — they are already
-spelling-tolerant and have no read-back grep, so nothing to change there. The
-browser deny-internal verify uses `grep -qF` on true CIDR prefixes (`/16`, `/8`,
-…), which iptables prints verbatim — unaffected. Not pushed, no PR.
-
-## Leftover risk
-
-1. **CI is still the oracle.** Docker is unavailable here, so the e2e legs are
-   unrun locally. The claim is that the read-back now matches what `iptables -S`
-   prints; if a provision still fails, the next thing to read is the verify
-   sidecar's stderr, *not* the caller's static error text — see Issue 1.
-2. **Only the first failure is visible.** Because the callers' messages are
-   static and `set -e` aborts on the first failed assertion, a future verify
-   failure will again mis-report its cause. Surfacing the failing assertion
-   (e.g. `set -x`, or the sidecar's stderr in the `SandboxBackendError`) would
-   have turned this fixround into a log read. Deliberately left out of scope —
-   it changes error plumbing on both callers.
-3. **The DNAT targets are not verified.** The read-back proves a `:53` DNAT and a
-   sentinel `:443` DNAT exist, not that they point at *this session's* resolver
-   port / proxy port. Pre-existing (the `:443` assertion never checked its target
-   either); closing it means threading `dns_port`/`proxy_port` into
-   `build_lockdown_verify_script`. Low value in-netns — nothing else installs a
-   nat OUTPUT DNAT there — but it is the remaining gap between "a chokepoint
-   landed" and "our chokepoint landed".
-4. **Pre-existing xdist flakiness**, unrelated to this change:
-   `tests/unit` under `-n 4` intermittently fails/errors in
-   `test_jobs_app_layering.py` and `tests/unit/sandbox/test_secret_egress_proxy.py`.
-   Reproduced on the unmodified tip `ed19d9d4` (6172 passed + 1 unrelated error);
-   all pass serially.
-
-## Verification run
-
-- `uv run mypy src tests` → Success, 1098 files.
-- `uv run ruff check src tests` → All checks passed; `ruff format --check` clean.
-- `uv run pytest tests/unit -q -n 4` → 6181 passed (+9 new), 1 pre-existing flake.
-- `uv run pytest tests/unit/test_networking.py -q` → 138 passed.
-- New tests run against `ed19d9d4`'s `setup.py` → 3 failed (reproduces CI).
-
-## Final HEAD
-
-Branch `trigswap3rev`, two commits on top of `ed19d9d4`:
-
-- `5cfbe61b` — `fix(sandbox): match the read-back spelling in lockdown/DNAT verify (#2422)`
-  (the product + test change; this is the commit CI should be read against)
-- the commit carrying this REVIEW.md, which is the branch tip
-
-REVIEW_DONE
+No push, no PR, no merge, no Track G performed.

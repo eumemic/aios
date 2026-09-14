@@ -9,6 +9,7 @@ import struct
 import subprocess
 import tempfile
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -258,6 +259,28 @@ class TestBuildIptablesScript:
                 f"-p {proto} --dport 53535 -j MASQUERADE"
             ) in script
         assert '"$IPT" -t nat -I POSTROUTING -j AIOS_CRED_DNS_SNAT' in script
+
+    def test_loopback_input_guard_pays_for_route_localnet(self) -> None:
+        """``route_localnet=1`` (needed so the redirected DNS REPLY is not
+        discarded as a martian destination) also makes this netns's
+        127.0.0.0/8 reachable from the ICC-on sandbox bridge. The chokepoint
+        pays for that in the same sidecar run: NEW loopback-destined flows that
+        did not arrive on ``lo`` are dropped. Only NEW — the DNS answer is
+        ESTABLISHED by the time it reaches filter INPUT, so the guard must not
+        break the very flow the sysctl exists to allow. Idempotent ``-C``/``-A``
+        because INPUT is never flushed."""
+        script = build_iptables_script(
+            allowed_hosts=set(),
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        assert (
+            "\"$IPT\" -C INPUT '!' -i lo -d 127.0.0.0/8 "
+            "-m conntrack --ctstate NEW -j DROP 2>/dev/null || "
+            "\"$IPT\" -A INPUT '!' -i lo -d 127.0.0.0/8 "
+            "-m conntrack --ctstate NEW -j DROP"
+        ) in script
 
     def test_proxy_alias_miss_is_a_hard_failure(self) -> None:
         """A ``$PROXY_IP`` miss must abort the apply, not skip the block.
@@ -576,6 +599,27 @@ class TestBuildSecretEgressDnatScript:
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
 
+    def test_loopback_input_guard_pays_for_route_localnet(self) -> None:
+        """``route_localnet=1`` (needed so the redirected DNS REPLY is not
+        discarded as a martian destination) also makes this netns's
+        127.0.0.0/8 reachable from the ICC-on sandbox bridge. The chokepoint
+        pays for that in the same sidecar run: NEW loopback-destined flows that
+        did not arrive on ``lo`` are dropped. Only NEW — the DNS answer is
+        ESTABLISHED by the time it reaches filter INPUT, so the guard must not
+        break the very flow the sysctl exists to allow. Idempotent ``-C``/``-A``
+        because INPUT is never flushed."""
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        assert (
+            "\"$IPT\" -C INPUT '!' -i lo -d 127.0.0.0/8 "
+            "-m conntrack --ctstate NEW -j DROP 2>/dev/null || "
+            "\"$IPT\" -A INPUT '!' -i lo -d 127.0.0.0/8 "
+            "-m conntrack --ctstate NEW -j DROP"
+        ) in script
+
     def test_sentinel_reject_is_unconditional(self) -> None:
         """The fail-closed filter REJECT for the sentinel is emitted flat — not
         inside a resolution loop — so its coverage cannot depend on what DNS
@@ -852,16 +896,26 @@ class TestBuildLockdownVerifyScript:
                 f"-A OUTPUT -d {sentinel} -j REJECT --reject-with icmp-port-unreachable"
             ),
         }
-        nat_out = "\n".join(
-            ["-P OUTPUT ACCEPT"] + [r for k, r in nat_rules.items() if k not in omit]
-        )
+        # ``-S <chain>`` is PER-CHAIN, like the real thing: the nat fake must
+        # not answer ``-S POSTROUTING`` with the whole table, or a grep aimed at
+        # one chain would silently be satisfied by a rule in another (#2422).
+        # The private SNAT chain exists unless ``omit`` names it, so a verify
+        # run against a netns where ``-N`` never landed can be shown to abort
+        # under ``set -e`` the way real ``iptables -S <missing chain>`` does.
+        nat_chains = ["-P OUTPUT ACCEPT", "-P POSTROUTING ACCEPT"]
+        if "dns_snat_chain" not in omit:
+            nat_chains.append("-N AIOS_CRED_DNS_SNAT")
+        nat_out = "\n".join(nat_chains + [r for k, r in nat_rules.items() if k not in omit])
         filter_out = "\n".join(
             [f"-P OUTPUT {v4_policy}"] + [r for k, r in filter_rules.items() if k not in omit]
         )
         v4 = (
             "#!/usr/bin/env bash\n"
-            "if [ \"$1\" = '-t' ] && [ \"$2\" = 'nat' ]; then\n"
-            f"cat <<'NATEOF'\n{nat_out}\nNATEOF\n"
+            "if [ \"$1\" = '-t' ] && [ \"$2\" = 'nat' ] && [ \"$3\" = '-S' ]; then\n"
+            f"nat=$(cat <<'NATEOF'\n{nat_out}\nNATEOF\n)\n"
+            'if ! printf \'%s\\n\' "$nat" | grep -qE -- "^-[PN] $4( |$)"; then\n'
+            'echo "iptables: No chain/target/match by that name." >&2; exit 1; fi\n'
+            'printf \'%s\\n\' "$nat" | grep -E -- "^-[PA] $4( |$)" || true\n'
             "exit 0; fi\n"
             "if [ \"$1\" = '-S' ] && [ \"$2\" = 'OUTPUT' ]; then\n"
             f"cat <<'FILTEOF'\n{filter_out}\nFILTEOF\n"
@@ -955,13 +1009,30 @@ class TestBuildLockdownVerifyScript:
             == 0
         )
 
-    @pytest.mark.parametrize("missing", ["dns_udp", "dns_tcp", "sentinel_dnat", "sentinel_reject"])
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "dns_udp",
+            "dns_tcp",
+            "dns_snat_chain",
+            "dns_snat_jump",
+            "dns_udp_snat",
+            "dns_tcp_snat",
+            "sentinel_dnat",
+            "sentinel_reject",
+        ],
+    )
     def test_each_missing_chokepoint_rule_fails_closed(self, missing: str) -> None:
-        """Still fail-closed: dropping ANY ONE of the four chokepoint rules from
-        the read-back fails the verify. Tolerating both print spellings must not
-        have loosened the greps into passing a half-installed chokepoint — a
-        green verify over unprotected credential egress is the exact failure
-        mode #2042's read-back exists to kill."""
+        """Still fail-closed: dropping ANY ONE of the chokepoint rules from the
+        read-back fails the verify — the two ``:53`` DNATs, the private SNAT
+        chain, its POSTROUTING link, both MASQUERADEs, the sentinel DNAT and the
+        sentinel REJECT. Tolerating both print spellings must not have loosened
+        the greps into passing a half-installed chokepoint — a green verify over
+        unprotected credential egress is the exact failure mode #2042's
+        read-back exists to kill. The source-NAT rules are load-bearing in the
+        same way (#2422): without them the redirected DNS query leaves the netns
+        with a ``127/8`` source and is never answered, so a chokepoint that
+        verifies green while DNS is black-holed is the same class of defect."""
         assert (
             self._run_verify(
                 v4_policy="DROP",
@@ -1060,6 +1131,54 @@ class TestDockerBackendArgs:
         assert "--ipc" in argv
         i = argv.index("--ipc")
         assert argv[i + 1] == "private"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            LimitedNetworking(type="limited", allowed_hosts=["example.com"]),
+            UnrestrictedNetworking(),
+        ],
+        ids=["limited", "unrestricted"],
+    )
+    async def test_no_route_localnet_sysctl_without_credentials(
+        self, policy: LimitedNetworking | UnrestrictedNetworking
+    ) -> None:
+        """``route_localnet`` is OFF by default, in BOTH networking modes: a
+        session with no env-var credentials installs no credential chokepoint,
+        so it must not carry the sysctl that makes this netns's 127.0.0.0/8
+        reachable from the (ICC-on) sandbox bridge."""
+        argv = await _capture_docker_argv(_make_spec(policy))
+        assert "--sysctl" not in argv
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            LimitedNetworking(type="limited", allowed_hosts=["example.com"]),
+            UnrestrictedNetworking(),
+        ],
+        ids=["limited", "unrestricted"],
+    )
+    async def test_route_localnet_sysctl_when_chokepoint_installed(
+        self, policy: LimitedNetworking | UnrestrictedNetworking
+    ) -> None:
+        """REGRESSION (#2422): the credential chokepoint DNATs the sandbox's
+        loopback-destined DNS (Docker's embedded resolver at 127.0.0.11) to the
+        worker resolver and MASQUERADEs the request. The REPLY is un-SNATed back
+        to a 127.0.0.1 DESTINATION in nat PREROUTING, and the kernel discards a
+        loopback destination arriving on a non-loopback device as a martian
+        destination unless ``route_localnet`` is set — so without this flag the
+        DNS answer never lands, every credential lookup times out, and the swap
+        legs stay red with exactly the pre-fix symptom (``HTTP_STATUS=000`` /
+        empty recorder). The lockdown sidecar cannot set it (unprivileged, and
+        Docker refuses ``--sysctl net.*`` for a shared netns), so it has to come
+        from the sandbox's own ``docker run``."""
+        spec = replace(_make_spec(policy), route_localnet=True)
+        argv = await _capture_docker_argv(spec)
+        assert "--sysctl" in argv
+        i = argv.index("--sysctl")
+        assert argv[i + 1] == "net.ipv4.conf.all.route_localnet=1"
 
 
 class TestDockerBackendIsAlive:

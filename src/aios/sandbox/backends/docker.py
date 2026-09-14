@@ -198,6 +198,15 @@ class DockerBackend:
         argv.extend(["--security-opt", "no-new-privileges"])
         argv.extend(["--ipc", "private"])
 
+        # Credential-DNS chokepoint transport (#2422). See
+        # ``SandboxSpec.route_localnet``: the redirected DNS reply is un-SNATed
+        # back to a ``127.0.0.1`` destination in nat PREROUTING and would be
+        # dropped as a martian destination without this. Applies to the
+        # container's OWN network namespace only (``--network <name>``), never
+        # the host's; emitted only for sessions that install the chokepoint.
+        if spec.route_localnet:
+            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
 

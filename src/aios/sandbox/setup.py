@@ -406,7 +406,11 @@ def _nat_dnat_lines(
        the netns can answer a credential name first.
     3. UDP+TCP source NAT for the redirected DNS flow. Docker's 127.0.0.11
        destination makes the kernel select a loopback source before OUTPUT
-       DNAT; MASQUERADE replaces it so the packet can cross the bridge.
+       DNAT; MASQUERADE replaces it so the packet can cross the bridge. The
+       matching REPLY needs ``net.ipv4.conf.all.route_localnet=1`` on the
+       sandbox container (``SandboxSpec.route_localnet``) — see the inline
+       comment — plus the filter INPUT guard that keeps that sysctl from
+       exposing this netns's loopback services to the sandbox bridge.
     4. One credential DNAT keyed on :data:`CREDENTIAL_SENTINEL_IP` — the single
        address every credential name now resolves to inside the sandbox.
     5. A filter REJECT for any other sentinel-addressed packet (the ``:443``
@@ -451,6 +455,26 @@ def _nat_dnat_lines(
         f"-p udp --dport {dns_port} -j MASQUERADE",
         f'"$IPT" -t nat -A {_CREDENTIAL_DNS_SNAT_CHAIN} -d "$PROXY_IP" '
         f"-p tcp --dport {dns_port} -j MASQUERADE",
+        # The MASQUERADE above only repairs the REQUEST. The reply is un-SNATed
+        # in nat PREROUTING back to a 127.0.0.1 DESTINATION before input
+        # routing, which the kernel discards as a martian destination unless
+        # net.ipv4.conf.all.route_localnet=1 — so the sandbox container is
+        # started with that sysctl (``SandboxSpec.route_localnet``, set by the
+        # spec builder for exactly the sessions that reach this block).
+        #
+        # route_localnet also makes 127.0.0.0/8 services in this netns
+        # reachable from the (ICC-on) sandbox bridge, so pay for it here: drop
+        # every NEW loopback-destined flow that did not arrive on lo. The
+        # redirected DNS answer is ESTABLISHED by the time it reaches filter
+        # INPUT (conntrack runs in PREROUTING, nat's LOCAL_IN source rewrite
+        # runs after filter), so it is unaffected. Idempotent -C/-A: INPUT is
+        # never flushed, so a reprovision must not append a second copy.
+        "# route_localnet is on for this netns (#2422); keep it from exposing",
+        "# loopback services to the bridge. The redirected DNS reply is",
+        "# ESTABLISHED here, so only NEW inbound loopback flows are dropped.",
+        "\"$IPT\" -C INPUT '!' -i lo -d 127.0.0.0/8 -m conntrack --ctstate NEW "
+        "-j DROP 2>/dev/null || "
+        "\"$IPT\" -A INPUT '!' -i lo -d 127.0.0.0/8 -m conntrack --ctstate NEW -j DROP",
         "# The ONE credential rule: every credential name resolves to this sentinel",
         "# inside the sandbox, so this covers the host completely (#2042).",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
