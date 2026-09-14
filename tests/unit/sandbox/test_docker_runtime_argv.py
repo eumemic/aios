@@ -84,6 +84,12 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
+async def test_create_refuses_runsc_on_arm64(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docker_backend.platform, "machine", lambda: "aarch64")
+    with pytest.raises(docker_backend.SandboxBackendError, match="unsupported on arm64"):
+        await DockerBackend().create(_spec(runtime="runsc"))
+
+
 async def test_netns_sidecar_runsc_execs_into_the_target_sentry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

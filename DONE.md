@@ -68,3 +68,13 @@ cannot deliver the runtime property on its own.
   the e2e image contract — the only test that can decide whether `--link`
   actually works — was NOT run. The fix remains unverified where it matters.
 - Not pushed, not merged, no PR.
+
+## Follow-up fixes after rebase
+
+- The resolver bake remains a same-path `COPY --link` because glibc and the
+  read-only runsc chroot both require `/etc/resolv.conf`; a non-special path
+  cannot be consumed by `getent`. The Docker e2e contract is the authoritative
+  check, and Docker is unavailable in this environment.
+- Runsc is now fail-closed on arm64 (`aarch64`/`arm64`/`armv8l`). The operator
+  image and explicit ELF loader/library paths are x86_64-only; both sandbox
+  creation and the sidecar path reject arm64 before invoking Docker.

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
 import shutil
 from pathlib import Path
 from time import monotonic
@@ -239,6 +240,15 @@ class DockerBackend:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
+        if spec.runtime == "runsc" and platform.machine().lower() in {
+            "aarch64",
+            "arm64",
+            "armv8l",
+        }:
+            raise SandboxBackendError(
+                "gVisor runsc sandboxes are unsupported on arm64: the operator "
+                "image currently contains x86_64 loader and libraries"
+            )
         argv: list[str] = [
             "docker",
             "run",
@@ -1281,6 +1291,15 @@ class DockerBackend:
         the same embedded-resolver address the preamble writes. Without it
         every host resolves to nothing and Limited egress blackholes.
         """
+        if runtime == "runsc" and platform.machine().lower() in {
+            "aarch64",
+            "arm64",
+            "armv8l",
+        }:
+            raise SandboxBackendError(
+                "gVisor runsc egress is unsupported on arm64: the operator image "
+                "currently contains x86_64 loader and libraries"
+            )
         if runtime == "runsc":
             argv = ["docker", "exec", "--privileged"]
             for key, value in _RUNSC_OPERATOR_EXEC_ENV:
