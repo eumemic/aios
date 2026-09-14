@@ -109,6 +109,35 @@ _RUNSC_OPERATOR_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu"
 _RUNSC_OPERATOR_SHELL = "/usr/bin/bash"
 _RUNSC_OPERATOR_CHROOT = "/usr/bin/busybox"
 
+# The two paths above are x86_64 ELF locations, and the operator image is
+# published multi-arch (``build-sandbox.yml`` builds linux/amd64 AND
+# linux/arm64) -- an arm64 pull carries its loader under a different multiarch
+# triple entirely. Rather than guess a triple per machine, runsc is refused
+# wherever the baked paths cannot be right. This is an ALLOW-list on purpose:
+# a machine nobody considered (ppc64le, riscv64, 32-bit x86) fails closed here
+# instead of reaching ``docker`` and dying inside the chroot with an opaque
+# ``exec format error``.
+#
+# ``platform.machine()`` is the arch of the *worker process*, which is a proxy
+# for the daemon's -- a remote ``DOCKER_HOST`` can differ. Both ways out of a
+# mismatch are safe: it either refuses a runsc sandbox that would have worked,
+# or lets one through to the preamble's presence check below, which fails
+# closed with ``operator tool root incomplete`` (exit 90). Neither silently
+# blackholes egress, which is the failure mode that matters.
+_RUNSC_SUPPORTED_MACHINES = frozenset({"x86_64", "amd64"})
+
+
+def _require_runsc_supported_machine(what: str) -> None:
+    """Fail closed when the operator image's ELF paths cannot fit this machine."""
+    machine = platform.machine()
+    if machine.lower() not in _RUNSC_SUPPORTED_MACHINES:
+        raise SandboxBackendError(
+            f"gVisor runsc {what} is unsupported on {machine or 'unknown machine'}: "
+            f"the operator image is entered through {_RUNSC_OPERATOR_LOADER}, which "
+            "exists only in its x86_64 build"
+        )
+
+
 # Shell command name -> operator-image path, for every external command the
 # egress scripts in ``aios.sandbox.setup`` invoke. Anything NOT listed here
 # resolves through ``PATH``, which the exec pins to the operator root -- so a
@@ -240,15 +269,8 @@ class DockerBackend:
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
-        if spec.runtime == "runsc" and platform.machine().lower() in {
-            "aarch64",
-            "arm64",
-            "armv8l",
-        }:
-            raise SandboxBackendError(
-                "gVisor runsc sandboxes are unsupported on arm64: the operator "
-                "image currently contains x86_64 loader and libraries"
-            )
+        if spec.runtime == "runsc":
+            _require_runsc_supported_machine("sandboxes")
         argv: list[str] = [
             "docker",
             "run",
@@ -1291,16 +1313,8 @@ class DockerBackend:
         the same embedded-resolver address the preamble writes. Without it
         every host resolves to nothing and Limited egress blackholes.
         """
-        if runtime == "runsc" and platform.machine().lower() in {
-            "aarch64",
-            "arm64",
-            "armv8l",
-        }:
-            raise SandboxBackendError(
-                "gVisor runsc egress is unsupported on arm64: the operator image "
-                "currently contains x86_64 loader and libraries"
-            )
         if runtime == "runsc":
+            _require_runsc_supported_machine("egress")
             argv = ["docker", "exec", "--privileged"]
             for key, value in _RUNSC_OPERATOR_EXEC_ENV:
                 argv.extend(["--env", f"{key}={value}"])

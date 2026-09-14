@@ -166,7 +166,19 @@ _OPERATOR_CHAIN = (
     "/usr/bin/bash",
 )
 
+# The chain is x86_64-only BY CONSTRUCTION: that loader path exists only in the
+# amd64 build of this multi-arch image, which is exactly why ``DockerBackend``
+# refuses runsc off x86_64 (``_RUNSC_SUPPORTED_MACHINES``). An arm64 pull would
+# fail these two for that reason and no other — a restatement of a decision
+# already made, not a finding — so they skip there. CI runs on amd64 runners,
+# so nothing is lost; the skip only spares a developer on Apple Silicon.
+_x86_64_only = pytest.mark.skipif(
+    platform.machine().lower() not in {"x86_64", "amd64"},
+    reason="the runsc operator chain is amd64-only; DockerBackend refuses runsc elsewhere",
+)
 
+
+@_x86_64_only
 @pytest.mark.parametrize("path", _OPERATOR_CHAIN)
 def test_operator_chain_binary_at_absolute_path(pulled_image: str, path: str) -> None:
     """Each link of the privileged exec chain must be executable at its exact
@@ -185,6 +197,7 @@ def test_busybox_ships_the_chroot_applet(pulled_image: str) -> None:
     assert "chroot" in r.stdout.split(), "busybox in this image has no chroot applet"
 
 
+@_x86_64_only
 def test_operator_chain_executes_end_to_end(pulled_image: str) -> None:
     """Run the real chain (chroot → trusted loader → ``bash -p``) once.
 
@@ -217,7 +230,11 @@ def test_image_layer_carries_the_embedded_dns_resolver(pulled_image: str) -> Non
     Read through ``docker cp`` from a created-but-never-started container: a
     running container has Docker's own resolv.conf bind-mounted over the path,
     which is exactly why a missing baked file is invisible until a runsc
-    provision blackholes. The chrooted runsc exec sees the layer, cannot write
+    provision blackholes. ``docker cp`` reads the container's layers, beneath
+    that bind mount (moby/moby#9998 is a bug report about precisely this
+    "returns the layer's empty stub, not the live file" behaviour), so it is a
+    faithful probe of what the image ships -- an empty read here means the
+    bytes are genuinely not in the layer, not that the probe cannot see them. The chrooted runsc exec sees the layer, cannot write
     to it (the operator mount is read-only, so ``setup._RESOLV_PREAMBLE`` is a
     no-op there), and ``getent`` silently falls back to 127.0.0.1 without it —
     which empties the Limited allow-list.

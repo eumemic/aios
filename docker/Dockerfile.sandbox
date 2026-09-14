@@ -117,11 +117,22 @@ ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
 # BuildKit-built image through ``docker cp`` and got a 0-byte
 # /etc/resolv.conf (aios#2410). BuildKit special-cases this path as a build
 # mount (moby/buildkit#1267) and the copied bytes did not survive into the
-# committed layer. ``--link`` builds the file as a standalone layer over
-# scratch and merges it on top, so the bytes are never written through the
-# parent snapshot that carries the mount placeholder.
+# committed layer.
 #
-# That last sentence is a HYPOTHESIS, not a verified mechanism: --link is not
+# Two adjacent explanations for that reading are RULED OUT rather than assumed
+# away. (1) Stale image: the lane that saw it builds locally --
+# ``docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .`` in
+# code-validation.yml, with AIOS_DOCKER_IMAGE pointed at that tag -- so it was
+# not a registry pull predating the bake. (2) Blind probe: ``docker cp`` reads
+# the container's LAYERS, underneath the daemon's resolv.conf bind mount
+# (moby/moby#9998 is a bug report about exactly that "you get the layer stub,
+# not the live file" behaviour), so an empty read is the layer's own content.
+#
+# ``--link`` builds the file as a standalone layer over scratch and merges it
+# on top, so the bytes are never written through the parent snapshot that
+# carries the mount placeholder.
+#
+# That last paragraph is a HYPOTHESIS, not a verified mechanism: --link is not
 # a documented remedy for this path, and the only thing that can decide it is
 # ``tests/e2e/test_sandbox_image_contract.py::
 # test_image_layer_carries_the_embedded_dns_resolver``, which needs a Docker
