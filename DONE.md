@@ -1,128 +1,159 @@
-# Done
+# Done — aios#2410 fixround
 
-- Implementer commits reviewed: `119ed983` (fix) and `0b0effc9` (DONE.md), on
-  branch `botpost2410g`. This review branch is `botpost2410grev`.
-- `origin/master` (`abe20173`) is an ancestor of HEAD; 28 commits ahead. The
-  prior gVisor work (`17ef3de9` chroot-before-loader, `538ab985` resolver bake)
-  and the whole review-harness series are retained.
+Branch `botpost2410i`, on top of `e10f4e07` (`origin/master` is an ancestor;
+31 commits ahead, no rebase needed). All prior #2410 security/harness work is
+kept — the chroot-before-loader operator chain, the runsc machine allow-list,
+the operator shadow map and its test. Not pushed, no PR.
 
-## Root cause — what is observed and what is hypothesised
+Two items were asked for. Both are done.
 
-OBSERVED: the e2e image contract
-(`tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`)
-built the image from this Dockerfile and read `/etc/resolv.conf` back out of
-the committed layer with `docker create` + `docker cp`. It came back with no
-`nameserver` line, although `docker/sandbox-resolv.conf` is correct and the
-plain `COPY … /etc/resolv.conf` already sat after every `RUN`. The CI
-`detect` filter puts `docker/sandbox-resolv.conf` and `docker/Dockerfile.sandbox`
-in `sandbox_changed`, and on `pull_request` the base is `PR_BASE_SHA`, so that
-run really did build a fresh image — it is not a stale `:smoked` pull.
+---
 
-HYPOTHESISED: that BuildKit's `/etc/resolv.conf` special-casing
-(moby/buildkit#1267) leaves its placeholder in the committed snapshot and that
-`COPY --link` dodges it by building the file over `scratch` and merging it on
-top rather than writing through the parent snapshot. This is a bet, not a
-verified mechanism — `--link` is nowhere documented as a remedy for this path,
-and BuildKit's documented masking is a RUN-time bind mount, which this COPY is
-already past. The implementer's DONE.md stated it as settled fact; it is not.
+## 1. The empty `/etc/resolv.conf` layer
 
-## Bake path
+**Verdict: baking `/etc/resolv.conf` is impossible under BuildKit.** The
+sanctioned second branch was taken — the operator/chroot read path is fixed by
+removing its dependence on that file entirely.
 
-Kept `COPY --link docker/sandbox-resolv.conf /etc/resolv.conf`. Same-path bake
-is the only shape that can work: glibc reads `_PATH_RESCONF` = `/etc/resolv.conf`
-and nothing else (no env override), the runsc operator root is mounted READ-ONLY
-so `setup._RESOLV_PREAMBLE` cannot write it, and a gVisor-internal bind mount is
-not dependable. TASK.md's advisory "non-special path + symlink/bind" direction
-cannot deliver the runtime property on its own.
+### Evidence
 
-## Fixes made on this review branch
+No Docker daemon is available in this environment, so the evidence is registry
+blobs, the CI job log, and moby/BuildKit source — not another local build.
 
-- `tests/unit/test_detect_filter_sync.py`: `test_build_sandbox_triggers_on_every_copied_file`
-  was RED on `0b0effc9`. Its `^COPY <path>\s` pattern is flag-sensitive, so
-  adding `--link` read as "the file is no longer COPYed". Widened to
-  `^COPY (?:--\S+ )*<path>\s`. The implementer ran only the narrow resolver
-  test file and could not see it; CI would have gone red on the unit shard
-  before ever reaching the e2e.
-- `docker/Dockerfile.sandbox`: rewrote the resolver comment to separate the
-  observed failure from the `--link` hypothesis, name the e2e as the only
-  oracle, record that a non-special path alone does not rescue it, and note
-  that `--link` raises the floor to BuildKit >= 0.10 / Docker >= 23 with no
-  `# syntax=` pin (an older daemon fails loudly instead of shipping an empty
-  resolver).
-- `tests/unit/sandbox/test_sandbox_resolv_conf.py`: added a SCOPE paragraph
-  saying these are source-level pins that cannot distinguish a surviving layer
-  from a stripped one, and re-keyed the matcher onto the DESTINATION so a plain
-  `COPY … /etc/resolv.conf` is found and rejected by name rather than silently
-  missed by a flag-sensitive pattern.
-- `tests/e2e/test_sandbox_image_contract.py`: gave the nameserver assertion an
-  actionable message and a comment saying what a repeat failure means (the
-  `--link` layer was stripped too; the fix then has to move to the operator
-  read path).
+* **E1.** `docker/sandbox-resolv.conf` was 838 bytes containing exactly one
+  `nameserver 127.0.0.11`, and is not `.dockerignore`d. The input was correct.
+* **E2.** The failing lane genuinely rebuilt. Job log for run
+  `34807834078` (`gh api .../jobs/103863091603/logs`) shows
+  `#11 [6/7] COPY --link docker/sandbox-resolv.conf /etc/resolv.conf`,
+  `#11 DONE 0.0s`, `writing image sha256:d98fe7ad…`,
+  `naming to docker.io/library/aios-sandbox:ci` — with
+  `AIOS_DOCKER_IMAGE=aios-sandbox:ci`. Not a stale `:smoked` pull.
+* **E3.** `python:3.13-slim-bookworm` (amd64) ships `etc/resolv.conf` in layer 0
+  as a **regular 104-byte file** (`# https://1.1.1.1 …`, `nameserver 1.1.1.1`,
+  `nameserver 1.0.0.1`) — read out of the layer blob over the registry v2 API.
+* **E4.** `ghcr.io/eumemic/aios-sandbox:smoked` (9 layers, built before the COPY
+  existed) carries `etc/resolv.conf` **only** in that base layer, same 104
+  bytes, no whiteout and no aios layer rewriting it.
+* **E5.** The CI oracle read `''` — neither 838 bytes nor 104.
+* **E6.** The probe is faithful. In moby v28, `docker cp` on a **never-started**
+  container goes `containerArchivePath` → `openContainerFS` → `daemon.Mount` +
+  `setupMounts`, which appends `Container.NetworkMounts()`; that method emits
+  `/etc/resolv.conf` **only when `ResolvConfPath != ""`**, and that field is set
+  only at container **start** (`buildSandboxOptions` /
+  `initializeNetworkingPaths`) or by an explicit volume (`TrySetNetworkMount`).
+  `daemon/create.go` never sets it. So nothing is mounted over the path and
+  `docker cp` reads the layer's own content.
+* **E7.** The oracle was introduced in `bce1dfc2` alongside the bake; it has
+  never been green.
 
-## Verification
+**Conclusion.** E3+E4 are decisive: if the `COPY` were merely *ignored*, the
+read would return the base image's 104 bytes. It returned `''`. So the `COPY`
+does not land the bytes — it *replaces* the inherited file with an **empty
+entry**. Observed with plain `COPY` (which is what motivated `ce9619b7`) and
+again with `COPY --link` (run `34807834078`). This matches
+moby/buildkit#1267, where tonistiigi states these files "are configured by the
+container runtime… BuildKit will not allow writes instead of silently ignoring
+them" and "BuildKit currently mounts these read-only". `--link` changes nothing
+because the path, not the write mechanism, is what is special-cased.
 
-- `uv run pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py tests/unit/test_detect_filter_sync.py tests/unit/sandbox/test_docker_runtime_argv.py tests/unit/test_gvisor_validation_workflow.py` — 24 passed.
-- `uv run ruff check` / `ruff format --check` / `uv run mypy` on the four
-  touched files — clean.
+### The fix
 
-  (Corrected on the review branch: this verification was too narrow. Repo-wide
-  `uv run mypy src tests` — the command CLAUDE.md requires — was RED at
-  `c24d25bf`, on `docker_backend.platform` / `docker_backend.SandboxBackendError`
-  implicit re-exports in the new test. Repo-wide `uv run pytest tests/unit` was
-  also red on any non-x86_64 host, because three pre-existing runsc argv tests
-  assume the machine passes the new guard.)
-- Docker is NOT available in this environment (`docker: command not found`), so
-  the e2e image contract — the only test that can decide whether `--link`
-  actually works — was NOT run. The fix remains unverified where it matters.
-- Not pushed, not merged, no PR.
+Stop reading a resolver config file. glibc (`getent`) can only read
+`/etc/resolv.conf` — there is no env override for nameservers — so `getent` had
+to go. Resolution now **names the server as an argument**:
 
-## Follow-up fixes after rebase
+```sh
+resolve_ipv4() { busybox nslookup "$1" 127.0.0.11 2>/dev/null \
+  | awk '/^Name:/ { answer = 1 }
+         /^Address:/ && answer && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }' \
+  | sort -u; }
+```
 
-- The resolver bake remains a same-path `COPY --link` because glibc and the
-  read-only runsc chroot both require `/etc/resolv.conf`; a non-special path
-  cannot be consumed by `getent`. The Docker e2e contract is the authoritative
-  check, and Docker is unavailable in this environment.
-- Runsc is fail-closed on every machine that is not x86_64/amd64. The operator
-  image and explicit ELF loader/library paths are x86_64-only; both sandbox
-  creation and the sidecar path refuse before invoking Docker.
+* `busybox` is already in the image and already the runsc chroot's entry
+  binary. Being **static** it carries no `PT_INTERP`, so it is bound in a new
+  `_RUNSC_OPERATOR_STATIC_COMMANDS` family invoked directly rather than through
+  the operator image's `ld.so` (running a static binary through the loader would
+  fail). It is shadowed to the operator root exactly like every other command,
+  so the tenant cannot substitute it.
+* Debian bookworm's `busybox-static` is built with `CONFIG_NSLOOKUP=y`
+  (verified in `debian/config/pkg/static` for `1:1.35.0-4+deb12u1`). The e2e
+  contract pins the applet's presence anyway.
+* The parse was checked against busybox 1.35 `networking/nslookup.c`: answers
+  print `Name:\t<name>` then `Address: <ip>`, the server block prints
+  `Server:`/`Address:\t<ip>:<port>` first. Taking answers only **after** a
+  `Name:` line means the resolver's own address can never be mistaken for an
+  answer (which would ACCEPT 127.0.0.11 or DNAT every credential host at the
+  resolver); the dotted-quad test drops AAAA, preserving the IPv4-only
+  fail-closed semantics of #978. A miss prints nothing → no rule → fail-closed.
 
-  (Corrected on the review branch: as shipped at `c24d25bf` this was a DENY-list
-  of three arm spellings — `aarch64`/`arm64`/`armv8l` — so `armv7l`, `ppc64le`,
-  `riscv64` and `i686` fell through to the x86_64 loader path. It is now an
-  ALLOW-list, `_RUNSC_SUPPORTED_MACHINES = {"x86_64", "amd64"}`, applied through
-  a single `_require_runsc_supported_machine()` helper instead of two inline
-  copies.)
+Deleted as a consequence: `setup._RESOLV_PREAMBLE` (the `printf … >
+/etc/resolv.conf || true` that was a silent no-op under runsc anyway),
+`docker/sandbox-resolv.conf`, the Dockerfile's `COPY --link` and its
+hypothesis comment block, and the file's entries in both workflow triggers.
 
-## Review-branch round (`botpost2410hrev`, uncorrelated review of `c24d25bf`)
+### Rejected alternatives
 
-Verdict and full findings: `REVIEW.md`. Items 1 and 2 verified clean; item 3 was
-the right decision in the wrong shape. Fixed here:
+* **Symlink `/etc/resolv.conf` → a baked non-special path.** Another unverified
+  BuildKit bet, untestable here, and it keeps glibc's single-file dependency.
+* **Bind-mount a writable resolv.conf into the chroot.** Reintroduces exactly
+  the tenant-poisonable resolver the read-only operator root exists to prevent.
+* **Resolve worker-side and pass literals in.** Loses in-netns resolution
+  through Docker's embedded DNS (container aliases, the proxy alias) and is a
+  much larger architectural change.
 
-- **mypy red** — the new test imports `SandboxBackendError` from
-  `aios.sandbox.backends.base` and patches the stdlib `platform` module
-  directly, instead of reaching through the `docker` module's implicit
-  re-exports. `uv run mypy src tests` now: no issues in 1098 source files.
-- **Deny-list → allow-list** — see the correction above.
-- **Arch-dependent unit suite** — an autouse fixture pins `platform.machine()`
-  to `x86_64` for `test_docker_runtime_argv.py`, so the module's runsc argv
-  tests state the host they always assumed. Confirmed green under a simulated
-  aarch64 host (758 passed).
-- **Sidecar coverage** — the commit message claimed create + sidecar; only
-  `create` had a test. Both paths now refuse `aarch64, arm64, armv7l, ppc64le,
-  riscv64, i686` and assert the daemon was never called, plus a regression test
-  that arm64 still gets a working default-runtime sandbox and sidecar.
-- **e2e consistency** — `test_operator_chain_binary_at_absolute_path` and
-  `test_operator_chain_executes_end_to_end` pin x86_64 loader paths against a
-  multi-arch image, so they are now skipped off amd64 for the same reason the
-  backend refuses. CI runners are amd64; no coverage lost.
-- **Resolver root cause hardened, code unchanged** — the two competing
-  explanations for the observed empty `/etc/resolv.conf` are now ruled out in
-  `docker/Dockerfile.sandbox` and the e2e docstring: the lane that saw it builds
-  the image locally (`docker build -t aios-sandbox:ci` in `code-validation.yml`,
-  with `AIOS_DOCKER_IMAGE` pointed at that tag), so it was not a stale pull; and
-  `docker cp` reads the container's layers beneath the daemon's resolv.conf bind
-  mount (moby/moby#9998), so the empty read is the layer's own content, not a
-  blind probe. The `--link` mergeop mechanism itself stays labelled HYPOTHESIS.
+### Oracles
 
-Still NOT run: the e2e image contract. `docker` does not exist in this
-environment. Not pushed, not merged, no PR opened.
+`test_image_layer_carries_the_embedded_dns_resolver` is gone — it asserted a
+property that cannot hold. Replacing it:
+
+* `tests/e2e/test_sandbox_image_contract.py::test_busybox_ships_the_nslookup_applet`
+  — the applet is configurable at busybox build time; without it every
+  allow-list empties silently.
+* `…::test_busybox_nslookup_answers_from_the_embedded_dns` — the live oracle.
+  On a throwaway user-defined network (where Docker serves embedded DNS), the
+  image resolves its own alias against `127.0.0.11` and the **output shape** is
+  asserted: the server block precedes the `Name:` line, and an IPv4 answer
+  follows it. Hermetic — no upstream DNS, no internet.
+* `tests/unit/sandbox/test_sandbox_dns_resolution.py` — executes the real
+  emitted `resolve_ipv4` against a stub busybox printing that exact shape:
+  A records only (AAAA and the server's own address excluded), and a miss
+  yields nothing. Also pins that no generated script mentions `/etc/resolv.conf`
+  or `getent`, and that the Dockerfile bakes no resolver (the regression guard
+  for "just COPY one in").
+
+---
+
+## 2. The runsc operator image mount
+
+`DockerBackend.create()` mounted `get_settings().docker_image` at
+`_RUNSC_OPERATOR_ROOT` while the tenant container ran
+`spec.snapshot_image or spec.image` — two independent sources for one
+relationship.
+
+New `_runsc_operator_image(spec)` derives the mount from **`spec.image`** and
+**rejects a mismatch** with `settings.docker_image`, raising
+`SandboxBackendError` before the daemon is touched (same shape as
+`_require_runsc_supported_machine`). Deriving alone would be a privilege
+escalation: `EnvironmentConfig.image` is a free-form tenant field (#724), and
+the operator root is the first thing a `--privileged` exec enters — a
+tenant-chosen `/usr/bin/busybox` would run there holding `NET_ADMIN` the
+sandbox itself was denied. `spec.snapshot_image` is deliberately never
+considered: it is the tenant's own mutated rootfs, the exact filesystem the
+chroot exists to escape. The gate is runsc-only; runc keeps applying its
+lockdown from a separate operator-image sidecar, so a custom sandbox image
+still works there. `run_netns_sidecar`'s docstring was corrected to match.
+
+---
+
+## Checks
+
+`uv run ruff check src tests`, `uv run ruff format --check src tests` and
+`uv run mypy src tests` (1098 files) are clean. `uv run pytest tests/unit` is
+green: 6202 tests, all passing. Under `-n 2` on this memory-tight host a
+handful of unrelated tests (image downscaling, an MCP pool retry, a browser
+quota) flake differently on each run — two runs produced disjoint failure sets,
+and every one of them passes serially. Nothing in `tests/unit/sandbox` or
+`tests/unit/test_networking.py` flaked.
+
+The e2e docker shard cannot run here (no daemon); the two replacement
+image-contract tests above are what CI must prove.

@@ -39,6 +39,7 @@ from aios.sandbox.backends.docker import (
     _RUNSC_OPERATOR_LOADER,
     _RUNSC_OPERATOR_ROOT,
     _RUNSC_OPERATOR_SHELL,
+    _RUNSC_OPERATOR_STATIC_COMMANDS,
     _runsc_operator_preamble,
 )
 
@@ -67,7 +68,18 @@ _IPTABLES_STUB = (
     "esac; done\n"
     "exit 0\n"
 )
-_GETENT_STUB = '#!/bin/sh\necho "203.0.113.7 STREAM $2"\nexit 0\n'
+# ``resolve_ipv4`` shells out to ``busybox nslookup <host> <server>``; this stub
+# answers in the real busybox 1.35 shape -- the resolver's own address first
+# (which must NOT be taken for an answer), then one A and one AAAA record (the
+# AAAA must be dropped: every rule these scripts emit is IPv4-only). Emitting
+# the real shape means the awk parse in ``_RESOLVE_IPV4_FN`` is exercised here,
+# not just the command surface.
+_BUSYBOX_STUB = (
+    "#!/bin/sh\n"
+    '[ "$1" = nslookup ] || { echo "busybox: unknown applet $1" >&2; exit 1; }\n'
+    "printf 'Server:\\t\\t%s\\nAddress:\\t%s:53\\n\\nName:\\t%s\\n"
+    'Address: 203.0.113.7\\nAddress: 2001:db8::1\\n\' "$3" "$3" "$2"\n'
+)
 
 
 def _real(name: str) -> str:
@@ -92,12 +104,14 @@ def _operator_root(tmp_path: Path) -> Path:
     _write(_RUNSC_OPERATOR_LOADER, _LOADER_STUB)
     _write(_RUNSC_OPERATOR_SHELL, f'#!/bin/sh\nexec {_real("bash")} "$@"\n')
     (root / _RUNSC_OPERATOR_LIBRARY_PATH.lstrip("/")).mkdir(parents=True, exist_ok=True)
-    for path in sorted(set(_RUNSC_OPERATOR_COMMANDS.values())):
+    for path in sorted(
+        set(_RUNSC_OPERATOR_COMMANDS.values()) | set(_RUNSC_OPERATOR_STATIC_COMMANDS.values())
+    ):
         name = os.path.basename(path)
         if name in ("iptables-legacy", "ip6tables-legacy"):
             _write(path, _IPTABLES_STUB)
-        elif name == "getent":
-            _write(path, _GETENT_STUB)
+        elif name == "busybox":
+            _write(path, _BUSYBOX_STUB)
         else:
             # grep/mawk/sort/head must behave: the scripts parse their output
             # and assert on their exit status.
@@ -117,9 +131,6 @@ def _run(script: str, tmp_path: Path) -> tuple[int, list[str], str]:
     # falls through to PATH; PATH holds only the operator root, so an
     # unshadowed external command lands here.
     trap = f'command_not_found_handle() {{ printf "%s\\n" "$1" >> {misses}; return 127; }}\n'
-    # Keep the tenant's /etc/resolv.conf out of the unit-test host's way; the
-    # substitution does not touch the command surface being asserted.
-    script = script.replace("/etc/resolv.conf", str(tmp_path / "resolv.conf"))
     env = {
         "PATH": f"{root}/usr/sbin:{root}/usr/bin",
         "HOME": str(tmp_path),
@@ -138,16 +149,14 @@ def _scripts() -> dict[str, str]:
     """Every script `aios.sandbox.setup` hands to ``run_netns_sidecar``."""
     dnat_target = ("aios-worker", 49152)
     return {
-        "limited_lockdown_apply": setup._RESOLV_PREAMBLE
-        + setup.build_iptables_script(
+        "limited_lockdown_apply": setup.build_iptables_script(
             {"example.com"},
             [("extra.example.com", 8080)],
             dnat_hosts=["api.secret.com"],
             dnat_target=dnat_target,
         ),
         "lockdown_verify": setup.build_lockdown_verify_script(["api.secret.com"]),
-        "dnat_only_apply": setup._RESOLV_PREAMBLE
-        + setup.build_secret_egress_dnat_script(["api.secret.com"], dnat_target),
+        "dnat_only_apply": setup.build_secret_egress_dnat_script(["api.secret.com"], dnat_target),
         "dnat_only_verify": setup.build_lockdown_verify_script(
             ["api.secret.com"], assert_drop=False
         ),
@@ -208,7 +217,10 @@ def test_shadowed_paths_are_never_alternatives_symlinks() -> None:
     root. Only real files may sit behind a shadow function.
     """
     alternatives = {"/usr/sbin/iptables", "/usr/sbin/ip6tables", "/usr/bin/awk"}
-    assert not alternatives & set(_RUNSC_OPERATOR_COMMANDS.values())
+    shadowed = set(_RUNSC_OPERATOR_COMMANDS.values()) | set(
+        _RUNSC_OPERATOR_STATIC_COMMANDS.values()
+    )
+    assert not alternatives & shadowed
 
 
 def test_shadow_targets_do_not_rely_on_usr_merge_symlinks() -> None:
@@ -225,5 +237,6 @@ def test_shadow_targets_do_not_rely_on_usr_merge_symlinks() -> None:
         _RUNSC_OPERATOR_LIBRARY_PATH + "/",
         _RUNSC_OPERATOR_SHELL,
         *_RUNSC_OPERATOR_COMMANDS.values(),
+        *_RUNSC_OPERATOR_STATIC_COMMANDS.values(),
     ]
     assert [p for p in paths if p.startswith(merged)] == []

@@ -30,7 +30,7 @@ logged, never raised; the model can retry or work around missing tooling.
 open to the network, which silently violates the operator's intent (and
 is especially dangerous combined with the per-environment image override
 in #724 — a tenant-supplied image with a stripped-down ``iptables``/
-``getent`` would otherwise downgrade to unrestricted networking without
+``busybox`` would otherwise downgrade to unrestricted networking without
 anyone noticing). So that step **fails closed**: if the lockdown command
 exits nonzero, or the backend exec itself errors, it raises
 :class:`SandboxBackendError`, which the registry turns into a
@@ -346,6 +346,11 @@ _IP6TABLES_CREDENTIAL_HTTPS_DENY_LINES = (
     "fi",
 )
 
+# Docker's embedded DNS, served inside every user-defined-network netns (the
+# sandbox runs on the ``aios-sandbox`` user-defined bridge). Every hostname the
+# lockdown scripts resolve is resolved against THIS address and no other.
+_EMBEDDED_DNS_ADDRESS = "127.0.0.11"
+
 
 # Emitted shell helper that resolves a hostname to its **IPv4 addresses only**,
 # one per line. Centralizes the IPv4-only resolution shared by every host
@@ -353,22 +358,61 @@ _IP6TABLES_CREDENTIAL_HTTPS_DENY_LINES = (
 # loop, the credential-host DNAT loop, and the proxy-alias lookup), so the
 # IPv4-only invariant lives in exactly one place (#978).
 #
+# NAMES THE RESOLVER EXPLICITLY -- no ``/etc/resolv.conf`` anywhere on this
+# path (aios#2410). glibc's ``getent`` has no way to be pointed at a server, so
+# it can only read that file, and on both sidecar shapes that file is the wrong
+# one or an unwritable one:
+#
+#   * runc: Docker writes no resolv.conf for a ``--network container:<id>``
+#     sidecar, so it inherits the IMAGE's file;
+#   * runsc: the exec chroots into the operator image mounted READ-ONLY, so it
+#     reads that image's file and nothing can write another one.
+#
+# Baking the right file into the image does not work either: BuildKit treats
+# ``/etc/resolv.conf`` as runtime-managed and commits an EMPTY entry for any
+# ``COPY`` to that path -- verified against a CI-built image through ``docker
+# cp`` from a never-started container, with both a plain ``COPY`` and
+# ``COPY --link`` (moby/buildkit#1267; see DONE.md for the full evidence
+# chain). A resolver that cannot be baked and cannot be written has to be
+# passed as an argument, so it is.
+#
+# ``busybox nslookup`` rather than ``getent``: busybox is already in the image
+# as the runsc chroot's static entry binary, it takes the server as an
+# argument, and being static it needs no dynamic loader -- so the runsc
+# preamble can bind it directly instead of through the operator image's ld.so.
+#
 # Why IPv4-only: every rule emitted by these scripts is an IPv4 ``iptables``
 # command, and the secret-egress proxy binds the IPv4 ``WORKER_NETWORK_ALIAS``
-# (it cannot intercept IPv6). ``getent ahosts`` returns BOTH A and AAAA
-# records; feeding an AAAA literal to an IPv4-only ``iptables -d`` would error,
-# and under ``set -e`` abort the whole apply. The sandbox network is currently
-# IPv4-only so this is latent today, but if an IPv6-capable network is ever
-# enabled it would break Limited networking on every IPv6-resolving host. Using
-# ``getent ahostsv4`` makes only A records reach the rules; any AAAA/IPv6
-# egress is simply dropped by the default policy (fail-closed) — which is the
-# correct semantics for credential hosts too (IPv6 must never be sent
-# un-proxied).
+# (it cannot intercept IPv6). Feeding an AAAA literal to an IPv4-only
+# ``iptables -d`` would error, and under ``set -e`` abort the whole apply. The
+# sandbox network is currently IPv4-only so this is latent today, but if an
+# IPv6-capable network is ever enabled it would break Limited networking on
+# every IPv6-resolving host. Keeping only dotted-quad answers means any
+# AAAA/IPv6 egress is simply dropped by the default policy (fail-closed) --
+# which is the correct semantics for credential hosts too (IPv6 must never be
+# sent un-proxied).
+#
+# The parse, against busybox 1.35 ``nslookup`` output:
+#
+#     Server:\t\t127.0.0.11
+#     Address:\t127.0.0.11:53
+#     <blank>
+#     Name:\texample.com
+#     Address: 93.184.216.34
+#
+# The server block is skipped by requiring a preceding ``Name:`` line -- not by
+# pattern-matching the address -- so the resolver's own address can never be
+# mistaken for an answer and handed to ``iptables -d`` or picked up as
+# ``$PROXY_IP``. AAAA answers print in the same ``Address:`` shape and are
+# rejected by the dotted-quad test.
 #
 # A resolution miss prints nothing (the caller's ``for`` loop / ``$()`` capture
-# sees no IPs), so the host gets no rule — fail-closed, never a bypass.
+# sees no IPs), so the host gets no rule -- fail-closed, never a bypass.
 _RESOLVE_IPV4_FN = (
-    "resolve_ipv4() { getent ahostsv4 \"$1\" 2>/dev/null | awk '{print $1}' | sort -u; }"
+    'resolve_ipv4() { busybox nslookup "$1" ' + _EMBEDDED_DNS_ADDRESS + " 2>/dev/null"
+    " | awk '/^Name:/ { answer = 1 }"
+    " /^Address:/ && answer && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }'"
+    " | sort -u; }"
 )
 
 
@@ -559,7 +603,7 @@ def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
     lines = ["set -e", _RESOLVE_IPV4_FN]
     for host in sorted(set(hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
-    return _RESOLV_PREAMBLE + "\n".join(lines)
+    return "\n".join(lines)
 
 
 def egress_unread_hosts(
@@ -1007,8 +1051,8 @@ def build_browser_deny_internal_script() -> str:
     catch — while leaving the public web reachable.
 
     Only the filter OUTPUT chain is flushed (for idempotent re-apply); the nat
-    table is untouched. No ``_RESOLV_PREAMBLE``: the rules are static CIDRs, so
-    nothing resolves a hostname.
+    table is untouched. Nothing here resolves a hostname: the rules are static
+    CIDRs.
     """
     lines = [
         "set -e",
@@ -1042,34 +1086,6 @@ def build_browser_deny_internal_verify_script() -> str:
         for cidr in _BROWSER_DENY_INTERNAL_CIDRS
     ]
     return "\n".join(lines)
-
-
-# Docker's embedded DNS, served inside every user-defined-network netns (the
-# sandbox runs on the ``aios-sandbox`` user-defined bridge). The lockdown
-# sidecar joins that netns, but Docker does NOT manage resolv.conf for a
-# netns-joining container, so the sidecar has to find the embedded resolver
-# itself before ``getent`` resolves the allowed hosts. A DNS miss fails CLOSED
-# (the host gets no ACCEPT rule → blocked), never a bypass.
-#
-# This address is also baked into the sandbox image at ``/etc/resolv.conf``
-# (``docker/sandbox-resolv.conf``) — the runsc path chroots into that image
-# READ-ONLY, where the preamble below cannot write. Keep the two in step;
-# ``tests/unit/sandbox/test_sandbox_resolv_conf.py`` pins the pair.
-_EMBEDDED_DNS_ADDRESS = "127.0.0.11"
-
-
-# Point the netns-joining sidecar at the embedded resolver before any
-# ``getent`` runs. Prepended to BOTH the Limited lockdown apply script and the
-# Unrestricted DNAT-only apply script (#1153) so credential / allowed-host
-# resolution works the same way in either mode.
-#
-# Best-effort by design: on the runc path this writes the sidecar container's
-# own file, while under runsc the script runs chrooted into the read-only
-# operator image and the write fails. Both end up at the same nameserver —
-# there because the image ships it — which is why the failure is tolerated.
-_RESOLV_PREAMBLE = (
-    f"printf 'nameserver {_EMBEDDED_DNS_ADDRESS}\\n' > /etc/resolv.conf 2>/dev/null || true\n"
-)
 
 
 # ``iptables -S`` does not echo the apply command back: it re-prints each rule
@@ -1271,7 +1287,7 @@ async def apply_network_lockdown(
     provision rather than running unprotected.
 
     **Off the tenant-writable filesystem (§5.8).** Under durable persistence,
-    running the lockdown *inside* the sandbox (its own ``iptables``/``getent``)
+    running the lockdown *inside* the sandbox (its own ``iptables``/``busybox``)
     was a bypass: a tenant could replace ``/usr/sbin/iptables`` with ``exit 0``
     in an Unrestricted session, persist it in the snapshot, and have the
     fail-closed gate trust the poisoned binary's exit 0 when the environment
@@ -1299,8 +1315,7 @@ async def apply_network_lockdown(
         dnat_target=dnat_target,
         dns_port=dns_port,
     )
-    # Point the sidecar at the netns's embedded resolver before getent runs.
-    apply_script = _RESOLV_PREAMBLE + iptables_script
+    apply_script = iptables_script
     settings = get_settings()
 
     try:
@@ -1414,9 +1429,7 @@ async def apply_secret_egress_dnat(
     propagates and the registry tears the sandbox down rather than handing back
     a half-wired credentialed box whose swap silently doesn't fire.
     """
-    apply_script = _RESOLV_PREAMBLE + build_secret_egress_dnat_script(
-        dnat_hosts, dnat_target, dns_port
-    )
+    apply_script = build_secret_egress_dnat_script(dnat_hosts, dnat_target, dns_port)
     settings = get_settings()
 
     try:
