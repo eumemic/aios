@@ -411,7 +411,7 @@ _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 _RESOLVE_IPV4_FN = (
     'resolve_ipv4() { busybox nslookup "$1" ' + _EMBEDDED_DNS_ADDRESS + " 2>/dev/null"
     " | awk '/^Name:/ { answer = 1 }"
-    " /^Address:/ && answer && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }'"
+    " /^Address:/ && answer && $2 != \"" + _EMBEDDED_DNS_ADDRESS + "\" && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }'"
     " | sort -u; }"
 )
 
