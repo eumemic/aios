@@ -1,133 +1,179 @@
-# Uncorrelated review — `botpost2410g` tip `0b0effc9` (aios#2410)
+# Uncorrelated review — `botpost2410h` tip `c24d25bf` (aios#2410)
 
-**Verdict: changes requested — 1 High, 1 High/Medium, 2 Low. The High and the
-High/Medium are fixed on this review branch (`botpost2410grev`); the Lows are
-recorded below, one fixed in comment form, one left as noted.**
+**Verdict: changes requested — 1 High, 2 Medium, 1 Low. All four are fixed on
+this review branch (`botpost2410hrev`). The resolver bake is unchanged and
+still unverifiable here: no Docker daemon, so the one test that can decide it
+was NOT run.**
 
-The bake path the implementer chose is the right *shape*. Every alternative
-route dies on the same fact: glibc reads `_PATH_RESCONF` = `/etc/resolv.conf`
-and nothing else, there is no env override, and the runsc operator root is
-mounted READ-ONLY so `setup._RESOLV_PREAMBLE`'s `printf … || true` is a
-guaranteed no-op there. TASK.md's advisory direction — bake to a non-special
-path and reach it via symlink/bind/operator read path — cannot deliver the
-required property from the Dockerfile alone. A same-path bake is the only
-Dockerfile-level shape that can work, so `COPY --link` stays.
-
-What the branch got wrong is everything around it: it ships red, and it asserts
-as established fact a mechanism nobody has verified.
+Scope this round: (1) rebase/mergeability, (2) the embedded-resolver bake,
+(3) the arm64 fail-closed for the hardcoded x86_64 runsc operator paths.
 
 ---
 
-## F1 (High) — the branch is red on the unit shard
+## Item 1 — rebase / mergeability: **verified clean**
 
-`tests/unit/test_detect_filter_sync.py::test_build_sandbox_triggers_on_every_copied_file[docker/sandbox-resolv.conf]`
-fails on `0b0effc9`:
+`origin/master` (`63337f26`, fetched this session) IS an ancestor of `HEAD`;
+`git rev-list --left-right --count origin/master...HEAD` = `0 30`. Nothing to
+rebase, no conflicts possible, the PR is fast-forwardable. The implementer's
+claim holds.
+
+Everything the round was told to keep is present in the tree, not just in the
+log: `64e9b37f` / `6c6f750c` / `2e121847` (runsc egress in the target Sentry,
+the operator-binary claim, chroot before the privileged loader), `bce1dfc2`
+(the resolver bake) and the whole review-harness series, including the two-job
+`agent` → `publish`-on-a-fresh-runner isolation in
+`.github/workflows/eumemic-bot-review.yml`. No Track G.
+
+## Item 2 — resolver bake: **kept, with the root-cause reasoning tightened**
+
+`COPY --link docker/sandbox-resolv.conf /etc/resolv.conf` stays. Same-path is
+still the only shape that can work — glibc reads `_PATH_RESCONF` and nothing
+else, and the runsc operator root is a read-only image mount, so
+`setup._RESOLV_PREAMBLE` has nowhere to write.
+
+What I could add without a daemon is evidence that *rules out the two
+alternative explanations* for the observed empty read, which the branch had
+left open:
+
+- **Not a stale image.** The lane that saw it (`code-validation.yml`, the
+  `e2e` docker shard with `sandbox_changed=true`) runs
+  `docker build -t aios-sandbox:ci -f docker/Dockerfile.sandbox .` and points
+  `AIOS_DOCKER_IMAGE` at that local tag. It really was reading a fresh build,
+  not a registry pull predating the bake.
+- **Not a blind probe.** `docker cp` reads the container's *layers*, underneath
+  the daemon's resolv.conf bind mount — [moby/moby#9998](https://github.com/moby/moby/issues/9998)
+  is a bug report about exactly that ("returns the layer's empty stub, not the
+  live file"). So an empty read is the layer's own content. This one mattered:
+  if `docker cp` had been the artefact, no Dockerfile change could ever turn
+  that e2e green and the fix would belong in the test.
+
+Both are now written into `docker/Dockerfile.sandbox` and the e2e docstring.
+The `--link` mergeop mechanism itself remains labelled HYPOTHESIS, because it
+is one: `--link` is not a documented remedy for this path, and
+`test_image_layer_carries_the_embedded_dns_resolver` is the only oracle.
+**It was not run** — `docker` is absent from this environment.
+
+## Item 3 — arm64 fail-closed: right call, wrong shape
+
+Refusing is the correct arm of TASK.md's choice: per-arch loader paths would
+be an untested second code path for a runtime nobody runs on arm64, and the
+image really is published multi-arch (`build-sandbox.yml` builds
+`linux/amd64,linux/arm64`), so an Apple Silicon pull genuinely carries a loader
+at another triple. The *placement* is also right — both entry points that
+consume `_RUNSC_OPERATOR_LOADER` are guarded, and `create` + `run_netns_sidecar`
+are the only two (`registry.py` reaches the backend through exactly these,
+browser containers included). But:
+
+### F1 (High) — the branch is red on mypy
+
+`uv run mypy src tests` on `c24d25bf`:
 
 ```
-assert None
- +  where None = re.search('(?m)^COPY docker/sandbox\-resolv\.conf\s', '# aios sandbox base image...')
-AssertionError: 'docker/sandbox-resolv.conf' is no longer COPYed by docker/Dockerfile.sandbox — drop it
-from this parametrization (and from the build trigger) rather than pinning a path the image does not consume
+tests/unit/sandbox/test_docker_runtime_argv.py:88: error: Module "aios.sandbox.backends.docker"
+  does not explicitly export attribute "platform"  [attr-defined]
+tests/unit/sandbox/test_docker_runtime_argv.py:89: error: Module "aios.sandbox.backends.docker"
+  does not explicitly export attribute "SandboxBackendError"  [attr-defined]
 ```
 
-The pattern anchors `^COPY <path>` with no room for flags, so `COPY --link …`
-reads to it as a removal. This is a plain CI-red regression: the unit shard
-fails long before the e2e that the change exists to turn green. It was missed
-because DONE.md's verification is `pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py`
-— a single file, which cannot see a drift check living two directories away.
-CLAUDE.md asks for `uv run pytest tests/unit -q` before a commit.
+The new test reaches through `docker_backend.platform` / `.SandboxBackendError`,
+both implicit re-exports, which this repo forbids. CI fails on the type shard.
+This is the *same miss as last round in a different shard*: DONE.md's
+verification was again a narrow `pytest` on one file, and CLAUDE.md's
+pre-commit trio (`mypy` **and** `ruff` **and** `pytest tests/unit`) was not run.
 
-**Fixed** — widened to `^COPY (?:--\S+ )*<path>\s`, with a comment saying the
-pin is on the *source path*, not on the flags.
+**Fixed** — the test imports `SandboxBackendError` from `backends.base` and
+patches the stdlib `platform` module directly.
 
-## F2 (High/Medium) — a hypothesis asserted as a root cause
+### F2 (Medium) — the guard was a denylist, so most machines fell through
 
-DONE.md and the Dockerfile comment both state flatly that "BuildKit treats
-`/etc/resolv.conf` as a daemon-managed build mount, so a plain `COPY` can be
-absent from the committed image layer", and that `--link` "forces the resolver
-bytes into a linked image layer".
+```python
+platform.machine().lower() in {"aarch64", "arm64", "armv8l"}
+```
 
-The first half is a real phenomenon (moby/buildkit#1267, still open) but the
-documented mechanism is a *RUN-time* bind mount of `/etc/resolv.conf` and
-`/etc/hosts` into build containers — and this COPY already sits after every
-`RUN`, which is precisely why the plain COPY was expected to work. The second
-half has no support at all: no upstream source lists `--link` as a remedy for
-this path. The external workarounds that are documented are "write it at
-runtime" or "use a non-special path" — neither available here (see the preamble
-above).
+names three spellings of one architecture. On `armv7l`, `ppc64le`, `riscv64`
+or `i686` the check passes and execution proceeds into the x86_64 loader
+path — i.e. the silent fallthrough the round was asked to close. "Fail hard,
+no fallbacks" and correct-by-construction both point the other way: the
+property is *"this machine is x86_64"*, not *"this machine is not one of three
+arm strings"*.
 
-`--link` may well work; the mergeop shape is a plausible way around a
-placeholder in the parent snapshot. But it is a **bet**, and nothing on this
-branch can settle it: the unit pins read the Dockerfile text, and no source-level
-test can tell a surviving layer from a stripped one. The only oracle is
-`tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`,
-which needs a Docker daemon — unavailable in this checkout and unrun by the
-implementer (that caveat in DONE.md is truthful).
+**Fixed** — one `_RUNSC_SUPPORTED_MACHINES = frozenset({"x86_64", "amd64"})`
+allow-list and a `_require_runsc_supported_machine(what)` helper, called from
+both sites (the two copies had already drifted in wording). The message now
+names the machine it actually saw and the loader path that does not exist for
+it, instead of asserting "arm64" at a reader who is on ppc64le. The comment
+records that `platform.machine()` is the *worker's* arch — a proxy for the
+daemon's, which a remote `DOCKER_HOST` can break — and that both ways out of
+that mismatch are safe: refuse a runsc sandbox that would have worked, or fall
+through to the preamble's `operator tool root incomplete` (exit 90). Neither
+silently blackholes egress.
 
-Shipping an unverified bet is acceptable here; shipping it labelled as a
-diagnosed root cause is not, because the next person to read that comment will
-not know there is anything left to check.
+### F3 (Medium) — the unit suite became arch-dependent, and the sidecar was untested
 
-**Fixed** — the Dockerfile comment now separates OBSERVED (a freshly built
-image read back through `docker cp` had a 0-byte `/etc/resolv.conf`) from
-HYPOTHESIS (the `--link` mergeop mechanism), names the e2e as the sole oracle,
-and says what to conclude if it stays red: the same-path bake is dead and the
-resolver has to reach the chrooted operator on the read path instead — a
-non-special path on its own does *not* do it. DONE.md is rewritten to the same
-standard. The resolver unit module gained a SCOPE paragraph stating it cannot
-see the built image and that a red e2e must never be "fixed" by relaxing
-anything there, and the e2e assertion now fails with a sentence instead of
-`[] == ['127.0.0.11']`.
+The commit message claims "Covers create and the netns sidecar path". The code
+does; the tests did not — `test_create_refuses_runsc_on_arm64` was the only new
+test, and nothing exercised `run_netns_sidecar`'s guard. Worse, the three
+existing runsc argv tests assume an x86_64 host implicitly. Simulating an
+aarch64 machine on `c24d25bf`:
 
-## F3 (Low) — `--link` raises the minimum builder, silently
+```
+FAILED tests/unit/sandbox/test_docker_runtime_argv.py::test_create_emits_configured_runtime
+FAILED tests/unit/sandbox/test_docker_runtime_argv.py::test_netns_sidecar_runsc_execs_into_the_target_sentry
+FAILED tests/unit/sandbox/test_docker_runtime_argv.py::test_netns_sidecar_runsc_runs_only_operator_image_binaries
+```
 
-`COPY --link` needs a Dockerfile frontend with mergeop support: BuildKit >= 0.10,
-i.e. Docker >= 23. The file carries no `# syntax=` pin. That turns out to be the
-*right* configuration — without a pin, an older daemon rejects the unknown flag
-and fails the build loudly, rather than parsing it away and shipping an empty
-resolver. Adding a `# syntax=docker/dockerfile:1.x` line would make the flag
-work on older daemons and is tempting; it would also remove the loud failure.
+`uv run pytest tests/unit` — the command CLAUDE.md requires before every
+commit — is now red on any Apple Silicon machine, which is what this repo's
+own docs show the maintainer developing on (`/Users/tom/.docker/...`).
 
-**Fixed in comment form** — the requirement and the deliberate absence of the
-pin are now written down in the Dockerfile, so the next person doesn't "helpfully"
-add one.
+**Fixed** — an autouse fixture pins `x86_64` for the module, and the arch tests
+override it. Coverage is now: refusal on `aarch64, arm64, armv7l, ppc64le,
+riscv64, i686` for **both** `create` and `run_netns_sidecar`, each asserting
+the daemon was never touched; plus a test that arm64 still gets a working
+*default-runtime* sandbox and sidecar, so a future widening of the guard cannot
+take the platform out entirely.
 
-## F4 (Low, pre-existing) — `Dockerfile.sandbox` advertises a command that does not exist
+### F4 (Low) — the e2e operator-chain contract contradicts the new decision
 
-Line 22 offers `uv run python -m aios build-image` as the local-dev shortcut.
-There is no `build-image` command anywhere in `src/`. Out of the blast radius of
-this fix and left alone; noted so it can be deleted (per "don't deprecate,
-delete") in a pass that owns that file's header.
+`tests/e2e/test_sandbox_image_contract.py` pins
+`/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` unconditionally, while
+`TestArchitecture::test_image_architecture_matches_runner` in the same file
+expects an arm64 image on an arm64 host. After this change those two tests fail
+on arm64 *by design* — they assert a path the product now says is
+x86_64-only — which reads as a finding instead of a restatement.
+
+**Fixed** — the two operator-chain tests carry an `_x86_64_only` skip marker
+naming `_RUNSC_SUPPORTED_MACHINES` as the reason. CI runs on amd64 runners, so
+no coverage is lost.
 
 ---
-
-## Items that verify clean
-
-- **Isolation** — untouched. No change to `_RUNSC_OPERATOR_ROOT`, the chroot
-  chain, the read-only operator mount, or the Limited-networking lockdown. The
-  fix is one Dockerfile flag plus comments and tests. This is the smallest
-  honest fix available given F2's constraint.
-- **Test integrity (review item 3)** — no test was weakened. The resolver pin
-  was *strengthened*: it now matches on the destination path, so a plain
-  `COPY … /etc/resolv.conf` is found and rejected by name rather than silently
-  missed. The e2e contract is unchanged in what it asserts.
-- **Ancestry and retention (review item 4)** — `origin/master` (`abe20173`) is
-  an ancestor of HEAD, 28 commits ahead. `17ef3de9` (chroot before the
-  privileged runsc loader), `538ab985` (the original resolver bake) and the full
-  review-harness series are all present.
-- **DONE.md's Docker caveat (review item 5)** — truthful; `docker` is genuinely
-  absent here. Its "2 passed" was also literally true, which is exactly why it
-  was misleading: it is the report of a command narrow enough to miss F1.
 
 ## Verification run here
 
 ```
-uv run pytest -q tests/unit/sandbox/test_sandbox_resolv_conf.py \
-               tests/unit/test_detect_filter_sync.py \
-               tests/unit/sandbox/test_docker_runtime_argv.py \
-               tests/unit/test_gvisor_validation_workflow.py    # 24 passed
-uv run ruff check / ruff format --check / uv run mypy  (touched files)  # clean
+uv run mypy src tests                                   # Success: no issues in 1098 source files
+uv run ruff check src tests && ruff format --check      # All checks passed / 1098 files formatted
+uv run pytest tests/unit -q -n 4                        # 5315 passed pre-fix, 17 xdist worker
+                                                        #   crashes; all 17 pass serially and are
+                                                        #   unrelated to this branch (memory
+                                                        #   pressure in this container)
+uv run pytest -q tests/unit/sandbox tests/unit/test_networking.py \
+              tests/unit/test_sandbox_registry.py tests/unit/test_detect_filter_sync.py
+                                                        # green on x86_64 …
+PYTHONPATH=<machine()->aarch64> uv run pytest -q …      # … and green with an aarch64 host: 758 passed
 ```
 
-The e2e image contract was **not** run — no Docker daemon here. Whether this
-branch actually fixes aios#2410 is still open, and only that test can close it.
+**Not run: the e2e image contract.** `docker` does not exist in this
+environment. Whether `COPY --link` actually lands the resolver bytes in the
+layer is still open, and only
+`tests/e2e/test_sandbox_image_contract.py::test_image_layer_carries_the_embedded_dns_resolver`
+on a daemon can close it. Not pushed, not merged, no PR opened.
+
+## Residual risk for the shepherd
+
+The one thing that can still fail after this branch merges is the resolver
+e2e, for the reason the Dockerfile now spells out. If it is red again, the
+next round should stop iterating on the Dockerfile: with a stale image and a
+blind probe both ruled out, a second empty read means same-path bake is dead
+under BuildKit, and the resolver must reach the chrooted operator on the read
+path instead.
