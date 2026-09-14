@@ -16,7 +16,8 @@ shrinks the window and cannot close it: a sample is not a guarantee.
 runs on the worker; every DNS query leaving the sandbox netns is redirected to
 it (a nat-OUTPUT DNAT on ``:53``, inserted at the TOP of the chain so no
 in-netns resolver — including Docker's embedded DNS at ``127.0.0.11`` — can
-answer first). For a **credential host** the resolver never forwards and never
+answer first), with the rewritten flow source-NATed so Docker's loopback source
+can cross the bridge to the worker. For a **credential host** the resolver never forwards and never
 returns a real address: it answers ``A`` with a single fixed, non-routable
 sentinel (:data:`CREDENTIAL_SENTINEL_IP`), and answers every other record type
 for that name with NODATA — so ``AAAA``, and the ``ipv4hint``/``ipv6hint``

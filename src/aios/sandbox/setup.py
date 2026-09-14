@@ -378,6 +378,8 @@ _RESOLVE_IPV4_FN = (
 # ruleset and replays the resulting packet — including a live pool address no
 # sampler ever returned.
 
+_CREDENTIAL_DNS_SNAT_CHAIN = "AIOS_CRED_DNS_SNAT"
+
 
 def _nat_dnat_lines(
     dnat_hosts: Sequence[str],
@@ -402,9 +404,12 @@ def _nat_dnat_lines(
     2. The DNS interception: udp+tcp ``:53`` DNATed to the worker-controlled
        resolver, inserted with ``-I`` at the TOP of nat OUTPUT so nothing in
        the netns can answer a credential name first.
-    3. One credential DNAT keyed on :data:`CREDENTIAL_SENTINEL_IP` — the single
+    3. UDP+TCP source NAT for the redirected DNS flow. Docker's 127.0.0.11
+       destination makes the kernel select a loopback source before OUTPUT
+       DNAT; MASQUERADE replaces it so the packet can cross the bridge.
+    4. One credential DNAT keyed on :data:`CREDENTIAL_SENTINEL_IP` — the single
        address every credential name now resolves to inside the sandbox.
-    4. A filter REJECT for any other sentinel-addressed packet (the ``:443``
+    5. A filter REJECT for any other sentinel-addressed packet (the ``:443``
        flow is already rewritten to the proxy by the nat table, which runs
        first, so this cannot catch it).
 
@@ -431,6 +436,21 @@ def _nat_dnat_lines(
         "# these at the TOP of nat OUTPUT so no in-netns resolver answers first.",
         f'"$IPT" -t nat -I OUTPUT -p udp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
         f'"$IPT" -t nat -I OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$PROXY_IP:{dns_port}"',
+        # Docker tells the container to query its embedded resolver at
+        # 127.0.0.11.  The kernel selects a loopback source before nat OUTPUT;
+        # changing only the destination to the worker would therefore put a
+        # 127/8-sourced packet on the bridge, where it is dropped as a martian.
+        # Source-NAT the rewritten DNS flow so it can actually cross the bridge
+        # and receive the answer.  A private chain makes reprovision idempotent
+        # without flushing Docker's own POSTROUTING rules.
+        f'"$IPT" -t nat -N {_CREDENTIAL_DNS_SNAT_CHAIN} 2>/dev/null || '
+        f'"$IPT" -t nat -F {_CREDENTIAL_DNS_SNAT_CHAIN}',
+        f'"$IPT" -t nat -C POSTROUTING -j {_CREDENTIAL_DNS_SNAT_CHAIN} 2>/dev/null || '
+        f'"$IPT" -t nat -I POSTROUTING -j {_CREDENTIAL_DNS_SNAT_CHAIN}',
+        f'"$IPT" -t nat -A {_CREDENTIAL_DNS_SNAT_CHAIN} -d "$PROXY_IP" '
+        f"-p udp --dport {dns_port} -j MASQUERADE",
+        f'"$IPT" -t nat -A {_CREDENTIAL_DNS_SNAT_CHAIN} -d "$PROXY_IP" '
+        f"-p tcp --dport {dns_port} -j MASQUERADE",
         "# The ONE credential rule: every credential name resolves to this sentinel",
         "# inside the sandbox, so this covers the host completely (#2042).",
         f'"$IPT" -t nat -A OUTPUT -d {CREDENTIAL_SENTINEL_IP} -p tcp --dport 443 '
@@ -923,7 +943,7 @@ _SENTINEL_RE = CREDENTIAL_SENTINEL_IP.replace(".", r"\.") + "(/32)?"
 # lockdown actually took effect in the shared netns, not just that the apply
 # script exited 0.
 def build_lockdown_verify_script(
-    dnat_hosts: Sequence[str] = (), *, assert_drop: bool = True
+    dnat_hosts: Sequence[str] = (), *, dns_port: int | None = None, assert_drop: bool = True
 ) -> str:
     """Build the read-back verify script run by the lockdown sidecar.
 
@@ -941,8 +961,10 @@ def build_lockdown_verify_script(
 
     When ``dnat_hosts`` is non-empty it ALSO reads back every rule the
     name-based credential chokepoint depends on (#2042): the ``:53`` DNAT to
-    the worker-controlled resolver (udp AND tcp), the sentinel ``:443`` DNAT to
-    the secret-egress proxy, and the sentinel filter REJECT. Asserting merely
+    the worker-controlled resolver (udp AND tcp), the matching source NAT that
+    lets Docker's loopback-sourced DNS packets cross the bridge (udp AND tcp),
+    the sentinel ``:443`` DNAT to the secret-egress proxy, and the sentinel
+    filter REJECT. Asserting merely
     that "some ``-j DNAT`` exists" (the pre-#2042 check) would pass on a
     half-installed chokepoint — DNS intercepted but the sentinel unrouted, or
     the reverse — which is a green verify over unprotected credential egress,
@@ -952,7 +974,7 @@ def build_lockdown_verify_script(
     that resolves to zero IPs is no longer even relevant, because no rule is
     keyed on a resolution any more.)
 
-    Those four greps match the spelling ``iptables -S`` *prints*, which is not
+    Those read-back greps match the spelling ``iptables -S`` *prints*, which is not
     the spelling the apply script *wrote* (#2422) — see ``_SENTINEL_RE``. A
     grep written against the apply spelling fails on a correctly installed
     chokepoint, and because the callers' error text is static ("OUTPUT policy
@@ -997,7 +1019,9 @@ def build_lockdown_verify_script(
             "printf '%s\\n' \"$v6_output\" | grep -qx -- '-P OUTPUT DROP'; fi"
         )
     if dnat_hosts:
-        # Read back the FOUR rules that make the name-based chokepoint real
+        if dns_port is None:
+            raise ValueError("dns_port is required when verifying credential-host interception")
+        # Read back every rule that makes the name-based chokepoint real
         # (#2042). Asserting only "some DNAT exists" would pass on a ruleset
         # that intercepts DNS but never redirects the sentinel (or vice versa)
         # — i.e. green verify while credential egress is unprotected. Each is
@@ -1016,6 +1040,14 @@ def build_lockdown_verify_script(
         lines.append(
             "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'"
         )
+        lines.append(
+            f"\"$IPT\" -t nat -S POSTROUTING | grep -q -- '-j {_CREDENTIAL_DNS_SNAT_CHAIN}'"
+        )
+        for proto in ("udp", "tcp"):
+            lines.append(
+                f'"$IPT" -t nat -S {_CREDENTIAL_DNS_SNAT_CHAIN} | grep -qE -- '
+                f"'-p {proto}( -m {proto})? --dport {dns_port} -j MASQUERADE'"
+            )
         lines.append(f"\"$IPT\" -S OUTPUT | grep -qE -- '-d {_SENTINEL_RE} -j REJECT'")
     return "\n".join(lines)
 
@@ -1118,7 +1150,7 @@ async def apply_network_lockdown(
         verify = await backend.run_netns_sidecar(
             handle.sandbox_id,
             image=settings.docker_image,
-            script=build_lockdown_verify_script(dnat_hosts),
+            script=build_lockdown_verify_script(dnat_hosts, dns_port=dns_port),
             timeout_seconds=15,
             max_output_bytes=settings.bash_max_output_bytes,
             runtime=runtime,
@@ -1228,7 +1260,7 @@ async def apply_secret_egress_dnat(
         verify = await backend.run_netns_sidecar(
             handle.sandbox_id,
             image=settings.docker_image,
-            script=build_lockdown_verify_script(dnat_hosts, assert_drop=False),
+            script=build_lockdown_verify_script(dnat_hosts, dns_port=dns_port, assert_drop=False),
             timeout_seconds=15,
             max_output_bytes=settings.bash_max_output_bytes,
             runtime=runtime,

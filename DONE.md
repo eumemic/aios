@@ -1,5 +1,47 @@
 # Done
 
+## #2422 functional swap follow-up
+
+The branch is rebased onto `origin/master` at `63337f26` with the true #2042
+name-based resolver/sentinel path, the refresh-sweep sentinel guard, and the
+iptables `-S` spelling fixes retained.
+
+**Root cause of `HTTP_STATUS=000` / the empty recorder.** The prior fix made
+Docker-container DNS leave the netns by OUTPUT-DNATing queries from Docker's
+embedded resolver address (`127.0.0.11`) to the worker's per-session resolver.
+That changed only the destination. The kernel had already selected
+`127.0.0.1` as the source for the original loopback destination; after DNAT,
+the resulting `127/8`-sourced packet could not cross the Docker bridge. The
+credential DNS query therefore timed out, curl exhausted its 25-second bound
+and printed `HTTP_STATUS=000`, and neither run nor trigger ever opened a TLS
+connection to the secret-egress proxy or recorder. This is why the apply and
+read-back greps could be green while all four functional legs stayed red.
+
+Evidence: on this host a UDP socket connected to `127.0.0.11:53` selects
+`127.0.0.1`, while the same socket connected to an external destination selects
+the interface address. The failed CI run took the curl timeout and showed
+`HTTP_STATUS=000` plus `recorder.requests=[]` in both networking modes, with no
+provision failure. The only new runtime seam shared by those four legs was the
+loopback-to-worker DNS redirect.
+
+**Fix.** The shared Limited/Unrestricted rule generator now links an
+idempotent private nat POSTROUTING chain and MASQUERADEs only UDP/TCP traffic
+already redirected to the worker resolver port. That gives the DNS request a
+bridge-routable source and lets conntrack restore the reply to the sandbox's
+original resolver socket. Reprovision flushes only the private chain, never
+Docker's POSTROUTING rules. The fail-closed verify now requires the chain link
+and both protocol-specific MASQUERADE rules in addition to the name-based DNS
+DNAT, sentinel DNAT, and sentinel REJECT; this is a functional transport fix,
+not another relaxation of a grep.
+
+Validation in this Docker-less workspace:
+
+* `uv run pytest -q tests/unit/sandbox/test_credential_dns.py tests/unit/test_networking.py tests/unit/sandbox/test_egress_refresh.py tests/unit/sandbox/test_egress_refresh_live_path.py` — 185 passed.
+* The two requested run-origin Docker tests collect and skip only because Docker
+  is unavailable locally; CI remains the functional oracle for all four legs.
+
+No push or merge performed.
+
 ## Root cause (evidence-backed)
 
 Credential-host interception was keyed on **sampled IP addresses**, not on the

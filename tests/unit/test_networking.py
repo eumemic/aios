@@ -253,6 +253,11 @@ class TestBuildIptablesScript:
                 f'"$IPT" -t nat -I OUTPUT -p {proto} --dport 53 -j DNAT '
                 '--to-destination "$PROXY_IP:53535"'
             ) in script
+            assert (
+                f'"$IPT" -t nat -A AIOS_CRED_DNS_SNAT -d "$PROXY_IP" '
+                f"-p {proto} --dport 53535 -j MASQUERADE"
+            ) in script
+        assert '"$IPT" -t nat -I POSTROUTING -j AIOS_CRED_DNS_SNAT' in script
 
     def test_proxy_alias_miss_is_a_hard_failure(self) -> None:
         """A ``$PROXY_IP`` miss must abort the apply, not skip the block.
@@ -562,6 +567,11 @@ class TestBuildSecretEgressDnatScript:
                 f'"$IPT" -t nat -I OUTPUT -p {proto} --dport 53 -j DNAT '
                 '--to-destination "$PROXY_IP:53535"'
             ) in script
+            assert (
+                f'"$IPT" -t nat -A AIOS_CRED_DNS_SNAT -d "$PROXY_IP" '
+                f"-p {proto} --dport 53535 -j MASQUERADE"
+            ) in script
+        assert '"$IPT" -t nat -I POSTROUTING -j AIOS_CRED_DNS_SNAT' in script
         assert "PROXY_IP=$(resolve_ipv4 aios-worker" in script
         assert "resolve_ipv4 api.secret.com" not in script
         assert "resolve_ipv4 data.secret.com" not in script
@@ -674,9 +684,10 @@ class TestBuildLockdownVerifyScript:
         Asserting only that "some ``-j DNAT`` exists" (the pre-#2042 check)
         passes on a half-installed ruleset — DNS intercepted but the sentinel
         unrouted, or the reverse — i.e. a green verify over unprotected
-        credential egress. All four rules are asserted individually.
+        credential egress. The DNAT, source-NAT, chain-link, and reject rules
+        are asserted individually.
         """
-        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], dns_port=53535)
         assert (
             '"$IPT" -t nat -S OUTPUT | grep -qE -- '
             f"'-d {_SENTINEL_RE} -p tcp( -m tcp)? --dport 443 -j DNAT'"
@@ -687,6 +698,13 @@ class TestBuildLockdownVerifyScript:
         assert (
             "\"$IPT\" -t nat -S OUTPUT | grep -qE -- '-p tcp( -m tcp)? --dport 53 -j DNAT'"
         ) in script
+        assert '"$IPT" -t nat -S POSTROUTING' in script
+        assert "'-j AIOS_CRED_DNS_SNAT'" in script
+        for proto in ("udp", "tcp"):
+            assert (
+                f'"$IPT" -t nat -S AIOS_CRED_DNS_SNAT | grep -qE -- '
+                f"'-p {proto}( -m {proto})? --dport 53535 -j MASQUERADE'"
+            ) in script
         assert f"\"$IPT\" -S OUTPUT | grep -qE -- '-d {_SENTINEL_RE} -j REJECT'" in script
         # The filter-table DROP assertion is still present.
         assert "OUTPUT DROP" in script
@@ -694,7 +712,7 @@ class TestBuildLockdownVerifyScript:
     def test_uses_selected_backend_no_bare_iptables(self) -> None:
         """Both assertions go through the ``$IPT`` selector so the verify reads
         the same netfilter backend the apply wrote to (#1022)."""
-        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], dns_port=53535)
         assert "command -v iptables-legacy" in script
         for line in script.splitlines():
             stripped = line.strip()
@@ -732,7 +750,7 @@ class TestBuildLockdownVerifyScript:
     def test_v6_verify_uses_legacy_backend_no_bare_ip6tables(self) -> None:
         """The v6 read-back selects the same legacy backend the apply wrote to,
         so it reads the right table under runsc — and never a bare ip6tables."""
-        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], dns_port=53535)
         assert "command -v ip6tables-legacy" in script
         for line in script.splitlines():
             stripped = line.strip()
@@ -747,7 +765,9 @@ class TestBuildLockdownVerifyScript:
         # ACCEPT, so the verify must NOT assert a DROP policy (it would always
         # fail) — but still asserts nat DNAT coverage. The v6 DROP assertion is
         # likewise omitted (the DNAT-only path installs no v6 DROP).
-        script = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False)
+        script = build_lockdown_verify_script(
+            dnat_hosts=["api.secret.com"], dns_port=53535, assert_drop=False
+        )
         assert "OUTPUT DROP" not in script
         assert "IP6T" not in script
         assert (
@@ -758,7 +778,9 @@ class TestBuildLockdownVerifyScript:
     def test_assert_drop_true_is_default(self) -> None:
         # Backward-compat: the Limited callers pass no assert_drop and must keep
         # getting the DROP assertion.
-        assert "OUTPUT DROP" in build_lockdown_verify_script(dnat_hosts=["api.secret.com"])
+        assert "OUTPUT DROP" in build_lockdown_verify_script(
+            dnat_hosts=["api.secret.com"], dns_port=53535
+        )
 
     def test_emits_set_e_first(self) -> None:
         """Every assertion must be independently fatal. The sidecar runs the
@@ -770,8 +792,10 @@ class TestBuildLockdownVerifyScript:
         script the instant they fail."""
         for script in (
             build_lockdown_verify_script(),
-            build_lockdown_verify_script(dnat_hosts=["api.secret.com"]),
-            build_lockdown_verify_script(dnat_hosts=["api.secret.com"], assert_drop=False),
+            build_lockdown_verify_script(dnat_hosts=["api.secret.com"], dns_port=53535),
+            build_lockdown_verify_script(
+                dnat_hosts=["api.secret.com"], dns_port=53535, assert_drop=False
+            ),
         ):
             assert script.splitlines()[0] == "set -e"
 
@@ -799,7 +823,11 @@ class TestBuildLockdownVerifyScript:
         ``/32`` + ``-m tcp``/``-m udp``; ``"bare"``: neither); ``omit`` names
         chokepoint rules to leave out so a missing rule can be shown to fail.
         """
-        script = build_lockdown_verify_script(dnat_hosts=dnat_hosts, assert_drop=assert_drop)
+        script = build_lockdown_verify_script(
+            dnat_hosts=dnat_hosts,
+            dns_port=53535 if dnat_hosts else None,
+            assert_drop=assert_drop,
+        )
         bindir = tempfile.mkdtemp()
         sentinel = CREDENTIAL_SENTINEL_IP + ("/32" if spelling == "canonical" else "")
         m_tcp = " -m tcp" if spelling == "canonical" else ""
@@ -807,6 +835,13 @@ class TestBuildLockdownVerifyScript:
         nat_rules = {
             "dns_udp": f"-A OUTPUT -p udp{m_udp} --dport 53 -j DNAT --to-destination 172.17.0.5:5353",
             "dns_tcp": f"-A OUTPUT -p tcp{m_tcp} --dport 53 -j DNAT --to-destination 172.17.0.5:5353",
+            "dns_snat_jump": "-A POSTROUTING -j AIOS_CRED_DNS_SNAT",
+            "dns_udp_snat": (
+                f"-A AIOS_CRED_DNS_SNAT -d 172.17.0.5 -p udp{m_udp} --dport 53535 -j MASQUERADE"
+            ),
+            "dns_tcp_snat": (
+                f"-A AIOS_CRED_DNS_SNAT -d 172.17.0.5 -p tcp{m_tcp} --dport 53535 -j MASQUERADE"
+            ),
             "sentinel_dnat": (
                 f"-A OUTPUT -d {sentinel} -p tcp{m_tcp} --dport 443 "
                 "-j DNAT --to-destination 172.17.0.5:49152"
