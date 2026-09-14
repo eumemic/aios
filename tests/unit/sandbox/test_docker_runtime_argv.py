@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.config import get_settings
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends import docker as docker_backend
 from aios.sandbox.backends.base import (
@@ -33,7 +34,10 @@ def _on_x86_64(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
 
 
-def _spec(*, runtime: str | None = None) -> SandboxSpec:
+def _spec(*, runtime: str | None = None, image: str | None = None) -> SandboxSpec:
+    # runsc sandboxes must run the operator image itself (the egress exec
+    # chroots into it), so that is the default here; the runc path is
+    # image-agnostic and the mismatch test overrides it.
     return SandboxSpec(
         session_id="sess_runtime",
         instance_id="inst_runtime",
@@ -47,7 +51,7 @@ def _spec(*, runtime: str | None = None) -> SandboxSpec:
         },
         network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
-        image="aios-sandbox:test",
+        image=image or get_settings().docker_image,
         runtime=runtime,
     )
 
@@ -96,6 +100,55 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     assert mount == (
         "type=image,src=ghcr.io/eumemic/aios-sandbox:latest,dst=/run/aios-operator-root"
     )
+    # Derived from ``spec.image`` — the image the tenant container itself runs —
+    # so the operator root can never silently disagree with the sandbox.
+    assert f"src={_spec(runtime='runsc').image}," in mount
+
+
+async def test_create_refuses_runsc_on_a_tenant_supplied_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``spec.image`` is tenant-authored (#724); an operator root is not.
+
+    The operator root is the first thing the egress exec enters, holding
+    ``NET_ADMIN`` the sandbox itself was denied — so a per-environment image
+    override would otherwise get its own ``/usr/bin/busybox`` run privileged.
+    Refusing beats silently mounting ``settings.docker_image`` under a sandbox
+    built from something else.
+    """
+    ran: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        ran.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    with pytest.raises(SandboxBackendError, match="must run the operator image"):
+        await DockerBackend().create(_spec(runtime="runsc", image="tenant/evil:latest"))
+    assert ran == [], "the guard must fail closed before the daemon is touched"
+
+
+async def test_create_allows_any_image_under_runc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is runsc-only: runc applies its lockdown from a separate
+    operator-image sidecar, so the sandbox image is free to be the tenant's."""
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(image="tenant/custom:latest"))
+
+    assert calls[0][-1] == "tenant/custom:latest"
 
 
 # Every machine the operator image's x86_64 ELF paths cannot fit. aarch64 is

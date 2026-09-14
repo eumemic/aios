@@ -11,13 +11,12 @@ no Postgres, no async. They require only a Docker daemon.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import platform
 import re
 import subprocess
-import tarfile
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -218,67 +217,94 @@ def test_operator_chain_executes_end_to_end(pulled_image: str) -> None:
         "/usr/bin/bash",
         "-p",
         "-c",
-        "getent --version >/dev/null && echo operator-ok",
+        "mawk -W version >/dev/null && echo operator-ok",
     )
     assert r.returncode == 0, f"operator chain failed: {r.stdout}{r.stderr}"
     assert r.stdout.strip() == "operator-ok"
 
 
-def test_image_layer_carries_the_embedded_dns_resolver(pulled_image: str) -> None:
-    """``/etc/resolv.conf`` must exist IN THE LAYER, naming 127.0.0.11.
+def test_busybox_ships_the_nslookup_applet(pulled_image: str) -> None:
+    """The egress scripts resolve every host with ``busybox nslookup``.
 
-    Read through ``docker cp`` from a created-but-never-started container: a
-    running container has Docker's own resolv.conf bind-mounted over the path,
-    which is exactly why a missing baked file is invisible until a runsc
-    provision blackholes. ``docker cp`` reads the container's layers, beneath
-    that bind mount (moby/moby#9998 is a bug report about precisely this
-    "returns the layer's empty stub, not the live file" behaviour), so it is a
-    faithful probe of what the image ships -- an empty read here means the
-    bytes are genuinely not in the layer, not that the probe cannot see them. The chrooted runsc exec sees the layer, cannot write
-    to it (the operator mount is read-only, so ``setup._RESOLV_PREAMBLE`` is a
-    no-op there), and ``getent`` silently falls back to 127.0.0.1 without it —
-    which empties the Limited allow-list.
+    ``setup._RESOLVE_IPV4_FN`` names Docker's embedded resolver (127.0.0.11) as
+    an ARGUMENT rather than reading ``/etc/resolv.conf``: no sidecar shape has a
+    usable one (runc inherits the image's, runsc chroots into a read-only mount)
+    and BuildKit will not let one be baked -- it commits an EMPTY entry for any
+    ``COPY`` to that path (aios#2410, moby/buildkit#1267). busybox-static is
+    compiled with a configurable applet list, so a build without ``nslookup``
+    would leave every Limited allow-list empty and every credential host
+    un-DNATed, silently.
     """
+    r = _docker_run(pulled_image, "/usr/bin/busybox", "--list")
+    assert r.returncode == 0, r.stderr
+    assert "nslookup" in r.stdout.split(), "busybox in this image has no nslookup applet"
+
+
+def test_busybox_nslookup_answers_from_the_embedded_dns(pulled_image: str) -> None:
+    """The live oracle for the resolution path: query 127.0.0.11 by address.
+
+    Runs on a throwaway user-defined network, which is where Docker serves its
+    embedded DNS and where every sandbox runs. Resolving the container's OWN
+    network alias keeps this hermetic (no upstream DNS, no internet) while still
+    exercising the whole path the lockdown depends on: the applet, the netns's
+    embedded resolver, and the output shape.
+
+    The shape is load-bearing, not cosmetic. ``setup._RESOLVE_IPV4_FN`` parses
+    it with awk: answers are taken only AFTER a ``Name:`` line, so the server
+    block (``Server:``/``Address:``, which reports the resolver's own address)
+    can never be mistaken for an answer and handed to ``iptables -d``. If
+    busybox ever reshapes this output, the parse silently returns nothing --
+    every allow-list empties -- so both halves are asserted here.
+    ``tests/unit/sandbox/test_sandbox_dns_resolution.py`` runs the real parse
+    against this exact shape.
+    """
+    network = f"aios-dns-contract-{uuid.uuid4().hex[:8]}"
     created = subprocess.run(
-        ["docker", "create", pulled_image],
+        ["docker", "network", "create", network],
         capture_output=True,
         text=True,
         check=False,
         timeout=60,
     )
-    assert created.returncode == 0, f"docker create failed: {created.stderr}"
-    container = created.stdout.strip()
+    assert created.returncode == 0, f"docker network create failed: {created.stderr}"
     try:
-        copied = subprocess.run(
-            ["docker", "cp", f"{container}:/etc/resolv.conf", "-"],
+        r = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                network,
+                "--name",
+                network,
+                pulled_image,
+                "/usr/bin/busybox",
+                "nslookup",
+                network,
+                "127.0.0.11",
+            ],
             capture_output=True,
+            text=True,
             check=False,
             timeout=60,
         )
-        assert copied.returncode == 0, (
-            "/etc/resolv.conf is absent from the image layer — the runsc operator "
-            f"chroot would have no resolver: {copied.stderr.decode(errors='replace')}"
-        )
-        with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as tar:
-            member = tar.extractfile("resolv.conf")
-            assert member is not None
-            baked = member.read().decode()
     finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=60)
+        subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=60)
 
-    # Keep in step with ``aios.sandbox.setup._EMBEDDED_DNS_ADDRESS``;
-    # ``tests/unit/sandbox/test_sandbox_resolv_conf.py`` pins the source pair.
-    #
-    # A file that is PRESENT but carries no nameserver is the aios#2410 shape:
-    # BuildKit special-cases this path as a build mount and leaves the 0-byte
-    # placeholder in the layer instead of the COPYed bytes. The Dockerfile
-    # answers that with ``COPY --link``; if this still reads empty, --link did
-    # not survive either and the same-path bake is dead. Baking to a
-    # non-special path does NOT rescue it on its own — glibc reads
-    # /etc/resolv.conf and nothing else, so the fix then has to be on the
-    # operator read path, not in the Dockerfile.
-    assert re.findall(r"(?m)^\s*nameserver\s+(\S+)\s*$", baked) == ["127.0.0.11"], (
-        f"/etc/resolv.conf is in the layer but does not name the embedded resolver: {baked!r}"
+    assert r.returncode == 0, (
+        f"busybox nslookup against the embedded DNS failed: {r.stdout}{r.stderr}"
+    )
+    lines = r.stdout.splitlines()
+    server = [i for i, line in enumerate(lines) if line.startswith("Server:")]
+    name = [i for i, line in enumerate(lines) if line.startswith("Name:")]
+    assert server and name, f"unexpected nslookup output shape: {r.stdout!r}"
+    assert server[0] < name[0], (
+        f"the server block no longer precedes the answer; the parse's ``Name:`` "
+        f"guard would admit the resolver's own address: {r.stdout!r}"
+    )
+    answers = re.findall(r"(?m)^Address:\s*(\S+)\s*$", "\n".join(lines[name[0] :]))
+    assert any(re.fullmatch(r"\d+\.\d+\.\d+\.\d+", a) for a in answers), (
+        f"no IPv4 answer after the ``Name:`` line: {r.stdout!r}"
     )
 
 

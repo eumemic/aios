@@ -138,6 +138,40 @@ def _require_runsc_supported_machine(what: str) -> None:
         )
 
 
+def _runsc_operator_image(spec: SandboxSpec) -> str:
+    """The image to mount read-only at :data:`_RUNSC_OPERATOR_ROOT`, or raise.
+
+    The operator root is the FIRST thing the egress exec enters -- ``busybox
+    chroot`` out of the tenant root, then that image's ``ld.so``, shell and
+    netfilter tools -- all while holding ``NET_ADMIN`` the sandbox itself was
+    denied. So it must be the operator-trusted image and nothing else.
+
+    It is derived from ``spec.image`` rather than read straight off the
+    settings, so the mounted root is by construction the same image the tenant
+    container was built from -- an operator root that silently disagreed with
+    the sandbox (different base, different multiarch variant, tools in different
+    places) is a class of drift this rules out. ``EnvironmentConfig.image`` is a
+    free-form tenant field, though (#724), so a *derived* root has to be gated:
+    a mismatch is refused here rather than mounted, because mounting
+    ``spec.image`` unchecked would hand a tenant-chosen ``/usr/bin/busybox`` the
+    first exec of a ``NET_ADMIN`` sidecar.
+
+    ``spec.snapshot_image`` deliberately plays no part: the tenant container
+    runs from the snapshot when there is one (see :meth:`create`), but a
+    snapshot is the tenant's own mutated rootfs committed back to an image --
+    the exact filesystem the chroot exists to escape.
+    """
+    operator_image = get_settings().docker_image
+    if spec.image != operator_image:
+        raise SandboxBackendError(
+            f"gVisor runsc sandboxes must run the operator image: spec.image "
+            f"{spec.image!r} is not the configured docker_image {operator_image!r}. "
+            "The runsc egress path chroots into this image to apply the network "
+            "lockdown, so it cannot be tenant-supplied."
+        )
+    return spec.image
+
+
 # Shell command name -> operator-image path, for every external command the
 # egress scripts in ``aios.sandbox.setup`` invoke. Anything NOT listed here
 # resolves through ``PATH``, which the exec pins to the operator root -- so a
@@ -149,11 +183,21 @@ _RUNSC_OPERATOR_COMMANDS: dict[str, str] = {
     "ip6tables-legacy": "/usr/sbin/ip6tables-legacy",
     "iptables": "/usr/sbin/iptables-legacy",
     "ip6tables": "/usr/sbin/ip6tables-legacy",
-    "getent": "/usr/bin/getent",
     "grep": "/usr/bin/grep",
     "awk": "/usr/bin/mawk",
     "sort": "/usr/bin/sort",
     "head": "/usr/bin/head",
+}
+
+# Same idea for operator binaries that are STATICALLY linked: they carry no
+# ``PT_INTERP``, so there is no interpreter for a poisoned tenant loader to be
+# resolved as, and running one THROUGH ``ld.so`` would fail outright. busybox is
+# the one -- it is already the chroot entry binary for exactly that reason -- and
+# ``resolve_ipv4`` (:mod:`aios.sandbox.setup`) runs ``busybox nslookup`` to query
+# Docker's embedded DNS by address, because nothing on this path can supply the
+# ``/etc/resolv.conf`` glibc's ``getent`` would have to read (aios#2410).
+_RUNSC_OPERATOR_STATIC_COMMANDS: dict[str, str] = {
+    "busybox": _RUNSC_OPERATOR_CHROOT,
 }
 
 # Environment the ``docker exec`` overrides. The container's own environment is
@@ -197,7 +241,9 @@ def _runsc_operator_preamble(operator_root: str = _RUNSC_OPERATOR_ROOT) -> str:
     because bash honours an inherited ``IFS`` and every script splits resolver
     output on it.
     """
-    paths = sorted(set(_RUNSC_OPERATOR_COMMANDS.values()))
+    paths = sorted(
+        set(_RUNSC_OPERATOR_COMMANDS.values()) | set(_RUNSC_OPERATOR_STATIC_COMMANDS.values())
+    )
     lines = [
         f"OP={operator_root}",
         "IFS=$' \\t\\n'",
@@ -211,7 +257,12 @@ def _runsc_operator_preamble(operator_root: str = _RUNSC_OPERATOR_ROOT) -> str:
             f'{name}() {{ operator_exec {path} "$@"; }}'
             for name, path in _RUNSC_OPERATOR_COMMANDS.items()
         ),
-        "export -f operator_exec " + " ".join(_RUNSC_OPERATOR_COMMANDS),
+        *(
+            f'{name}() {{ "$OP{path}" "$@"; }}'
+            for name, path in _RUNSC_OPERATOR_STATIC_COMMANDS.items()
+        ),
+        "export -f operator_exec "
+        + " ".join((*_RUNSC_OPERATOR_COMMANDS, *_RUNSC_OPERATOR_STATIC_COMMANDS)),
     ]
     return "\n".join(lines) + "\n"
 
@@ -304,7 +355,7 @@ class DockerBackend:
             argv.extend(
                 [
                     "--mount",
-                    f"type=image,src={get_settings().docker_image},dst={_RUNSC_OPERATOR_ROOT}",
+                    f"type=image,src={_runsc_operator_image(spec)},dst={_RUNSC_OPERATOR_ROOT}",
                 ]
             )
 
@@ -1277,20 +1328,18 @@ class DockerBackend:
         it. See :func:`_runsc_operator_preamble`.
 
         ``image`` is unused on the runsc path: the operator root is whatever
-        :meth:`create` mounted (``settings.docker_image``), which is the same
-        image every in-tree caller passes here.
+        :meth:`create` mounted, which :func:`_runsc_operator_image` has already
+        pinned to the configured ``settings.docker_image`` — the same image
+        every in-tree caller passes here.
 
         NOTE (runsc only): the chroot also decides which ``/etc/resolv.conf``
-        ``getent`` reads — the operator image's, not the tenant's. That is the
-        property we want (the allow-list is built from what ``getent`` returns,
-        so a tenant-poisoned ``resolv.conf`` would otherwise choose which
-        addresses get an ACCEPT rule), but it means ``setup._RESOLV_PREAMBLE``
-        no longer has anywhere to write: the operator root is a read-only image
-        mount, so its ``printf`` fails and is swallowed by ``|| true``. The
-        nameserver therefore has to be in the image already —
-        ``docker/sandbox-resolv.conf``, COPYed to ``/etc/resolv.conf``, holding
-        the same embedded-resolver address the preamble writes. Without it
-        every host resolves to nothing and Limited egress blackholes.
+        the scripts would read — the operator image's, not the tenant's, which
+        is the property we want, except that neither image has a usable one
+        (BuildKit commits an empty entry for any ``COPY`` to that path, and the
+        operator root is a read-only mount so nothing can write one at runtime).
+        So nothing on this path reads it: ``setup._RESOLVE_IPV4_FN`` passes the
+        embedded resolver's address to ``busybox nslookup`` as an argument
+        (aios#2410; DONE.md carries the evidence chain).
         """
         if runtime == "runsc":
             _require_runsc_supported_machine("egress")
