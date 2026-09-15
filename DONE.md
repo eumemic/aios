@@ -292,8 +292,13 @@ the alias also carries the tool broker, git proxy and echo URLs).
   new `TestReplySourceAddressMatchesTheQueriedAddress` leg FAILS with
   `TimeoutError` against `22e4d7e1`'s resolver and passes after the fix.
 * `uv run pytest tests/unit/test_networking.py tests/unit/sandbox -q` — 693 passed.
+* `uv run pytest tests/unit -q` — 6239 passed (serial). The `-n 4` shard is not
+  a usable signal in this workspace: the box has ~200 MB free and the OOM killer
+  takes an xdist worker down mid-run (`[gwN] node down`, `dmesg` `oom-kill`),
+  which cascades into a scattered set of unrelated failures. All of them pass
+  serially and in their own files.
 * `uv run mypy src tests` clean (1098 files); `ruff check` / `ruff format --check`
-  clean; `uv run pytest tests/unit -q -n 4` green.
+  clean.
 * Docker is unavailable in this workspace, so the four e2e legs remain CI's to
   confirm; no claim of e2e green is made here.
 
