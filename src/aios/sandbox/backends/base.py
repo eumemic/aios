@@ -137,6 +137,35 @@ class SandboxSpec:
     # unreachable from every agent sandbox by construction (§6.2). A network
     # NAME, not an egress policy — that is ``network_policy``.
     network_name: str | None = None
+    # ``net.ipv4.conf.all.route_localnet=1`` in the container's OWN netns
+    # (#2422). Set by the spec builder EXACTLY when the session carries
+    # env-var credentials, i.e. exactly when the name-based credential
+    # chokepoint (#2042) is installed, and only then:
+    #
+    # Docker points the container's ``/etc/resolv.conf`` at its embedded
+    # resolver on ``127.0.0.11``, so the kernel picks a ``127/8`` source
+    # BEFORE nat OUTPUT rewrites the destination to the worker resolver. The
+    # chokepoint MASQUERADEs the request so it can cross the bridge, but the
+    # REPLY is un-SNATed in nat PREROUTING back to ``127.0.0.1`` before input
+    # routing — and ``ip_route_input_slow`` discards a loopback destination
+    # arriving on a non-loopback device as a martian destination unless
+    # ``route_localnet`` is set. Without this the DNS answer never reaches the
+    # sandbox and every credential lookup times out.
+    #
+    # It cannot be set from the lockdown sidecar: that container is not
+    # privileged (``/proc/sys`` is read-only) and Docker rejects ``--sysctl
+    # net.*`` for a container sharing another's netns. The sandbox's own
+    # ``docker run`` is the only place it can be applied.
+    #
+    # Gated rather than unconditional because ``route_localnet`` also lets a
+    # sibling container on the (ICC-on) sandbox bridge reach ``127.0.0.0/8``
+    # services in this netns; the chokepoint's own filter INPUT guard
+    # (``setup._nat_dnat_lines``) closes that, and it is installed by the same
+    # sidecar run that needs the sysctl. Credential attach/detach bumps the
+    # mount snapshot (``VAULT_CREDENTIAL`` tuples), so a session that gains or
+    # loses credentials is recycled onto a container with the matching flag —
+    # the two can't drift.
+    route_localnet: bool = False
 
 
 @dataclass(frozen=True, slots=True)

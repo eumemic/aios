@@ -618,3 +618,36 @@ def test_placeholder_is_stable_across_recycle() -> None:
     first = mint_secret_placeholder(salt, "sess_01TEST", "vcr_01")
     second = mint_secret_placeholder(salt, "sess_01TEST", "vcr_01")
     assert first == second
+
+
+async def test_route_localnet_tracks_env_var_credentials() -> None:
+    """#2422: the sandbox carries ``net.ipv4.conf.all.route_localnet=1``
+    EXACTLY when it will get the name-based credential chokepoint.
+
+    The chokepoint DNATs the sandbox's loopback-destined DNS (Docker's embedded
+    resolver at 127.0.0.11) to the worker resolver and MASQUERADEs the request;
+    the reply is un-SNATed back to a 127.0.0.1 DESTINATION before input routing,
+    which the kernel discards as a martian destination without this sysctl. It
+    cannot be set from the lockdown sidecar (unprivileged; Docker refuses
+    ``--sysctl net.*`` for a shared netns), so it is a property of the sandbox's
+    own ``docker run`` and therefore of the spec.
+
+    Gated on the same value that feeds the mount snapshot's ``VAULT_CREDENTIAL``
+    tuples, so attaching or detaching a credential recycles the session onto a
+    container carrying the matching flag — the sysctl and the chokepoint cannot
+    drift apart.
+    """
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(
+            env_config=_LIMITED_GITHUB,
+            env_var_credentials=AsyncMock(return_value=(_CRED,)),
+        ):
+            stack.enter_context(ctx)
+        with_creds = await build_spec_from_session("sess_01TEST")
+    assert with_creds.spec.route_localnet is True
+
+    with contextlib.ExitStack() as stack:
+        for ctx in patch_build_spec_deps(env_config=_LIMITED_GITHUB):
+            stack.enter_context(ctx)
+        no_creds = await build_spec_from_session("sess_01TEST")
+    assert no_creds.spec.route_localnet is False

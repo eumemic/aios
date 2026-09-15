@@ -1266,6 +1266,15 @@ def _assemble_plan(
         # the deny-list profile by default; the literal "unconfined" only
         # appears via the AIOS_SANDBOX_SECCOMP_PROFILE emergency override.
         seccomp_profile=settings.sandbox_seccomp_profile,
+        # ``net.ipv4.conf.all.route_localnet=1`` iff this session installs the
+        # name-based credential chokepoint (#2422). The chokepoint NATs a
+        # loopback-destined DNS flow (Docker's embedded resolver at
+        # 127.0.0.11), and the reply is un-SNATed back to a 127/8 destination
+        # before input routing — a martian destination without this sysctl.
+        # Keyed on the SAME value that feeds the mount snapshot's
+        # VAULT_CREDENTIAL tuples, so gaining or losing credentials recycles
+        # the sandbox onto a container carrying the matching flag.
+        route_localnet=bool(env_var_credentials),
         # Optional sandbox runtime (#1014). ``None`` leaves Docker's default in
         # place; operators can select gVisor with AIOS_SANDBOX_RUNTIME=runsc.
         runtime=settings.sandbox_runtime,
