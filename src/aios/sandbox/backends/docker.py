@@ -205,19 +205,19 @@ class DockerBackend:
         # container's OWN network namespace only (``--network <name>``), never
         # the host's; emitted only for sessions that install the chokepoint.
         if spec.route_localnet:
-            # ``all`` is the aggregate knob, but kernels consult the
-            # per-device value during the route lookup of the un-SNATed DNS
-            # reply.  Docker creates ``eth0`` before applying sysctls, so set
-            # both explicitly; retaining ``all`` also covers alternate
-            # interfaces/runtimes.
-            argv.extend(
-                [
-                    "--sysctl",
-                    "net.ipv4.conf.all.route_localnet=1",
-                    "--sysctl",
-                    "net.ipv4.conf.eth0.route_localnet=1",
-                ]
-            )
+            # ``all`` ALONE is sufficient and is deliberately the only knob set
+            # here. The kernel reads this flag through ``IN_DEV_ORCONF``, i.e.
+            # ``conf.all.route_localnet || conf.<dev>.route_localnet``,
+            # evaluated per packet at route time — not copied into the device
+            # at creation — so a device that already existed when ``all`` was
+            # written still sees the aggregate value. Do NOT add a per-device
+            # ``net.ipv4.conf.eth0.route_localnet`` here: runc applies
+            # per-interface sysctls at task creation, before the endpoint
+            # exists on engines without moby#47686, where it fails the whole
+            # ``docker run`` with "no such file or directory" (moby#47619,
+            # docker/cli#4990). That would break provisioning for EVERY
+            # credentialed sandbox in exchange for nothing.
+            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
 
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])

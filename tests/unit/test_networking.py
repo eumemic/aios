@@ -1168,19 +1168,20 @@ class TestDockerBackendArgs:
         worker resolver and MASQUERADEs the request. The REPLY is un-SNATed back
         to a 127.0.0.1 DESTINATION in nat PREROUTING, and the kernel discards a
         loopback destination arriving on a non-loopback device as a martian
-        destination unless ``route_localnet`` is set on the receiving device —
-        so without the eth0 flag the DNS answer never lands and every lookup times out. The swap
-        legs stay red with exactly the pre-fix symptom (``HTTP_STATUS=000`` /
-        empty recorder). The lockdown sidecar cannot set it (unprivileged, and
-        Docker refuses ``--sysctl net.*`` for a shared netns), so it has to come
-        from the sandbox's own ``docker run``."""
+        destination unless ``route_localnet`` is set. The lockdown sidecar
+        cannot set it (unprivileged, and Docker refuses ``--sysctl net.*`` for a
+        shared netns), so it has to come from the sandbox's own ``docker run``.
+
+        The assertion is EXACT — ``all`` and nothing else. ``all`` is an OR with
+        the per-device value (``IN_DEV_ORCONF``) evaluated per packet, so it
+        already covers ``eth0``; adding an explicit
+        ``net.ipv4.conf.eth0.route_localnet`` would buy no behavior and would
+        abort ``docker run`` on engines that apply per-interface sysctls before
+        the endpoint exists (moby#47619, docker/cli#4990)."""
         spec = replace(_make_spec(policy), route_localnet=True)
         argv = await _capture_docker_argv(spec)
         sysctls = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--sysctl"]
-        assert sysctls == [
-            "net.ipv4.conf.all.route_localnet=1",
-            "net.ipv4.conf.eth0.route_localnet=1",
-        ]
+        assert sysctls == ["net.ipv4.conf.all.route_localnet=1"]
 
 
 class TestDockerBackendIsAlive:
