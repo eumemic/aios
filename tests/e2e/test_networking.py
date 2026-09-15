@@ -96,7 +96,7 @@ class TestNetworkingEnforcement:
     # emitted ZERO lockdown/DNAT failures -- only session_egress_state_invalidated
     # with reason "no_credentials". It fails under runsc with curl exit 6,
     # CURLE_COULDNT_RESOLVE_HOST: a real, unexplained DNS defect under gVisor.
-    # Marked with its own honest cause (#2431) rather than being buried under the
+    # Marked with its own honest cause (#2430) rather than being buried under the
     # nat/netstack story, which would have silenced a genuine signal.
     @pytest.mark.runsc_dns_unresolved
     async def test_unrestricted_allows_all(self, docker_harness: Harness) -> None:

@@ -133,7 +133,7 @@ jobs:
         #   * `runsc_dns_unresolved` -- ONE test (test_unrestricted_allows_all) fails
         #     for a completely different reason: curl exit 6, could-not-resolve-host,
         #     in an Unrestricted sandbox that never invokes the sidecar at all. That
-        #     is an unexplained gVisor DNS defect, filed as aios#2431. It is
+        #     is an unexplained gVisor DNS defect, filed as aios#2430. It is
         #     deselected under its own honest marker rather than mislabelled as a
         #     sidecar failure -- attributing it to the netstack story would have
         #     silenced a real signal.
