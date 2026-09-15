@@ -1168,17 +1168,19 @@ class TestDockerBackendArgs:
         worker resolver and MASQUERADEs the request. The REPLY is un-SNATed back
         to a 127.0.0.1 DESTINATION in nat PREROUTING, and the kernel discards a
         loopback destination arriving on a non-loopback device as a martian
-        destination unless ``route_localnet`` is set — so without this flag the
-        DNS answer never lands, every credential lookup times out, and the swap
+        destination unless ``route_localnet`` is set on the receiving device —
+        so without the eth0 flag the DNS answer never lands and every lookup times out. The swap
         legs stay red with exactly the pre-fix symptom (``HTTP_STATUS=000`` /
         empty recorder). The lockdown sidecar cannot set it (unprivileged, and
         Docker refuses ``--sysctl net.*`` for a shared netns), so it has to come
         from the sandbox's own ``docker run``."""
         spec = replace(_make_spec(policy), route_localnet=True)
         argv = await _capture_docker_argv(spec)
-        assert "--sysctl" in argv
-        i = argv.index("--sysctl")
-        assert argv[i + 1] == "net.ipv4.conf.all.route_localnet=1"
+        sysctls = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--sysctl"]
+        assert sysctls == [
+            "net.ipv4.conf.all.route_localnet=1",
+            "net.ipv4.conf.eth0.route_localnet=1",
+        ]
 
 
 class TestDockerBackendIsAlive:

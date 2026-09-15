@@ -205,7 +205,19 @@ class DockerBackend:
         # container's OWN network namespace only (``--network <name>``), never
         # the host's; emitted only for sessions that install the chokepoint.
         if spec.route_localnet:
-            argv.extend(["--sysctl", "net.ipv4.conf.all.route_localnet=1"])
+            # ``all`` is the aggregate knob, but kernels consult the
+            # per-device value during the route lookup of the un-SNATed DNS
+            # reply.  Docker creates ``eth0`` before applying sysctls, so set
+            # both explicitly; retaining ``all`` also covers alternate
+            # interfaces/runtimes.
+            argv.extend(
+                [
+                    "--sysctl",
+                    "net.ipv4.conf.all.route_localnet=1",
+                    "--sysctl",
+                    "net.ipv4.conf.eth0.route_localnet=1",
+                ]
+            )
 
         if spec.host_gateway_alias is not None:
             argv.extend(["--add-host", f"{spec.host_gateway_alias}:host-gateway"])
