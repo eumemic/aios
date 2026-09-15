@@ -100,6 +100,16 @@ async def test_limited_lockdown_either_installs_or_refuses(tmp_path: Path) -> No
             # FAIL-CLOSED: the lockdown could not be installed and the layer said
             # so rather than handing back a sandbox with open egress. This is the
             # expected path under runsc.
+            #
+            # GATED ON THE RUNTIME (#2429 review, finding X4). Swallowing this
+            # unconditionally would have made the test exactly the thing its own
+            # docstring warns against: under runc a regression that made EVERY
+            # Limited lockdown fail would land here and return GREEN. The runc
+            # branch is the half that keeps this control honest, so under runc a
+            # refusal must propagate. `raise` rather than pytest.fail to keep the
+            # original traceback.
+            if runtime != "runsc":
+                raise
             return
 
         # The lockdown reported success, so it must actually BE in force -- a
