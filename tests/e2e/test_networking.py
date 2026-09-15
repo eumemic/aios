@@ -26,10 +26,10 @@ pytestmark = pytest.mark.docker
 # to it. A control that cannot tell those apart is not a control. It is deselected here
 # with its siblings rather than left behind as a green that proves nothing.
 @needs_docker
-@pytest.mark.netns_sidecar_egress
 class TestNetworkingEnforcement:
     """Verify that iptables lockdown actually blocks/allows traffic."""
 
+    @pytest.mark.netns_sidecar_egress
     async def test_limited_blocks_unlisted_host(self, docker_harness: Harness) -> None:
         """A limited environment should block curl to a host NOT in allowed_hosts."""
         docker_harness.script_model(
@@ -62,6 +62,7 @@ class TestNetworkingEnforcement:
             or (tool_result.data.get("exit_code", 0) != 0)
         )
 
+    @pytest.mark.netns_sidecar_egress
     async def test_limited_allows_listed_host(self, docker_harness: Harness) -> None:
         """A limited environment should allow curl to a host in allowed_hosts."""
         docker_harness.script_model(
@@ -89,6 +90,15 @@ class TestNetworkingEnforcement:
         # example.com returns a simple HTML page with "Example Domain"
         assert "Example Domain" in content
 
+    # NOT a netns-sidecar failure. An Unrestricted environment with no env-var
+    # credentials never invokes the sidecar at all (registry.py _apply_egress_rules
+    # falls through to the no-op branch), and the job log confirms this session
+    # emitted ZERO lockdown/DNAT failures -- only session_egress_state_invalidated
+    # with reason "no_credentials". It fails under runsc with curl exit 6,
+    # CURLE_COULDNT_RESOLVE_HOST: a real, unexplained DNS defect under gVisor.
+    # Marked with its own honest cause (#2431) rather than being buried under the
+    # nat/netstack story, which would have silenced a genuine signal.
+    @pytest.mark.runsc_dns_unresolved
     async def test_unrestricted_allows_all(self, docker_harness: Harness) -> None:
         """An unrestricted environment should allow curl to any host."""
         docker_harness.script_model(

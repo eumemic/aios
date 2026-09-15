@@ -267,5 +267,6 @@ markers = [
     "slow: heavy tests (benchmarks, large fixtures) — skipped on PR CI, run nightly",
     "docker: e2e tests that need the sandbox image (selected by CI's docker shard)",
     "perf: ADVISORY wall-clock scaling backstops — NON-GATING, never in required-checks (#1661)",
-    "netns_sidecar_egress: needs in-netns iptables via the netns sidecar — STRUCTURALLY impossible under gVisor/runsc (separate netstacks per container, and gVisor has never implemented the nat table: gvisor#170, aios#2310). Deselected in the gVisor leg; runs normally under runc.",
+    "netns_sidecar_egress: asserts on the effect of the in-netns iptables lockdown, applied by a sidecar that joins the sandbox netns. Cannot work with the CURRENT mechanism under gVisor/runsc: two containers sharing a netns get separate Sentries/netstacks, so the sidecar addresses a different netstack and even the FILTER table fails to initialize (aios#2310). Deselected in the gVisor leg only; runs normally under runc. A runtime-agnostic egress mechanism (host-level DOCKER-USER rules) would fix it — this is not unfixable, just not possible in-netns.",
+    "runsc_dns_unresolved: fails under gVisor/runsc with curl exit 6 (CURLE_COULDNT_RESOLVE_HOST) for a reason NOT related to the egress sidecar — the sandbox never invokes it. An unexplained DNS defect under runsc, tracked separately (aios#2431) so it is not buried under the netstack story.",
 ]

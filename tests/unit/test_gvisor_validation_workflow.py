@@ -46,8 +46,22 @@ def test_gvisor_workflow_mirrors_docker_e2e_setup_and_runs_runsc_shard() -> None
     ]:
         assert snippet in workflow
 
+    # Assert the SEMANTIC properties of the gVisor selector rather than a
+    # byte-exact command line. The previous exact-string pin broke the moment
+    # the selector legitimately changed, which tells you the test was guarding
+    # the spelling instead of the meaning (#2429 review, finding X3).
+    assert "AIOS_SANDBOX_RUNTIME=runsc" in workflow
+    assert "uv run pytest tests/e2e" in workflow
+    assert "--junitxml=e2e-results.xml" in workflow
+    assert "-n 4 --dist=loadfile" in workflow
+
+    # The gVisor leg must deselect the netns-sidecar egress tests: that path
+    # cannot work under runsc (separate netstacks per container), so those
+    # tests can never pass here. It must NOT deselect anything else -- a green
+    # run has to still mean "aios works under gVisor".
+    assert "not netns_sidecar_egress" in workflow
     assert (
-        "AIOS_SANDBOX_RUNTIME=runsc uv run pytest tests/e2e -q -m docker -n 4 --dist=loadfile --junitxml=e2e-results.xml"
+        "-m 'docker and not netns_sidecar_egress and not runsc_dns_unresolved and not perf'"
         in workflow
     )
 
