@@ -267,4 +267,5 @@ markers = [
     "slow: heavy tests (benchmarks, large fixtures) — skipped on PR CI, run nightly",
     "docker: e2e tests that need the sandbox image (selected by CI's docker shard)",
     "perf: ADVISORY wall-clock scaling backstops — NON-GATING, never in required-checks (#1661)",
+    "netns_sidecar_egress: needs in-netns iptables via the netns sidecar — STRUCTURALLY impossible under gVisor/runsc (separate netstacks per container, and gVisor has never implemented the nat table: gvisor#170, aios#2310). Deselected in the gVisor leg; runs normally under runc.",
 ]

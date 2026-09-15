@@ -15,7 +15,18 @@ from tests.e2e.harness import Harness, assistant, bash
 pytestmark = pytest.mark.docker
 
 
+# Every test here asserts on the EFFECT of the netns-sidecar iptables lockdown, which
+# cannot be installed under gVisor/runsc (separate netstacks per container; the nat
+# table has never been implemented -- gvisor#170, aios#2310). The lockdown fails closed,
+# so the sandbox refuses to provision and no assertion here is meaningful.
+#
+# NOTE test_limited_blocks_unlisted_host in particular: under runsc it currently
+# REPORTS PASS, and that pass is worthless. Its assertion accepts any non-zero exit,
+# so "iptables dropped the packet" and "the sandbox never came up" are indistinguishable
+# to it. A control that cannot tell those apart is not a control. It is deselected here
+# with its siblings rather than left behind as a green that proves nothing.
 @needs_docker
+@pytest.mark.netns_sidecar_egress
 class TestNetworkingEnforcement:
     """Verify that iptables lockdown actually blocks/allows traffic."""
 

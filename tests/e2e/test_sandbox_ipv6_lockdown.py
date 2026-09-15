@@ -44,7 +44,14 @@ from aios.sandbox.network import ensure_sandbox_network
 from aios.sandbox.setup import apply_network_lockdown
 from tests.conftest import needs_docker
 
-pytestmark = [needs_docker, pytest.mark.docker]
+# Requires the netns-sidecar iptables path, which CANNOT work under gVisor/runsc:
+# two runsc containers sharing a netns get separate Sentries/netstacks, and gVisor
+# has never implemented the nat table (gvisor#170, aios#2310). The lockdown then
+# fails CLOSED -- correct behaviour, but it means these tests can never pass there.
+# Deselected in the gVisor leg only; they run normally under runc.
+pytestmark = [needs_docker, pytest.mark.docker,
+    pytest.mark.netns_sidecar_egress,
+]
 
 IMAGE = "ghcr.io/eumemic/aios-sandbox:latest"
 
