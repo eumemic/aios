@@ -38,6 +38,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       # Only the routed harness: installing all three triples the install time
       # and lets an unrelated publisher hiccup block every review. The `family`
