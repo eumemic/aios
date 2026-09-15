@@ -1,23 +1,22 @@
-# aios#2410 merge-path fixround (botpost2410i)
+# aios#2410 fixround (botpost2410j) — DNAT family RED + persist-credentials
 
 PR: https://github.com/eumemic/aios/pull/2410
-Branch: `gvisorgrn` tip `e10f4e07`
-Requester: AIOS Bot
+Branch: `gvisorgrn` tip `2e0225cc`
+Fail: https://github.com/eumemic/aios/actions/runs/34822598014
+Empty-resolv e2e NOT in FAIL list anymore (DNS-by-arg worked for that). e2e RED is now DNAT family:
+- same four swap legs (HTTP_STATUS=000 / empty recorder)
+- placeholder KeyError stdout (provision fail symptom)
+nslookup-by-arg path may have broken credential swap.
+
+Also bot finding: restore `persist-credentials: false` on checkout (GITHUB_TOKEN in .git/config during agent phase) in eumemic-bot-review workflow.
 
 ## Do
-1. **Fix e2e that botpost2410h did not clear**: layer `/etc/resolv.conf` present but **empty**.
-   Fail: https://github.com/eumemic/aios/actions/runs/34807834078/job/103863091603
-   `test_image_layer_carries_the_embedded_dns_resolver` — content `''`.
-   `COPY --link` failed the CI oracle. Tip docs already warn same-path bake may be dead.
-   Make `docker cp` from a never-started container read `nameserver 127.0.0.11`, **or** fix the operator/chroot read path if baking to `/etc/resolv.conf` is impossible under BuildKit (non-special bake path + ensure getent in runsc chroot sees it).
+1. Fix credential-swap / DNAT functional path so the four swap + placeholder e2e go green without re-breaking the resolv/image-contract win.
+2. Restore `persist-credentials: false` on the agent-job checkout.
+3. Rebase onto origin/master if behind.
 
-2. **Fix fresh bot finding**: derive runsc operator image mount from the **same image as the tenant container** (`spec.image`), or reject mismatch — not `get_settings().docker_image` alone (`docker.py` ~306).
+## Constraints
+pr_only; do not merge; do not push; no Track G. DONE.md. Docker may be absent — CI oracle.
 
 ## Success
-- e2e(docker) green on the image-contract resolv test
-- Fresh ### Code review with no blocking findings
-- Mergeable
-- pr_only — do not merge; do not push (Shepherd pushes); no Track G
-- DONE.md with evidence-backed resolv approach (not another unverified --link bet)
-
-Rebase onto origin/master if behind. Keep prior #2410 security/harness work.
+e2e(docker) green + posted ### Code review with no blockers.
