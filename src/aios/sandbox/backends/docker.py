@@ -193,9 +193,12 @@ _RUNSC_OPERATOR_COMMANDS: dict[str, str] = {
 # ``PT_INTERP``, so there is no interpreter for a poisoned tenant loader to be
 # resolved as, and running one THROUGH ``ld.so`` would fail outright. busybox is
 # the one -- it is already the chroot entry binary for exactly that reason -- and
-# ``resolve_ipv4`` (:mod:`aios.sandbox.setup`) runs ``busybox nslookup`` to query
-# Docker's embedded DNS by address, because nothing on this path can supply the
-# ``/etc/resolv.conf`` glibc's ``getent`` would have to read (aios#2410).
+# ``resolve_ipv4`` (:mod:`aios.sandbox.setup`) falls back to ``busybox
+# nslookup`` to query Docker's embedded DNS by address, because nothing on this
+# path can supply the ``/etc/resolv.conf`` glibc's ``getent`` would have to read
+# (aios#2410). Its FIRST step -- the ``/etc/hosts`` scan, which is what makes a
+# ``--add-host`` alias resolvable -- needs no binary beyond the already-shadowed
+# ``awk``/``sort``.
 _RUNSC_OPERATOR_STATIC_COMMANDS: dict[str, str] = {
     "busybox": _RUNSC_OPERATOR_CHROOT,
 }
