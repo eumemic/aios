@@ -104,17 +104,42 @@ async def test_limited_lockdown_either_installs_or_refuses(tmp_path: Path) -> No
 
         # The lockdown reported success, so it must actually BE in force -- a
         # success return with no DROP policy would be the fail-open we are
-        # guarding against. Read the live policy back from inside the netns.
-        result = await backend.exec(
-            handle,
+        # guarding against.
+        #
+        # READ IT BACK THROUGH THE SIDECAR, NOT backend.exec. The sandbox holds
+        # no CAP_NET_ADMIN by design (docker.py: root-in-sandbox must not be able
+        # to flush its own lockdown), and `iptables -S` is NOT a read-only
+        # operation -- it getsockopts the table and needs that capability. An
+        # in-sandbox read therefore fails with "can't initialize iptables table
+        # `filter': Permission denied (you must be root)" even on a perfectly
+        # locked-down box: a FALSE RED that accuses a correct sandbox of running
+        # open. The first version of this test did exactly that and turned the
+        # runc gate red (#2429 review, finding X1-NEW).
+        #
+        # The sidecar joins the same netns WITH NET_ADMIN, which is how the
+        # sibling ip6tables read-back does it.
+        settings_now = get_settings()
+        script = (
             "if command -v iptables-legacy >/dev/null 2>&1; then IPT=iptables-legacy; "
-            'else IPT=iptables; fi; "$IPT" -S OUTPUT 2>&1 || true',
+            "else IPT=iptables; fi\n"
+            '"$IPT" -S OUTPUT | grep -qx -- "-P OUTPUT DROP"'
+        )
+        result = await backend.run_netns_sidecar(
+            handle.sandbox_id,
+            image=settings_now.docker_image,
+            script=script,
             timeout_seconds=20,
             max_output_bytes=20_000,
+            runtime=runtime,
         )
-        assert "-P OUTPUT DROP" in result.stdout, (
+        # Assert on the EXIT CODE, and deliberately do NOT swallow errors with
+        # `2>&1 || true`. Laundering a failed table-init into stdout makes the
+        # read succeed while proving nothing -- a fail-open dressed as a check.
+        # If the table cannot be read, that is a hard failure here.
+        assert result.exit_code == 0, (
             "apply_network_lockdown returned success but the OUTPUT policy is not "
-            f"DROP -- a Limited sandbox is running with open egress: {result.stdout!r}"
+            "DROP -- a Limited sandbox is running with open egress.\n"
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
         )
     finally:
         await backend.destroy(handle)
