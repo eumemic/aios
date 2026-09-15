@@ -263,6 +263,46 @@ class TestOrdinaryResolutionIsUnaffected:
             await r.stop()
 
 
+@pytest.mark.skipif(not hasattr(socket, "IP_PKTINFO"), reason="IP_PKTINFO is a Linux socket option")
+class TestReplySourceAddressMatchesTheQueriedAddress:
+    """REGRESSION (#2422): the chokepoint's DNS hop is the first UDP hop from
+    the sandbox to the worker, and the worker is multihomed.
+
+    In CI the worker runs on the host, so the sandbox reaches it at the
+    ``aios-worker`` ``/etc/hosts`` entry — ``host-gateway``, i.e. the
+    ``docker0`` gateway — while the route back to the sandbox leaves via the
+    ``aios-sandbox`` bridge. A wildcard-bound socket answering with plain
+    ``sendto`` therefore sources the reply from the WRONG local address; the
+    sandbox's conntrack entry does not match it, and because glibc's stub
+    resolver uses a CONNECTED socket the kernel drops the reply outright. Every
+    lookup times out, curl reports ``HTTP_STATUS=000`` and the recorder stays
+    empty — in BOTH networking modes, immune to any iptables fix.
+
+    Loopback reproduces it exactly: bind ``0.0.0.0``, query ``127.0.0.2`` from a
+    connected socket. Without the ``IP_PKTINFO`` echo the reply leaves with
+    source ``127.0.0.1`` and never arrives. The TCP path needs no equivalent —
+    an accepted socket's local address is pinned to the SYN's destination.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connected_client_on_a_secondary_local_address_gets_the_reply(
+        self, resolver: CredentialDnsResolver
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        try:
+            # ``connect`` makes the kernel drop any datagram whose source is not
+            # this exact peer — the stub resolver's behavior, and what turns a
+            # wrong reply source into a timeout rather than a stray packet.
+            sock.connect(("127.0.0.2", resolver.port))
+            await loop.sock_sendall(sock, _query(CREDENTIAL_HOST))
+            response = await asyncio.wait_for(loop.sock_recv(sock, 512), 5.0)
+        finally:
+            sock.close()
+        assert _answers(response) == [CREDENTIAL_SENTINEL_IP]
+
+
 class TestFailClosed:
     @pytest.mark.asyncio
     async def test_malformed_query_does_not_crash_the_resolver(self) -> None:
@@ -285,10 +325,10 @@ class TestFailClosed:
         without interception."""
         r = CredentialDnsResolver([CREDENTIAL_HOST])
 
-        async def _boom(*args: object, **kwargs: object) -> None:
+        def _boom(*args: object, **kwargs: object) -> None:
             raise OSError("no sockets today")
 
-        monkeypatch.setattr(asyncio.get_running_loop(), "create_datagram_endpoint", _boom)
+        monkeypatch.setattr(socket.socket, "bind", _boom)
         with pytest.raises(CredentialDnsError):
             await r.start()
 

@@ -26,6 +26,13 @@ Everything else is forwarded verbatim to the worker's own upstream resolver, so
 ordinary sandbox name resolution (including Docker network aliases such as
 ``aios-worker``) is unchanged.
 
+This interception also makes DNS the first **UDP** hop from a sandbox to the
+worker (every other chokepoint hop — tool broker, git proxy, secret-egress
+proxy — is TCP, where the accepted socket's local address is pinned to the
+SYN's destination). A multihomed worker must therefore answer from the address
+the sandbox queried, not from whatever the route back picks; see
+:func:`_reply_pktinfo`.
+
 The netns then carries exactly one credential rule, and it is keyed on a
 constant this worker chose:
 
@@ -90,6 +97,7 @@ _QTYPE_A = 1
 _QCLASS_IN = 1
 
 _MAX_UDP_RESPONSE = 512
+_MAX_UDP_QUERY = 65535
 _MAX_TCP_MESSAGE = 65535
 _UPSTREAM_TIMEOUT_S = 5.0
 _TCP_IDLE_TIMEOUT_S = 15.0
@@ -100,6 +108,14 @@ _TCP_IDLE_TIMEOUT_S = 15.0
 # ``aios-worker`` — so forwarding there keeps sandbox name resolution
 # byte-identical to what it was before interception.
 _RESOLV_CONF = Path("/etc/resolv.conf")
+
+# ``struct in_pktinfo`` — ``{int ipi_ifindex; struct in_addr ipi_spec_dst;
+# struct in_addr ipi_addr;}``, 12 bytes with no padding, native byte order.
+_PKTINFO_FORMAT = "I4s4s"
+_PKTINFO_SIZE = struct.calcsize(_PKTINFO_FORMAT)
+# Linux-only; absent on macOS, where a developer's worker and sandbox share a
+# single address anyway.
+_IP_PKTINFO: int | None = getattr(socket, "IP_PKTINFO", None)
 
 
 class CredentialDnsError(RuntimeError):
@@ -192,6 +208,39 @@ def _resolv_conf_nameserver(path: Path = _RESOLV_CONF) -> str | None:
     return None
 
 
+def _reply_pktinfo(ancdata: Iterable[tuple[int, int, bytes]]) -> bytes | None:
+    """Packed ``in_pktinfo`` that sources a reply from the address that was queried.
+
+    A wildcard-bound (``0.0.0.0``) UDP socket that answers with plain
+    ``sendto`` lets the ROUTE pick the reply's source address, which on a
+    multihomed worker is not the address the client sent to. That is fatal
+    here: the sandbox reaches the resolver at the ``aios-worker`` address
+    (``host-gateway`` → the ``docker0`` gateway when the worker runs on the
+    host), while the route back to the sandbox leaves via the
+    ``aios-sandbox`` bridge — so the reply arrives with a source the
+    sandbox's conntrack entry does not match, and is discarded. glibc's stub
+    resolver uses a *connected* socket, so the kernel drops the mismatched
+    reply before the process ever sees it and every lookup times out.
+
+    The fix is what every real resolver does: read ``IP_PKTINFO`` off the
+    query and echo the local address back on the reply.
+    ``ipi_spec_dst`` is the kernel's own answer to "what source would you use
+    to reply to this packet" (``fib_compute_spec_dst``), and on send it is the
+    field that selects the source; ``ipi_ifindex`` 0 and ``ipi_addr`` are
+    ignored there, so they go out zeroed.
+    """
+    if _IP_PKTINFO is None:
+        return None
+    for level, cmsg_type, cmsg_data in ancdata:
+        if level != socket.IPPROTO_IP or cmsg_type != _IP_PKTINFO:
+            continue
+        if len(cmsg_data) < _PKTINFO_SIZE:
+            continue
+        _ifindex, spec_dst, _hdr_dst = struct.unpack_from(_PKTINFO_FORMAT, cmsg_data)
+        return struct.pack(_PKTINFO_FORMAT, 0, spec_dst, b"\x00" * 4)
+    return None
+
+
 class CredentialDnsResolver:
     """Per-session DNS server that answers credential hosts with the sentinel.
 
@@ -210,7 +259,8 @@ class CredentialDnsResolver:
         )
         self._upstream: str | None = upstream or _resolv_conf_nameserver()
         self._port: int | None = None
-        self._udp_transport: asyncio.DatagramTransport | None = None
+        self._udp_sock: socket.socket | None = None
+        self._udp_tasks: set[asyncio.Task[None]] = set()
         self._tcp_server: asyncio.Server | None = None
         self._tcp_conns: set[asyncio.Task[None]] = set()
 
@@ -233,13 +283,20 @@ class CredentialDnsResolver:
         loop = asyncio.get_running_loop()
         try:
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Assigned before the first fallible call so a later failure still
+            # closes the descriptor through :meth:`stop`.
+            self._udp_sock = udp_sock
             udp_sock.setblocking(False)
+            if _IP_PKTINFO is not None:
+                # See :func:`_reply_pktinfo`: without this the reply to a
+                # sandbox query can leave with the wrong source address.
+                udp_sock.setsockopt(socket.IPPROTO_IP, _IP_PKTINFO, 1)
             udp_sock.bind(("0.0.0.0", 0))
             port = udp_sock.getsockname()[1]
-            transport, _protocol = await loop.create_datagram_endpoint(
-                lambda: _UdpProtocol(self), sock=udp_sock
-            )
-            self._udp_transport = transport
+            # Read the socket directly rather than through a DatagramTransport:
+            # the transport has no way to attach the ``IP_PKTINFO`` control
+            # message the reply needs.
+            loop.add_reader(udp_sock.fileno(), self._read_udp)
             self._tcp_server = await asyncio.start_server(self._handle_tcp, "0.0.0.0", port)
             self._port = port
         except BaseException as exc:
@@ -253,9 +310,15 @@ class CredentialDnsResolver:
         )
 
     async def stop(self) -> None:
-        if self._udp_transport is not None:
-            self._udp_transport.close()
-            self._udp_transport = None
+        if self._udp_sock is not None:
+            with contextlib.suppress(Exception):
+                asyncio.get_running_loop().remove_reader(self._udp_sock.fileno())
+            self._udp_sock.close()
+            self._udp_sock = None
+        for task in list(self._udp_tasks):
+            task.cancel()
+        if self._udp_tasks:
+            await asyncio.gather(*self._udp_tasks, return_exceptions=True)
         if self._tcp_server is not None:
             self._tcp_server.close()
             for task in list(self._tcp_conns):
@@ -316,6 +379,48 @@ class CredentialDnsResolver:
         finally:
             transport.close()
 
+    def _read_udp(self) -> None:
+        """Read one query off the wildcard socket (level-triggered: the loop
+        re-enters while more are queued)."""
+        sock = self._udp_sock
+        if sock is None:
+            return
+        try:
+            data, ancdata, _flags, addr = sock.recvmsg(
+                _MAX_UDP_QUERY, socket.CMSG_SPACE(_PKTINFO_SIZE)
+            )
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError as exc:
+            log.warning("credential_dns.udp_error", error_type=type(exc).__name__)
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._respond_udp(data, addr, _reply_pktinfo(ancdata))
+        )
+        self._udp_tasks.add(task)
+        task.add_done_callback(self._udp_tasks.discard)
+
+    async def _respond_udp(self, data: bytes, addr: tuple[str, int], pktinfo: bytes | None) -> None:
+        try:
+            response = await self.answer(data)
+        except Exception as exc:
+            log.warning("credential_dns.udp_error", error_type=type(exc).__name__)
+            response = _servfail(data)
+        sock = self._udp_sock
+        if not response or sock is None:
+            return
+        # Truncate rather than fragment; a client that needs the full answer
+        # retries over TCP, which we also serve.
+        payload = response[:_MAX_UDP_RESPONSE]
+        try:
+            if pktinfo is None:
+                sock.sendto(payload, addr)
+            else:
+                assert _IP_PKTINFO is not None
+                sock.sendmsg([payload], [(socket.IPPROTO_IP, _IP_PKTINFO, pktinfo)], 0, addr)
+        except OSError as exc:
+            log.warning("credential_dns.udp_error", error_type=type(exc).__name__)
+
     async def _handle_tcp(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         if task is not None:
@@ -345,35 +450,6 @@ class CredentialDnsResolver:
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
-
-
-class _UdpProtocol(asyncio.DatagramProtocol):
-    """Datagram side of :class:`CredentialDnsResolver`."""
-
-    def __init__(self, resolver: CredentialDnsResolver) -> None:
-        self._resolver = resolver
-        self._transport: asyncio.DatagramTransport | None = None
-        self._tasks: set[asyncio.Task[None]] = set()
-
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        assert isinstance(transport, asyncio.DatagramTransport)
-        self._transport = transport
-
-    def datagram_received(self, data: bytes, addr: tuple[str | int, ...]) -> None:
-        task = asyncio.get_running_loop().create_task(self._respond(data, addr))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _respond(self, data: bytes, addr: tuple[str | int, ...]) -> None:
-        try:
-            response = await self._resolver.answer(data)
-        except Exception as exc:
-            log.warning("credential_dns.udp_error", error_type=type(exc).__name__)
-            response = _servfail(data)
-        if response and self._transport is not None:
-            # Truncate rather than fragment; a client that needs the full
-            # answer retries over TCP, which we also serve.
-            self._transport.sendto(response[:_MAX_UDP_RESPONSE], addr)
 
 
 class _ForwardProtocol(asyncio.DatagramProtocol):
