@@ -1,213 +1,134 @@
-# Uncorrelated review — aios#2410 fixround `botpost2410l`
+# Uncorrelated review — aios#2410 fixround `botpost2410m`
 
-**Verdict: FAIL (blocking).**
+**Verdict: PASS.**
 
 | | |
 |---|---|
-| Reviewed tip | `e07df12520521b1dcca7c711c6a48f4d20e530ae` |
-| Review branch | `botpost2410lrev` (this worktree; not pushed) |
-| Implementer | gpt-5.6-sol on `botpost2410l` |
-| Checker | claude-opus-5 on `botpost2410lrev` |
-| `origin/gvisorgrn` | `e07df125` — identical to the reviewed tip |
-| `origin/master` | `63337f26` — an ancestor of the tip |
+| Reviewed tip | `88c0d3b2625d204380adf4c712bf9255101f0ecc` |
+| Final HEAD | this `docs(review)` commit on `88c0d3b2` (no product changes) |
+| Review branch | `botpost2410mrev` (this worktree; not pushed) |
+| Implementer | claude-opus-5 on `botpost2410m` |
+| Checker | grok-4.6 on `botpost2410mrev` |
+| Parent / `origin/gvisorgrn` | `d21d38623ecc0a13e9c011ba5fb591b1e9ddb0d4` — FAIL review-docs only; parent of the product commit |
+| `origin/master` | `63337f26378ddd2c5ce1567faed60f38d8a5a63e` — ancestor of the tip |
 
-The round delivered nothing. The implementer's Codex session aborted at model
-capacity before it ran, so `botpost2410l`'s HEAD is still round k's FAIL review
-commit. Item 1 — the actual credential-swap/DNAT fix — has now been skipped for
-three consecutive rounds (j, k, l), and the six e2e failures reproduce unchanged
-at this exact tip.
+One product commit ahead of `origin/gvisorgrn`. Rebase was not needed (`origin/gvisorgrn` and `origin/master` are both ancestors). Shape 2 (out-of-netns IP inject) is not in the diff. No push, no PR.
 
-This review re-confirms the pinned root cause against the source, and adds the
-two facts the next round needs before it writes the fix: **which** `/etc/hosts`
-each runtime's lockdown context actually reads, and why that makes "hosts first"
-correct for the red lane but silently inert on the runsc lane.
+---
+
+## Scope vs TASK
+
+TASK asked for shape 1 only:
+
+1. `resolve_ipv4` (the single helper used for PROXY_IP / `dnat_target` alias resolution): awk `/etc/hosts` **first**, then busybox nslookup.
+2. Must not restore `getent`.
+3. Document the tenant-writable hosts caveat on the refresh path.
+4. Hosts-only oracle/unit if feasible.
+5. Rebase if needed; true DONE.md for this round; do not push.
+
+All five hold. Files in `d21d3862..88c0d3b2` are exactly those TASK listed: `src/aios/sandbox/setup.py`, `src/aios/sandbox/backends/docker.py` (comment only), `tests/unit/sandbox/test_sandbox_dns_resolution.py`, `DONE.md`.
 
 ---
 
 ## Findings
 
-### 1. [BLOCKING] No product change. The tip is a review commit.
+No blocking findings. The round does the thing the last three rounds skipped.
 
-```
-$ git diff --stat d27c242d..HEAD
- REVIEW.md | 342 ++++++++++++++++++-------------------
- TASK.md   |  25 ++--
-```
+### Hosts-first lands in the emitted scripts
 
-`git log` on `botpost2410l` ends at `e07df125` *docs(review): … — FAIL*, which is
-this round's **input**, not its output. The only working-tree change was the
-uncommitted TASK.md rewrite (the round-l brief itself, authored by the shepherd).
-`src/aios/sandbox/setup.py` and `src/aios/sandbox/backends/docker.py` are
-byte-identical to `2e0225cc`, the commit the failure was first reported against.
+`setup._RESOLVE_IPV4_FN` is no longer DNS-only. Evaluated at this tip it is:
 
-TASK items 1 and 2 are untouched; item 3 (true DONE.md) is untouched; item 4
-(rebase) needed no action; item 5 (do not push) held.
-
-### 2. [BLOCKING] `resolve_ipv4` is still DNS-only.
-
-`src/aios/sandbox/setup.py:365-371`, unchanged since `9b246ab7`:
-
-```python
-_RESOLVE_IPV4_FN = (
-    'resolve_ipv4() { busybox nslookup "$1" ' + _EMBEDDED_DNS_ADDRESS + " 2>/dev/null"
-    ...
+```sh
+resolve_ipv4() {
+  _hosts_ips=$(awk -v name="$1" '{ sub(/#.*/, "") } $1 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { for (i = 2; i <= NF; i++) if ($i == name) { print $1; next } }' /etc/hosts 2>/dev/null | sort -u)
+  if [ -n "$_hosts_ips" ]; then printf '%s\n' "$_hosts_ips"; return 0; fi
+  busybox nslookup "$1" 127.0.0.11 2>/dev/null | awk '/^Name:/ { answer = 1 } /^Address:/ && answer && $2 != "127.0.0.11" && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }' | sort -u
+}
 ```
 
-There is no NSS path, no `/etc/hosts` read, and no fallback. A hostname that
-exists **only** as an `--add-host` entry resolves to nothing. `PROXY_IP` at
-`setup.py:460` is then empty, the `if [ -n "$PROXY_IP" ]` guard at `:461` skips
-the whole DNAT block, apply still exits 0, and the read-back at `:1141` raises
+That function is interpolated into `build_iptables_script`, `build_secret_egress_dnat_script`, and `build_egress_resolve_script` — the three scripts that actually call `resolve_ipv4` for PROXY_IP / allow-list / credential-host lookups. There is no sibling resolver. `build_egress_refresh_script` continues to take an already-resolved `(proxy_ip, port)` and does not look names up; the names it consumes come from the resolve script, which now has hosts-first.
 
-> `nat OUTPUT carries no DNAT rule after apply; refusing to run an
-> env-var-credentialed sandbox whose secret-swap DNAT is unverified`
+The CI failure chain this is aimed at (`resolve_ipv4 aios-worker` → empty `PROXY_IP` → skipped nat block → `nat OUTPUT carries no DNAT rule after apply`) is closed on the runc lane, where `--network container:` bind-mounts the sandbox's `/etc/hosts` (including `--add-host aios-worker:host-gateway`) into the sidecar.
 
-which is exactly the error CI reports. The root cause pinned in round k's review
-survives source inspection at this tip.
+Properties checked against the emitted text, not the Python comments:
 
-### 3. [BLOCKING] CI is red at this tip, with the same six failures.
+- `/etc/hosts` is consulted **before** `busybox nslookup` in every generated script that defines the helper.
+- `getent` is absent from those scripts. `test_no_script_touches_resolv_conf_or_getent` still pins both `getent` and `/etc/resolv.conf` out; `TestIPv4OnlyResolution.test_no_script_resolves_through_glibc` does the same on a wider script set.
+- IPv4-only on both halves (dotted-quad on `$1` for hosts, `$2` for DNS). AAAA / `::1` cannot reach `iptables -d`.
+- Both halves are pipelines ending in `sort -u`, so a missing hosts file or a failed nslookup cannot abort `set -e` (no `pipefail` on these scripts). Covered by `test_dns_still_answers_when_there_is_no_hosts_file`.
+- `awk` / `sort` were already in `_RUNSC_OPERATOR_COMMANDS`; no new unshadowed binary. `test_script_runs_no_unshadowed_command` still applies.
 
-Run `34921131742` (Code Validation, head `e07df125`), job `104229330589`
-*e2e (docker)* — the newer run than the `34919782033` cited in the brief, and on
-this tip rather than `d27c242d`:
+### getent stays out; shape 2 was not smuggled
 
-```
-FAILED tests/e2e/test_run_env_var_placeholder.py::test_run_bash_env_var_placeholder_round_trip - KeyError: 'stdout'
-FAILED tests/e2e/test_run_env_var_placeholder.py::test_run_swap_fires_under_unrestricted_dnat_only - assert 'HTTP_STATUS=200' in ''
-FAILED tests/e2e/test_run_env_var_placeholder.py::test_run_swap_fires_under_limited - assert 'HTTP_STATUS=200' in ''
-FAILED tests/e2e/test_trigger_fire_env_var_swap.py::test_trigger_swap_fires_under_limited - assert 0 == 1
-FAILED tests/e2e/test_trigger_fire_env_var_swap.py::test_trigger_swap_fires_under_unrestricted_dnat_only - assert 0 == 1
-FAILED tests/e2e/test_env_var_placeholder_materialized.py::test_placeholder_visible_in_container_secret_absent - KeyError: 'stdout'
-```
+`docker.py` product diff is the `_RUNSC_OPERATOR_STATIC_COMMANDS` comment only — it now says `resolve_ipv4` *falls back* to busybox nslookup and that the hosts scan needs no extra shadow. `spec.host_gateway_alias` is still `--add-host <alias>:host-gateway`. No address is resolved on the host and baked into the script.
 
-with the provisioning error above logged upstream of every one of them. `e2e
-(docker)` is the only failing job in the run.
+Runsc remains DNS-fallback-on-miss, as documented: the exec chroots into the operator image and reads *that* `/etc/hosts`, which has no alias. TASK called that shape 2 and out of scope. DONE.md states it rather than hiding it.
 
-### 4. [BLOCKING] DONE.md is the stale `botpost2410i` report.
+### Caveat is on the refresh path
 
-Its first line:
+`build_egress_resolve_script`'s docstring carries the tenant-writable `/etc/hosts` caveat in full (refresh tick; tenant can retarget an already-allowed *name*, not admit a new one). `_RESOLVE_IPV4_FN`'s comment block summarises the same and points at that function. That is what TASK asked for.
 
-> `Branch `botpost2410i`, on top of `e10f4e07` … Two items were asked for. Both are done.`
+DONE.md also flags the order trade (DNS-first-with-hosts-fallback would have avoided the exposure while still catching a DNS-miss `aios-worker`) and correctly notes the task pinned hosts-first. Not re-decided here.
 
-Beyond being the wrong round, it is now **affirmatively misleading**: §1 "The
-fix" presents the busybox-nslookup resolver as correct and fail-closed, with a
-seven-item evidence chain, and says nothing about the regression it caused —
-because it was written before CI ran it. Two live code comments cite it as the
-authority for that design (`setup.py:329-330`, `docker.py:1342`), so the stale
-report is load-bearing documentation for the defect it caused.
+### Hosts-only oracles assert something real
 
-I have deliberately **not** rewritten DONE.md. A checker authoring the maker's
-report for a round in which no work happened would destroy the only signal that
-the round produced nothing.
+Prior DNS oracles all queried names the stub resolver answers, so they could not see this bug. New tests in `tests/unit/sandbox/test_sandbox_dns_resolution.py` query names the stub **fails** (or answers differently):
 
-### 5. [BLOCKING] The DNS oracles are structurally incapable of catching this.
+- `test_add_host_alias_resolves_without_dns` — hosts-only name, DNS miss.
+- `test_hosts_file_is_consulted_before_dns` — order: hosts short-circuits rather than merging.
+- `test_dns_still_answers_when_the_hosts_file_has_no_entry` / `…when_there_is_no_hosts_file` — prefix, not replacement; missing file is a miss, not an abort.
+- Parse tests: aliases, `#` comments, IPv6 lines, partial-name non-matches.
+- `test_hosts_only_proxy_alias_still_installs_the_dnat` — the CI-failure oracle at **rule** level: real `build_secret_egress_dnat_script`, recording iptables shims, stub busybox that fails `aios-worker`, fixture hosts with `172.17.0.1 aios-worker`, then asserts the two `-t nat -A OUTPUT … -j DNAT --to-destination 172.17.0.1:49152` lines. A DNS-only helper would skip the nat block and record zero DNAT rules.
 
-TASK item 2 asked for them to move into the sidecar-after-flush context. They
-did not move, and inspection shows why that matters more than "wrong context" —
-both oracles resolve a name that **can never exhibit the bug**:
+`_resolve()` now retargets `_HOSTS_FILE` at a fixture, so the old DNS assertions no longer depend on the test machine's `/etc/hosts`.
 
-* `tests/e2e/test_sandbox_image_contract.py::test_busybox_nslookup_answers_from_the_embedded_dns`
-  (`:243-288`) creates a throwaway user-defined network and resolves the
-  container's **own network alias** — a name Docker's embedded DNS serves by
-  construction. The failing name is one embedded DNS has never heard of.
-* `tests/unit/sandbox/test_sandbox_dns_resolution.py` runs the real
-  `_RESOLVE_IPV4_FN` against a **stub busybox** (`_BUSYBOX_STUB`, `:107-120`)
-  that answers everything except `missing.example.com`. A hosts-only name is not
-  representable in that stub.
+### DONE.md vs reality
 
-Both were green through the entire regression. Any fix must land an oracle keyed
-on *a name present only in `/etc/hosts`*, or the next resolver change will break
-the same way.
+DONE.md is a true report for **this** round (`botpost2410m`), not a stale i/k write-up. It correctly states:
 
-### 6. Rebase: not needed. (TASK item 4 — verified, no action.)
+- tip is one product commit on `d21d3862` / `origin/gvisorgrn`; no rebase;
+- root cause (`9b246ab7` dropped nsswitch `files`);
+- the emitted helper shape;
+- getent still banned;
+- runsc / shape 2 out of scope;
+- tenant-writable hosts on refresh;
+- e2e not run here.
 
-`git merge-base --is-ancestor origin/master HEAD` succeeds (`origin/master`
-`63337f26`), and the tip already equals `origin/gvisorgrn`. The PR branch stays
-`gvisorgrn`.
-
-### 7. Local checks on the unchanged tree.
-
-`uv run pytest tests/unit/sandbox/test_sandbox_dns_resolution.py
-tests/unit/test_networking.py -q` → **129 passed**. This is a statement about
-the tree, not about the fix: the unit suite was green throughout the regression
-(finding 5). Docker is absent in this environment (`docker: No such file or
-directory`), so no e2e was run here and **no e2e-green claim is made** — CI is
-the oracle.
+The `6210 passed` unit-suite figure is a chunked sum under host memory pressure, with an explicit caveat that `-n 4` OOMs. Not independently re-counted here. Targeted tests were re-run (below). DONE does not claim e2e green.
 
 ---
 
-## For the next round: which `/etc/hosts` each context reads
+## Checks run this review
 
-The brief prescribes "hosts first, then busybox nslookup". That is right for the
-red lane, but the two runtimes do **not** see the same hosts file, and the fix
-must say so or it will be assumed to cover both.
+```
+git fetch origin gvisorgrn master
+# origin/gvisorgrn = d21d3862, ancestor of HEAD
+# origin/master   = 63337f26, ancestor of HEAD
 
-**The red lane is runc.** `code-validation.yml`'s `e2e (docker)` step sets no
-`AIOS_SANDBOX_RUNTIME`, and `config.py:349` defaults `sandbox_runtime=None`, so
-`run_netns_sidecar` takes the `else` branch at `docker.py:1369-1381`:
-`docker run --rm --network container:<id>`. moby copies `HostsPath` and
-`ResolvConfPath` from the joined container for `container:` network mode, so the
-sidecar reads the **target sandbox's** `/etc/hosts` — which carries the
-`--add-host aios-worker:host-gateway` entry from `docker.py:394`. That is why
-`getent ahostsv4` was green at `e10f4e07` and why a hosts read fixes this lane.
-(Stated from moby's documented behaviour; **not** re-verified here — no Docker in
-this environment. It is the load-bearing assumption of the whole fix and the
-implementer should confirm it empirically before relying on it. The same
-question puts a question mark on `setup.py:320-322`'s claim that the sidecar
-"inherits the IMAGE's" resolv.conf, which is part of the stated justification
-for the `9b246ab7` redesign.)
+uv run pytest tests/unit/sandbox/test_sandbox_dns_resolution.py \
+              tests/unit/sandbox/test_runsc_operator_shadow.py \
+              tests/unit/test_networking.py::TestIPv4OnlyResolution -q
+# 36 passed
 
-**The runsc lane reads a different file.** `docker.py:1350-1364` `chroot`s into
-`_RUNSC_OPERATOR_ROOT` before the script runs, so post-chroot `/etc/hosts` is the
-**operator image's** — exactly as that method's own docstring already says about
-`/etc/resolv.conf` (`:1335-1339`). It has no `aios-worker` entry, so hosts-first
-resolves nothing there and `PROXY_IP` stays empty under runsc whenever the worker
-runs on the host. Bounded, but must be stated:
+uv run ruff check / format --check on the three Python files touched
+# clean
+```
 
-* production is unaffected — the worker is containerized
-  (`spec.py:1238` sets `host_gateway_alias=None` when
-  `is_running_in_container()`), joins the network, and embedded DNS serves the
-  alias on both runtimes;
-* `gvisor-validation` is `workflow_dispatch` + weekly cron and has failed on
-  `master` for five consecutive weeks, so it will not surface this.
+Emitted scripts inspected via `setup.build_*`: hosts-first present, `getent` / `/etc/resolv.conf` absent.
 
-Closing it properly means giving the script the address rather than a name for
-the proxy alias (resolve worker-side, inject the literal), which is the brief's
-shape 2 and should not be smuggled in under shape 1 without the shepherd's call.
-
-**Two constraints the fix must respect.**
-
-1. `tests/unit/sandbox/test_sandbox_dns_resolution.py::test_no_script_touches_resolv_conf_or_getent`
-   pins `"getent" not in script`. The hosts lookup must therefore be a direct
-   parse of `/etc/hosts` (awk — already in the operator shadow set), not a
-   restored `getent`. Restoring `getent` would also restore the
-   `/etc/resolv.conf` dependence that `9b246ab7` existed to remove.
-2. Order is load-bearing and so is the tenant-writability caveat. On runc the
-   file read is the tenant container's own `/etc/hosts`, writable by root inside
-   the sandbox. A tenant that poisons it chooses `$PROXY_IP` and the learned
-   addresses that the per-host ACCEPT/DNAT rules are built from — and the egress
-   **refresh** path (`setup.py:705-725`) re-resolves *while the tenant is live*,
-   so this is not only a provision-time window. This is a **restoration** of
-   `e10f4e07` behaviour, not a new hole (`getent` read the same file through
-   NSS), but it belongs in the comment block, and whether the hosts read should
-   be narrowed to the proxy alias alone is a design call for the shepherd, not
-   something to decide inside the fix.
+E2E was not run (no Docker in this container). CI remains the e2e oracle; this review does not claim those six credential-swap tests green.
 
 ---
 
-## Why this review lands no fix
+## Nits (non-blocking, not fixed)
 
-Per the review brief: when the implementer misses the work entirely, document it
-as blocking rather than expanding into a rewrite unless a small correct fix is
-clear and in-scope. It is not. What is missing is the round's **entire** scope —
-product change, hosts-only oracle, and DONE.md — and the fix carries a tenant-
-writability tradeoff and a runsc gap that want the shepherd's sign-off, not a
-checker's unilateral commit. Maker ≠ checker holds: writing it here would leave
-the result unreviewed.
+- `DockerBackend.run_netns_sidecar` still describes `_RESOLVE_IPV4_FN` as “passes the embedded resolver's address to busybox nslookup as an argument” (`docker.py` ~1343). True of the DNS half; it does not mention the new hosts scan. The nearby `_RUNSC_OPERATOR_STATIC_COMMANDS` comment *was* updated. Incomplete, not wrong.
+- `_nat_dnat_lines` still says “proxy-alias DNS miss” for the empty-`PROXY_IP` guard. The miss can now be hosts+DNS.
 
-**Recommendation:** re-run `botpost2410l` on a model with capacity, with findings
-5 and the two constraints above folded into the brief.
+Neither is in TASK scope and neither changes behaviour.
 
-**Final HEAD:** the product tip is unchanged at
-`e07df12520521b1dcca7c711c6a48f4d20e530ae` — no source file was touched by this
-round or by this review. `botpost2410lrev` adds exactly one commit on top of it,
-this document (`git rev-parse botpost2410lrev`). Not pushed, no PR.
+---
+
+## Verdict
+
+**PASS.** Shape 1 is in the emitted helper, getent is still pinned out, the hosts-only DNAT oracle would have failed on the pre-fix helper, shape 2 was not smuggled, DONE.md matches this tip, rebase was unnecessary. Remaining e2e proof is CI's, not this host's.
