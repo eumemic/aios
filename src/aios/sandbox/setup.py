@@ -348,51 +348,29 @@ _IP6TABLES_CREDENTIAL_HTTPS_DENY_LINES = (
 
 # Docker's embedded DNS, served inside every user-defined-network netns (the
 # sandbox runs on the ``aios-sandbox`` user-defined bridge). Every hostname the
-# lockdown scripts resolve is resolved against THIS address and no other.
+# lockdown scripts resolve THROUGH DNS is resolved against THIS address and no
+# other.
 _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 
 
-# Emitted shell helper that resolves a hostname to its **IPv4 addresses only**,
-# one per line. Centralizes the IPv4-only resolution shared by every host
-# lookup in the lockdown scripts (the allowed-host loops, the extra-host-ports
-# loop, the credential-host DNAT loop, and the proxy-alias lookup), so the
-# IPv4-only invariant lives in exactly one place (#978).
-#
-# NAMES THE RESOLVER EXPLICITLY -- no ``/etc/resolv.conf`` anywhere on this
-# path (aios#2410). glibc's ``getent`` has no way to be pointed at a server, so
-# it can only read that file, and on both sidecar shapes that file is the wrong
-# one or an unwritable one:
-#
-#   * runc: Docker writes no resolv.conf for a ``--network container:<id>``
-#     sidecar, so it inherits the IMAGE's file;
-#   * runsc: the exec chroots into the operator image mounted READ-ONLY, so it
-#     reads that image's file and nothing can write another one.
-#
-# Baking the right file into the image does not work either: BuildKit treats
-# ``/etc/resolv.conf`` as runtime-managed and commits an EMPTY entry for any
-# ``COPY`` to that path -- verified against a CI-built image through ``docker
-# cp`` from a never-started container, with both a plain ``COPY`` and
-# ``COPY --link`` (moby/buildkit#1267; see DONE.md for the full evidence
-# chain). A resolver that cannot be baked and cannot be written has to be
-# passed as an argument, so it is.
-#
-# ``busybox nslookup`` rather than ``getent``: busybox is already in the image
-# as the runsc chroot's static entry binary, it takes the server as an
-# argument, and being static it needs no dynamic loader -- so the runsc
-# preamble can bind it directly instead of through the operator image's ld.so.
-#
-# Why IPv4-only: every rule emitted by these scripts is an IPv4 ``iptables``
-# command, and the secret-egress proxy binds the IPv4 ``WORKER_NETWORK_ALIAS``
-# (it cannot intercept IPv6). Feeding an AAAA literal to an IPv4-only
-# ``iptables -d`` would error, and under ``set -e`` abort the whole apply. The
-# sandbox network is currently IPv4-only so this is latent today, but if an
-# IPv6-capable network is ever enabled it would break Limited networking on
-# every IPv6-resolving host. Keeping only dotted-quad answers means any
-# AAAA/IPv6 egress is simply dropped by the default policy (fail-closed) --
-# which is the correct semantics for credential hosts too (IPv6 must never be
-# sent un-proxied).
-#
-# The parse, against busybox 1.35 ``nslookup`` output:
+# The netns's own name table, consulted BEFORE DNS (see ``_RESOLVE_IPV4_FN``).
+# A named constant so a test can retarget the lookup at a fixture file.
+_HOSTS_FILE = "/etc/hosts"
+
+
+# awk program that reads ``_HOSTS_FILE`` looking for ``name``: strip the
+# comment, keep only lines whose first field is a dotted quad (so ``::1
+# localhost`` and friends never reach an IPv4 ``iptables -d``), and print that
+# address when ``name`` matches the canonical name or any alias on the line.
+# ``next`` after the first hit so a line naming it twice prints once.
+_HOSTS_LOOKUP_AWK = (
+    '{ sub(/#.*/, "") } '
+    "$1 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ "
+    "{ for (i = 2; i <= NF; i++) if ($i == name) { print $1; next } }"
+)
+
+
+# awk program parsing busybox 1.35 ``nslookup`` output:
 #
 #     Server:\t\t127.0.0.11
 #     Address:\t127.0.0.11:53
@@ -405,16 +383,105 @@ _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 # mistaken for an answer and handed to ``iptables -d`` or picked up as
 # ``$PROXY_IP``. AAAA answers print in the same ``Address:`` shape and are
 # rejected by the dotted-quad test.
-#
-# A resolution miss prints nothing (the caller's ``for`` loop / ``$()`` capture
-# sees no IPs), so the host gets no rule -- fail-closed, never a bypass.
-_RESOLVE_IPV4_FN = (
-    'resolve_ipv4() { busybox nslookup "$1" ' + _EMBEDDED_DNS_ADDRESS + " 2>/dev/null"
-    " | awk '/^Name:/ { answer = 1 }"
-    ' /^Address:/ && answer && $2 != "'
+_NSLOOKUP_PARSE_AWK = (
+    "/^Name:/ { answer = 1 } "
+    '/^Address:/ && answer && $2 != "' + _EMBEDDED_DNS_ADDRESS + '" '
+    "&& $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }"
+)
+
+_HOSTS_LOOKUP_CMD = (
+    'awk -v name="$1" \'' + _HOSTS_LOOKUP_AWK + "' " + _HOSTS_FILE + " 2>/dev/null | sort -u"
+)
+
+_NSLOOKUP_CMD = (
+    'busybox nslookup "$1" '
     + _EMBEDDED_DNS_ADDRESS
-    + "\" && $2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ { print $2 }'"
-    " | sort -u; }"
+    + " 2>/dev/null | awk '"
+    + _NSLOOKUP_PARSE_AWK
+    + "' | sort -u"
+)
+
+
+# Emitted shell helper that resolves a hostname to its **IPv4 addresses only**,
+# one per line. Centralizes the resolution shared by every host lookup in the
+# lockdown scripts (the allowed-host loops, the extra-host-ports loop, the
+# credential-host DNAT loop, and the proxy-alias lookup), so every invariant
+# below lives in exactly one place (#978).
+#
+# HOSTS FIRST, THEN DNS (aios#2410) -- the ``files dns`` order glibc gives
+# every other resolver in the container, because a DNS-only lookup cannot see a
+# ``--add-host`` alias. ``aios-worker`` has TWO resolution paths (see
+# :mod:`aios.sandbox.network`): the embedded DNS when the worker itself sits on
+# the sandbox network, and ``/etc/hosts`` when it runs on the HOST -- the e2e
+# and host-worker shape, where the sandbox is created with ``--add-host
+# aios-worker:host-gateway`` and Docker writes that into the container's
+# ``/etc/hosts`` WITHOUT publishing it to the embedded DNS at 127.0.0.11. Only
+# the first path survives a DNS-only lookup, so on the second ``resolve_ipv4
+# aios-worker`` answers nothing, ``PROXY_IP`` comes back empty, the whole
+# ``if [ -n "$PROXY_IP" ]`` nat block is skipped, and the apply exits 0 with
+# ``nat OUTPUT`` carrying no DNAT rule at all -- the credential-host redirect
+# silently absent.
+#
+# Which ``/etc/hosts`` each sidecar shape reads:
+#
+#   * runc: the sidecar joins with ``--network container:<id>``, and Docker
+#     bind-mounts the TARGET's ``/etc/hosts`` into it along with the rest of the
+#     netns-owned files. So the sidecar reads the SANDBOX's file, ``--add-host``
+#     alias included, and the lookup lands.
+#   * runsc: the exec chroots into the read-only operator image first, so it
+#     reads the OPERATOR image's ``/etc/hosts``, which carries no alias. The
+#     lookup misses and falls through to DNS -- i.e. exactly the DNS-only
+#     behaviour it has today. No regression, and no fix either: closing it means
+#     injecting an address resolved outside the netns instead of looking one up
+#     inside it, which is a different change and deliberately not attempted here.
+#
+# NOT a return to ``getent``, which stays banned (pinned by
+# ``test_no_script_touches_resolv_conf_or_getent``). glibc reads the hosts file
+# AND ``/etc/resolv.conf``, and the resolv.conf half is the unusable one: it
+# cannot be written on either sidecar shape and BuildKit commits an EMPTY entry
+# for any ``COPY`` to that path, verified against a CI-built image with a plain
+# ``COPY`` and again with ``COPY --link`` (moby/buildkit#1267; DONE.md carries
+# the evidence chain). Reading the hosts file with awk takes the ``files`` half
+# of nsswitch without taking the ``dns`` half's dependency on a file we cannot
+# supply; the ``dns`` half is busybox nslookup with the server as an ARGUMENT.
+#
+# ``busybox nslookup`` rather than any glibc path: busybox is already in the
+# image as the runsc chroot's static entry binary, it takes the server as an
+# argument, and being static it needs no dynamic loader -- so the runsc
+# preamble can bind it directly instead of through the operator image's ld.so.
+#
+# TENANT-WRITABLE INPUT. On the runc shape the file above is the sandbox's, and
+# root inside the sandbox can write it. A tenant entry cannot introduce a NAME
+# (only operator-configured hosts are ever looked up) but it can choose the
+# ADDRESS an allowed name resolves to, and therefore the address a rule is
+# installed for. Provision-time applies are out of reach -- the lockdown lands
+# before any tenant code runs -- so the exposed path is the refresh tick; see
+# :func:`build_egress_resolve_script`, which carries the caveat in full.
+#
+# Why IPv4-only: every rule emitted by these scripts is an IPv4 ``iptables``
+# command, and the secret-egress proxy binds the IPv4 ``WORKER_NETWORK_ALIAS``
+# (it cannot intercept IPv6). Feeding an AAAA literal to an IPv4-only
+# ``iptables -d`` would error, and under ``set -e`` abort the whole apply. The
+# sandbox network is currently IPv4-only so this is latent today, but if an
+# IPv6-capable network is ever enabled it would break Limited networking on
+# every IPv6-resolving host. Keeping only dotted-quad answers means any
+# AAAA/IPv6 egress is simply dropped by the default policy (fail-closed) --
+# which is the correct semantics for credential hosts too (IPv6 must never be
+# sent un-proxied).
+#
+# A resolution miss on BOTH steps prints nothing (the caller's ``for`` loop /
+# ``$()`` capture sees no IPs), so the host gets no rule -- fail-closed, never a
+# bypass. Both steps are pipelines ending in ``sort -u``, so neither a missing
+# hosts file nor an nslookup failure can return nonzero and abort the caller's
+# ``set -e`` script.
+_RESOLVE_IPV4_FN = "\n".join(
+    (
+        "resolve_ipv4() {",
+        f"  _hosts_ips=$({_HOSTS_LOOKUP_CMD})",
+        '  if [ -n "$_hosts_ips" ]; then printf \'%s\\n\' "$_hosts_ips"; return 0; fi',
+        f"  {_NSLOOKUP_CMD}",
+        "}",
+    )
 )
 
 
@@ -601,7 +668,23 @@ def _nat_dnat_lines(
 
 
 def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
-    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP."""
+    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP.
+
+    CAVEAT — TENANT-WRITABLE ``/etc/hosts`` ON THIS PATH. ``resolve_ipv4`` reads
+    the hosts file before asking DNS (aios#2410, needed so a ``--add-host``
+    alias resolves at all), and on the runc shape that file is the SANDBOX's,
+    writable by root inside the container. The provision-time applies are out of
+    reach — the lockdown lands before any tenant code runs — but this script
+    runs on every refresh tick, by which point the tenant has had the container.
+    So an entry written there names the address the refreshed ACCEPT/DNAT rule
+    is installed for. The exposure is the allow-list's ADDRESSES, never its
+    NAMES: only operator-configured hosts are ever looked up, so a tenant can
+    point an already-allowed name at an address of their choosing, not admit a
+    name of their choosing. Closing it means resolving OUTSIDE the tenant's
+    reach and injecting the answer into the script instead of looking it up in
+    the netns — the same change the runsc alias gap needs, and out of scope
+    here.
+    """
     lines = ["set -e", _RESOLVE_IPV4_FN]
     for host in sorted(set(hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
