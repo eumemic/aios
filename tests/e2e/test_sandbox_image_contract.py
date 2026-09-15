@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import subprocess
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -94,6 +95,7 @@ def _docker_run(
     "binary",
     [
         "bash",
+        "busybox",  # static chroot shields privileged runsc exec from tenant ld.so.preload
         "python3",
         "python3.13",
         "rg",  # ripgrep -- required by the glob and grep tools
@@ -132,6 +134,178 @@ def test_binary_available(pulled_image: str, binary: str) -> None:
     """
     r = _docker_run(pulled_image, "which", binary)
     assert r.returncode == 0, f"{binary!r} not found: {r.stderr}"
+
+
+def test_busybox_chroot_is_from_the_static_package(pulled_image: str) -> None:
+    """The first privileged runsc executable must not need the tenant loader."""
+    r = _docker_run(
+        pulled_image,
+        "dpkg-query",
+        "--show",
+        "--showformat=${db:Status-Abbrev}",
+        "busybox-static",
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "ii ", r.stdout
+
+
+# -- the privileged runsc operator chain ---------------------------------------
+#
+# ``DockerBackend.run_netns_sidecar`` execs this exact chain into the target
+# Sentry with ``--privileged``.  Every path in it is spelled absolutely in
+# ``src/aios/sandbox/backends/docker.py`` (``_RUNSC_OPERATOR_*``) and resolved
+# inside the operator image, so a base-image bump that relocates any link in
+# the chain breaks provisioning at run time with an opaque ``exec`` failure.
+# Duplicated here rather than imported: this module stays free of aios package
+# imports (see the module docstring), and ``test_docker_runtime_argv.py`` pins
+# the argv against the constants from the other side.
+_OPERATOR_CHAIN = (
+    "/usr/bin/busybox",
+    "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/usr/bin/bash",
+)
+
+# The chain is x86_64-only BY CONSTRUCTION: that loader path exists only in the
+# amd64 build of this multi-arch image, which is exactly why ``DockerBackend``
+# refuses runsc off x86_64 (``_RUNSC_SUPPORTED_MACHINES``). An arm64 pull would
+# fail these two for that reason and no other — a restatement of a decision
+# already made, not a finding — so they skip there. CI runs on amd64 runners,
+# so nothing is lost; the skip only spares a developer on Apple Silicon.
+_x86_64_only = pytest.mark.skipif(
+    platform.machine().lower() not in {"x86_64", "amd64"},
+    reason="the runsc operator chain is amd64-only; DockerBackend refuses runsc elsewhere",
+)
+
+
+@_x86_64_only
+@pytest.mark.parametrize("path", _OPERATOR_CHAIN)
+def test_operator_chain_binary_at_absolute_path(pulled_image: str, path: str) -> None:
+    """Each link of the privileged exec chain must be executable at its exact
+    path — the exec never consults PATH for these (``/usr/bin/tail`` above is
+    the same argument for the image CMD)."""
+    r = _docker_run(pulled_image, "test", "-x", path)
+    assert r.returncode == 0, f"{path} is not executable in the image: {r.stderr}"
+
+
+def test_busybox_ships_the_chroot_applet(pulled_image: str) -> None:
+    """busybox-static is compiled with a configurable applet list; the runsc
+    exec calls exactly one applet, and a build without it would leave the
+    tenant's ``/etc/ld.so.preload`` in force under ``--privileged``."""
+    r = _docker_run(pulled_image, "/usr/bin/busybox", "--list")
+    assert r.returncode == 0, r.stderr
+    assert "chroot" in r.stdout.split(), "busybox in this image has no chroot applet"
+
+
+@_x86_64_only
+def test_operator_chain_executes_end_to_end(pulled_image: str) -> None:
+    """Run the real chain (chroot → trusted loader → ``bash -p``) once.
+
+    ``/`` stands in for the operator mount — under runsc the chroot target is
+    ``_RUNSC_OPERATOR_ROOT``, which IS this image. That substitution keeps the
+    test runnable without a runsc daemon (the gVisor suite is a weekly cron)
+    while still proving the four pieces compose: the static applet, the
+    loader's ``--library-path`` form, privileged bash, and its ``-c`` script.
+    """
+    r = _docker_run(
+        pulled_image,
+        "/usr/bin/busybox",
+        "chroot",
+        "/",
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "--library-path",
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/bin/bash",
+        "-p",
+        "-c",
+        "mawk -W version >/dev/null && echo operator-ok",
+    )
+    assert r.returncode == 0, f"operator chain failed: {r.stdout}{r.stderr}"
+    assert r.stdout.strip() == "operator-ok"
+
+
+def test_busybox_ships_the_nslookup_applet(pulled_image: str) -> None:
+    """The egress scripts resolve every host with ``busybox nslookup``.
+
+    ``setup._RESOLVE_IPV4_FN`` names Docker's embedded resolver (127.0.0.11) as
+    an ARGUMENT rather than reading ``/etc/resolv.conf``: no sidecar shape has a
+    usable one (runc inherits the image's, runsc chroots into a read-only mount)
+    and BuildKit will not let one be baked -- it commits an EMPTY entry for any
+    ``COPY`` to that path (aios#2410, moby/buildkit#1267). busybox-static is
+    compiled with a configurable applet list, so a build without ``nslookup``
+    would leave every Limited allow-list empty and every credential host
+    un-DNATed, silently.
+    """
+    r = _docker_run(pulled_image, "/usr/bin/busybox", "--list")
+    assert r.returncode == 0, r.stderr
+    assert "nslookup" in r.stdout.split(), "busybox in this image has no nslookup applet"
+
+
+def test_busybox_nslookup_answers_from_the_embedded_dns(pulled_image: str) -> None:
+    """The live oracle for the resolution path: query 127.0.0.11 by address.
+
+    Runs on a throwaway user-defined network, which is where Docker serves its
+    embedded DNS and where every sandbox runs. Resolving the container's OWN
+    network alias keeps this hermetic (no upstream DNS, no internet) while still
+    exercising the whole path the lockdown depends on: the applet, the netns's
+    embedded resolver, and the output shape.
+
+    The shape is load-bearing, not cosmetic. ``setup._RESOLVE_IPV4_FN`` parses
+    it with awk: answers are taken only AFTER a ``Name:`` line, so the server
+    block (``Server:``/``Address:``, which reports the resolver's own address)
+    can never be mistaken for an answer and handed to ``iptables -d``. If
+    busybox ever reshapes this output, the parse silently returns nothing --
+    every allow-list empties -- so both halves are asserted here.
+    ``tests/unit/sandbox/test_sandbox_dns_resolution.py`` runs the real parse
+    against this exact shape.
+    """
+    network = f"aios-dns-contract-{uuid.uuid4().hex[:8]}"
+    created = subprocess.run(
+        ["docker", "network", "create", network],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert created.returncode == 0, f"docker network create failed: {created.stderr}"
+    try:
+        r = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                network,
+                "--name",
+                network,
+                pulled_image,
+                "/usr/bin/busybox",
+                "nslookup",
+                network,
+                "127.0.0.11",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    finally:
+        subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=60)
+
+    assert r.returncode == 0, (
+        f"busybox nslookup against the embedded DNS failed: {r.stdout}{r.stderr}"
+    )
+    lines = r.stdout.splitlines()
+    server = [i for i, line in enumerate(lines) if line.startswith("Server:")]
+    name = [i for i, line in enumerate(lines) if line.startswith("Name:")]
+    assert server and name, f"unexpected nslookup output shape: {r.stdout!r}"
+    assert server[0] < name[0], (
+        f"the server block no longer precedes the answer; the parse's ``Name:`` "
+        f"guard would admit the resolver's own address: {r.stdout!r}"
+    )
+    answers = re.findall(r"(?m)^Address:\s*(\S+)\s*$", "\n".join(lines[name[0] :]))
+    assert any(re.fullmatch(r"\d+\.\d+\.\d+\.\d+", a) for a in answers), (
+        f"no IPv4 answer after the ``Name:`` line: {r.stdout!r}"
+    )
 
 
 def test_tail_at_absolute_path(pulled_image: str) -> None:

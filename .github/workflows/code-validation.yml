@@ -101,7 +101,8 @@ jobs:
           fi
 
           # Sandbox image inputs: exactly what ``docker/Dockerfile.sandbox``
-          # is built from — itself plus the ``bin/tool`` binary it COPYs.
+          # is built from — itself plus the one file it COPYs, the
+          # ``bin/tool`` binary.
           # When none changed, the ``e2e`` job can pull
           # ``ghcr.io/eumemic/aios-sandbox:smoked`` (published by
           # ``build-sandbox.yml`` after its smoke test passes) instead of

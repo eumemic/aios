@@ -366,18 +366,29 @@ class TestIPv6EgressLockdown:
 
 # ── IPv4-only host resolution (#978) ──────────────────────────────────────────
 
+# The awk test in ``setup._RESOLVE_IPV4_FN`` that drops every answer which is
+# not a dotted quad — i.e. every AAAA record busybox printed in the same
+# ``Address:`` shape as the A records.
+_IPV4_ONLY_GUARD = "$2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/"
+
 
 class TestIPv4OnlyResolution:
     """Every host lookup in the lockdown scripts must resolve IPv4-only.
 
-    ``getent ahosts`` returns BOTH A and AAAA records; the emitted rules are
-    all IPv4 ``iptables`` commands and the script runs under ``set -e``, so an
-    AAAA literal fed to ``iptables -d`` would error and abort the whole apply
-    the moment an IPv6-capable sandbox network is enabled. Resolving with
-    ``getent ahostsv4`` keeps only A records flowing into the IPv4 rules; IPv6
-    egress is left to the default DROP policy (fail-closed). The proxy binds the
-    IPv4 ``WORKER_NETWORK_ALIAS`` and cannot intercept IPv6, so IPv4-only DNAT
-    is also the correct credential-host semantics.
+    ``busybox nslookup`` prints A and AAAA answers in the same ``Address:``
+    shape; the emitted rules are all IPv4 ``iptables`` commands and the script
+    runs under ``set -e``, so an AAAA literal fed to ``iptables -d`` would error
+    and abort the whole apply the moment an IPv6-capable sandbox network is
+    enabled. The helper's parse keeps only dotted quads, so only A records flow
+    into the IPv4 rules; IPv6 egress is left to the default DROP policy
+    (fail-closed). The proxy binds the IPv4 ``WORKER_NETWORK_ALIAS`` and cannot
+    intercept IPv6, so IPv4-only DNAT is also the correct credential-host
+    semantics.
+
+    The resolver itself is named explicitly rather than read out of
+    ``/etc/resolv.conf`` (aios#2410) — see
+    ``tests/unit/sandbox/test_sandbox_dns_resolution.py``, which executes this
+    helper against a stub busybox and asserts the parse.
     """
 
     def _all_scripts(self) -> dict[str, str]:
@@ -397,31 +408,26 @@ class TestIPv4OnlyResolution:
             ),
         }
 
-    def test_no_dual_stack_getent_ahosts(self) -> None:
-        """No script may use the dual-stack ``getent ahosts`` (which also
-        returns AAAA); every lookup must use the IPv4-only ``getent ahostsv4``.
-        """
+    def test_no_script_resolves_through_glibc(self) -> None:
+        """``getent`` is banned outright: it resolves through whichever
+        ``/etc/resolv.conf`` the sidecar inherited, and its dual-stack
+        ``ahosts`` form also leaks AAAA into the IPv4 rules (aios#2410)."""
         for name, script in self._all_scripts().items():
-            for line in script.splitlines():
-                # ``ahostsv4`` contains ``ahosts`` as a substring, so match the
-                # exact dual-stack token (``ahosts`` followed by a space).
-                assert "getent ahosts " not in line, (
-                    f"{name}: dual-stack getent leaks AAAA into IPv4 rules: {line!r}"
-                )
+            assert "getent" not in script, f"{name}: resolves through glibc/getent"
 
     def test_helper_resolves_ipv4_only(self) -> None:
-        """The shared helper is defined and uses ``getent ahostsv4``."""
+        """The shared helper is defined and keeps only dotted-quad answers."""
         for name, script in self._all_scripts().items():
             if "resolve_ipv4 " not in script:
                 continue
             assert "resolve_ipv4()" in script, f"{name}: helper used but not defined"
-            assert "getent ahostsv4" in script, f"{name}: helper is not IPv4-only"
+            assert _IPV4_ONLY_GUARD in script, f"{name}: helper is not IPv4-only"
 
     def test_allowed_host_loop_uses_helper(self) -> None:
         script = build_iptables_script(allowed_hosts={"api.example.com"})
         assert "ips=$(resolve_ipv4 api.example.com)" in script
         assert "for ip in $ips; do" in script
-        assert "getent ahostsv4" in script
+        assert _IPV4_ONLY_GUARD in script
 
     def test_extra_host_ports_loop_uses_helper(self) -> None:
         script = build_iptables_script(
@@ -444,7 +450,7 @@ class TestIPv4OnlyResolution:
             dnat_hosts=["api.secret.com"], dnat_target=("aios-worker", 49152)
         )
         assert "resolve_ipv4()" in script
-        assert "getent ahostsv4" in script
+        assert _IPV4_ONLY_GUARD in script
         assert "ips=$(resolve_ipv4 api.secret.com)" in script
         assert "for ip in $ips; do" in script
 
@@ -557,7 +563,7 @@ class TestBuildLockdownVerifyScript:
         assert "DNAT" not in script
 
     def test_asserts_nat_dnat_coverage_when_dnat_hosts_present(self) -> None:
-        """#984: a credential host whose getent returns zero IPs emits no DNAT
+        """#984: a credential host that resolves to zero IPs emits no DNAT
         rule and no error — apply exits 0 and a filter-only verify passes,
         silently running the session without DNAT. When dnat_hosts is non-empty
         the verify must ALSO assert the nat table carries a DNAT OUTPUT rule, so
@@ -894,8 +900,8 @@ class TestApplyNetworkLockdown:
         apply_script, verify_script = scripts
         assert '"$IPT" -P OUTPUT DROP' in apply_script
         assert "resolve_ipv4 api.example.com" in apply_script
-        # The sidecar inherits the operator image's (empty) resolv.conf, so the
-        # apply script points itself at the netns embedded DNS before getent.
+        # No sidecar shape has a usable /etc/resolv.conf (aios#2410), so every
+        # lookup names the netns's embedded resolver as an argument instead.
         assert "127.0.0.11" in apply_script
         assert "OUTPUT DROP" in verify_script
         # The sidecar runs the OPERATOR image, never env_config.image.
@@ -1152,9 +1158,10 @@ class TestApplySecretEgressDnat:
         assert "OUTPUT DROP" not in verify_script
 
     @pytest.mark.asyncio
-    async def test_resolv_preamble_prepended_to_apply(self) -> None:
-        # The apply script points the netns-joining sidecar at the embedded
-        # resolver before any getent runs (same preamble as the Limited path).
+    async def test_apply_names_the_embedded_resolver(self) -> None:
+        # The DNAT-only apply resolves against the netns's embedded DNS by
+        # address, exactly as the Limited path does — never through a
+        # /etc/resolv.conf it cannot write and cannot bake (aios#2410).
         backend = FakeBackend()
         handle = make_handle()
 
@@ -1163,7 +1170,8 @@ class TestApplySecretEgressDnat:
         )
 
         apply_script = self._sidecar_scripts(backend)[0]
-        assert "nameserver 127.0.0.11" in apply_script
+        assert 'busybox nslookup "$1" 127.0.0.11' in apply_script
+        assert "/etc/resolv.conf" not in apply_script
 
     @pytest.mark.asyncio
     async def test_runtime_threaded_to_both_sidecar_calls(self) -> None:
@@ -1252,7 +1260,7 @@ class TestCredentialHostEgressVerdict:
     an IP the sampler never returned. This class asks that question.
 
     Method: run the real generated script under ``bash`` against fake
-    ``iptables``/``getent`` shims that RECORD the rules instead of installing
+    ``iptables``/``busybox`` shims that RECORD the rules instead of installing
     them, then replay the recorded ruleset against a packet the way netfilter
     would — nat OUTPUT first (a DNAT match rewrites the destination), then
     filter OUTPUT, first-match-wins, falling through to the chain policy. The
@@ -1279,12 +1287,14 @@ class TestCredentialHostEgressVerdict:
         """Run the generated script with recording shims; return (table, argv)."""
         bindir = tempfile.mkdtemp()
         log = os.path.join(bindir, "rules.log")
-        # getent ahostsv4 <host> answers with the SAMPLED address only — the
-        # subset the resolver happened to return at rule-generation time.
-        getent = (
+        # ``busybox nslookup <host> <server>`` answers in the real busybox
+        # shape with the SAMPLED address only — the subset the resolver
+        # happened to return at rule-generation time.
+        busybox = (
             "#!/usr/bin/env bash\n"
-            f'if [ "$2" = "{self.HOST}" ]; then echo "{self.SAMPLED_IP} STREAM {self.HOST}"; fi\n'
-            f'if [ "$2" = "aios-worker" ]; then echo "{self.PROXY_IP} STREAM aios-worker"; fi\n'
+            'printf "Server:\\t\\t%s\\nAddress:\\t%s:53\\n\\n" "$3" "$3"\n'
+            f'if [ "$2" = "{self.HOST}" ]; then printf "Name:\\t%s\\nAddress: {self.SAMPLED_IP}\\n" "$2"; fi\n'
+            f'if [ "$2" = "aios-worker" ]; then printf "Name:\\t%s\\nAddress: {self.PROXY_IP}\\n" "$2"; fi\n'
             "exit 0\n"
         )
         # iptables shim: append the argv of every mutating call to the log.
@@ -1299,7 +1309,7 @@ class TestCredentialHostEgressVerdict:
             "exit 0\n"
         )
         for name, body in (
-            ("getent", getent),
+            ("busybox", busybox),
             ("iptables-legacy", ipt),
             ("iptables", ipt),
             ("ip6tables-legacy", ipt),
@@ -1512,8 +1522,9 @@ class TestBuildBrowserDenyInternalScript:
     def test_emits_set_e_first(self) -> None:
         assert build_browser_deny_internal_script().splitlines()[0] == "set -e"
 
-    def test_no_dns_preamble(self) -> None:
-        # Static CIDRs resolve nothing, so the embedded-DNS preamble is absent.
+    def test_resolves_nothing(self) -> None:
+        # Static CIDRs only — this script never names the embedded resolver
+        # because it never looks a host up.
         assert "127.0.0.11" not in build_browser_deny_internal_script()
         assert "resolve_ipv4" not in build_browser_deny_internal_script()
 
