@@ -54,12 +54,19 @@ jobs:
               config = json.loads(daemon_json.read_text())
           else:
               config = {}
-          config.setdefault("runtimes", {})["runsc"] = {"path": "/usr/bin/runsc"}
+          config.setdefault("runtimes", {})["runsc"] = {
+              "path": "/usr/bin/runsc",
+              # --oci-seccomp: runsc defaults this OFF, so Docker's authored
+              # seccomp profile (CLONE_NEWUSER deny) never reaches the Sentry.
+              # --overlay2=none: gVisor's default rootfs self-overlay hides
+              # tenant writes from Docker SizeRw/diff/commit identity.
+              "runtimeArgs": ["--oci-seccomp", "--overlay2=none"],
+          }
           # Image mounts provide the read-only operator tool root used to
           # program netfilter inside the target runsc Sentry.
           config.setdefault("features", {})["containerd-snapshotter"] = True
           daemon_json.write_text(json.dumps(config, separators=(",", ":")))
-          # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}}
+          # Expected runtime stanza: {"runtimes":{"runsc":{"path":"/usr/bin/runsc","runtimeArgs":["--oci-seccomp","--overlay2=none"]}}}
           PY
           sudo systemctl restart docker
           docker run --runtime=runsc --rm alpine echo ok

@@ -358,7 +358,11 @@ class Settings(BaseSettings):
         "from inside the target Sentry (#2310), which needs the read-only operator "
         "tool root DockerBackend.create mounts with --mount type=image — Docker "
         "Engine 28+ with features.containerd-snapshotter enabled. Without it, "
-        "Limited sandboxes fail to provision (fail-closed, not open).",
+        "Limited sandboxes fail to provision (fail-closed, not open). The runsc "
+        "runtime stanza must also pass --oci-seccomp (runsc defaults this off, so "
+        "the authored seccomp profile never reaches the Sentry) and "
+        "--overlay2=none (gVisor's default rootfs overlay hides tenant writes from "
+        "Docker SizeRw/commit identity).",
     )
     # ── Account browser containers ("the computer", jarbot#106 Phase 1) ────
     sandbox_browser_image: str = Field(

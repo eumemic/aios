@@ -31,6 +31,7 @@ from aios.sandbox.backends.docker import (
     _FLATTEN_DEPTH_CEILING,
     DockerBackend,
     writable_layer_delta,
+    writable_layer_diff_paths,
 )
 
 _Usage = namedtuple("_Usage", ["total", "used", "free"])
@@ -67,6 +68,7 @@ class _FakeDocker:
         # assert the pipeline uses the config-driven progress deadlines, not a
         # size-scaled timeout.
         self.pipeline_timeouts: list[tuple[float, float]] = []
+        self.diff_output = ""
 
     async def cli(
         self, argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
@@ -76,6 +78,8 @@ class _FakeDocker:
         sub = argv[1]
         if sub == "stop":
             return 0, b"cid\n", b""
+        if sub == "diff":
+            return 0, self.diff_output.encode(), b""
         if sub == "inspect" and "--size" in argv:
             # The budgeted writable-layer size-walk: `{{.SizeRw}}` only.
             return 0, f"{self.size_rw}".encode(), b""
@@ -262,6 +266,68 @@ class TestSkipEmptyFloor:
         assert writable_layer_delta(70_000, 70_000) == 0
         assert writable_layer_delta(70_000, 80_000) == 0
 
+    def test_writable_layer_diff_paths_parses_status_lines(self) -> None:
+        assert writable_layer_diff_paths(
+            "C /etc/hosts\nA /.dockerenv\nD /tmp/gone\n\nbogus\n"
+        ) == frozenset({"/etc/hosts", "/.dockerenv", "/tmp/gone"})
+
+    @pytest.mark.asyncio
+    async def test_overshot_baseline_with_new_diff_paths_commits(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """Create-time SizeRw overshoot: snapshot SizeRw == baseline so the
+        delta is 0, but docker diff grew a tenant file — must commit."""
+        fake_docker.size_rw = 70_000
+        fake_docker.diff_output = "C /etc/hosts\nA /root/blob\n"
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        backend._snapshot_diff_baselines["cid"] = frozenset({"/etc/hosts"})
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "committed"
+        assert _committed(fake_docker)
+
+    @pytest.mark.asyncio
+    async def test_overshot_baseline_without_new_diff_paths_is_skipped(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        fake_docker.size_rw = 70_000
+        fake_docker.diff_output = "C /etc/hosts\nA /.dockerenv\n"
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        backend._snapshot_diff_baselines["cid"] = frozenset({"/etc/hosts", "/.dockerenv"})
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "skipped_empty"
+        assert not _committed(fake_docker)
+
+    @pytest.mark.asyncio
+    async def test_overshot_baseline_unreadable_diff_commits_fail_closed(
+        self, fake_docker: _FakeDocker, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_docker.size_rw = 70_000
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        backend._snapshot_diff_baselines["cid"] = frozenset({"/etc/hosts"})
+
+        real_cli = fake_docker.cli
+
+        async def failing_diff(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            if argv[1] == "diff":
+                return 1, b"", b"diff failed"
+            return await real_cli(argv, timeout_s=timeout_s, snapshot_timeout=snapshot_timeout)
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", failing_diff)
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "committed"
+        assert _committed(fake_docker)
+
 
 def _create_spec() -> SandboxSpec:
     return SandboxSpec(
@@ -294,6 +360,8 @@ class TestSnapshotBaselineStamp:
                 return 0, b"cid123deadbeef\n", b""
             if argv[1] == "inspect" and "--size" in argv:
                 return 0, b"4096\n", b""
+            if argv[1] == "diff":
+                return 0, b"C /etc/hosts\nA /.dockerenv\n", b""
             raise AssertionError(f"unexpected docker cli: {argv}")
 
         monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fake_run)
@@ -301,6 +369,9 @@ class TestSnapshotBaselineStamp:
         handle = await backend.create(_create_spec())
         assert handle.snapshot_baseline_bytes == 4096
         assert backend._snapshot_baselines[handle.sandbox_id] == 4096
+        assert backend._snapshot_diff_baselines[handle.sandbox_id] == frozenset(
+            {"/etc/hosts", "/.dockerenv"}
+        )
 
     @pytest.mark.asyncio
     async def test_create_survives_unparseable_sizerw(
@@ -314,6 +385,8 @@ class TestSnapshotBaselineStamp:
                 return 0, b"cid123deadbeef\n", b""
             if argv[1] == "inspect":
                 return 0, b"not-a-number\n", b""
+            if argv[1] == "diff":
+                return 0, b"", b""
             raise AssertionError(f"unexpected docker cli: {argv}")
 
         monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fake_run)

@@ -17,6 +17,7 @@ from aios.sandbox.network import (
     ensure_browser_network,
     ensure_sandbox_network,
     resolve_host_gateway,
+    resolve_sandbox_network_gateway,
 )
 
 DockerResponder = Callable[[list[str]], tuple[int, bytes, bytes]]
@@ -368,3 +369,43 @@ class TestResolveHostGateway:
         install_docker_responder(monkeypatch, responder)
         with pytest.raises(ValueError):
             await resolve_host_gateway()
+
+
+class TestResolveSandboxNetworkGateway:
+    """runsc --dns must land on the user-defined network gateway, not 127.0.0.11."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self) -> Iterator[None]:
+        sandbox_network._sandbox_network_gateways.clear()
+        yield
+        sandbox_network._sandbox_network_gateways.clear()
+
+    async def test_reads_gateway_and_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            assert argv[:3] == ["docker", "network", "inspect"]
+            assert "--format" in argv
+            assert argv[-1] == SANDBOX_NETWORK_NAME
+            return 0, b"172.18.0.1\n", b""
+
+        calls = install_docker_responder(monkeypatch, responder)
+        assert await resolve_sandbox_network_gateway() == "172.18.0.1"
+        assert await resolve_sandbox_network_gateway() == "172.18.0.1"
+        assert len(calls) == 1
+
+    async def test_probe_failure_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            del argv
+            return 1, b"", b"Error: No such network\n"
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="gateway probe failed"):
+            await resolve_sandbox_network_gateway()
+
+    async def test_non_ipv4_gateway_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            del argv
+            return 0, b"not-an-ip\n", b""
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="not an IPv4 address"):
+            await resolve_sandbox_network_gateway()

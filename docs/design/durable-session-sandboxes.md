@@ -136,9 +136,13 @@ the overlay2-verified §5.2/§5.6 pseudocode and are what the implementation shi
   containerd image store, and the containerd-snapshotter / runsc overlay copy-up more.
   Create stamps that empty `SizeRw` before tenant exec; the identity short-circuit fires
   on `SizeRw - baseline <= sandbox_snapshot_empty_floor_bytes` (default 8 KiB of tenant
-  writes), so read/chat-only sessions never grow a chain (§5.7's premise) and the discard
-  window stays one page regardless of store or runtime. An `== 0` test would never fire
-  in prod.
+  writes) **and** no new `docker diff` paths since create. SizeRw-delta alone overshoots
+  under runsc: gVisor's default rootfs overlay (and the operator `type=image` mount)
+  inflates create-time SizeRw so a 64 KiB tenant write still looks empty. The diff veto
+  keeps salvage/commit/flatten working; a matching diff keeps chat-only sessions at
+  `skipped_empty`. An `== 0` test would never fire in prod. The gVisor validation
+  runtime stanza passes `--overlay2=none` so tenant writes land in Docker's writable
+  layer, and `--oci-seccomp` so the authored profile is loaded inside the Sentry.
 - **Flatten is budget-driven; the layer wall does not exist.** The overlay2 ~125-layer
   commit wall is absent on the containerd store (a chain ran cleanly through 250 layers).
   Flatten is therefore driven by the per-session unique-bytes budget (storage), with layer

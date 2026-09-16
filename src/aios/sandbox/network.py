@@ -47,6 +47,9 @@ _HOST_GATEWAY_PROBE_ALIAS = "aios-host-gateway-probe"
 _host_gateway_ip: str | None = None
 _host_gateway_lock = asyncio.Lock()
 
+_sandbox_network_gateways: dict[str, str] = {}
+_sandbox_network_gateway_lock = asyncio.Lock()
+
 
 async def resolve_host_gateway() -> str:
     """The IPv4 address ``host-gateway`` resolves to on THIS Docker daemon.
@@ -123,6 +126,53 @@ async def _probe_host_gateway() -> str:
         f"host-gateway probe wrote no {_HOST_GATEWAY_PROBE_ALIAS!r} entry; this "
         "Docker daemon does not support --add-host <name>:host-gateway"
     )
+
+
+async def resolve_sandbox_network_gateway(network: str = SANDBOX_NETWORK_NAME) -> str:
+    """The IPv4 gateway of ``network`` — where dockerd's embedded DNS listens.
+
+    User-defined Docker networks serve container-alias DNS on the gateway address
+    (not on ``127.0.0.11`` inside a gVisor Sentry: that redirect is a Linux-netns
+    DNAT the Sentry never sees). runsc sandboxes therefore get ``--dns`` pointed
+    here so ``aios-worker`` and other network aliases resolve.
+
+    Cached per network name for the life of the process: the gateway is allocated
+    at ``docker network create`` and does not move. **Fails hard** — a runsc
+    sandbox that cannot reach Docker DNS cannot reach the worker alias.
+    """
+    async with _sandbox_network_gateway_lock:
+        cached = _sandbox_network_gateways.get(network)
+        if cached is not None:
+            return cached
+        address = await _probe_network_gateway(network)
+        _sandbox_network_gateways[network] = address
+        log.info("sandbox.network_gateway_resolved", network=network, address=address)
+        return address
+
+
+async def _probe_network_gateway(network: str) -> str:
+    rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            "{{(index .IPAM.Config 0).Gateway}}",
+            network,
+        ]
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"sandbox network gateway probe failed ({network!r}, exit {rc}): "
+            f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+        )
+    raw = stdout_bytes.decode("utf-8", errors="replace").strip()
+    try:
+        return str(ipaddress.IPv4Address(raw))
+    except ValueError as err:
+        raise RuntimeError(
+            f"sandbox network {network!r} gateway is not an IPv4 address: {raw!r}"
+        ) from err
 
 
 async def ensure_sandbox_network() -> None:
@@ -330,4 +380,5 @@ __all__ = [
     "ensure_sandbox_network",
     "is_running_in_container",
     "resolve_host_gateway",
+    "resolve_sandbox_network_gateway",
 ]

@@ -27,7 +27,10 @@ def test_gvisor_workflow_installs_and_smokes_runsc_runtime() -> None:
 
     assert "https://storage.googleapis.com/gvisor/releases" in workflow
     assert "sudo apt-get install -y runsc" in workflow
-    assert '"runtimes":{"runsc":{"path":"/usr/bin/runsc"}}' in workflow
+    assert (
+        '"runtimes":{"runsc":{"path":"/usr/bin/runsc",'
+        '"runtimeArgs":["--oci-seccomp","--overlay2=none"]}}' in workflow
+    )
     assert "sudo systemctl restart docker" in workflow
     assert "docker run --runtime=runsc --rm alpine echo ok" in workflow
 

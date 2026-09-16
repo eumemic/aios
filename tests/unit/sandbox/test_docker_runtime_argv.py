@@ -79,6 +79,11 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     # per sandbox and needs Docker's containerd image store, neither of which
     # the runc path (the production default) has any use for.
     assert "--mount" not in calls[0]
+    assert "--dns" not in calls[0]
+
+
+def _run_argv(calls: list[list[str]]) -> list[str]:
+    return next(c for c in calls if len(c) >= 2 and c[1] == "run")
 
 
 async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,20 +94,51 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return 0, b"172.18.0.1\n", b""
         return 0, b"deadbeefcafe\n", b""
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network._sandbox_network_gateways", {})
 
     await DockerBackend().create(_spec(runtime="runsc"))
 
-    assert _runtime_values(calls[0]) == ["runsc"]
-    mount = calls[0][calls[0].index("--mount") + 1]
+    run = _run_argv(calls)
+    assert _runtime_values(run) == ["runsc"]
+    mount = run[run.index("--mount") + 1]
     assert mount == (
         "type=image,src=ghcr.io/eumemic/aios-sandbox:latest,dst=/run/aios-operator-root"
     )
     # Derived from ``spec.image`` — the image the tenant container itself runs —
     # so the operator root can never silently disagree with the sandbox.
     assert f"src={_spec(runtime='runsc').image}," in mount
+    assert run[run.index("--dns") + 1] == "172.18.0.1"
+
+
+async def test_create_runsc_dns_is_the_sandbox_network_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gVisor never sees Docker's 127.0.0.11 DNAT; --dns must be the bridge gateway."""
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return 0, b"172.19.0.1\n", b""
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network._sandbox_network_gateways", {})
+
+    await DockerBackend().create(_spec(runtime="runsc"))
+    run = _run_argv(calls)
+    assert run[run.index("--dns") + 1] == "172.19.0.1"
+    assert any(c[:3] == ["docker", "network", "inspect"] for c in calls)
 
 
 async def test_create_refuses_runsc_on_a_tenant_supplied_image(
