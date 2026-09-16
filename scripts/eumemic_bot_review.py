@@ -424,13 +424,66 @@ def _make_tree_readable(path: Path) -> None:
     _sudo(["chmod", "-R", "a+rX", str(path)])
 
 
+def _chmod_add(path: Path, bits: int) -> None:
+    """OR `bits` into `path`'s mode. Skip symlinks. sudo if we do not own it."""
+    if path.is_symlink():
+        return
+    try:
+        current = path.stat().st_mode
+    except OSError as exc:
+        _die(f"cannot stat {path} to grant dropped-uid access: {exc}")
+    desired = (current & 0o777) | bits
+    if desired == (current & 0o777):
+        return
+    try:
+        os.chmod(path, desired)
+        return
+    except OSError:
+        pass
+    result = _sudo(["chmod", f"{desired:o}", str(path)])
+    if result.returncode:
+        _die(
+            f"cannot chmod {desired:o} {path} for {AGENT_USER}: "
+            f"{(result.stderr or result.stdout).strip()[:300]}"
+        )
+
+
+def _ensure_dropped_uid_can_enter(path: Path) -> None:
+    """Make `path` chdir-able and readable for a uid that is not the owner.
+
+    ubuntu-latest leaves ``$HOME`` 0700. ``GIT_CONFIG_GLOBAL`` / ``safe.directory``
+    cannot help: git chdirs first and dies with ``cannot change to '...':
+    Permission denied``, so the mandated digest is empty. Grant other-execute
+    on each ancestor (0700 → 0711, traverse-only — do not world-read ``$HOME``)
+    and ``a+rX`` on the checkout so ``.git`` and the worktree are readable.
+    """
+    path = path.resolve()
+    ancestor = path.parent
+    while True:
+        # a+x only. 0700 becomes 0711; 0755 is already other-executable and
+        # is left alone. Never recurse into $HOME.
+        _chmod_add(ancestor, 0o111)
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+    _chmod_add(path, 0o555)
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        root = Path(dirpath)
+        for name in dirnames:
+            _chmod_add(root / name, 0o555)
+        for name in filenames:
+            _chmod_add(root / name, 0o444)
+
+
 def _agent_gitconfig_text(directory: str) -> str:
     """Git config that lets the dropped uid read a runner-owned checkout.
 
     ``safe.directory`` is per-uid. actions/checkout writes it to the runner's
     ``~/.gitconfig``, which the agent never reads (HOME is the agent temp).
     Without this, ``git diff base...head`` fails with dubious ownership and
-    the mandated digest hashes empty.
+    the mandated digest hashes empty. It is not sufficient on ubuntu-latest:
+    the dropped uid must also be able to chdir into the checkout (see
+    ``_ensure_dropped_uid_can_enter``).
     """
     entries: list[str] = []
     for path in (directory, os.path.realpath(directory)):
@@ -930,8 +983,11 @@ def _run_harness(
         harness = command[0]
         try:
             command, env = _drop_into_agent_user(command, env, agent_home)
-            if base_sha and head_sha and "setpriv" in command:
-                _verify_dropped_diff(agent_home, base_sha, head_sha, evidence)
+            if "setpriv" in command:
+                # safe.directory does not chdir. GH $HOME is often 0700.
+                _ensure_dropped_uid_can_enter(Path(os.getcwd()))
+                if base_sha and head_sha:
+                    _verify_dropped_diff(agent_home, base_sha, head_sha, evidence)
             try:
                 result = subprocess.run(
                     command,

@@ -678,6 +678,92 @@ def test_dropped_gitconfig_marks_the_checkout_safe() -> None:
     assert f"directory = {cwd}" in text
 
 
+def test_ensure_dropped_uid_can_enter_opens_a_0700_home(tmp_path: Path) -> None:
+    """Live FATAL: git cannot chdir into $GITHUB_WORKSPACE when $HOME is 0700."""
+    home = tmp_path / "runner"
+    checkout = home / "work" / "aios" / "aios"
+    checkout.mkdir(parents=True)
+    git_dir = checkout / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (checkout / "file.py").write_text("x = 1\n")
+    secret = home / ".secret"
+    secret.write_text("do-not-widen\n")
+    os.chmod(secret, 0o600)
+    os.chmod(home, 0o700)
+    os.chmod(checkout, 0o700)
+    os.chmod(git_dir, 0o700)
+    os.chmod(git_dir / "HEAD", 0o600)
+    os.chmod(checkout / "file.py", 0o600)
+    reviewer._ensure_dropped_uid_can_enter(checkout)
+    assert home.stat().st_mode & 0o777 == 0o711
+    assert secret.stat().st_mode & 0o777 == 0o600
+    assert checkout.stat().st_mode & 0o005 == 0o005
+    assert git_dir.stat().st_mode & 0o005 == 0o005
+    assert (git_dir / "HEAD").stat().st_mode & 0o004
+    assert (checkout / "file.py").stat().st_mode & 0o004
+
+
+def test_ensure_dropped_uid_can_enter_does_not_strip_existing_bits(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    os.chmod(tmp_path, 0o755)
+    os.chmod(checkout, 0o755)
+    reviewer._ensure_dropped_uid_can_enter(checkout)
+    assert tmp_path.stat().st_mode & 0o777 == 0o755
+    assert checkout.stat().st_mode & 0o777 == 0o755
+
+
+def test_run_agent_opens_the_checkout_before_the_dropped_diff(
+    monkeypatch: Any, clean_env: None
+) -> None:
+    monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
+    order: list[str] = []
+
+    def drop(
+        command: list[str], env: dict[str, str], temp: Path
+    ) -> tuple[list[str], dict[str, str]]:
+        order.append("drop")
+        return ["sudo", "-n", "--", "setpriv", "--no-new-privs", "--", *command], env
+
+    def enter(path: Path) -> None:
+        order.append("enter")
+        assert Path(path) == Path(os.getcwd())
+
+    def verify(*args: Any, **kwargs: Any) -> None:
+        order.append("verify")
+
+    monkeypatch.setattr(reviewer, "_drop_into_agent_user", drop)
+    monkeypatch.setattr(reviewer, "_ensure_dropped_uid_can_enter", enter)
+    monkeypatch.setattr(reviewer, "_verify_dropped_diff", verify)
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(_good_artifact(), 0))
+    reviewer.run_agent(
+        "claude-opus-5", "prompt", 10, _DIFF_EVIDENCE, base_sha="base", head_sha="head"
+    )
+    assert order == ["drop", "enter", "verify"]
+
+
+def test_verify_dropped_diff_dies_on_checkout_permission_denied(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    (tmp_path / "gitconfig").write_text("[safe]\n")
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [],
+            128,
+            b"",
+            b"fatal: cannot change to '/home/runner/work/aios/aios': Permission denied",
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer._verify_dropped_diff(tmp_path, "base", "head", _DIFF_EVIDENCE)
+    assert exc.value.code == 1
+
+
 def test_verify_dropped_diff_dies_on_dubious_ownership(monkeypatch: Any, tmp_path: Path) -> None:
     (tmp_path / "gitconfig").write_text("[safe]\n")
     monkeypatch.setattr(

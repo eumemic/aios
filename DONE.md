@@ -16,11 +16,17 @@ channel.
 The dropped uid is given `GIT_CONFIG_GLOBAL` with `safe.directory` for the
 runner-owned checkout, and the launcher checks it can reproduce the digest
 before the harness starts — otherwise every review hashes empty and is
-refused as NO EVIDENCE. Only an `agent/` subdirectory is chowned; the
-launcher `TemporaryDirectory` stays ours, is `chmod 0711` so the dropped
-uid can traverse into `agent/`, and is torn down with `sudo rm`
-plus `ignore_cleanup_errors`, so cleanup cannot swallow the NO_EVIDENCE
-exit or prevent writing the artifact.
+refused as NO EVIDENCE. `safe.directory` is not enough on ubuntu-latest:
+`$HOME` is often `0700`, so `git -C $GITHUB_WORKSPACE` dies with
+`cannot change to '...': Permission denied` before git reads config. The
+launcher adds other-execute on each ancestor of the checkout (`0700` →
+`0711`, traverse-only; `$HOME` is not world-readable) and `a+rX` on the
+checkout itself so the dropped uid can enter `.git` and hash a non-empty
+diff. Only an `agent/` subdirectory is chowned; the launcher
+`TemporaryDirectory` stays ours, is `chmod 0711` so the dropped uid can
+traverse into `agent/`, and is torn down with `sudo rm` plus
+`ignore_cleanup_errors`, so cleanup cannot swallow the NO_EVIDENCE exit or
+prevent writing the artifact.
 
 Focused unit tests: `tests/unit/test_eumemic_bot_review.py`.
 
