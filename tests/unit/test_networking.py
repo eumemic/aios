@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import socket
 import struct
@@ -445,17 +446,28 @@ class TestIPv6EgressLockdown:
         )
         assert '"$IP6T" -P OUTPUT DROP' in script
 
-    def test_dnat_only_script_has_no_v6_drop(self) -> None:
+    def test_dnat_only_script_denies_v6_443_only(self) -> None:
         """The Unrestricted DNAT-only path leaves general egress open, so it
-        must NOT install a v6 DROP (which would deny v6 egress in an otherwise
-        open box)."""
+        must NOT install a blanket v6 DROP policy (that would deny v6 egress in
+        an otherwise open box) — but it MUST deny v6 ``:443`` (#2422).
+
+        Every rule in this script is IPv4 ``iptables`` and the secret-egress
+        proxy binds IPv4, so a sandbox with a v6 route could reach a credential
+        host over v6 with no swap and no proxy: the same direct-IP bypass, one
+        stack down. Denying exactly the port the swap lives on closes that
+        without turning Unrestricted into a lockdown.
+        """
         script = build_secret_egress_dnat_script(
             dnat_hosts=["api.secret.com"],
             dnat_target=("aios-worker", 49152),
             dns_port=53535,
         )
-        assert "ip6tables" not in script
+        assert '"$IP6T" -A OUTPUT -p tcp --dport 443 -j DROP' in script
+        # No blanket denial, v4 or v6 — general egress stays open.
         assert "-P OUTPUT DROP" not in script
+        # Guarded like the Limited v6 block: a host without ip6_tables has no
+        # v6 netfilter path to leak through, so skip rather than abort.
+        assert 'if "$IP6T" -S OUTPUT >/dev/null 2>&1; then' in script
 
 
 # ── IPv4-only host resolution (#978) ──────────────────────────────────────────
@@ -620,6 +632,58 @@ class TestBuildSecretEgressDnatScript:
             "-m conntrack --ctstate NEW -j DROP"
         ) in script
 
+    def test_emits_direct_ip_catch_all_for_https(self) -> None:
+        """#2422: EVERY outbound ``:443`` is redirected to the proxy.
+
+        The sentinel rule above only covers a client that ASKED DNS. The
+        catch-all covers the one that dials a real credential-host address it
+        holds out of band — the direct-IP bypass — by making the destination
+        address stop deciding: the proxy keys on the ClientHello SNI and
+        blind-relays a non-credential name, so open egress survives.
+
+        Loopback is excluded so an in-sandbox ``https://127.0.0.1`` is not
+        dragged out to the worker (``route_localnet`` is on for this netns).
+        """
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        assert (
+            "\"$IPT\" -t nat -A OUTPUT '!' -d 127.0.0.0/8 -p tcp --dport 443 "
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in script
+        # It closes a bypass; it does not lock the box down.
+        assert "-P OUTPUT DROP" not in script
+
+    def test_direct_ip_catch_all_is_unconditional_and_not_host_keyed(self) -> None:
+        """The catch-all is emitted flat, with no ``-d`` naming a credential host
+        and no resolution loop, so its coverage is a property of the ruleset and
+        not of what DNS returned — the same stance #2042 took for the sentinel
+        rule, extended to clients that never resolve anything."""
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        catch_all = [line for line in script.splitlines() if "'!' -d 127.0.0.0/8" in line]
+        assert len(catch_all) == 1, catch_all
+        assert not catch_all[0].startswith((" ", "\t")), "catch-all emitted inside a loop or guard"
+        assert "api.secret.com" not in catch_all[0]
+
+    def test_denies_v6_443_so_the_v4_chokepoint_cannot_be_stepped_around(self) -> None:
+        """The chokepoint is IPv4-only (the proxy binds v4), so a v6 route to a
+        credential host would be a second, un-chokepointed stack. Limited closes
+        that with a blanket v6 policy DROP; Unrestricted must stay open, so it
+        denies exactly ``:443``."""
+        script = build_secret_egress_dnat_script(
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+        assert '"$IP6T" -A OUTPUT -p tcp --dport 443 -j DROP' in script
+        assert 'if "$IP6T" -S OUTPUT >/dev/null 2>&1; then' in script
+
     def test_sentinel_reject_is_unconditional(self) -> None:
         """The fail-closed filter REJECT for the sentinel is emitted flat — not
         inside a resolution loop — so its coverage cannot depend on what DNS
@@ -765,6 +829,42 @@ class TestBuildLockdownVerifyScript:
             assert not stripped.startswith("iptables "), (
                 f"verify uses a bare iptables (nft default): {line!r}"
             )
+
+    def test_asserts_direct_ip_catch_all_when_requested(self) -> None:
+        """#2422: the catch-all must be READ BACK, not merely applied.
+
+        Every sentinel rule can land while the one rule covering a client that
+        never asked DNS is missing — a green verify over unprotected credential
+        egress, exactly the failure mode this read-back exists to kill. The v6
+        ``:443`` deny is asserted too, guarded the same way the v6 policy
+        assertion is (no v6 filter table in the netns → nothing to read back).
+        """
+        script = build_lockdown_verify_script(
+            dnat_hosts=["api.secret.com"],
+            dns_port=53535,
+            assert_drop=False,
+            assert_https_catch_all=True,
+        )
+        assert (
+            '"$IPT" -t nat -S OUTPUT | grep -qE -- '
+            "'! -d 127\\.0\\.0\\.0/8 -p tcp( -m tcp)? --dport 443 -j DNAT'"
+        ) in script
+        assert "grep -qE -- '-p tcp( -m tcp)? --dport 443 -j DROP'" in script
+        assert 'if v6_output="$("$IP6T" -S OUTPUT 2>/dev/null)"; then' in script
+        # Still the DNAT-only path: no policy assertion sneaks in with the flag.
+        assert "OUTPUT DROP" not in script
+
+    def test_catch_all_assertion_is_opt_in_not_implied_by_assert_drop_false(self) -> None:
+        """Limited closes the same bypass by WITHHOLDING an ACCEPT, so it has no
+        catch-all rule to read back. The flag is separate from ``assert_drop`` so
+        a Limited verify can never acquire an assertion for a rule its own apply
+        does not emit — which would fail every Limited provision."""
+        limited = build_lockdown_verify_script(dnat_hosts=["api.secret.com"], dns_port=53535)
+        assert "127\\.0\\.0\\.0/8" not in limited
+        dnat_only_default = build_lockdown_verify_script(
+            dnat_hosts=["api.secret.com"], dns_port=53535, assert_drop=False
+        )
+        assert "127\\.0\\.0\\.0/8" not in dnat_only_default
 
     def test_asserts_ip6tables_drop_policy(self) -> None:
         """#1207: the v6 DROP installed by the apply must itself be verified —
@@ -1559,6 +1659,29 @@ class TestApplySecretEgressDnat:
         assert "OUTPUT DROP" not in verify_script
 
     @pytest.mark.asyncio
+    async def test_direct_ip_catch_all_applied_and_verified(self) -> None:
+        """#2422 threaded end to end: the apply installs the direct-IP catch-all
+        and the verify reads it back, so a sandbox whose bypass-closing rule
+        silently failed to land fails provisioning instead of running open."""
+        backend = FakeBackend()
+        handle = make_handle()
+
+        await apply_secret_egress_dnat(
+            backend,
+            handle,
+            dnat_hosts=["api.secret.com"],
+            dnat_target=("aios-worker", 49152),
+            dns_port=53535,
+        )
+
+        apply_script, verify_script = self._sidecar_scripts(backend)
+        assert (
+            "\"$IPT\" -t nat -A OUTPUT '!' -d 127.0.0.0/8 -p tcp --dport 443 "
+            '-j DNAT --to-destination "$PROXY_IP:49152"'
+        ) in apply_script
+        assert ("'! -d 127\\.0\\.0\\.0/8 -p tcp( -m tcp)? --dport 443 -j DNAT'") in verify_script
+
+    @pytest.mark.asyncio
     async def test_resolv_preamble_prepended_to_apply(self) -> None:
         # The apply script points the netns-joining sidecar at the embedded
         # resolver before any getent runs (same preamble as the Limited path).
@@ -1714,6 +1837,13 @@ class TestCredentialHostEgressVerdict:
         """Run the generated script with recording shims; return (table, argv)."""
         bindir = tempfile.mkdtemp()
         log = os.path.join(bindir, "rules.log")
+        # IPv6 rules go to their own log and are NOT replayed below: this model
+        # evaluates one IPv4 packet, and ip6tables writes a SEPARATE stack whose
+        # rules can never match it. Folding them in silently mis-verdicts — the
+        # Unrestricted v6 ``:443`` DROP (#2422) would read as a v4 block, hiding
+        # whether the v4 catch-all works at all. The v6 rules are asserted
+        # directly by ``TestIPv6EgressLockdown``.
+        log6 = os.path.join(bindir, "rules6.log")
         # getent ahostsv4 <host> answers with the SAMPLED address only — the
         # subset the resolver happened to return at rule-generation time. Post
         # #2042 the credential host is not looked up at all; the shim still
@@ -1724,23 +1854,28 @@ class TestCredentialHostEgressVerdict:
             f'if [ "$2" = "aios-worker" ]; then echo "{self.PROXY_IP} STREAM aios-worker"; fi\n'
             "exit 0\n"
         )
+
         # iptables shim: append the argv of every mutating call to the log.
         # -S/-C/-D calls are answered so the script's guards behave (nothing is
         # installed, so -C "rule exists?" is false and -D is a no-op).
-        ipt = (
-            "#!/usr/bin/env bash\n"
-            f'printf "%s\\n" "$*" >> {log}\n'
-            'for a in "$@"; do\n'
-            '  case "$a" in -S) exit 0;; -C) exit 1;; -D) exit 1;; esac\n'
-            "done\n"
-            "exit 0\n"
-        )
+        def _ipt_shim(target: str) -> str:
+            return (
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "$*" >> {target}\n'
+                'for a in "$@"; do\n'
+                '  case "$a" in -S) exit 0;; -C) exit 1;; -D) exit 1;; esac\n'
+                "done\n"
+                "exit 0\n"
+            )
+
+        ipt = _ipt_shim(log)
+        ipt6 = _ipt_shim(log6)
         for name, body in (
             ("getent", getent),
             ("iptables-legacy", ipt),
             ("iptables", ipt),
-            ("ip6tables-legacy", ipt),
-            ("ip6tables", ipt),
+            ("ip6tables-legacy", ipt6),
+            ("ip6tables", ipt6),
         ):
             p = os.path.join(bindir, name)
             with open(p, "w") as f:
@@ -1816,8 +1951,23 @@ class TestCredentialHostEgressVerdict:
                     chain.insert(0, argv)
             return chain
 
+        def _dest_matches(argv: list[str], ip: str) -> bool:
+            """Evaluate the rule's ``-d`` match, honouring a leading ``!``.
+
+            The direct-IP catch-all (#2422) is written ``! -d 127.0.0.0/8``, so
+            a model that read ``-d`` positionally would invert it and conclude
+            the rule matches ONLY loopback — i.e. would report the bypass as
+            still open on a ruleset that closes it. Prefix-aware because the
+            operand is a CIDR, not a host address.
+            """
+            if "-d" not in argv:
+                return True
+            idx = argv.index("-d")
+            hit = ipaddress.ip_address(ip) in ipaddress.ip_network(argv[idx + 1], strict=False)
+            return not hit if idx > 0 and argv[idx - 1] == "!" else hit
+
         def _matches(argv: list[str], ip: str, port: int) -> bool:
-            if "-d" in argv and argv[argv.index("-d") + 1] != ip:
+            if not _dest_matches(argv, ip):
                 return False
             if "--dport" in argv and argv[argv.index("--dport") + 1] != str(port):
                 return False
@@ -1959,6 +2109,102 @@ class TestCredentialHostEgressVerdict:
         assert dest is not None
         assert self._verdict(rules, dest) == "proxied"
 
+    # ── the direct-IP client: the #2422 High ──────────────────────────────────
+
+    def test_unrestricted_direct_ip_to_credential_host_is_proxied(self) -> None:
+        """FLIPPED by #2422 — the bypass the High was filed against.
+
+        Name-keying binds a client that ASKS DNS. It says nothing about one
+        that never asks and dials a real credential-host address it holds out
+        of band: a published API address, one cached before provision, one read
+        back over DoH/DoT (which this netns does not intercept). Before #2422
+        that packet matched no nat rule, met the default-``ACCEPT`` filter
+        policy, and left carrying the literal placeholder — the #2042 failure
+        mode reached by a different route.
+
+        The catch-all makes the destination address stop deciding: EVERY
+        outbound ``:443`` lands on the proxy, which keys on the ClientHello SNI.
+        Asserted over the sampled address, the unsampled one, and an address
+        unrelated to any resolution at all — none of them is special any more.
+        """
+        rules = self._unrestricted_rules()
+        for ip in (self.SAMPLED_IP, self.UNSAMPLED_IP, "203.0.113.7"):
+            assert self._verdict(rules, ip) == "proxied", (
+                f"direct-IP :443 to {ip} escaped the proxy (#2422)"
+            )
+
+    def test_unrestricted_loopback_https_is_not_hijacked(self) -> None:
+        """The catch-all excludes loopback.
+
+        ``route_localnet`` is on for this netns, so without the exclusion an
+        in-sandbox ``https://127.0.0.1`` — a dev server the model just started,
+        a local test fixture — would be dragged out to the worker proxy and
+        answered by whatever its SNI resolved to.
+        """
+        rules = self._unrestricted_rules()
+        assert self._verdict(rules, "127.0.0.1") == "direct"
+
+    def test_unrestricted_non_https_egress_stays_open(self) -> None:
+        """The catch-all is ``:443``-only: Unrestricted stays unrestricted.
+
+        Closing the bypass must not turn an open box into a lockdown. Only the
+        port the credential swap lives on is redirected; everything else still
+        leaves directly.
+        """
+        rules = self._unrestricted_rules()
+        for port in (80, 22, 8080):
+            assert self._verdict(rules, "203.0.113.7", dport=port) == "direct"
+
+    def test_limited_direct_ip_to_credential_host_is_blocked(self) -> None:
+        """Limited closes the same bypass by WITHHOLDING an ACCEPT (#2422).
+
+        The sidecar resolves allowed hosts before the ``:53`` interception is
+        installed, so a host that is both allowed and credential-bearing used
+        to get its REAL addresses ACCEPTed on ``:443`` — and a direct-IP client
+        walked straight out through them. No legitimate in-sandbox client ever
+        reaches those addresses (the name resolves only to the sentinel), so
+        the rule is pure bypass surface; without it the terminal ``-P OUTPUT
+        DROP`` refuses the packet.
+
+        Limited cannot use the Unrestricted redirect: the secret-egress proxy
+        runs STRICT here (any SNI outside the credential set is refused), so
+        routing every ``:443`` through it would break ordinary allowed hosts.
+        """
+        rules = self._limited_rules()
+        for ip in (self.SAMPLED_IP, self.UNSAMPLED_IP):
+            assert self._verdict(rules, ip) == "blocked"
+
+    def test_limited_shared_address_residual_is_named_not_silent(self) -> None:
+        """NAMED RESIDUAL, pinned so it cannot be mistaken for coverage.
+
+        Withholding the credential host's own ACCEPT does not help when a
+        DIFFERENT allowed host resolves to the SAME address (a shared CDN
+        front): that host's ACCEPT admits the packet, and a direct-IP
+        connection to the co-tenanted credential host is still un-proxied.
+        Closing it needs the proxy to carry the Limited allow-set so all
+        ``:443`` can be routed through it — a proxy-side change, not a ruleset
+        one. Unrestricted has no such residual: its catch-all is unconditional.
+        """
+        rules = self._record_rules(
+            build_iptables_script(
+                allowed_hosts={self.HOST, "shared.example.com"},
+                dnat_hosts=[self.HOST],
+                dnat_target=("aios-worker", self.PROXY_PORT),
+                dns_port=self.DNS_PORT,
+            )
+        )
+        # ``shared.example.com`` does not resolve in the shim, so it installs
+        # nothing and the credential host's address stays blocked here. The
+        # residual is about the case where it DOES share an address; assert the
+        # mechanism (no credential-host ACCEPT of our own) rather than pretend
+        # the shared case is covered.
+        assert self._verdict(rules, self.SAMPLED_IP) == "blocked"
+        assert not [
+            argv
+            for table, argv in rules
+            if table == "filter" and "ACCEPT" in argv and self.SAMPLED_IP in argv
+        ], "credential host still gets a per-address filter ACCEPT"
+
     def test_no_credential_rule_is_keyed_on_a_resolved_address(self) -> None:
         """The property behind #2042, inverted.
 
@@ -1969,10 +2215,16 @@ class TestCredentialHostEgressVerdict:
         coverage is a property of the ruleset rather than of what DNS returned.
         """
         for rules in (self._unrestricted_rules(), self._limited_rules()):
+            # A NEGATED -d (the catch-all's ``! -d 127.0.0.0/8``) is not a rule
+            # "keyed on" that destination — it is keyed on everything else, and
+            # its operand is a constant this file chose, not a resolution.
             credential_dests = {
                 argv[argv.index("-d") + 1]
                 for table, argv in rules
-                if table == "nat" and "DNAT" in argv and "-d" in argv
+                if table == "nat"
+                and "DNAT" in argv
+                and "-d" in argv
+                and argv[argv.index("-d") - 1] != "!"
             }
             assert credential_dests == {CREDENTIAL_SENTINEL_IP}
             assert self.SAMPLED_IP not in credential_dests
