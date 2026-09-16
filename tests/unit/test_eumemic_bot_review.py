@@ -580,6 +580,27 @@ def test_drop_wraps_the_harness_with_setpriv_no_new_privs(monkeypatch: Any, tmp_
     assert spec["env"]["HOME"] == str(tmp_path)
 
 
+def test_temp_root_gets_traverse_bit_before_drop(monkeypatch: Any, clean_env: None) -> None:
+    """B1: mkdtemp is 0700; without 0711 the dropped uid cannot enter agent/."""
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    seen_roots: list[Path] = []
+    real_chmod = os.chmod
+
+    def tracking_chmod(path: str | Path, mode: int, *args: Any, **kwargs: Any) -> None:
+        p = Path(path)
+        if mode == 0o711 and p.name.startswith("eumemic-review-"):
+            seen_roots.append(p)
+        real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", tracking_chmod)
+    monkeypatch.setattr(reviewer, "_drop_into_agent_user", lambda c, e, t: (c, e))
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning("### Code review\n\nLGTM.", 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    assert seen_roots, "launcher temp root must be chmod 0711 for agent traverse"
+
+
 def test_drop_chowns_only_the_path_it_is_given(monkeypatch: Any, tmp_path: Path) -> None:
     """F2: the launcher TemporaryDirectory parent must stay launcher-owned."""
     monkeypatch.setattr(reviewer, "_require_agent_user", lambda: "eumemic-review")

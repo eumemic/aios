@@ -918,6 +918,11 @@ def _run_harness(
     # PermissionError from TemporaryDirectory must not supersede SystemExit.
     with tempfile.TemporaryDirectory(prefix="eumemic-review-", ignore_cleanup_errors=True) as temp:
         root = Path(temp)
+        # mkdtemp is 0700. The agent/ subtree is chowned 0700 to the dropped
+        # uid; without traverse on this still-launcher-owned root, that uid
+        # cannot open anything under agent/ (gitconfig, harness-spec, artifact).
+        # 0711 is traverse-only (not listable); teardown stays ours.
+        os.chmod(root, 0o711)
         agent_home = root / "agent"
         agent_home.mkdir()
         artifact_path = agent_home / "last-message.md"

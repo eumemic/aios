@@ -17,7 +17,8 @@ The dropped uid is given `GIT_CONFIG_GLOBAL` with `safe.directory` for the
 runner-owned checkout, and the launcher checks it can reproduce the digest
 before the harness starts — otherwise every review hashes empty and is
 refused as NO EVIDENCE. Only an `agent/` subdirectory is chowned; the
-launcher `TemporaryDirectory` stays ours and is torn down with `sudo rm`
+launcher `TemporaryDirectory` stays ours, is `chmod 0711` so the dropped
+uid can traverse into `agent/`, and is torn down with `sudo rm`
 plus `ignore_cleanup_errors`, so cleanup cannot swallow the NO_EVIDENCE
 exit or prevent writing the artifact.
 
