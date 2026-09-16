@@ -1,182 +1,160 @@
-# Uncorrelated review — aios#2410 tip `84aa0759`
+# Uncorrelated review — gVisor snapshot empty-floor, tip `77e18b2745408725a8748e8ac322bf38f8668133`
 
-- **Round**: `botpost2410u` (implementer grok-4.6, worktree `aios-botpost2410u`)
-- **Checker**: claude-opus-5, worktree `aios-botpost2410urev`, branch `botpost2410urev` (maker ≠ checker)
-- **Tip reviewed**: `84aa075961fa370debec3d45e98195a086d21b19` "fix(ci): let dropped review uid enter a 0700 runner home"
-- **Verdict**: **PASS** — the live FATAL is closed, and I reproduced both halves of the
-  A/B on a real `setpriv` drop to a real unprivileged uid. F2, the High privilege
-  boundary, the Medium digest gate and the keep list are all intact.
+- **Round**: `gvisfloor` (implementer grok-4.6, worktree `aios-gvisfloorrev`, reviewer claude-opus-5)
+- **Base**: `cc9a3c0e` — `fix(sandbox): apply runsc egress rules in the target Sentry (#2410)`
+- **Target defect**: master RED gVisor Validation, Actions 35146073686 —
+  `tests/e2e/test_sandbox_persistence.py::test_zero_write_release_is_skipped_empty`
+  expected `skipped_empty`, got `committed` at `empty_floor_bytes=8192`.
+- **Verdict**: **FAIL**
 
-State: `origin/gvisorgrn = 5766de7d`; HEAD is one product commit ahead and **unpushed**.
-Not pushed, not merged, no PR opened. `TASK.md` is dirty (Shepherd's round file) and
-untouched. The tip touches four files and no `src/`: `DONE.md`,
-`docs/eumemic-bot-review.md`, `scripts/eumemic_bot_review.py`,
-`tests/unit/test_eumemic_bot_review.py`.
+The change is small, well-documented and mechanically sound in isolation
+(single production call site, `max(configured, …)` so an operator override
+still wins, runc untouched, #2410 operator-mount / Sentry-exec / proxy-key
+paths untouched, two new unit tests — both pass locally). It fails review on
+its **causal claim**: the container that produced the red is not a runsc
+container, so the condition the commit gates on is not the condition that
+caused the failure. The e2e goes green by moving the expectation, not by
+matching the cause, and the real trigger stays ungated in production.
 
-## Method
+---
 
-Same posture as the previous two rounds: the committed tests still stub the boundary, so
-nothing in-tree can prove reachability. I drove the **real** `_run_harness` through a
-**real** `sudo setpriv` drop to the **real** unprivileged `eumemic-review` user (uid 998,
-no sudo) against a **real** git repo sitting under a **0700** `$HOME` — the ubuntu-latest
-shape from the live Action. Every claim below is a reproduction, not a reading.
+## F1 (blocking) — the failing container does not run under runsc; the gate is keyed on the wrong thing
 
-## F1 — live FATAL: closed (A/B proof)
+`test_zero_write_release_is_skipped_empty` builds its spec with the module-local
+`_spec()` helper (`tests/e2e/test_sandbox_persistence.py:53`), which constructs
+`SandboxSpec(...)` with explicit keyword arguments and **never sets `runtime=`**.
+`SandboxSpec` is a pure dataclass with no `__post_init__` and
+`runtime: str | None = None` (`src/aios/sandbox/backends/base.py:132`), and
+`DockerBackend.create` emits the flag only under `if spec.runtime:`
+(`src/aios/sandbox/backends/docker.py:460-461`). The `daemon` fixture
+(`tests/e2e/conftest.py:130`) hands back a bare `DockerBackend()` and does not
+thread settings in either.
 
-`_ensure_dropped_uid_can_enter` (`scripts/eumemic_bot_review.py:441`) is called from
-`_run_harness` (`:986`) on the dropped path, before `_verify_dropped_diff`. It adds
-other-**execute** on every ancestor of the checkout and `a+rX`-equivalent bits on the
-checkout itself.
+So in Actions 35146073686 this container ran under **Docker's default runtime
+(runc)**, not gVisor — even though the step exports `AIOS_SANDBOX_RUNTIME=runsc`.
+Sibling e2e files that genuinely need gVisor thread it explicitly
+(`tests/e2e/test_sandbox_ipv6_lockdown.py:230` → `runtime=settings.sandbox_runtime`);
+this one does not.
 
-The same driver, same repo, same 0700 `$HOME`, with the new function neutered vs. as
-committed:
+Consequences:
 
-```
-===== WITHOUT the new opener (fix neutered) =====
-DRIVER launcher evidence: (19, 'eb5f3889...67b7')
-FATAL: dropped user eumemic-review cannot git diff 8be94c73...b78ed901:
-  fatal: cannot change to '/tmp/rev2410u/home/runner/work/aios/aios': Permission denied
-DRIVER SystemExit: 1
+1. **The stated mechanism cannot be the mechanism.** "runsc's overlay adds more
+   (gvisor#10256)" is inapplicable to a container with no Sentry. Likewise
+   `--mount type=image` is appended only under `if spec.runtime == "runsc"`
+   (`docker.py:356`), so the operator-root copy-up named in the commit message
+   is not present here either. The only environmental delta in that job that
+   actually reaches this container is daemon-wide:
+   `features.containerd-snapshotter: true` in `/etc/docker/daemon.json`
+   (`.github/workflows/gvisor-validation.yml`, "Register runsc Docker runtime"),
+   plus the runner's Engine version — both of which apply identically to runc.
 
-===== WITH the opener (as committed) =====
-HARNESS uid=998 cwd=/tmp/rev2410u/home/runner/work/aios/aios HOME=/tmp/eumemic-review-7ohpca52/agent
-HARNESS git rc=0 stderr=
-HARNESS lines=19 sha=eb5f38899a4cf17046a0c18463f56e9e6f27182076f623766d69fac3e57e67b7
-DRIVER RETURNED ARTIFACT:
-### Code review
-...
-<!-- inspected: lines=19 sha256=eb5f3889...67b7 -->
-EXIT=0
-```
+2. **The gate does not cover the failing configuration.** `snapshot_empty_floor_bytes`
+   keys on `settings.sandbox_runtime == "runsc"` (`src/aios/config.py:1392`). A
+   deployment on the containerd image store running the default runtime — which
+   is exactly the shape CI just demonstrated produces `SizeRw > 8192` — keeps the
+   8 KiB floor and keeps growing a snapshot chain on every idle for chat-only /
+   read-only sessions. That is the #923 condition the floor exists to prevent,
+   and after this change no test can detect it.
 
-The neutered run reproduces TASK's live error **verbatim** (`cannot change to '...':
-Permission denied`); the committed code makes the dropped uid enter the checkout, read
-`.git`, and emit a **non-empty digest that matches the launcher's**. The shape is also
-diagnosis-independent: it opens *every* ancestor rather than betting on which component
-was restrictive, so it closes the class, not just the observed instance.
+3. **The e2e's green is coincidental.** The test now derives its own expectation
+   from the same helper production uses (`test_sandbox_persistence.py:176-178`),
+   reading `AIOS_SANDBOX_RUNTIME` — an env var that in this test affects only the
+   assertion, never the container under test. The assertion and the code now move
+   together; the test no longer pins the floor against observed reality.
 
-Three properties I checked because they could have turned this fix into a different
-failure:
+## F2 (blocking) — 64 KiB is unmeasured; neither bound it claims is verified
 
-- **It does not perturb the digest.** Files get `+r` only, never `+x`, so no tracked file
-  flips `100644`→`100755` between `diff_evidence` (computed before the walk) and the
-  agent's own hash. Verified with a tracked `0755` script and a tracked `0600` file in the
-  tree: digest byte-identical before/after, `git status --porcelain` clean, `run.sh` still
-  `-rwxr-xr-x`.
-- **It does not open `$HOME` for reading.** `0700` → `0711`, traverse-only. Live, as the
-  dropped uid: `LIST_HOME=denied`, `READ_PRIVATE=denied` (a `0600` sibling), while
-  `ENTER_CHECKOUT=ok`.
-- **It is not a cost.** The walk on the real aios checkout (fetch-depth-0, 68M `.git`) is
-  605 dirs / 4940 files, **1** of which needs a chmod at all, at 0.11s. No sudo fallback
-  fires in the CI shape, where the runner owns the whole tree.
+The commit picks "16 inodes" but never records the **actual** no-write `SizeRw`
+from the failing run — the one number that would justify a value. The CI failure
+message at the time printed only `got committed`, and the run link is cited
+without the observed figure. Both bounds asserted in the message are therefore
+unverified:
 
-## F2 — cleanup: still closed
+- lower bound ("above the empty baseline"): unknown baseline — if it is, say,
+  70 KiB, the job is still red and the next patch is another guess;
+- upper bound ("still sits below a 64 KiB tenant write plus directory inodes
+  (~72 KiB)"): the helper writes **exactly** 65536 bytes
+  (`_write_substantial`, `test_sandbox_persistence.py:80-84`;
+  `test_sandbox_provision_path.py:126`), i.e. exactly the new floor. `st_blocks*512`
+  for that file is 65536, so it clears `size_rw <= empty_floor_bytes`
+  (`docker.py:872`) **only** by the baseline overhead whose size is the very
+  unknown that prompted the change. That is circular.
 
-`os.chmod(root, 0o711)` (`:978`, the leftover applied from last round) plus the chown
-narrowed to `agent/` plus `_rmtree_maybe_foreign` in the `finally` (`:1023`). Across three
-real dropped runs in this review — success, heading-only refusal, and the FATAL path —
-**zero** `/tmp/eumemic-review-*` directories leaked and no `PermissionError` traceback
-appeared. (The three leftovers on this box timestamp 19:18–19:21, i.e. the implementer's
-own probes before the fix, not my runs at 20:05–20:07.) The NO_EVIDENCE exit is not
-swallowed: exit **3** with the banner and the `::error` annotation, nothing written.
+`tests/e2e/test_sandbox_salvage.py` makes this concrete: it drives the real
+registry (`SandboxRegistry(backend=backend)` → `_salvage_session_corpses`,
+lines 103/118, 161/193) and therefore now runs against the **production**
+65536 floor under the gVisor job env, with a corpse that wrote
+`echo pre-crash > /root/survivor` + a 65536-byte blob (line 110/166) —
+clearing the floor by ~4 KiB plus that same unmeasured baseline.
 
-## High — privilege boundary: still closed
+Also stale: `_write_substantial`'s docstring still reads "well over the
+empty-floor (8 KiB)", which is now false for the runsc path (it is *at* the floor).
 
-Untouched by this tip, and re-verified live rather than assumed. As the dropped uid:
-`SUDO=denied`, `READ_OTHER_ENVIRON=denied`, harness `uid=998` while the launcher stayed
-uid 1000. `_require_agent_user` (`:342`) still fails closed on uid 0, a shared euid, and a
-user it cannot prove is outside `sudo`/`admin`/`wheel`. The reusable key stays in the
-launcher's `_ProxyBroker`; the spec crossing the boundary carries only the loopback token;
-`REVIEW_PROXY_KEY_FILE` is read and unlinked in `_proxy_key` **before** anything is
-widened, so the staged key is gone from the filesystem by the time the agent can traverse
-`RUNNER_TEMP`. Nothing in prose passes prctl+broker off as the boundary. The new walk adds
-only `r`/`x`, never `w`, so the agent still cannot tamper with the workspace or the
-artifact path.
+## F3 (major) — the discard window widens 16× and is not bounded or mentioned
 
-## Medium — artifact gate: still closed
+`skipped_empty` is not a no-op: `_snapshot_uncounted` returns before commit
+(`docker.py:872-882`) and `_snapshot_and_remove` then `destroy()`s the corpse
+(`registry.py:1800-1802`), so the writable layer is **discarded**. Raising the
+floor to 64 KiB means any runsc session whose rootfs delta lands under
+~(64 KiB − baseline) silently loses its writes at release.
 
-`require_inspection_evidence` (`:611`) is untouched, still called inside `_run_harness`
-(`:1010`) and again in `run_agent_phase` before the write, still full-64-hex-only. Live
-heading-only harness, through the real drop:
+`/workspace` is a bind mount and is excluded from the snapshot
+(`test_sandbox_persistence.py:130-131`), so tenant workspace files are safe.
+Not safe: `/root` dotfiles, `~/.ssh`, `~/.config`, `git config`, small
+`pip install --user` results, `/etc` edits — the `/root`, `/etc`,
+`/usr/local` persistence the suite's first test exists to guarantee. The commit
+neither quantifies this window nor mentions the trade-off. An eightfold-plus
+increase in silently-dropped writes is a durability change that needs to be
+stated, and ideally bounded by measurement rather than by a round number.
 
-```
-FATAL: NO EVIDENCE OF INSPECTION — refusing to publish a verdict: ... no well-formed
-`<!-- inspected: lines=<N> sha256=<HEX> -->` line ...
-DRIVER SystemExit: 3
-```
+## F4 (minor) — floor keyed on the current global setting, not the corpse
 
-Note the gate is now *reachable on its merits* for the first time: previously every run
-died before the harness, so the digest channel had never actually accepted a real dropped
-agent's evidence. It does now.
+`registry.py:1822-1824` passes `settings.sandbox_runtime`, i.e. the runtime
+configured *now*, to judge a corpse that may have been created under a different
+one (salvage of a pre-flip corpse, `_snapshot_and_record` called with a bare
+`sandbox_id`). The backend already inspects the container on this path
+(`_inspect_container_for_snapshot`), so the corpse's own `.HostConfig.Runtime`
+is available and would be exact.
 
-## Keep list — intact
+---
 
-The tip touches no `src/`. Hosts-first `resolve_ipv4` / `build_resolve_ipv4_fn` with
-`ResolveScope` and operator-controlled `operator_hosts` (`src/aios/sandbox/setup.py:490`,
-`:532`, `:567`), the runsc gateway bake (`.github/workflows/gvisor-validation.yml`), and
-proxy-key-out-of-harness-env (`REVIEW_PROXY_KEY_FILE` staged in its own step, read and
-unlinked, plus `_STRIPPED_ENV`) are all unchanged.
+## On the review question: floor bump vs. runtime-aware `SizeRw`
 
-## Checks run
+Runtime-aware — and more precisely **container-aware** — is the right shape, and
+F1 is why: the quantity that varies is the writable layer's *empty baseline*,
+which is a property of the image store and the container, not of a runtime
+string in settings. The robust form is to measure it rather than name it:
 
-Focused only, per the ops constraint — no full suite, no `-n`:
+- stamp the container's `SizeRw` at create, before any tenant exec, onto the
+  handle (or a label, so salvage of a corpse can read it back), and
+- make the identity short-circuit `size_rw - baseline <= configured_floor`.
 
-- `uv run pytest tests/unit/test_eumemic_bot_review.py -q` → **69 passed**
-- `uv run ruff check` / `ruff format --check` on the two changed Python files → clean
-- `uv run mypy scripts/eumemic_bot_review.py` → clean
+That keeps the discard window at one page regardless of store or runtime, needs
+no magic constant, removes the special case instead of adding one, and is
+correct-by-construction in the CLAUDE.md sense ("unify toward minimal
+primitives… encode variation as a *kind*, never a flag"). It also fixes the runc
++ containerd-snapshotter case F1 leaves open.
 
-## Non-blocking notes
+If that is judged too large for a CI-red unblock, the minimum acceptable
+smaller fix is: (a) capture the real no-write `SizeRw` under the failing
+configuration and cite it, (b) key on the image store (or make it a plain
+setting the gVisor job sets) rather than on `sandbox_runtime`, and (c) state the
+resulting discard window explicitly in the config docstring.
 
-1. **The next dir of the same class is the agent home, not the checkout.** The opener is
-   applied to `os.getcwd()` only. `agent_home` lives under `tempfile.gettempdir()`, which
-   is reachable today purely because ubuntu-latest leaves `TMPDIR` unset and `/tmp` is
-   `1777`. Set `TMPDIR` to anything `0700` (or point it at `$HOME`) and the dropped uid
-   loses its own `gitconfig`/`harness-spec.json` again — the exact defect of round
-   `botpost2410t`, in a new disguise. It would fail closed and loudly, so it is not a
-   blocker, but calling `_ensure_dropped_uid_can_enter(root.parent)` (or asserting
-   traversability of the temp root's ancestors) would retire the class rather than the
-   instance.
-2. **The walk widens `0600` files inside the checkout to world-readable.** Verified:
-   a tracked `0600` `cfg.ini` became readable to the dropped agent. Harmless in this
-   workflow — the only thing in `$GITHUB_WORKSPACE` before the agent step is
-   `actions/checkout` output with `persist-credentials: false` — but it means any future
-   step that stages a secret into the workspace hands it to an untrusted agent. Scoping
-   the read-widening to `.git` plus `git ls-files` output would keep the property the
-   digest needs without the sharp edge.
-3. **Two mechanisms for one job.** `_make_tree_readable` (`:421`, one `sudo chmod -R
-   a+rX`) and the new per-entry Python walk do the same thing by different means.
-   Per CLAUDE.md's "compose, don't accrete", one of them should be the primitive.
-4. **`_chmod_add` `_die`s when `stat` fails mid-walk** (`:434`), turning a benign
-   file-vanished race into a FATAL. `os.walk` over a live tree can hand out entries that
-   are already gone; skipping `FileNotFoundError` would be strictly better.
-5. **The new unit test mutates directories outside `tmp_path`.** Because the opener walks
-   to `/`, `test_ensure_dropped_uid_can_enter_opens_a_0700_home` left `/tmp/pytest-of-box`
-   and `/tmp/pytest-of-box/pytest-17{2,3}` at `0711` on this box (earlier `pytest-171` is
-   still `0700`). Harmless, but a unit test should not chmod its way up the filesystem —
-   an explicit stop boundary on the ancestor walk would fix both this and note 1.
-6. **Still no test that performs a real drop.** `test_run_agent_opens_the_checkout_before_
-   the_dropped_diff` stubs `_drop_into_agent_user`, `_ensure_dropped_uid_can_enter` and
-   `_verify_dropped_diff` and asserts call *order* — useful, and still not reachability.
-   `test_ensure_dropped_uid_can_enter_opens_a_0700_home` is the first test in this family
-   that asserts real modes, which is the right direction. A skip-if-unavailable test that
-   does a real `setpriv` drop and asserts the dropped uid can `cat` its own
-   `harness-spec.json` and reproduce the digest would have caught all three blockers of
-   the last three rounds; this review has had to supply that out-of-tree every time.
-7. Prior-round notes 1–3 stand: the self-check still gates on the stringly
-   `"setpriv" in command` (`:986`) with `base_sha`/`head_sha` defaulted to `""`, so a
-   caller that forgets the kwargs silently skips the fail-closed check;
-   `_agent_gitconfig_text` still does not escape git-config value syntax; and
-   `diff_evidence` (launcher env/global config) vs `_verify_dropped_diff`
-   (`env -i … LANG=C`, different `GIT_CONFIG_GLOBAL`) still compute the digest under
-   different config postures. All three matched live here.
+## Regressions / #2410 integrity
 
-## Verdict
+- No #2410 surface touched: `_runsc_operator_image`, `--mount type=image`,
+  the Sentry-exec chroot path and proxy-key isolation are unchanged. Confirmed
+  by diff inspection of `docker.py` (comment-only change at the identity
+  short-circuit) and `registry.py` (one call-site change).
+- Sole production consumer of the new helper is `registry.py:1822`. All other
+  `empty_floor_bytes=` sites are tests passing a literal `8192`, unaffected.
+- `runtime == "runsc"` matches the established idiom (`docker.py:325,356,1383`).
+- New unit tests pass: `uv run pytest tests/unit/test_config.py -k snapshot_empty_floor` → 2 passed.
+- Not run in this round (OOM budget): mypy, full ruff, gVisor e2e.
 
-**PASS.** This is the first tip in the series where a review can actually complete: the
-dropped `eumemic-review` uid enters a `0700`-ancestor checkout, reproduces the launcher's
-digest byte-for-byte, and the artifact comes back with exit 0 — while the heading-only
-harness still exits 3 with no artifact, `$HOME` stays unlistable, the agent still cannot
-sudo or read the key-holder's `/proc`, the temp tree tears down cleanly, and the digest is
-provably unperturbed by the chmod walk. The fix is also the right *shape*: it opens every
-ancestor instead of betting on which one was `0700`. The remaining notes are hardening,
-not blockers.
+## Leftovers applied
+
+None. F1 requires re-keying the gate (and, for a real fix, measuring the
+baseline) — not a leftover that can be applied cleanly on top of this tip.
+Product code left untouched.
