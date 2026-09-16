@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import socket
 import struct
 from collections.abc import Iterable
@@ -101,6 +102,11 @@ _MAX_UDP_QUERY = 65535
 _MAX_TCP_MESSAGE = 65535
 _UPSTREAM_TIMEOUT_S = 5.0
 _TCP_IDLE_TIMEOUT_S = 15.0
+# UDP bind(0) and TCP bind(0) consult separate port spaces, so a dual-protocol
+# bind on one port can collide with a live listener under parallel e2e. Retry
+# a fresh ephemeral pair; SO_REUSEADDR / SO_REUSEPORT would not make a live
+# listener shareable and must not — two sessions must not share a resolver.
+_BIND_ATTEMPTS = 16
 
 # Standard resolver config on the worker; its first nameserver is the upstream
 # ordinary (non-credential) queries are forwarded to. In a containerized worker
@@ -279,35 +285,62 @@ class CredentialDnsResolver:
         Raises :class:`CredentialDnsError` if either bind fails — the caller
         turns that into a failed provision, because a sandbox whose credential
         names cannot be pinned must not be handed a credential.
+
+        TCP is bound first so the kernel hands us a port that is free in the
+        TCP space; UDP is then attached to that port. The opposite order is
+        what fails under parallel e2e: ``UDP bind(0)`` does not consult TCP
+        listeners, so it can land on a port another process already holds,
+        and the subsequent TCP bind raises ``EADDRINUSE`` (errno 98). The
+        netns DNAT uses a single ``dns_port`` for both ``udp/53`` and
+        ``tcp/53`` (:func:`aios.sandbox.setup._nat_dnat_lines`), so the
+        sockets must share a port — splitting them is not an option.
+        ``EADDRINUSE`` on the UDP attach (or a race) retries with a new
+        ephemeral port; any other bind error still fails closed.
         """
-        loop = asyncio.get_running_loop()
-        try:
-            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Assigned before the first fallible call so a later failure still
-            # closes the descriptor through :meth:`stop`.
-            self._udp_sock = udp_sock
-            udp_sock.setblocking(False)
-            if _IP_PKTINFO is not None:
-                # See :func:`_reply_pktinfo`: without this the reply to a
-                # sandbox query can leave with the wrong source address.
-                udp_sock.setsockopt(socket.IPPROTO_IP, _IP_PKTINFO, 1)
-            udp_sock.bind(("0.0.0.0", 0))
-            port = udp_sock.getsockname()[1]
-            # Read the socket directly rather than through a DatagramTransport:
-            # the transport has no way to attach the ``IP_PKTINFO`` control
-            # message the reply needs.
-            loop.add_reader(udp_sock.fileno(), self._read_udp)
-            self._tcp_server = await asyncio.start_server(self._handle_tcp, "0.0.0.0", port)
-            self._port = port
-        except BaseException as exc:
-            await self.stop()
-            raise CredentialDnsError("credential DNS resolver failed to bind") from exc
+        last_exc: BaseException | None = None
+        for attempt in range(_BIND_ATTEMPTS):
+            try:
+                await self._bind()
+                last_exc = None
+                break
+            except OSError as exc:
+                last_exc = exc
+                await self.stop()
+                if exc.errno != errno.EADDRINUSE or attempt + 1 == _BIND_ATTEMPTS:
+                    break
+            except BaseException as exc:
+                await self.stop()
+                raise CredentialDnsError("credential DNS resolver failed to bind") from exc
+        if self._port is None:
+            raise CredentialDnsError("credential DNS resolver failed to bind") from last_exc
         log.info(
             "credential_dns.started",
             port=self._port,
             credential_host_count=len(self._hosts),
             has_upstream=self._upstream is not None,
         )
+
+    async def _bind(self) -> None:
+        loop = asyncio.get_running_loop()
+        self._tcp_server = await asyncio.start_server(self._handle_tcp, "0.0.0.0", 0)
+        sockets = self._tcp_server.sockets
+        assert sockets, "asyncio.start_server returned no sockets"
+        port: int = sockets[0].getsockname()[1]
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Assigned before the first fallible call so a later failure still
+        # closes the descriptor through :meth:`stop`.
+        self._udp_sock = udp_sock
+        udp_sock.setblocking(False)
+        if _IP_PKTINFO is not None:
+            # See :func:`_reply_pktinfo`: without this the reply to a
+            # sandbox query can leave with the wrong source address.
+            udp_sock.setsockopt(socket.IPPROTO_IP, _IP_PKTINFO, 1)
+        udp_sock.bind(("0.0.0.0", port))
+        # Read the socket directly rather than through a DatagramTransport:
+        # the transport has no way to attach the ``IP_PKTINFO`` control
+        # message the reply needs.
+        loop.add_reader(udp_sock.fileno(), self._read_udp)
+        self._port = port
 
     async def stop(self) -> None:
         if self._udp_sock is not None:
