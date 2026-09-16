@@ -1,5 +1,22 @@
 # Done
 
+## #2422 tip `7f5666f3` — direct-IP catch-all (High closed)
+
+Uncorrelated review (grok-4.6 on `trigswap6brev`) of tip
+`7f5666f3` (*fix(sandbox): force direct-IP credential traffic through the
+egress proxy*) — **PASS**. No product follow-up from the reviewer.
+
+This tip closes the High on PR #2422: Unrestricted credentialed sandboxes
+DNAT every outbound `tcp:443` except loopback to the secret-egress proxy
+(SNI-keyed swap / SSRF-checked relay). Limited withholds the credential
+host's own per-address filter `ACCEPT`. Name-based sentinel / PKTINFO /
+hosts-first resolve are untouched. Focused unit tests: 178 passed
+(`tests/unit/test_networking.py`, `tests/unit/sandbox/test_credential_dns.py`).
+CI remains the e2e oracle.
+
+Named residual (not claimed closed): an address shared with a different
+allowed host can still carry that host's Limited ACCEPT.
+
 ## #2422 functional swap follow-up
 
 The branch is rebased onto `origin/master` at `63337f26` with the true #2042
