@@ -38,11 +38,16 @@ def _on_x86_64(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
 
 
-def _spec(*, runtime: str | None = None, image: str | None = None) -> SandboxSpec:
+def _spec(
+    *,
+    runtime: str | None = None,
+    image: str | None = None,
+    seccomp_profile: str | None = None,
+) -> SandboxSpec:
     # runsc sandboxes must run the operator image itself (the egress exec
     # chroots into it), so that is the default here; the runc path is
     # image-agnostic and the mismatch test overrides it.
-    return SandboxSpec(
+    spec = SandboxSpec(
         session_id="sess_runtime",
         instance_id="inst_runtime",
         workspace=Mount(host_path=Path("/tmp/ws"), sandbox_path="/workspace"),
@@ -58,6 +63,9 @@ def _spec(*, runtime: str | None = None, image: str | None = None) -> SandboxSpe
         image=image or get_settings().docker_image,
         runtime=runtime,
     )
+    if seccomp_profile is not None:
+        return replace(spec, seccomp_profile=seccomp_profile)
+    return spec
 
 
 def _runtime_values(argv: list[str]) -> list[str]:
@@ -518,3 +526,65 @@ async def test_netns_sidecar_omits_runtime_when_none(monkeypatch: pytest.MonkeyP
     assert argv[:2] == ["docker", "run"]
     assert _runtime_values(argv) == []
     assert argv[-4:] == ["aios-sandbox:test", "bash", "-c", "true"]
+
+
+_SECCOMP_SANDBOX = Path(__file__).parents[3] / "docker" / "seccomp-sandbox.json"
+
+
+def _seccomp_values(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, tok in enumerate(argv) if tok == "--security-opt"]
+
+
+def _assert_runsc_clone3_profile(path: Path) -> None:
+    assert path != _SECCOMP_SANDBOX, "runsc must not use the runc profile as-is"
+    profile = json.loads(path.read_text())
+    clone3_allow = next(
+        blk
+        for blk in profile["syscalls"]
+        if blk.get("action") == "SCMP_ACT_ALLOW" and "clone3" in blk.get("names", [])
+    )
+    assert not clone3_allow.get("args"), "clone3 ALLOW must be unfiltered (struct flags)"
+    assert not clone3_allow.get("includes")
+    unshare_denied = any(
+        blk.get("action") == "SCMP_ACT_ERRNO" and "unshare" in blk.get("names", [])
+        for blk in profile["syscalls"]
+    )
+    assert unshare_denied, "CLONE_NEWUSER denial via unshare must survive the runsc copy"
+
+
+async def test_create_runsc_emits_clone3_allow_seccomp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runsc OCI seccomp ignores errnoRet, so clone3 ENOSYS becomes EPERM and
+    python/node threads die. The create path must swap in a profile that
+    allows clone3 while keeping the authored unshare deny."""
+    calls: list[list[str]] = []
+    fake_run = _runsc_responder(calls)
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(runtime="runsc", seccomp_profile=str(_SECCOMP_SANDBOX)))
+
+    run = _run_argv(calls)
+    seccomp = next(v for v in _seccomp_values(run) if v.startswith("seccomp="))
+    _assert_runsc_clone3_profile(Path(seccomp.removeprefix("seccomp=")))
+
+
+async def test_create_runc_keeps_the_authored_seccomp_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    async def fake_run(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s
+        calls.append(list(argv))
+        return 0, b"deadbeefcafe\n", b""
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(seccomp_profile=str(_SECCOMP_SANDBOX)))
+
+    seccomp = next(v for v in _seccomp_values(calls[0]) if v.startswith("seccomp="))
+    assert seccomp == f"seccomp={_SECCOMP_SANDBOX}"

@@ -143,6 +143,11 @@ the overlay2-verified §5.2/§5.6 pseudocode and are what the implementation shi
   `skipped_empty`. An `== 0` test would never fire in prod. The gVisor validation
   runtime stanza passes `--overlay2=none` so tenant writes land in Docker's writable
   layer, and `--oci-seccomp` so the authored profile is loaded inside the Sentry.
+  runsc still mounts tmpfs over an *empty* `/tmp`; the sandbox image plants
+  `/tmp/.aios-keep` so `/tmp` stays on the rootfs and snapshot/resume keeps
+  `/tmp/marker`. `--oci-seccomp` plus gVisor's errnoRet-ignoring translator would
+  turn clone3 ENOSYS into EPERM and brick python/node threads; create() prepends
+  a clone3 ALLOW for runsc only, while unshare `CLONE_NEWUSER` stays denied.
 - **Flatten is budget-driven; the layer wall does not exist.** The overlay2 ~125-layer
   commit wall is absent on the containerd store (a chain ran cleanly through 250 layers).
   Flatten is therefore driven by the per-session unique-bytes budget (storage), with layer

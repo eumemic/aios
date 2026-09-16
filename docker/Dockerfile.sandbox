@@ -97,6 +97,13 @@ ENV HOME=/root
 # somehow lapses.
 ENV TOOL_BROKER_URL=unix:///var/run/aios/tool-broker.sock
 
+# gVisor (runsc) mounts an internal tmpfs over an empty `/tmp`
+# (`runsc/boot/vfs.go` `mountTmp`). That hides tenant writes from `docker
+# commit`, so `/tmp/marker` fails snapshot/resume. A sentinel makes `/tmp`
+# non-empty; runsc then leaves it on the rootfs. Sessions still bind-mount
+# `/tmp` (#2280); this is for the snapshot contract and non-session planes.
+RUN touch /tmp/.aios-keep && chmod 1777 /tmp
+
 # Workspace directory. The host mounts a per-session directory here at
 # container start via `-v <workspace_root>/<session_id>:/workspace`. The
 # directory is created empty on the host on first provision.

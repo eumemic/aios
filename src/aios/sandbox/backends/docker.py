@@ -21,9 +21,11 @@ expected to run arbitrary shell inside the sandbox.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import platform
 import shutil
+import tempfile
 from pathlib import Path
 from time import monotonic
 
@@ -167,6 +169,52 @@ def _require_runsc_supported_machine(what: str) -> None:
             f"the operator image is entered through {_RUNSC_OPERATOR_LOADER}, which "
             "exists only in its x86_64 build"
         )
+
+
+@functools.cache
+def _runsc_seccomp_profile(source: str) -> str:
+    """Derive a runsc-safe copy of *source* that lets python/node threads start.
+
+    gVisor's OCI seccomp translator (``runsc/specutils/seccomp``) ignores
+    ``errnoRet`` and always returns EPERM for ``SCMP_ACT_ERRNO``. The vendored
+    clone3 rule is ENOSYS (38) so glibc/libuv fall back to arg-filtered clone;
+    under runsc that rule becomes EPERM, pthread_create fails, and Node aborts
+    in ``uv_thread_create`` (exit 134). Prepending an unfiltered clone3 ALLOW
+    restores threads. ``CLONE_NEWUSER`` stays denied: the authored unshare
+    EPERM block and the arg-filtered clone ALLOW are untouched, and those are
+    what ``test_unshare_user_namespace_denied`` exercises.
+    """
+    data: object = json.loads(Path(source).read_text())
+    if not isinstance(data, dict):
+        raise SandboxBackendError(f"seccomp profile {source} is not a JSON object")
+    syscalls = data.get("syscalls")
+    if not isinstance(syscalls, list):
+        raise SandboxBackendError(f"seccomp profile {source} has no syscalls list")
+    syscalls.insert(
+        0,
+        {
+            "names": ["clone3"],
+            "action": "SCMP_ACT_ALLOW",
+            "comment": (
+                "runsc OCI seccomp always returns EPERM for ERRNO (ignores "
+                "errnoRet 38); allow clone3 so glibc/libuv can create threads. "
+                "CLONE_NEWUSER remains denied on unshare and arg-filtered clone."
+            ),
+        },
+    )
+    with tempfile.NamedTemporaryFile(
+        prefix="aios-seccomp-runsc-", suffix=".json", mode="w", delete=False
+    ) as handle:
+        json.dump(data, handle)
+        return handle.name
+
+
+def _seccomp_opt(spec: SandboxSpec) -> str:
+    """``--security-opt seccomp=`` value. runsc gets the clone3-ALLOW derivative."""
+    profile = spec.seccomp_profile
+    if spec.runtime == "runsc" and profile != "unconfined":
+        return _runsc_seccomp_profile(profile)
+    return profile
 
 
 def _runsc_operator_image(spec: SandboxSpec) -> str:
@@ -517,7 +565,7 @@ class DockerBackend:
         # so a misconfiguration can't silently fall back to Docker's default profile.
         # The value is a host path the docker CLI reads, or the literal "unconfined"
         # (emergency rollback via AIOS_SANDBOX_SECCOMP_PROFILE only).
-        argv.extend(["--security-opt", f"seccomp={spec.seccomp_profile}"])
+        argv.extend(["--security-opt", f"seccomp={_seccomp_opt(spec)}"])
 
         if spec.runtime:
             argv.extend(["--runtime", spec.runtime])
