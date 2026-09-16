@@ -56,7 +56,15 @@ from tests.conftest import needs_docker
 from tests.e2e.harness import Harness
 from tests.helpers.recorder_upstream import RecorderUpstream
 
-pytestmark = pytest.mark.docker
+# Requires the netns-sidecar iptables path, which CANNOT work under gVisor/runsc:
+# two runsc containers sharing a netns get separate Sentries/netstacks, and gVisor
+# has never implemented the nat table (gvisor#170, aios#2310). The lockdown then
+# fails CLOSED -- correct behaviour, but it means these tests can never pass there.
+# Deselected in the gVisor leg only; they run normally under runc.
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.netns_sidecar_egress,
+]
 
 _ACCOUNT_ID = "acc_test_stub"
 _SECRET_NAME = "GITHUB_TOKEN"

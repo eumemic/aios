@@ -62,6 +62,52 @@ def workspace(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+async def limited_sandbox_no_lockdown(
+    _network_ready: None, workspace: Path
+) -> AsyncIterator[tuple[DockerBackend, SandboxHandle]]:
+    """Provision a Limited sandbox WITHOUT applying the netns-sidecar lockdown.
+
+    Split out of ``limited_sandbox`` (#2429 review, finding B3). The address and
+    default-route assertions below need only a running sandbox — they ask whether
+    the container has a routable global IPv6 address or a v6 default route at
+    all, which is a property of the network/runtime, not of iptables. Coupling
+    them to the lockdown fixture made all three tests in this file error out
+    under runsc for one shared reason, and deselecting the file would have
+    silently dropped genuine runsc IPv6 coverage: runsc runs its own userspace
+    netstack, so "does a runsc sandbox get a global v6 address" is exactly the
+    kind of question worth keeping.
+    """
+    settings = get_settings()
+    image = os.environ.get("AIOS_DOCKER_IMAGE", settings.docker_image) or IMAGE
+    runtime = settings.sandbox_runtime
+
+    backend = DockerBackend()
+    instance_id = f"test_{uuid.uuid4().hex[:8]}"
+    session_id = f"sess_{uuid.uuid4().hex[:8]}"
+    spec = SandboxSpec(
+        session_id=session_id,
+        instance_id=instance_id,
+        workspace=Mount(host_path=workspace, sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={
+            MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
+            INSTANCE_LABEL_KEY: instance_id,
+            SESSION_LABEL_KEY: session_id,
+        },
+        network_policy=LimitedNetworking(type="limited", allowed_hosts=["example.com"]),
+        host_gateway_alias=None,
+        image=image,
+        runtime=runtime,
+    )
+    handle = await backend.create(spec)
+    try:
+        yield backend, handle
+    finally:
+        await backend.destroy(handle)
+
+
+@pytest.fixture
 async def limited_sandbox(
     _network_ready: None, workspace: Path
 ) -> AsyncIterator[tuple[DockerBackend, SandboxHandle]]:
@@ -106,11 +152,11 @@ async def limited_sandbox(
 
 
 async def test_sandbox_has_no_global_ipv6_address(
-    limited_sandbox: tuple[DockerBackend, SandboxHandle],
+    limited_sandbox_no_lockdown: tuple[DockerBackend, SandboxHandle],
 ) -> None:
     """No global-scope IPv6 address means there is no v6 source to egress from —
     the implicit invariant the IPv4-only lockdown rested on, now asserted."""
-    backend, handle = limited_sandbox
+    backend, handle = limited_sandbox_no_lockdown
     result = await backend.exec(
         handle,
         "ip -6 addr show scope global 2>/dev/null || true",
@@ -125,11 +171,11 @@ async def test_sandbox_has_no_global_ipv6_address(
 
 
 async def test_sandbox_has_no_ipv6_default_route(
-    limited_sandbox: tuple[DockerBackend, SandboxHandle],
+    limited_sandbox_no_lockdown: tuple[DockerBackend, SandboxHandle],
 ) -> None:
     """No v6 default route means no path off-host over IPv6, so the IPv4-only
     lockdown cannot be bypassed over v6 today."""
-    backend, handle = limited_sandbox
+    backend, handle = limited_sandbox_no_lockdown
     result = await backend.exec(
         handle,
         "ip -6 route show default 2>/dev/null || true",
@@ -141,6 +187,10 @@ async def test_sandbox_has_no_ipv6_default_route(
     )
 
 
+# ONLY this test needs the netns sidecar: it reads ip6tables rules back through
+# it. Its two siblings above assert on addresses/routes and now use the
+# no-lockdown fixture, so they keep running under runsc (#2429 review, B3).
+@pytest.mark.netns_sidecar_egress
 async def test_ip6tables_output_policy_is_drop(
     limited_sandbox: tuple[DockerBackend, SandboxHandle],
 ) -> None:
