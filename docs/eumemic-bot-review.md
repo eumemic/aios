@@ -41,9 +41,11 @@ The launcher also accepts the conventional `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
 
 ## How each harness reaches its proxy
 
-- **Codex** is pointed at oai-proxy with an explicit provider (`-c model_provider=…` plus a `model_providers.…` table with `wire_api="responses"`), *not* `OPENAI_BASE_URL`. Codex's built-in `openai` provider pins `api.openai.com` and its own auth and ignores that variable, so an env-var-only setup silently 401s against the real OpenAI instead of using the proxy. It runs with `--sandbox danger-full-access`: GitHub-hosted runners reject the bubblewrap loopback setup used by Codex's `read-only` sandbox, while the separate publisher runner holds the installation token (see below).
-- **Claude Code** honours `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` directly.
-- **Pi** gets a generated `models.json` in a throwaway `PI_CODING_AGENT_DIR` declaring an `xai-proxy` provider, selected with `--provider xai-proxy`.
+The reusable proxy key never enters the harness. A prior step writes the routed family's key to a `0600` file under `RUNNER_TEMP` and exits. The launcher reads that file, unlinks it, seals itself with `prctl(PR_SET_DUMPABLE, 0)` so its `/proc` and memory are closed to the child, and starts a loopback `_ProxyBroker` that stamps the real key onto upstream requests. The harness is given a random per-run token and a `127.0.0.1` base URL; both die with the launcher.
+
+- **Codex** is pointed at the broker with an explicit provider (`-c model_provider=…` plus a `model_providers.…` table with `wire_api="responses"`), *not* `OPENAI_BASE_URL`. Codex's built-in `openai` provider pins `api.openai.com` and its own auth and ignores that variable, so an env-var-only setup silently 401s against the real OpenAI instead of using the proxy. It runs with `--sandbox danger-full-access`: GitHub-hosted runners reject the bubblewrap loopback setup used by Codex's `read-only` sandbox. Isolation is the broker token plus the separate publisher runner (see below), not Codex's own sandbox.
+- **Claude Code** honours `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, both aimed at the broker.
+- **Pi** gets a generated `models.json` in a throwaway `PI_CODING_AGENT_DIR` declaring an `xai-proxy` provider whose `baseUrl` and `apiKey` are the broker, selected with `--provider xai-proxy`.
 
 ## Why the token is minted after the agent, not before
 
@@ -52,8 +54,8 @@ The agent reads PR-authored files (including `AGENTS.md` / `CLAUDE.md`), runs sh
 Stripping the child environment (`_STRIPPED_ENV`) does not achieve that by itself. `unsetenv` does not rewrite `/proc/<pid>/environ`, so an agent running as the same OS user can read every variable the launcher was started with off `/proc/$PPID/environ` no matter how the child env is scrubbed. A secret is only withheld from the agent if the *step* never receives it. Hence:
 
 - The installation token is minted **in a separate job and fresh runner** after the agent job has completed, so `GH_TOKEN` and the App private key never exist on the agent's runner. The agent phase additionally refuses to start if `GH_TOKEN` is set.
-- The agent step is given **only the routed family's** proxy secret, selected by the `family` output of the harness-install step; the other two arrive as empty strings.
-- Credentials in files are out of reach of both: `actions/checkout` persists the workflow token as an `http.*.extraheader` in `.git/config`, so the launcher unsets that header once it has finished pinning the checkout and before it starts the agent.
+- The routed proxy key is staged in a **different step** than the agent, selected by the `family` output of the harness-install step. The agent step receives only `REVIEW_PROXY_KEY_FILE` (a path). After the launcher unlinks that file, the credential the harness can read is a loopback broker token, not the proxy secret. Manual runs may still set `OAI_PROXY_API_KEY` / `ANT_PROXY_API_KEY` / `XAI_PROXY_API_KEY` (or the conventional unprefixed names); those stay in the sealed launcher and are never copied into the child environment.
+- Credentials in files are handled the same way: `actions/checkout` persists the workflow token as an `http.*.extraheader` in `.git/config`, so the launcher unsets that header once it has finished pinning the checkout and before it starts the agent. The staged proxy-key file is unlinked in that same window.
 - The token-bearing job does not check out the repository or execute Python
   from either the PR head or its base SHA. The publisher is the inline `gh api`
   logic pinned in the workflow revision GitHub is running. The markdown is the

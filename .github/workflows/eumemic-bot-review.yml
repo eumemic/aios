@@ -42,7 +42,7 @@ jobs:
 
       # Only the routed harness: installing all three triples the install time
       # and lets an unrelated publisher hiccup block every review. The `family`
-      # output also decides which single proxy secret the agent step is given.
+      # output also decides which single proxy secret the staging step writes.
       - name: Install the coding-agent harness
         id: harness
         continue-on-error: true
@@ -59,25 +59,52 @@ jobs:
           echo "family=$family" >> "$GITHUB_OUTPUT"
           npm install --global "$package"
 
+      # The routed proxy key is written to a 0600 file here rather than handed
+      # to the agent step as an environment variable. unsetenv does not rewrite
+      # /proc/<pid>/environ, and every process in the agent's ancestry — this
+      # job's step shell included — runs under the agent's own uid, so a secret
+      # the agent *step* receives is a secret a prompt-injected agent reads and
+      # can spend or exfiltrate over its network. This step's shell has exited
+      # before the agent starts. The launcher reads the file, unlinks it, seals
+      # itself with prctl(PR_SET_DUMPABLE, 0) so its own /proc and memory are
+      # closed to its child, and hands the harness only a loopback broker token
+      # that dies with the launcher.
+      - name: Stage the routed proxy key
+        id: proxykey
+        if: steps.harness.outcome == 'success'
+        continue-on-error: true
+        env:
+          FAMILY: ${{ steps.harness.outputs.family }}
+          OAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'oai' && secrets.OAI_PROXY_API_KEY || '' }}
+          ANT_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'ant' && secrets.ANT_PROXY_API_KEY || '' }}
+          XAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'xai' && secrets.XAI_PROXY_API_KEY || '' }}
+        run: |
+          key_file="$RUNNER_TEMP/eumemic-review-proxy-key"
+          install -m 600 /dev/null "$key_file"
+          case "$FAMILY" in
+            oai) printf '%s' "$OAI_PROXY_API_KEY" > "$key_file" ;;
+            ant) printf '%s' "$ANT_PROXY_API_KEY" > "$key_file" ;;
+            xai) printf '%s' "$XAI_PROXY_API_KEY" > "$key_file" ;;
+            *)
+              echo "no routed family from the harness step" >&2
+              exit 1
+              ;;
+          esac
+          test -s "$key_file"
+
       # This process and all of its descendants run before an installation token
       # exists. In particular, there is no GH_TOKEN for an unsandboxed Codex to
       # recover through /proc/$PPID/environ. The launcher waits for the harness
       # before it writes the final artifact and exits.
       #
-      # Only the routed family's proxy key is passed. The launcher strips the
-      # other two from the *child* environment, but unsetenv does not rewrite
-      # /proc/<pid>/environ, so a secret this step receives stays readable to
-      # the agent for the life of the process however the child is scrubbed.
-      # Whatever the agent must not hold has to be absent here, not removed
-      # later — which is the same reason the App token is minted below.
+      # No proxy secret is in this step's environment: REVIEW_PROXY_KEY_FILE is
+      # a path, and the launcher has unlinked it before the harness starts.
       - name: Run coding agent
         id: agent
-        if: steps.harness.outcome == 'success'
+        if: steps.proxykey.outcome == 'success'
         continue-on-error: true
         env:
-          OAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'oai' && secrets.OAI_PROXY_API_KEY || '' }}
-          ANT_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'ant' && secrets.ANT_PROXY_API_KEY || '' }}
-          XAI_PROXY_API_KEY: ${{ steps.harness.outputs.family == 'xai' && secrets.XAI_PROXY_API_KEY || '' }}
+          REVIEW_PROXY_KEY_FILE: ${{ runner.temp }}/eumemic-review-proxy-key
           REVIEW_TIMEOUT_SECONDS: "900"
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -85,6 +112,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           REVIEW_ARTIFACT_PATH: ${{ github.workspace }}/.eumemic-bot-review.md
         run: python3 scripts/eumemic_bot_review.py agent
+
+      # The launcher unlinks the staged key itself; this is the path where it
+      # never got that far — a harness that failed to install, a FATAL before
+      # the read, a cancelled step.
+      - name: Drop any unread proxy key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/eumemic-review-proxy-key"
 
       # ``include-hidden-files`` is load-bearing, not tidiness: since v4.4 the
       # action skips anything whose name starts with a dot, and the launcher
