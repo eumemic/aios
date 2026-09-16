@@ -46,6 +46,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -374,29 +375,8 @@ def _require_agent_user() -> str:
     return AGENT_USER
 
 
-def _drop_into_agent_user(
-    command: list[str], env: dict[str, str], temp: Path
-) -> tuple[list[str], dict[str, str]]:
-    """Wrap `command` so it runs as AGENT_USER with no-new-privs.
-
-    The reusable proxy key stays in *this* process. The child receives only
-    `env`, which holds the loopback broker token. ``setpriv --no-new-privs`` is
-    what stops the child from sudoing back into the key holder's domain;
-    PR_SET_DUMPABLE does not.
-    """
-    user = _require_agent_user()
-    dropped_env = {**env, "HOME": str(temp), "USER": user, "LOGNAME": user}
-    spec_path = temp / "harness-spec.json"
-    spec_path.write_text(
-        json.dumps({"argv": command, "env": dropped_env, "cwd": os.getcwd()}),
-        encoding="utf-8",
-    )
-    os.chmod(temp, 0o755)
-    os.chmod(spec_path, 0o644)
-    owned = _sudo(["chown", "-R", user, str(temp)])
-    if owned.returncode:
-        _die(f"cannot hand {temp} to {user}: {owned.stderr.strip()[:300]}")
-    wrapped = [
+def _setpriv_argv(user: str) -> list[str]:
+    return [
         "sudo",
         "-n",
         "--",
@@ -407,6 +387,140 @@ def _drop_into_agent_user(
         "--no-new-privs",
         "--inh-caps=-all",
         "--",
+    ]
+
+
+def _tree_is_ours(path: Path) -> bool:
+    try:
+        return path.stat().st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def _rmtree_maybe_foreign(path: Path) -> None:
+    """Remove `path` without raising. Use sudo if we no longer own it.
+
+    `_drop_into_agent_user` chowns only the agent subdirectory. A naive
+    ``TemporaryDirectory`` cleanup after that chown raises PermissionError and
+    would swallow ``SystemExit(NO_EVIDENCE_EXIT_CODE)`` on the refusal path.
+    This helper is the teardown that must always run, including on FATAL.
+    """
+    if not path.exists():
+        return
+    if _tree_is_ours(path):
+        shutil.rmtree(path, ignore_errors=True)
+        return
+    result = _sudo(["rm", "-rf", str(path)])
+    if result.returncode:
+        print(
+            f"WARN: could not remove {path}: {result.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
+
+
+def _make_tree_readable(path: Path) -> None:
+    if not path.exists() or _tree_is_ours(path):
+        return
+    _sudo(["chmod", "-R", "a+rX", str(path)])
+
+
+def _agent_gitconfig_text(directory: str) -> str:
+    """Git config that lets the dropped uid read a runner-owned checkout.
+
+    ``safe.directory`` is per-uid. actions/checkout writes it to the runner's
+    ``~/.gitconfig``, which the agent never reads (HOME is the agent temp).
+    Without this, ``git diff base...head`` fails with dubious ownership and
+    the mandated digest hashes empty.
+    """
+    entries: list[str] = []
+    for path in (directory, os.path.realpath(directory)):
+        if path not in entries:
+            entries.append(path)
+    lines = ["[safe]"]
+    lines.extend(f"\tdirectory = {path}" for path in entries)
+    return "\n".join(lines) + "\n"
+
+
+def _verify_dropped_diff(
+    agent_home: Path, base_sha: str, head_sha: str, expected: tuple[int, str]
+) -> None:
+    """Fail closed if the dropped uid cannot reproduce `diff_evidence`."""
+    gitconfig = agent_home / "gitconfig"
+    result = subprocess.run(
+        [
+            *_setpriv_argv(AGENT_USER),
+            "/usr/bin/env",
+            "-i",
+            f"HOME={agent_home}",
+            f"GIT_CONFIG_GLOBAL={gitconfig}",
+            "PATH=/usr/bin:/bin",
+            "LANG=C",
+            "git",
+            "-C",
+            os.getcwd(),
+            "--no-pager",
+            "diff",
+            f"{base_sha}...{head_sha}",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        _die(
+            f"dropped user {AGENT_USER} cannot git diff {base_sha}...{head_sha}: "
+            f"{result.stderr.decode(errors='replace')[:300]}"
+        )
+    raw = result.stdout
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != expected[1].lower():
+        _die(
+            f"dropped user {AGENT_USER} reproduced a different diff "
+            f"(lines={raw.count(b'\\n')} sha256={digest}; expected lines={expected[0]} "
+            f"sha256={expected[1]})"
+        )
+
+
+def _drop_into_agent_user(
+    command: list[str], env: dict[str, str], temp: Path
+) -> tuple[list[str], dict[str, str]]:
+    """Wrap `command` so it runs as AGENT_USER with no-new-privs.
+
+    `temp` must be an *agent* subdirectory of the launcher's TemporaryDirectory,
+    not that TemporaryDirectory itself. Chowning the launcher-owned temp root
+    makes ``TemporaryDirectory`` cleanup raise PermissionError.
+
+    The reusable proxy key stays in *this* process. The child receives only
+    `env`, which holds the loopback broker token. ``setpriv --no-new-privs`` is
+    what stops the child from sudoing back into the key holder's domain;
+    PR_SET_DUMPABLE does not.
+    """
+    user = _require_agent_user()
+    cwd = os.getcwd()
+    gitconfig = temp / "gitconfig"
+    gitconfig.write_text(_agent_gitconfig_text(cwd), encoding="utf-8")
+    dropped_env = {
+        **env,
+        "HOME": str(temp),
+        "USER": user,
+        "LOGNAME": user,
+        "GIT_CONFIG_GLOBAL": str(gitconfig),
+    }
+    spec_path = temp / "harness-spec.json"
+    spec_path.write_text(
+        json.dumps({"argv": command, "env": dropped_env, "cwd": cwd}),
+        encoding="utf-8",
+    )
+    # 0700 after the uid change: only the agent needs this tree. The launcher
+    # reads the artifact back via _make_tree_readable. Spec is world-readable
+    # on purpose (loopback token only); the directory mode is what hides it.
+    os.chmod(spec_path, 0o644)
+    os.chmod(gitconfig, 0o644)
+    os.chmod(temp, 0o700)
+    owned = _sudo(["chown", "-R", user, str(temp)])
+    if owned.returncode:
+        _die(f"cannot hand {temp} to {user}: {owned.stderr.strip()[:300]}")
+    wrapped = [
+        *_setpriv_argv(user),
         "/usr/bin/python3",
         "-c",
         _HARNESS_TRAMPOLINE,
@@ -772,11 +886,19 @@ def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
     )
 
 
-def run_agent(model: str, prompt: str, timeout: int, evidence: tuple[int, str]) -> str:
+def run_agent(
+    model: str,
+    prompt: str,
+    timeout: int,
+    evidence: tuple[int, str],
+    *,
+    base_sha: str = "",
+    head_sha: str = "",
+) -> str:
     broker = _broker_for(model)
     broker.start()
     try:
-        return _run_harness(model, prompt, timeout, broker, evidence)
+        return _run_harness(model, prompt, timeout, broker, evidence, base_sha, head_sha)
     finally:
         # The token is only worth anything while this listener is up, so it goes
         # down on every path out, including the timeout FATAL.
@@ -784,48 +906,64 @@ def run_agent(model: str, prompt: str, timeout: int, evidence: tuple[int, str]) 
 
 
 def _run_harness(
-    model: str, prompt: str, timeout: int, broker: _ProxyBroker, evidence: tuple[int, str]
+    model: str,
+    prompt: str,
+    timeout: int,
+    broker: _ProxyBroker,
+    evidence: tuple[int, str],
+    base_sha: str = "",
+    head_sha: str = "",
 ) -> str:
-    with tempfile.TemporaryDirectory(prefix="eumemic-review-") as temp:
-        artifact_path = Path(temp) / "last-message.md"
+    # ignore_cleanup_errors is belt: even if sudo-rm of the agent subdir fails,
+    # PermissionError from TemporaryDirectory must not supersede SystemExit.
+    with tempfile.TemporaryDirectory(prefix="eumemic-review-", ignore_cleanup_errors=True) as temp:
+        root = Path(temp)
+        agent_home = root / "agent"
+        agent_home.mkdir()
+        artifact_path = agent_home / "last-message.md"
         command, env = _agent_command(model, artifact_path, broker)
-        command, env = _drop_into_agent_user(command, env, Path(temp))
+        harness = command[0]
         try:
-            result = subprocess.run(
-                command,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                env=env,
-                timeout=timeout,
-                check=False,
-            )
-        except FileNotFoundError:
-            _die(f"{command[0]} is not installed")
-        except subprocess.TimeoutExpired as exc:
-            # capture_output buffers everything until the process ends, so a
-            # timeout is exactly the run whose log would otherwise be empty.
-            _emit(exc.stdout if isinstance(exc.stdout, str) else None, sys.stdout)
-            _emit(exc.stderr if isinstance(exc.stderr, str) else None, sys.stderr)
-            _die(f"{model} review exceeded {timeout} seconds")
-        _emit(result.stdout, sys.stdout)
-        _emit(result.stderr, sys.stderr)
-        if result.returncode:
-            _die(f"{command[0]} exited with status {result.returncode}")
-        # last-message.md is owned by AGENT_USER after a real drop; make it
-        # readable before we pick it up. Skipped when the temp dir is still
-        # ours (tests that passthrough the drop). Not a secret boundary.
-        if os.stat(temp).st_uid != os.getuid():
-            _sudo(["chmod", "-R", "a+rX", str(temp)])
-        output = artifact_path.read_text() if artifact_path.exists() else result.stdout
-        artifact = _artifact_in(output)
-        if artifact is None:
-            _die(f"{model} returned no `{ARTIFACT_HEADING}` artifact")
-        # Exit 0 proves only that the harness process ended. A heading-only
-        # artifact is not a review. The digest check is what separates a review
-        # from a fluent guess, and it gates writing independently of exit status.
-        require_inspection_evidence(artifact, evidence)
-        return artifact
+            command, env = _drop_into_agent_user(command, env, agent_home)
+            if base_sha and head_sha and "setpriv" in command:
+                _verify_dropped_diff(agent_home, base_sha, head_sha, evidence)
+            try:
+                result = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    timeout=timeout,
+                    check=False,
+                )
+            except FileNotFoundError:
+                _die(f"{harness} is not installed")
+            except subprocess.TimeoutExpired as exc:
+                # capture_output buffers everything until the process ends, so a
+                # timeout is exactly the run whose log would otherwise be empty.
+                _emit(exc.stdout if isinstance(exc.stdout, str) else None, sys.stdout)
+                _emit(exc.stderr if isinstance(exc.stderr, str) else None, sys.stderr)
+                _die(f"{model} review exceeded {timeout} seconds")
+            _emit(result.stdout, sys.stdout)
+            _emit(result.stderr, sys.stderr)
+            if result.returncode:
+                _die(f"{harness} exited with status {result.returncode}")
+            # last-message.md is owned by AGENT_USER after a real drop; make it
+            # readable before we pick it up. Skipped when the agent home is still
+            # ours (tests that passthrough the drop). Not a secret boundary.
+            _make_tree_readable(agent_home)
+            output = artifact_path.read_text() if artifact_path.exists() else result.stdout
+            artifact = _artifact_in(output)
+            if artifact is None:
+                _die(f"{model} returned no `{ARTIFACT_HEADING}` artifact")
+            # Exit 0 proves only that the harness process ended. A heading-only
+            # artifact is not a review. The digest check is what separates a review
+            # from a fluent guess, and it gates writing independently of exit status.
+            require_inspection_evidence(artifact, evidence)
+            return artifact
+        finally:
+            _rmtree_maybe_foreign(agent_home)
 
 
 def _github_request(
@@ -902,7 +1040,14 @@ def run_agent_phase() -> None:
         f"reviewing {repo}#{pr_number}@{head_sha} against {base_sha} with {model} "
         f"({model_kind(model)}); diff is {evidence[0]} lines, sha256 {evidence[1]}"
     )
-    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout, evidence)
+    review = run_agent(
+        model,
+        _prompt(repo, pr_number, head_sha, base_sha),
+        timeout,
+        evidence,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
     # Belt: run_agent already checked, but writing is the publishable act.
     require_inspection_evidence(review, evidence)
     artifact_path.write_text(review + "\n")

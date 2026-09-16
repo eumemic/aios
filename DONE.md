@@ -13,6 +13,14 @@ diff-inspection digest (`<!-- inspected: lines=… sha256=… -->` matching
 refused (`NO EVIDENCE OF INSPECTION`); the digest is the only accepting
 channel.
 
+The dropped uid is given `GIT_CONFIG_GLOBAL` with `safe.directory` for the
+runner-owned checkout, and the launcher checks it can reproduce the digest
+before the harness starts — otherwise every review hashes empty and is
+refused as NO EVIDENCE. Only an `agent/` subdirectory is chowned; the
+launcher `TemporaryDirectory` stays ours and is torn down with `sudo rm`
+plus `ignore_cleanup_errors`, so cleanup cannot swallow the NO_EVIDENCE
+exit or prevent writing the artifact.
+
 Focused unit tests: `tests/unit/test_eumemic_bot_review.py`.
 
 Hosts-first resolve, operator-controlled refresh hosts, runsc gateway bake,

@@ -451,7 +451,7 @@ def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
     def seal() -> None:
         order.append("seal")
 
-    def agent(*args: Any) -> str:
+    def agent(*args: Any, **kwargs: Any) -> str:
         order.append("agent")
         return _good_artifact("Pass.")
 
@@ -501,7 +501,7 @@ def test_agent_phase_rejects_gh_token_before_launch(monkeypatch: Any, tmp_path: 
     _agent_env(monkeypatch, tmp_path)
     monkeypatch.setenv("GH_TOKEN", "must-not-exist")
     monkeypatch.setattr(
-        reviewer, "run_agent", lambda *args: pytest.fail("agent must not be launched")
+        reviewer, "run_agent", lambda *args, **kwargs: pytest.fail("agent must not be launched")
     )
     with pytest.raises(SystemExit):
         reviewer.run_agent_phase()
@@ -510,7 +510,7 @@ def test_agent_phase_rejects_gh_token_before_launch(monkeypatch: Any, tmp_path: 
 def test_agent_phase_writes_artifact_after_agent_returns(monkeypatch: Any, tmp_path: Path) -> None:
     artifact = _agent_env(monkeypatch, tmp_path)
 
-    def agent(*args: Any) -> str:
+    def agent(*args: Any, **kwargs: Any) -> str:
         assert not artifact.exists()
         return _good_artifact("Pass.")
 
@@ -572,6 +572,116 @@ def test_drop_wraps_the_harness_with_setpriv_no_new_privs(monkeypatch: Any, tmp_
     assert spec["argv"] == ["claude", "--print"]
     assert spec["env"]["ANTHROPIC_API_KEY"] == "loopback-token"
     assert spec["env"]["USER"] == "eumemic-review"
+    gitconfig = Path(spec["env"]["GIT_CONFIG_GLOBAL"])
+    assert gitconfig.exists()
+    gitconfig_text = gitconfig.read_text()
+    assert os.getcwd() in gitconfig_text
+    assert "directory" in gitconfig_text
+    assert spec["env"]["HOME"] == str(tmp_path)
+
+
+def test_drop_chowns_only_the_path_it_is_given(monkeypatch: Any, tmp_path: Path) -> None:
+    """F2: the launcher TemporaryDirectory parent must stay launcher-owned."""
+    monkeypatch.setattr(reviewer, "_require_agent_user", lambda: "eumemic-review")
+    calls: list[list[str]] = []
+
+    def sudo(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(reviewer, "_sudo", sudo)
+    agent_home = tmp_path / "agent"
+    agent_home.mkdir()
+    reviewer._drop_into_agent_user(["claude"], {"K": "v"}, agent_home)
+    assert ["chown", "-R", "eumemic-review", str(agent_home)] in calls
+    assert not any(str(tmp_path) == arg for args in calls for arg in args[1:])
+
+
+def test_rmtree_maybe_foreign_deletes_ours_without_sudo(monkeypatch: Any, tmp_path: Path) -> None:
+    target = tmp_path / "agent"
+    target.mkdir()
+    (target / "x").write_text("y")
+    monkeypatch.setattr(
+        reviewer, "_sudo", lambda args: pytest.fail("sudo must not run for our tree")
+    )
+    reviewer._rmtree_maybe_foreign(target)
+    assert not target.exists()
+
+
+def test_rmtree_maybe_foreign_uses_sudo_when_not_ours(monkeypatch: Any, tmp_path: Path) -> None:
+    target = tmp_path / "agent"
+    target.mkdir()
+    calls: list[list[str]] = []
+
+    def sudo(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return _ok()
+
+    monkeypatch.setattr(reviewer, "_tree_is_ours", lambda path: False)
+    monkeypatch.setattr(reviewer, "_sudo", sudo)
+    reviewer._rmtree_maybe_foreign(target)
+    assert calls == [["rm", "-rf", str(target)]]
+
+
+def test_rmtree_maybe_foreign_swallows_sudo_failure(monkeypatch: Any, tmp_path: Path) -> None:
+    target = tmp_path / "agent"
+    target.mkdir()
+    monkeypatch.setattr(reviewer, "_tree_is_ours", lambda path: False)
+    monkeypatch.setattr(
+        reviewer,
+        "_sudo",
+        lambda args: subprocess.CompletedProcess(args, 1, "", "operation not permitted"),
+    )
+    reviewer._rmtree_maybe_foreign(target)
+
+
+def test_no_evidence_still_cleans_agent_home_and_keeps_exit_3(
+    monkeypatch: Any, clean_env: None
+) -> None:
+    """F2: cleanup must run on the refusal path and must not hide NO_EVIDENCE."""
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    cleaned: list[Path] = []
+    monkeypatch.setattr(reviewer, "_drop_into_agent_user", lambda c, e, t: (c, e))
+    monkeypatch.setattr(reviewer, "_rmtree_maybe_foreign", lambda p: cleaned.append(p))
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning("### Code review\n\nLGTM.", 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    assert cleaned and cleaned[0].name == "agent"
+
+
+def test_dropped_gitconfig_marks_the_checkout_safe() -> None:
+    cwd = os.getcwd()
+    text = reviewer._agent_gitconfig_text(cwd)
+    assert "[safe]" in text
+    assert f"directory = {cwd}" in text
+
+
+def test_verify_dropped_diff_dies_on_dubious_ownership(monkeypatch: Any, tmp_path: Path) -> None:
+    (tmp_path / "gitconfig").write_text("[safe]\n")
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [], 128, b"", b"fatal: detected dubious ownership"
+        ),
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer._verify_dropped_diff(tmp_path, "base", "head", _DIFF_EVIDENCE)
+    assert exc.value.code == 1
+
+
+def test_verify_dropped_diff_accepts_a_matching_digest(monkeypatch: Any, tmp_path: Path) -> None:
+    payload = b"diff --git a/x b/x\n+one\n"
+    (tmp_path / "gitconfig").write_text("[safe]\n")
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, payload, b""),
+    )
+    reviewer._verify_dropped_diff(
+        tmp_path, "base", "head", (2, hashlib.sha256(payload).hexdigest())
+    )
 
 
 def test_require_agent_user_refuses_when_the_user_can_sudo(monkeypatch: Any) -> None:
@@ -747,7 +857,7 @@ def test_agent_phase_does_not_write_artifact_without_inspection_evidence(
 ) -> None:
     artifact = _agent_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        reviewer, "run_agent", lambda *args: "### Code review\n\nLGTM, nothing to flag."
+        reviewer, "run_agent", lambda *args, **kwargs: "### Code review\n\nLGTM, nothing to flag."
     )
     with pytest.raises(SystemExit) as exc:
         reviewer.run_agent_phase()
