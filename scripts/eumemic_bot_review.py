@@ -9,9 +9,20 @@ out or executes this PR-head script. The legacy ``publish`` phase remains for
 manual compatibility but is not part of the Action's trust path.
 
 The routed proxy key is never handed to the harness. ``_ProxyBroker`` keeps it
-in this process — sealed against ``/proc`` and ``ptrace`` for an unprivileged
-child by ``_seal_process`` — and the agent is given a random loopback-only
-token instead.
+in this process and the agent is given a random loopback-only token instead.
+
+``prctl(PR_SET_DUMPABLE)`` is **not** the credential boundary and does **not**
+seal GitHub-hosted runners: ubuntu-latest grants the ``runner`` user passwordless
+sudo, which can read this process's memory regardless of the dumpable flag.
+The boundary is a different OS user (``AGENT_USER``): the harness is exec'd
+through ``setpriv --no-new-privs`` as that user, who cannot sudo, cannot ptrace
+this process, and cannot read its ``/proc``. Broker+seal alone is insufficient.
+
+Writing the ``### Code review`` artifact is gated on evidence of inspection,
+not on the harness exit status. A zero exit with only the heading is refused.
+The agent must echo the sha256 of ``git diff base...head``; the launcher
+recomputes it. A mismatch or missing line is a distinct never-publishable
+state (``NO_EVIDENCE_EXIT_CODE``).
 
 Env:
   REVIEW_ARTIFACT_PATH, REPO, PR_NUMBER, HEAD_SHA
@@ -29,9 +40,11 @@ Env:
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -49,6 +62,36 @@ ARTIFACT_HEADING = "### Code review"
 DEFAULT_MODEL = "gpt-5.6-sol"
 _REVIEW_SECONDS = 900
 
+# A verdict is only written when the agent proved it read the diff. The proof
+# is a line the agent can only produce by hashing that diff: the launcher
+# computes the same digest itself and compares. Nothing derivable from the
+# prompt alone counts — the expected values are deliberately NOT in the prompt,
+# only the recipe for deriving them.
+EVIDENCE_TEMPLATE = "<!-- inspected: lines=<N> sha256=<HEX> -->"
+# The FULL 64-hex digest, not a prefix. A prefix shortens the only
+# high-entropy channel, and the width itself is load-bearing.
+_EVIDENCE_RE = re.compile(
+    r"<!--\s*inspected:\s*lines=(\d+)\s+sha256=([0-9a-fA-F]{64})\s*-->", re.IGNORECASE
+)
+# "The agent inspected nothing" is NOT an ordinary failure: a harness can exit
+# 0 having never run a command. Distinct exit code, distinct banner, never
+# written as a publishable artifact.
+NO_EVIDENCE_EXIT_CODE = 3
+NO_EVIDENCE_BANNER = "NO EVIDENCE OF INSPECTION — refusing to publish a verdict"
+
+# OS user the coding-agent harness runs as. Must not be the key-holder user
+# (typically `runner` on ubuntu-latest) and must not have passwordless sudo.
+AGENT_USER = "eumemic-review"
+# Tiny exec trampoline: sudo/setpriv cannot forward an arbitrary env dict
+# without quoting holes, so the dropped process reads argv/env/cwd from a
+# JSON spec (loopback token only — never the reusable proxy key).
+_HARNESS_TRAMPOLINE = (
+    "import json,os,sys;"
+    "spec=json.load(open(sys.argv[1],encoding='utf-8'));"
+    "os.chdir(spec['cwd']);"
+    "os.execvpe(spec['argv'][0],spec['argv'],spec['env'])"
+)
+
 OAI_PROXY_URL = "https://oai-proxy.eumemic.ai/v1"
 ANT_PROXY_URL = "https://ant-proxy.eumemic.ai"
 XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
@@ -59,14 +102,14 @@ XAI_PROXY_URL = "https://xai-proxy.eumemic.ai/v1"
 # key spends money and outlives the job. The agent gets back exactly one
 # credential, and it is a _ProxyBroker token that is worthless off this runner.
 #
-# This list is defence in depth, never the guarantee: an agent that has a shell
-# as this user can read /proc/$PPID/environ, which still holds every variable
-# this process was exec'd with (unsetenv does not rewrite that mapping). A
-# secret is only withheld from the agent if it is absent from every unsealed
-# ancestor — which is why the workflow mints the App token in a different job
-# and stages the proxy key through a file rather than the agent step's env.
-# Credentials that live in files rather than the environment are handled
-# separately by _drop_persisted_git_credentials and _proxy_key.
+# This list is defence in depth, never the guarantee. unsetenv does not rewrite
+# /proc/<pid>/environ, so a same-uid agent can read every variable this process
+# was exec'd with. That is why the harness does not share a uid with this
+# process (see _drop_into_agent_user): a different uid cannot read our /proc,
+# and without sudo it cannot become us. The workflow still mints the App token
+# in a different job and stages the proxy key through a file rather than the
+# agent step's env, so even this process's /proc never holds GH_TOKEN. File
+# credentials are handled by _drop_persisted_git_credentials and _proxy_key.
 _STRIPPED_ENV = (
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -85,7 +128,8 @@ _STRIPPED_ENV = (
 PROXY_KEY_FILE_ENV = "REVIEW_PROXY_KEY_FILE"
 
 # prctl(2). Clearing the dumpable flag reassigns this process's /proc entries to
-# root and makes ptrace_may_access refuse every unprivileged tracer.
+# root and makes ptrace_may_access refuse every *unprivileged* tracer. It does
+# not stop passwordless sudo. Do not treat this as sealing a GH runner.
 _PR_SET_DUMPABLE = 4
 
 _BROKER_CHUNK = 64 * 1024
@@ -196,20 +240,17 @@ def model_kind(model: str) -> str:
 
 
 def _seal_process() -> None:
-    """Make this process unreadable to the agent it is about to spawn.
+    """Defence in depth against an *unprivileged* same-uid reader of /proc.
 
-    Every other credential this launcher touches is kept from the agent by not
-    holding it: the App token is minted in another job, the git push header is
-    unset, the unrouted proxy keys never reach the step. The broker cannot work
-    that way — it has to hold the routed proxy key for the whole review, in the
-    agent's own parent, while the agent runs as the same uid with a shell.
+    This is NOT the credential boundary and it does NOT seal GitHub-hosted
+    runners. ubuntu-latest gives `runner` passwordless sudo; sudo can read this
+    process's memory whether dumpable is set or not. Broker+seal alone is
+    insufficient. The boundary is `_drop_into_agent_user`: the harness runs as
+    a different uid that cannot sudo.
 
-    Clearing the dumpable flag closes exactly that gap. The kernel reassigns
-    /proc/<pid> to root and denies PTRACE_MODE_ATTACH to unprivileged tracers,
-    so `cat /proc/$PPID/environ` and reading our memory both fail for an
-    unprivileged agent/child. Passwordless sudo on ubuntu-latest can still read
-    the launcher's memory. It is the property the loopback broker's credential
-    separation rests on, so a failure to set it is fatal rather than a warning.
+    Clearing dumpable still stops an unprivileged same-uid grandchild from
+    reading /proc/<pid>, so a failure to set it is fatal — but prctl is not
+    what keeps the reusable proxy key away from the coding agent.
     """
     if sys.platform != "linux":
         _die(f"cannot seal the launcher against /proc on {sys.platform}; run the agent on Linux")
@@ -248,6 +289,194 @@ def _proxy_key(primary: str, fallback: str) -> str:
     return value
 
 
+def _sudo(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["sudo", "-n", "--", *args], text=True, capture_output=True, check=False)
+
+
+def _create_agent_user() -> None:
+    result = _sudo(
+        [
+            "useradd",
+            "--system",
+            "--create-home",
+            "--home-dir",
+            f"/tmp/{AGENT_USER}",
+            "--shell",
+            "/usr/sbin/nologin",
+            AGENT_USER,
+        ]
+    )
+    if result.returncode:
+        _die(
+            f"cannot create unprivileged agent user {AGENT_USER} "
+            f"(the coding agent must not share sudo with the key holder): "
+            f"{(result.stderr or result.stdout).strip()[:300]}"
+        )
+
+
+def _agent_user_may_sudo(user: str) -> bool:
+    """True if `user` can raise itself to the key-holder's domain."""
+    nested = subprocess.run(
+        ["sudo", "-n", "-u", user, "--", "sudo", "-n", "true"],
+        capture_output=True,
+        check=False,
+    )
+    if nested.returncode == 0:
+        return True
+    try:
+        import grp
+        import pwd
+
+        info = pwd.getpwnam(user)
+        privileged = {"sudo", "admin", "wheel"}
+        for gid in os.getgrouplist(user, info.pw_gid):
+            if grp.getgrgid(gid).gr_name in privileged:
+                return True
+    except (KeyError, OSError):
+        # Cannot prove the user is unprivileged — fail closed.
+        return True
+    return False
+
+
+def _require_agent_user() -> str:
+    """Return the coding-agent OS user, creating it if needed.
+
+    The credential boundary is this user, not prctl. ubuntu-latest gives the
+    runner passwordless sudo, so a same-uid agent can read the key-holder's
+    memory regardless of PR_SET_DUMPABLE. The harness therefore runs as a
+    different uid with no sudo and with no-new-privs.
+    """
+    if sys.platform != "linux":
+        _die(
+            f"cannot separate the agent from the key holder on {sys.platform}; "
+            "run the agent on Linux"
+        )
+    import pwd
+
+    try:
+        info = pwd.getpwnam(AGENT_USER)
+    except KeyError:
+        _create_agent_user()
+        try:
+            info = pwd.getpwnam(AGENT_USER)
+        except KeyError:
+            _die(f"created {AGENT_USER} but lookup still failed")
+    if info.pw_uid == 0 or info.pw_uid in {os.geteuid(), os.getuid()}:
+        _die(
+            f"agent user {AGENT_USER} uid {info.pw_uid} shares this process's "
+            f"privilege domain (euid {os.geteuid()}); refusing to start the harness"
+        )
+    if _agent_user_may_sudo(AGENT_USER):
+        _die(
+            f"agent user {AGENT_USER} can sudo; that is the same domain as the "
+            "key holder on ubuntu-latest, so the reusable proxy key would be readable"
+        )
+    return AGENT_USER
+
+
+def _drop_into_agent_user(
+    command: list[str], env: dict[str, str], temp: Path
+) -> tuple[list[str], dict[str, str]]:
+    """Wrap `command` so it runs as AGENT_USER with no-new-privs.
+
+    The reusable proxy key stays in *this* process. The child receives only
+    `env`, which holds the loopback broker token. ``setpriv --no-new-privs`` is
+    what stops the child from sudoing back into the key holder's domain;
+    PR_SET_DUMPABLE does not.
+    """
+    user = _require_agent_user()
+    dropped_env = {**env, "HOME": str(temp), "USER": user, "LOGNAME": user}
+    spec_path = temp / "harness-spec.json"
+    spec_path.write_text(
+        json.dumps({"argv": command, "env": dropped_env, "cwd": os.getcwd()}),
+        encoding="utf-8",
+    )
+    os.chmod(temp, 0o755)
+    os.chmod(spec_path, 0o644)
+    owned = _sudo(["chown", "-R", user, str(temp)])
+    if owned.returncode:
+        _die(f"cannot hand {temp} to {user}: {owned.stderr.strip()[:300]}")
+    wrapped = [
+        "sudo",
+        "-n",
+        "--",
+        "setpriv",
+        f"--reuid={user}",
+        f"--regid={user}",
+        "--clear-groups",
+        "--no-new-privs",
+        "--inh-caps=-all",
+        "--",
+        "/usr/bin/python3",
+        "-c",
+        _HARNESS_TRAMPOLINE,
+        str(spec_path),
+    ]
+    # sudo/setpriv themselves must not see the loopback token or anything else
+    # from the harness env; the trampoline reads the spec after the uid drop.
+    return wrapped, {"PATH": "/usr/sbin:/usr/bin:/bin", "LANG": "C"}
+
+
+def diff_evidence(base_sha: str, head_sha: str) -> tuple[int, str]:
+    """Return (line count, sha256) of `git diff base...head`, computed locally.
+
+    This is the value the agent has to reproduce. It is deliberately never put
+    in the prompt — only the recipe for deriving it — so an agent whose shell is
+    dead cannot emit it, and neither can one that guessed.
+    """
+    result = subprocess.run(
+        ["git", "--no-pager", "diff", f"{base_sha}...{head_sha}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        _die(
+            f"could not compute the diff for {base_sha}...{head_sha}: "
+            f"{result.stderr.decode(errors='replace')[:300]}"
+        )
+    raw = result.stdout
+    if not raw.strip():
+        _die(f"`git diff {base_sha}...{head_sha}` is empty; there is nothing to review")
+    return raw.count(b"\n"), hashlib.sha256(raw).hexdigest()
+
+
+def _die_without_evidence(detail: str) -> NoReturn:
+    """The loud, distinct, never-publishable state."""
+    print(f"FATAL: {NO_EVIDENCE_BANNER}: {detail}", file=sys.stderr)
+    print(f"::error title={NO_EVIDENCE_BANNER}::{detail}", file=sys.stdout)
+    raise SystemExit(NO_EVIDENCE_EXIT_CODE)
+
+
+def require_inspection_evidence(artifact: str, expected: tuple[int, str]) -> None:
+    """Refuse to write an artifact unless it proves the agent read the diff.
+
+    THE DIGEST IS THE ONLY ACCEPTING CHANNEL, and it must match in full.
+
+    The line count is parsed and reported on a mismatch because it makes the
+    diagnostic legible; it cannot authorise publication. It is public at the
+    PR's `.diff` URL, so it never distinguished a real read from a network
+    fetch. A zero-exit harness whose artifact is only `{ARTIFACT_HEADING}` is
+    the state this gate exists to catch.
+    """
+    expected_lines, expected_digest = expected
+    match = _EVIDENCE_RE.search(artifact)
+    if match is None:
+        _die_without_evidence(
+            f"the agent's `{ARTIFACT_HEADING}` carries no well-formed "
+            f"`{EVIDENCE_TEMPLATE}` line (the sha256 must be all 64 hex characters), "
+            "so nothing shows it read the diff. Its verdict is not publishable."
+        )
+    claimed_lines = int(match.group(1))
+    claimed_digest = match.group(2).lower()
+    if claimed_digest == expected_digest.lower():
+        return
+    _die_without_evidence(
+        f"inspection evidence does not match the diff: agent claimed lines={claimed_lines} "
+        f"sha256={claimed_digest}, launcher computed lines={expected_lines} "
+        f"sha256={expected_digest}. Its verdict is not publishable."
+    )
+
+
 class _ProxyBroker:
     """A loopback reverse proxy that owns the routed proxy key.
 
@@ -257,7 +486,8 @@ class _ProxyBroker:
     model. The broker resolves that by making the credential the agent holds
     worth nothing off this runner: a random per-run token, accepted only on
     127.0.0.1, by a listener that dies with this process. The reusable key never
-    enters the agent's environment or its process tree's readable /proc; it is
+    enters the agent's environment; the agent does not share a uid with this
+    process, so it also cannot read the key out of our memory. The key is
     stamped onto each request here, on the way out.
     """
 
@@ -431,11 +661,12 @@ def _agent_command(
                 "--sandbox",
                 # Codex's own sandbox stays off: GitHub-hosted runners do not
                 # permit its bubblewrap loopback setup, and a sandbox that
-                # cannot start is a review that never posts. The agent's
-                # authority is bounded outside the harness instead — no write
-                # credential on the runner at all, and a broker token for a
-                # listener that only exists while this launcher does. The
-                # network the agent keeps buys it nothing it can replay later.
+                # cannot start is a review that never posts. Isolation is the
+                # unprivileged OS user (no sudo, no-new-privs) plus a broker
+                # token for a listener that only exists while this launcher
+                # does. The network the agent keeps buys it nothing it can
+                # replay later; it cannot read the reusable key from this
+                # process.
                 "danger-full-access",
                 "--ephemeral",
                 "-c",
@@ -523,25 +754,42 @@ def _prompt(repo: str, pr_number: str, head_sha: str, base_sha: str) -> str:
         f"do not review code outside it except as context. Report only actionable "
         f"correctness, security, or regression findings, with file and line references. If "
         f"there are none, say so briefly. Your final response must start exactly with "
-        f"`{ARTIFACT_HEADING}`. {REVIEW_SCOPE}"
+        f"`{ARTIFACT_HEADING}`.\n\n"
+        f"MANDATORY PROOF OF INSPECTION. Run exactly:\n"
+        f"  git --no-pager diff {base_sha}...{head_sha} | wc -l\n"
+        f"  git --no-pager diff {base_sha}...{head_sha} | sha256sum\n"
+        f"and end your final response with a line of the form\n"
+        f"  {EVIDENCE_TEMPLATE}\n"
+        f"substituting the real values you observed. Quote the sha256 IN FULL — all 64 hex "
+        f"characters, not an abbreviation: the digest is the channel that authorises "
+        f"publication, and an abbreviated or malformed one is refused. Do NOT guess, infer, or "
+        f"fabricate the values: the launcher recomputes the digest and refuses to publish any "
+        f"review whose digest does not match exactly. The line count alone will NOT do — it is "
+        f"published at the PR's .diff URL and so proves nothing about what you read. "
+        f"If your shell cannot run those commands, say so plainly and DO NOT emit an "
+        f"evidence line and DO NOT render a verdict — an unverifiable review is worse than "
+        f"none. {REVIEW_SCOPE}"
     )
 
 
-def run_agent(model: str, prompt: str, timeout: int) -> str:
+def run_agent(model: str, prompt: str, timeout: int, evidence: tuple[int, str]) -> str:
     broker = _broker_for(model)
     broker.start()
     try:
-        return _run_harness(model, prompt, timeout, broker)
+        return _run_harness(model, prompt, timeout, broker, evidence)
     finally:
         # The token is only worth anything while this listener is up, so it goes
         # down on every path out, including the timeout FATAL.
         broker.close()
 
 
-def _run_harness(model: str, prompt: str, timeout: int, broker: _ProxyBroker) -> str:
+def _run_harness(
+    model: str, prompt: str, timeout: int, broker: _ProxyBroker, evidence: tuple[int, str]
+) -> str:
     with tempfile.TemporaryDirectory(prefix="eumemic-review-") as temp:
         artifact_path = Path(temp) / "last-message.md"
         command, env = _agent_command(model, artifact_path, broker)
+        command, env = _drop_into_agent_user(command, env, Path(temp))
         try:
             result = subprocess.run(
                 command,
@@ -564,10 +812,19 @@ def _run_harness(model: str, prompt: str, timeout: int, broker: _ProxyBroker) ->
         _emit(result.stderr, sys.stderr)
         if result.returncode:
             _die(f"{command[0]} exited with status {result.returncode}")
+        # last-message.md is owned by AGENT_USER after a real drop; make it
+        # readable before we pick it up. Skipped when the temp dir is still
+        # ours (tests that passthrough the drop). Not a secret boundary.
+        if os.stat(temp).st_uid != os.getuid():
+            _sudo(["chmod", "-R", "a+rX", str(temp)])
         output = artifact_path.read_text() if artifact_path.exists() else result.stdout
         artifact = _artifact_in(output)
         if artifact is None:
             _die(f"{model} returned no `{ARTIFACT_HEADING}` artifact")
+        # Exit 0 proves only that the harness process ended. A heading-only
+        # artifact is not a review. The digest check is what separates a review
+        # from a fluent guess, and it gates writing independently of exit status.
+        require_inspection_evidence(artifact, evidence)
         return artifact
 
 
@@ -636,14 +893,18 @@ def run_agent_phase() -> None:
     timeout = int(os.environ.get("REVIEW_TIMEOUT_SECONDS") or _REVIEW_SECONDS)
     _pin_checkout(head_sha, base_sha)
     _drop_persisted_git_credentials()
-    # Before anything reads the proxy key: from here the launcher holds a
-    # credential its own child must not be able to read back out of /proc.
+    # Privilege boundary before the key is read: the harness will not share
+    # this uid. prctl is extra against same-uid /proc reads, not the boundary.
+    _require_agent_user()
     _seal_process()
+    evidence = diff_evidence(base_sha, head_sha)
     print(
         f"reviewing {repo}#{pr_number}@{head_sha} against {base_sha} with {model} "
-        f"({model_kind(model)})"
+        f"({model_kind(model)}); diff is {evidence[0]} lines, sha256 {evidence[1]}"
     )
-    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout)
+    review = run_agent(model, _prompt(repo, pr_number, head_sha, base_sha), timeout, evidence)
+    # Belt: run_agent already checked, but writing is the publishable act.
+    require_inspection_evidence(review, evidence)
     artifact_path.write_text(review + "\n")
     print(f"wrote {ARTIFACT_HEADING} artifact to {artifact_path}")
 

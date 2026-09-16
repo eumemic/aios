@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import os
 import subprocess
+import sys
+import types
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -24,9 +28,30 @@ assert _SPEC and _SPEC.loader
 reviewer = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(reviewer)
 
+_DIFF_EVIDENCE = (137, "a" * 64)
+
 
 def _ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], 0, stdout, "")
+
+
+def _good_artifact(body: str = "A real finding.", lines: int = 137, digest: str = "a" * 64) -> str:
+    return f"### Code review\n\n{body}\n\n<!-- inspected: lines={lines} sha256={digest} -->"
+
+
+def _agent_returning(stdout: str, returncode: int = 0) -> Any:
+    def run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], returncode, stdout, "")
+
+    return run
+
+
+@pytest.fixture
+def passthrough_drop(monkeypatch: Any) -> None:
+    """Run the harness argv as-is so tests can inspect command/env."""
+    monkeypatch.setattr(
+        reviewer, "_drop_into_agent_user", lambda command, env, temp: (command, env)
+    )
 
 
 @contextmanager
@@ -244,17 +269,27 @@ def test_prompt_pins_the_reviewed_range_to_base_and_head() -> None:
     prompt = reviewer._prompt("eumemic/aios", "7", "headsha", "basesha")
     assert "git diff basesha...headsha" in prompt
     assert reviewer.ARTIFACT_HEADING in prompt
+    assert "sha256sum" in prompt
+    assert reviewer.EVIDENCE_TEMPLATE in prompt
+    # Expected evidence values must NOT be in the prompt, or a blocked agent
+    # can parrot them back and the evidence proves nothing.
+    assert "137" not in prompt
 
 
-def test_run_agent_extracts_heading_from_stdout(monkeypatch: Any, clean_env: None) -> None:
+def test_run_agent_extracts_heading_from_stdout(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
     monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
-    completed = subprocess.CompletedProcess([], 0, "preamble\n### Code review\n\nFinding.", "")
+    artifact = "preamble\n" + _good_artifact("Finding.")
+    completed = subprocess.CompletedProcess([], 0, artifact, "")
     monkeypatch.setattr(reviewer.subprocess, "run", lambda *args, **kwargs: completed)
-    assert reviewer.run_agent("claude-opus-5", "prompt", 10) == "### Code review\n\nFinding."
+    assert reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE) == _good_artifact(
+        "Finding."
+    )
 
 
 def test_run_agent_unlinks_the_staged_key_and_does_not_hand_it_to_the_harness(
-    monkeypatch: Any, clean_env: None, tmp_path: Path
+    monkeypatch: Any, clean_env: None, tmp_path: Path, passthrough_drop: None
 ) -> None:
     """The High: danger-full-access plus a reusable proxy secret is the leak.
 
@@ -270,10 +305,12 @@ def test_run_agent_unlinks_the_staged_key_and_does_not_hand_it_to_the_harness(
         seen["command"] = command
         seen["env"] = kwargs["env"]
         assert not staged.exists()
-        return subprocess.CompletedProcess(command, 0, "### Code review\n\nFinding.", "")
+        return subprocess.CompletedProcess(command, 0, _good_artifact("Finding."), "")
 
     monkeypatch.setattr(reviewer.subprocess, "run", run)
-    assert reviewer.run_agent("claude-opus-5", "prompt", 10) == "### Code review\n\nFinding."
+    assert reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE) == _good_artifact(
+        "Finding."
+    )
     env = seen["env"]
     assert "reusable-proxy-secret" not in env.values()
     assert env["ANTHROPIC_API_KEY"] != "reusable-proxy-secret"
@@ -283,35 +320,38 @@ def test_run_agent_unlinks_the_staged_key_and_does_not_hand_it_to_the_harness(
 
 
 def test_run_agent_takes_the_final_heading_not_an_echoed_one(
-    monkeypatch: Any, clean_env: None
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
 ) -> None:
     """Pi and Claude stdout carries tool activity, which can quote the heading."""
     monkeypatch.setenv("XAI_PROXY_API_KEY", "secret")
+    real = _good_artifact("The real finding.")
     noisy = (
         'grep "### Code review" scripts/eumemic_bot_review.py\n'
         "### Code review\nARTIFACT_HEADING = ...\n"
-        "### Code review\n\nThe real finding.\n"
+        f"{real}\n"
     )
     monkeypatch.setattr(
         reviewer.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, noisy, "")
     )
-    assert reviewer.run_agent("grok-4.6", "prompt", 10) == "### Code review\n\nThe real finding."
+    assert reviewer.run_agent("grok-4.6", "prompt", 10, _DIFF_EVIDENCE) == real
 
 
-def test_run_agent_prefers_codex_last_message(monkeypatch: Any, clean_env: None) -> None:
+def test_run_agent_prefers_codex_last_message(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
     monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
 
     def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         path = Path(command[command.index("--output-last-message") + 1])
-        path.write_text("chatty\n### Code review\n\nLooks good.")
+        path.write_text("chatty\n" + _good_artifact("Looks good."))
         return subprocess.CompletedProcess(command, 0, "event output", "")
 
     monkeypatch.setattr(reviewer.subprocess, "run", run)
-    assert reviewer.run_agent("gpt-5.6-sol", "prompt", 10).endswith("Looks good.")
+    assert "Looks good." in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
 
 
 def test_run_agent_reports_partial_output_on_timeout(
-    monkeypatch: Any, clean_env: None, capsys: Any
+    monkeypatch: Any, clean_env: None, capsys: Any, passthrough_drop: None
 ) -> None:
     """A 15-minute timeout is the likeliest failure; its log must not be empty."""
     monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
@@ -321,13 +361,15 @@ def test_run_agent_reports_partial_output_on_timeout(
 
     monkeypatch.setattr(reviewer.subprocess, "run", run)
     with pytest.raises(SystemExit):
-        reviewer.run_agent("claude-opus-5", "prompt", 10)
+        reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE)
     captured = capsys.readouterr()
     assert "got this far" in captured.out
     assert "warned" in captured.err
 
 
-def test_missing_artifact_heading_is_fatal(monkeypatch: Any, clean_env: None) -> None:
+def test_missing_artifact_heading_is_fatal(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
     monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
     monkeypatch.setattr(
         reviewer.subprocess,
@@ -335,7 +377,7 @@ def test_missing_artifact_heading_is_fatal(monkeypatch: Any, clean_env: None) ->
         lambda *a, **k: subprocess.CompletedProcess([], 0, "I refuse to follow format", ""),
     )
     with pytest.raises(SystemExit):
-        reviewer.run_agent("claude-opus-5", "prompt", 10)
+        reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE)
 
 
 def test_pin_checkout_rejects_a_tree_that_is_not_the_pr_head(monkeypatch: Any) -> None:
@@ -393,8 +435,8 @@ def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
 ) -> None:
     """Ordering is the point: _pin_checkout may fetch, the agent must not be able to.
 
-    Seal sits between scrub and the harness: the launcher must be undumpable
-    before it reads the proxy key that run_agent holds for the broker.
+    The unprivileged-user boundary is established before seal and before the
+    harness: prctl is extra, not the credential boundary.
     """
     _agent_env(monkeypatch, tmp_path)
     order: list[str] = []
@@ -402,18 +444,23 @@ def test_main_scrubs_the_git_credential_before_handing_the_tree_to_the_agent(
     def scrub() -> None:
         order.append("scrub")
 
+    def boundary() -> str:
+        order.append("boundary")
+        return "eumemic-review"
+
     def seal() -> None:
         order.append("seal")
 
     def agent(*args: Any) -> str:
         order.append("agent")
-        return "### Code review\n\nPass."
+        return _good_artifact("Pass.")
 
     monkeypatch.setattr(reviewer, "_drop_persisted_git_credentials", scrub)
+    monkeypatch.setattr(reviewer, "_require_agent_user", boundary)
     monkeypatch.setattr(reviewer, "_seal_process", seal)
     monkeypatch.setattr(reviewer, "run_agent", agent)
     reviewer.run_agent_phase()
-    assert order == ["scrub", "seal", "agent"]
+    assert order == ["scrub", "boundary", "seal", "agent"]
 
 
 def _agent_env(monkeypatch: Any, tmp_path: Path) -> Path:
@@ -431,6 +478,8 @@ def _agent_env(monkeypatch: Any, tmp_path: Path) -> Path:
         reviewer, "_git", lambda *args: _ok("abc123full\n" if args[0] == "rev-parse" else "")
     )
     monkeypatch.setattr(reviewer, "_seal_process", lambda: None)
+    monkeypatch.setattr(reviewer, "_require_agent_user", lambda: "eumemic-review")
+    monkeypatch.setattr(reviewer, "diff_evidence", lambda *args: _DIFF_EVIDENCE)
     return artifact
 
 
@@ -463,11 +512,11 @@ def test_agent_phase_writes_artifact_after_agent_returns(monkeypatch: Any, tmp_p
 
     def agent(*args: Any) -> str:
         assert not artifact.exists()
-        return "### Code review\n\nPass."
+        return _good_artifact("Pass.")
 
     monkeypatch.setattr(reviewer, "run_agent", agent)
     reviewer.run_agent_phase()
-    assert artifact.read_text() == "### Code review\n\nPass.\n"
+    assert artifact.read_text() == _good_artifact("Pass.") + "\n"
 
 
 def test_publish_phase_posts_and_verifies_marker(
@@ -499,6 +548,235 @@ def test_publish_phase_fails_when_github_does_not_echo_the_marker(
     )
     with pytest.raises(SystemExit):
         reviewer.run_publish_phase()
+
+
+def test_drop_wraps_the_harness_with_setpriv_no_new_privs(monkeypatch: Any, tmp_path: Path) -> None:
+    """The coding agent must not share a uid or sudo with the key holder."""
+    monkeypatch.setattr(reviewer, "_require_agent_user", lambda: "eumemic-review")
+    monkeypatch.setattr(
+        reviewer, "_sudo", lambda args: subprocess.CompletedProcess(args, 0, "", "")
+    )
+    command, env = reviewer._drop_into_agent_user(
+        ["claude", "--print"],
+        {"ANTHROPIC_API_KEY": "loopback-token", "PATH": "/usr/bin"},
+        tmp_path,
+    )
+    assert command[:3] == ["sudo", "-n", "--"]
+    assert "setpriv" in command
+    assert "--no-new-privs" in command
+    assert "--reuid=eumemic-review" in command
+    assert "--regid=eumemic-review" in command
+    assert "loopback-token" not in command
+    assert "loopback-token" not in env.values()
+    spec = json.loads(Path(command[-1]).read_text())
+    assert spec["argv"] == ["claude", "--print"]
+    assert spec["env"]["ANTHROPIC_API_KEY"] == "loopback-token"
+    assert spec["env"]["USER"] == "eumemic-review"
+
+
+def test_require_agent_user_refuses_when_the_user_can_sudo(monkeypatch: Any) -> None:
+    class Info:
+        pw_uid = 12345
+
+    monkeypatch.setattr(reviewer.sys, "platform", "linux")
+    monkeypatch.setattr(reviewer, "_agent_user_may_sudo", lambda user: True)
+    monkeypatch.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwnam=lambda name: Info()))
+    with pytest.raises(SystemExit):
+        reviewer._require_agent_user()
+
+
+def test_require_agent_user_refuses_a_same_uid(monkeypatch: Any) -> None:
+    class Info:
+        pw_uid = os.geteuid()
+
+    monkeypatch.setattr(reviewer.sys, "platform", "linux")
+    monkeypatch.setattr(reviewer, "_agent_user_may_sudo", lambda user: False)
+    monkeypatch.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwnam=lambda name: Info()))
+    with pytest.raises(SystemExit):
+        reviewer._require_agent_user()
+
+
+def test_run_agent_actually_drops_before_exec(
+    monkeypatch: Any, clean_env: None, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ANT_PROXY_API_KEY", "secret")
+    seen: dict[str, Any] = {}
+
+    def drop(
+        command: list[str], env: dict[str, str], temp: Path
+    ) -> tuple[list[str], dict[str, str]]:
+        seen["dropped"] = True
+        seen["env"] = env
+        assert "secret" not in env.values()
+        return command, env
+
+    monkeypatch.setattr(reviewer, "_drop_into_agent_user", drop)
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(_good_artifact(), 0))
+    reviewer.run_agent("claude-opus-5", "prompt", 10, _DIFF_EVIDENCE)
+    assert seen["dropped"] is True
+
+
+def test_comments_do_not_claim_prctl_seals_github_runners() -> None:
+    """Honesty: passwordless sudo on ubuntu-latest outranks PR_SET_DUMPABLE."""
+    script = _SCRIPT.read_text()
+    docs = (_ROOT / "docs/eumemic-bot-review.md").read_text()
+    workflow = _WORKFLOW.read_text()
+    blob = script + docs + workflow
+    assert (
+        "does NOT seal GitHub-hosted runners" in script
+        or "does **not**\nseal GitHub-hosted runners" in script
+        or "does **not** seal GitHub-hosted runners" in script
+    )
+    assert "passwordless sudo" in blob
+    assert (
+        "Broker+seal alone is insufficient" in script
+        or "broker+seal alone is insufficient" in blob.lower()
+    )
+    # Must not claim dumpable is the property credential separation rests on.
+    assert "credential separation rests on" not in script
+
+
+def test_agent_exiting_zero_having_run_no_commands_must_not_write(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
+    """Zero-exit + heading only is not a review and must not become an artifact."""
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    lgtm = "### Code review\n\nNo actionable findings in this range. LGTM."
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(lgtm, 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_no_evidence_is_a_distinct_loud_state_not_an_ordinary_failure(
+    monkeypatch: Any, clean_env: None, capsys: Any, passthrough_drop: None
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning("### Code review\n\nLGTM.", 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    assert exc.value.code != 1
+    captured = capsys.readouterr()
+    assert reviewer.NO_EVIDENCE_BANNER in captured.err
+    assert "::error" in captured.out
+
+
+def test_fabricated_inspection_evidence_must_not_write(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    monkeypatch.setattr(
+        reviewer.subprocess, "run", _agent_returning(_good_artifact(lines=999, digest="b" * 64), 0)
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "No actionable findings. LGTM.",
+        "BLOCKING: this must not merge — unguarded SQL interpolation at src/x.py:12.",
+    ],
+)
+def test_a_genuinely_inspected_review_is_written_whatever_its_verdict(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None, verdict: str
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    artifact = _good_artifact(verdict)
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    assert verdict in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+
+
+def test_a_matching_line_count_alone_is_NOT_evidence(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    artifact = "### Code review\n\nOK.\n\n<!-- inspected: lines=137 sha256=" + "c" * 64 + " -->"
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_the_published_diff_line_count_paired_with_a_forged_digest_is_refused() -> None:
+    public_line_count = 2243
+    real = (2243, "085b04f85930cebf3d476a4905763f2c6d1ede92e9d2c1a060fe254d499dfd3b")
+    artifact = (
+        f"### Code review\n\nLGTM.\n\n"
+        f"<!-- inspected: lines={public_line_count} sha256={'f' * 64} -->"
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer.require_inspection_evidence(artifact, real)
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_an_abbreviated_digest_is_refused() -> None:
+    with pytest.raises(SystemExit) as exc:
+        reviewer.require_inspection_evidence(
+            "### Code review\n\n<!-- inspected: lines=137 sha256=aaaaaaaaaaaaaaaa -->",
+            _DIFF_EVIDENCE,
+        )
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+
+
+def test_the_full_digest_is_what_writes(
+    monkeypatch: Any, clean_env: None, passthrough_drop: None
+) -> None:
+    monkeypatch.setenv("OAI_PROXY_API_KEY", "secret")
+    # Wrong line count, right digest: digest alone must suffice.
+    artifact = (
+        "### Code review\n\nReal finding.\n\n<!-- inspected: lines=999 sha256=" + "a" * 64 + " -->"
+    )
+    monkeypatch.setattr(reviewer.subprocess, "run", _agent_returning(artifact, 0))
+    assert "Real finding." in reviewer.run_agent("gpt-5.6-sol", "prompt", 10, _DIFF_EVIDENCE)
+
+
+def test_evidence_regex_will_not_even_match_a_short_digest() -> None:
+    assert reviewer._EVIDENCE_RE.search("<!-- inspected: lines=1 sha256=" + "a" * 64 + " -->")
+    for short in ("a" * 16, "a" * 63, "a" * 8):
+        assert not reviewer._EVIDENCE_RE.search(f"<!-- inspected: lines=1 sha256={short} -->"), (
+            f"regex matched a {len(short)}-char digest; the width is the guard"
+        )
+
+
+def test_agent_phase_does_not_write_artifact_without_inspection_evidence(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    artifact = _agent_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        reviewer, "run_agent", lambda *args: "### Code review\n\nLGTM, nothing to flag."
+    )
+    with pytest.raises(SystemExit) as exc:
+        reviewer.run_agent_phase()
+    assert exc.value.code == reviewer.NO_EVIDENCE_EXIT_CODE
+    assert not artifact.exists()
+
+
+def test_diff_evidence_is_computed_from_the_real_diff(monkeypatch: Any) -> None:
+    payload = b"diff --git a/x b/x\n+one\n+two\n"
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        assert command[:3] == ["git", "--no-pager", "diff"]
+        assert command[3] == "base456...abc123"
+        return subprocess.CompletedProcess(command, 0, payload, b"")
+
+    monkeypatch.setattr(reviewer.subprocess, "run", run)
+    lines, digest = reviewer.diff_evidence("base456", "abc123")
+    assert lines == 3
+    assert digest == hashlib.sha256(payload).hexdigest()
+
+
+def test_diff_evidence_refuses_an_empty_diff(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        reviewer.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, b"   \n", b""),
+    )
+    with pytest.raises(SystemExit):
+        reviewer.diff_evidence("base456", "abc123")
 
 
 def test_workflow_pins_head_and_base_and_keeps_no_aios_session_config() -> None:

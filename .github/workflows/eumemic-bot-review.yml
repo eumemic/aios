@@ -61,14 +61,14 @@ jobs:
 
       # The routed proxy key is written to a 0600 file here rather than handed
       # to the agent step as an environment variable. unsetenv does not rewrite
-      # /proc/<pid>/environ, and every process in the agent's ancestry — this
-      # job's step shell included — runs under the agent's own uid, so a secret
-      # the agent *step* receives is a secret a prompt-injected agent reads and
-      # can spend or exfiltrate over its network. This step's shell has exited
-      # before the agent starts. The launcher reads the file, unlinks it, seals
-      # itself with prctl(PR_SET_DUMPABLE, 0) so its own /proc and memory are
-      # closed to its child, and hands the harness only a loopback broker token
-      # that dies with the launcher.
+      # /proc/<pid>/environ. This step's shell has exited before the agent
+      # starts. The launcher reads the file, unlinks it, and holds the key in
+      # the broker process (this job's `runner` uid). prctl(PR_SET_DUMPABLE) is
+      # NOT the boundary: passwordless sudo on ubuntu-latest can still read
+      # that process's memory. The coding-agent harness is exec'd as a dedicated
+      # unprivileged user (`eumemic-review`) via setpriv --no-new-privs, so it
+      # cannot sudo, ptrace, or read the key-holder. It gets only a loopback
+      # broker token that dies with the launcher.
       - name: Stage the routed proxy key
         id: proxykey
         if: steps.harness.outcome == 'success'
@@ -99,6 +99,7 @@ jobs:
       #
       # No proxy secret is in this step's environment: REVIEW_PROXY_KEY_FILE is
       # a path, and the launcher has unlinked it before the harness starts.
+      # The harness itself does not run as this step's user.
       - name: Run coding agent
         id: agent
         if: steps.proxykey.outcome == 'success'
