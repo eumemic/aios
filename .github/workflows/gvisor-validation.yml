@@ -122,7 +122,7 @@ jobs:
         # Each worker amortizes its own testcontainer-Postgres + Docker
         # setup over ~55 tests.
         #
-        # ``-m 'docker and not perf'``: the ``perf`` mark is the ADVISORY
+        # ``-m 'docker and not netns_sidecar_egress and not runsc_dns_unresolved and not perf'``: the ``perf`` mark is the ADVISORY
         # wall-clock scaling backstop (#1661), excluded here for the same
         # reason it is excluded from the gating run in ``code-validation.yml``
         # — shared-runner jitter can exceed its ratio threshold on work that
