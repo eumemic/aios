@@ -9,8 +9,9 @@ out or executes this PR-head script. The legacy ``publish`` phase remains for
 manual compatibility but is not part of the Action's trust path.
 
 The routed proxy key is never handed to the harness. ``_ProxyBroker`` keeps it
-in this process — sealed against ``/proc`` and ``ptrace`` by ``_seal_process`` —
-and the agent is given a random loopback-only token instead.
+in this process — sealed against ``/proc`` and ``ptrace`` for an unprivileged
+child by ``_seal_process`` — and the agent is given a random loopback-only
+token instead.
 
 Env:
   REVIEW_ARTIFACT_PATH, REPO, PR_NUMBER, HEAD_SHA
@@ -205,9 +206,10 @@ def _seal_process() -> None:
 
     Clearing the dumpable flag closes exactly that gap. The kernel reassigns
     /proc/<pid> to root and denies PTRACE_MODE_ATTACH to unprivileged tracers,
-    so `cat /proc/$PPID/environ` and reading our memory both fail for the agent.
-    It is the property the loopback broker's credential separation rests on, so
-    a failure to set it is fatal rather than a warning.
+    so `cat /proc/$PPID/environ` and reading our memory both fail for an
+    unprivileged agent/child. Passwordless sudo on ubuntu-latest can still read
+    the launcher's memory. It is the property the loopback broker's credential
+    separation rests on, so a failure to set it is fatal rather than a warning.
     """
     if sys.platform != "linux":
         _die(f"cannot seal the launcher against /proc on {sys.platform}; run the agent on Linux")
