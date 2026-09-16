@@ -865,7 +865,10 @@ class DockerBackend:
         #    produces content identical to the existing tag. On the containerd
         #    image store a no-write container reports SizeRw == 4096 (NOT 0),
         #    so the floor — not an == 0 test — is what keeps chat-only and
-        #    read-only sessions from ever growing a chain.
+        #    read-only sessions from ever growing a chain. Callers pass
+        #    ``snapshot_empty_floor_bytes(runtime, ...)``: runsc's overlay +
+        #    containerd inode charging (st_blocks*512) sits above the 8 KiB
+        #    runc floor (gvisor#10256 / #2410 containerd-snapshotter).
         if size_rw is not None and size_rw <= empty_floor_bytes:
             if tag_fields is None:
                 return SnapshotOutcome(kind="skipped_empty", image_id=None, unique_bytes=0, depth=0)

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.config import get_settings, snapshot_empty_floor_bytes
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
@@ -160,21 +161,34 @@ async def test_filesystem_persists_processes_and_shm_do_not(
 async def test_zero_write_release_is_skipped_empty(
     daemon: tuple[DockerBackend, str, str, Path],
 ) -> None:
-    """A read/chat-only session (no writes) snapshots as ``skipped_empty`` — the
-    containerd-store SizeRw floor (a no-write container reports 4096, not 0)."""
+    """A read/chat-only session (no writes) snapshots as ``skipped_empty``.
+
+    containerd SizeRw is ``st_blocks * 512`` (4 KiB/inode). overlay2 no-write
+    is 4096, which the default 8 KiB floor covers. Under runsc the
+    containerd-snapshotter copy-up + gVisor overlay charge more inodes
+    (gvisor#10256; Actions 35146073686 committed at floor=8192), so the
+    production helper raises the runsc floor to 64 KiB — still below a 64 KiB
+    tenant write plus directory inodes.
+    """
     backend, instance_id, session_id, workspace = daemon
     tag = snapshot_tag(instance_id, session_id)
+    settings = get_settings()
+    floor = snapshot_empty_floor_bytes(
+        settings.sandbox_runtime, settings.sandbox_snapshot_empty_floor_bytes
+    )
 
     h1 = await backend.create(
         _spec(instance_id=instance_id, session_id=session_id, workspace=workspace)
     )
     await run_sandbox(backend, h1, "true")  # no filesystem writes
     out = await backend.snapshot(
-        h1.sandbox_id, tag, empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        h1.sandbox_id, tag, empty_floor_bytes=floor, flatten_if_unique_bytes_over=None
     )
     await backend.destroy(h1)
     assert out.kind == "skipped_empty", (
-        f"a no-write release must be skipped_empty on the floor, got {out.kind}"
+        f"a no-write release must be skipped_empty on the floor "
+        f"(floor={floor}, runtime={settings.sandbox_runtime!r}, "
+        f"unique_bytes={out.unique_bytes}), got {out.kind}"
     )
 
 

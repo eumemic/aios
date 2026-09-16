@@ -22,6 +22,18 @@ from aios.sandbox.limits import MAX_BASH_TIMEOUT_SECONDS
 # timeout; the validators below reject per-phase budgets that meet or exceed it.
 HARNESS_STEP_TIMEOUT_S: float = 960.0
 
+# containerd ``Usage`` (``docker inspect --size`` / ``.SizeRw``) is
+# ``st_blocks * 512`` — 4 KiB per inode on ext4 (containerd/continuity
+# ``fs.DiskUsage``). overlay2-era no-write is 1 inode (4096); the default
+# 8 KiB floor covers that with a page of headroom. The containerd image
+# store required for runsc ``--mount type=image`` (#2410) copy-ups Docker
+# metadata (``.dockerenv``, ``/etc/hosts`` / ``hostname`` / ``resolv.conf``
+# plus parent dirs) at several inodes, and runsc's overlay adds more
+# (gvisor#10256). Sixteen inodes (64 KiB) still sits below a 64 KiB tenant
+# write plus its directory inodes (~72 KiB), so chat-only sessions skip
+# and real writes still commit.
+RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES = 64 * 1024
+
 OutboundToolQuota = tuple[
     Annotated[int, Field(gt=0)],
     Annotated[int, Field(gt=0)],
@@ -330,7 +342,9 @@ class Settings(BaseSettings):
         "a no-write container reports ``SizeRw == 4096``, not 0, so an "
         "``== 0`` test would never fire in prod and chat-only / read-only "
         "sessions would grow a chain every idle. The floor (default 8 KiB) is "
-        "what keeps them from ever snapshotting.",
+        "what keeps them from ever snapshotting under runc. Callers must pass "
+        ":func:`snapshot_empty_floor_bytes` so runsc gets the 64 KiB inode "
+        "ceiling (containerd ``st_blocks*512`` copy-up + gVisor overlay).",
     )
     sandbox_seccomp_profile: str = Field(
         default=str(Path(__file__).resolve().parents[2] / "docker" / "seccomp-sandbox.json"),
@@ -1364,3 +1378,17 @@ def get_settings() -> Settings:
     inside a fixture.
     """
     return Settings()
+
+
+def snapshot_empty_floor_bytes(runtime: str | None, configured: int) -> int:
+    """SizeRw identity floor for ``runtime``. Never below ``configured``.
+
+    runc / default Docker keep the overlay2-era 8 KiB setting. runsc uses at
+    least :data:`RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES` (16 ext4 inodes) because
+    containerd Usage charges ``st_blocks * 512`` per copy-up inode and gVisor's
+    overlay adds more than the 2-inode 8 KiB ceiling (gvisor#10256, #2410
+    containerd-snapshotter). A configured floor above that wins.
+    """
+    if runtime == "runsc":
+        return max(configured, RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES)
+    return configured

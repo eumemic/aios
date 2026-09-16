@@ -504,3 +504,20 @@ def test_browser_call_timeout_error_names_env_var_and_floor(
     assert "exec_kill_margin 5s" in msg
     assert "170.0s" in msg
     assert "viewerless grant" in msg
+
+
+def test_snapshot_empty_floor_keeps_runc_at_configured_8kib() -> None:
+    from aios.config import snapshot_empty_floor_bytes
+
+    assert snapshot_empty_floor_bytes(None, 8192) == 8192
+    assert snapshot_empty_floor_bytes("runc", 8192) == 8192
+
+
+def test_snapshot_empty_floor_raises_runsc_to_16_inodes() -> None:
+    """containerd Usage is st_blocks*512 (4 KiB/inode). runsc + containerd
+    copy-up charges more than the overlay2-era 2-inode / 8 KiB floor."""
+    from aios.config import RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES, snapshot_empty_floor_bytes
+
+    assert RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES == 64 * 1024
+    assert snapshot_empty_floor_bytes("runsc", 8192) == 64 * 1024
+    assert snapshot_empty_floor_bytes("runsc", 128 * 1024) == 128 * 1024
