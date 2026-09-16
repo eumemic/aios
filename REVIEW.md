@@ -1,172 +1,146 @@
-# REVIEW — Master RED gVisor validation after #2432
+# REVIEW — round `gvisred3`, tip `5d94b476909f19d13358009d30f20a8ec7ec25bb`
 
-- **Product tip (PR):** `6805d03d` — implement `f480501c` + High leftover (`/etc/hosts` worker alias, not `--dns` gateway)
-- **Round:** `gvisred2` / `gvisred2rev`
-- **Implementer:** grok-4.6 · **Reviewer:** claude-opus-5
-- **Base:** `origin/master` @ `8f3111f0` (#2432)
-- **Evidence:** https://github.com/eumemic/aios/actions/runs/35157209667 — 11 fail / 364 pass. Related #923.
+Checker: claude-opus-5 (uncorrelated; implementer was grok-4.6 on `gvisred3`).
+Branch under review: `gvisred3rev` (forked from the implement tip). Base:
+`origin/master` @ `f5c22254` (#2434). Evidence:
+https://github.com/eumemic/aios/actions/runs/35161851660 — 4 failed / 372 passed.
+Not pushed, not merged, no PR opened.
 
-## Verdict: **PASS** (after leftover)
+## Verdict: **FAIL** — both mechanisms are right, two shipped claims are not.
 
-Initial review **FAIL** on leg (c): `--dns <bridge gateway>` cannot make `aios-worker` resolve under runsc (Docker `--dns` is only an upstream forwarder; gateway is not a resolver). High leftover applied on this tip as `6805d03d` (`/etc/hosts` / extra_hosts). Legs (a) SizeRw overshoot and (b) seccomp unshare denial from `f480501c` kept.
+The tip fixes the RED legs. It also asserts, in four places, a security
+invariant that its own change breaks, and it fixes leg (b) only for images that
+never flatten. Both are High/Medium and both are **fixed in this worktree** as
+`1a588c41` (product + tests + docs). Re-review of that commit should be short;
+the tip's own code is otherwise sound and stays as-is.
 
----
+## What was verified
+
+**(a) Seccomp / threads — mechanism correct.** Both upstream premises check out
+against gVisor `master`:
+
+* `runsc/specutils/seccomp/seccomp.go` pins every `SCMP_ACT_ERRNO` to a
+  package-level `errnoAction = seccomp.ReturnError.Code(uint16(unix.EPERM))`
+  and never reads `ErrnoRet` — so the vendored `clone3` ENOSYS(38) rule arrives
+  in the Sentry as EPERM, which is not a glibc/libuv fallback trigger. That is
+  the `uv_thread_create` exit-134 signature exactly.
+* An ALLOW is the *only* available repair: ENOSYS cannot be expressed through
+  OCI seccomp under runsc, and clone3's flags live in a `struct clone_args` in
+  user memory that seccomp cannot filter.
+
+`_seccomp_opt` is correctly runsc-only and passes `unconfined` through
+untouched; the derived profile puts the ALLOW ahead of the vendored ENOSYS rule,
+which is what gVisor's in-order ruleset evaluation needs. The three RED tests
+(`tests/e2e/test_sandbox_seccomp.py`) build their spec with
+`runtime=get_settings().sandbox_runtime`, so the derivation does reach them in
+the gVisor job. `test_unshare_user_namespace_denied` stays green:
+`unshare -U` still falls through the masked-eq ALLOW into the #807 deny.
+
+**(b) Snapshot residual — mechanism correct.** `runsc/boot/vfs.go` `mountTmp`
+skips its internal tmpfs on `ENOTEMPTY` (and on an explicit `/tmp` spec mount,
+which is why production's #2280 bind mount was never affected and only the
+bind-mount-free e2e spec went red). The sentinel therefore does keep `/tmp` on
+the rootfs. The image is built in-job (`docker build -t aios-sandbox:ci`), so
+the Dockerfile change lands in the same CI run — no registry-rebuild dependency.
+`Dockerfile.sandbox` is single-stage with no `VOLUME` and no later `/tmp` purge.
+
+**(3) #2434 kept.** The tip is a single commit touching six files; nothing in
+the SizeRw commit/flatten path, the `skipped_empty` identity, or the worker
+`/etc/hosts` DNS is touched. No regression by construction.
+
+**(4)/(5) Coverage and message.** Focused unit coverage exists and passes; the
+commit body matches the diff. `uv run mypy src tests` clean, `ruff check` /
+`ruff format --check` clean. Focused runs only — no full suite, no `-n`:
+`tests/unit/sandbox` + `tests/unit/test_tar_filter.py` → **724 passed**
+(683 + 41 after the fixes).
 
 ## Findings
 
-### High — (c) `--dns <gateway>` cannot make `aios-worker` resolve under runsc — FIXED in this worktree
+### F1 — High. The clone3 ALLOW re-opens CLONE_NEWUSER under runsc; the tip says it does not.
 
-The tip added `resolve_sandbox_network_gateway()` (`src/aios/sandbox/network.py`)
-and passed `--dns <bridge gateway IP>` on runsc creates, on the stated rationale
-that "dockerd actually answers alias lookups" at the gateway. Both halves of
-that are false:
+`_runsc_seccomp_profile`'s docstring: *"`CLONE_NEWUSER` stays denied: the
+authored unshare EPERM block and the arg-filtered clone ALLOW are untouched,
+and those are what `test_unshare_user_namespace_denied` exercises."* The same
+claim is in the commit message, `config.py`'s `sandbox_runtime` description and
+the design doc. It does not follow, and it is false under runsc:
 
-1. **`--dns` does not replace the sandbox's resolver.** On a user-defined
-   network Docker always writes `127.0.0.11` as the container's *only*
-   nameserver and treats `--dns` as the *upstream forwarder* the embedded
-   resolver consults for names it cannot answer itself. Passing `--dns` never
-   changes what the sandbox queries, so the Sentry keeps sending every lookup
-   to the one address the tip itself identifies as unreachable.
-2. **Nothing answers DNS on the bridge gateway.** libnetwork binds the embedded
-   resolver on `127.0.0.11` *inside the container's netns* (ephemeral port, plus
-   netns-local DNAT/SNAT rules that rewrite `:53`). The gateway is the host's
-   bridge interface, not a resolver. (Gateway-answers-DNS is the
-   Podman/aardvark-dns shape, not Docker's.)
+* gVisor implements clone3 — `linux64.go`:
+  `435: syscalls.PartiallySupported("clone3", Clone3, "Options CLONE_NEWTIME,
+  CLONE_SYSVSEM and SetTid are not supported.", nil)`. `Clone3` copies
+  `clone_args` and calls the same `t.Clone(&cloneArgs)` as legacy clone, passing
+  the flags through untouched apart from `CLONE_DETACHED`/exit-signal checks.
+* `task_clone.go` gates `CLONE_NEWUSER` on nothing but `t.IsChrooted()` — no
+  capability check (that is standard unprivileged-userns behaviour).
+* The inserted ALLOW is unfiltered, necessarily so.
 
-The tip's *diagnosis* of the root cause is right — the Sentry never replays the
-netns netfilter rules, so `127.0.0.11` is unreachable (google/gvisor#7469) — but
-gVisor's own guidance for this failure points the other way: a real external
-resolver for external names, static addresses / `extra_hosts` for service names.
+So a tenant in a runsc sandbox can obtain a user namespace via
+`clone3(CLONE_NEWUSER)` while the guard test, which drives only `unshare`, stays
+green. That is precisely the shape a checker exists to catch: the test that is
+supposed to prove the property is insensitive to the change that breaks it.
 
-**Fix applied (`d6e924d7`):** use the primitive this codebase already chose for
-exactly this problem. The egress scripts stopped looking the alias up inside the
-netns and instead have the *worker* resolve it and bake the answer in
-(`_operator_ipv4`, aios#2410). The tenant side now does the same:
+Residual risk is bounded, and that is *why* the ALLOW is still the right call —
+the #807 deny block is unconditional and first-match, so
+`mount/umount/setns/unshare/keyctl/bpf` remain EPERM inside any namespace
+obtained this way, and a fresh netns has no routable interface (wiring one in
+needs CAP_NET_ADMIN in the **parent** userns). runc is untouched: it honours
+`ErrnoRet`, keeps ENOSYS, and never sees the derived profile.
 
-- `resolve_network_alias_ipv4(alias, network)` (`sandbox/network.py`) reads the
-  endpoint Docker itself recorded for the alias — `docker ps --filter network=`
-  then `docker inspect` parsed as JSON (never per-field templating under
-  `missingkey=error`), matching on `Aliases` ∪ `DNSNames`.
-- runsc creates pass `--add-host aios-worker:<addr>`. libc reads the hosts file
-  before DNS and runsc passes that bind mount through untouched, so the alias
-  resolves in the Sentry without the embedded DNS.
-- Scoped to the shape that needs it: runc keeps using the embedded DNS (no
-  probe, no hosts entry); the worker-on-host shape already has its own
-  `--add-host` and is not on the sandbox network. No container claiming the
-  alias logs a warning and emits nothing rather than inventing an address —
-  provisioning's own proxy-alias resolve is already the hard failure for a
-  sandbox that must reach the broker.
+**Fixed in `1a588c41`:** the ALLOW is kept; `docker.py`, `config.py` and the
+design doc now state the hole as an accepted risk with the bounding argument,
+and `test_runsc_profile_is_the_authored_one_plus_exactly_the_clone3_allow` pins
+the derivation to *authored + exactly one rule* (plus
+`test_runsc_profile_keeps_the_unconditional_namespace_deny`) so a second hole
+cannot be added silently.
 
-`resolve_sandbox_network_gateway` / `_probe_network_gateway` and their caches are
-deleted (don't-deprecate-delete), and `TestResolveSandboxNetworkGateway` is
-replaced by `TestResolveNetworkAliasIPv4` (6 cases: alias via `Aliases`, alias
-via `DNSNames`, no claimant, empty network skips the inspect entirely,
-degenerate/vanished records don't poison the batch, listing failure fails hard).
-`test_docker_runtime_argv.py` now asserts the runsc create carries
-`--add-host aios-worker:<addr>` and no `--dns`, that a worker-less network omits
-the entry, that the host-worker shape keeps its own host-gateway `--add-host`,
-and that runc emits neither the `docker ps` probe nor an `--add-host`.
+### F2 — Medium. The `/tmp` sentinel does not survive flatten, so leg (b) regresses on the next cycle.
 
-### Medium — (a) the `docker diff` veto is inert under a default runsc install; `--overlay2=none` is the whole fix
+`EPHEMERAL_PREFIXES` (`src/aios/sandbox/_tar_filter.py`) drops everything under
+`tmp/` from the flatten export — keeping the directory, dropping its contents,
+including `/tmp/.aios-keep`. A flattened image therefore resumes with an
+**empty** `/tmp`, `mountTmp` overlays tmpfs again, and the hidden-writes bug is
+back. The design-doc sentence the tip added ("`/tmp` stays on the rootfs and
+snapshot/resume keeps `/tmp/marker`") is true only until the first flatten. The
+RED test passes because it pins `flatten_if_unique_bytes_over=None`, so CI would
+not have caught the gap.
 
-The diagnosis is correct: `--overlay2=root:self` **is** the runsc default, and it
-hides rootfs writes from Docker's image store, which is why a written layer
-reported `SizeRw == baseline` and snapshot returned `skipped_empty`. Setting
-`"runtimeArgs": ["--oci-seccomp", "--overlay2=none"]` in the CI daemon.json is
-the real repair, and it is the only part of leg (a) that changes the failing
-tests' behavior.
+**Fixed in `1a588c41`:** `KEPT_PATHS = {"tmp/.aios-keep"}` carves the sentinel
+out of `_is_ephemeral`, with `TestGvisorSentinel` asserting it survives while
+its siblings are dropped and that it matches the Dockerfile that plants it. The
+sentinel is zero bytes, so the `_ephemeral_bytes` flatten-gate estimate is
+unaffected in any meaningful way.
 
-The accompanying product change — stamping `docker diff` paths at create and
-vetoing `size_is_empty` when new paths appear — does not carry its weight:
+### F3 — Low (note only). Derived-profile temp file is never cleaned up.
 
-- **Inert in the very configuration it claims to defend against.** With the
-  self-backed overlay, tenant writes land *inside the pre-existing filestore
-  file* (`.gvisor.overlay.img.{CID}/filestore-*`), which is already in the
-  create-time stamp. No new diff path appears, so the veto never fires. It only
-  helps in configurations where `docker diff` already sees the writes — i.e.
-  where `SizeRw` mostly works anyway.
-- **Path-set comparison misses in-place growth.** A tenant that only *modifies*
-  paths already present at create time (the common case for an image with a
-  pre-seeded workspace) produces the same path set, so the veto passes it
-  through as empty.
-- **Costs a `docker diff` per create for every runtime**, including runc where
-  `SizeRw` is reliable.
-- **Fails closed to "commit" on an unreadable diff** (`current_paths is None` →
-  `size_is_empty = False`), which reintroduces the exact overshoot #2432 fixed
-  whenever the daemon call is flaky.
+`_runsc_seccomp_profile` writes a `NamedTemporaryFile(delete=False)` and is
+`functools.cache`d on the source path: one leaked file per profile path per
+worker process (bounded, but never removed), and an edit to the authored profile
+inside a live process is not picked up. A missing/unreadable profile now raises a
+bare `OSError` out of `create()` rather than the `SandboxBackendError` its
+siblings raise two lines below — it still fails hard, just with a less
+recognisable error. Left as-is.
 
-Not fixed here: the zero-write `skipped_empty` tests still pass with it in place,
-and removing it is a design call about whether a second, weaker empty-signal is
-wanted at all. Recommendation for the PR discussion: drop the create-time diff
-stamp and let `--overlay2=none` (plus the #2432 baseline identity) carry leg (a),
-or promote it to a real content signal rather than a path-set diff.
+### F4 — Low (note only). The ALLOW is inserted at index 0, ahead of the authored #807 deny block.
 
-### Medium — (b) seccomp restoration is CI-config-only, with no runtime assertion
+Harmless today — the deny block deliberately excludes `clone`/`clone3` — but if
+`clone3` were ever added there, the runsc copy would silently override it rather
+than failing loudly. Inserting immediately after the authored deny block instead
+of at the head would make that a loud CI failure. The new
+authored-plus-exactly-one-rule test narrows the blast radius; the insertion point
+is unchanged.
 
-The diagnosis is sound and the fix is right: runsc's `--oci-seccomp` defaults
-**off**, so the authored profile never reached the Sentry and `CLONE_NEWUSER`
-succeeded (exit 0 / `0 0 0 0`). Adding it to the CI daemon.json `runtimeArgs`
-restores `test_unshare_user_namespace_denied` and
-`test_unshare_argfilter_distinguishes_our_profile`.
+### F5 — Low (note only). A tenant can delete the sentinel.
 
-The gap is that this is a *CI workflow* change. A production runsc deployment
-that does not carry the same `runtimeArgs` silently drops the sandbox seccomp
-profile — the sandbox looks configured (the profile is authored and passed to
-Docker) while enforcing nothing. The only record of the requirement is a
-`Field(description=...)` string in `src/aios/config.py`; there is no startup
-assertion and no e2e that would catch an operator missing it outside CI.
+`/tmp/.aios-keep` is root-owned `644` in a sandbox whose agent runs as root. A
+session that removes it *and* empties `/tmp` gets the tmpfs overlay back on the
+next resume. Self-inflicted and not worth a guard; noted for the record.
 
-Suggested follow-up (not applied — it is a new behavior, outside this review's
-repair scope): when `sandbox_runtime == "runsc"`, assert at worker startup that
-the daemon's runtime args include `--oci-seccomp` and fail hard, consistent with
-the fail-hard/no-fallbacks stance. A silently-unenforced seccomp profile is
-precisely the class of failure that policy exists for.
-
-### Low (note) — Limited networking under runsc + worker-in-container still has no name source
-
-`_operator_hosts` returns `NO_OPERATOR_HOSTS` in the worker-in-container shape,
-and under runsc the egress scripts read the *operator image's* hosts file and
-cannot see the embedded DNS at all. So `aios-worker` resolves for the tenant
-(after the fix above) but still resolves nowhere for the egress scripts, leaving
-Limited networking nameless in that shape. This is pre-existing and orthogonal to
-the three clusters; it is the residual tracked by #923.
-
-Natural follow-up now that the primitive exists: populate the operator table from
-`resolve_network_alias_ipv4` for the runsc + worker-in-container combination.
-Comments in `sandbox/setup.py` (`NO_OPERATOR_HOSTS`) and `sandbox/registry.py`
-(`_operator_hosts`) were corrected in `d6e924d7` — they previously claimed the
-runsc sandbox gets no `--add-host` at all, which is no longer true — and now
-state the residual explicitly.
-
-### Note — commit message / diff correspondence
-
-Legs (a) and (b): the commit body's rationale matches the diff and matches
-reality (`--overlay2=root:self` default hiding rootfs writes; `--oci-seccomp`
-defaulting off). Leg (c): the diff matches the stated rationale, but the
-rationale itself — that dockerd answers alias lookups on the bridge gateway — is
-factually wrong, which is the High finding above.
-
----
-
-## Checks run (focused only; no full suite, no `-n`)
+## Reproduction commands
 
 ```
-uv run pytest tests/unit/sandbox -q -p no:randomly        # 822 passed
-uv run mypy src tests                                     # Success (1101 files)
-uv run ruff check src tests                               # clean
-uv run ruff format --check src tests                      # clean
+uv run pytest tests/unit/sandbox tests/unit/test_tar_filter.py -q   # 724 passed
+uv run mypy src tests                                               # clean
+uv run ruff check src tests && uv run ruff format --check src tests # clean
 ```
 
-Docker / gVisor e2e was not run here (out of scope per TASK.md item 4); the three
-named e2e clusters remain the CI gate.
-
-## State of this worktree
-
-- Branch `gvisred2rev`, tip `d6e924d7` on top of the reviewed `f480501c`.
-- Commit `d6e924d7` contains only the High fix and its tests/doc corrections:
-  `sandbox/network.py`, `sandbox/backends/docker.py`, `sandbox/registry.py`,
-  `sandbox/setup.py`, `tests/unit/sandbox/test_sandbox_network.py`,
-  `tests/unit/sandbox/test_docker_runtime_argv.py`.
-- `TASK.md` is modified in the working tree by the harness (the committed copy
-  still carries the older aios#2410 task text); deliberately left uncommitted.
-- Not pushed, not merged, no PR opened — Shepherd owns leftover apply + push.
+No docker/gVisor e2e was run here (per brief). The e2e verdict still rests on
+the next gVisor Validation run.
