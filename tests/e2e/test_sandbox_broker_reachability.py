@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.config import get_settings
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     INSTANCE_LABEL_KEY,
@@ -128,6 +129,7 @@ async def test_sandbox_resolves_worker_alias_via_docker_dns(
         network_policy=UnrestrictedNetworking(),
         host_gateway_alias=None,
         image=IMAGE,
+        runtime=get_settings().sandbox_runtime,
     )
     handle = await backend.create(spec)
     try:

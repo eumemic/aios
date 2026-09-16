@@ -91,6 +91,7 @@ def _spec(session_id: str, workspace: Path) -> SandboxSpec:
         host_gateway_alias=None,
         image=IMAGE,
         seccomp_profile=SECCOMP_PROFILE,
+        runtime=get_settings().sandbox_runtime,
     )
 
 

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.config import get_settings
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     INSTANCE_LABEL_KEY,
@@ -78,6 +79,7 @@ def _spec(workspace: Path) -> SandboxSpec:
         host_gateway_alias=None,
         image=IMAGE,
         seccomp_profile=PROFILE_PATH,
+        runtime=get_settings().sandbox_runtime,
     )
 
 

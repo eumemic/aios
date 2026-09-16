@@ -85,6 +85,16 @@ _MANAGED_INSPECT_BATCH_SIZE = 100
 # an unbounded chain. NOT a hard-wall dodge on the prod store.
 _FLATTEN_DEPTH_CEILING = 200
 
+
+def writable_layer_delta(size_rw: int, baseline_bytes: int) -> int:
+    """Tenant-authored writable-layer bytes: ``SizeRw`` minus create-time baseline.
+
+    Negative deltas (SizeRw shrank — rare) clamp to 0 so they still short-circuit
+    as empty rather than commit a "negative write".
+    """
+    return max(0, size_rw - baseline_bytes)
+
+
 # A runsc sandbox's netfilter lives in its Sentry, not in the Linux network
 # namespace Docker can join a second container to.  Mount the operator image
 # read-only so the runsc exec path below can use known-good networking tools
@@ -319,6 +329,7 @@ class DockerBackend:
 
     def __init__(self) -> None:
         self._snapshot_timeout_attempts: dict[str, int] = {}
+        self._snapshot_baselines: dict[str, int] = {}
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Run ``docker run`` per ``spec`` and return a handle to the started container."""
@@ -490,6 +501,10 @@ class DockerBackend:
         if not container_id:
             raise SandboxBackendError("docker run returned an empty container id")
 
+        baseline = await self._stamp_snapshot_baseline(container_id)
+        if baseline is not None:
+            self._snapshot_baselines[container_id] = baseline
+
         return SandboxHandle(
             owner_id=spec.session_id,
             sandbox_id=container_id,
@@ -498,6 +513,7 @@ class DockerBackend:
             spec_version=spec.spec_version,
             snapshot_image=spec.snapshot_image,
             disk_limit_bytes=spec.snapshot_budget_bytes,
+            snapshot_baseline_bytes=baseline,
         )
 
     async def exec(
@@ -559,6 +575,7 @@ class DockerBackend:
 
     async def destroy(self, handle: SandboxHandle) -> None:
         """``docker rm --force`` the container. No-op if already gone."""
+        self._snapshot_baselines.pop(handle.sandbox_id, None)
         argv = ["docker", "rm", "--force", handle.sandbox_id]
         try:
             rc, _, stderr_bytes = await run_docker_cli(argv)
@@ -657,6 +674,7 @@ class DockerBackend:
 
     async def force_remove(self, sandbox_id: str) -> None:
         """``docker rm --force`` a container by id. Logs but does not raise."""
+        self._snapshot_baselines.pop(sandbox_id, None)
         argv = ["docker", "rm", "--force", sandbox_id]
         try:
             rc, _, stderr_bytes = await run_docker_cli(argv)
@@ -861,15 +879,16 @@ class DockerBackend:
                 depth=tag_fields[2],
             )
 
-        # 5. Identity short-circuit: a writable layer at/below the empty floor
-        #    produces content identical to the existing tag. On the containerd
-        #    image store a no-write container reports SizeRw == 4096 (NOT 0),
-        #    so the floor — not an == 0 test — is what keeps chat-only and
-        #    read-only sessions from ever growing a chain. Callers pass
-        #    ``snapshot_empty_floor_bytes(runtime, ...)``: runsc's overlay +
-        #    containerd inode charging (st_blocks*512) sits above the 8 KiB
-        #    runc floor (gvisor#10256 / #2410 containerd-snapshotter).
-        if size_rw is not None and size_rw <= empty_floor_bytes:
+        # 5. Identity short-circuit: tenant-authored writable-layer bytes at
+        #    or below the empty floor produce content identical to the existing
+        #    tag. On the containerd image store a no-write container reports
+        #    SizeRw == 4096 (NOT 0), and the containerd-snapshotter / runsc
+        #    overlay copy-up more; the floor applies to SizeRw minus the
+        #    create-time baseline, so the discard window stays one page of
+        #    tenant writes regardless of store or runtime. Unstamped corpses
+        #    (other process, pre-upgrade) use baseline 0 (fail closed: commit).
+        baseline = self._snapshot_baselines.get(sandbox_id, 0)
+        if size_rw is not None and writable_layer_delta(size_rw, baseline) <= empty_floor_bytes:
             if tag_fields is None:
                 return SnapshotOutcome(kind="skipped_empty", image_id=None, unique_bytes=0, depth=0)
             return SnapshotOutcome(
@@ -1535,6 +1554,23 @@ class DockerBackend:
             )
         raw_rw = stdout_bytes.decode("utf-8").strip()
         return int(raw_rw) if raw_rw.isdigit() else None
+
+    async def _stamp_snapshot_baseline(self, sandbox_id: str) -> int | None:
+        """Measure SizeRw before tenant exec. Identity is ``SizeRw - baseline``.
+
+        Recorded on the backend (and the handle) so snapshot/salvage in this
+        process subtracts the empty layer rather than guessing a runtime floor.
+        Failure returns ``None`` (snapshot then uses baseline 0 — fail closed).
+        """
+        try:
+            return await self._inspect_container_size_rw(sandbox_id)
+        except SandboxBackendError as err:
+            log.warning(
+                "sandbox.snapshot_baseline_inspect_failed",
+                container_id=sandbox_id[:12],
+                error=str(err),
+            )
+            return None
 
     async def _inspect_image_fields(self, ref: str) -> tuple[str, int, int, dict[str, str]] | None:
         """Return ``(image_id, size_bytes, layer_depth, labels)`` or ``None`` if absent.

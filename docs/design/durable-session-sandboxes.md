@@ -131,12 +131,14 @@ Two deliberate amendments to the proposed contract, both strengths:
 **Two containerd-image-store amendments (verified on the production store, which OVERRIDE
 the overlay2-verified §5.2/§5.6 pseudocode and are what the implementation ships):**
 
-- **Skip-empty threshold is a byte floor, not `== 0`.** A no-write container reports
-  `SizeRw == 4096`, not 0, on the containerd image store. The identity short-circuit fires
-  on `SizeRw <= snapshot_empty_floor_bytes(runtime, sandbox_snapshot_empty_floor_bytes)`
-  (default 8 KiB under runc; 64 KiB under runsc — containerd `st_blocks*512` inode
-  charging plus gVisor overlay, gvisor#10256), so read/chat-only sessions never grow a
-  chain (§5.7's premise). An `== 0` test would never fire in prod.
+- **Skip-empty threshold is a byte floor on the SizeRw *delta*, not `== 0` and not an
+  absolute SizeRw cap.** A no-write container reports `SizeRw == 4096`, not 0, on the
+  containerd image store, and the containerd-snapshotter / runsc overlay copy-up more.
+  Create stamps that empty `SizeRw` before tenant exec; the identity short-circuit fires
+  on `SizeRw - baseline <= sandbox_snapshot_empty_floor_bytes` (default 8 KiB of tenant
+  writes), so read/chat-only sessions never grow a chain (§5.7's premise) and the discard
+  window stays one page regardless of store or runtime. An `== 0` test would never fire
+  in prod.
 - **Flatten is budget-driven; the layer wall does not exist.** The overlay2 ~125-layer
   commit wall is absent on the containerd store (a chain ran cleanly through 250 layers).
   Flatten is therefore driven by the per-session unique-bytes budget (storage), with layer
@@ -262,7 +264,7 @@ docker inspect <id>          → .Image (parent), .Config.Env, labels
 docker image inspect <tag>   → .Id, layer depth, .Size      # absent → first snapshot
 LINEAGE GATE: proceed iff tag absent OR tag.Id == corpse.Image   # else skipped_stale
 docker inspect --size <id>   → SizeRw
-SizeRw <= empty_floor → skipped_empty          # identity short-circuit (containerd no-write == 4096; runsc floor 64 KiB; §3)
+SizeRw - create-time baseline <= empty_floor → skipped_empty  # identity (containerd no-write == 4096; §3)
 flatten? (unique-bytes over per-session budget [primary], or depth+1 ≥ 200 [soft guard] — §3)
   COMMIT:  docker commit --change 'ENV K='  (per key in aios.env_keys ONLY)  <id> <tag>
   FLATTEN: docker export <id> | docker import

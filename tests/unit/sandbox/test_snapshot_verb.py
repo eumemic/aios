@@ -10,13 +10,28 @@ from __future__ import annotations
 
 import json
 from collections import namedtuple
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from aios.config import get_settings
-from aios.sandbox.backends.base import SandboxBackendError, SandboxSnapshotTimeoutError
-from aios.sandbox.backends.docker import _FLATTEN_DEPTH_CEILING, DockerBackend
+from aios.models.environments import UnrestrictedNetworking
+from aios.sandbox.backends.base import (
+    INSTANCE_LABEL_KEY,
+    MANAGED_LABEL_KEY,
+    MANAGED_LABEL_VALUE,
+    SESSION_LABEL_KEY,
+    Mount,
+    SandboxBackendError,
+    SandboxSnapshotTimeoutError,
+    SandboxSpec,
+)
+from aios.sandbox.backends.docker import (
+    _FLATTEN_DEPTH_CEILING,
+    DockerBackend,
+    writable_layer_delta,
+)
 
 _Usage = namedtuple("_Usage", ["total", "used", "free"])
 
@@ -189,6 +204,121 @@ class TestSkipEmptyFloor:
         assert out.kind == "skipped_empty"
         assert out.image_id == "img_S1"
         assert not _committed(fake_docker)
+
+    @pytest.mark.asyncio
+    async def test_high_baseline_no_write_is_skipped(self, fake_docker: _FakeDocker) -> None:
+        """containerd-snapshotter / runsc copy-up can put empty SizeRw well
+        above 8 KiB. Subtracting the create-time baseline keeps the skip."""
+        fake_docker.size_rw = 70_000
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "skipped_empty"
+        assert not _committed(fake_docker), "a no-write layer must not grow a chain"
+
+    @pytest.mark.asyncio
+    async def test_high_baseline_tenant_write_at_floor_is_skipped(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        fake_docker.size_rw = 70_000 + 8192
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "skipped_empty"
+        assert not _committed(fake_docker)
+
+    @pytest.mark.asyncio
+    async def test_high_baseline_tenant_write_above_floor_commits(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        fake_docker.size_rw = 70_000 + 8193
+        backend = DockerBackend()
+        backend._snapshot_baselines["cid"] = 70_000
+        out = await backend.snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "committed"
+        assert _committed(fake_docker)
+
+    @pytest.mark.asyncio
+    async def test_unstamped_high_sizerw_commits_fail_closed(
+        self, fake_docker: _FakeDocker
+    ) -> None:
+        """The master RED signature: SizeRw above the 8 KiB absolute floor and
+        no create-time baseline. Fail closed — commit rather than skip."""
+        fake_docker.size_rw = 65536
+        out = await DockerBackend().snapshot(
+            "cid", "tag:latest", empty_floor_bytes=8192, flatten_if_unique_bytes_over=None
+        )
+        assert out.kind == "committed"
+        assert _committed(fake_docker)
+
+    def test_writable_layer_delta_clamps_negative(self) -> None:
+        assert writable_layer_delta(4096, 0) == 4096
+        assert writable_layer_delta(70_000, 70_000) == 0
+        assert writable_layer_delta(70_000, 80_000) == 0
+
+
+def _create_spec() -> SandboxSpec:
+    return SandboxSpec(
+        session_id="sess_baseline",
+        instance_id="inst_baseline",
+        workspace=Mount(host_path=Path("/tmp/ws"), sandbox_path="/workspace"),
+        extra_mounts=(),
+        environment={},
+        labels={
+            MANAGED_LABEL_KEY: MANAGED_LABEL_VALUE,
+            INSTANCE_LABEL_KEY: "inst_baseline",
+            SESSION_LABEL_KEY: "sess_baseline",
+        },
+        network_policy=UnrestrictedNetworking(),
+        host_gateway_alias=None,
+        image="aios-sandbox:test",
+    )
+
+
+class TestSnapshotBaselineStamp:
+    @pytest.mark.asyncio
+    async def test_create_stamps_sizerw_onto_handle_and_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_run(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            del timeout_s, snapshot_timeout
+            if argv[1] == "run":
+                return 0, b"cid123deadbeef\n", b""
+            if argv[1] == "inspect" and "--size" in argv:
+                return 0, b"4096\n", b""
+            raise AssertionError(f"unexpected docker cli: {argv}")
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fake_run)
+        backend = DockerBackend()
+        handle = await backend.create(_create_spec())
+        assert handle.snapshot_baseline_bytes == 4096
+        assert backend._snapshot_baselines[handle.sandbox_id] == 4096
+
+    @pytest.mark.asyncio
+    async def test_create_survives_unparseable_sizerw(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_run(
+            argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+        ) -> tuple[int, bytes, bytes]:
+            del timeout_s, snapshot_timeout
+            if argv[1] == "run":
+                return 0, b"cid123deadbeef\n", b""
+            if argv[1] == "inspect":
+                return 0, b"not-a-number\n", b""
+            raise AssertionError(f"unexpected docker cli: {argv}")
+
+        monkeypatch.setattr("aios.sandbox.backends.docker.run_docker_cli", fake_run)
+        handle = await DockerBackend().create(_create_spec())
+        assert handle.snapshot_baseline_bytes is None
 
 
 # ── lineage gate truth table ─────────────────────────────────────────────────

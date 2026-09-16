@@ -213,6 +213,10 @@ class SandboxHandle:
     # ``spec.snapshot_budget_bytes``. The release path passes it back to
     # ``backend.snapshot`` as the flatten trigger. ``None`` ⇒ unbounded.
     disk_limit_bytes: int | None = None
+    # Writable-layer ``SizeRw`` at create, before any tenant exec. Snapshot
+    # identity is ``SizeRw - snapshot_baseline_bytes``. ``None`` if create
+    # could not measure it (snapshot then uses baseline 0 — fail closed).
+    snapshot_baseline_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +291,8 @@ class SnapshotOutcome:
     - ``flattened`` — the chain was collapsed to a single standalone layer
       (``export | import``), stripping baked config (the definitive secret
       scrub) and re-rooting off the base.
-    - ``skipped_empty`` — the writable layer was at/below the empty floor
+    - ``skipped_empty`` — tenant-authored writable-layer bytes (``SizeRw``
+      minus the create-time baseline) were at/below the empty floor
       (identity short-circuit), so no new image; the prior tag, if any,
       stays canonical. ``image_id`` is ``None`` only when no prior tag
       existed (a chat/read-only session that never wrote).
@@ -422,9 +427,9 @@ class SandboxBackend(Protocol):
         The planned-teardown verb of durable session sandboxes (§5.2):
         ``stop -t 5`` → inspect → **lineage gate** (proceed iff ``tag``
         absent or ``tag.Id == corpse.Image``; else ``skipped_stale``) →
-        ``SizeRw <= empty_floor_bytes`` short-circuit (``skipped_empty``)
-        → commit-or-flatten. The container is **not** removed — the caller
-        removes it only after this returns successfully.
+        ``SizeRw - create-time baseline <= empty_floor_bytes`` short-circuit
+        (``skipped_empty``) → commit-or-flatten. The container is **not**
+        removed — the caller removes it only after this returns successfully.
 
         Flatten (``export | import``, collapsing the chain to one
         standalone layer and stripping baked config — the definitive

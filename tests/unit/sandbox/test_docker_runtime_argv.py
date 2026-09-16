@@ -258,9 +258,10 @@ async def test_arm64_still_gets_the_default_runtime(
         runtime=None,
     )
 
-    assert [call[:2] for call in calls] == [["docker", "run"], ["docker", "run"]]
-    assert _runtime_values(calls[0]) == []
-    assert _runtime_values(calls[1]) == []
+    docker_runs = [c for c in calls if len(c) >= 2 and c[1] == "run"]
+    assert len(docker_runs) == 2
+    assert _runtime_values(docker_runs[0]) == []
+    assert _runtime_values(docker_runs[1]) == []
 
 
 async def test_netns_sidecar_runsc_execs_into_the_target_sentry(

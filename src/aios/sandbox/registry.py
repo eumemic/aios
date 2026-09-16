@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from aios import ids
-from aios.config import get_settings, snapshot_empty_floor_bytes
+from aios.config import get_settings
 from aios.db import queries
 from aios.errors import NotFoundError
 from aios.ids import sandbox_owner_kind
@@ -1819,9 +1819,7 @@ class SandboxRegistry:
             outcome = await self._backend.snapshot(
                 sandbox_id,
                 tag,
-                empty_floor_bytes=snapshot_empty_floor_bytes(
-                    settings.sandbox_runtime, settings.sandbox_snapshot_empty_floor_bytes
-                ),
+                empty_floor_bytes=settings.sandbox_snapshot_empty_floor_bytes,
                 flatten_if_unique_bytes_over=disk_limit_bytes,
             )
         except Exception as err:

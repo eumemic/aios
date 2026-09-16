@@ -46,8 +46,12 @@ async def _capture_argv(spec: SandboxSpec) -> list[str]:
     """
     captured: dict[str, list[str]] = {}
 
-    async def fake_run_docker(argv: list[str]) -> tuple[int, bytes, bytes]:
-        captured["argv"] = argv
+    async def fake_run_docker(
+        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
+    ) -> tuple[int, bytes, bytes]:
+        del timeout_s, snapshot_timeout
+        if argv[1] == "run":
+            captured["argv"] = argv
         return 0, b"deadbeef1234\n", b""
 
     with patch("aios.sandbox.backends.docker.run_docker_cli", side_effect=fake_run_docker):

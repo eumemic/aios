@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from aios.config import get_settings
 from aios.models.environments import UnrestrictedNetworking
 from aios.sandbox.backends.base import (
     BASE_IMAGE_LABEL_KEY,
@@ -77,6 +78,7 @@ def _spec(
         image=IMAGE,
         snapshot_image=snapshot_image,
         seccomp_profile=SECCOMP_PROFILE,
+        runtime=get_settings().sandbox_runtime,
     )
 
 
