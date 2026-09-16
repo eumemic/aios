@@ -297,22 +297,22 @@ class CredentialDnsResolver:
         ``EADDRINUSE`` on the UDP attach (or a race) retries with a new
         ephemeral port; any other bind error still fails closed.
         """
-        last_exc: BaseException | None = None
         for attempt in range(_BIND_ATTEMPTS):
             try:
                 await self._bind()
-                last_exc = None
                 break
             except OSError as exc:
-                last_exc = exc
                 await self.stop()
+                # Raise from the loop, never from a post-loop state check: a
+                # resolver that bound once keeps ``_port`` across ``stop()``,
+                # so "did we bind?" must be answered by control flow or a
+                # failed re-``start()`` would return a stale port with nothing
+                # listening on it.
                 if exc.errno != errno.EADDRINUSE or attempt + 1 == _BIND_ATTEMPTS:
-                    break
+                    raise CredentialDnsError("credential DNS resolver failed to bind") from exc
             except BaseException as exc:
                 await self.stop()
                 raise CredentialDnsError("credential DNS resolver failed to bind") from exc
-        if self._port is None:
-            raise CredentialDnsError("credential DNS resolver failed to bind") from last_exc
         log.info(
             "credential_dns.started",
             port=self._port,

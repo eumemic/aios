@@ -1,223 +1,164 @@
-# Uncorrelated review — gVisor snapshot empty-floor, tip `e28d3c399f0568d43d37b0332b71f2ba985188ed`
+# Uncorrelated review — aios#2432 fixround, round `gvisfloor3`
 
-- **Round**: `gvisfloor2` (implementer grok-4.6, worktree `aios-gvisfloor2`; reviewer claude-opus-5, worktree `aios-gvisfloor2rev`)
-- **Product tip**: `e28d3c39` — `fix(sandbox): skip-empty identity is SizeRw minus create-time baseline`
-- **Prior round**: `77e18b27` (FAIL, review `b3cf1342`) — runtime-keyed 64 KiB absolute floor
-- **Base**: `cc9a3c0e` — `fix(sandbox): apply runsc egress rules in the target Sentry (#2410)`
-- **Target defect**: master RED gVisor Validation, Actions 35146073686 —
-  `tests/e2e/test_sandbox_persistence.py::test_zero_write_release_is_skipped_empty`
-  expected `skipped_empty`, got `committed` at `empty_floor_bytes=8192`.
-- **Verdict**: **PASS** (3 Medium notes, 3 Low notes — none blocking; see Follow-ups)
+**Tip reviewed:** `5683c1b861e1b8d28ad71fffc2535225529e4565`
+("fix(sandbox): retry credential DNS bind on dual-protocol EADDRINUSE")
+**Branch:** `gvisfloor3rev` (forked from implement tip on `gvisfloor3`)
+**Implementer:** grok-4.6 · **Checker:** claude-opus-5 (maker ≠ checker)
+**PR:** https://github.com/eumemic/aios/pull/2432 (branch `gvisfloor`)
+**Scope:** light review — focused unit tests only, no docker e2e, no `-n`.
 
-Both blocking items from the prior FAIL are addressed at the cause, not at the
-expectation. The runtime threading makes the gVisor job's containers actually
-gVisor containers, and the identity gate stops guessing at an unmeasured
-constant: it subtracts a **per-corpse measurement** taken on that same
-container at create. That inverts the failure mode of the prior tip — where a
-64 KiB absolute floor sat exactly on `_write_substantial`'s 65536-byte blob and
-could have *discarded* a real tenant write — into a fail-closed one (unstamped
-⇒ commit). mypy, ruff and every focused unit test pass locally.
+## Verdict: **FAIL** — one Medium defect (latent fail-open), **fixed in this worktree**
 
----
-
-## Verified
-
-**1. e2e specs now thread the runtime (TASK item 1).** `runtime=get_settings().sandbox_runtime`
-is set in all five direct-backend spec builders — `test_sandbox_persistence.py:78`,
-`test_sandbox_provision_path.py:81`, `test_sandbox_salvage.py:94`,
-`test_sandbox_seccomp.py:82`, `test_sandbox_broker_reachability.py:132` —
-matching the pre-existing precedent at `test_sandbox_ipv6_lockdown.py:230`.
-`get_settings` is already imported in each of the five files (checked; no
-NameError at collection). The gVisor leg exports `AIOS_SANDBOX_RUNTIME=runsc`
-for the whole e2e step (`.github/workflows/gvisor-validation.yml:177`), and
-`DockerBackend.create` emits `--runtime` under `if spec.runtime:`
-(`docker.py:471-472`), so these containers now genuinely carry a Sentry. The
-prior tip's gate keyed on a condition its own container never met; that is
-fixed.
-
-**2. Identity is container-aware (TASK item 2).** `create` stamps SizeRw before
-any tenant exec (`docker.py:504-506` → `_stamp_snapshot_baseline`, `docker.py:1558`)
-onto the backend's `_snapshot_baselines` and the handle (`base.py:216-219`); the
-gate at `docker.py:889-891` compares `writable_layer_delta(size_rw, baseline)`
-against the configured floor. Keying checked: `create` stores the full 64-hex id
-from `docker run` stdout, and the salvage/GC ref path re-inspects with
-`{{.Id}}` after `docker ps --quiet` (`docker.py:637`), so refs carry the full id
-and lookups hit — no short-id mismatch. Entries are popped in `destroy`
-(`:578`) and `force_remove` (`:677`); the pop precedes removal and follows the
-snapshot, so the release ordering invariant is intact.
-
-**3. Fail-closed paths are real, not nominal.** `run_docker_cli` raises
-`SandboxBackendError` on launch failure *and* timeout (`_subprocess.py:113-115`),
-which `_stamp_snapshot_baseline` catches; an unparseable `.SizeRw` returns
-`None` (`docker.py:1556`). Both degrade to baseline 0 ⇒ commit. Importantly,
-neither can turn a successful `docker run` into a raised `create()`: the
-registry's create-failure handler deliberately does **not** destroy ("there is
-no sandbox yet", `registry.py:693-706`), so a raising stamp would have leaked a
-live container. It doesn't.
-
-**4. Safety vs a real tenant write (TASK item 3).** The floor is now 8 KiB *of
-tenant delta*, against `_write_substantial`'s 65536-byte blob
-(`test_sandbox_persistence.py:86`) — an 8× margin, where the prior tip's runsc
-floor was 1.0×. The discard window is bounded at one page of tenant writes
-regardless of store or runtime, and no longer widens with the copy-up. The
-delta framing also *strengthens* the identity claim rather than weakening it:
-what it subtracts is precisely the daemon-injected per-life metadata
-(`/.dockerenv`, hosts/hostname/resolv.conf + parent dirs), which is
-regenerated identically on the next container and is not tenant content.
-Unit coverage pins the boundary — `70_000+8192` skips, `70_000+8193` commits,
-unstamped `65536` commits (the master RED signature), negative delta clamps
-(`tests/unit/sandbox/test_snapshot_verb.py:209-263`), plus the stamp itself and
-its unparseable-SizeRw degrade (`:284-321`).
-
-**5. Budget arithmetic left alone.** `projected_unique` / flatten sizing still
-use absolute `size_rw` (`docker.py:910-912`, `:930`) — correct: storage is
-storage, only *identity* is tenant-relative. No inconsistency introduced.
-
-**6. #2410 intact (TASK item 4).** `git diff cc9a3c0e..HEAD -- src/aios/sandbox/backends/docker.py`
-touches no hosts-first / operator-mount / Sentry-exec / proxy-key code; the only
-runsc mention in the diff is a comment in the identity block. The helper
-`snapshot_empty_floor_bytes` and `RUNSC_SNAPSHOT_EMPTY_FLOOR_BYTES` are deleted
-outright (not shimmed), `registry.py:1822` is back to the plain setting, and a
-tree-wide grep finds no stale references in src, tests, docs, README or
-`.env.example`. Design doc §3 amendment and the §5.2 pseudocode were both
-updated to the delta form.
-
-**7. Commit message vs diff (TASK item 6).** Claims check out, with one
-overstatement (M1) and one wording inaccuracy (L1) below.
-
-### Commands run (focused; no full suite, no `-n`)
-
-```
-uv run pytest tests/unit/sandbox/test_snapshot_verb.py \
-  tests/unit/sandbox/test_docker_runtime_argv.py tests/unit/test_config.py -q   → 83 passed
-uv run pytest tests/unit/sandbox tests/unit/test_sandbox_init_reaper.py \
-  tests/unit/test_sandbox_pull_always.py tests/unit/test_sandbox_resource_caps.py \
-  tests/unit/test_networking.py -q                                             → 797 passed
-uv run pytest tests/unit/test_gvisor_validation_workflow.py -q                 → 5 passed
-uv run mypy src tests            → Success: no issues found in 1101 source files
-uv run ruff check src tests      → All checks passed
-uv run ruff format --check       → 1101 files already formatted
-```
-
-No Docker (and no runsc) in this environment, so the gVisor e2e was not run —
-light-review scope per the prompt. CI remains the oracle for M2/M3.
+The diagnosis and the shape of the fix are right: TCP-first ephemeral bind +
+UDP attach on the same port + bounded `EADDRINUSE` retry is the correct answer
+to the CI red, and it does not weaken the one-resolver-per-session property.
+The defect is in how `start()` decides it succeeded: it replaced a
+structurally-enforced fail-closed postcondition with a check on mutable
+instance state that `stop()` never clears, so a resolver that bound once can
+return from a *failing* `start()` reporting a stale port with nothing
+listening on it. In the module whose entire job is failing closed, that is not
+a shape to ship. Reproduced, fixed, and covered by a regression test below.
 
 ---
 
 ## Findings
 
-### M1 (Medium, non-blocking) — the baseline is process-local, so the gate is inert for cross-process corpses
+### M1 (Medium, FIXED) — `start()` could return "started" while unbound
 
-`_snapshot_baselines` is an in-memory dict on the `DockerBackend` instance. The
-single snapshot call site `_snapshot_and_record` (`registry.py:1805`) serves
-three callers: planned release with an in-process handle (`:1800`), the salvage
-preamble (`:2004`) and the GC tick (`:3129`). The latter two pass a corpse id
-discovered from `docker ps` labels — and after a worker restart (or a GC tick in
-a sibling worker) that container was created by a *different process*, so the
-lookup misses and baseline is 0. Under the containerd image store / runsc the
-empty layer is well above 8192, so the gate never fires on exactly the crash
-path §5.4 exists for: a chat-only session that crossed a process boundary
-commits an identity layer.
+`src/aios/sandbox/credential_dns.py` — as committed:
 
-This is **by design and blessed by TASK item 2** ("unstamped corpses fail
-closed"), it is not a regression against master (master compares absolute
-SizeRw to the same 8192), the outcome is safe (commit, never discard), and it
-matches an established convention in this file — the per-corpse
-`disk_limit_bytes` already falls back to the global default for the same reason
-(`registry.py:2007`, and the docstring at `:1952` says so). No cheap durable
-stamp exists: a Docker label can't be written post-`run`, and the handle is
-itself process-local, so durability would mean a DB column keyed by container
-id (a migration).
+```python
+for attempt in range(_BIND_ATTEMPTS):
+    ...
+    except OSError as exc:
+        last_exc = exc
+        await self.stop()
+        if exc.errno != errno.EADDRINUSE or attempt + 1 == _BIND_ATTEMPTS:
+            break
+if self._port is None:                      # <-- success predicate
+    raise CredentialDnsError(...) from last_exc
+```
 
-What is worth correcting is the **claim**, not the code: the commit body says
-the skip holds "under runc, containerd-snapshotter, and runsc alike" without
-the caveat, and `_stamp_snapshot_baseline`'s docstring hedges it only as "in
-this process". Recommend a sentence in the design doc §3 amendment naming the
-cross-process corpse as the one case that still commits, and an issue for the
-durable stamp if the chain growth shows up in prod.
+`stop()` does not clear `self._port` (it still reads it for the
+`credential_dns.stopped` log line). So `self._port is None` only answers "did
+we bind?" for an instance that has never bound. For an instance that bound
+once and was stopped, every bind attempt can fail and `start()` still falls
+through to `log.info("credential_dns.started", port=<previous run's port>)`
+and returns — the caller then DNATs the sandbox's `udp/53` + `tcp/53` at a
+port this process no longer owns, with no interception behind it. That is a
+fail-open in the path whose own docstring says a failed bind "turns into a
+failed provision, because a sandbox whose credential names cannot be pinned
+must not be handed a credential", and it contradicts CLAUDE.md's *fail hard,
+no fallbacks* / *correct-by-construction*.
 
-### M2 (Medium, non-blocking) — start-time vs stop-time SizeRw under runsc is still unmeasured
+Reproduced against the committed tip (`_BIND_ATTEMPTS=2`, all binds raising
+`EADDRINUSE`, after one successful start/stop):
 
-The baseline is measured on a *running* container immediately after `docker run`
-returns; the gate compares SizeRw of a *stopped* one (`snapshot` does `stop -t 5`
-first, `docker.py:855`). If gVisor's Sentry flushes overlay state to the
-writable layer at exit — the general shape of gvisor#10256, cited by the prior
-tip — the delta for a no-write container is not 0 and the e2e stays red. The
-design no longer *depends* on knowing the empty-layer magnitude (that is the
-central improvement over `77e18b27`), but it does still assume the empty layer
-is stable across the container's life. Nothing in-tree or in the commit
-measures that under runsc, and it cannot be measured here.
+```
+credential_dns.started  port=40707      <- first, real start
+credential_dns.stopped  port=40707
+credential_dns.stopped  port=40707      <- retry 1 failed
+credential_dns.stopped  port=40707      <- retry 2 failed
+credential_dns.started  port=40707      <- BUG: returns OK, nothing bound
+```
 
-Failure mode if the assumption is wrong is benign (commit, not discard) and the
-gVisor leg reports it. If that leg comes back red on this test, the cheapest
-next step is to widen the e2e assertion message: it currently prints
-`baseline` and `out.unique_bytes` (`test_sandbox_persistence.py:185-188`), but
-`unique_bytes` on a `committed` outcome is the tag's unique bytes, not the
-observed SizeRw — so the message cannot distinguish "baseline stale" from
-"tenant actually wrote". Printing the corpse's `SizeRw` would make the next
-failure self-diagnosing.
+Not reachable in production **today** — `SecretEgressProxy.__init__` builds a
+fresh `CredentialDnsResolver` and `SecretEgressProxy.start()` is called once
+per proxy (`spec.py:803`, `spec.py:947`) — which is why this is Medium and not
+High. It is nonetheless a defect introduced by this commit: the pre-tip code
+raised from inside the `except`, so the postcondition held for any call
+sequence.
 
-### M3 (Medium, pre-existing, adjacent) — in production the delta window opens *before* provisioning writes
+**Fix applied here:** raise from inside the loop; the loop now either binds or
+raises, with no post-loop state check and no `last_exc` bookkeeping (net
+simpler than the committed form).
 
-The stamp is taken inside `backend.create`, but the registry then runs
-`install_egress_ca` and `install_packages` against the container
-(`registry.py:715-717`). `install_egress_ca` writes the PEM into
-`/usr/local/share/ca-certificates/` and runs `update-ca-certificates`
-(`setup.py:161-169`), which rewrites the aggregate bundle — hundreds of KiB into
-the writable layer, attributed to "tenant" by the delta. Unless the
-`_prewarmed_setup_satisfied` skip fires (`registry.py:715`, which keys on a
-prewarm label a session snapshot tag will not carry), a chat-only session's
-release therefore still commits.
+```python
+for attempt in range(_BIND_ATTEMPTS):
+    try:
+        await self._bind()
+        break
+    except OSError as exc:
+        await self.stop()
+        if exc.errno != errno.EADDRINUSE or attempt + 1 == _BIND_ATTEMPTS:
+            raise CredentialDnsError("credential DNS resolver failed to bind") from exc
+    except BaseException as exc:
+        await self.stop()
+        raise CredentialDnsError("credential DNS resolver failed to bind") from exc
+```
 
-This is **not caused by this tip** — the absolute floor had the identical
-property — and fixing it is a registry-level change (re-stamp after setup, or
-pass `baseline_bytes` into `backend.snapshot`), outside this task's scope. But
-it is the reason the commit's "read/chat-only sessions never grow a chain"
-(design doc §3) is, in prod, true only on the prewarm path. Worth an issue: a
-post-setup stamp would make the gate actually load-bearing in production and
-would simultaneously let the backend drop its dict (M1/L1 fall out with it),
-since the registry holds the handle at that point.
+Regression test added: `test_failed_restart_does_not_report_a_stale_port`
+(verified RED on the committed tip, GREEN after the fix).
 
-### L1 (Low) — `SandboxHandle.snapshot_baseline_bytes` is write-only
+### M2 (Medium, FIXED) — the arm the change *creates* had no unit coverage
 
-The field is set at `docker.py:516` and read nowhere in `src/` — the gate uses
-the backend dict. Its only consumer is an e2e assertion message
-(`test_sandbox_persistence.py:187`). Per CLAUDE.md "compose, don't accrete",
-either consume it (registry passes it into `backend.snapshot` — which is also
-the shape M3 wants) or drop it and keep the dict as the single source. The
-commit body's "stamped … onto the handle and the backend" reads as though both
-are load-bearing; only one is.
+TCP-first removes the observed race (UDP picks a port, TCP `start_server`
+dies on it — exactly the `('0.0.0.0', 56370)` shape in the CI log, since
+asyncio's `create_server` re-raises the bind `OSError` with the resolved
+address in the message and the errno preserved). It moves the race to the
+other side: TCP wins a port whose UDP half is already held, so the **UDP
+attach** is the new `EADDRINUSE` site and its retry must also unwind the TCP
+server it already bound. The committed
+`test_eaddrinuse_retries_on_a_new_ephemeral_port` forces the *TCP* bind onto a
+live listener, so it never exercises that arm.
 
-### L2 (Low) — one extra `docker inspect --size` on every create
+Verified manually that the arm is correct (forcing the first `SOCK_DGRAM`
+bind to raise `EADDRINUSE`): the resolver retries, answers the sentinel over
+UDP, accepts TCP **on the same port**, and `/proc/self/fd` is back to its
+pre-start count after `stop()` (7 → 7, no leaked TCP listener). Added
+`test_eaddrinuse_on_the_udp_attach_retries` so a future edit cannot break it
+silently. (Passes on the committed tip too — it is coverage, not a bug fix.)
 
-`_stamp_snapshot_baseline` runs on *every* `create`, including run and browser
-sandboxes that are never snapshotted, on the cold-start path #1348 was
-explicitly tuned for. The walk is over an empty layer so it is cheap, and it is
-budgeted by `sandbox_inspect_size_timeout_seconds` rather than the blanket CLI
-bound — but it is a new unconditional round trip. If cold-start latency
-regresses measurably, skipping the stamp when the spec has no
-`snapshot_budget_bytes`/durable rootfs would recover it.
+### L1 (Low, note) — retry logs `credential_dns.stopped port=None`
 
-### L3 (Low, watch-item, not a defect) — newly-runsc e2e specs may surface known gVisor defects
+Every failed attempt calls `stop()`, which emits a `credential_dns.stopped`
+line with `port=None` (and, after M1's stale-`_port` case, the *previous*
+port). Harmless log noise; left alone rather than widening the diff.
 
-Threading the runtime is what TASK asked for, and it is correct — but four spec
-files that previously ran under runc in the gVisor leg now run under gVisor for
-the first time. Two are worth watching on the next run:
-`test_sandbox_broker_reachability.py::test_sandbox_resolves_worker_alias_via_docker_dns`
-is a `curl` to a *name* (`:137-144`), the same shape as the test already marked
-`runsc_dns_unresolved` for aios#2430; and the seccomp e2e now asserts deny-list
-behavior against gVisor's own syscall surface. A red in either is a
-pre-existing gVisor defect newly exposed, not a regression from this tip —
-and per the workflow's own stance (`gvisor-validation.yml:173`) it should be
-fixed or honestly marked with its cause, never silently deselected.
+### L2 (Low, note, pre-existing) — `CancelledError` becomes `CredentialDnsError`
+
+`except BaseException` in `start()` converts a cancellation into a domain
+error. Unchanged by this tip (the pre-tip code did the same) and it still
+fails closed, so it is out of scope here.
+
+### L3 (Low, note) — `assert sockets` in `_bind()` is stripped under `-O`
+
+`assert sockets, "asyncio.start_server returned no sockets"` is the repo's
+existing idiom (cf. the `port` property), so consistent; noting only that it
+is not a runtime guarantee.
 
 ---
 
-## Follow-ups (none blocking this tip)
+## Requirement-by-requirement
 
-1. Document the cross-process-corpse caveat in design doc §3 / the stamp
-   docstring; file the durable-baseline issue (M1).
-2. Print the corpse `SizeRw` in the e2e assertion message so a runsc red is
-   self-diagnosing (M2).
-3. Issue: stamp the baseline after provisioning setup so the gate is
-   load-bearing in production; folds in L1 (M3).
+| # | Requirement | Result |
+|---|---|---|
+| 1 | Dual-protocol bind no longer fails closed on parallel-e2e `EADDRINUSE` | **PASS** — TCP `start_server(0)` first, UDP attached to the returned port, bounded 16-attempt retry on a fresh pair for either side. Both directions verified (committed test forces the TCP side; added test forces the UDP attach). |
+| 2 | Two sessions must not share a resolver; one `dns_port` for udp/53 + tcp/53 | **PASS** — neither socket sets `SO_REUSEADDR`/`SO_REUSEPORT` explicitly; asyncio's `create_server` sets `SO_REUSEADDR` implicitly on POSIX (pre-existing, unchanged) and Linux does **not** let that bind over a socket in `LISTEN`. Empirically: 6 concurrent resolvers get 6 distinct ports, and a third-party `SO_REUSEADDR` bind onto a live resolver's port is refused with errno 98 on **both** TCP and UDP. DNAT still uses a single `dns_port` for `udp/53` + `tcp/53` (`setup.py:704-705`, `718-720`), so the shared-port constraint is real and is preserved. |
+| 3 | Non-`EADDRINUSE` bind errors still fail closed | **PASS** — errno-gated: anything else raises `CredentialDnsError` on the first attempt (no 16× burn). Covered by the pre-existing `test_bind_failure_raises_credential_dns_error` (`OSError("no sockets today")`, errno `None`). Exhausted retries also fail closed (`test_persistent_eaddrinuse_still_fails_closed`). |
+| 4 | Create-time `SizeRw` baseline + e2e runtime threading from `e28d3c39` intact | **PASS** — `git diff e28d3c39..HEAD` touches only `credential_dns.py`, its test, and `REVIEW.md`; no snapshot/backend file changed. `tests/unit/sandbox/test_snapshot_verb.py` green in the run below. |
+| 5 | Focused unit coverage for the bind/retry path | **PASS after M2** — `tests/unit/sandbox/test_credential_dns.py`: retry-on-busy-TCP-port, persistent-`EADDRINUSE` fail-closed (committed) + UDP-attach retry and stale-port regression (added). |
+| 6 | Commit message / diff match the claimed rationale | **PASS** — TCP-first, shared port because of the single `dns_port` DNAT, no `SO_REUSE*`, bounded retry, other errnos fail closed: every claim is in the diff, and the cited CI signature matches the failure asyncio actually produces for a UDP-first bind. |
+
+## Checks run (focused; no full suite, no `-n`)
+
+```
+uv run pytest tests/unit/sandbox tests/unit/test_networking.py -q -p no:randomly
+  -> 780 passed
+uv run mypy src/aios/sandbox/credential_dns.py tests/unit/sandbox/test_credential_dns.py
+  -> Success: no issues found in 2 source files
+uv run ruff check / ruff format --check (both files)   -> clean
+```
+
+Docker e2e not run here (light review). The remaining e2e risk is the one this
+change cannot remove: `_BIND_ATTEMPTS = 16` fresh ephemeral pairs is a bound,
+not a guarantee, under genuine port-space exhaustion — correct behaviour is
+still a failed provision, which is what the e2e would report.
+
+## Leftovers for the Shepherd
+
+- M1 + M2 are **fixed in this worktree** on `gvisfloor3rev` (product +
+  tests); not pushed, not merged, no PR opened.
+- L1-L3 are notes only; no action taken.
+- `TASK.md` in the working tree is this round's brief (written by the
+  Shepherd after the tip was committed) and is left unstaged.

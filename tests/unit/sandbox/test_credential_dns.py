@@ -10,6 +10,7 @@ so no sampled-or-unsampled real address can ever reach the sandbox.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import socket
 import struct
@@ -366,6 +367,57 @@ class TestFailClosed:
         finally:
             await r.stop()
             occupier.close()
+
+    @pytest.mark.asyncio
+    async def test_eaddrinuse_on_the_udp_attach_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TCP-first moves the race to the UDP attach: the TCP bind can win a
+        port the UDP space says is busy. That arm must retry on a fresh pair
+        (closing the TCP server it already bound), not fail the provision."""
+        state = {"failed": False}
+        orig_bind = socket.socket.bind
+
+        def _bind(sock: socket.socket, address: tuple[str, int]) -> None:
+            if sock.type == socket.SOCK_DGRAM and not state["failed"]:
+                state["failed"] = True
+                raise OSError(errno.EADDRINUSE, "address already in use")
+            orig_bind(sock, address)
+
+        monkeypatch.setattr(socket.socket, "bind", _bind)
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
+        try:
+            await r.start()
+            assert state["failed"]
+            response = await _udp_ask(r.port, _query(CREDENTIAL_HOST))
+            assert _answers(response) == [CREDENTIAL_SENTINEL_IP]
+            # Both sockets on ONE port: the netns DNAT sends udp/53 and tcp/53
+            # to a single dns_port, so the retry must re-pair them.
+            _reader, writer = await asyncio.open_connection("127.0.0.1", r.port)
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+        finally:
+            await r.stop()
+
+    @pytest.mark.asyncio
+    async def test_failed_restart_does_not_report_a_stale_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A resolver that bound once keeps ``_port`` across ``stop()``, so a
+        later start() that cannot bind must fail closed on its own control
+        flow — never return with the previous run's port and no listener."""
+        r = CredentialDnsResolver([CREDENTIAL_HOST], upstream=None)
+        await r.start()
+        await r.stop()
+        monkeypatch.setattr(credential_dns_mod, "_BIND_ATTEMPTS", 2)
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EADDRINUSE, "address already in use")
+
+        monkeypatch.setattr(socket.socket, "bind", _boom)
+        with pytest.raises(CredentialDnsError):
+            await r.start()
 
     @pytest.mark.asyncio
     async def test_persistent_eaddrinuse_still_fails_closed(
