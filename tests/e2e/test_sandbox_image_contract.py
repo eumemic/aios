@@ -226,7 +226,7 @@ def test_operator_chain_executes_end_to_end(pulled_image: str) -> None:
 def test_busybox_ships_the_nslookup_applet(pulled_image: str) -> None:
     """The egress scripts resolve every host with ``busybox nslookup``.
 
-    ``setup._RESOLVE_IPV4_FN`` names Docker's embedded resolver (127.0.0.11) as
+    ``setup.build_resolve_ipv4_fn`` names Docker's embedded resolver (127.0.0.11) as
     an ARGUMENT rather than reading ``/etc/resolv.conf``: no sidecar shape has a
     usable one (runc inherits the image's, runsc chroots into a read-only mount)
     and BuildKit will not let one be baked -- it commits an EMPTY entry for any
@@ -249,7 +249,7 @@ def test_busybox_nslookup_answers_from_the_embedded_dns(pulled_image: str) -> No
     exercising the whole path the lockdown depends on: the applet, the netns's
     embedded resolver, and the output shape.
 
-    The shape is load-bearing, not cosmetic. ``setup._RESOLVE_IPV4_FN`` parses
+    The shape is load-bearing, not cosmetic. ``setup.build_resolve_ipv4_fn`` parses
     it with awk: answers are taken only AFTER a ``Name:`` line, so the server
     block (``Server:``/``Address:``, which reports the resolver's own address)
     can never be mistaken for an answer and handed to ``iptables -d``. If

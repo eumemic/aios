@@ -1,15 +1,21 @@
 """Worker-managed Docker network the sandbox uses to reach the worker.
 
-Two resolution paths share one hostname (``aios-worker``): Docker's
-embedded DNS when the worker is on the sandbox network, ``/etc/hosts``
-populated by ``--add-host`` when the worker runs on the host.
+Two in-netns resolution paths share one hostname (``aios-worker``): Docker's
+embedded DNS when the worker is on the sandbox network, and ``/etc/hosts``
+populated by ``--add-host`` when the worker runs on the host. A third path
+lives on the worker itself: :func:`resolve_host_gateway` turns the daemon's
+``host-gateway`` substitution into an address the egress scripts can bake in,
+so neither sidecar shape has to look that alias up inside the netns.
 """
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import socket
 from pathlib import Path
 
+from aios.config import get_settings
 from aios.logging import get_logger
 from aios.sandbox._subprocess import run_docker_cli
 
@@ -31,6 +37,92 @@ _BROWSER_NETWORK_ICC_OPTION = "com.docker.network.bridge.enable_icc"
 def is_running_in_container() -> bool:
     """``True`` when ``/.dockerenv`` exists."""
     return Path("/.dockerenv").exists()
+
+
+# A name that exists only inside the throwaway probe container below, so the
+# address we read back is unambiguously the one Docker substituted for
+# ``host-gateway`` and not some unrelated line of the image's ``/etc/hosts``.
+_HOST_GATEWAY_PROBE_ALIAS = "aios-host-gateway-probe"
+
+_host_gateway_ip: str | None = None
+_host_gateway_lock = asyncio.Lock()
+
+
+async def resolve_host_gateway() -> str:
+    """The IPv4 address ``host-gateway`` resolves to on THIS Docker daemon.
+
+    When the worker runs on the HOST rather than on the sandbox network, the
+    sandbox is created with ``--add-host aios-worker:host-gateway`` and reaches
+    the worker through whatever address the daemon substitutes there. Two things
+    need that address as a VALUE rather than as a magic word:
+
+    * The egress lockdown resolves ``aios-worker`` to build ``$PROXY_IP``. On
+      the runsc sidecar shape it cannot look the alias up at all — the exec
+      chroots into the read-only operator image, whose ``/etc/hosts`` never
+      carried it — and Docker does not publish ``--add-host`` entries to the
+      embedded DNS, so the lookup misses and the credential-host redirect is
+      never installed (aios#2410).
+    * The periodic egress refresh must resolve names WITHOUT consulting the
+      sandbox's own, tenant-writable ``/etc/hosts``
+      (:class:`aios.sandbox.setup.ResolveScope`). A name the operator supplied
+      has to come from somewhere the tenant cannot reach; this is that place.
+
+    The value is daemon-dependent — the default bridge gateway on plain Linux
+    Docker, the VM's host proxy (``192.168.65.2``) on Docker Desktop — and
+    ``docker network inspect bridge`` answers only the first case. So we ask
+    Docker the same question the sandbox asks: run a throwaway operator-image
+    container with the same ``--add-host … :host-gateway`` and read what got
+    written. ``--network none`` keeps the probe off every network; extra hosts
+    are written regardless of network mode.
+
+    Cached for the life of the worker process: the substitution is daemon
+    configuration (``--host-gateway-ip``), which cannot change without a daemon
+    restart. **Fails hard** — a deployment that passes ``--add-host
+    …:host-gateway`` on every sandbox and cannot find out what it means is
+    broken, and the alternative is a lockdown that silently installs no
+    credential redirect.
+    """
+    global _host_gateway_ip
+    async with _host_gateway_lock:
+        if _host_gateway_ip is None:
+            _host_gateway_ip = await _probe_host_gateway()
+            log.info("sandbox.host_gateway_resolved", address=_host_gateway_ip)
+        return _host_gateway_ip
+
+
+async def _probe_host_gateway() -> str:
+    image = get_settings().docker_image
+    rc, stdout_bytes, stderr_bytes = await run_docker_cli(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--add-host",
+            f"{_HOST_GATEWAY_PROBE_ALIAS}:host-gateway",
+            "--entrypoint",
+            "cat",
+            image,
+            "/etc/hosts",
+        ],
+        timeout_s=60.0,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"host-gateway probe failed (image {image!r}, exit {rc}): "
+            f"{stderr_bytes.decode('utf-8', errors='replace').strip()}"
+        )
+    for raw in stdout_bytes.decode("utf-8", errors="replace").splitlines():
+        fields = raw.split("#", 1)[0].split()
+        if len(fields) >= 2 and _HOST_GATEWAY_PROBE_ALIAS in fields[1:]:
+            # Raises ValueError on a non-dotted-quad, which is the right
+            # outcome: every rule this address feeds is IPv4-only.
+            return str(ipaddress.IPv4Address(fields[0]))
+    raise RuntimeError(
+        f"host-gateway probe wrote no {_HOST_GATEWAY_PROBE_ALIAS!r} entry; this "
+        "Docker daemon does not support --add-host <name>:host-gateway"
+    )
 
 
 async def ensure_sandbox_network() -> None:
@@ -237,4 +329,5 @@ __all__ = [
     "ensure_browser_network",
     "ensure_sandbox_network",
     "is_running_in_container",
+    "resolve_host_gateway",
 ]

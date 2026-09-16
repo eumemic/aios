@@ -196,9 +196,8 @@ _RUNSC_OPERATOR_COMMANDS: dict[str, str] = {
 # ``resolve_ipv4`` (:mod:`aios.sandbox.setup`) falls back to ``busybox
 # nslookup`` to query Docker's embedded DNS by address, because nothing on this
 # path can supply the ``/etc/resolv.conf`` glibc's ``getent`` would have to read
-# (aios#2410). Its FIRST step -- the ``/etc/hosts`` scan, which is what makes a
-# ``--add-host`` alias resolvable -- needs no binary beyond the already-shadowed
-# ``awk``/``sort``.
+# (aios#2410). The hosts-file scan that follows the baked operator table on the
+# provision arm needs no binary beyond the already-shadowed ``awk``/``sort``.
 _RUNSC_OPERATOR_STATIC_COMMANDS: dict[str, str] = {
     "busybox": _RUNSC_OPERATOR_CHROOT,
 }
@@ -1361,9 +1360,22 @@ class DockerBackend:
         is the property we want, except that neither image has a usable one
         (BuildKit commits an empty entry for any ``COPY`` to that path, and the
         operator root is a read-only mount so nothing can write one at runtime).
-        So nothing on this path reads it: ``setup._RESOLVE_IPV4_FN`` passes the
-        embedded resolver's address to ``busybox nslookup`` as an argument
-        (aios#2410; DONE.md carries the evidence chain).
+        So nothing on this path reads it: the resolver emitted by
+        ``setup.build_resolve_ipv4_fn`` passes the embedded resolver's address
+        to ``busybox nslookup`` as an argument (aios#2410; DONE.md carries the
+        evidence chain).
+
+        The chroot decides the ``/etc/hosts`` those scripts read too, and THAT
+        one is load-bearing: it is the operator image's, which never carried the
+        sandbox's ``--add-host aios-worker:host-gateway`` line, and Docker does
+        not publish ``--add-host`` entries to the embedded DNS either. So on a
+        host-worker deployment this path could not resolve ``aios-worker`` by
+        any in-netns means, and the credential-host DNAT built on ``$PROXY_IP``
+        had nowhere to point. The fix is not in this method: the worker resolves
+        that alias itself (:func:`aios.sandbox.network.resolve_host_gateway`)
+        and bakes it into the script as an operator table consulted ahead of
+        every in-netns lookup, so the answer no longer depends on which
+        ``/etc/hosts`` the chroot exposes.
         """
         if runtime == "runsc":
             _require_runsc_supported_machine("egress")

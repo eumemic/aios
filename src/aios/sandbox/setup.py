@@ -43,8 +43,12 @@ the registry and the orchestrator backend-agnostic.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import ipaddress
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
 
 from aios.config import get_settings
 from aios.logging import get_logger
@@ -353,7 +357,7 @@ _IP6TABLES_CREDENTIAL_HTTPS_DENY_LINES = (
 _EMBEDDED_DNS_ADDRESS = "127.0.0.11"
 
 
-# The netns's own name table, consulted BEFORE DNS (see ``_RESOLVE_IPV4_FN``).
+# The netns's own name table, consulted BEFORE DNS (see ``build_resolve_ipv4_fn``).
 # A named constant so a test can retarget the lookup at a fixture file.
 _HOSTS_FILE = "/etc/hosts"
 
@@ -408,32 +412,33 @@ _NSLOOKUP_CMD = (
 # credential-host DNAT loop, and the proxy-alias lookup), so every invariant
 # below lives in exactly one place (#978).
 #
-# HOSTS FIRST, THEN DNS (aios#2410) -- the ``files dns`` order glibc gives
-# every other resolver in the container, because a DNS-only lookup cannot see a
-# ``--add-host`` alias. ``aios-worker`` has TWO resolution paths (see
+# OPERATOR TABLE, THEN (PROVISION ONLY) HOSTS, THEN DNS (aios#2410).
+# A DNS-only lookup cannot see a ``--add-host`` alias: Docker writes that into
+# the container's ``/etc/hosts`` WITHOUT publishing it to the embedded DNS at
+# 127.0.0.11. ``aios-worker`` therefore has two in-netns paths (see
 # :mod:`aios.sandbox.network`): the embedded DNS when the worker itself sits on
-# the sandbox network, and ``/etc/hosts`` when it runs on the HOST -- the e2e
-# and host-worker shape, where the sandbox is created with ``--add-host
-# aios-worker:host-gateway`` and Docker writes that into the container's
-# ``/etc/hosts`` WITHOUT publishing it to the embedded DNS at 127.0.0.11. Only
-# the first path survives a DNS-only lookup, so on the second ``resolve_ipv4
-# aios-worker`` answers nothing, ``PROXY_IP`` comes back empty, the whole
-# ``if [ -n "$PROXY_IP" ]`` nat block is skipped, and the apply exits 0 with
-# ``nat OUTPUT`` carrying no DNAT rule at all -- the credential-host redirect
-# silently absent.
+# the sandbox network, and ``/etc/hosts`` when it runs on the HOST. A DNS-only
+# ``resolve_ipv4 aios-worker`` on the second path answers nothing, ``PROXY_IP``
+# comes back empty, and post-#2042 the apply hard-fails rather than install a
+# credential redirect with nowhere to point.
 #
-# Which ``/etc/hosts`` each sidecar shape reads:
+# Which ``/etc/hosts`` each sidecar shape reads, and why that is not enough:
 #
 #   * runc: the sidecar joins with ``--network container:<id>``, and Docker
 #     bind-mounts the TARGET's ``/etc/hosts`` into it along with the rest of the
-#     netns-owned files. So the sidecar reads the SANDBOX's file, ``--add-host``
-#     alias included, and the lookup lands.
+#     netns-owned files. At provision that file is still what Docker wrote, so
+#     reading it IS reading operator input. After the tenant owns the container,
+#     the same file is writable by root inside the sandbox.
 #   * runsc: the exec chroots into the read-only operator image first, so it
-#     reads the OPERATOR image's ``/etc/hosts``, which carries no alias. The
-#     lookup misses and falls through to DNS -- i.e. exactly the DNS-only
-#     behaviour it has today. No regression, and no fix either: closing it means
-#     injecting an address resolved outside the netns instead of looking one up
-#     inside it, which is a different change and deliberately not attempted here.
+#     reads the OPERATOR image's ``/etc/hosts``, which never carried the
+#     sandbox's ``--add-host`` line. Hosts-first is inert there; the alias is
+#     invisible to DNS too.
+#
+# Both gaps close the same way: the worker resolves the operator-supplied
+# alias itself (:func:`aios.sandbox.network.resolve_host_gateway`) and bakes
+# the answer into the script as ``_operator_ipv4``, consulted BEFORE anything
+# inside the netns. The provision arm still reads the hosts file after that
+# (operator input, no tenant process yet). The refresh arm does not.
 #
 # NOT a return to ``getent``, which stays banned (pinned by
 # ``test_no_script_touches_resolv_conf_or_getent``). glibc reads the hosts file
@@ -450,13 +455,21 @@ _NSLOOKUP_CMD = (
 # argument, and being static it needs no dynamic loader -- so the runsc
 # preamble can bind it directly instead of through the operator image's ld.so.
 #
-# TENANT-WRITABLE INPUT. On the runc shape the file above is the sandbox's, and
-# root inside the sandbox can write it. A tenant entry cannot introduce a NAME
-# (only operator-configured hosts are ever looked up) but it can choose the
-# ADDRESS an allowed name resolves to, and therefore the address a rule is
-# installed for. Provision-time applies are out of reach -- the lockdown lands
-# before any tenant code runs -- so the exposed path is the refresh tick; see
-# :func:`build_egress_resolve_script`, which carries the caveat in full.
+# TENANT-WRITABLE INPUT -- AND WHY AN OPERATOR TABLE COMES FIRST. On the runc
+# shape the file above is the SANDBOX's, and root inside the sandbox can write
+# it. A tenant entry cannot introduce a NAME (only operator-configured hosts are
+# ever looked up) but it can choose the ADDRESS an allowed name resolves to, and
+# therefore the address a rule is installed for. Provision-time applies are out
+# of reach -- the lockdown lands before any tenant code runs -- but the refresh
+# tick runs once the tenant owns the container, so an entry written there would
+# have widened the Limited allow-list's ADDRESSES on the next tick.
+#
+# Both halves of that are now closed by ONE primitive: a name table computed on
+# the WORKER and baked into the script (``_operator_ipv4``), consulted BEFORE
+# anything inside the netns, plus a :class:`ResolveScope` that decides whether
+# the netns's own hosts file is consulted at all. The refresh arm does not read
+# it; the provision arm still does, because that is where a legitimate
+# ``--add-host`` alias lives and no tenant process exists yet.
 #
 # Why IPv4-only: every rule emitted by these scripts is an IPv4 ``iptables``
 # command, and the secret-egress proxy binds the IPv4 ``WORKER_NETWORK_ALIAS``
@@ -474,15 +487,106 @@ _NSLOOKUP_CMD = (
 # bypass. Both steps are pipelines ending in ``sort -u``, so neither a missing
 # hosts file nor an nslookup failure can return nonzero and abort the caller's
 # ``set -e`` script.
-_RESOLVE_IPV4_FN = "\n".join(
-    (
+class ResolveScope(StrEnum):
+    """Which name sources the emitted ``resolve_ipv4`` may consult.
+
+    The operator table is consulted FIRST on both arms. The arms differ only in
+    whether the netns's own :data:`_HOSTS_FILE` is read before falling through
+    to Docker's embedded DNS -- i.e. in whether a file the tenant can write is
+    allowed to decide an address a rule gets installed for.
+
+    ``PROVISION``
+        operator table -> netns ``/etc/hosts`` -> embedded DNS. The apply
+        scripts and the provision-time stamp resolve run BEFORE any tenant
+        process exists, so the hosts file is still exactly what Docker wrote
+        from ``--add-host``: reading it IS reading operator input, and it is
+        the only way a ``--add-host`` alias resolves at all on a daemon whose
+        embedded DNS never learns it.
+
+    ``REFRESH``
+        operator table -> embedded DNS. The periodic refresh resolve runs while
+        the tenant owns the container, where root can rewrite the hosts file
+        and point an already-allowed name at an address of their choosing --
+        which the next tick would have installed an ACCEPT for. This arm simply
+        never reads it. Nothing legitimate is lost: the only ``--add-host``
+        entry this subsystem depends on is the worker alias, and the operator
+        table supplies that by construction.
+    """
+
+    PROVISION = "provision"
+    REFRESH = "refresh"
+
+
+# A hostname as it may appear in a generated script. Operator-configured hosts
+# are already validated at the model layer; the operator table additionally
+# carries the worker alias, and its names land in a shell ``case`` pattern, so
+# both are re-checked at emit time rather than trusted from the call site.
+_SCRIPT_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
+
+# "This deployment supplies no operator names" -- the in-container-worker shape,
+# where the sandbox gets no ``--add-host`` at all and the embedded DNS knows
+# every name the scripts look up.
+NO_OPERATOR_HOSTS: Mapping[str, str] = MappingProxyType({})
+
+
+def _operator_ipv4_fn(operator_hosts: Mapping[str, str]) -> str:
+    """Emit ``_operator_ipv4()`` -- the baked-in, worker-resolved name table.
+
+    This is the operator-controlled resolution source ``resolve_ipv4`` consults
+    before anything inside the netns. Its entries are computed ON THE WORKER
+    (:func:`aios.sandbox.network.resolve_host_gateway`), so no tenant-writable
+    file contributes to them, and they are identical on every sidecar shape --
+    which is also what makes the worker alias resolvable under runsc, where the
+    exec chroots into the operator image and never sees the sandbox's
+    ``--add-host`` line at all (aios#2410).
+
+    Both halves of every entry are validated here and a bad one raises
+    :class:`ValueError` rather than being emitted: the name is interpolated
+    into a shell ``case`` pattern and the address into an ``iptables -d``
+    argument.
+    """
+    body: list[str] = []
+    if operator_hosts:
+        body.append('  case "$1" in')
+        for name, address in sorted(operator_hosts.items()):
+            if not _SCRIPT_HOSTNAME_RE.match(name):
+                raise ValueError(f"operator host name is not a hostname: {name!r}")
+            # Raises ValueError on anything that is not a dotted quad, so an
+            # AAAA literal can never reach the IPv4-only rules below.
+            ipv4 = ipaddress.IPv4Address(address)
+            body.append(f"    {name}) printf '%s\\n' '{ipv4}' ;;")
+        body.append("  esac")
+    else:
+        # A shell function body may not be empty.
+        body.append("  :")
+    return "\n".join(["_operator_ipv4() {", *body, "}"])
+
+
+def build_resolve_ipv4_fn(
+    *,
+    scope: ResolveScope,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
+) -> str:
+    """Emit ``_operator_ipv4()`` + ``resolve_ipv4()`` for ``scope``.
+
+    See the comment block above for every invariant the emitted resolver holds,
+    and :class:`ResolveScope` for what the two arms differ in.
+    """
+    lines = [
+        _operator_ipv4_fn(operator_hosts),
         "resolve_ipv4() {",
-        f"  _hosts_ips=$({_HOSTS_LOOKUP_CMD})",
-        '  if [ -n "$_hosts_ips" ]; then printf \'%s\\n\' "$_hosts_ips"; return 0; fi',
-        f"  {_NSLOOKUP_CMD}",
-        "}",
-    )
-)
+        '  _operator_ips=$(_operator_ipv4 "$1")',
+        '  if [ -n "$_operator_ips" ]; then printf \'%s\\n\' "$_operator_ips"; return 0; fi',
+    ]
+    if scope is ResolveScope.PROVISION:
+        lines.extend(
+            [
+                f"  _hosts_ips=$({_HOSTS_LOOKUP_CMD})",
+                '  if [ -n "$_hosts_ips" ]; then printf \'%s\\n\' "$_hosts_ips"; return 0; fi',
+            ]
+        )
+    lines.extend([f"  {_NSLOOKUP_CMD}", "}"])
+    return "\n".join(lines)
 
 
 # NAME-BASED credential-host interception (eumemic/aios#2042).
@@ -667,25 +771,37 @@ def _nat_dnat_lines(
     return lines
 
 
-def build_egress_resolve_script(hosts: Sequence[str] | set[str]) -> str:
-    """Resolve refresh hosts inside the sandbox netns, one machine-readable row per IP.
+def build_egress_resolve_script(
+    hosts: Sequence[str] | set[str],
+    *,
+    scope: ResolveScope,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
+) -> str:
+    """Resolve hosts inside the sandbox netns, one machine-readable row per IP.
 
-    CAVEAT — TENANT-WRITABLE ``/etc/hosts`` ON THIS PATH. ``resolve_ipv4`` reads
-    the hosts file before asking DNS (aios#2410, needed so a ``--add-host``
-    alias resolves at all), and on the runc shape that file is the SANDBOX's,
-    writable by root inside the container. The provision-time applies are out of
-    reach — the lockdown lands before any tenant code runs — but this script
-    runs on every refresh tick, by which point the tenant has had the container.
-    So an entry written there names the address the refreshed ACCEPT/DNAT rule
-    is installed for. The exposure is the allow-list's ADDRESSES, never its
-    NAMES: only operator-configured hosts are ever looked up, so a tenant can
-    point an already-allowed name at an address of their choosing, not admit a
-    name of their choosing. Closing it means resolving OUTSIDE the tenant's
-    reach and injecting the answer into the script instead of looking it up in
-    the netns — the same change the runsc alias gap needs, and out of scope
-    here.
+    ``scope`` is REQUIRED and is the whole security content of this function,
+    because its two call sites sit on opposite sides of the tenant.
+
+    * :attr:`ResolveScope.PROVISION` — the stamp-time resolve, which runs in
+      the same window as the apply it attributes rules to, before any tenant
+      process exists. It must see what the apply script saw, ``--add-host``
+      alias included, or ``pinned`` disagrees with the installed rules.
+    * :attr:`ResolveScope.REFRESH` — the periodic tick, which runs while the
+      tenant owns the container. On the runc shape the sidecar reads the
+      SANDBOX's ``/etc/hosts``, writable by root in there, and whatever this
+      script prints becomes the address of a refreshed ACCEPT/DNAT rule. The
+      exposure was never the allow-list's NAMES (only operator-configured hosts
+      are ever looked up) but its ADDRESSES: a tenant could point an
+      already-allowed name at an address of their choosing and have the next
+      tick install an ACCEPT for it — a widened Limited egress allow-list. The
+      refresh arm therefore resolves from the operator table and DNS only, and
+      never reads that file.
+
+    ``operator_hosts`` is the worker-computed table consulted before either, so
+    the names the operator really did supply (the ``--add-host`` worker alias)
+    still resolve on both arms without any tenant-writable file in the path.
     """
-    lines = ["set -e", _RESOLVE_IPV4_FN]
+    lines = ["set -e", build_resolve_ipv4_fn(operator_hosts=operator_hosts, scope=scope)]
     for host in sorted(set(hosts)):
         lines.append(f"for ip in $(resolve_ipv4 {host}); do printf '%s %s\\n' {host} \"$ip\"; done")
     return "\n".join(lines)
@@ -862,6 +978,7 @@ def build_iptables_script(
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
     dns_port: int | None = None,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
 ) -> str:
     """Build a shell script that restricts outbound traffic via iptables.
 
@@ -901,6 +1018,13 @@ def build_iptables_script(
     direct-IP connection to a real address of it is refused by the terminal
     ``-P OUTPUT DROP`` instead of leaving un-proxied with the placeholder.
 
+    ``operator_hosts`` is the worker-computed name table baked into the emitted
+    ``resolve_ipv4`` (:func:`build_resolve_ipv4_fn`). It carries the
+    ``--add-host`` worker alias, which is the one name this script MUST resolve
+    (``$PROXY_IP``, a hard ``exit 1`` on a miss) and the one the runsc shape
+    cannot look up inside the netns at all -- the exec chroots into the
+    operator image, whose ``/etc/hosts`` never carried the alias.
+
     Hostnames are validated at the model layer (alphanumerics, dots, hyphens
     only) so embedding them in the script is safe; ``proxy_port`` is an int.
     """
@@ -910,7 +1034,7 @@ def build_iptables_script(
         _IPTABLES_BACKEND_SELECT,
         "",
         "# Resolve hosts IPv4-only so AAAA records never reach the IPv4 rules (#978)",
-        _RESOLVE_IPV4_FN,
+        build_resolve_ipv4_fn(operator_hosts=operator_hosts, scope=ResolveScope.PROVISION),
         "",
         "# Flush existing OUTPUT rules (filter + nat) for idempotent re-apply",
         '"$IPT" -F OUTPUT',
@@ -993,7 +1117,11 @@ def build_iptables_script(
 
 
 def build_secret_egress_dnat_script(
-    dnat_hosts: Sequence[str], dnat_target: tuple[str, int], dns_port: int
+    dnat_hosts: Sequence[str],
+    dnat_target: tuple[str, int],
+    dns_port: int,
+    *,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
 ) -> str:
     """Install ONLY the credential-host interception chokepoint (no lockdown).
 
@@ -1056,6 +1184,11 @@ def build_secret_egress_dnat_script(
     REJECT this function must own. That REJECT (and the v6 ``:443`` DROP) is
     deleted-then-appended so a re-apply cannot stack duplicates.
 
+    ``operator_hosts`` is threaded into the emitted ``resolve_ipv4`` exactly as
+    in :func:`build_iptables_script`, and for the same reason: the worker-alias
+    lookup behind ``$PROXY_IP`` must land on every sidecar shape, runsc's
+    operator chroot included.
+
     Callers only invoke this with a non-empty ``dnat_hosts`` and a real
     ``dnat_target`` (the registry routes here only when there are credentials),
     so the block is always emitted.
@@ -1067,7 +1200,7 @@ def build_secret_egress_dnat_script(
             _IPTABLES_BACKEND_SELECT,
             "",
             "# Resolve hosts IPv4-only so AAAA records never reach the IPv4 rules (#978)",
-            _RESOLVE_IPV4_FN,
+            build_resolve_ipv4_fn(operator_hosts=operator_hosts, scope=ResolveScope.PROVISION),
             "",
             "# Flush nat OUTPUT for idempotent re-apply (do NOT touch filter OUTPUT:",
             "# under Unrestricted it carries the operator's / Docker's own rules).",
@@ -1348,6 +1481,7 @@ async def apply_network_lockdown(
     dnat_hosts: Sequence[str] = (),
     dnat_target: tuple[str, int] | None = None,
     dns_port: int | None = None,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
     runtime: str | None = None,
 ) -> EgressProvisionResult:
     """Apply + verify iptables egress rules via an ephemeral operator-image sidecar.
@@ -1360,6 +1494,12 @@ async def apply_network_lockdown(
     spec so the sidecar always runs under the same runtime as the sandbox it
     locks down. The backend layer takes it as an explicit parameter — it never
     reads ambient config.
+
+    ``operator_hosts`` is the worker-computed name table baked into the emitted
+    ``resolve_ipv4`` (:func:`build_resolve_ipv4_fn`) — the ``--add-host`` worker
+    alias, resolved on the worker rather than looked up in the netns, so the
+    proxy-alias lookup lands even on the runsc shape whose operator chroot never
+    sees the sandbox's hosts file.
 
     ``dnat_hosts`` + ``dnat_target`` + ``dns_port`` are threaded into
     :func:`build_iptables_script` to install the name-based credential
@@ -1399,6 +1539,7 @@ async def apply_network_lockdown(
         dnat_hosts=dnat_hosts,
         dnat_target=dnat_target,
         dns_port=dns_port,
+        operator_hosts=operator_hosts,
     )
     apply_script = iptables_script
     settings = get_settings()
@@ -1473,6 +1614,7 @@ async def apply_secret_egress_dnat(
     dnat_hosts: Sequence[str],
     dnat_target: tuple[str, int],
     dns_port: int,
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
     runtime: str | None = None,
 ) -> EgressProvisionResult:
     """Install the name-based credential chokepoint in an OPEN-egress sandbox (#1153).
@@ -1514,7 +1656,9 @@ async def apply_secret_egress_dnat(
     propagates and the registry tears the sandbox down rather than handing back
     a half-wired credentialed box whose swap silently doesn't fire.
     """
-    apply_script = build_secret_egress_dnat_script(dnat_hosts, dnat_target, dns_port)
+    apply_script = build_secret_egress_dnat_script(
+        dnat_hosts, dnat_target, dns_port, operator_hosts=operator_hosts
+    )
     settings = get_settings()
 
     try:

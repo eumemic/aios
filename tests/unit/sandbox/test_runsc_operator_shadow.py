@@ -42,6 +42,7 @@ from aios.sandbox.backends.docker import (
     _RUNSC_OPERATOR_STATIC_COMMANDS,
     _runsc_operator_preamble,
 )
+from aios.sandbox.credential_dns import CREDENTIAL_SENTINEL_IP
 
 # Stub bodies for the synthetic operator root. Real behaviour where the scripts
 # depend on it (text tools), recording/permissive stubs where they don't.
@@ -52,10 +53,23 @@ _LOADER_STUB = (
 # a verify script's nonzero exit means the operator preamble broke it, not that
 # the stub is unconvincing. ``-C``/``-D`` answer "absent" so the refresh
 # script's append-if-missing / delete-if-present guards both take a branch.
+_SENTINEL = CREDENTIAL_SENTINEL_IP
 _IPTABLES_SHOW = "\n".join(
     [
         "-P OUTPUT DROP",
-        "-A OUTPUT -d 203.0.113.7/32 -p tcp -m tcp --dport 443 -j DNAT",
+        # The name-based credential chokepoint (#2042/#2422) the verify reads
+        # back in full: sentinel :443 DNAT, :53 interception (udp+tcp), the
+        # POSTROUTING chain link and its MASQUERADE rules, the sentinel REJECT,
+        # and the Unrestricted direct-IP catch-all.
+        f"-A OUTPUT -d {_SENTINEL}/32 -p tcp -m tcp --dport 443 -j DNAT",
+        "-A OUTPUT -p udp -m udp --dport 53 -j DNAT",
+        "-A OUTPUT -p tcp -m tcp --dport 53 -j DNAT",
+        "-A POSTROUTING -j AIOS_CRED_DNS_SNAT",
+        "-A AIOS_CRED_DNS_SNAT -p udp -m udp --dport 53535 -j MASQUERADE",
+        "-A AIOS_CRED_DNS_SNAT -p tcp -m tcp --dport 53535 -j MASQUERADE",
+        f"-A OUTPUT -d {_SENTINEL}/32 -j REJECT",
+        "-A OUTPUT ! -d 127.0.0.0/8 -p tcp -m tcp --dport 443 -j DNAT",
+        "-A OUTPUT -p tcp -m tcp --dport 443 -j DROP",
         *(f"-A OUTPUT -d {cidr} -j DROP" for cidr in setup._BROWSER_DENY_INTERNAL_CIDRS),
     ]
 )
@@ -72,7 +86,7 @@ _IPTABLES_STUB = (
 # answers in the real busybox 1.35 shape -- the resolver's own address first
 # (which must NOT be taken for an answer), then one A and one AAAA record (the
 # AAAA must be dropped: every rule these scripts emit is IPv4-only). Emitting
-# the real shape means the awk parse in ``_RESOLVE_IPV4_FN`` is exercised here,
+# the real shape means the awk parse in ``build_resolve_ipv4_fn`` is exercised here,
 # not just the command surface.
 _BUSYBOX_STUB = (
     "#!/bin/sh\n"
@@ -148,20 +162,40 @@ def _run(script: str, tmp_path: Path) -> tuple[int, list[str], str]:
 def _scripts() -> dict[str, str]:
     """Every script `aios.sandbox.setup` hands to ``run_netns_sidecar``."""
     dnat_target = ("aios-worker", 49152)
+    dns_port = 53535
+    # The host-worker shape: the worker bakes the ``--add-host`` alias in as an
+    # operator table because this path cannot look it up — the exec chroots into
+    # the operator image, whose ``/etc/hosts`` never carried it (aios#2410). Its
+    # emitted ``case`` block runs under the shadow harness like everything else.
+    operator_hosts = {"aios-worker": "192.168.65.2"}
     return {
         "limited_lockdown_apply": setup.build_iptables_script(
             {"example.com"},
             [("extra.example.com", 8080)],
             dnat_hosts=["api.secret.com"],
             dnat_target=dnat_target,
+            dns_port=dns_port,
+            operator_hosts=operator_hosts,
         ),
-        "lockdown_verify": setup.build_lockdown_verify_script(["api.secret.com"]),
-        "dnat_only_apply": setup.build_secret_egress_dnat_script(["api.secret.com"], dnat_target),
+        "lockdown_verify": setup.build_lockdown_verify_script(
+            ["api.secret.com"], dns_port=dns_port
+        ),
+        "dnat_only_apply": setup.build_secret_egress_dnat_script(
+            ["api.secret.com"], dnat_target, dns_port, operator_hosts=operator_hosts
+        ),
         "dnat_only_verify": setup.build_lockdown_verify_script(
-            ["api.secret.com"], assert_drop=False
+            ["api.secret.com"],
+            dns_port=dns_port,
+            assert_drop=False,
+            assert_https_catch_all=True,
         ),
         "egress_dump": setup.build_egress_dump_script(),
-        "egress_resolve": setup.build_egress_resolve_script(["example.com"]),
+        "egress_resolve_provision": setup.build_egress_resolve_script(
+            ["example.com"], scope=setup.ResolveScope.PROVISION, operator_hosts=operator_hosts
+        ),
+        "egress_resolve_refresh": setup.build_egress_resolve_script(
+            ["example.com"], scope=setup.ResolveScope.REFRESH, operator_hosts=operator_hosts
+        ),
         "egress_refresh": setup.build_egress_refresh_script(
             old_ips={"api.secret.com": {"198.51.100.1"}, "example.com": {"198.51.100.2"}},
             new_ips={"api.secret.com": {"203.0.113.1"}, "example.com": {"203.0.113.2"}},

@@ -35,7 +35,7 @@ import dataclasses
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, assert_never
@@ -68,10 +68,12 @@ from aios.sandbox.backends.base import (
     split_label_list,
 )
 from aios.sandbox.git_proxy import GitProxy
-from aios.sandbox.network import WORKER_NETWORK_ALIAS
+from aios.sandbox.network import WORKER_NETWORK_ALIAS, resolve_host_gateway
 from aios.sandbox.setup import (
+    NO_OPERATOR_HOSTS,
     PACKAGE_REGISTRY_HOSTS,
     EgressProvisionResult,
+    ResolveScope,
     apply_browser_deny_internal,
     apply_network_lockdown,
     apply_secret_egress_dnat,
@@ -153,6 +155,10 @@ class EgressRefreshState:
     proxy_ip: str
     runtime: str | None
     pinned: dict[str, dict[str, int]]
+    # The operator-supplied name table stamped at provision, carried so the
+    # refresh tick can resolve WITHOUT the tenant-writable hosts file it
+    # deliberately stops reading (``ResolveScope.REFRESH``).
+    operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS
 
 
 # Parses one ``iptables -S OUTPUT`` rule line into the fields the refresh
@@ -1093,6 +1099,8 @@ class SandboxRegistry:
                 "name-based credential-host interception (#2042)"
             )
 
+        operator_hosts = await self._operator_hosts(plan)
+
         if isinstance(networking, LimitedNetworking):
             extra_host_ports: list[tuple[str, int]] = [
                 (WORKER_NETWORK_ALIAS, runtime.require_tool_broker().port),
@@ -1114,6 +1122,10 @@ class SandboxRegistry:
                 # (#2042): ALL sandbox :53 is DNATed here so credential names
                 # resolve to the sentinel and never to a real pool address.
                 dns_port=dns_port,
+                # The worker-resolved ``--add-host`` table (#2410): makes the
+                # ``$PROXY_IP`` lookup land on the runsc shape, whose operator
+                # chroot cannot see the sandbox's hosts file at all.
+                operator_hosts=operator_hosts,
                 # Pin the lockdown sidecar to the same container runtime as the
                 # sandbox it locks down (#1014) — sourced from the sandbox's own
                 # provisioning spec, never ambient config.
@@ -1132,6 +1144,7 @@ class SandboxRegistry:
                 dnat_hosts=dnat_hosts,
                 dnat_target=dnat_target,
                 dns_port=dns_port,
+                operator_hosts=operator_hosts,
                 runtime=plan.spec.runtime,
             )
         else:
@@ -1158,10 +1171,31 @@ class SandboxRegistry:
                 credential_hosts=frozenset(dnat_hosts),
                 limited_hosts=frozenset(limited_hosts),
                 fallback_proxy_port=dnat_target[1],
+                operator_hosts=operator_hosts,
                 runtime=plan.spec.runtime,
                 credentials=plan.env_var_credentials,
             )
         return outcome
+
+    async def _operator_hosts(self, plan: ProvisioningPlan) -> Mapping[str, str]:
+        """The operator-supplied name table baked into this sandbox's egress scripts.
+
+        Exactly the ``--add-host`` entries :meth:`SandboxBackend.create` passes
+        for this spec, resolved to addresses HERE, on the worker, so that the
+        generated scripts never have to look an operator-supplied name up
+        through anything the tenant can write
+        (:class:`aios.sandbox.setup.ResolveScope`) or through a netns view the
+        runsc operator chroot does not have.
+
+        ``host_gateway_alias is None`` is the worker-in-container shape: the
+        sandbox gets no ``--add-host``, and Docker's embedded DNS already knows
+        every name these scripts resolve — so the table is empty and the
+        resolver falls straight through to it.
+        """
+        alias = plan.spec.host_gateway_alias
+        if alias is None:
+            return NO_OPERATOR_HOSTS
+        return {alias: await resolve_host_gateway()}
 
     async def _stamp_egress_state(
         self,
@@ -1170,6 +1204,7 @@ class SandboxRegistry:
         credential_hosts: frozenset[str],
         limited_hosts: frozenset[str],
         fallback_proxy_port: int,
+        operator_hosts: Mapping[str, str] = NO_OPERATOR_HOSTS,
         runtime: str | None,
         credentials: tuple[ResolvedEnvVarCredential, ...] = (),
     ) -> None:
@@ -1201,8 +1236,17 @@ class SandboxRegistry:
         exists to prevent, whereas an absent row reports "I could not observe
         it" via the same ``NotFoundError`` contract as unreadable state.
         """
+        # PROVISION scope: this resolve must see exactly what the apply script
+        # saw (``--add-host`` alias included) or ``pinned`` disagrees with the
+        # rules it is attributing. It runs in the same pre-tenant window, so the
+        # netns hosts file is still operator input. The refresh tick that comes
+        # later does NOT get that arm — see ``_refresh_egress_once``.
         resolved = await self._resolve_egress_hosts(
-            handle, set(credential_hosts) | set(limited_hosts), runtime
+            handle,
+            set(credential_hosts) | set(limited_hosts),
+            runtime,
+            scope=ResolveScope.PROVISION,
+            operator_hosts=operator_hosts,
         )
         installed = await self._read_installed_egress_rules(handle, runtime)
         if installed is None:
@@ -1247,7 +1291,13 @@ class SandboxRegistry:
             # No credential hosts → no DNAT rules to read the proxy from (and
             # none to refresh). Resolve the alias so limited-host ACCEPT
             # refresh still runs; on a miss, leave the session unswept.
-            proxy_ips = await self._resolve_egress_hosts(handle, {WORKER_NETWORK_ALIAS}, runtime)
+            proxy_ips = await self._resolve_egress_hosts(
+                handle,
+                {WORKER_NETWORK_ALIAS},
+                runtime,
+                scope=ResolveScope.PROVISION,
+                operator_hosts=operator_hosts,
+            )
             if not proxy_ips.get(WORKER_NETWORK_ALIAS):
                 log.warning(
                     "sandbox.egress_refresh_unswept",
@@ -1297,6 +1347,7 @@ class SandboxRegistry:
                 dnat_ips=dnat_ips,
                 accept_ips=accept_ips,
             ),
+            operator_hosts=operator_hosts,
         )
 
     @staticmethod
@@ -1457,13 +1508,19 @@ class SandboxRegistry:
         return pinned
 
     async def _resolve_egress_hosts(
-        self, handle: SandboxHandle, hosts: set[str], runtime: str | None
+        self,
+        handle: SandboxHandle,
+        hosts: set[str],
+        runtime: str | None,
+        *,
+        scope: ResolveScope,
+        operator_hosts: Mapping[str, str],
     ) -> dict[str, set[str]]:
         settings = get_settings()
         result = await self._backend.run_netns_sidecar(
             handle.sandbox_id,
             image=settings.docker_image,
-            script=build_egress_resolve_script(hosts),
+            script=build_egress_resolve_script(hosts, scope=scope, operator_hosts=operator_hosts),
             timeout_seconds=15,
             max_output_bytes=settings.bash_max_output_bytes,
             runtime=runtime,
@@ -1562,10 +1619,18 @@ class SandboxRegistry:
             try:
                 handle = self._handles.get(session_id)
                 if handle is not None:
+                    # REFRESH scope: the tenant has owned this container since
+                    # the provision stamp, so its ``/etc/hosts`` is no longer
+                    # operator input and is not read. An allowed name resolves
+                    # from the operator table or from DNS, never from a file a
+                    # tenant could point at an address of their choosing to
+                    # widen the ACCEPTs this tick installs (#2410).
                     resolved = await self._resolve_egress_hosts(
                         handle,
                         set(state.credential_hosts) | set(state.limited_hosts),
                         state.runtime,
+                        scope=ResolveScope.REFRESH,
+                        operator_hosts=state.operator_hosts,
                     )
                     await self._merge_egress_resolutions(session_id, resolved)
             except Exception as err:

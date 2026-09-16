@@ -4,7 +4,8 @@ runner is patched so no real daemon is required."""
 from __future__ import annotations
 
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,7 @@ from aios.sandbox.network import (
     WORKER_NETWORK_ALIAS,
     ensure_browser_network,
     ensure_sandbox_network,
+    resolve_host_gateway,
 )
 
 DockerResponder = Callable[[list[str]], tuple[int, bytes, bytes]]
@@ -298,3 +300,71 @@ class TestEnsureBrowserNetwork:
         install_docker_responder(monkeypatch, responder)
         with pytest.raises(RuntimeError, match="IPv6 enabled"):
             await ensure_browser_network()
+
+
+# ── resolve_host_gateway: operator-controlled --add-host address ─────────────
+
+
+class TestResolveHostGateway:
+    """The worker, not the tenant netns, learns what ``host-gateway`` means."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self) -> Iterator[None]:
+        sandbox_network._host_gateway_ip = None
+        yield
+        sandbox_network._host_gateway_ip = None
+
+    @staticmethod
+    def _image(monkeypatch: pytest.MonkeyPatch, image: str = "aios-sandbox:test") -> None:
+        monkeypatch.setattr(
+            sandbox_network, "get_settings", lambda: SimpleNamespace(docker_image=image)
+        )
+
+    async def test_reads_the_probe_alias_and_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._image(monkeypatch)
+        hosts = f"127.0.0.1\tlocalhost\n192.168.65.2\t{sandbox_network._HOST_GATEWAY_PROBE_ALIAS}\n"
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            assert argv[:5] == ["docker", "run", "--rm", "--network", "none"]
+            assert f"{sandbox_network._HOST_GATEWAY_PROBE_ALIAS}:host-gateway" in argv
+            assert argv[-2:] == ["aios-sandbox:test", "/etc/hosts"]
+            return 0, hosts.encode(), b""
+
+        calls = install_docker_responder(monkeypatch, responder)
+        assert await resolve_host_gateway() == "192.168.65.2"
+        assert await resolve_host_gateway() == "192.168.65.2"
+        assert len(calls) == 1
+
+    async def test_probe_failure_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._image(monkeypatch)
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            del argv
+            return 1, b"", b"Error: image not found\n"
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="host-gateway probe failed"):
+            await resolve_host_gateway()
+
+    async def test_missing_alias_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._image(monkeypatch)
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            del argv
+            return 0, b"127.0.0.1\tlocalhost\n", b""
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(RuntimeError, match="wrote no"):
+            await resolve_host_gateway()
+
+    async def test_non_ipv4_substitution_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._image(monkeypatch)
+        hosts = f"2001:db8::1\t{sandbox_network._HOST_GATEWAY_PROBE_ALIAS}\n"
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            del argv
+            return 0, hosts.encode(), b""
+
+        install_docker_responder(monkeypatch, responder)
+        with pytest.raises(ValueError):
+            await resolve_host_gateway()

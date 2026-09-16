@@ -8,6 +8,7 @@ non-idempotent rule op is only visible there.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -287,7 +288,60 @@ async def test_resolve_miss_retains_last_good_and_skips_refresh_sidecar() -> Non
     # dispatched, so the installed rules are untouched.
     assert len(scripts) == 1
     assert "resolve_ipv4" in scripts[0]
+    # REFRESH scope: the tenant owns this container, so the resolve must not
+    # read its hosts file (aios#2410). An ACCEPT for whatever that file said
+    # would widen the Limited allow-list to an attacker-chosen address.
+    assert "/etc/hosts" not in scripts[0]
     assert state.pinned == {"api.github.com": {"1.1.1.1": 0}}
+
+
+async def test_refresh_resolve_bakes_operator_hosts_without_reading_tenant_hosts() -> None:
+    """The High, at the sweep: refresh consults the baked table, not ``/etc/hosts``.
+
+    ``operator_hosts`` is stamped at provision and carried on the refresh state
+    so this tick can resolve the worker alias after it stops reading the
+    tenant-writable hosts file. If the table were dropped here, the next three
+    ticks would start evicting the alias's own rules; if the hosts file were
+    still read, a tenant rewrite of an allowed name would widen the ACCEPTs.
+    """
+    backend = FakeBackend()
+    registry = SandboxRegistry(backend)
+    registry._handles["sess_X"] = make_handle(session_id="sess_X")
+    registry._egress_states["sess_X"] = EgressRefreshState(
+        credential_hosts=frozenset(),
+        limited_hosts=frozenset({"example.com"}),
+        proxy_port=_PROXY[1],
+        proxy_ip=_PROXY[0],
+        runtime=None,
+        pinned={"example.com": {"1.1.1.1": 0}},
+        operator_hosts={"aios-worker": "192.168.65.2"},
+    )
+
+    await registry._refresh_egress_once()
+
+    scripts = _sidecar_scripts(backend)
+    assert scripts, "expected a resolve sidecar"
+    resolve = scripts[0]
+    assert "/etc/hosts" not in resolve
+    assert "192.168.65.2" in resolve
+    assert "aios-worker)" in resolve
+
+
+async def test_operator_hosts_empty_when_worker_is_on_the_sandbox_network() -> None:
+    registry = SandboxRegistry(FakeBackend())
+    assert dict(await registry._operator_hosts(_credential_free_plan())) == {}
+
+
+async def test_operator_hosts_bakes_the_resolved_host_gateway() -> None:
+    registry = SandboxRegistry(FakeBackend())
+    plan = replace(
+        _credential_free_plan(),
+        spec=replace(_credential_free_plan().spec, host_gateway_alias="aios-worker"),
+    )
+    with patch(
+        "aios.sandbox.registry.resolve_host_gateway", AsyncMock(return_value="192.168.65.2")
+    ):
+        assert dict(await registry._operator_hosts(plan)) == {"aios-worker": "192.168.65.2"}
 
 
 async def test_blackhole_recovery_swaps_dnat_and_limited_accept_rules() -> None:

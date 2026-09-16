@@ -472,7 +472,7 @@ class TestIPv6EgressLockdown:
 
 # ── IPv4-only host resolution (#978) ──────────────────────────────────────────
 
-# The awk test in ``setup._RESOLVE_IPV4_FN`` that drops every answer which is
+# The awk test in ``setup.build_resolve_ipv4_fn`` that drops every answer which is
 # not a dotted quad — i.e. every AAAA record busybox printed in the same
 # ``Address:`` shape as the A records.
 _IPV4_ONLY_GUARD = "$2 ~ /^[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/"
