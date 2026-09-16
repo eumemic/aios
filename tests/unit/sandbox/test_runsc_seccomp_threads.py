@@ -97,6 +97,50 @@ def test_seccomp_opt_is_runsc_only() -> None:
     assert Path(derived).is_file()
 
 
+def test_runsc_profile_is_the_authored_one_plus_exactly_the_clone3_allow() -> None:
+    """The derived copy must widen the authored policy by ONE rule and no more.
+
+    The clone3 ALLOW is a deliberate, documented hole (gVisor implements clone3
+    natively, and its flags live in a struct seccomp cannot filter, so
+    ``clone3(CLONE_NEWUSER)`` is reachable under runsc). Pinning the rest of the
+    profile byte-for-byte is what keeps that hole from quietly growing a second
+    one the next time this derivation is touched.
+    """
+    authored = json.loads(_PROFILE.read_text())
+    derived = json.loads(Path(_runsc_seccomp_profile(str(_PROFILE))).read_text())
+    inserted = derived["syscalls"][0]
+    assert inserted["names"] == ["clone3"] and inserted["action"] == "SCMP_ACT_ALLOW"
+    assert derived["syscalls"][1:] == authored["syscalls"]
+    assert {k: v for k, v in derived.items() if k != "syscalls"} == {
+        k: v for k, v in authored.items() if k != "syscalls"
+    }
+
+
+def test_runsc_profile_keeps_the_unconditional_namespace_deny() -> None:
+    """What still holds after the clone3 ALLOW: the #807 deny block is
+    unconditional and ahead of every base ALLOW, so a tenant who does reach a
+    user namespace via clone3 still cannot mount/setns/unshare inside it."""
+    derived = json.loads(Path(_runsc_seccomp_profile(str(_PROFILE))).read_text())
+    syscalls = derived["syscalls"]
+    deny_idx = next(
+        i
+        for i, blk in enumerate(syscalls)
+        if blk.get("action") == "SCMP_ACT_ERRNO" and {"mount", "setns"} <= set(blk.get("names", []))
+    )
+    deny = syscalls[deny_idx]
+    assert not deny.get("args") and not deny.get("includes"), "the deny must be unconditional"
+    later_allows = [
+        i
+        for i, blk in enumerate(syscalls)
+        if i > deny_idx
+        and blk.get("action") == "SCMP_ACT_ALLOW"
+        and set(blk.get("names", [])) & set(deny["names"])
+    ]
+    assert all(syscalls[i].get("args") or syscalls[i].get("includes") for i in later_allows), (
+        "an unconditional ALLOW after the deny would shadow it"
+    )
+
+
 def test_sandbox_image_keeps_tmp_nonempty_for_gvisor() -> None:
     """runsc `mountTmp` overlays tmpfs on empty /tmp; a sentinel prevents that."""
     text = _DOCKERFILE.read_text()

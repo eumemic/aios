@@ -145,9 +145,18 @@ the overlay2-verified §5.2/§5.6 pseudocode and are what the implementation shi
   layer, and `--oci-seccomp` so the authored profile is loaded inside the Sentry.
   runsc still mounts tmpfs over an *empty* `/tmp`; the sandbox image plants
   `/tmp/.aios-keep` so `/tmp` stays on the rootfs and snapshot/resume keeps
-  `/tmp/marker`. `--oci-seccomp` plus gVisor's errnoRet-ignoring translator would
-  turn clone3 ENOSYS into EPERM and brick python/node threads; create() prepends
-  a clone3 ALLOW for runsc only, while unshare `CLONE_NEWUSER` stays denied.
+  `/tmp/marker`. The flatten tar filter exempts that sentinel (`KEPT_PATHS`) —
+  dropping it would re-empty `/tmp` in the flattened image and bring the hidden
+  writes back on the next resume. `--oci-seccomp` plus gVisor's
+  errnoRet-ignoring translator would turn clone3 ENOSYS into EPERM and brick
+  python/node threads; create() prepends a clone3 ALLOW for runsc only. That
+  ALLOW is unfiltered by necessity (clone3's flags live in a struct seccomp
+  cannot read) and gVisor implements clone3 natively, so under runsc
+  `clone3(CLONE_NEWUSER)` is an OPEN path to a user namespace — an accepted
+  risk, not a preserved invariant. `unshare(CLONE_NEWUSER)` and arg-filtered
+  `clone` stay denied, and the unconditional #807 deny block keeps
+  mount/umount/setns/unshare/keyctl/bpf at EPERM inside any namespace created
+  that way, so the egress and mount lockdowns are not reachable from it.
 - **Flatten is budget-driven; the layer wall does not exist.** The overlay2 ~125-layer
   commit wall is absent on the containerd store (a chain ran cleanly through 250 layers).
   Flatten is therefore driven by the per-session unique-bytes budget (storage), with layer

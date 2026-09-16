@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import io
 import tarfile
+from pathlib import Path
 
 import pytest
 
-from aios.sandbox._tar_filter import TarPrefixFilter, _is_ephemeral
+from aios.sandbox._tar_filter import KEPT_PATHS, TarPrefixFilter, _is_ephemeral
 
 
 def _build_tar(entries: list[tuple[str, bytes]], **kwargs: object) -> bytes:
@@ -59,6 +60,9 @@ class TestPrefixMatching:
             "tmp",  # the mount point itself must survive
             "tmp/",
             "./tmp",
+            "tmp/.aios-keep",  # the gVisor empty-/tmp sentinel
+            "./tmp/.aios-keep",
+            "/tmp/.aios-keep",
             "var",
             "var/tmp",  # ditto
             "workspace/tmp/x",  # only ROOT-anchored prefixes match
@@ -186,6 +190,32 @@ class TestAwkwardHeaders:
         out = _run(buf.getvalue())
         # ``tmp`` itself survives: the bind mount needs a mount point.
         assert _names(out) == ["workspace", "tmp", "workspace/link"]
+
+
+class TestGvisorSentinel:
+    """The one file under ``tmp/`` that must cross a flatten.
+
+    runsc overlays an internal tmpfs on an EMPTY ``/tmp``, which hides tenant
+    writes from ``docker commit``. The sandbox image plants a sentinel to keep
+    ``/tmp`` non-empty; if flatten dropped it with the rest of the scratch, the
+    flattened image would resume with an empty ``/tmp`` and lose writes again.
+    """
+
+    def test_sentinel_survives_while_its_siblings_are_dropped(self) -> None:
+        raw = _build_tar(
+            [
+                ("tmp/.aios-keep", b""),
+                ("tmp/junk.bin", b"x" * 4096),
+                ("tmp/deep/nested", b"y" * 512),
+                ("workspace/keep.txt", b"keep me"),
+            ]
+        )
+        assert _names(_run(raw)) == ["tmp/.aios-keep", "workspace/keep.txt"]
+
+    def test_sentinel_matches_the_sandbox_image(self) -> None:
+        dockerfile = (Path(__file__).parents[2] / "docker" / "Dockerfile.sandbox").read_text()
+        for kept in KEPT_PATHS:
+            assert f"touch /{kept}" in dockerfile, f"{kept} is not planted by the image"
 
 
 class TestFailureModes:

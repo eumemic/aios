@@ -27,7 +27,9 @@ Design notes
 
 * **The mount points survive.** ``tmp/`` itself is kept while everything
   beneath it is dropped: the directory must exist in the image for the bind
-  to have something to mount onto.
+  to have something to mount onto. :data:`KEPT_PATHS` carves out the one file
+  beneath it that must also survive — an empty ``/tmp`` is what makes runsc
+  overlay a tmpfs there.
 
 * **Extended headers travel with their target.** GNU ``L``/``K`` and pax
   ``x``/``X`` records describe the *next* entry, so the drop decision cannot
@@ -61,6 +63,15 @@ _BLOCK = 512
 # re-fetch, so it stays durable state.
 EPHEMERAL_PREFIXES: tuple[str, ...] = ("tmp/", "var/tmp/", "run/")
 
+# Paths INSIDE a dropped prefix that must survive anyway. runsc mounts an
+# internal tmpfs over ``/tmp`` only when ``/tmp`` is EMPTY (``runsc/boot/vfs.go``
+# ``mountTmp`` walks the dirents and skips on ENOTEMPTY), and that overlay hides
+# tenant writes from ``docker commit``. The sandbox image plants this zero-byte
+# sentinel to keep ``/tmp`` on the rootfs; dropping it on flatten would re-empty
+# ``/tmp`` in the flattened image and bring the hidden-writes bug straight back
+# on the next resume. Kept in sync with ``docker/Dockerfile.sandbox``.
+KEPT_PATHS: frozenset[str] = frozenset({"tmp/.aios-keep"})
+
 # Record types describing the FOLLOWING entry rather than a file of their own:
 # GNU long name / long link name, pax extended / global headers.
 _META_TYPES = frozenset({b"L", b"K", b"x", b"X"})
@@ -78,9 +89,11 @@ def _is_ephemeral(name: str, prefixes: tuple[str, ...]) -> bool:
     """True if ``name`` is *inside* one of ``prefixes``.
 
     The prefix directories themselves are kept — see the mount-point note in
-    the module docstring.
+    the module docstring — and so is every member of :data:`KEPT_PATHS`.
     """
     norm = _normalize(name).rstrip("/")
+    if norm in KEPT_PATHS:
+        return False  # the gVisor /tmp sentinel — see KEPT_PATHS
     for prefix in prefixes:
         stem = prefix.rstrip("/")
         if norm == stem:

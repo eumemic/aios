@@ -175,14 +175,34 @@ def _require_runsc_supported_machine(what: str) -> None:
 def _runsc_seccomp_profile(source: str) -> str:
     """Derive a runsc-safe copy of *source* that lets python/node threads start.
 
-    gVisor's OCI seccomp translator (``runsc/specutils/seccomp``) ignores
-    ``errnoRet`` and always returns EPERM for ``SCMP_ACT_ERRNO``. The vendored
-    clone3 rule is ENOSYS (38) so glibc/libuv fall back to arg-filtered clone;
-    under runsc that rule becomes EPERM, pthread_create fails, and Node aborts
-    in ``uv_thread_create`` (exit 134). Prepending an unfiltered clone3 ALLOW
-    restores threads. ``CLONE_NEWUSER`` stays denied: the authored unshare
-    EPERM block and the arg-filtered clone ALLOW are untouched, and those are
-    what ``test_unshare_user_namespace_denied`` exercises.
+    gVisor's OCI seccomp translator (``runsc/specutils/seccomp``) pins every
+    ``SCMP_ACT_ERRNO`` to EPERM — ``errnoAction`` is a package-level constant
+    and ``ErrnoRet`` is never read. The vendored clone3 rule is ENOSYS (38)
+    precisely so glibc/libuv fall back to the arg-filtered clone; under runsc
+    it arrives as EPERM, which is NOT a fallback trigger, so pthread_create
+    fails and Node aborts in ``uv_thread_create`` (exit 134). ENOSYS cannot be
+    expressed through OCI seccomp under runsc at all, so the only way to give
+    the thread path back is ALLOW.
+
+    ACCEPTED RISK, stated plainly because the alternative is a security claim
+    that is not true: the ALLOW is unfiltered and has to be — clone3 takes its
+    flags in a ``struct clone_args`` in user memory, which seccomp cannot read
+    (that is exactly why the vendored profile answers ENOSYS instead of
+    arg-filtering it like clone). gVisor implements clone3 natively
+    (``linux64.go``: ``PartiallySupported("clone3", Clone3, ...)``, converging
+    on the same ``Task.Clone`` as clone, which accepts ``CLONE_NEWUSER`` with
+    no capability check), so under runsc ``clone3(CLONE_NEWUSER)`` DOES create
+    a user namespace. ``test_unshare_user_namespace_denied`` covers only the
+    ``unshare`` path and stays green either way — it is not evidence for the
+    stronger claim.
+
+    What still holds under runsc: the authored #807 deny block is
+    unconditional and first-match, so mount/umount/setns/unshare/keyctl/bpf
+    stay EPERM inside any namespace a tenant creates this way; and a fresh
+    netns has no routable interface (moving one in needs CAP_NET_ADMIN in the
+    PARENT userns, which the tenant does not have), so the egress lockdown is
+    not reachable from here. runc is untouched: it honours ``ErrnoRet``, keeps
+    the ENOSYS fallback, and never sees this derived profile.
     """
     data: object = json.loads(Path(source).read_text())
     if not isinstance(data, dict):

@@ -364,8 +364,12 @@ class Settings(BaseSettings):
         "--overlay2=none (gVisor's default rootfs overlay hides tenant writes from "
         "Docker SizeRw/commit identity). runsc's OCI seccomp translator ignores "
         "errnoRet and always returns EPERM, so create() prepends a clone3 ALLOW "
-        "(glibc/libuv otherwise abort instead of falling back to filtered clone); "
-        "CLONE_NEWUSER stays denied via unshare and arg-filtered clone.",
+        "(glibc/libuv otherwise abort instead of falling back to filtered clone). "
+        "That ALLOW is necessarily unfiltered (clone3 flags live in a struct "
+        "seccomp cannot read) and gVisor implements clone3, so under runsc "
+        "clone3(CLONE_NEWUSER) is NOT denied — unshare and arg-filtered clone "
+        "still are, and the unconditional mount/setns/unshare deny still applies "
+        "inside any namespace so created.",
     )
     # ── Account browser containers ("the computer", jarbot#106 Phase 1) ────
     sandbox_browser_image: str = Field(
