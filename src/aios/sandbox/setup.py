@@ -524,8 +524,13 @@ class ResolveScope(StrEnum):
 _SCRIPT_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
 # "This deployment supplies no operator names" -- the in-container-worker shape,
-# where the sandbox gets no ``--add-host`` at all and the embedded DNS knows
-# every name the scripts look up.
+# where the embedded DNS knows every name the scripts look up. NOTE the runsc
+# sandbox in that shape does now get ONE ``--add-host`` (the worker alias,
+# resolved on the worker by
+# :func:`aios.sandbox.network.resolve_network_alias_ipv4`) so the TENANT can
+# reach the broker without the embedded DNS the Sentry cannot see. It is not in
+# this table: these scripts read the OPERATOR image's hosts file under runsc,
+# never the sandbox's.
 NO_OPERATOR_HOSTS: Mapping[str, str] = MappingProxyType({})
 
 

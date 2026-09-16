@@ -54,7 +54,11 @@ from aios.sandbox.backends.base import (
     SnapshotOutcome,
     split_label_list,
 )
-from aios.sandbox.network import SANDBOX_NETWORK_NAME, resolve_sandbox_network_gateway
+from aios.sandbox.network import (
+    SANDBOX_NETWORK_NAME,
+    WORKER_NETWORK_ALIAS,
+    resolve_network_alias_ipv4,
+)
 
 log = get_logger("aios.sandbox.backends.docker")
 
@@ -386,11 +390,32 @@ class DockerBackend:
         if spec.runtime == "runsc":
             # Fail closed on a tenant-supplied image BEFORE any daemon call.
             operator_image = _runsc_operator_image(spec)
-            # gVisor's netstack does not honour Docker's 127.0.0.11 embedded-DNS
-            # redirect (that DNAT lives in the Linux netns, not the Sentry).
-            # Point resolv.conf at the user-defined network's gateway, where
-            # dockerd actually answers alias lookups like ``aios-worker``.
-            argv.extend(["--dns", await resolve_sandbox_network_gateway(network_name)])
+            # A runsc sandbox cannot use Docker's embedded DNS at all: that
+            # resolver lives on 127.0.0.11 in the netns, reached through
+            # netfilter rules the Sentry never replays (google/gvisor#7469),
+            # so ``aios-worker`` does not resolve inside gVisor and
+            # ``--dns`` cannot fix it (on a user-defined network Docker keeps
+            # 127.0.0.11 as the container's nameserver and treats ``--dns``
+            # as that resolver's upstream). Bake the alias into /etc/hosts
+            # instead, which libc reads first and runsc passes through.
+            # ``host_gateway_alias`` is the worker-on-host shape, which is
+            # already hosts-based and whose worker is not on this network.
+            if spec.host_gateway_alias is None:
+                worker_address = await resolve_network_alias_ipv4(
+                    WORKER_NETWORK_ALIAS, network_name
+                )
+                if worker_address is None:
+                    # No worker on this network to name. Not fatal here: a
+                    # sandbox that needs the broker fails loudly when it
+                    # reaches for it, and provisioning's own resolve of the
+                    # proxy alias is already a hard error (#2042).
+                    log.warning(
+                        "sandbox.runsc_worker_alias_unresolved",
+                        network=network_name,
+                        alias=WORKER_NETWORK_ALIAS,
+                    )
+                else:
+                    argv.extend(["--add-host", f"{WORKER_NETWORK_ALIAS}:{worker_address}"])
             argv.extend(
                 [
                     "--mount",

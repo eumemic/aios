@@ -3,6 +3,7 @@ runner is patched so no real daemon is required."""
 
 from __future__ import annotations
 
+import json
 import socket
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from aios.sandbox.network import (
     ensure_browser_network,
     ensure_sandbox_network,
     resolve_host_gateway,
-    resolve_sandbox_network_gateway,
+    resolve_network_alias_ipv4,
 )
 
 DockerResponder = Callable[[list[str]], tuple[int, bytes, bytes]]
@@ -371,41 +372,106 @@ class TestResolveHostGateway:
             await resolve_host_gateway()
 
 
-class TestResolveSandboxNetworkGateway:
-    """runsc --dns must land on the user-defined network gateway, not 127.0.0.11."""
+class TestResolveNetworkAliasIPv4:
+    """runsc cannot reach Docker's embedded DNS: the alias is resolved HERE
+    from the endpoints Docker recorded, and baked into /etc/hosts."""
 
-    @pytest.fixture(autouse=True)
-    def _reset_cache(self) -> Iterator[None]:
-        sandbox_network._sandbox_network_gateways.clear()
-        yield
-        sandbox_network._sandbox_network_gateways.clear()
+    @staticmethod
+    def _endpoint(aliases: list[str] | None = None, address: str = "172.18.0.2") -> bytes:
+        return json.dumps(
+            {SANDBOX_NETWORK_NAME: {"Aliases": aliases, "IPAddress": address}}
+        ).encode()
 
-    async def test_reads_gateway_and_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_reads_the_endpoint_publishing_the_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
-            assert argv[:3] == ["docker", "network", "inspect"]
-            assert "--format" in argv
-            assert argv[-1] == SANDBOX_NETWORK_NAME
-            return 0, b"172.18.0.1\n", b""
+            if argv[1] == "ps":
+                assert f"network={SANDBOX_NETWORK_NAME}" in argv
+                return 0, b"aaa\nbbb\n", b""
+            assert argv[:2] == ["docker", "inspect"]
+            assert argv[-2:] == ["aaa", "bbb"]
+            # First container is some other sandbox; the worker is second.
+            return (
+                0,
+                self._endpoint(["some-sandbox"])
+                + b"\n"
+                + self._endpoint([WORKER_NETWORK_ALIAS], "172.18.0.9")
+                + b"\n",
+                b"",
+            )
+
+        install_docker_responder(monkeypatch, responder)
+        assert await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS) == "172.18.0.9"
+
+    async def test_dns_names_field_also_publishes_the_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Engine 25+ records network aliases under ``DNSNames``."""
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[1] == "ps":
+                return 0, b"aaa\n", b""
+            record = json.dumps(
+                {
+                    SANDBOX_NETWORK_NAME: {
+                        "Aliases": None,
+                        "DNSNames": [WORKER_NETWORK_ALIAS, "worker-1"],
+                        "IPAddress": "172.18.0.4",
+                    }
+                }
+            ).encode()
+            return 0, record + b"\n", b""
+
+        install_docker_responder(monkeypatch, responder)
+        assert await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS) == "172.18.0.4"
+
+    async def test_no_container_claims_the_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[1] == "ps":
+                return 0, b"aaa\n", b""
+            return 0, self._endpoint(["some-sandbox"]) + b"\n", b""
+
+        install_docker_responder(monkeypatch, responder)
+        assert await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS) is None
+
+    async def test_empty_network_needs_no_inspect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            assert argv[1] == "ps"
+            return 0, b"\n", b""
 
         calls = install_docker_responder(monkeypatch, responder)
-        assert await resolve_sandbox_network_gateway() == "172.18.0.1"
-        assert await resolve_sandbox_network_gateway() == "172.18.0.1"
+        assert await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS) is None
         assert len(calls) == 1
 
-    async def test_probe_failure_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_degenerate_records_do_not_poison_the_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A vanished container makes inspect exit nonzero and drop lines; the
+        worker line that DID come back still answers. Null/odd records are
+        skipped rather than raising."""
+
+        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
+            if argv[1] == "ps":
+                return 0, b"aaa\nbbb\nccc\nddd\n", b""
+            lines = [
+                b"not json",
+                b"null",
+                json.dumps({SANDBOX_NETWORK_NAME: {"Aliases": [WORKER_NETWORK_ALIAS]}}).encode(),
+                self._endpoint([WORKER_NETWORK_ALIAS], "172.18.0.7"),
+            ]
+            return 1, b"\n".join(lines) + b"\n", b"Error: No such object: ddd\n"
+
+        install_docker_responder(monkeypatch, responder)
+        assert await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS) == "172.18.0.7"
+
+    async def test_container_listing_failure_fails_hard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
             del argv
             return 1, b"", b"Error: No such network\n"
 
         install_docker_responder(monkeypatch, responder)
-        with pytest.raises(RuntimeError, match="gateway probe failed"):
-            await resolve_sandbox_network_gateway()
-
-    async def test_non_ipv4_gateway_fails_hard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def responder(argv: list[str]) -> tuple[int, bytes, bytes]:
-            del argv
-            return 0, b"not-an-ip\n", b""
-
-        install_docker_responder(monkeypatch, responder)
-        with pytest.raises(RuntimeError, match="not an IPv4 address"):
-            await resolve_sandbox_network_gateway()
+        with pytest.raises(RuntimeError, match="listing containers on network"):
+            await resolve_network_alias_ipv4(WORKER_NETWORK_ALIAS)

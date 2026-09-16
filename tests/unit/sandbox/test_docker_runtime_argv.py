@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import platform
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +23,7 @@ from aios.sandbox.backends.base import (
     SandboxSpec,
 )
 from aios.sandbox.backends.docker import DockerBackend
+from aios.sandbox.network import SANDBOX_NETWORK_NAME, WORKER_NETWORK_ALIAS
 
 
 @pytest.fixture(autouse=True)
@@ -79,28 +83,53 @@ async def test_create_omits_runtime_by_default(monkeypatch: pytest.MonkeyPatch) 
     # per sandbox and needs Docker's containerd image store, neither of which
     # the runc path (the production default) has any use for.
     assert "--mount" not in calls[0]
-    assert "--dns" not in calls[0]
+    # runc reaches ``aios-worker`` through Docker's embedded DNS, so the runc
+    # path neither looks the alias up nor bakes it into /etc/hosts.
+    assert "--add-host" not in calls[0]
+    assert not any(c[1] == "ps" for c in calls)
 
 
 def _run_argv(calls: list[list[str]]) -> list[str]:
     return next(c for c in calls if len(c) >= 2 and c[1] == "run")
 
 
-async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
+def _worker_endpoint(address: str = "172.18.0.9") -> bytes:
+    return json.dumps(
+        {SANDBOX_NETWORK_NAME: {"Aliases": [WORKER_NETWORK_ALIAS], "IPAddress": address}}
+    ).encode()
+
+
+def _runsc_responder(
+    calls: list[list[str]], *, worker_address: str | None = "172.18.0.9"
+) -> Callable[..., Awaitable[tuple[int, bytes, bytes]]]:
+    """Answer the daemon calls a runsc create makes: the worker-alias probe
+    (``docker ps`` + ``docker inspect``) and everything else."""
 
     async def fake_run(
         argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
     ) -> tuple[int, bytes, bytes]:
         del timeout_s
         calls.append(list(argv))
-        if argv[:3] == ["docker", "network", "inspect"]:
-            return 0, b"172.18.0.1\n", b""
+        if argv[1] == "ps":
+            return 0, b"" if worker_address is None else b"aaa\n", b""
+        if (
+            argv[1] == "inspect"
+            and "--format" in argv
+            and "{{json .NetworkSettings.Networks}}" in argv
+        ):
+            assert worker_address is not None
+            return 0, _worker_endpoint(worker_address) + b"\n", b""
         return 0, b"deadbeefcafe\n", b""
+
+    return fake_run
+
+
+async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    fake_run = _runsc_responder(calls)
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
-    monkeypatch.setattr("aios.sandbox.network._sandbox_network_gateways", {})
 
     await DockerBackend().create(_spec(runtime="runsc"))
 
@@ -113,32 +142,62 @@ async def test_create_emits_configured_runtime(monkeypatch: pytest.MonkeyPatch) 
     # Derived from ``spec.image`` — the image the tenant container itself runs —
     # so the operator root can never silently disagree with the sandbox.
     assert f"src={_spec(runtime='runsc').image}," in mount
-    assert run[run.index("--dns") + 1] == "172.18.0.1"
 
 
-async def test_create_runsc_dns_is_the_sandbox_network_gateway(
+async def test_create_runsc_bakes_the_worker_alias_into_etc_hosts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """gVisor never sees Docker's 127.0.0.11 DNAT; --dns must be the bridge gateway."""
+    """A gVisor Sentry never sees the netns rules that make 127.0.0.11 answer,
+    so the worker alias is resolved on the worker and passed as --add-host."""
     calls: list[list[str]] = []
-
-    async def fake_run(
-        argv: list[str], *, timeout_s: float = 30.0, snapshot_timeout: bool = False
-    ) -> tuple[int, bytes, bytes]:
-        del timeout_s
-        calls.append(list(argv))
-        if argv[:3] == ["docker", "network", "inspect"]:
-            return 0, b"172.19.0.1\n", b""
-        return 0, b"deadbeefcafe\n", b""
+    fake_run = _runsc_responder(calls, worker_address="172.19.0.4")
 
     monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
     monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
-    monkeypatch.setattr("aios.sandbox.network._sandbox_network_gateways", {})
 
     await DockerBackend().create(_spec(runtime="runsc"))
+
     run = _run_argv(calls)
-    assert run[run.index("--dns") + 1] == "172.19.0.1"
-    assert any(c[:3] == ["docker", "network", "inspect"] for c in calls)
+    assert run[run.index("--add-host") + 1] == f"{WORKER_NETWORK_ALIAS}:172.19.0.4"
+    # ...and never through the embedded resolver the Sentry cannot reach.
+    assert "--dns" not in run
+    assert any(c[1] == "ps" for c in calls)
+
+
+async def test_create_runsc_without_a_worker_on_the_network_omits_add_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No container claims the alias: create still succeeds (the sandbox that
+    needs the broker fails loudly when it reaches for it) rather than inventing
+    an address."""
+    calls: list[list[str]] = []
+    fake_run = _runsc_responder(calls, worker_address=None)
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
+
+    await DockerBackend().create(_spec(runtime="runsc"))
+
+    assert "--add-host" not in _run_argv(calls)
+
+
+async def test_create_runsc_on_host_worker_keeps_the_host_gateway_add_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-on-host is already hosts-based and is not on the sandbox
+    network, so the alias probe never runs."""
+    calls: list[list[str]] = []
+    fake_run = _runsc_responder(calls, worker_address=None)
+
+    monkeypatch.setattr(docker_backend, "run_docker_cli", fake_run)
+    monkeypatch.setattr("aios.sandbox.network.run_docker_cli", fake_run)
+
+    spec = replace(_spec(runtime="runsc"), host_gateway_alias=WORKER_NETWORK_ALIAS)
+    await DockerBackend().create(spec)
+
+    run = _run_argv(calls)
+    assert run[run.index("--add-host") + 1] == f"{WORKER_NETWORK_ALIAS}:host-gateway"
+    assert not any(c[1] == "ps" for c in calls)
 
 
 async def test_create_refuses_runsc_on_a_tenant_supplied_image(

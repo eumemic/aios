@@ -1187,10 +1187,16 @@ class SandboxRegistry:
         (:class:`aios.sandbox.setup.ResolveScope`) or through a netns view the
         runsc operator chroot does not have.
 
-        ``host_gateway_alias is None`` is the worker-in-container shape: the
-        sandbox gets no ``--add-host``, and Docker's embedded DNS already knows
-        every name these scripts resolve — so the table is empty and the
-        resolver falls straight through to it.
+        ``host_gateway_alias is None`` is the worker-in-container shape: Docker's
+        embedded DNS already knows every name these scripts resolve — so the
+        table is empty and the resolver falls straight through to it. (A runsc
+        sandbox in that shape gets one ``--add-host`` for the worker alias so
+        the TENANT can reach the broker without the embedded DNS its Sentry
+        cannot see; it is deliberately not mirrored here, because under runsc
+        these scripts read the operator image's hosts file rather than the
+        sandbox's. The embedded DNS is equally invisible to them, so Limited
+        networking in the runsc + worker-in-container shape still has no name
+        source (#923).)
         """
         alias = plan.spec.host_gateway_alias
         if alias is None:
