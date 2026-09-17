@@ -9,8 +9,29 @@ name: gVisor Validation
 
 on:
   workflow_dispatch:
+  push:
+    branches: [master]
   schedule:
     - cron: '37 9 * * 2'
+
+# WHY PUSH (2026-09-16). This job proved itself on master only WEEKLY, so a gVisor
+# regression lived until the next Tuesday. On 2026-09-16 #2432 took the suite from
+# 1 failing test to 11 and nothing announced it: the weekly cadence meant master's
+# own runs were stale, and the only reason it surfaced at all was a human diffing
+# failing test NAMES between two hand-dispatched runs. A check that validates master
+# once a week is not validating master. Running on every push to master closes the
+# window from ~7 days to ~7 minutes.
+#
+# The concurrency group is REQUIRED alongside it, not decoration: three runs at the
+# same SHA raced on 2026-09-16 and two were auto-cancelled, and a `cancelled` run
+# renders in the commit's check-runs list as a non-success — indistinguishable from
+# a real failure at a glance. Serialising per-ref keeps one authoritative verdict
+# per commit. cancel-in-progress is deliberately FALSE: this job mutates global
+# Docker daemon state (runsc runtime registration) and a half-killed run can leave
+# the daemon reconfigured; let the in-flight one finish and queue the next.
+concurrency:
+  group: gvisor-validation-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   gvisor-validation:
