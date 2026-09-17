@@ -13,13 +13,50 @@ def _workflow_text() -> str:
 
 
 def test_gvisor_validation_workflow_exists_with_informational_triggers() -> None:
+    """The job must never gate a PR -- but it MUST validate master on every push.
+
+    The original contract (#1020) was "manual and weekly scheduled triggers",
+    written to keep this job OUT of the required PR check set. That purpose is
+    preserved here and still asserted: no ``pull_request:`` trigger, so no PR
+    can ever be blocked by it.
+
+    The ``branches: [master]`` ban was a different thing: it pinned the SPELLING
+    of "informational" to "never runs on a push", and that cost a real
+    regression. On 2026-09-16 #2432 took this suite from 1 failing test to 11,
+    and with only a weekly cron on master the failure went unannounced -- it
+    surfaced only because a human hand-dispatched two runs and diffed the
+    failing test NAMES. A check that validates master once a week is not
+    validating master; the exposure window was ~7 days.
+
+    A ``push: branches: [master]`` trigger runs POST-merge. It cannot block a
+    PR, so it does not join the required check set and the #1020 intent holds.
+    What it changes is how long a gVisor regression on master lives: ~7 minutes
+    instead of ~7 days.
+
+    This is the same lesson as the selector assertion below (#2429 review,
+    finding X3): guard the MEANING, not the spelling.
+    """
     workflow = _workflow_text()
 
     assert "workflow_dispatch:" in workflow
     assert "schedule:" in workflow
     assert "cron: '" in workflow
+
+    # THE LOAD-BEARING ASSERTION: never gate a pull request.
     assert "pull_request:" not in workflow
-    assert "branches: [master]" not in workflow
+
+    # Post-merge validation of master is REQUIRED, not merely permitted.
+    assert "push:" in workflow
+    assert "branches: [master]" in workflow
+
+    # Serialise per-ref. Three runs raced at one SHA on 2026-09-16 and two were
+    # auto-cancelled; a `cancelled` run shows in the commit check-runs list as a
+    # non-success, indistinguishable from a real failure at a glance. And the
+    # in-flight run must NOT be killed -- this job rewrites /etc/docker/daemon.json
+    # and restarts the daemon, so a half-killed run can leave global Docker state
+    # reconfigured for whatever runs next on that host.
+    assert "concurrency:" in workflow
+    assert "cancel-in-progress: false" in workflow
 
 
 def test_gvisor_workflow_installs_and_smokes_runsc_runtime() -> None:
