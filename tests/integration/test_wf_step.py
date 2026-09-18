@@ -3449,6 +3449,176 @@ async def test_agent_call_times_out_when_child_never_responds(
     assert child.archived_at is None  # left running — responding ≠ terminating
 
 
+async def test_agent_call_resolves_when_child_exceeds_the_spend_ceiling(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that burns past its SPEND ceiling resolves the agent() call as a
+    catchable AgentError(timeout) WITHOUT waiting out the wall-clock deadline (#2396).
+
+    The wall-clock bound cannot see this case: the call is nowhere near its 1h
+    deadline. On 2026-09-18 two review children spent ~1100 tool calls in two hours
+    while every status field read healthy and `updated_at` stayed fresh, so a
+    consumption bound is the only one that trips. Like the deadline, this writes a
+    response and does NOT terminate the child (responding != ending)."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    get_settings.cache_clear()
+    monkeypatch.setenv("AIOS_WORKFLOW_AGENT_COST_CEILING_MICROUSD", "500000")  # $0.50
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'stopped': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    # Child burns past the ceiling. The call_started is NOT aged: the deadline is
+    # untouched, so a pass here can only come from the spend bound.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 750000
+        )
+
+    await run_workflow_step(run_id)  # harvest: over ceiling -> resolve
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+        child = await db_queries.get_session_bare(conn, child_id, account_id="acc_wf")
+    assert run is not None and run.status == "completed"
+    assert run.output == {"stopped": "timeout"}
+    assert isinstance(resp, Err) and resp.error == {"kind": "timeout"}
+    assert child.archived_at is None  # left running — responding != terminating
+    get_settings.cache_clear()
+
+
+async def test_child_under_the_spend_ceiling_is_left_alone(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The NEGATIVE case, and the one that makes the test above mean anything: a
+    child spending real money but UNDER its ceiling stays pending and the parent
+    stays suspended. Without this, a ceiling that resolved every call — or one wired
+    to fire unconditionally — would pass the over-budget test identically."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    get_settings.cache_clear()
+    monkeypatch.setenv("AIOS_WORKFLOW_AGENT_COST_CEILING_MICROUSD", "500000")  # $0.50
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'stopped': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    async with pool.acquire() as conn:
+        # 499999 < 500000: one micro-dollar under. Boundary is >=, so this must NOT trip.
+        await conn.execute(
+            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 499999
+        )
+
+    await run_workflow_step(run_id)  # harvest: under ceiling -> still pending
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "suspended"  # still waiting, correctly
+    assert resp is None  # no response written — the child was not cut off
+    get_settings.cache_clear()
+
+
+async def test_spend_ceiling_disabled_by_default_leaves_a_big_spender_alone(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """Default 0 = disabled: an enormous spend does NOT resolve the call. The knob
+    ships inert, so merging this changes no existing behaviour until an operator
+    opts in."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    get_settings.cache_clear()
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'stopped': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 999_000_000
+        )
+
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "suspended"
+    assert resp is None
+    get_settings.cache_clear()
+
+
+async def test_unknown_child_cost_does_not_trip_the_spend_ceiling(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A NULL cost is 'unknown', not 'over budget'. Coercing unknown to over-budget
+    would make an unreadable cost indistinguishable from a runaway and would cut off
+    healthy children whenever accounting lags — the ABSENT-record-is-not-garbage
+    rule. Fail-open is safe here because the wall-clock deadline still bounds it."""
+    from aios.config import get_settings
+
+    pool = wf_runtime
+    get_settings.cache_clear()
+    monkeypatch.setenv("AIOS_WORKFLOW_AGENT_COST_CEILING_MICROUSD", "1")  # lowest possible
+    script = (
+        "async def main(input):\n"
+        "    try:\n"
+        f"        return await agent('go', agent_id={wf_agent_id!r})\n"
+        "    except AgentError as e:\n"
+        "        return {'stopped': e.kind}\n"
+    )
+    run_id = await _make_run(pool, script)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sessions SET cost_microusd = NULL WHERE id = $1", child_id)
+
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "suspended"  # unknown != over budget
+    assert resp is None
+    get_settings.cache_clear()
+
+
 async def test_past_deadline_child_that_already_responded_keeps_its_real_response(
     wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
 ) -> None:

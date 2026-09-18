@@ -1046,6 +1046,23 @@ class Settings(BaseSettings):
         "— a child doing real model+tool work can legitimately run for minutes; "
         "this is the never-resolves backstop, not a tight SLA.",
     )
+    workflow_agent_cost_ceiling_microusd: int = Field(
+        default=0,
+        ge=0,
+        description="Per-child SPEND ceiling for a single ``agent()`` call, in "
+        "micro-USD, measured as the child session's accumulated "
+        "``cost_microusd``. 0 disables the ceiling (the default, so behaviour is "
+        "unchanged until an operator opts in). This is the consumption analogue "
+        "of ``workflow_agent_deadline_seconds``: the wall-clock bound cannot see "
+        "a child that burns fast inside its time budget, and the deadline is "
+        "necessarily generous because a child doing real work legitimately runs "
+        "for minutes. Enforced on the SAME harvest path and resolved the same "
+        "way — a ``timeout``-kind error response written exactly-once, with the "
+        "cancel cascade — so a parent suspended behind a burning child is freed "
+        "by whichever bound trips first. Note the ceiling is checked when the "
+        "parent's step runs, so spend can overshoot by up to one harvest "
+        "interval; it bounds the blast radius, it is not a hard cutoff.",
+    )
     workflow_suspended_reap_seconds: float = Field(
         default=24 * 60 * 60,
         gt=0,
