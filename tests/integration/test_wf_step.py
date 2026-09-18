@@ -3480,9 +3480,7 @@ async def test_agent_call_resolves_when_child_exceeds_the_spend_ceiling(
     # Child burns past the ceiling. The call_started is NOT aged: the deadline is
     # untouched, so a pass here can only come from the spend bound.
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 750000
-        )
+        await conn.execute("UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 750000)
 
     await run_workflow_step(run_id)  # harvest: over ceiling -> resolve
 
@@ -3525,9 +3523,7 @@ async def test_child_under_the_spend_ceiling_is_left_alone(
 
     async with pool.acquire() as conn:
         # 499999 < 500000: one micro-dollar under. Boundary is >=, so this must NOT trip.
-        await conn.execute(
-            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 499999
-        )
+        await conn.execute("UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 499999)
 
     await run_workflow_step(run_id)  # harvest: under ceiling -> still pending
 
@@ -3606,9 +3602,7 @@ async def test_spend_ceiling_fires_at_exactly_the_ceiling(
 
     async with pool.acquire() as conn:
         # EXACTLY the ceiling, not a micro-dollar over.
-        await conn.execute(
-            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 500000
-        )
+        await conn.execute("UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 500000)
 
     await run_workflow_step(run_id)
 
