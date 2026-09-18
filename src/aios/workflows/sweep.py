@@ -65,6 +65,10 @@ async def wake_runs_needing_step(pool: asyncpg.Pool[Any]) -> int:
         run_ids = await wf_queries.list_run_ids_needing_step(
             conn,
             agent_deadline_seconds=settings.workflow_agent_deadline_seconds,
+            # #2396: wakes a parent parked behind a child that has hit its SPEND
+            # ceiling. Without this the ceiling never fires for a quiet suspended
+            # run -- nothing else drives a step on a spend event.
+            agent_cost_ceiling_microusd=settings.workflow_agent_cost_ceiling_microusd,
             # bash rides the `tool` capability, so the tool stale-clause covers it —
             # widened to the sandbox horizon (#988, Option 1).
             # Non-bash tools retain the original conservative stale horizon. Bash

@@ -1059,9 +1059,14 @@ class Settings(BaseSettings):
         "for minutes. Enforced on the SAME harvest path and resolved the same "
         "way — a ``timeout``-kind error response written exactly-once, with the "
         "cancel cascade — so a parent suspended behind a burning child is freed "
-        "by whichever bound trips first. Note the ceiling is checked when the "
-        "parent's step runs, so spend can overshoot by up to one harvest "
-        "interval; it bounds the blast radius, it is not a hard cutoff.",
+        "by whichever bound trips first. The sweep predicate "
+        "(``list_run_ids_needing_step``) carries a matching spend clause, which is "
+        "what makes this reachable at all: the check itself runs only on a step, "
+        "and a parent parked behind a burning child has no signal and no other "
+        "traffic to produce one. Overshoot is therefore bounded by the SWEEP "
+        "interval, not by the wall-clock deadline — but it is a bound on blast "
+        "radius, not a hard cutoff: spend accrues until the next sweep tick "
+        "observes it.",
     )
     workflow_suspended_reap_seconds: float = Field(
         default=24 * 60 * 60,

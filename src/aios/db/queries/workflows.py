@@ -1176,6 +1176,7 @@ async def list_run_ids_needing_step(
     conn: asyncpg.Connection[Any],
     *,
     agent_deadline_seconds: float,
+    agent_cost_ceiling_microusd: int = 0,
     tool_stale_seconds: float,
     call_llm_stale_seconds: float,
     bash_default_timeout_seconds: float,
@@ -1209,6 +1210,12 @@ async def list_run_ids_needing_step(
       it is recalled via the unharvested-signal clause above within a tick — not
       this deadline. The agent deadline remains only the backstop for a genuinely
       stuck or non-responding LIVE child.
+
+    - an inflight ``agent`` child at/over ``agent_cost_ceiling_microusd`` (#2396).
+      The spend analogue of the deadline clause above, and load-bearing for the
+      same reason: the ceiling enforced in ``_resolve_agent_call`` can only fire on
+      a step that actually runs, and a parent parked behind a burning child has no
+      signal and no other traffic to produce one. 0 disables.
 
     (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
     """
@@ -1275,6 +1282,25 @@ async def list_run_ids_needing_step(
                   SELECT 1 FROM wf_run_events e
                   WHERE e.run_id = r.id AND e.call_key = cs.call_key
                     AND e.type = 'call_result'))
+            -- An inflight agent() child that has reached its SPEND ceiling. Without
+            -- this clause the ceiling in _resolve_agent_call is unreachable for the
+            -- case it exists to catch: a parent parked behind a burning child has no
+            -- signal and no other traffic, so nothing wakes it until the wall-clock
+            -- deadline -- by which point the deadline resolves the call anyway and
+            -- the ceiling has contributed nothing. A bound enforced on the harvest
+            -- path is only as live as the predicate that wakes that path.
+            -- $7 = 0 disables (the default), and the clause is then a cheap false.
+            OR ($7::bigint > 0 AND EXISTS (
+              SELECT 1 FROM wf_run_events cs
+              JOIN sessions sess
+                ON sess.id = cs.payload->>'child_session_id'
+              WHERE cs.run_id = r.id AND cs.type = 'call_started'
+                AND cs.payload->>'capability' = 'agent'
+                AND sess.cost_microusd >= $7::bigint
+                AND NOT EXISTS (
+                  SELECT 1 FROM wf_run_events e
+                  WHERE e.run_id = r.id AND e.call_key = cs.call_key
+                    AND e.type = 'call_result')))
           )
         """,
         agent_deadline_seconds,
@@ -1283,6 +1309,7 @@ async def list_run_ids_needing_step(
         bash_default_timeout_seconds,
         sandbox_provisioning_slack_seconds,
         max_bash_timeout_seconds,
+        agent_cost_ceiling_microusd,
     )
     return [r["id"] for r in rows]
 

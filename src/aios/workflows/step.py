@@ -259,10 +259,14 @@ async def _resolve_agent_call(
             child_id,
             account_id,
         )
-        # A missing/NULL cost is NOT treated as over-budget: a child whose row is
-        # gone resolves as child_gone on the derive below, and coercing "unknown"
-        # to "kill it" would make an unreadable cost indistinguishable from a
-        # runaway -- fail-open here is correct because the deadline still bounds it.
+        # `sessions.cost_microusd` is NOT NULL DEFAULT 0, so a live row always has a
+        # number; `spent is None` means only that the row is GONE, which the re-derive
+        # below already resolves as child_gone. Hence None must not count as
+        # over-budget -- not as a fail-open policy, but because it is not a cost at all.
+        #
+        # Worth recording what this canNOT see: accounting lag shows up as a stale LOW
+        # integer (cost written after the spend), never as NULL. No null check helps
+        # there; detecting it would need a staleness signal on the cost value itself.
         over_budget = spent is not None and spent >= cost_ceiling_microusd
 
     if now - started_at < deadline and not over_budget:
