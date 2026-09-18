@@ -109,6 +109,7 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
             await wf_queries.list_run_ids_needing_step(
                 conn,
                 agent_deadline_seconds=3600,
+                agent_cost_ceiling_microusd=0,
                 tool_stale_seconds=60,
                 bash_default_timeout_seconds=120,
                 sandbox_provisioning_slack_seconds=180,
@@ -3676,6 +3677,20 @@ async def test_sweep_wakes_a_parent_parked_behind_an_over_ceiling_child(
             conn, agent_cost_ceiling_microusd=500_000, **sweep_kwargs
         )
         assert run_id not in ids
+
+        # EXACTLY at the ceiling: swept. This pins `>=` in the SQL, which the cases
+        # above cannot — they bracket the boundary (999_000_000 over, 100_000 under)
+        # and a reviewer's `>= -> >` mutant left all 16 spend tests passing. The two
+        # `>=` (here and in _resolve_agent_call) must agree, or a child at exactly the
+        # ceiling is woken but not resolved — a wake loop with no resolution — and
+        # nothing else in the suite would notice the drift.
+        await conn.execute(
+            "UPDATE sessions SET cost_microusd = $2 WHERE id = $1", child_id, 500_000
+        )
+        ids = await wf_queries.list_run_ids_needing_step(
+            conn, agent_cost_ceiling_microusd=500_000, **sweep_kwargs
+        )
+        assert run_id in ids
 
 
 async def test_past_deadline_child_that_already_responded_keeps_its_real_response(

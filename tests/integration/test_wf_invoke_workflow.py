@@ -189,6 +189,7 @@ async def test_cancelled_sub_run_wakes_its_parent_via_child_done(
         needing = await wf_queries.list_run_ids_needing_step(
             conn,
             agent_deadline_seconds=999,
+            agent_cost_ceiling_microusd=0,
             tool_stale_seconds=999,
             bash_default_timeout_seconds=120,
             sandbox_provisioning_slack_seconds=180,

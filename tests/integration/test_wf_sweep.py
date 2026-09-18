@@ -137,6 +137,7 @@ async def _needing(pool: asyncpg.Pool[Any]) -> set[str]:
         ids = await wf_queries.list_run_ids_needing_step(
             conn,
             agent_deadline_seconds=AGENT_DEADLINE,
+            agent_cost_ceiling_microusd=0,
             tool_stale_seconds=TOOL_STALE,
             call_llm_stale_seconds=CALL_LLM_STALE,
             bash_default_timeout_seconds=120,
@@ -427,6 +428,7 @@ async def test_inflight_bash_tool_wakes_past_sandbox_horizon(
             ids = await wf_queries.list_run_ids_needing_step(
                 conn,
                 agent_deadline_seconds=AGENT_DEADLINE,
+                agent_cost_ceiling_microusd=0,
                 tool_stale_seconds=horizon,
                 call_llm_stale_seconds=CALL_LLM_STALE,
                 bash_default_timeout_seconds=120,
@@ -533,6 +535,12 @@ async def test_wake_runs_needing_step_defers_for_matches(sweep_pool: asyncpg.Poo
         bash_default_timeout_seconds=120,
         workflow_call_llm_stale_seconds=CALL_LLM_STALE,
         workflow_suspended_reap_seconds=86_400,
+        # Required: sweep.py reads this and binds it as $7::bigint, so a bare Mock
+        # attribute reaches asyncpg and raises "'Mock' object cannot be interpreted
+        # as an integer" at BIND time — far from the edit, and it does not look like
+        # this change's fault in a CI log. Any whitelisting Mock of Settings must be
+        # extended whenever a swept query reads a new setting.
+        workflow_agent_cost_ceiling_microusd=0,
     )
     with (
         mock.patch("aios.workflows.sweep.get_settings", return_value=settings),

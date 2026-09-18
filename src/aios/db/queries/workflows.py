@@ -1176,7 +1176,14 @@ async def list_run_ids_needing_step(
     conn: asyncpg.Connection[Any],
     *,
     agent_deadline_seconds: float,
-    agent_cost_ceiling_microusd: int = 0,
+    # REQUIRED, deliberately not defaulted. A default of 0 made the ceiling
+    # silently inert if a caller forgot to pass it: the reviewer deleted the
+    # wiring line from sweep.py and ALL 200 TESTS STILL PASSED. Worse, deleting
+    # that line also turns a red CI test green, so the cheapest-looking fix for
+    # an unrelated failure is precisely the edit that disables the ceiling in
+    # production. The type checker is a better sentinel than a default value.
+    # (0 remains the correct *Settings* default -- inert on merge is right.)
+    agent_cost_ceiling_microusd: int,
     tool_stale_seconds: float,
     call_llm_stale_seconds: float,
     bash_default_timeout_seconds: float,
