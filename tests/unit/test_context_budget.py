@@ -139,6 +139,34 @@ def test_openrouter_provider_override_has_no_full_ceiling_reservation() -> None:
     assert request_budget(model=model, window_max=200_000, params=params) == 200_000
 
 
+def test_nonzero_reservation_without_a_ceiling_preserves_window_max() -> None:
+    """A reservation with NO ceiling to bind it against leaves window_max alone.
+
+    This pins the changed branch of ``effective_window_max`` directly: a
+    positive ``output_reserve`` combined with an unknown ceiling. Every other
+    test in this file either resolves a ceiling (the Anthropic routes) or
+    resolves a zero reservation (the default OpenRouter routes), so without
+    this case the old ``max(1, window_max - reservation)`` formula could be
+    reinstated on this path and the whole suite would still pass.
+
+    OpenRouter with a caller cap is the live instance: ``output_reservation``
+    reports the caller's 8000, but OpenRouter resolves no limit, so there is
+    nothing to subtract 8000 *from* — the operator's budget goes through
+    verbatim rather than silently losing 8000 tokens of history.
+    """
+    model = "openrouter/anthropic/claude-opus-4-1"
+    params: dict[str, Any] = {"max_tokens": 8_000}
+    reservation = resolved_output_reservation(model, params)
+    assert reservation == 8_000
+    assert resolved_context_limit(model, params) is None
+    assert served_ceiling(model) is None
+    assert request_budget(model=model, window_max=150_000, params=params) == 150_000
+    # The shrink ladder still bites on this path (the 2026-07-09 outage class).
+    assert (
+        request_budget(model=model, window_max=150_000, params=params, shrink_factor=0.8) == 120_000
+    )
+
+
 def test_anthropic_overflow_retry_still_shrinks_off_the_reserved_cap() -> None:
     """The shrink ladder composes with the reservation rather than bypassing
     it: a retry is strictly smaller than the already-reserved budget."""
