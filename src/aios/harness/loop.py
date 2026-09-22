@@ -41,6 +41,7 @@ from aios.harness.completion import (
     ModelCallDeadlineError,
     call_litellm,
     estimate_cost_usd,
+    resolved_context_limit,
     resolved_output_reservation,
     stream_litellm,
 )
@@ -1043,6 +1044,7 @@ async def _run_session_step_body(
             window_max=agent.window_max,
             params=agent.litellm_extra,
             output_reserve=resolved_output_reservation(capability_model, agent.litellm_extra),
+            context_limit=resolved_context_limit(capability_model, agent.litellm_extra),
             shrink_factor=(
                 _stop_reason.get("context_shrink_factor", _CONTEXT_OVERFLOW_SHRINK_BASE)
                 if adaptive_context_retry

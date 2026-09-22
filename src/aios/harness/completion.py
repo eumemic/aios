@@ -478,6 +478,46 @@ def default_max_tokens_for_request(model: str, params: dict[str, Any] | None) ->
     return default_max_output_tokens(model)
 
 
+@cache
+def model_context_limit(model: str) -> int | None:
+    """The model's total context limit, or ``None`` when it can't be established.
+
+    Resolves ``max_input_tokens`` from LiteLLM's bundled capability map — the
+    ceiling an Anthropic-shaped route charges ``input + max_tokens`` against
+    (see :func:`_apply_default_max_tokens`). Same source, same caching rationale
+    and the same **``None``-is-a-real-answer** stance as
+    :func:`default_max_output_tokens`: an unknown model, a missing or
+    non-positive entry, or a raising lookup all collapse to ``None``, and the
+    caller then forms the budget from ``window_max`` alone rather than guessing
+    a limit.
+    """
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        return None
+    value = info.get("max_input_tokens") if info else None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def resolved_context_limit(model: str, params: dict[str, Any] | None) -> int | None:
+    """The ceiling ``input + max_tokens`` is charged against, when known.
+
+    Gated on exactly the routes this module reserves output for
+    (:func:`_uses_anthropic_max_tokens_default`), because that gate is what
+    makes a *single* limit the right model: on an Anthropic-shaped route the
+    prompt and the ``max_tokens`` reservation are charged against one number, so
+    windowing must hand the windower ``limit - reservation``. Every other route
+    returns ``None`` and keeps its pre-existing ``window_max``-only budget —
+    OpenAI-shaped routes size ``max_tokens`` against the remaining window
+    themselves, and OpenRouter sends no reservation at all.
+    """
+    if not _uses_anthropic_max_tokens_default(model, params or {}):
+        return None
+    return model_context_limit(model)
+
+
 def resolved_output_reservation(model: str, params: dict[str, Any] | None) -> int | None:
     """Return the caller cap or the default that will be injected on the wire."""
     params = params or {}
