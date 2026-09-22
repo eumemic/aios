@@ -16,11 +16,50 @@ def served_ceiling(model: str) -> int | None:
     return _SERVED_CEILINGS.get(model)
 
 
+# THE one list of spellings a caller may use to name its own output cap, in
+# precedence order (first positive value wins). Defined here, in the module with
+# no aios imports, because three separate surfaces must agree on it and they sit
+# at different depths of the import graph:
+#
+#   * ``completion._has_explicit_output_cap`` — decides whether to inject the
+#     harness default (membership only; order is irrelevant there);
+#   * ``output_reservation`` below — the windowing reservation;
+#   * ``context_admission._output_reserve`` — the final-wire admission gate.
+#
+# They HAD drifted: ``max_completion_tokens`` was added to the first two and not
+# the third, so a request carrying only that spelling reached the wire with a
+# perfectly good cap and was still reported ``unverified`` (and rejected under
+# enforcement) for having "no enforced output token cap". One tuple, imported
+# everywhere, is what makes that class of drift unrepresentable rather than
+# merely fixed once.
+EXPLICIT_OUTPUT_CAP_KEYS: tuple[str, ...] = (
+    "max_output_tokens",
+    "max_tokens",
+    "max_completion_tokens",
+)
+
+
+def explicit_output_cap(params: dict[str, Any] | None) -> int | None:
+    """The caller's explicit output cap under any accepted spelling, else ``None``.
+
+    ``None`` means "no cap named", which is a different answer from a cap of 0
+    and is why this returns an optional rather than 0 — the admission gate must
+    distinguish "uncapped, therefore unverifiable" from "capped at some value".
+    """
+    if not params:
+        return None
+    for key in EXPLICIT_OUTPUT_CAP_KEYS:
+        value = params.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
 def output_reservation(params: dict[str, Any] | None) -> int:
     """Return the request's explicit maximum output/reasoning reservation."""
     if not params:
         return 0
-    for key in ("max_output_tokens", "max_tokens", "max_completion_tokens"):
+    for key in EXPLICIT_OUTPUT_CAP_KEYS:
         value = params.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value

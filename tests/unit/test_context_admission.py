@@ -118,3 +118,120 @@ def test_tools_multimodal_and_framing_reach_exact_counter_unchanged() -> None:
 
     admit_context(payload, mode=AdmissionMode.OBSERVE, attestation=attestation)
     assert seen == [payload]
+
+
+@pytest.mark.parametrize("spelling", ["max_tokens", "max_output_tokens", "max_completion_tokens"])
+def test_every_accepted_cap_spelling_is_a_verified_output_reserve(spelling: str) -> None:
+    """REQUIRED TEST — a request capped under ANY accepted spelling is admitted
+    with a VERIFIED reserve equal to that value, in observe mode and under
+    enforcement.
+
+    ``max_completion_tokens`` is the case that was red: ``completion.py`` accepts
+    it as an explicit cap (so the harness injects no ``max_tokens`` of its own)
+    and litellm maps it onto the provider's native spelling, so a real cap went
+    on the wire — but ``_output_reserve`` read only two of the three spellings,
+    so admission called the payload ``unverified``/``would_reject`` in observe
+    mode and raised "no enforced output token cap" under enforcement. The
+    parametrization is deliberate: pinning the three together is what stops the
+    list drifting again one spelling at a time.
+    """
+    attestation = _attestation()
+    payload = {
+        "model": "test/model",
+        "messages": [{"role": "user", "content": "1234"}],
+        spelling: 3,
+    }
+
+    observed = admit_context(payload, mode=AdmissionMode.OBSERVE, attestation=attestation)
+    assert observed.output_reserve == 3
+    assert observed.verified is True
+    assert observed.method is AdmissionMethod.EXACT_REPLICA
+    assert observed.bound == 4
+    assert observed.total == 7  # 4 + 3, under the limit of 10
+    assert observed.would_reject is False
+
+    # And under enforcement it is admitted rather than raising.
+    enforced = admit_context(payload, mode=AdmissionMode.ENFORCE, attestation=attestation)
+    assert enforced.verified is True
+    assert enforced.output_reserve == 3
+
+
+@pytest.mark.parametrize("spelling", ["max_tokens", "max_output_tokens", "max_completion_tokens"])
+def test_every_accepted_cap_spelling_counts_toward_the_limit(spelling: str) -> None:
+    """The reserve is not merely *recorded* per spelling — it is CHARGED against
+    the route limit identically. A ``_output_reserve`` that returned the value
+    but excluded it from ``total`` would pass the test above and still admit an
+    over-limit payload, so pin the rejection side per spelling too.
+    """
+    attestation = _attestation()  # context_limit=10
+    payload = {
+        "model": "test/model",
+        "messages": [{"role": "user", "content": "12345678"}],  # bound = 8
+        spelling: 3,  # 8 + 3 = 11 > 10
+    }
+
+    observed = admit_context(payload, mode=AdmissionMode.OBSERVE, attestation=attestation)
+    assert observed.total == 11
+    assert observed.would_reject is True
+
+    with pytest.raises(ContextAdmissionRejected, match="context admission rejected 11"):
+        admit_context(payload, mode=AdmissionMode.ENFORCE, attestation=attestation)
+
+
+def test_admission_reads_the_shared_cap_spelling_list() -> None:
+    """The three surfaces that must agree on the accepted spellings read ONE
+    list, so none can fall behind the others again.
+
+    This is the actual defect class: ``max_completion_tokens`` was added to
+    ``completion``'s injection gate and to ``output_reservation`` while the
+    admission gate kept its own inline pair. Asserting identity (``is``) rather
+    than equality means re-introducing a private copy fails here even if it
+    happens to be correct on the day it is written.
+    """
+    from aios.harness import completion, context_admission
+    from aios.harness.context_budget import EXPLICIT_OUTPUT_CAP_KEYS
+
+    assert context_admission.EXPLICIT_OUTPUT_CAP_KEYS is EXPLICIT_OUTPUT_CAP_KEYS
+    assert completion.EXPLICIT_OUTPUT_CAP_KEYS is EXPLICIT_OUTPUT_CAP_KEYS
+    assert set(EXPLICIT_OUTPUT_CAP_KEYS) == {
+        "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+    }
+
+
+def test_an_uncapped_payload_is_still_unverified() -> None:
+    """The negative half. Widening the spelling list must not turn "no cap named"
+    into a verified reserve — fail-closed on an uncapped payload is the property
+    the admission gate exists for, and a ``_output_reserve`` that returned some
+    default instead of ``None`` would pass every test above.
+    """
+    payload = {"model": "test/model", "messages": [{"role": "user", "content": "1234"}]}
+
+    report = admit_context(payload, mode=AdmissionMode.OBSERVE, attestation=_attestation())
+    assert report.output_reserve is None
+    assert report.verified is False
+    assert report.would_reject is True
+
+    with pytest.raises(ContextAdmissionRejected, match="no enforced output token cap"):
+        admit_context(payload, mode=AdmissionMode.ENFORCE, attestation=_attestation())
+
+
+def test_a_zero_or_bool_cap_is_not_a_cap_under_any_spelling() -> None:
+    """``max_completion_tokens: 0`` and ``: True`` must not be read as caps of 0
+    or 1 — the same guard the other two spellings already had. (``bool`` is an
+    ``int`` subclass in Python, which is why the explicit check exists.)
+    """
+    for spelling in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+        for bad in (0, -5, True, "4096", None):
+            report = admit_context(
+                {
+                    "model": "test/model",
+                    "messages": [{"role": "user", "content": "1234"}],
+                    spelling: bad,
+                },
+                mode=AdmissionMode.OBSERVE,
+                attestation=_attestation(),
+            )
+            assert report.output_reserve is None, f"{spelling}={bad!r} was read as a cap"
+            assert report.verified is False

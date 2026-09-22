@@ -39,6 +39,9 @@ from aios.harness.context_admission import (
     admit_context,
     route_attestation,
 )
+from aios.harness.context_budget import (
+    EXPLICIT_OUTPUT_CAP_KEYS as _EXPLICIT_OUTPUT_CAP_KEYS,
+)
 from aios.harness.context_budget import output_reservation
 from aios.harness.request_body_budget import (
     body_limits_for_model,
@@ -447,7 +450,14 @@ def default_max_output_tokens(model: str) -> int | None:
 # Every spelling a caller may use to name its own output cap. All three must
 # suppress the harness default; see :func:`_normalize_explicit_output_cap` for
 # why recognizing ``max_output_tokens`` here is necessary but NOT sufficient.
-EXPLICIT_OUTPUT_CAP_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+#
+# Re-exported from ``context_budget`` rather than re-listed. This name was a
+# second, independently-maintained copy of the same list, and the copy in
+# ``context_admission`` then fell a spelling behind both — which is the defect
+# this alias removes the possibility of, not just the instance of. Order here is
+# immaterial (membership test only); ``context_budget`` owns the precedence
+# order that the value-returning readers depend on.
+EXPLICIT_OUTPUT_CAP_KEYS = _EXPLICIT_OUTPUT_CAP_KEYS
 
 
 def _has_explicit_output_cap(params: dict[str, Any]) -> bool:

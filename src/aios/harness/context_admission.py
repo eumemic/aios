@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+# ``context_budget`` imports nothing from aios, so this seam adds no cycle.
+from aios.harness.context_budget import EXPLICIT_OUTPUT_CAP_KEYS
+
 
 class AdmissionMode(StrEnum):
     OBSERVE = "observe"
@@ -111,7 +114,17 @@ def payload_digest(payload: Mapping[str, Any], *, route_revision: str | None) ->
 
 
 def _output_reserve(payload: Mapping[str, Any]) -> int | None:
-    for key in ("max_output_tokens", "max_tokens"):
+    """The enforced output cap on the final payload, under ANY accepted spelling.
+
+    Reads :data:`~aios.harness.context_budget.EXPLICIT_OUTPUT_CAP_KEYS` rather
+    than an inline tuple. That list is shared with the injection gate in
+    ``completion`` and the windowing reservation in ``context_budget``; when
+    this one was inline it silently omitted ``max_completion_tokens``, so a
+    request that carried a real, provider-honoured cap under that spelling was
+    still reported ``unverified`` here and rejected under enforcement for
+    having "no enforced output token cap".
+    """
+    for key in EXPLICIT_OUTPUT_CAP_KEYS:
         value = payload.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
