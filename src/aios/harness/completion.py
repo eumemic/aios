@@ -39,6 +39,7 @@ from aios.harness.context_admission import (
     admit_context,
     route_attestation,
 )
+from aios.harness.context_budget import output_reservation
 from aios.harness.request_body_budget import (
     body_limits_for_model,
     enforce_request_body_budget,
@@ -443,6 +444,44 @@ def default_max_output_tokens(model: str) -> int | None:
     return value
 
 
+def _uses_anthropic_max_tokens_default(model: str, params: dict[str, Any]) -> bool:
+    """Whether this route gets the harness's Anthropic output default."""
+    return (
+        not (model.startswith("openrouter/") or params.get("custom_llm_provider") == "openrouter")
+        and model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC
+    )
+
+
+def default_max_tokens_for_request(model: str, params: dict[str, Any] | None) -> int | None:
+    """Return the implicit ``max_tokens`` this request should receive.
+
+    This is also the single source of truth used by context windowing.  A
+    caller cap suppresses the default, and OpenRouter retains provider-default
+    behavior (including when selected through ``custom_llm_provider``).
+    """
+    params = params or {}
+    if "max_tokens" in params or "max_completion_tokens" in params:
+        return None
+    if not _uses_anthropic_max_tokens_default(model, params):
+        return None
+    return default_max_output_tokens(model)
+
+
+def resolved_output_reservation(model: str, params: dict[str, Any] | None) -> int | None:
+    """Return the caller cap or the default that will be injected on the wire."""
+    params = params or {}
+    # Keep the windowing exception scoped exactly like injection.  In
+    # particular, an explicit cap on an unrelated route must retain the
+    # context-budget semantics that predate this Anthropic fix.
+    if model.startswith("openrouter/") or params.get("custom_llm_provider") == "openrouter":
+        return output_reservation(params)
+    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
+        # Let effective_window_max retain its ordinary served-ceiling logic.
+        return None
+    default = default_max_tokens_for_request(model, params)
+    return default if default is not None else output_reservation(params)
+
+
 def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
     """Reserve the model's full output ceiling when the caller named no cap.
 
@@ -506,18 +545,17 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
     than as a silently truncated reply. A loud, retried failure is the better
     end of that trade.
     """
-    if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
-        return
-    # Anthropic-shaped for caching, but not for this reservation — see the
-    # OpenRouter paragraph above. ``custom_llm_provider`` is already merged
-    # into ``kwargs`` from the caller's ``litellm_extra`` by this point, and it
-    # outranks the model prefix in LiteLLM's own dispatch.
-    if model.startswith("openrouter/") or kwargs.get("custom_llm_provider") == "openrouter":
-        return
-    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
-        return
-    ceiling = default_max_output_tokens(model)
+    ceiling = default_max_tokens_for_request(model, kwargs)
     if ceiling is None:
+        # ``None`` usually means this request is deliberately excluded or
+        # already capped. Only warn for an eligible uncapped route whose model
+        # metadata genuinely lacks a ceiling.
+        if (
+            "max_tokens" in kwargs
+            or "max_completion_tokens" in kwargs
+            or not _uses_anthropic_max_tokens_default(model, kwargs)
+        ):
+            return
         # Nothing authoritative to reserve. Leave the key absent (never None)
         # so the provider applies its own default — the pre-fix behavior, which
         # is the safe floor rather than a guess at someone else's ceiling.

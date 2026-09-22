@@ -1,3 +1,4 @@
+from aios.harness.completion import resolved_output_reservation
 from aios.harness.context_budget import (
     effective_window_max,
     output_reservation,
@@ -26,9 +27,60 @@ def test_unmapped_model_preserves_window_semantics() -> None:
     )
 
 
+def test_anthropic_default_is_reserved_from_window() -> None:
+    model = "anthropic/claude-opus-4-1"
+    reservation = resolved_output_reservation(model, None)
+    assert reservation > 0
+    assert (
+        effective_window_max(
+            model=model,
+            window_max=200_000,
+            params=None,
+            output_reserve=reservation,
+        )
+        == 200_000 - reservation
+    )
+
+
+def test_anthropic_explicit_max_tokens_wins_for_windowing() -> None:
+    model = "anthropic/claude-opus-4-1"
+    params = {"max_tokens": 1234}
+    assert resolved_output_reservation(model, params) == 1234
+    assert (
+        effective_window_max(
+            model=model,
+            window_max=200_000,
+            params=params,
+            output_reserve=resolved_output_reservation(model, params),
+        )
+        == 198_766
+    )
+
+
+def test_openrouter_anthropic_route_has_no_full_ceiling_reservation() -> None:
+    model = "openrouter/anthropic/claude-opus-4-1"
+    assert resolved_output_reservation(model, None) == 0
+    assert (
+        effective_window_max(
+            model=model,
+            window_max=200_000,
+            params=None,
+            output_reserve=resolved_output_reservation(model, None),
+        )
+        == 200_000
+    )
+
+
+def test_openrouter_provider_override_has_no_full_ceiling_reservation() -> None:
+    model = "anthropic/claude-opus-4-1"
+    params = {"custom_llm_provider": "openrouter"}
+    assert resolved_output_reservation(model, params) == 0
+
+
 def test_output_reservation_accepts_provider_parameter_spellings() -> None:
     assert output_reservation({"max_output_tokens": 20, "max_tokens": 10}) == 20
     assert output_reservation({"max_tokens": 10}) == 10
+    assert output_reservation({"max_completion_tokens": 30}) == 30
     assert output_reservation(None) == 0
 
 

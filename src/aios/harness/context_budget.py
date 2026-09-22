@@ -20,7 +20,7 @@ def output_reservation(params: dict[str, Any] | None) -> int:
     """Return the request's explicit maximum output/reasoning reservation."""
     if not params:
         return 0
-    for key in ("max_output_tokens", "max_tokens"):
+    for key in ("max_output_tokens", "max_tokens", "max_completion_tokens"):
         value = params.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
@@ -37,6 +37,7 @@ def effective_window_max(
     model: str,
     window_max: int,
     params: dict[str, Any] | None,
+    output_reserve: int | None = None,
     shrink_factor: float = 1.0,
 ) -> int:
     """Form the total input budget before the windower subtracts class masses.
@@ -46,12 +47,17 @@ def effective_window_max(
     calibrated class coefficients. No assembled-context token pass is involved.
     """
     ceiling = served_ceiling(model)
+    reservation = output_reservation(params) if output_reserve is None else output_reserve
     if ceiling is None:
         # Unmapped models retain window_max-only behavior at full budget
         # (shrink_factor == 1.0, today's semantics). But an overflow retry
         # (shrink_factor < 1) MUST still tighten the budget here — otherwise the
         # retry re-sends the identical oversized request and loops verbatim up
         # the reschedule ladder (the 2026-07-09 Ultron/sol outage class).
-        return max(1, int(window_max * shrink_factor))
-    input_cap = min(window_max, max(1, ceiling - output_reservation(params)))
+        # Most models retain window_max-only behavior.  Callers that resolve a
+        # route-specific output default pass it explicitly so the same total
+        # context ceiling is not spent once on input and again on output.
+        input_cap = window_max if output_reserve is None else max(1, window_max - reservation)
+        return max(1, int(input_cap * shrink_factor))
+    input_cap = min(window_max, max(1, ceiling - reservation))
     return max(1, int(input_cap * shrink_factor))
