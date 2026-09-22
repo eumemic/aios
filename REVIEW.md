@@ -1,146 +1,121 @@
-# REVIEW — round `gvisred3`, tip `5d94b476909f19d13358009d30f20a8ec7ec25bb`
+# Uncorrelated review — aios#2453 (OpenRouter `max_tokens` exclusion)
 
-Checker: claude-opus-5 (uncorrelated; implementer was grok-4.6 on `gvisred3`).
-Branch under review: `gvisred3rev` (forked from the implement tip). Base:
-`origin/master` @ `f5c22254` (#2434). Evidence:
-https://github.com/eumemic/aios/actions/runs/35161851660 — 4 failed / 372 passed.
-Not pushed, not merged, no PR opened.
+- **Tip reviewed:** `9697f1a9` (`fix/2451-default-max-tokens`), diffed against `b55ff619`
+- **Reviewer:** independent checker (Claude Opus 5). Implementer was gpt-5.6-sol.
+- **Fix commit landed in this worktree (not pushed):** `56661aeb`
+- **Verdict:** **FAIL** at `9697f1a9` — two Medium defects. Both fixed in `56661aeb`; the tree at `56661aeb` passes.
 
-## Verdict: **FAIL** — both mechanisms are right, two shipped claims are not.
+## Scope check — the brief's four asks
 
-The tip fixes the RED legs. It also asserts, in four places, a security
-invariant that its own change breaks, and it fixes leg (b) only for images that
-never flatten. Both are High/Medium and both are **fixed in this worktree** as
-`1a588c41` (product + tests + docs). Re-review of that commit should be short;
-the tip's own code is otherwise sound and stays as-is.
-
-## What was verified
-
-**(a) Seccomp / threads — mechanism correct.** Both upstream premises check out
-against gVisor `master`:
-
-* `runsc/specutils/seccomp/seccomp.go` pins every `SCMP_ACT_ERRNO` to a
-  package-level `errnoAction = seccomp.ReturnError.Code(uint16(unix.EPERM))`
-  and never reads `ErrnoRet` — so the vendored `clone3` ENOSYS(38) rule arrives
-  in the Sentry as EPERM, which is not a glibc/libuv fallback trigger. That is
-  the `uv_thread_create` exit-134 signature exactly.
-* An ALLOW is the *only* available repair: ENOSYS cannot be expressed through
-  OCI seccomp under runsc, and clone3's flags live in a `struct clone_args` in
-  user memory that seccomp cannot filter.
-
-`_seccomp_opt` is correctly runsc-only and passes `unconfined` through
-untouched; the derived profile puts the ALLOW ahead of the vendored ENOSYS rule,
-which is what gVisor's in-order ruleset evaluation needs. The three RED tests
-(`tests/e2e/test_sandbox_seccomp.py`) build their spec with
-`runtime=get_settings().sandbox_runtime`, so the derivation does reach them in
-the gVisor job. `test_unshare_user_namespace_denied` stays green:
-`unshare -U` still falls through the masked-eq ALLOW into the #807 deny.
-
-**(b) Snapshot residual — mechanism correct.** `runsc/boot/vfs.go` `mountTmp`
-skips its internal tmpfs on `ENOTEMPTY` (and on an explicit `/tmp` spec mount,
-which is why production's #2280 bind mount was never affected and only the
-bind-mount-free e2e spec went red). The sentinel therefore does keep `/tmp` on
-the rootfs. The image is built in-job (`docker build -t aios-sandbox:ci`), so
-the Dockerfile change lands in the same CI run — no registry-rebuild dependency.
-`Dockerfile.sandbox` is single-stage with no `VOLUME` and no later `/tmp` purge.
-
-**(3) #2434 kept.** The tip is a single commit touching six files; nothing in
-the SizeRw commit/flatten path, the `skipped_empty` identity, or the worker
-`/etc/hosts` DNS is touched. No regression by construction.
-
-**(4)/(5) Coverage and message.** Focused unit coverage exists and passes; the
-commit body matches the diff. `uv run mypy src tests` clean, `ruff check` /
-`ruff format --check` clean. Focused runs only — no full suite, no `-n`:
-`tests/unit/sandbox` + `tests/unit/test_tar_filter.py` → **724 passed**
-(683 + 41 after the fixes).
+| Ask | At `9697f1a9` |
+|---|---|
+| 1. OpenRouter must not get the Anthropic ceiling; early-return leaving `max_tokens` unset | Met for `openrouter/`-prefixed models; **incomplete** — see F1 |
+| 2. Direct `anthropic/*` still gets the ceiling | **Met.** Not weakened |
+| 3. Unit tests assert both sides | Both sides asserted, but **two pre-existing tests went vacuous** — see F2 |
+| 4. Smallest correct change; ruff/typing clean | Change is minimal and clean; docstring left contradicting the code — see F3 |
 
 ## Findings
 
-### F1 — High. The clone3 ALLOW re-opens CLONE_NEWUSER under runsc; the tip says it does not.
+### F1 — Medium. Exclusion keyed on the model prefix only; `custom_llm_provider` bypasses it
 
-`_runsc_seccomp_profile`'s docstring: *"`CLONE_NEWUSER` stays denied: the
-authored unshare EPERM block and the arg-filtered clone ALLOW are untouched,
-and those are what `test_unshare_user_namespace_denied` exercises."* The same
-claim is in the commit message, `config.py`'s `sandbox_runtime` description and
-the design doc. It does not follow, and it is false under runsc:
+`_apply_default_max_tokens` tested `model.startswith("openrouter/")`. But
+`custom_llm_provider` outranks the model string in LiteLLM's dispatch, and this
+codebase *already knows that* — `services/model_providers.py:_derive_provider`
+threads it into `get_llm_provider` precisely so "the row this function looks up
+must match what LiteLLM will actually call, not just the bare model string." It
+is also an allow-listed control param (`services/litellm_params.py:14`).
 
-* gVisor implements clone3 — `linux64.go`:
-  `435: syscalls.PartiallySupported("clone3", Clone3, "Options CLONE_NEWTIME,
-  CLONE_SYSVSEM and SetTid are not supported.", nil)`. `Clone3` copies
-  `clone_args` and calls the same `t.Clone(&cloneArgs)` as legacy clone, passing
-  the flags through untouched apart from `CLONE_DETACHED`/exit-signal checks.
-* `task_clone.go` gates `CLONE_NEWUSER` on nothing but `t.IsChrooted()` — no
-  capability check (that is standard unprivileged-userns behaviour).
-* The inserted ALLOW is unfiltered, necessarily so.
-
-So a tenant in a runsc sandbox can obtain a user namespace via
-`clone3(CLONE_NEWUSER)` while the guard test, which drives only `unshare`, stays
-green. That is precisely the shape a checker exists to catch: the test that is
-supposed to prove the property is insensitive to the change that breaks it.
-
-Residual risk is bounded, and that is *why* the ALLOW is still the right call —
-the #807 deny block is unconditional and first-match, so
-`mount/umount/setns/unshare/keyctl/bpf` remain EPERM inside any namespace
-obtained this way, and a fresh netns has no routable interface (wiring one in
-needs CAP_NET_ADMIN in the **parent** userns). runc is untouched: it honours
-`ErrnoRet`, keeps ENOSYS, and never sees the derived profile.
-
-**Fixed in `1a588c41`:** the ALLOW is kept; `docker.py`, `config.py` and the
-design doc now state the hole as an accepted risk with the bounding argument,
-and `test_runsc_profile_is_the_authored_one_plus_exactly_the_clone3_allow` pins
-the derivation to *authored + exactly one rule* (plus
-`test_runsc_profile_keeps_the_unconditional_namespace_deny`) so a second hole
-cannot be added silently.
-
-### F2 — Medium. The `/tmp` sentinel does not survive flatten, so leg (b) regresses on the next cycle.
-
-`EPHEMERAL_PREFIXES` (`src/aios/sandbox/_tar_filter.py`) drops everything under
-`tmp/` from the flatten export — keeping the directory, dropping its contents,
-including `/tmp/.aios-keep`. A flattened image therefore resumes with an
-**empty** `/tmp`, `mountTmp` overlays tmpfs again, and the hidden-writes bug is
-back. The design-doc sentence the tip added ("`/tmp` stays on the rootfs and
-snapshot/resume keeps `/tmp/marker`") is true only until the first flatten. The
-RED test passes because it pins `flatten_if_unique_bytes_over=None`, so CI would
-not have caught the gap.
-
-**Fixed in `1a588c41`:** `KEPT_PATHS = {"tmp/.aios-keep"}` carves the sentinel
-out of `_is_ephemeral`, with `TestGvisorSentinel` asserting it survives while
-its siblings are dropped and that it matches the Dockerfile that plants it. The
-sentinel is zero bytes, so the `_ephemeral_bytes` flatten-gate estimate is
-unaffected in any meaningful way.
-
-### F3 — Low (note only). Derived-profile temp file is never cleaned up.
-
-`_runsc_seccomp_profile` writes a `NamedTemporaryFile(delete=False)` and is
-`functools.cache`d on the source path: one leaked file per profile path per
-worker process (bounded, but never removed), and an edit to the authored profile
-inside a live process is not picked up. A missing/unreadable profile now raises a
-bare `OSError` out of `create()` rather than the `SandboxBackendError` its
-siblings raise two lines below — it still fails hard, just with a less
-recognisable error. Left as-is.
-
-### F4 — Low (note only). The ALLOW is inserted at index 0, ahead of the authored #807 deny block.
-
-Harmless today — the deny block deliberately excludes `clone`/`clone3` — but if
-`clone3` were ever added there, the runsc copy would silently override it rather
-than failing loudly. Inserting immediately after the authored deny block instead
-of at the head would make that a loud CI failure. The new
-authored-plus-exactly-one-rule test narrows the blast radius; the insertion point
-is unchanged.
-
-### F5 — Low (note only). A tenant can delete the sentinel.
-
-`/tmp/.aios-keep` is root-owned `644` in a sandbox whose agent runs as root. A
-session that removes it *and* empties `/tmp` gets the tmpfs overlay back on the
-next resume. Self-inflicted and not worth a guard; noted for the record.
-
-## Reproduction commands
+Verified against the pinned litellm:
 
 ```
-uv run pytest tests/unit/sandbox tests/unit/test_tar_filter.py -q   # 724 passed
-uv run mypy src tests                                               # clean
-uv run ruff check src tests && uv run ruff format --check src tests # clean
+litellm.get_llm_provider("anthropic/claude-opus-4-1")                                -> "anthropic"
+litellm.get_llm_provider("anthropic/claude-opus-4-1", custom_llm_provider="openrouter") -> "openrouter"
+model_descriptor("anthropic/claude-opus-4-1")  -> cache_channel=ANTHROPIC
 ```
 
-No docker/gVisor e2e was run here (per brief). The e2e verdict still rests on
-the next gVisor Validation run.
+So an agent with `litellm_extra={"custom_llm_provider": "openrouter"}` reaches
+OpenRouter, the prefix test does not fire, `model_descriptor` reads ANTHROPIC,
+the full 32K/64K ceiling is injected — and the call 402s. That is the exact P1
+failure mode this fixround exists to close, surviving on a routing path the
+codebase explicitly supports.
+
+**Fixed:** the guard now also tests `kwargs.get("custom_llm_provider")`. Free —
+the caller's `litellm_extra` is merged into `kwargs` before this runs (call site
+`completion.py:803`), so no signature change. New test pins it.
+
+### F2 — Medium. Two precedence tests became vacuous; the "caller value wins" rule went untested
+
+`test_explicit_caller_max_tokens_wins_verbatim` ("REQUIRED TEST 2") and
+`test_explicit_max_completion_tokens_also_suppresses_the_default` still ran on
+`_PROXY_CLAUDE_MODEL` (OpenRouter). The new early return satisfies both
+assertions on its own, so neither test can observe the guard it names.
+
+Confirmed by mutation at `9697f1a9` — deleting the caller-precedence guard
+**outright**:
+
+```
+    if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
+        return          # <- both lines removed
+=> 12 passed
+```
+
+A guard whose removal is invisible to the suite is not covered. This matters
+concretely: the brief's own framing is that ~52 agents carry hand-applied
+per-model `max_tokens` values that the central default must never overwrite.
+
+**Fixed:** both moved to `_DIRECT_CLAUDE_MODEL` — the only route where the
+default would otherwise fire. The same mutation now fails 2 tests. A module
+docstring note records *why* route choice is load-bearing here, so the tests do
+not drift back.
+
+### F3 — Medium (docs, repo convention). Docstring contradicted the code
+
+`_apply_default_max_tokens` still asserted it was "**Scoped to Anthropic-shaped
+routes** (the same gate `model_descriptor` uses for cache markers)" — no longer
+true — and named the OpenRouter 402 only as a reason to skip *OpenAI-shaped*
+routes, which reads as an argument *against* the change actually shipped. The
+sole rationale for the new early return lived in a test module docstring, and
+the return itself had no comment (the branch directly below it has three lines).
+In a file where docstrings are the design record, that is a broken window.
+
+**Fixed:** dedicated OpenRouter paragraph stating the exclusion, why (prices
+against the reservation, not usage), why it is a no-op rather than a regression
+(the route already sent no `max_tokens`), and the residual trade it accepts
+(silent truncation on OpenRouter stays, preferred over 402-ing every call).
+
+### Observations — no action
+
+- **Ordering.** The OpenRouter return sits above the `CacheChannel` check. No
+  behavioral difference (`openrouter/openai/*` is `OPENAI`, already excluded);
+  reads fine as "this provider is special regardless of channel."
+- **`bedrock/anthropic.*`** newly receives the ceiling (from `b55ff619`, not
+  this diff). Bedrock has no credit-affordance 402, so not a defect here.
+- **Coverage gap, minor.** No test for OpenRouter *without* thinking. The code
+  has no thinking branch, so this cannot hide a defect. Left alone.
+- **Lost coverage, benign.** `test_default_applies_without_thinking_too` was
+  removed; its no-thinking arm is preserved by the new direct-route test
+  (`params=None`).
+
+## Commands run
+
+All from the worktree root.
+
+| Command | Result |
+|---|---|
+| `uv run pytest tests/unit/test_completion_max_tokens.py -q` (at `9697f1a9`) | 12 passed |
+| Mutation A — caller-precedence guard deleted (at `9697f1a9`) | **12 passed — defect F2** |
+| `uv run pytest tests/unit/test_completion_max_tokens.py -q` (at `56661aeb`) | 13 passed |
+| Mutation A — caller-precedence guard deleted (at `56661aeb`) | 2 failed, 11 passed |
+| Mutation B — whole OpenRouter exclusion deleted (at `56661aeb`) | 2 failed, 11 passed |
+| Mutation C — `custom_llm_provider` arm dropped, i.e. the `9697f1a9` shape | 1 failed, 12 passed |
+| `uv run pytest tests/unit/test_completion_*.py tests/unit/test_model_binding.py tests/unit/test_run_llm.py tests/unit/harness -q` | 151 passed |
+| `uv run pytest tests/unit/test_context_admission.py tests/unit/test_context_budget.py tests/unit/test_litellm_param_validation.py tests/unit/test_model_providers_service.py -q` (+ max_tokens) | 74 passed |
+| `uv run ruff check` / `ruff format --check` on both touched files | clean / already formatted |
+| `uv run mypy src/aios/harness/completion.py tests/unit/test_completion_max_tokens.py` | Success, no issues |
+
+Mutants were applied to a scratch copy and reverted; `diff` against the restored
+file confirmed clean before committing.
+
+## Not done, per brief
+
+No push, no PR open/update, no merge. `56661aeb` sits local in this worktree.
