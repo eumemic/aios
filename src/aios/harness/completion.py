@@ -415,6 +415,104 @@ def model_descriptor(model: str) -> ModelDescriptor:
     return ModelDescriptor(cache_channel=channel, supports_thinking=supports_thinking)
 
 
+@cache
+def default_max_output_tokens(model: str) -> int | None:
+    """The model's own output ceiling, or ``None`` when it can't be established.
+
+    Resolves ``max_output_tokens`` from LiteLLM's bundled capability map. Pure
+    function of the model string; cached for the same reason
+    :func:`model_descriptor` is (called once per inference step, low
+    distinct-model cardinality).
+
+    **``None`` is a real answer, not a failure to be papered over.** An unknown
+    model, a catalog entry with no ``max_output_tokens``, a lookup that raises,
+    or a non-positive value all collapse to ``None``, and the caller then omits
+    ``max_tokens`` entirely. Sending ``max_tokens: None`` would be strictly
+    worse than sending nothing: several provider adapters serialize an explicit
+    ``None`` into the request body, turning a silent truncation into a 400.
+    """
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        # ``get_model_info`` raises a mix of BadRequestError (unknown model)
+        # and bare Exception depending on the miss; the verdict is the same.
+        return None
+    value = info.get("max_output_tokens") if info else None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
+    """Reserve the model's full output ceiling when the caller named no cap.
+
+    **Omitting ``max_tokens`` does not mean "unlimited" — it means whatever the
+    route's default is, and on Anthropic-shaped routes that default is 4096.**
+    Worse, extended-thinking tokens are drawn from that same budget, so a hard
+    turn can spend all 4096 reasoning and emit EMPTY assistant content with
+    ``finish_reason: "length"``: full cost billed, recorded as a clean turn, no
+    error raised (issue #2451). The failure gets *more* likely the harder the
+    task — exactly inverted from where reliability is wanted.
+
+    Where the 4096 comes from varies by route, which is why the reservation is
+    made explicit here rather than left to the adapter. Measured against the
+    pinned litellm 1.96.2 by capturing the real outbound body:
+
+    * ``anthropic/<model in litellm's catalog>`` — litellm's
+      ``AnthropicConfig.get_config`` already fills in the model's ceiling.
+    * ``anthropic/<model NOT in the catalog>`` and ``vertex_ai/claude-*`` — fall
+      back to ``DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS`` (4096). **A Claude newer
+      than this worker image's catalog snapshot lands here**, so the trap
+      re-arms itself on every model release.
+    * ``openrouter/anthropic/*`` and ``bedrock/anthropic.*`` — send no
+      ``max_tokens`` at all, inheriting the provider's own default.
+
+    **Scoped to Anthropic-shaped routes** (the same gate
+    :func:`model_descriptor` uses for cache markers). This is not timidity: on
+    OpenAI-shaped routes omitting ``max_tokens`` already means "as much as
+    fits", so there is no defect to fix, while reserving the full ceiling there
+    is an active regression — OpenAI rejects a request whose prompt plus
+    ``max_tokens`` exceeds the context window, and OpenRouter answers HTTP 402
+    when ``max_tokens`` exceeds the key's remaining credit affordance (the
+    failure ``evals/wam_fusion/recipes.py`` already caps around).
+
+    **A caller-supplied value always wins**, including OpenAI's newer
+    ``max_completion_tokens`` spelling — litellm maps that onto ``max_tokens``,
+    so injecting ours alongside it would send two competing caps. Agents
+    carrying an explicit per-model value (the hand-applied mitigation this
+    central fix supersedes) are therefore untouched.
+
+    Note the interaction with context admission: ``max_tokens`` is the
+    ``output_reserve`` half of :func:`~aios.harness.context_admission.admit_context`,
+    and Anthropic charges ``input + max_tokens`` against the context limit. A
+    session long enough that the full reservation no longer fits now surfaces as
+    a loud ``ContextWindowExceededError`` — which the harness already answers
+    with its adaptive shrink ladder (``_apply_context_overflow_retry``) — rather
+    than as a silently truncated reply. A loud, retried failure is the better
+    end of that trade.
+    """
+    if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
+        return
+    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
+        return
+    ceiling = default_max_output_tokens(model)
+    if ceiling is None:
+        # Nothing authoritative to reserve. Leave the key absent (never None)
+        # so the provider applies its own default — the pre-fix behavior, which
+        # is the safe floor rather than a guess at someone else's ceiling.
+        log.warning(
+            "model_max_output_tokens_unknown",
+            model=model,
+            detail=(
+                "no max_output_tokens in the capability map; leaving max_tokens unset, "
+                "so this route falls back to the provider default (4096 on Anthropic) "
+                "and long replies may truncate silently"
+            ),
+        )
+        return
+    kwargs["max_tokens"] = ceiling
+
+
 def _apply_provider_cache_hints(
     kwargs: dict[str, Any],
     model: str,
@@ -698,6 +796,9 @@ def _build_litellm_kwargs(
         effective_extra["allowed_openai_params"] = sorted(passthrough)
     if effective_extra:
         kwargs.update(effective_extra)
+    # AFTER the caller's extras are merged, so an agent-supplied ``max_tokens``
+    # (or ``max_completion_tokens``) is already present and wins outright.
+    _apply_default_max_tokens(kwargs, model)
     _apply_provider_cache_hints(kwargs, model, session_id)
     return kwargs
 

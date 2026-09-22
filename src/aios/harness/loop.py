@@ -133,6 +133,23 @@ _STREAK_TRANSPARENT_LIFECYCLE_EVENTS: frozenset[str] = frozenset({"adaptive_cont
 # stays provider-agnostic.
 REFUSAL_FINISH_REASON = "content_filter"
 
+# litellm's standardized ``finish_reason`` for a completion that hit its output
+# ceiling. The reply is truncated — cut mid-sentence, or (when extended thinking
+# consumed the whole budget before any text was emitted) EMPTY — yet it used to
+# be recorded exactly like a clean ``stop``: full cost billed, no warning, no
+# marker. The only way to spot the class was noticing that ``output_tokens``
+# happened to equal the cap exactly (issue #2451).
+#
+# Deliberately NOT treated like ``REFUSAL_FINISH_REASON``. A refusal bricks the
+# turn, so it is latched errored and never dispatched; a truncated turn's
+# content is real, partial, already-paid-for work, and its tool calls (if any)
+# were emitted before the cut. Discarding it would throw away that output and
+# could strand a session mid-tool-call. So the turn persists and dispatches as
+# before, and the truncation is made *queryable* instead: a
+# ``step.model_output_truncated`` warning plus an ``output_truncated`` flag on
+# the ``model_request_end`` span.
+TRUNCATED_FINISH_REASON = "length"
+
 # Operator-facing message on the errored stop_reason. Renders behind the
 # console's "Errored" pill (status idle + stop_reason.type == "error").
 _REFUSAL_STOP_REASON_MESSAGE = (
@@ -1605,6 +1622,30 @@ async def _run_session_step_body(
 
     local_tokens, by_class = await asyncio.to_thread(_compute_token_counts)
     cost_microusd = _resolve_cost_microusd(agent.model, usage, cost_usd, session_id=session_id)
+
+    # A completion that hit its output ceiling is TRUNCATED, not complete (#2451).
+    # Stamped on the span (so the class is queryable rather than inferred from
+    # ``output_tokens`` happening to equal the cap) and warned once here. The
+    # turn still persists and dispatches — see ``TRUNCATED_FINISH_REASON`` for
+    # why this is observability rather than a latch.
+    output_truncated = finish_reason == TRUNCATED_FINISH_REASON
+    if output_truncated:
+        log.warning(
+            "step.model_output_truncated",
+            session_id=session_id,
+            model=agent.model,
+            finish_reason=finish_reason,
+            output_tokens=usage.get("output_tokens"),
+            agent_max_tokens=(agent.litellm_extra or {}).get("max_tokens"),
+            # The catastrophic shape: thinking consumed the entire budget and the
+            # turn delivered NOTHING, while looking like a clean end_turn.
+            empty_content=not (llm_response.content or "").strip(),
+            had_tool_calls=bool(assistant_msg.get("tool_calls")),
+            detail=(
+                "model output hit the request's max_tokens ceiling; the reply is "
+                "truncated (empty when extended thinking consumed the whole budget)"
+            ),
+        )
     await sessions_service.append_event(
         pool,
         session_id,
@@ -1617,6 +1658,8 @@ async def _run_session_step_body(
             "cost_usd": cost_usd,
             "local_tokens": local_tokens,
             "local_tokens_by_class": by_class,
+            "finish_reason": finish_reason,
+            "output_truncated": output_truncated,
             # LINEAGE, not a constant (#2050 review).  Stamping an
             # unconditional current value here would admit spans from older /
             # mid-backfill sessions into the current calibration fit, training

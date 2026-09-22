@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Model calls now reserve the model's own output ceiling instead of inheriting
+  a provider default that silently truncates replies (#2451).** aios never set
+  `max_tokens`, and omitting it does NOT mean "unlimited" — on Anthropic-shaped
+  routes it means 4096. Extended-thinking tokens are drawn from that same
+  budget, so a hard turn could spend all 4096 reasoning and return EMPTY
+  assistant content with `finish_reason: "length"`: full cost billed, recorded
+  as a clean turn, no error raised — and the failure got *more* likely the
+  harder the task. `harness/completion.py` now defaults `max_tokens` from the
+  model's `max_output_tokens`, scoped to Anthropic-shaped routes (OpenAI's
+  no-`max_tokens` behaviour is already "as much as fits", and reserving there
+  regresses into OpenAI context-window 400s and OpenRouter credit-affordance
+  402s). An agent-supplied `max_tokens`/`max_completion_tokens` still wins
+  verbatim, and an unknown ceiling omits the key rather than sending
+  `max_tokens: None`.
+
+- A completion with `finish_reason == "length"` is no longer reported as a clean
+  turn: it is logged as `step.model_output_truncated` (flagging the empty-content
+  case explicitly) and stamped `output_truncated` / `finish_reason` on the
+  `model_request_end` span, so the class is queryable instead of being inferred
+  from `output_tokens` happening to equal the cap. The turn still persists and
+  dispatches — unlike a `content_filter` refusal, truncated output is real,
+  already-paid-for partial work (#2451).
+
 - Vision capability now treats a missing LiteLLM catalog entry or absent
   `supports_vision` field as unknown and lets image consumers attempt safe
   inline delivery by default. Explicit overrides and catalog booleans remain
