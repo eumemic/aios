@@ -38,7 +38,7 @@ vacuously — the OpenRouter early return alone satisfies them.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import litellm
 import pytest
@@ -371,6 +371,12 @@ class TestRealLiteLLMWireBody:
 
         monkeypatch.setattr(hh.AsyncHTTPHandler, "__init__", _patched_init)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy")
+        # litellm memoizes provider HTTP clients, so a handler built by an
+        # EARLIER call (patched or not) is reused and this transport never
+        # sees the request — the body then comes back empty. Harmless while
+        # each test called this helper once; flushing makes repeated calls
+        # within one test, and ordering between tests, both reliable.
+        litellm.in_memory_llm_clients_cache.flush_cache()  # type: ignore[no-untyped-call]
 
         asyncio.get_event_loop_policy()
         asyncio.run(
@@ -435,3 +441,205 @@ class TestRealLiteLLMWireBody:
         assert body["max_tokens"] == expected
         # Not the 4096 provider default, which is the defect this PR removes.
         assert body["max_tokens"] != 4096
+
+    def test_real_litellm_path_never_puts_an_invalid_cap_on_the_wire(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #2453 P1 property asserted against the actual request BYTES.
+
+        ``_capture_kwargs`` sees what aios hands litellm, not what litellm then
+        sends — and that blind spot is where this defect class lives. Two of
+        these values are only dangerous *after* litellm's mapping:
+        ``max_completion_tokens`` is mapped onto ``max_tokens``, so a surviving
+        ``-5`` becomes the cap the provider reads, and an unset ``max_tokens``
+        is refilled by ``AnthropicConfig.get_config()`` with its 4096 default.
+
+        Asserted relative to the catalog (see the sibling test) because the
+        pytest sandbox blocks egress and litellm falls back to its bundled map.
+        """
+        model = "anthropic/claude-opus-5-5"
+        expected = litellm.get_model_info(model)["max_output_tokens"]
+        assert isinstance(expected, int) and expected > 0
+
+        for params in (
+            {"max_tokens": None},
+            {"max_tokens": 0},
+            {"max_tokens": False},
+            {"max_completion_tokens": -5},
+            {"max_output_tokens": "x"},
+        ):
+            body = self._wire_body(monkeypatch, model=model, params=dict(params))
+
+            assert body["max_tokens"] == expected, params
+            # Not the provider's silent 4096 fallback — the #2451 defect.
+            assert body["max_tokens"] != 4096, params
+            assert "max_output_tokens" not in body, params
+            assert "max_completion_tokens" not in body, params
+
+
+class TestInvalidExplicitCapFallsBackToTheDefault:
+    """A cap is a POSITIVE INT — key presence alone is not a cap (#2453 P1).
+
+    The gate that decides whether to inject the harness ceiling used to test
+    ``key in params``, while ``context_budget.output_reservation`` and
+    ``context_admission._output_reserve`` both required a positive int. Sharing
+    the spelling *list* across the three surfaces had not unified the *validity*
+    rule, so ``{"max_tokens": None}`` (and ``0`` / ``False`` / ``-5`` / ``"x"``)
+    read as "the caller capped it" in exactly one of the three.
+
+    The consequences were concrete, not theoretical: the model-ceiling default
+    was suppressed, windowing reserved zero tokens, and the request reached the
+    provider either carrying a value it rejects (400) or carrying nothing — in
+    which case LiteLLM's ``DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS = 4096`` fallback
+    stands, which is the silent-truncation defect #2451 exists to close.
+
+    **Documented semantics, asserted here: an unusable explicit value is DROPPED
+    and the model-ceiling default applies**, i.e. the request behaves exactly as
+    if the caller had omitted the key. See ``_has_explicit_output_cap`` for why
+    that beats forwarding it for the provider to reject.
+
+    Every case runs on ``anthropic/*`` because that is the only route family the
+    default fires on; on OpenRouter the exclusion alone would satisfy these
+    assertions vacuously.
+    """
+
+    _INVALID_CAPS: ClassVar[list[dict[str, Any]]] = [
+        {"max_tokens": None},
+        {"max_tokens": 0},
+        {"max_tokens": False},
+        {"max_completion_tokens": -5},
+        {"max_output_tokens": "x"},
+    ]
+
+    @staticmethod
+    def _ids(params: dict[str, Any]) -> str:
+        key, value = next(iter(params.items()))
+        return f"{key}={value!r}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("params", _INVALID_CAPS, ids=_ids)
+    async def test_invalid_cap_still_gets_the_model_ceiling_default(
+        self, monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+    ) -> None:
+        """REQUIRED TEST — red on df912388 for all five spellings/values."""
+        expected = litellm.get_model_info(_DIRECT_CLAUDE_MODEL)["max_output_tokens"]
+        assert isinstance(expected, int) and expected > 4096  # fixture sanity
+
+        captured = await _capture_kwargs(
+            monkeypatch, model=_DIRECT_CLAUDE_MODEL, params=dict(params)
+        )
+
+        assert captured["max_tokens"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("params", _INVALID_CAPS, ids=_ids)
+    async def test_no_invalid_cap_reaches_the_wire(
+        self, monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+    ) -> None:
+        """The second half of the property, and the one a "just fix the gate"
+        change would miss: applying the default is not enough if the unusable
+        value travels alongside it.
+
+        ``max_completion_tokens`` is mapped onto ``max_tokens`` by LiteLLM, so a
+        surviving ``{"max_completion_tokens": -5}`` would put TWO caps on the
+        wire with the invalid one winning. Assert exactly one output cap, and
+        that it is the ceiling.
+        """
+        expected = litellm.get_model_info(_DIRECT_CLAUDE_MODEL)["max_output_tokens"]
+
+        captured = await _capture_kwargs(
+            monkeypatch, model=_DIRECT_CLAUDE_MODEL, params=dict(params)
+        )
+
+        caps = {
+            key: captured[key]
+            for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+            if key in captured
+        }
+        assert len(caps) == 1, f"expected exactly one output cap, got {caps}"
+        assert next(iter(caps.values())) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"max_tokens": 1234},
+            {"max_completion_tokens": 1234},
+            {"max_output_tokens": 1234},
+        ],
+        ids=lambda p: next(iter(p)),
+    )
+    async def test_a_valid_cap_still_wins_under_every_spelling(
+        self, monkeypatch: pytest.MonkeyPatch, params: dict[str, Any]
+    ) -> None:
+        """REQUIRED regression guard. Tightening the predicate from "the key is
+        present" to "the value is a positive int" must not cost a VALID caller
+        cap its precedence under any spelling — that would re-break #2451's
+        headline property (the 52 hand-mitigated agents carry explicit values).
+        """
+        captured = await _capture_kwargs(
+            monkeypatch, model=_DIRECT_CLAUDE_MODEL, params=dict(params)
+        )
+
+        caps = {
+            key: captured[key]
+            for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+            if key in captured
+        }
+        assert len(caps) == 1, f"expected exactly one output cap, got {caps}"
+        assert next(iter(caps.values())) == 1234
+
+    def test_the_three_surfaces_share_ONE_cap_predicate(self) -> None:
+        """The drift guard, as an identity assert rather than an equality one.
+
+        The spelling list was already shared when this defect was found; the
+        VALIDITY rule was not, and that was enough to keep the three surfaces
+        disagreeing. Pin that all three route through the same function object,
+        so a re-introduced local predicate — even one that happens to be correct
+        the day it is written, which is how this bug was born — fails here.
+        """
+        from aios.harness import context_admission, context_budget
+
+        assert completion.explicit_output_cap is context_budget.explicit_output_cap
+        assert context_admission.explicit_output_cap is context_budget.explicit_output_cap
+        assert completion.is_output_cap_value is context_budget.is_output_cap_value
+
+        # And the predicate itself answers the validity question one way.
+        bad_values: tuple[Any, ...] = (None, 0, False, True, -5, "x", 1.5, [], {})
+        for bad in bad_values:
+            assert context_budget.is_output_cap_value(bad) is False, bad
+        for good in (1, 1234, 128_000):
+            assert context_budget.is_output_cap_value(good) is True, good
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"max_tokens": None},
+            {"max_tokens": 0},
+            {"max_tokens": False},
+            {"max_completion_tokens": -5},
+            {"max_output_tokens": "x"},
+        ],
+        ids=_ids,
+    )
+    def test_all_three_readers_agree_an_invalid_value_is_no_cap(
+        self, params: dict[str, Any]
+    ) -> None:
+        """The property stated directly over the three readers, independent of
+        any route: they must return the SAME verdict for the same input.
+
+        This is the assertion that would have caught the original drift without
+        anyone having to think of the Anthropic route, and it is why the fix is
+        a shared parser rather than a second copy of the validity rule.
+        """
+        from aios.harness import context_admission, context_budget
+
+        assert completion._has_explicit_output_cap(dict(params)) is False
+        assert context_budget.output_reservation(dict(params)) == 0
+        assert context_admission._output_reserve(dict(params)) is None
+
+        valid = dict(params)
+        valid[next(iter(params))] = 4321
+        assert completion._has_explicit_output_cap(valid) is True
+        assert context_budget.output_reservation(valid) == 4321
+        assert context_admission._output_reserve(valid) == 4321

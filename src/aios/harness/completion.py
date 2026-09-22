@@ -42,6 +42,13 @@ from aios.harness.context_admission import (
 from aios.harness.context_budget import (
     EXPLICIT_OUTPUT_CAP_KEYS as _EXPLICIT_OUTPUT_CAP_KEYS,
 )
+
+# The two cap parsers are re-exported (``as`` form, which is mypy's explicit
+# re-export under strict) so the drift guard in
+# tests/unit/test_completion_max_tokens.py can assert this module and
+# ``context_admission`` resolve the SAME function objects as ``context_budget``.
+from aios.harness.context_budget import explicit_output_cap as explicit_output_cap
+from aios.harness.context_budget import is_output_cap_value as is_output_cap_value
 from aios.harness.context_budget import output_reservation
 from aios.harness.request_body_budget import (
     body_limits_for_model,
@@ -461,8 +468,37 @@ EXPLICIT_OUTPUT_CAP_KEYS = _EXPLICIT_OUTPUT_CAP_KEYS
 
 
 def _has_explicit_output_cap(params: dict[str, Any]) -> bool:
-    """Whether the caller named an output cap under any accepted spelling."""
-    return any(key in params for key in EXPLICIT_OUTPUT_CAP_KEYS)
+    """Whether the caller named a USABLE output cap under any accepted spelling.
+
+    Delegates to the shared :func:`explicit_output_cap` parser instead of
+    testing key membership. Membership was the same drift one level down:
+    sharing the spelling *list* left each reader free to invent its own answer
+    to "is this value a cap", and this one said yes to anything — while
+    ``output_reservation`` and ``context_admission._output_reserve`` both
+    required a positive int.
+
+    **``{"max_tokens": None}``, ``0``, ``False`` and ``"x"`` were therefore
+    treated as caller caps here and as no cap everywhere else.** The harness
+    ceiling was suppressed, windowing reserved zero, and the request went out
+    either carrying a value the provider rejects (a 400 on ``None``/``"x"``) or
+    letting LiteLLM's own ``DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS = 4096`` fallback
+    stand — which is precisely the silent-truncation defect #2451 exists to
+    close, re-entered through the back door.
+
+    **Chosen semantics for an invalid explicit value: drop it and apply the
+    model-ceiling default**, rather than forwarding it for the provider to
+    reject. Rationale — an invalid cap carries no information about what the
+    caller wanted, so honouring it is impossible either way; the only choice is
+    between a 400 (or a silent 4096) and the documented no-cap behaviour. The
+    no-cap path is what an agent that had simply omitted the key would get, and
+    every other value-reader in the harness already reaches that same verdict.
+    Note the *value* is not stripped from the payload — only ignored here, so a
+    caller's malformed key still surfaces at the provider rather than being
+    silently swallowed, except on the Anthropic fold path where
+    :func:`_normalize_explicit_output_cap` already drops an unusable
+    ``max_output_tokens`` that the route would reject as unknown anyway.
+    """
+    return explicit_output_cap(params) is not None
 
 
 def _uses_anthropic_max_tokens_default(model: str, params: dict[str, Any]) -> bool:
@@ -565,11 +601,39 @@ def _normalize_explicit_output_cap(kwargs: dict[str, Any], model: str) -> None:
     """
     if not _uses_anthropic_max_tokens_default(model, kwargs):
         return
+    # Unusable values under ANY accepted spelling go first, so that the
+    # membership tests below are equivalent to validity tests and the ceiling
+    # injected by :func:`_apply_default_max_tokens` ends up as the ONE cap on
+    # the wire. Without this, ``{"max_completion_tokens": 0}`` would keep its
+    # zero — which LiteLLM maps onto ``max_tokens`` — next to our injected
+    # ceiling: two competing caps, the invalid one winning, exactly the class
+    # of failure the fold exists to prevent. Dropping is LOGGED rather than
+    # silent: swallowing a caller's parameter while reporting success is the
+    # defect shape this module rejects elsewhere (see the
+    # ``litellm_silent_drop_control_overridden`` warning).
+    unusable = {
+        key: kwargs[key]
+        for key in EXPLICIT_OUTPUT_CAP_KEYS
+        if key in kwargs and not is_output_cap_value(kwargs[key])
+    }
+    for key in unusable:
+        kwargs.pop(key)
+    if unusable:
+        log.warning(
+            "explicit_output_cap_unusable",
+            model=model,
+            values=unusable,
+            detail=(
+                "caller named an output cap that is not a positive int; dropped and "
+                "replaced by the model-ceiling default, since an unusable cap would "
+                "otherwise either 400 or leave the provider's own 4096 fallback in place"
+            ),
+        )
     if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
         # An explicit Anthropic-native cap already wins; leave precedence alone.
         return
     value = kwargs.get("max_output_tokens")
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+    if is_output_cap_value(value):
         kwargs["max_tokens"] = kwargs.pop("max_output_tokens")
 
 

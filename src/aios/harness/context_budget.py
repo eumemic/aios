@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 # Served ceilings can differ materially from public model-card context windows.
@@ -22,7 +23,7 @@ def served_ceiling(model: str) -> int | None:
 # at different depths of the import graph:
 #
 #   * ``completion._has_explicit_output_cap`` — decides whether to inject the
-#     harness default (membership only; order is irrelevant there);
+#     harness default;
 #   * ``output_reservation`` below — the windowing reservation;
 #   * ``context_admission._output_reserve`` — the final-wire admission gate.
 #
@@ -32,6 +33,13 @@ def served_ceiling(model: str) -> int | None:
 # enforcement) for having "no enforced output token cap". One tuple, imported
 # everywhere, is what makes that class of drift unrepresentable rather than
 # merely fixed once.
+#
+# Sharing the tuple fixed only half of it. A spelling list has TWO halves — which
+# keys name a cap, and which VALUES count as one — and the second half had
+# drifted exactly the same way: the injection gate accepted bare key presence
+# while both readers here required a positive int. So the three surfaces read one
+# list and still disagreed. :func:`explicit_output_cap` below is the whole
+# answer, list and validity rule together; no caller may re-derive either half.
 EXPLICIT_OUTPUT_CAP_KEYS: tuple[str, ...] = (
     "max_output_tokens",
     "max_tokens",
@@ -39,34 +47,61 @@ EXPLICIT_OUTPUT_CAP_KEYS: tuple[str, ...] = (
 )
 
 
-def explicit_output_cap(params: dict[str, Any] | None) -> int | None:
+def is_output_cap_value(value: Any) -> bool:
+    """THE validity rule for a caller-supplied output cap: a positive ``int``.
+
+    ``bool`` is excluded deliberately — it is an ``int`` subclass in Python, so
+    ``max_tokens=True`` would otherwise parse as a cap of 1 and truncate every
+    reply to a single token.
+
+    Sharing the *list* of spellings was necessary but not sufficient: the three
+    readers also have to agree on what counts as a cap. They did not. This
+    module's readers required a positive int while
+    ``completion._has_explicit_output_cap`` tested mere key presence, so
+    ``{"max_tokens": None}`` / ``0`` / ``False`` / ``"x"`` read as "the caller
+    capped it" on the injection side and "no cap named" on both reservation
+    sides. One predicate, one answer.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def explicit_output_cap(params: Mapping[str, Any] | None) -> int | None:
     """The caller's explicit output cap under any accepted spelling, else ``None``.
+
+    THE one function that answers "what is the caller's cap, if any". Every
+    surface that needs either the value or the yes/no must route through it:
+    the injection gate in ``completion``, :func:`output_reservation` below, and
+    ``context_admission._output_reserve``.
 
     ``None`` means "no cap named", which is a different answer from a cap of 0
     and is why this returns an optional rather than 0 — the admission gate must
     distinguish "uncapped, therefore unverifiable" from "capped at some value".
+    **An invalid value is also ``None``**: a cap the provider cannot honour is
+    not a cap, and reporting it as one is what let a request reserve zero tokens
+    while the provider fell back to its own 4096 default.
     """
     if not params:
         return None
     for key in EXPLICIT_OUTPUT_CAP_KEYS:
         value = params.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if is_output_cap_value(value):
+            assert isinstance(value, int)
             return value
     return None
 
 
-def output_reservation(params: dict[str, Any] | None) -> int:
+def output_reservation(params: Mapping[str, Any] | None) -> int:
     """Return the request's explicit maximum output/reasoning reservation."""
+    cap = explicit_output_cap(params)
+    if cap is not None:
+        return cap
     if not params:
         return 0
-    for key in EXPLICIT_OUTPUT_CAP_KEYS:
-        value = params.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
     thinking = params.get("thinking")
     if isinstance(thinking, dict):
         value = thinking.get("budget_tokens")
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if is_output_cap_value(value):
+            assert isinstance(value, int)
             return value
     return 0
 
