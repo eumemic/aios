@@ -1,6 +1,6 @@
 from typing import Any
 
-from aios.harness.completion import resolved_context_limit, resolved_output_reservation
+from aios.harness.completion import resolve_output_cap
 from aios.harness.context_budget import (
     effective_window_max,
     output_reservation,
@@ -26,8 +26,8 @@ def request_budget(
         model=model,
         window_max=window_max,
         params=params,
-        output_reserve=resolved_output_reservation(model, params),
-        context_limit=resolved_context_limit(model, params),
+        output_reserve=resolve_output_cap(model, params).value,
+        context_limit=resolve_output_cap(model, params).context_limit,
         shrink_factor=shrink_factor,
     )
 
@@ -64,8 +64,8 @@ def test_anthropic_default_is_reserved_from_window() -> None:
     literals here would pin the catalog snapshot instead of the behavior.
     """
     model = "anthropic/claude-opus-4-1"
-    reservation = resolved_output_reservation(model, None)
-    limit = resolved_context_limit(model, None)
+    reservation = resolve_output_cap(model, None).value
+    limit = resolve_output_cap(model, None).context_limit
     assert reservation is not None and reservation > 0
     assert limit is not None and limit > reservation
     # A window_max set AT the provider limit is the case the reservation exists
@@ -87,8 +87,8 @@ def test_anthropic_reservation_never_shrinks_a_window_that_already_fits() -> Non
     step hard-fails outright. Both legs are asserted here.
     """
     model = "anthropic/claude-opus-4-1"
-    reservation = resolved_output_reservation(model, None)
-    limit = resolved_context_limit(model, None)
+    reservation = resolve_output_cap(model, None).value
+    limit = resolve_output_cap(model, None).context_limit
     assert reservation is not None and limit is not None
 
     # (a) Any window that already leaves the reservation room inside the limit
@@ -106,8 +106,8 @@ def test_anthropic_reservation_never_shrinks_a_window_that_already_fits() -> Non
 def test_anthropic_explicit_max_tokens_wins_for_windowing() -> None:
     model = "anthropic/claude-opus-4-1"
     params: dict[str, Any] = {"max_tokens": 1234}
-    limit = resolved_context_limit(model, params)
-    assert resolved_output_reservation(model, params) == 1234
+    limit = resolve_output_cap(model, params).context_limit
+    assert resolve_output_cap(model, params).value == 1234
     assert limit is not None
     assert request_budget(model=model, window_max=limit, params=params) == limit - 1234
 
@@ -116,26 +116,26 @@ def test_anthropic_explicit_max_output_tokens_wins_for_windowing() -> None:
     """Windowing reserves the caller's cap, not the output ceiling."""
     model = "anthropic/claude-opus-4-1"
     params = {"max_output_tokens": 1234}
-    limit = resolved_context_limit(model, params)
-    assert resolved_output_reservation(model, params) == 1234
+    limit = resolve_output_cap(model, params).context_limit
+    assert resolve_output_cap(model, params).value == 1234
     assert limit is not None
     assert request_budget(model=model, window_max=limit, params=params) == limit - 1234
 
 
 def test_openrouter_anthropic_route_has_no_full_ceiling_reservation() -> None:
     model = "openrouter/anthropic/claude-opus-4-1"
-    assert resolved_output_reservation(model, None) == 0
+    assert resolve_output_cap(model, None).value is None
     # No injected cap on this route, so nothing to reserve and no limit to bind
     # against: the budget is the operator's window_max verbatim.
-    assert resolved_context_limit(model, None) is None
+    assert resolve_output_cap(model, None).context_limit is None
     assert request_budget(model=model, window_max=200_000) == 200_000
 
 
 def test_openrouter_provider_override_has_no_full_ceiling_reservation() -> None:
     model = "anthropic/claude-opus-4-1"
     params: dict[str, Any] = {"custom_llm_provider": "openrouter"}
-    assert resolved_output_reservation(model, params) == 0
-    assert resolved_context_limit(model, params) is None
+    assert resolve_output_cap(model, params).value is None
+    assert resolve_output_cap(model, params).context_limit is None
     assert request_budget(model=model, window_max=200_000, params=params) == 200_000
 
 
@@ -156,9 +156,9 @@ def test_nonzero_reservation_without_a_ceiling_preserves_window_max() -> None:
     """
     model = "openrouter/anthropic/claude-opus-4-1"
     params: dict[str, Any] = {"max_tokens": 8_000}
-    reservation = resolved_output_reservation(model, params)
+    reservation = resolve_output_cap(model, params).value
     assert reservation == 8_000
-    assert resolved_context_limit(model, params) is None
+    assert resolve_output_cap(model, params).context_limit is None
     assert served_ceiling(model) is None
     assert request_budget(model=model, window_max=150_000, params=params) == 150_000
     # The shrink ladder still bites on this path (the 2026-07-09 outage class).
@@ -171,8 +171,8 @@ def test_anthropic_overflow_retry_still_shrinks_off_the_reserved_cap() -> None:
     """The shrink ladder composes with the reservation rather than bypassing
     it: a retry is strictly smaller than the already-reserved budget."""
     model = "anthropic/claude-opus-4-1"
-    limit = resolved_context_limit(model, None)
-    reservation = resolved_output_reservation(model, None)
+    limit = resolve_output_cap(model, None).context_limit
+    reservation = resolve_output_cap(model, None).value
     assert limit is not None and reservation is not None
     full = request_budget(model=model, window_max=limit)
     shrunk = request_budget(model=model, window_max=limit, shrink_factor=0.8)
@@ -185,8 +185,8 @@ def test_non_anthropic_routes_keep_window_only_budget() -> None:
     """An OpenAI-shaped route sizes its own output against the remaining
     window, so it resolves no reservation and no limit — unchanged behavior."""
     model = "openai/gpt-4.1"
-    assert resolved_output_reservation(model, None) is None
-    assert resolved_context_limit(model, None) is None
+    assert resolve_output_cap(model, None).value is None
+    assert resolve_output_cap(model, None).context_limit is None
     assert request_budget(model=model, window_max=400_000) == 400_000
 
 

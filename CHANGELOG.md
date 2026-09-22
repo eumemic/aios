@@ -15,23 +15,16 @@
   regresses into OpenAI context-window 400s and OpenRouter credit-affordance
   402s). An agent-supplied `max_tokens`/`max_completion_tokens` still wins
   verbatim, and an unknown ceiling omits the key rather than sending
-  `max_tokens: None`. `max_output_tokens` is honoured as a third caller-cap
-  spelling: on Anthropic-shaped routes it is folded onto `max_tokens` so the
-  caller's value is the single cap on the wire. Merely suppressing the harness
-  default for that spelling was not enough — LiteLLM passes `max_output_tokens`
-  through unrecognised and `AnthropicConfig.get_config()` then fills
-  `max_tokens` from the catalog, so the request arrived with two competing caps
-  and the provider obeyed the larger ceiling. OpenAI-shaped routes (notably
-  `openai/responses/*`), where `max_output_tokens` is the native spelling, keep
-  it verbatim.
-
-- A completion with `finish_reason == "length"` is no longer reported as a clean
-  turn: it is logged as `step.model_output_truncated` (flagging the empty-content
-  case explicitly) and stamped `output_truncated` / `finish_reason` on the
-  `model_request_end` span, so the class is queryable instead of being inferred
-  from `output_tokens` happening to equal the cap. The turn still persists and
-  dispatches — unlike a `content_filter` refusal, truncated output is real,
-  already-paid-for partial work (#2451).
+  `max_tokens: None`. One resolver (`completion.resolve_output_cap`) decides
+  THE cap for every consumer: the first positive-int value in
+  `max_output_tokens > max_tokens > max_completion_tokens` order, else the
+  model-ceiling default. The request then carries exactly that one cap key —
+  `max_tokens` on Anthropic-shaped routes (LiteLLM passes `max_output_tokens`
+  through unrecognised and fills its own `max_tokens`, so a second spelling is a
+  second, competing cap), the winning spelling verbatim elsewhere (notably
+  `openai/responses/*`). Competing or invalid spellings are dropped and logged
+  (`explicit_output_cap_discarded`), and context windowing reserves the same
+  value the wire carries.
 
 - Vision capability now treats a missing LiteLLM catalog entry or absent
   `supports_vision` field as unknown and lets image consumers attempt safe

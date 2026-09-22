@@ -22,9 +22,9 @@ def served_ceiling(model: str) -> int | None:
 # no aios imports, because three separate surfaces must agree on it and they sit
 # at different depths of the import graph:
 #
-#   * ``completion._has_explicit_output_cap`` — decides whether to inject the
-#     harness default;
-#   * ``output_reservation`` below — the windowing reservation;
+#   * ``completion.resolve_output_cap`` — the ONE wire cap, which is also the
+#     windowing reserve ``loop`` hands to :func:`effective_window_max`;
+#   * ``output_reservation`` below — the windowing fallback when no cap resolves;
 #   * ``context_admission._output_reserve`` — the final-wire admission gate.
 #
 # They HAD drifted: ``max_completion_tokens`` was added to the first two and not
@@ -38,7 +38,7 @@ def served_ceiling(model: str) -> int | None:
 # keys name a cap, and which VALUES count as one — and the second half had
 # drifted exactly the same way: the injection gate accepted bare key presence
 # while both readers here required a positive int. So the three surfaces read one
-# list and still disagreed. :func:`explicit_output_cap` below is the whole
+# list and still disagreed. :func:`explicit_output_cap_entry` below is the whole
 # answer, list and validity rule together; no caller may re-derive either half.
 EXPLICIT_OUTPUT_CAP_KEYS: tuple[str, ...] = (
     "max_output_tokens",
@@ -56,8 +56,8 @@ def is_output_cap_value(value: Any) -> bool:
 
     Sharing the *list* of spellings was necessary but not sufficient: the three
     readers also have to agree on what counts as a cap. They did not. This
-    module's readers required a positive int while
-    ``completion._has_explicit_output_cap`` tested mere key presence, so
+    module's readers required a positive int while the (since deleted)
+    injection gate in ``completion`` tested mere key presence, so
     ``{"max_tokens": None}`` / ``0`` / ``False`` / ``"x"`` read as "the caller
     capped it" on the injection side and "no cap named" on both reservation
     sides. One predicate, one answer.
@@ -65,20 +65,14 @@ def is_output_cap_value(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def explicit_output_cap(params: Mapping[str, Any] | None) -> int | None:
-    """The caller's explicit output cap under any accepted spelling, else ``None``.
+def explicit_output_cap_entry(params: Mapping[str, Any] | None) -> tuple[str, int] | None:
+    """The winning ``(spelling, value)`` of the caller's explicit output cap, else ``None``.
 
-    THE one function that answers "what is the caller's cap, if any". Every
-    surface that needs either the value or the yes/no must route through it:
-    the injection gate in ``completion``, :func:`output_reservation` below, and
-    ``context_admission._output_reserve``.
-
-    ``None`` means "no cap named", which is a different answer from a cap of 0
-    and is why this returns an optional rather than 0 — the admission gate must
-    distinguish "uncapped, therefore unverifiable" from "capped at some value".
-    **An invalid value is also ``None``**: a cap the provider cannot honour is
-    not a cap, and reporting it as one is what let a request reserve zero tokens
-    while the provider fell back to its own 4096 default.
+    THE one parser of caller caps: the first key in :data:`EXPLICIT_OUTPUT_CAP_KEYS`
+    (precedence order) whose value passes :func:`is_output_cap_value`. An invalid
+    value is not a cap and never wins, even when it outranks a valid one.
+    ``completion.resolve_output_cap`` needs the spelling (non-Anthropic routes send
+    it verbatim); everyone else wants just the value via :func:`explicit_output_cap`.
     """
     if not params:
         return None
@@ -86,8 +80,22 @@ def explicit_output_cap(params: Mapping[str, Any] | None) -> int | None:
         value = params.get(key)
         if is_output_cap_value(value):
             assert isinstance(value, int)
-            return value
+            return key, value
     return None
+
+
+def explicit_output_cap(params: Mapping[str, Any] | None) -> int | None:
+    """The caller's explicit output cap under any accepted spelling, else ``None``.
+
+    ``None`` means "no cap named" (distinct from a cap of 0): the admission gate
+    must tell "uncapped, therefore unverifiable" from "capped at some value".
+    **An invalid value is also ``None``** — a cap the provider cannot honour is
+    not a cap. Shared by ``context_admission._output_reserve`` and
+    :func:`output_reservation`; ``completion.resolve_output_cap`` uses the same
+    parser via :func:`explicit_output_cap_entry`.
+    """
+    entry = explicit_output_cap_entry(params)
+    return entry[1] if entry is not None else None
 
 
 def output_reservation(params: Mapping[str, Any] | None) -> int:
@@ -136,7 +144,7 @@ def effective_window_max(
 
     ``context_limit`` supplies that ceiling for routes that have no entry in
     :data:`_SERVED_CEILINGS` but whose limit the caller can resolve from model
-    metadata (see :func:`~aios.harness.completion.resolved_context_limit` —
+    metadata (see :func:`~aios.harness.completion.resolve_output_cap` —
     Anthropic-shaped routes, where ``input + max_tokens`` is charged against one
     limit). ``served_ceiling`` still wins when declared: an empirically measured
     served ceiling outranks a published model-card number.

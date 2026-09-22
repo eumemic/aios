@@ -165,7 +165,9 @@ class TestDefaultMaxTokens:
     ) -> None:
         """``max_completion_tokens`` is the same reservation under OpenAI's newer
         spelling (litellm maps it onto ``max_tokens``). Injecting our own
-        ``max_tokens`` alongside it would send two competing caps.
+        ``max_tokens`` alongside it would send two competing caps; on an
+        Anthropic-shaped route the resolver sends it under the native
+        ``max_tokens`` spelling, as the ONE cap.
         """
         captured = await _capture_kwargs(
             monkeypatch,
@@ -175,8 +177,8 @@ class TestDefaultMaxTokens:
             params={"max_completion_tokens": 4321},
         )
 
-        assert "max_tokens" not in captured
-        assert captured["max_completion_tokens"] == 4321
+        assert "max_completion_tokens" not in captured
+        assert captured["max_tokens"] == 4321
 
     @pytest.mark.asyncio
     async def test_explicit_max_output_tokens_is_the_only_cap_and_is_the_callers(
@@ -495,7 +497,7 @@ class TestInvalidExplicitCapFallsBackToTheDefault:
 
     **Documented semantics, asserted here: an unusable explicit value is DROPPED
     and the model-ceiling default applies**, i.e. the request behaves exactly as
-    if the caller had omitted the key. See ``_has_explicit_output_cap`` for why
+    if the caller had omitted the key. See ``resolve_output_cap`` for why
     that beats forwarding it for the provider to reject.
 
     Every case runs on ``anthropic/*`` because that is the only route family the
@@ -634,12 +636,16 @@ class TestInvalidExplicitCapFallsBackToTheDefault:
         """
         from aios.harness import context_admission, context_budget
 
-        assert completion._has_explicit_output_cap(dict(params)) is False
+        assert completion.explicit_output_cap_entry(dict(params)) is None
+        # ...and the resolver therefore falls through to the model ceiling.
+        assert completion.resolve_output_cap(
+            _DIRECT_CLAUDE_MODEL, dict(params)
+        ).value == completion.default_max_output_tokens(_DIRECT_CLAUDE_MODEL)
         assert context_budget.output_reservation(dict(params)) == 0
         assert context_admission._output_reserve(dict(params)) is None
 
         valid = dict(params)
         valid[next(iter(params))] = 4321
-        assert completion._has_explicit_output_cap(valid) is True
+        assert completion.resolve_output_cap(_DIRECT_CLAUDE_MODEL, valid).value == 4321
         assert context_budget.output_reservation(valid) == 4321
         assert context_admission._output_reserve(valid) == 4321

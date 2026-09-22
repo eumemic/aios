@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cache
@@ -39,17 +40,13 @@ from aios.harness.context_admission import (
     admit_context,
     route_attestation,
 )
-from aios.harness.context_budget import (
-    EXPLICIT_OUTPUT_CAP_KEYS as _EXPLICIT_OUTPUT_CAP_KEYS,
-)
 
-# The two cap parsers are re-exported (``as`` form, which is mypy's explicit
-# re-export under strict) so the drift guard in
-# tests/unit/test_completion_max_tokens.py can assert this module and
-# ``context_admission`` resolve the SAME function objects as ``context_budget``.
+# Re-exported (``as`` form, mypy's explicit re-export under strict) so the drift
+# guards can assert this module resolves the SAME objects as ``context_budget``.
+from aios.harness.context_budget import EXPLICIT_OUTPUT_CAP_KEYS as EXPLICIT_OUTPUT_CAP_KEYS
 from aios.harness.context_budget import explicit_output_cap as explicit_output_cap
+from aios.harness.context_budget import explicit_output_cap_entry as explicit_output_cap_entry
 from aios.harness.context_budget import is_output_cap_value as is_output_cap_value
-from aios.harness.context_budget import output_reservation
 from aios.harness.request_body_budget import (
     body_limits_for_model,
     enforce_request_body_budget,
@@ -454,88 +451,21 @@ def default_max_output_tokens(model: str) -> int | None:
     return value
 
 
-# Every spelling a caller may use to name its own output cap. All three must
-# suppress the harness default; see :func:`_normalize_explicit_output_cap` for
-# why recognizing ``max_output_tokens`` here is necessary but NOT sufficient.
-#
-# Re-exported from ``context_budget`` rather than re-listed. This name was a
-# second, independently-maintained copy of the same list, and the copy in
-# ``context_admission`` then fell a spelling behind both — which is the defect
-# this alias removes the possibility of, not just the instance of. Order here is
-# immaterial (membership test only); ``context_budget`` owns the precedence
-# order that the value-returning readers depend on.
-EXPLICIT_OUTPUT_CAP_KEYS = _EXPLICIT_OUTPUT_CAP_KEYS
-
-
-def _has_explicit_output_cap(params: dict[str, Any]) -> bool:
-    """Whether the caller named a USABLE output cap under any accepted spelling.
-
-    Delegates to the shared :func:`explicit_output_cap` parser instead of
-    testing key membership. Membership was the same drift one level down:
-    sharing the spelling *list* left each reader free to invent its own answer
-    to "is this value a cap", and this one said yes to anything — while
-    ``output_reservation`` and ``context_admission._output_reserve`` both
-    required a positive int.
-
-    **``{"max_tokens": None}``, ``0``, ``False`` and ``"x"`` were therefore
-    treated as caller caps here and as no cap everywhere else.** The harness
-    ceiling was suppressed, windowing reserved zero, and the request went out
-    either carrying a value the provider rejects (a 400 on ``None``/``"x"``) or
-    letting LiteLLM's own ``DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS = 4096`` fallback
-    stand — which is precisely the silent-truncation defect #2451 exists to
-    close, re-entered through the back door.
-
-    **Chosen semantics for an invalid explicit value: drop it and apply the
-    model-ceiling default**, rather than forwarding it for the provider to
-    reject. Rationale — an invalid cap carries no information about what the
-    caller wanted, so honouring it is impossible either way; the only choice is
-    between a 400 (or a silent 4096) and the documented no-cap behaviour. The
-    no-cap path is what an agent that had simply omitted the key would get, and
-    every other value-reader in the harness already reaches that same verdict.
-    Note the *value* is not stripped from the payload — only ignored here, so a
-    caller's malformed key still surfaces at the provider rather than being
-    silently swallowed, except on the Anthropic fold path where
-    :func:`_normalize_explicit_output_cap` already drops an unusable
-    ``max_output_tokens`` that the route would reject as unknown anyway.
-    """
-    return explicit_output_cap(params) is not None
-
-
-def _uses_anthropic_max_tokens_default(model: str, params: dict[str, Any]) -> bool:
-    """Whether this route gets the harness's Anthropic output default."""
+def _uses_anthropic_max_tokens_default(model: str, params: Mapping[str, Any]) -> bool:
+    """Whether this route gets the harness's model-ceiling default (see :func:`resolve_output_cap`)."""
     return (
         not (model.startswith("openrouter/") or params.get("custom_llm_provider") == "openrouter")
         and model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC
     )
 
 
-def default_max_tokens_for_request(model: str, params: dict[str, Any] | None) -> int | None:
-    """Return the implicit ``max_tokens`` this request should receive.
-
-    This is also the single source of truth used by context windowing.  A
-    caller cap suppresses the default, and OpenRouter retains provider-default
-    behavior (including when selected through ``custom_llm_provider``).
-    """
-    params = params or {}
-    if _has_explicit_output_cap(params):
-        return None
-    if not _uses_anthropic_max_tokens_default(model, params):
-        return None
-    return default_max_output_tokens(model)
-
-
 @cache
 def model_context_limit(model: str) -> int | None:
     """The model's total context limit, or ``None`` when it can't be established.
 
-    Resolves ``max_input_tokens`` from LiteLLM's bundled capability map — the
-    ceiling an Anthropic-shaped route charges ``input + max_tokens`` against
-    (see :func:`_apply_default_max_tokens`). Same source, same caching rationale
-    and the same **``None``-is-a-real-answer** stance as
-    :func:`default_max_output_tokens`: an unknown model, a missing or
-    non-positive entry, or a raising lookup all collapse to ``None``, and the
-    caller then forms the budget from ``window_max`` alone rather than guessing
-    a limit.
+    Resolves ``max_input_tokens`` from LiteLLM's capability map — the ceiling an
+    Anthropic-shaped route charges ``input + max_tokens`` against. Same
+    **``None``-is-a-real-answer** stance as :func:`default_max_output_tokens`.
     """
     try:
         info = litellm.get_model_info(model)
@@ -547,171 +477,112 @@ def model_context_limit(model: str) -> int | None:
     return value
 
 
-def resolved_context_limit(model: str, params: dict[str, Any] | None) -> int | None:
-    """The ceiling ``input + max_tokens`` is charged against, when known.
+@dataclass(frozen=True, slots=True)
+class OutputCap:
+    """THE answer to "what output cap does this request carry" (#2451 / #2453).
 
-    Gated on exactly the routes this module reserves output for
-    (:func:`_uses_anthropic_max_tokens_default`), because that gate is what
-    makes a *single* limit the right model: on an Anthropic-shaped route the
-    prompt and the ``max_tokens`` reservation are charged against one number, so
-    windowing must hand the windower ``limit - reservation``. Every other route
-    returns ``None`` and keeps its pre-existing ``window_max``-only budget —
-    OpenAI-shaped routes size ``max_tokens`` against the remaining window
-    themselves, and OpenRouter sends no reservation at all.
+    * ``value`` — the one cap the provider will enforce, or ``None`` when the
+      wire carries no cap key at all (provider default applies).
+    * ``key`` — the one spelling ``value`` goes on the wire under.
+    * ``context_limit`` — the limit ``input + value`` is charged against, when
+      this module is the one reserving the output (Anthropic default routes).
     """
-    if not _uses_anthropic_max_tokens_default(model, params or {}):
-        return None
-    return model_context_limit(model)
+
+    value: int | None
+    key: str | None
+    context_limit: int | None
 
 
-def resolved_output_reservation(model: str, params: dict[str, Any] | None) -> int | None:
-    """Return the caller cap or the default that will be injected on the wire."""
+def resolve_output_cap(model: str, params: Mapping[str, Any] | None) -> OutputCap:
+    """The ONE function that decides a request's output cap.
+
+    Every consumer reads this answer and none re-derives it: the wire
+    normalization (:func:`_apply_output_cap`), windowing (``loop`` passes
+    ``value``/``context_limit`` into ``effective_window_max``), and — because
+    the wire then carries exactly one cap key — the admission gate, which parses
+    the final payload with the same :func:`explicit_output_cap`.
+
+    Rules, in order:
+
+    1. **Caller cap.** :func:`explicit_output_cap` — the first *valid* (positive,
+       non-bool ``int``) value in :data:`EXPLICIT_OUTPUT_CAP_KEYS` precedence
+       order (``max_output_tokens`` > ``max_tokens`` > ``max_completion_tokens``).
+       Invalid values are not caps; they never win and never reach the wire.
+    2. **Model-ceiling default** — only on routes :func:`_uses_anthropic_max_tokens_default`
+       admits (Anthropic-shaped, minus OpenRouter's 402-on-reservation), and
+       only when the catalog knows the ceiling. Omitting ``max_tokens`` there
+       means a 4096 provider default, which is the #2451 defect.
+    3. Otherwise no cap.
+
+    Why the default is scoped: on OpenAI-shaped routes omitting ``max_tokens``
+    already means "as much as fits", and reserving the full ceiling there is a
+    regression (prompt + ``max_tokens`` > window is a 400). OpenRouter prices
+    against the *reservation* and 402s a ceiling a key cannot afford, so it keeps
+    its pre-fix provider default — tested on ``custom_llm_provider`` as well as
+    the prefix, because litellm dispatches on the override.
+
+    **Key.** Anthropic-shaped routes (including OpenRouter/Vertex/Bedrock
+    Claude) read ``max_tokens``; litellm passes ``max_output_tokens`` through
+    unrecognised and then fills its own ``max_tokens``, so the cap MUST travel
+    under ``max_tokens`` there. Every other route keeps the winning spelling
+    verbatim (``openai/responses/*`` natively reads ``max_output_tokens``).
+    """
     params = params or {}
-    # Keep the windowing exception scoped exactly like injection.  In
-    # particular, an explicit cap on an unrelated route must retain the
-    # context-budget semantics that predate this Anthropic fix.
-    if model.startswith("openrouter/") or params.get("custom_llm_provider") == "openrouter":
-        return output_reservation(params)
-    if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
-        # Let effective_window_max retain its ordinary served-ceiling logic.
-        return None
-    default = default_max_tokens_for_request(model, params)
-    return default if default is not None else output_reservation(params)
+    anthropic_shaped = model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC
+    defaulting = _uses_anthropic_max_tokens_default(model, params)
+    context_limit = model_context_limit(model) if defaulting else None
+    entry = explicit_output_cap_entry(params)
+    if entry is not None:
+        key, value = entry
+        return OutputCap(
+            value=value,
+            key="max_tokens" if anthropic_shaped else key,
+            context_limit=context_limit,
+        )
+    ceiling = default_max_output_tokens(model) if defaulting else None
+    return OutputCap(
+        value=ceiling,
+        key="max_tokens" if ceiling is not None else None,
+        context_limit=context_limit,
+    )
 
 
-def _normalize_explicit_output_cap(kwargs: dict[str, Any], model: str) -> None:
-    """Fold a caller's ``max_output_tokens`` into the cap Anthropic actually reads.
+def _apply_output_cap(kwargs: dict[str, Any], model: str) -> None:
+    """Rewrite ``kwargs`` so the wire carries exactly :func:`resolve_output_cap`'s answer.
 
-    **Suppressing the harness default is necessary but not sufficient, and this
-    is the half a narrow "add it to the early-return set" fix would miss.**
-    Measured against the pinned litellm 1.96.2 by capturing the real outbound
-    body: ``get_optional_params`` treats ``max_output_tokens`` as an
-    unrecognized passthrough and leaves ``max_tokens`` unset, whereupon
-    ``AnthropicConfig.get_config()`` injects its own ``max_tokens``. So merely
-    declining to inject ours still puts TWO caps on the wire —
-    ``{"max_output_tokens": 1234, "max_tokens": 128000}`` — and the one the
-    provider honors is the ceiling, not the caller's 1234. The caller's cap is
-    silently ignored, which is the very defect this PR exists to remove.
-
-    Renaming it to the spelling the Anthropic route reads makes the caller's
-    value the single effective cap, and drops a key the provider would reject
-    as unknown. Scoped exactly like the default injection: OpenAI-shaped routes
-    (notably ``openai/responses/*``) use ``max_output_tokens`` as their *native*
-    spelling and must keep it verbatim.
+    Every caller spelling is removed and the resolved cap is written back under
+    its one key. Removing is what makes the property hold by construction: the
+    previous per-case fold returned early when ``max_tokens`` /
+    ``max_completion_tokens`` were present and left ``max_output_tokens``
+    alongside them, so the Anthropic request carried competing caps while
+    admission/windowing reserved a different one (#2453 P1). Anything removed
+    that was not the winner is LOGGED — swallowing a caller parameter silently
+    is the defect shape this module rejects elsewhere.
     """
-    if not _uses_anthropic_max_tokens_default(model, kwargs):
-        return
-    # Unusable values under ANY accepted spelling go first, so that the
-    # membership tests below are equivalent to validity tests and the ceiling
-    # injected by :func:`_apply_default_max_tokens` ends up as the ONE cap on
-    # the wire. Without this, ``{"max_completion_tokens": 0}`` would keep its
-    # zero — which LiteLLM maps onto ``max_tokens`` — next to our injected
-    # ceiling: two competing caps, the invalid one winning, exactly the class
-    # of failure the fold exists to prevent. Dropping is LOGGED rather than
-    # silent: swallowing a caller's parameter while reporting success is the
-    # defect shape this module rejects elsewhere (see the
-    # ``litellm_silent_drop_control_overridden`` warning).
-    unusable = {
-        key: kwargs[key]
-        for key in EXPLICIT_OUTPUT_CAP_KEYS
-        if key in kwargs and not is_output_cap_value(kwargs[key])
+    cap = resolve_output_cap(model, kwargs)
+    supplied = {key: kwargs.pop(key) for key in EXPLICIT_OUTPUT_CAP_KEYS if key in kwargs}
+    if cap.key is not None:
+        kwargs[cap.key] = cap.value
+    discarded = {
+        key: value
+        for key, value in supplied.items()
+        if not (is_output_cap_value(value) and value == cap.value)
     }
-    for key in unusable:
-        kwargs.pop(key)
-    if unusable:
+    if discarded:
         log.warning(
-            "explicit_output_cap_unusable",
+            "explicit_output_cap_discarded",
             model=model,
-            values=unusable,
+            discarded=discarded,
+            sent={cap.key: cap.value} if cap.key is not None else {},
             detail=(
-                "caller named an output cap that is not a positive int; dropped and "
-                "replaced by the model-ceiling default, since an unusable cap would "
-                "otherwise either 400 or leave the provider's own 4096 fallback in place"
+                "caller named competing or unusable output caps; exactly one cap is sent "
+                "(first positive int in max_output_tokens > max_tokens > "
+                "max_completion_tokens order, else the model-ceiling default)"
             ),
         )
-    if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
-        # An explicit Anthropic-native cap already wins; leave precedence alone.
-        return
-    value = kwargs.get("max_output_tokens")
-    if is_output_cap_value(value):
-        kwargs["max_tokens"] = kwargs.pop("max_output_tokens")
-
-
-def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
-    """Reserve the model's full output ceiling when the caller named no cap.
-
-    **Omitting ``max_tokens`` does not mean "unlimited" — it means whatever the
-    route's default is, and on Anthropic-shaped routes that default is 4096.**
-    Worse, extended-thinking tokens are drawn from that same budget, so a hard
-    turn can spend all 4096 reasoning and emit EMPTY assistant content with
-    ``finish_reason: "length"``: full cost billed, recorded as a clean turn, no
-    error raised (issue #2451). The failure gets *more* likely the harder the
-    task — exactly inverted from where reliability is wanted.
-
-    Where the 4096 comes from varies by route, which is why the reservation is
-    made explicit here rather than left to the adapter. Measured against the
-    pinned litellm 1.96.2 by capturing the real outbound body:
-
-    * ``anthropic/<model in litellm's catalog>`` — litellm's
-      ``AnthropicConfig.get_config`` already fills in the model's ceiling.
-    * ``anthropic/<model NOT in the catalog>`` and ``vertex_ai/claude-*`` — fall
-      back to ``DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS`` (4096). **A Claude newer
-      than this worker image's catalog snapshot lands here**, so the trap
-      re-arms itself on every model release.
-    * ``openrouter/anthropic/*`` and ``bedrock/anthropic.*`` — send no
-      ``max_tokens`` at all, inheriting the provider's own default.
-
-    **Scoped to Anthropic-shaped routes** (the same gate
-    :func:`model_descriptor` uses for cache markers), **minus OpenRouter**.
-    This is not timidity: on OpenAI-shaped routes omitting ``max_tokens``
-    already means "as much as fits", so there is no defect to fix, while
-    reserving the full ceiling there is an active regression — OpenAI rejects
-    a request whose prompt plus ``max_tokens`` exceeds the context window.
-
-    **OpenRouter is excluded even on its ``anthropic/*`` routes**, which the
-    cache gate does admit. It prices against the *reservation* rather than the
-    usage: a request whose ``max_tokens`` exceeds the key's remaining credit
-    affordance is answered with HTTP 402 (the failure
-    ``evals/wam_fusion/recipes.py`` already caps around), so reserving a
-    32K/64K ceiling would hard-fail accounts that worked fine under the
-    provider default. That route already sent no ``max_tokens`` before this
-    fix, so the exclusion restores its exact prior behavior rather than
-    regressing it — it leaves the silent-truncation risk in place on
-    OpenRouter, which is the better end of the trade against 402-ing every
-    call. The exclusion tests ``custom_llm_provider`` as well as the model
-    prefix: LiteLLM's dispatch honors that override over the model string (see
-    :func:`~aios.services.model_providers._derive_provider`), so
-    ``anthropic/claude-*`` with ``custom_llm_provider="openrouter"`` reaches
-    OpenRouter while :func:`model_descriptor` — which sniffs the bare string —
-    still reads it as direct Anthropic.
-
-    **A caller-supplied value always wins**, including OpenAI's newer
-    ``max_completion_tokens`` spelling — litellm maps that onto ``max_tokens``,
-    so injecting ours alongside it would send two competing caps. Agents
-    carrying an explicit per-model value (the hand-applied mitigation this
-    central fix supersedes) are therefore untouched.
-
-    Note the interaction with context admission: ``max_tokens`` is the
-    ``output_reserve`` half of :func:`~aios.harness.context_admission.admit_context`,
-    and Anthropic charges ``input + max_tokens`` against the context limit. A
-    session long enough that the full reservation no longer fits now surfaces as
-    a loud ``ContextWindowExceededError`` — which the harness already answers
-    with its adaptive shrink ladder (``_apply_context_overflow_retry``) — rather
-    than as a silently truncated reply. A loud, retried failure is the better
-    end of that trade.
-    """
-    ceiling = default_max_tokens_for_request(model, kwargs)
-    if ceiling is None:
-        # ``None`` usually means this request is deliberately excluded or
-        # already capped. Only warn for an eligible uncapped route whose model
-        # metadata genuinely lacks a ceiling.
-        if _has_explicit_output_cap(kwargs) or not _uses_anthropic_max_tokens_default(
-            model, kwargs
-        ):
-            return
-        # Nothing authoritative to reserve. Leave the key absent (never None)
-        # so the provider applies its own default — the pre-fix behavior, which
-        # is the safe floor rather than a guess at someone else's ceiling.
+    if cap.value is None and _uses_anthropic_max_tokens_default(model, kwargs):
+        # Nothing authoritative to reserve. Leave the key absent (never None) so
+        # the provider applies its own default — the pre-fix floor, not a guess.
         log.warning(
             "model_max_output_tokens_unknown",
             model=model,
@@ -721,8 +592,6 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
                 "and long replies may truncate silently"
             ),
         )
-        return
-    kwargs["max_tokens"] = ceiling
 
 
 def _apply_provider_cache_hints(
@@ -1008,12 +877,9 @@ def _build_litellm_kwargs(
         effective_extra["allowed_openai_params"] = sorted(passthrough)
     if effective_extra:
         kwargs.update(effective_extra)
-    # AFTER the caller's extras are merged, so an agent-supplied cap (under any
-    # of EXPLICIT_OUTPUT_CAP_KEYS) is already present and wins outright.
-    # Normalize first: folding ``max_output_tokens`` onto the Anthropic-native
-    # spelling is what makes the caller's value the ONE cap on the wire.
-    _normalize_explicit_output_cap(kwargs, model)
-    _apply_default_max_tokens(kwargs, model)
+    # AFTER the caller's extras are merged, so every caller spelling is visible
+    # to the one resolver; the wire then carries exactly its answer.
+    _apply_output_cap(kwargs, model)
     _apply_provider_cache_hints(kwargs, model, session_id)
     return kwargs
 
