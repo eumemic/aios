@@ -24,10 +24,9 @@ route                            ``max_tokens`` sent when the caller omits it
 ``bedrock/anthropic.*``          absent → the provider's own default
 ===============================  ==========================================
 
-So the fix's job is to make the reservation **explicit and route-independent**
-rather than inherited from a provider default that nothing in aios controls.
-The tests below pin the outbound value on the proxy routes (where the value
-genuinely changes) as well as the precedence and fail-safe rules.
+OpenRouter is deliberately excluded because it validates affordability against
+``max_tokens`` and can reject a full-ceiling reservation with HTTP 402. Direct
+Anthropic and other Anthropic-shaped routes still receive the explicit ceiling.
 """
 
 from __future__ import annotations
@@ -80,46 +79,32 @@ async def _capture_kwargs(
     return captured
 
 
-# A Claude route that is NOT the direct ``anthropic/`` provider, so litellm's own
-# ``AnthropicConfig`` default cannot mask whether aios set the value: before the
-# fix these routes carried no ``max_tokens`` at all.
+# Paired provider routes pin the deliberate difference in defaulting behavior.
 _PROXY_CLAUDE_MODEL = "openrouter/anthropic/claude-opus-4-1"
+_DIRECT_CLAUDE_MODEL = "anthropic/claude-opus-4-1"
 
 
 class TestDefaultMaxTokens:
     @pytest.mark.asyncio
-    async def test_thinking_request_without_max_tokens_gets_model_ceiling(
+    async def test_openrouter_thinking_request_leaves_max_tokens_unset(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """REQUIRED TEST 1 — a thinking-enabled call with no caller ``max_tokens``
-        must carry the model's own ``max_output_tokens``.
-
-        Discriminating: before the fix this route sent **no** ``max_tokens`` key,
-        so the assertion failed outright.
-        """
-        expected = litellm.get_model_info(_PROXY_CLAUDE_MODEL)["max_output_tokens"]
-        assert isinstance(expected, int) and expected > 4096  # fixture sanity
-
         captured = await _capture_kwargs(
             monkeypatch,
             model=_PROXY_CLAUDE_MODEL,
             params={"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}},
         )
 
-        assert captured["max_tokens"] == expected
+        assert "max_tokens" not in captured
 
     @pytest.mark.asyncio
-    async def test_default_applies_without_thinking_too(
+    async def test_direct_anthropic_without_max_tokens_gets_model_ceiling(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Thinking only makes the truncation likelier; it is not the cause.
+        expected = litellm.get_model_info(_DIRECT_CLAUDE_MODEL)["max_output_tokens"]
+        assert isinstance(expected, int) and expected > 4096  # fixture sanity
 
-        A 4096 ceiling silently truncates long non-thinking answers as well, so
-        the reservation is not gated on the thinking param.
-        """
-        expected = litellm.get_model_info(_PROXY_CLAUDE_MODEL)["max_output_tokens"]
-
-        captured = await _capture_kwargs(monkeypatch, model=_PROXY_CLAUDE_MODEL, params=None)
+        captured = await _capture_kwargs(monkeypatch, model=_DIRECT_CLAUDE_MODEL, params=None)
 
         assert captured["max_tokens"] == expected
 
@@ -171,7 +156,7 @@ class TestDefaultMaxTokens:
             monkeypatch,
             # Unmapped but unmistakably Claude-shaped, so the Anthropic gate
             # admits it and only the catalog lookup can fail.
-            model="openrouter/anthropic/claude-not-a-real-model-2451",
+            model="anthropic/claude-not-a-real-model-2451",
             params={"thinking": {"type": "adaptive"}},
         )
 
@@ -192,7 +177,7 @@ class TestDefaultMaxTokens:
         completion.default_max_output_tokens.cache_clear()
 
         captured = await _capture_kwargs(
-            monkeypatch, model=_PROXY_CLAUDE_MODEL, params={"thinking": {"type": "adaptive"}}
+            monkeypatch, model=_DIRECT_CLAUDE_MODEL, params={"thinking": {"type": "adaptive"}}
         )
 
         assert "max_tokens" not in captured
@@ -223,7 +208,7 @@ class TestDefaultMaxTokens:
         the streaming path is covered so the defect cannot survive on one arm.
         """
         kwargs = completion._build_litellm_kwargs(
-            model=_PROXY_CLAUDE_MODEL,
+            model=_DIRECT_CLAUDE_MODEL,
             messages=[{"role": "user", "content": "hi"}],
             tools=None,
             auth=None,
@@ -233,7 +218,8 @@ class TestDefaultMaxTokens:
         )
 
         assert (
-            kwargs["max_tokens"] == litellm.get_model_info(_PROXY_CLAUDE_MODEL)["max_output_tokens"]
+            kwargs["max_tokens"]
+            == litellm.get_model_info(_DIRECT_CLAUDE_MODEL)["max_output_tokens"]
         )
 
 

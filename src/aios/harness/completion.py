@@ -493,6 +493,8 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
     """
     if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
         return
+    if model.startswith("openrouter/"):
+        return
     if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
         return
     ceiling = default_max_output_tokens(model)
