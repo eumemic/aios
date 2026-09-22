@@ -179,6 +179,38 @@ class TestDefaultMaxTokens:
         assert captured["max_completion_tokens"] == 4321
 
     @pytest.mark.asyncio
+    async def test_explicit_max_output_tokens_is_the_only_cap_and_is_the_callers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """REQUIRED TEST — ``max_output_tokens`` suppresses the default too.
+
+        Third accepted spelling of a caller cap. ``output_reservation()``
+        already honored it for windowing, so before this fix the harness
+        reserved 1234 locally while sending the model ceiling on the wire:
+        two competing limits, and the provider obeyed the larger one.
+
+        The assertion is deliberately "exactly ONE output cap, and it is the
+        caller's" rather than "``max_output_tokens`` is preserved verbatim".
+        Preserving it verbatim is what the wire probe shows to be broken: see
+        ``test_real_litellm_path_sends_only_the_callers_max_output_tokens``.
+        """
+        captured = await _capture_kwargs(
+            monkeypatch,
+            # Direct route: the default would otherwise fire here, so a
+            # suppression failure is attributable to this guard alone.
+            model=_DIRECT_CLAUDE_MODEL,
+            params={"max_output_tokens": 1234, "thinking": {"type": "adaptive"}},
+        )
+
+        caps = {
+            key: captured[key]
+            for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+            if key in captured
+        }
+        assert len(caps) == 1, f"expected exactly one output cap, got {caps}"
+        assert next(iter(caps.values())) == 1234
+
+    @pytest.mark.asyncio
     async def test_unknown_model_omits_max_tokens_rather_than_sending_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -287,3 +319,119 @@ class TestDefaultMaxOutputTokensHelper:
             assert completion.default_max_output_tokens("anthropic/claude-sonnet-4-5") is None
         finally:
             completion.default_max_output_tokens.cache_clear()
+
+
+class TestRealLiteLLMWireBody:
+    """Evidence through the REAL litellm path, not a stub that bypasses it.
+
+    ``_capture_kwargs`` monkeypatches ``litellm.acompletion``, so it observes
+    what aios *hands to* litellm — it cannot see the defaulting litellm then
+    applies on top. That blind spot is exactly where this defect lived:
+    ``AnthropicConfig.get_config()`` injects ``max_tokens`` when
+    ``get_optional_params`` left it unset, so a request aios believed carried
+    only the caller's cap arrived at Anthropic carrying the model ceiling too.
+
+    These tests intercept at the httpx transport instead, so the assertion is
+    about the bytes on the wire.
+    """
+
+    @staticmethod
+    def _wire_body(monkeypatch: pytest.MonkeyPatch, *, model: str, params: dict[str, Any]) -> Any:
+        import asyncio
+        import json
+
+        import httpx
+        import litellm.llms.custom_httpx.http_handler as hh
+
+        captured: dict[str, Any] = {}
+
+        class _Transport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                captured["body"] = json.loads(request.content)
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-opus-5-5",
+                        "content": [{"type": "text", "text": "hi"}],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 10, "output_tokens": 2},
+                    },
+                )
+
+        client = httpx.AsyncClient(transport=_Transport())
+        original_init = hh.AsyncHTTPHandler.__init__
+
+        def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
+            original_init(self, *args, **kwargs)
+            self.client = client
+
+        monkeypatch.setattr(hh.AsyncHTTPHandler, "__init__", _patched_init)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy")
+
+        asyncio.get_event_loop_policy()
+        asyncio.run(
+            completion.call_litellm(
+                completion.LlmRequest(
+                    messages=[{"role": "user", "content": "hi"}],
+                    params=dict(params),
+                    session_id="sess_wire",
+                ),
+                model=model,
+            )
+        )
+        return captured["body"]
+
+    def test_real_litellm_path_sends_only_the_callers_max_output_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The caller's cap must be the ONE cap Anthropic actually receives.
+
+        Before the fix this body was
+        ``{"max_output_tokens": 1234, "max_tokens": 128000}`` — litellm passes
+        ``max_output_tokens`` through unrecognized and fills ``max_tokens``
+        from the catalog, so the provider honored 128000 and the caller's 1234
+        did nothing. Suppressing only the *harness* default does not fix that;
+        the spelling has to be folded onto ``max_tokens``.
+        """
+        body = self._wire_body(
+            monkeypatch,
+            model="anthropic/claude-opus-5-5",
+            params={"max_output_tokens": 1234},
+        )
+
+        assert body["max_tokens"] == 1234
+        assert "max_output_tokens" not in body
+
+    def test_real_litellm_path_reserves_the_ceiling_when_no_cap_is_given(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative control: with no caller cap the full ceiling is still sent.
+
+        Without this arm the test above would also pass if the fix wrongly
+        dropped every output cap.
+
+        The expected value is read from the catalog rather than hardcoded on
+        purpose. Under pytest, egress is blocked, so litellm cannot fetch its
+        remote cost map and falls back to the bundled backup — which carries a
+        *different* ceiling for this model than the live map (64000 vs
+        128000). Pinning a literal here would assert the sandbox's catalog
+        snapshot, not the behavior under test, and would break on any litellm
+        bump.
+        """
+        model = "anthropic/claude-opus-5-5"
+        expected = litellm.get_model_info(model)["max_output_tokens"]
+        assert isinstance(expected, int) and expected > 0
+
+        body = self._wire_body(
+            monkeypatch,
+            model=model,
+            params={"thinking": {"type": "adaptive"}},
+        )
+
+        assert body["max_tokens"] == expected
+        # Not the 4096 provider default, which is the defect this PR removes.
+        assert body["max_tokens"] != 4096

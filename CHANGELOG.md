@@ -15,7 +15,15 @@
   regresses into OpenAI context-window 400s and OpenRouter credit-affordance
   402s). An agent-supplied `max_tokens`/`max_completion_tokens` still wins
   verbatim, and an unknown ceiling omits the key rather than sending
-  `max_tokens: None`.
+  `max_tokens: None`. `max_output_tokens` is honoured as a third caller-cap
+  spelling: on Anthropic-shaped routes it is folded onto `max_tokens` so the
+  caller's value is the single cap on the wire. Merely suppressing the harness
+  default for that spelling was not enough — LiteLLM passes `max_output_tokens`
+  through unrecognised and `AnthropicConfig.get_config()` then fills
+  `max_tokens` from the catalog, so the request arrived with two competing caps
+  and the provider obeyed the larger ceiling. OpenAI-shaped routes (notably
+  `openai/responses/*`), where `max_output_tokens` is the native spelling, keep
+  it verbatim.
 
 - A completion with `finish_reason == "length"` is no longer reported as a clean
   turn: it is logged as `step.model_output_truncated` (flagging the empty-content

@@ -30,6 +30,10 @@ def test_unmapped_model_preserves_window_semantics() -> None:
 def test_anthropic_default_is_reserved_from_window() -> None:
     model = "anthropic/claude-opus-4-1"
     reservation = resolved_output_reservation(model, None)
+    # An Anthropic route must resolve a concrete reservation; ``None`` here
+    # would mean the windowing exception silently fell back to window_max-only
+    # semantics, which is the regression this test guards.
+    assert reservation is not None
     assert reservation > 0
     assert (
         effective_window_max(
@@ -45,6 +49,28 @@ def test_anthropic_default_is_reserved_from_window() -> None:
 def test_anthropic_explicit_max_tokens_wins_for_windowing() -> None:
     model = "anthropic/claude-opus-4-1"
     params = {"max_tokens": 1234}
+    assert resolved_output_reservation(model, params) == 1234
+    assert (
+        effective_window_max(
+            model=model,
+            window_max=200_000,
+            params=params,
+            output_reserve=resolved_output_reservation(model, params),
+        )
+        == 198_766
+    )
+
+
+def test_anthropic_explicit_max_output_tokens_wins_for_windowing() -> None:
+    """REQUIRED TEST — windowing reserves the caller's cap, not the ceiling.
+
+    ``output_reservation`` has always recognized ``max_output_tokens``, but
+    ``default_max_tokens_for_request`` did not, so this spelling resolved to
+    the model ceiling (32000 here) instead of the caller's 1234 — reserving
+    ~31k tokens of context that the request was never going to spend.
+    """
+    model = "anthropic/claude-opus-4-1"
+    params = {"max_output_tokens": 1234}
     assert resolved_output_reservation(model, params) == 1234
     assert (
         effective_window_max(

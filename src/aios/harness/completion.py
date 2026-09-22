@@ -444,6 +444,17 @@ def default_max_output_tokens(model: str) -> int | None:
     return value
 
 
+# Every spelling a caller may use to name its own output cap. All three must
+# suppress the harness default; see :func:`_normalize_explicit_output_cap` for
+# why recognizing ``max_output_tokens`` here is necessary but NOT sufficient.
+EXPLICIT_OUTPUT_CAP_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _has_explicit_output_cap(params: dict[str, Any]) -> bool:
+    """Whether the caller named an output cap under any accepted spelling."""
+    return any(key in params for key in EXPLICIT_OUTPUT_CAP_KEYS)
+
+
 def _uses_anthropic_max_tokens_default(model: str, params: dict[str, Any]) -> bool:
     """Whether this route gets the harness's Anthropic output default."""
     return (
@@ -460,7 +471,7 @@ def default_max_tokens_for_request(model: str, params: dict[str, Any] | None) ->
     behavior (including when selected through ``custom_llm_provider``).
     """
     params = params or {}
-    if "max_tokens" in params or "max_completion_tokens" in params:
+    if _has_explicit_output_cap(params):
         return None
     if not _uses_anthropic_max_tokens_default(model, params):
         return None
@@ -480,6 +491,36 @@ def resolved_output_reservation(model: str, params: dict[str, Any] | None) -> in
         return None
     default = default_max_tokens_for_request(model, params)
     return default if default is not None else output_reservation(params)
+
+
+def _normalize_explicit_output_cap(kwargs: dict[str, Any], model: str) -> None:
+    """Fold a caller's ``max_output_tokens`` into the cap Anthropic actually reads.
+
+    **Suppressing the harness default is necessary but not sufficient, and this
+    is the half a narrow "add it to the early-return set" fix would miss.**
+    Measured against the pinned litellm 1.96.2 by capturing the real outbound
+    body: ``get_optional_params`` treats ``max_output_tokens`` as an
+    unrecognized passthrough and leaves ``max_tokens`` unset, whereupon
+    ``AnthropicConfig.get_config()`` injects its own ``max_tokens``. So merely
+    declining to inject ours still puts TWO caps on the wire —
+    ``{"max_output_tokens": 1234, "max_tokens": 128000}`` — and the one the
+    provider honors is the ceiling, not the caller's 1234. The caller's cap is
+    silently ignored, which is the very defect this PR exists to remove.
+
+    Renaming it to the spelling the Anthropic route reads makes the caller's
+    value the single effective cap, and drops a key the provider would reject
+    as unknown. Scoped exactly like the default injection: OpenAI-shaped routes
+    (notably ``openai/responses/*``) use ``max_output_tokens`` as their *native*
+    spelling and must keep it verbatim.
+    """
+    if not _uses_anthropic_max_tokens_default(model, kwargs):
+        return
+    if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
+        # An explicit Anthropic-native cap already wins; leave precedence alone.
+        return
+    value = kwargs.get("max_output_tokens")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        kwargs["max_tokens"] = kwargs.pop("max_output_tokens")
 
 
 def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
@@ -550,10 +591,8 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
         # ``None`` usually means this request is deliberately excluded or
         # already capped. Only warn for an eligible uncapped route whose model
         # metadata genuinely lacks a ceiling.
-        if (
-            "max_tokens" in kwargs
-            or "max_completion_tokens" in kwargs
-            or not _uses_anthropic_max_tokens_default(model, kwargs)
+        if _has_explicit_output_cap(kwargs) or not _uses_anthropic_max_tokens_default(
+            model, kwargs
         ):
             return
         # Nothing authoritative to reserve. Leave the key absent (never None)
@@ -855,8 +894,11 @@ def _build_litellm_kwargs(
         effective_extra["allowed_openai_params"] = sorted(passthrough)
     if effective_extra:
         kwargs.update(effective_extra)
-    # AFTER the caller's extras are merged, so an agent-supplied ``max_tokens``
-    # (or ``max_completion_tokens``) is already present and wins outright.
+    # AFTER the caller's extras are merged, so an agent-supplied cap (under any
+    # of EXPLICIT_OUTPUT_CAP_KEYS) is already present and wins outright.
+    # Normalize first: folding ``max_output_tokens`` onto the Anthropic-native
+    # spelling is what makes the caller's value the ONE cap on the wire.
+    _normalize_explicit_output_cap(kwargs, model)
     _apply_default_max_tokens(kwargs, model)
     _apply_provider_cache_hints(kwargs, model, session_id)
     return kwargs
