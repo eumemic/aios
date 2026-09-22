@@ -468,13 +468,28 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
       ``max_tokens`` at all, inheriting the provider's own default.
 
     **Scoped to Anthropic-shaped routes** (the same gate
-    :func:`model_descriptor` uses for cache markers). This is not timidity: on
-    OpenAI-shaped routes omitting ``max_tokens`` already means "as much as
-    fits", so there is no defect to fix, while reserving the full ceiling there
-    is an active regression — OpenAI rejects a request whose prompt plus
-    ``max_tokens`` exceeds the context window, and OpenRouter answers HTTP 402
-    when ``max_tokens`` exceeds the key's remaining credit affordance (the
-    failure ``evals/wam_fusion/recipes.py`` already caps around).
+    :func:`model_descriptor` uses for cache markers), **minus OpenRouter**.
+    This is not timidity: on OpenAI-shaped routes omitting ``max_tokens``
+    already means "as much as fits", so there is no defect to fix, while
+    reserving the full ceiling there is an active regression — OpenAI rejects
+    a request whose prompt plus ``max_tokens`` exceeds the context window.
+
+    **OpenRouter is excluded even on its ``anthropic/*`` routes**, which the
+    cache gate does admit. It prices against the *reservation* rather than the
+    usage: a request whose ``max_tokens`` exceeds the key's remaining credit
+    affordance is answered with HTTP 402 (the failure
+    ``evals/wam_fusion/recipes.py`` already caps around), so reserving a
+    32K/64K ceiling would hard-fail accounts that worked fine under the
+    provider default. That route already sent no ``max_tokens`` before this
+    fix, so the exclusion restores its exact prior behavior rather than
+    regressing it — it leaves the silent-truncation risk in place on
+    OpenRouter, which is the better end of the trade against 402-ing every
+    call. The exclusion tests ``custom_llm_provider`` as well as the model
+    prefix: LiteLLM's dispatch honors that override over the model string (see
+    :func:`~aios.services.model_providers._derive_provider`), so
+    ``anthropic/claude-*`` with ``custom_llm_provider="openrouter"`` reaches
+    OpenRouter while :func:`model_descriptor` — which sniffs the bare string —
+    still reads it as direct Anthropic.
 
     **A caller-supplied value always wins**, including OpenAI's newer
     ``max_completion_tokens`` spelling — litellm maps that onto ``max_tokens``,
@@ -493,7 +508,11 @@ def _apply_default_max_tokens(kwargs: dict[str, Any], model: str) -> None:
     """
     if "max_tokens" in kwargs or "max_completion_tokens" in kwargs:
         return
-    if model.startswith("openrouter/"):
+    # Anthropic-shaped for caching, but not for this reservation — see the
+    # OpenRouter paragraph above. ``custom_llm_provider`` is already merged
+    # into ``kwargs`` from the caller's ``litellm_extra`` by this point, and it
+    # outranks the model prefix in LiteLLM's own dispatch.
+    if model.startswith("openrouter/") or kwargs.get("custom_llm_provider") == "openrouter":
         return
     if model_descriptor(model).cache_channel is not CacheChannel.ANTHROPIC:
         return

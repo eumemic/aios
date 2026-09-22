@@ -27,6 +27,13 @@ route                            ``max_tokens`` sent when the caller omits it
 OpenRouter is deliberately excluded because it validates affordability against
 ``max_tokens`` and can reject a full-ceiling reservation with HTTP 402. Direct
 Anthropic and other Anthropic-shaped routes still receive the explicit ceiling.
+The exclusion is keyed on ``custom_llm_provider`` as well as the model prefix,
+because LiteLLM dispatches on the override when one is present.
+
+Note which route each test runs on: the precedence rules (a caller value wins)
+are only observable on a route the default would otherwise fire on, so they are
+pinned against ``anthropic/*``. Asserting them on ``openrouter/*`` would pass
+vacuously — the OpenRouter early return alone satisfies them.
 """
 
 from __future__ import annotations
@@ -109,6 +116,31 @@ class TestDefaultMaxTokens:
         assert captured["max_tokens"] == expected
 
     @pytest.mark.asyncio
+    async def test_openrouter_via_custom_llm_provider_override_is_also_excluded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exclusion must follow LiteLLM's dispatch, not just the prefix.
+
+        ``custom_llm_provider`` outranks the model string when LiteLLM picks a
+        provider, so this call reaches OpenRouter — and would 402 — while
+        ``model_descriptor`` reads the bare string as direct Anthropic and the
+        prefix test alone does not fire.
+        """
+        assert litellm.get_llm_provider(_DIRECT_CLAUDE_MODEL)[1] == "anthropic"
+        assert (
+            litellm.get_llm_provider(_DIRECT_CLAUDE_MODEL, custom_llm_provider="openrouter")[1]
+            == "openrouter"
+        )
+
+        captured = await _capture_kwargs(
+            monkeypatch,
+            model=_DIRECT_CLAUDE_MODEL,
+            params={"custom_llm_provider": "openrouter"},
+        )
+
+        assert "max_tokens" not in captured
+
+    @pytest.mark.asyncio
     async def test_explicit_caller_max_tokens_wins_verbatim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -119,7 +151,9 @@ class TestDefaultMaxTokens:
         """
         captured = await _capture_kwargs(
             monkeypatch,
-            model=_PROXY_CLAUDE_MODEL,
+            # Direct, not OpenRouter: this must fail if the precedence guard is
+            # removed, and on OpenRouter the exclusion would mask that.
+            model=_DIRECT_CLAUDE_MODEL,
             params={"max_tokens": 1234, "thinking": {"type": "adaptive"}},
         )
 
@@ -135,7 +169,9 @@ class TestDefaultMaxTokens:
         """
         captured = await _capture_kwargs(
             monkeypatch,
-            model=_PROXY_CLAUDE_MODEL,
+            # Direct, so the absence below is attributable to this guard rather
+            # than to the OpenRouter exclusion.
+            model=_DIRECT_CLAUDE_MODEL,
             params={"max_completion_tokens": 4321},
         )
 
