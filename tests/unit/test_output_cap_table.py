@@ -79,6 +79,35 @@ _ROUTES: list[tuple[str, str, dict[str, Any], bool, int | None]] = [
         None,
     ),
     ("vertex-claude", "vertex_ai/claude-opus-4-1", {}, True, _ceiling("vertex_ai/claude-opus-4-1")),
+    # ``custom_llm_provider`` overrides the provider, so route shape follows the
+    # override (``litellm.get_llm_provider(model, custom_llm_provider=...)``, the
+    # credential resolver's sniff), not the bare model string.
+    #
+    # An alias litellm can't place from the string alone, sent to Anthropic via
+    # the override: litellm 1.96.2 dispatches this to its Anthropic handler, so
+    # an omitted cap is the 4096 trap and ``max_output_tokens`` must become
+    # ``max_tokens``. Unmapped there, so no ceiling default.
+    (
+        "alias-via-anthropic-override",
+        "opus-alias-2451",
+        {"custom_llm_provider": "anthropic"},
+        True,
+        None,
+    ),
+    # ``gpt-4`` + ``anthropic``: classified Anthropic-shaped, unmapped (NOT
+    # OpenAI's gpt-4 catalog entry). NOTE litellm 1.96.2 ``completion()`` checks
+    # ``model in open_ai_chat_completion_models`` BEFORE the provider branch and
+    # actually sends this to its OpenAI handler; ``max_tokens`` is valid there
+    # too and no default is injected, so the outcome is safe either way.
+    ("gpt4-via-anthropic-override", "gpt-4", {"custom_llm_provider": "anthropic"}, True, None),
+    # ``claude-*`` dispatched to OpenAI is OpenAI-shaped: no ceiling default.
+    (
+        "claude-via-openai-override",
+        "claude-opus-4-1",
+        {"custom_llm_provider": "openai"},
+        False,
+        None,
+    ),
 ]
 
 
@@ -197,3 +226,23 @@ def test_real_anthropic_wire_body_carries_only_the_resolved_cap(
         monkeypatch, model="anthropic/claude-opus-4-1", params=params
     )
     assert {k: body[k] for k in _CAP_KEYS if k in body} == {"max_tokens": expected}
+
+
+def test_real_wire_body_honours_the_custom_llm_provider_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model string litellm can't place, sent to Anthropic via ``custom_llm_provider``.
+
+    Classified from the bare string, the caller's ``max_output_tokens`` passed
+    through verbatim and litellm added its own ``max_tokens: 4096`` — two
+    competing caps, the caller's ignored. Classified from the dispatch provider,
+    the one cap travels as ``max_tokens``.
+    """
+    from tests.unit.test_completion_max_tokens import TestRealLiteLLMWireBody
+
+    body = TestRealLiteLLMWireBody._wire_body(
+        monkeypatch,
+        model="opus-alias-2451",
+        params={"custom_llm_provider": "anthropic", "max_output_tokens": 1111},
+    )
+    assert {k: body[k] for k in _CAP_KEYS if k in body} == {"max_tokens": 1111}

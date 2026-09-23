@@ -358,8 +358,19 @@ class ModelDescriptor:
     supports_thinking: bool
 
 
+def dispatch_override(params: Mapping[str, Any] | None) -> str | None:
+    """The ``custom_llm_provider`` LiteLLM will dispatch on, normalized like the credential resolver.
+
+    Only a non-empty ``str`` is an override (``services.model_providers`` applies
+    the same rule before its ``get_llm_provider`` sniff); anything else is
+    ``None`` so the ``@cache``'d lookups below keep hashable keys.
+    """
+    raw = (params or {}).get("custom_llm_provider")
+    return raw if isinstance(raw, str) and raw else None
+
+
 @cache
-def model_descriptor(model: str) -> ModelDescriptor:
+def model_descriptor(model: str, custom_llm_provider: str | None = None) -> ModelDescriptor:
     """Resolve the provider-quirk verdicts for ``model``.
 
     One ``litellm.get_llm_provider`` sniff feeds both projections. Pure
@@ -391,6 +402,12 @@ def model_descriptor(model: str) -> ModelDescriptor:
       silently dropped by OpenRouter for non-OpenAI backends and could
       trip parameter validation on some adapter versions.
 
+    **Dispatch override.** ``custom_llm_provider`` is passed to
+    ``get_llm_provider`` exactly as LiteLLM's own dispatch (and the credential
+    resolver) does, so ``model="gpt-4", custom_llm_provider="anthropic"``
+    classifies as Anthropic and ``model="claude-*", custom_llm_provider="openai"``
+    as OpenAI. Callers without the agent's params pass ``None`` (bare string).
+
     Unknown model strings (``get_llm_provider`` raises) collapse to a
     safe ``NONE`` — the no-op posture for both cache gates.
 
@@ -405,7 +422,9 @@ def model_descriptor(model: str) -> ModelDescriptor:
     ``False`` when it can't tell).
     """
     try:
-        model_name, provider, _, _ = litellm.get_llm_provider(model)
+        model_name, provider, _, _ = litellm.get_llm_provider(
+            model, custom_llm_provider=custom_llm_provider
+        )
     except Exception:
         provider, model_name = "", model
     lower = (model_name or model).lower()
@@ -424,7 +443,7 @@ def model_descriptor(model: str) -> ModelDescriptor:
 
 
 @cache
-def default_max_output_tokens(model: str) -> int | None:
+def default_max_output_tokens(model: str, custom_llm_provider: str | None = None) -> int | None:
     """The model's own output ceiling, or ``None`` when it can't be established.
 
     Resolves ``max_output_tokens`` from LiteLLM's bundled capability map. Pure
@@ -440,7 +459,7 @@ def default_max_output_tokens(model: str) -> int | None:
     ``None`` into the request body, turning a silent truncation into a 400.
     """
     try:
-        info = litellm.get_model_info(model)
+        info = litellm.get_model_info(model, custom_llm_provider=custom_llm_provider)
     except Exception:
         # ``get_model_info`` raises a mix of BadRequestError (unknown model)
         # and bare Exception depending on the miss; the verdict is the same.
@@ -453,14 +472,15 @@ def default_max_output_tokens(model: str) -> int | None:
 
 def _uses_anthropic_max_tokens_default(model: str, params: Mapping[str, Any]) -> bool:
     """Whether this route gets the harness's model-ceiling default (see :func:`resolve_output_cap`)."""
+    override = dispatch_override(params)
     return (
-        not (model.startswith("openrouter/") or params.get("custom_llm_provider") == "openrouter")
-        and model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC
+        not (model.startswith("openrouter/") or override == "openrouter")
+        and model_descriptor(model, override).cache_channel is CacheChannel.ANTHROPIC
     )
 
 
 @cache
-def model_context_limit(model: str) -> int | None:
+def model_context_limit(model: str, custom_llm_provider: str | None = None) -> int | None:
     """The model's total context limit, or ``None`` when it can't be established.
 
     Resolves ``max_input_tokens`` from LiteLLM's capability map — the ceiling an
@@ -468,7 +488,7 @@ def model_context_limit(model: str) -> int | None:
     **``None``-is-a-real-answer** stance as :func:`default_max_output_tokens`.
     """
     try:
-        info = litellm.get_model_info(model)
+        info = litellm.get_model_info(model, custom_llm_provider=custom_llm_provider)
     except Exception:
         return None
     value = info.get("max_input_tokens") if info else None
@@ -528,9 +548,12 @@ def resolve_output_cap(model: str, params: Mapping[str, Any] | None) -> OutputCa
     verbatim (``openai/responses/*`` natively reads ``max_output_tokens``).
     """
     params = params or {}
-    anthropic_shaped = model_descriptor(model).cache_channel is CacheChannel.ANTHROPIC
+    # Route shape comes from the provider LiteLLM will DISPATCH to, i.e. with
+    # ``custom_llm_provider`` applied — not from the bare model string.
+    override = dispatch_override(params)
+    anthropic_shaped = model_descriptor(model, override).cache_channel is CacheChannel.ANTHROPIC
     defaulting = _uses_anthropic_max_tokens_default(model, params)
-    context_limit = model_context_limit(model) if defaulting else None
+    context_limit = model_context_limit(model, override) if defaulting else None
     entry = explicit_output_cap_entry(params)
     if entry is not None:
         key, value = entry
@@ -539,7 +562,7 @@ def resolve_output_cap(model: str, params: Mapping[str, Any] | None) -> OutputCa
             key="max_tokens" if anthropic_shaped else key,
             context_limit=context_limit,
         )
-    ceiling = default_max_output_tokens(model) if defaulting else None
+    ceiling = default_max_output_tokens(model, override) if defaulting else None
     return OutputCap(
         value=ceiling,
         key="max_tokens" if ceiling is not None else None,
