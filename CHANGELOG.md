@@ -16,9 +16,13 @@
   `create_run` under the same per-account advisory lock as the launcher and
   account fan-out caps, so concurrent fires of one trigger cannot both pass.
   The field only restricts: it never lifts those caps. It is available on the
-  HTTP API and on the `trigger_create`/`trigger_update` tools. On update it is
-  REQUIRED in a workflow action (Replace semantics; send explicit `null` to
-  uncap).
+  HTTP API and on the `trigger_create`/`trigger_update` tools.
+  **BREAKING for update callers:** `WorkflowActionReplace` now REQUIRES
+  `max_outstanding_runs` (Replace semantics; send explicit `null` for
+  uncapped). A PUT of a workflow action without the key now fails with 422.
+  Affected callers: the CLI `sessions triggers update`, `trigger_update` tool
+  calls, and SDK builds generated before this change. Add
+  `"max_outstanding_runs": null` to keep the old uncapped behavior.
 
 - **Model calls now reserve the model's own output ceiling instead of inheriting
   a provider default that silently truncates replies (#2451).** aios never set

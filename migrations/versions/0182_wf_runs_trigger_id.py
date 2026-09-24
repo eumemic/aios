@@ -39,6 +39,13 @@ INDEX_DEFINITION = (
 
 
 def upgrade() -> None:
+    # The column add is metadata-only but still takes ACCESS EXCLUSIVE on
+    # wf_runs. Behind a long transaction it would queue that lock and block
+    # every run INSERT behind it; bound the wait (0169's mechanism) so the
+    # deploy fails fast and rolls back instead. SET LOCAL ends at the commit
+    # that opens the autocommit block, so the concurrent index build is not
+    # bounded by it.
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute("ALTER TABLE wf_runs ADD COLUMN IF NOT EXISTS trigger_id text")
     with op.get_context().autocommit_block():
         # An interrupted concurrent build can leave an invalid same-named index.

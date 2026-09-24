@@ -44,6 +44,7 @@ def test_revision_chain() -> None:
 def test_upgrade_adds_nullable_column_then_builds_index_concurrently() -> None:
     statements, context = _capture("upgrade")
     assert statements == [
+        "SET LOCAL lock_timeout = '5s'",
         "ALTER TABLE wf_runs ADD COLUMN IF NOT EXISTS trigger_id text",
         "DROP INDEX CONCURRENTLY IF EXISTS wf_runs_trigger_active_idx",
         "CREATE INDEX CONCURRENTLY wf_runs_trigger_active_idx ON wf_runs (trigger_id) "
@@ -51,6 +52,34 @@ def test_upgrade_adds_nullable_column_then_builds_index_concurrently() -> None:
         "AND status IN ('pending','running','suspended')",
     ]
     context.autocommit_block.assert_called_once_with()
+
+
+def test_upgrade_column_add_fails_fast_on_lock_contention() -> None:
+    """The ACCESS EXCLUSIVE ``ADD COLUMN`` must run under a transaction-scoped
+    ``lock_timeout`` (0169's mechanism): behind a long transaction on ``wf_runs``
+    the deploy fails fast instead of queueing a lock every run INSERT waits on.
+    ``SET LOCAL`` ends at the commit that opens the autocommit block, so the
+    concurrent index build is never bounded by it.
+    """
+    migration = _load()
+    events: list[str] = []
+    context = Mock()
+
+    class _Block:
+        def __enter__(self) -> None:
+            events.append("<autocommit>")
+
+        def __exit__(self, *exc: object) -> None:
+            events.append("</autocommit>")
+
+    context.autocommit_block.return_value = _Block()
+    migration.op.get_context = Mock(return_value=context)
+    migration.op.execute = events.append
+    migration.upgrade()
+    set_at = events.index("SET LOCAL lock_timeout = '5s'")
+    add_at = events.index("ALTER TABLE wf_runs ADD COLUMN IF NOT EXISTS trigger_id text")
+    assert set_at < add_at < events.index("<autocommit>")
+    assert not any("lock_timeout" in e for e in events[events.index("<autocommit>") :])
 
 
 def test_downgrade_drops_index_then_column() -> None:
