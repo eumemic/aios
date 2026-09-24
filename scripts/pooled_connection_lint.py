@@ -43,6 +43,7 @@ _DB_HELPER_SYMBOLS = frozenset(
     {
         "_queries.list_session_memory_store_echoes",
         "append_event",
+        "runs_budget_spent_microusd",
         "accounting_queries.ranked_consumers",
         "accounting_queries.usage_for_node",
         "accounting_queries.usage_for_nodes",
@@ -400,7 +401,9 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.pin_call_started_timeout",
         "wf_queries.read_run_signal",
         "wf_queries.resolve_run_error",
+        "wf_queries.run_budget_spent_microusd",
         "wf_queries.run_children_usage",
+        "wf_queries.runs_budget_spent_microusd",
         "wf_queries.runs_children_usage",
         "wf_queries.set_run_status",
         "wf_queries.set_run_terminal",

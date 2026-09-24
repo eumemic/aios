@@ -46,6 +46,21 @@ async def work(pool, run):
     )
 
 
+def test_allows_run_budget_subtree_helper_receiving_the_held_connection() -> None:
+    # #2446 b: the run budget reads the subtree rollup on the SAME conn it is
+    # handed (runs_budget_spent_microusd -> accounting usage_for_nodes ->
+    # conn.fetch), so it is a DB surface, not a foreign await.
+    assert not _messages(
+        """
+async def work(pool, run_id):
+    async with pool.acquire() as conn:
+        await wf_queries.run_budget_spent_microusd(conn, run_id, account_id="acc")
+    async with conn.transaction():
+        await runs_budget_spent_microusd(conn, [run_id], account_id="acc")
+"""
+    )
+
+
 def test_allows_database_stats_helpers_receiving_the_held_connection() -> None:
     assert not _messages(
         """

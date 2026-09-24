@@ -1435,11 +1435,22 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
     for row in candidates:
         by_account.setdefault(row["account_id"], []).append(row)
     over: list[str] = []
-    for account_id, rows in by_account.items():
-        spent = await runs_budget_spent_microusd(
-            conn, [r["id"] for r in rows], account_id=account_id
-        )
-        over.extend(r["id"] for r in rows if spent[r["id"]] >= r["budget_total_microusd"])
+    if not by_account:
+        return over
+    # JIT off for the batched rollup ONLY. Prod runs jit=on, jit_above_cost=100000.
+    # The subtree statement's planner cost crosses that at ~10 roots (EXPLAIN on
+    # PG 18 at 50k runs: 15k @1 root, 482k @10, 1.09M @100, 3.75M @500) because
+    # PostgreSQL over-estimates the recursive walk. JIT then compiles ~70 functions
+    # for ~55ms @10 roots and ~1s @100+, against 1-40ms of real execution. The
+    # step's point read (1 root, ~15k) stays under the threshold and is untouched.
+    # ``SET LOCAL`` dies with this transaction, so the pooled conn is not altered.
+    async with conn.transaction():
+        await conn.execute("SET LOCAL jit = off")
+        for account_id, rows in by_account.items():
+            spent = await runs_budget_spent_microusd(
+                conn, [r["id"] for r in rows], account_id=account_id
+            )
+            over.extend(r["id"] for r in rows if spent[r["id"]] >= r["budget_total_microusd"])
     return over
 
 

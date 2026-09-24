@@ -6549,3 +6549,33 @@ async def test_sweep_never_selects_an_unbudgeted_run(
         )
     assert run is not None and run.status == "suspended"
     assert resp is None
+
+
+async def test_sweep_budget_rollup_runs_with_jit_off_scoped_to_its_transaction(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The sweep's batched budget rollup disables JIT for itself only (#2446 c).
+
+    Prod runs jit=on with jit_above_cost=100000; the batched subtree rollup's plan
+    cost passes that at ~10 roots (measured 481k) and JIT compile then costs
+    ~55ms at 10 roots and ~1s at 100+, against ~1-40ms of execution. The
+    ``SET LOCAL`` must be in force while the rollup runs and must NOT leak onto
+    the pooled connection afterwards."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(run_id)  # spawn + suspend: a sweep budget candidate
+    seen: list[str] = []
+    real = wf_queries.runs_budget_spent_microusd
+
+    async def spy(conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str):
+        seen.append(await conn.fetchval("SHOW jit"))
+        return await real(conn, run_ids, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        await conn.execute("SET jit = on")
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", spy):
+            await wf_queries.list_parked_run_ids_over_budget(conn)
+        after = await conn.fetchval("SHOW jit")
+        await conn.execute("RESET jit")
+    assert seen == ["off"]  # the rollup ran with JIT disabled
+    assert after == "on"  # ...and the setting died with its transaction
