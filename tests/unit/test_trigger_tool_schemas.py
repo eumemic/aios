@@ -50,6 +50,8 @@ class TestCreateSchemaBranches:
         branch = _branch(TRIGGER_CREATE_PARAMETERS_SCHEMA, "action", "workflow")
         assert branch["required"] == ["kind", "workflow_id"]
         assert branch["properties"]["workflow_version"]["type"] == ["integer", "null"]
+        cap = branch["properties"]["max_outstanding_runs"]
+        assert (cap["type"], cap["minimum"], cap["default"]) == (["integer", "null"], 1, None)
         assert "environment_id" not in branch["properties"]
         assert branch["additionalProperties"] is False
         # input_template is deliberately schemaless (any JSON type, incl. null).
@@ -107,7 +109,10 @@ class TestUpdateSchemaReplaceSemantics:
             "version",
             "input_template",
             "vault_ids",
+            "max_outstanding_runs",
         ]
+        assert branch["properties"]["max_outstanding_runs"]["type"] == ["integer", "null"]
+        assert "default" not in branch["properties"]["max_outstanding_runs"]
         assert "environment_id" not in branch["properties"]
 
     def test_wake_session_branch(self) -> None:

@@ -334,6 +334,13 @@ class WorkflowAction(BaseModel):
     version: int | None = Field(default=None, ge=1)
     input_template: Any = None  # arbitrary JSON, any type; null = no payload
     vault_ids: list[str] = Field(default_factory=list)
+    # Opt-in per-trigger back-pressure (#2446 d): at most this many of THIS
+    # trigger's launched runs may be outstanding (pending/running/suspended).
+    # A fire at the cap is recorded ``skipped`` (never an error, so it never
+    # advances ``consecutive_failures``). ``None`` = uncapped (prior behaviour).
+    # Agent-reachable, and it can only RESTRICT: it never lifts the launcher /
+    # account caps ``create_run`` enforces independently.
+    max_outstanding_runs: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _reject_version_and_assertion(self) -> WorkflowAction:
@@ -361,6 +368,7 @@ class WorkflowActionReplace(WorkflowAction):
     version: int | None = Field(ge=1)
     input_template: Any
     vault_ids: list[str]
+    max_outstanding_runs: int | None = Field(ge=1)
 
 
 TriggerAction = Annotated[

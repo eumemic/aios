@@ -128,6 +128,7 @@ class TestWorkflowAction:
             "version": None,
             "input_template": None,
             "vault_ids": [],
+            "max_outstanding_runs": None,
         }
 
     def test_no_environment_id_field(self) -> None:
@@ -150,6 +151,7 @@ class TestWorkflowAction:
                     "version": None,
                     "input_template": None,
                     "vault_ids": [],
+                    "max_outstanding_runs": None,
                 }
             }
         )
@@ -200,6 +202,58 @@ class TestWorkflowAction:
             )
 
 
+class TestMaxOutstandingRuns:
+    """#2446 (d): the opt-in per-trigger outstanding-runs cap."""
+
+    def test_defaults_to_uncapped(self) -> None:
+        spec = _create()
+        assert isinstance(spec.action, WorkflowAction)
+        assert spec.action.max_outstanding_runs is None
+
+    def test_positive_int_accepted(self) -> None:
+        spec = _create(
+            action={"kind": "workflow", "workflow_id": "wf_t", "max_outstanding_runs": 1}
+        )
+        assert isinstance(spec.action, WorkflowAction)
+        assert spec.action.max_outstanding_runs == 1
+
+    @pytest.mark.parametrize("bad", [0, -1, 1.5, "x"])
+    def test_non_positive_or_non_int_rejected(self, bad: object) -> None:
+        with pytest.raises(ValidationError):
+            _create(action={"kind": "workflow", "workflow_id": "wf_t", "max_outstanding_runs": bad})
+
+    def test_update_replace_requires_it(self) -> None:
+        """Replace semantics: omitting the cap on UPDATE 422s rather than
+        silently lifting a stored cap."""
+        with pytest.raises(ValidationError):
+            TriggerUpdate.model_validate(
+                {
+                    "action": {
+                        "kind": "workflow",
+                        "workflow_id": "wf_t",
+                        "workflow_version": None,
+                        "version": None,
+                        "input_template": None,
+                        "vault_ids": [],
+                    }
+                }
+            )
+
+    def test_read_adapter_accepts_rows_persisted_before_the_field(self) -> None:
+        """Stored actions written before #2446 lack the key; they read as uncapped."""
+        action = TRIGGER_ACTION_ADAPTER.validate_python(
+            {
+                "kind": "workflow",
+                "workflow_id": "wf_t",
+                "workflow_version": None,
+                "input_template": None,
+                "vault_ids": [],
+            }
+        )
+        assert isinstance(action, WorkflowAction)
+        assert action.max_outstanding_runs is None
+
+
 class TestInputTemplateWriteBound:
     def test_oversize_template_422s_on_write_models(self) -> None:
         big = {"blob": "x" * MAX_INPUT_TEMPLATE_BYTES}
@@ -215,6 +269,7 @@ class TestInputTemplateWriteBound:
                         "version": None,
                         "input_template": big,
                         "vault_ids": [],
+                        "max_outstanding_runs": None,
                     }
                 }
             )

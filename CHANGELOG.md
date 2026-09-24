@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Workflow-action triggers can cap their own outstanding runs (#2446, part d).**
+  New opt-in `WorkflowAction.max_outstanding_runs` (`int >= 1`, default `null` =
+  uncapped, same as before). A trigger's `running_since` lease clears when
+  `create_run` returns, not when the launched run finishes. So a slow or
+  suspended run never stopped the next fire from stacking a second run on top of
+  it. With the cap set, a fire where this trigger already has that many
+  `pending`/`running`/`suspended` runs launches nothing and records `skipped`
+  (reason `outstanding_runs_cap: ...`). That is back-pressure, not an error:
+  `consecutive_failures` does not move, so a healthy capped lane is never
+  auto-disabled. Runs now record their launching trigger (`wf_runs.trigger_id`,
+  migration 0182, with a partial active-runs index). The count happens inside
+  `create_run` under the same per-account advisory lock as the launcher and
+  account fan-out caps, so concurrent fires of one trigger cannot both pass.
+  The field only restricts: it never lifts those caps. It is available on the
+  HTTP API and on the `trigger_create`/`trigger_update` tools. On update it is
+  REQUIRED in a workflow action (Replace semantics; send explicit `null` to
+  uncap).
+
 - **Model calls now reserve the model's own output ceiling instead of inheriting
   a provider default that silently truncates replies (#2451).** aios never set
   `max_tokens`, and omitting it does NOT mean "unlimited" — on Anthropic-shaped

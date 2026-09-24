@@ -691,6 +691,7 @@ async def insert_wf_run(
     depth: int,
     workspace: str = "fresh",
     workspace_path: str | None = None,
+    trigger_id: str | None = None,
 ) -> WfRun:
     """Insert a fresh ``pending`` run that snapshots ``script`` (+ ``script_sha``) and the
     declared tool surface (``tools``/``mcp_servers``/``http_servers``) — pinned at launch.
@@ -711,7 +712,11 @@ async def insert_wf_run(
     ``run_id`` (#1129) pins the id to a deterministic value — the ``invoke_workflow``
     sub-run spawn's replay key. The insert is ``ON CONFLICT (id) DO NOTHING``, so a
     replay re-attaches the existing row (re-fetched here) instead of erroring; the
-    default (``None``) mints a fresh ULID for which the conflict can never fire."""
+    default (``None``) mints a fresh ULID for which the conflict can never fire.
+
+    ``trigger_id`` (#2446 d) records the trigger whose fire launched this run —
+    the durable link :func:`count_active_runs` counts for the opt-in
+    ``max_outstanding_runs`` cap. ``None`` for every non-trigger launch."""
     new_id = run_id if run_id is not None else make_id(WORKFLOW_RUN)
     creator_session_id: str | None = None
     creator_run_id: str | None = None
@@ -736,10 +741,12 @@ async def insert_wf_run(
                  workspace_mode, workspace_path,
                  script, script_sha, source_version, host_semantics_epoch, status, input,
                  tools, mcp_servers, http_servers, budget_total_microusd, default_child_model,
-                 depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers)
+                 depth, tools_vocab_epoch, creator_session_id, creator_run_id, ssh_servers,
+                 trigger_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15,
                     'pending', $16::jsonb,
-                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb)
+                    $17::jsonb, $18::jsonb, $19::jsonb, $20, $21, $22, $23, $24, $25, $26::jsonb,
+                    $27)
             ON CONFLICT (id) DO NOTHING
             RETURNING *
             """,
@@ -769,6 +776,7 @@ async def insert_wf_run(
             creator_session_id,
             creator_run_id,
             json.dumps([s.model_dump() for s in (ssh_servers or [])]),
+            trigger_id,
         )
     except asyncpg.ForeignKeyViolationError as exc:
         raise NotFoundError(
@@ -993,10 +1001,16 @@ async def unscoped_terminal_run_ids(conn: asyncpg.Connection[Any], run_ids: list
 
 
 async def count_active_runs(
-    conn: asyncpg.Connection[Any], *, account_id: str, launcher_session_id: str | None = None
+    conn: asyncpg.Connection[Any],
+    *,
+    account_id: str,
+    launcher_session_id: str | None = None,
+    trigger_id: str | None = None,
 ) -> int:
     """Count the account's OUTSTANDING (non-terminal, non-archived) runs — optionally
-    only those launched by one session. The two fan-out cap reads.
+    only those launched by one session, or only those launched by one trigger's
+    fires (the opt-in per-trigger ``max_outstanding_runs`` cap, #2446 d; at most
+    one of the two filters). The fan-out cap reads.
 
     The status list is verbatim-identical to the ``wf_runs_launcher_active_idx``
     predicate (migration 0078) — keep them in sync so the planner uses the partial
@@ -1009,6 +1023,20 @@ async def count_active_runs(
     ('pending','running','suspended')`` count below. No archived-but-running run can
     escape the count while still consuming real capacity.
     """
+    if launcher_session_id is not None and trigger_id is not None:
+        raise ValueError("count_active_runs takes at most one of launcher_session_id/trigger_id")
+    if trigger_id is not None:
+        # Predicate matches ``wf_runs_trigger_active_idx`` (migration 0182).
+        by_trigger: int = await conn.fetchval(
+            """
+            SELECT count(*) FROM wf_runs
+             WHERE account_id = $1 AND trigger_id = $2 AND archived_at IS NULL
+               AND status IN ('pending','running','suspended')
+            """,
+            account_id,
+            trigger_id,
+        )
+        return by_trigger
     if launcher_session_id is None:
         count: int = await conn.fetchval(
             """

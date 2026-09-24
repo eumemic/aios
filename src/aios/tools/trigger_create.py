@@ -56,7 +56,7 @@ TRIGGER_CREATE_DESCRIPTION = (
     "session (named by id), waking it — subject to the same wake-depth / "
     "per-pair-rate caps as the wake_session tool; `{kind: 'workflow', "
     "workflow_id, input_template?, "
-    "workflow_version?, vault_ids?}` launches a run of that workflow — "
+    "workflow_version?, vault_ids?, max_outstanding_runs?}` launches a run of that workflow — "
     "deterministic, no model wake; the run launches into this session's own "
     "environment with your authority (its surface and vaults are checked "
     "against yours at every fire).\n"
@@ -293,6 +293,19 @@ _ACTION_SCHEMA: dict[str, Any] = {
                     "description": (
                         "Vaults to bind to the launched run — must be a subset of this "
                         "session's vaults, re-checked at every fire."
+                    ),
+                },
+                "max_outstanding_runs": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "default": None,
+                    "description": (
+                        "null (default): no per-trigger limit. An integer caps how many "
+                        "runs launched by THIS trigger may be outstanding (pending/"
+                        "running/suspended) at once; a fire at the cap launches nothing "
+                        "and is recorded 'skipped' (not an error — it never counts "
+                        "toward auto-disable). Set 1 to stop a slow run's successor "
+                        "stacking on top of it."
                     ),
                 },
             },

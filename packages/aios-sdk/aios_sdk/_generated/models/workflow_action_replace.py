@@ -27,6 +27,7 @@ class WorkflowActionReplace:
             version (int | None):
             input_template (Any):
             vault_ids (list[str]):
+            max_outstanding_runs (int | None):
             kind (Literal['workflow'] | Unset):  Default: 'workflow'.
     """
 
@@ -35,6 +36,7 @@ class WorkflowActionReplace:
     version: int | None
     input_template: Any
     vault_ids: list[str]
+    max_outstanding_runs: int | None
     kind: Literal["workflow"] | Unset = "workflow"
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +52,9 @@ class WorkflowActionReplace:
 
         vault_ids = self.vault_ids
 
+        max_outstanding_runs: int | None
+        max_outstanding_runs = self.max_outstanding_runs
+
         kind = self.kind
 
         field_dict: dict[str, Any] = {}
@@ -61,6 +66,7 @@ class WorkflowActionReplace:
                 "version": version,
                 "input_template": input_template,
                 "vault_ids": vault_ids,
+                "max_outstanding_runs": max_outstanding_runs,
             }
         )
         if kind is not UNSET:
@@ -91,6 +97,15 @@ class WorkflowActionReplace:
 
         vault_ids = cast(list[str], d.pop("vault_ids"))
 
+        def _parse_max_outstanding_runs(data: object) -> int | None:
+            if data is None:
+                return data
+            return cast(int | None, data)
+
+        max_outstanding_runs = _parse_max_outstanding_runs(
+            d.pop("max_outstanding_runs")
+        )
+
         kind = cast(Literal["workflow"] | Unset, d.pop("kind", UNSET))
         if kind != "workflow" and not isinstance(kind, Unset):
             raise ValueError(f"kind must match const 'workflow', got '{kind}'")
@@ -101,6 +116,7 @@ class WorkflowActionReplace:
             version=version,
             input_template=input_template,
             vault_ids=vault_ids,
+            max_outstanding_runs=max_outstanding_runs,
             kind=kind,
         )
 

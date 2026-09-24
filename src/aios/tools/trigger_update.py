@@ -243,6 +243,16 @@ _ACTION_SCHEMA: dict[str, Any] = {
                         "this session's vaults, re-checked at every fire."
                     ),
                 },
+                "max_outstanding_runs": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": (
+                        "Required on update (explicit null = no per-trigger limit). An "
+                        "integer caps this trigger's outstanding (pending/running/"
+                        "suspended) runs; a fire at the cap is recorded 'skipped', "
+                        "never an error."
+                    ),
+                },
             },
             "required": [
                 "kind",
@@ -251,6 +261,7 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 "version",
                 "input_template",
                 "vault_ids",
+                "max_outstanding_runs",
             ],
             "additionalProperties": False,
         },

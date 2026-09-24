@@ -743,6 +743,11 @@ async def _run_workflow(
 ) -> tuple[TriggerFireStatus, str | None, str | None]:
     """Run a ``workflow`` action — launch a run, deterministic, no model wake.
 
+    ``'skipped'`` (#2446 d): the action's opt-in ``max_outstanding_runs`` cap
+    was saturated — no run was created. Checked inside ``create_run`` under the
+    per-account fan-out advisory lock against runs stamped with this trigger's
+    id, so concurrent fires of one trigger cannot both pass.
+
     ``'ok'`` means the run was CREATED (launch semantics): the run executes
     asynchronously and its own outcome is its own audit trail, reachable via
     the returned ``result_id`` — observing run outcomes is what a
@@ -842,6 +847,8 @@ async def _run_workflow(
             parent_run_id=parent_run_id,
             expected_version=action.workflow_version,
             version=action.version,
+            trigger_id=trigger.id,
+            trigger_max_outstanding_runs=action.max_outstanding_runs,
         )
         log.info(
             "trigger.fired",
@@ -853,6 +860,20 @@ async def _run_workflow(
             run_id=run.id,
         )
         return "ok", None, run.id
+    except wf_run_service.TriggerOutstandingRunsCapError as e:
+        # Opt-in back-pressure (#2446 d), NOT a failure: ``skipped`` leaves
+        # ``consecutive_failures`` unchanged, so a healthy capped lane is never
+        # auto-disabled. Reachable ONLY when ``action.max_outstanding_runs`` is
+        # set — an uncapped trigger never passes a cap to ``create_run``.
+        log.info(
+            "trigger.skip_outstanding_runs_cap",
+            trigger_id=trigger.id,
+            session_id=trigger.owner_session_id,
+            name=trigger.name,
+            outstanding=e.detail.get("outstanding"),
+            max_outstanding_runs=e.detail.get("max"),
+        )
+        return "skipped", str(e), None
     except Exception as e:
         log.exception(
             "trigger.workflow_error",

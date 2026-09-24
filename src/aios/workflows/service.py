@@ -71,6 +71,20 @@ class WorkflowRunDepthExceededError(AiosError):
     status_code = 409
 
 
+class TriggerOutstandingRunsCapError(AiosError):
+    """A trigger's opt-in ``max_outstanding_runs`` cap is saturated (#2446 d).
+
+    Raised by :func:`create_run` under the per-account fan-out advisory lock,
+    BEFORE any run row is written. Deliberately NOT a :class:`RateLimitedError`:
+    the trigger runner maps THIS refusal to a ``skipped`` fire (normal
+    back-pressure the trigger's owner asked for), while the launcher / account
+    caps stay loud errors that feed auto-disable.
+    """
+
+    error_type = "trigger_outstanding_runs_cap"
+    status_code = 429
+
+
 class InlineScript:
     """The inline-script body of an anonymous run launch (T5, #1466).
 
@@ -212,6 +226,8 @@ async def create_run(
     budget_usd: float | None = None,
     default_child_model: str | None = None,
     workspace: str = "fresh",
+    trigger_id: str | None = None,
+    trigger_max_outstanding_runs: int | None = None,
 ) -> WfRun:
     """Create a run that snapshots a script, then wake it.
 
@@ -285,6 +301,12 @@ async def create_run(
     lock, so the caps are contractual against concurrent launches. (A concurrently
     *completing* run flips terminal without the lock, so a count can only be
     stale-high — a conservative early refusal, never a cap breach.)
+
+    ``trigger_id`` (#2446 d) stamps the launching trigger on the run (trigger-runner
+    launches only). With ``trigger_max_outstanding_runs`` set, that trigger's own
+    outstanding runs are counted under the SAME advisory lock, and a launch at the
+    cap raises :class:`TriggerOutstandingRunsCapError` before any row is written —
+    so two concurrent fires of one trigger can never both pass the check.
     """
     # A shared workspace is inherited from a launcher session. Reject an impossible
     # pointer before minting an id, acquiring a connection, inserting a row, or waking.
@@ -476,6 +498,24 @@ async def create_run(
         # takes the lock). The advisory lock serializes COUNT+INSERT account-wide.
         settings = get_settings()
         await wf_queries.acquire_account_wf_runs_lock(conn, account_id)
+        if trigger_max_outstanding_runs is not None:
+            # Checked FIRST: a trigger at its own opt-in cap is back-pressure
+            # (the fire is skipped), which must win over a launcher/account cap
+            # refusal (an error that feeds the trigger's auto-disable breaker).
+            assert trigger_id is not None, "a per-trigger cap needs the trigger id"
+            trigger_outstanding = await wf_queries.count_active_runs(
+                conn, account_id=account_id, trigger_id=trigger_id
+            )
+            if trigger_outstanding >= trigger_max_outstanding_runs:
+                raise TriggerOutstandingRunsCapError(
+                    f"outstanding_runs_cap: trigger has {trigger_outstanding} outstanding "
+                    f"run(s) (max_outstanding_runs={trigger_max_outstanding_runs})",
+                    detail={
+                        "trigger_id": trigger_id,
+                        "outstanding": trigger_outstanding,
+                        "max": trigger_max_outstanding_runs,
+                    },
+                )
         if launcher_session_id is not None:
             launcher_cap = settings.workflow_runs_per_launcher_max
             outstanding = await wf_queries.count_active_runs(
@@ -532,6 +572,7 @@ async def create_run(
             budget_usd=budget_usd,
             default_child_model=run_default_child_model,
             depth=child_depth,
+            trigger_id=trigger_id,
         )
         if requested:
             await wf_queries.set_run_vaults(conn, run.id, requested, account_id=account_id)
