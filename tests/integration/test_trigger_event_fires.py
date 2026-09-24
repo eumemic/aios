@@ -20,6 +20,7 @@ directly, with every procrastinate defer patched out — the same surface
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -1312,3 +1313,217 @@ async def test_update_to_external_event_mints_and_away_revokes(
             "SELECT ingest_token_hash FROM triggers WHERE id = $1", created.id
         )
     assert stored2 is None
+
+
+# ─── #2446 (d): opt-in per-trigger outstanding-runs cap ──────────────────────
+
+
+async def _capped_cron_trigger(
+    pool: asyncpg.Pool[Any],
+    prefix: str,
+    *,
+    cap: int | None,
+    source: dict[str, Any] | None = None,
+) -> tuple[str, str, str]:
+    """A (default cron) trigger whose workflow action carries
+    ``max_outstanding_runs=cap``. Returns ``(trigger_id, target_workflow_id, env_id)``."""
+    _, env, session = await seed_agent_env_session(pool, account_id=ACC, prefix=prefix)
+    target = await _make_workflow(pool)
+    action: dict[str, Any] = {"kind": "workflow", "workflow_id": target}
+    if cap is not None:
+        action["max_outstanding_runs"] = cap
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "capped",
+            "source": source or {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": action,
+        },
+    )
+    return tid, target, env.id
+
+
+async def _runs_of(pool: asyncpg.Pool[Any], workflow_id: str) -> list[asyncpg.Record]:
+    async with pool.acquire() as conn:
+        return list(
+            await conn.fetch(
+                "SELECT id, status, trigger_id FROM wf_runs WHERE workflow_id = $1 "
+                "ORDER BY created_at",
+                workflow_id,
+            )
+        )
+
+
+async def _last_fire(pool: asyncpg.Pool[Any], trigger_id: str) -> asyncpg.Record:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_fire_status, consecutive_failures FROM triggers WHERE id = $1",
+            trigger_id,
+        )
+    assert row is not None
+    return row
+
+
+async def test_outstanding_cap_skips_fire_while_prior_run_outstanding(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """cap=1 + one non-terminal run of this trigger → the next fire launches
+    NOTHING (create_run's insert never happens) and records ``skipped`` with the
+    cap reason; ``consecutive_failures`` is untouched."""
+    pool = trig_runtime
+    tid, target, _ = await _capped_cron_trigger(pool, "cap1", cap=1)
+
+    await run_trigger_step(tid)  # first fire launches; run stays 'pending'
+    runs = await _runs_of(pool, target)
+    assert [(r["status"], r["trigger_id"]) for r in runs] == [("pending", tid)]
+
+    insert_spy = AsyncMock(wraps=wf_queries.insert_wf_run)
+    with mock.patch.object(wf_queries, "insert_wf_run", insert_spy):
+        await run_trigger_step(tid)  # second fire: at the cap
+    insert_spy.assert_not_called()
+
+    assert len(await _runs_of(pool, target)) == 1
+    fire = await _last_fire(pool, tid)
+    assert fire["last_fire_status"] == "skipped"
+    assert fire["consecutive_failures"] == 0
+    rows = await _carrier_rows(pool, tid)
+    assert [r["status"] for r in rows] == ["ok", "skipped"]
+    assert rows[-1]["result_id"] is None
+    assert "outstanding_runs_cap" in rows[-1]["error_summary"]
+
+
+async def test_outstanding_cap_skips_never_advance_failure_counter(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A lane pinned at its cap for many fires is healthy back-pressure: well
+    past MAX_CONSECUTIVE_FAILURES skips, the counter stays 0 and the trigger
+    stays enabled (the auto-disable breaker never trips)."""
+    from aios.harness.trigger_runner import MAX_CONSECUTIVE_FAILURES
+
+    pool = trig_runtime
+    tid, target, _ = await _capped_cron_trigger(pool, "capcf", cap=1)
+    await run_trigger_step(tid)
+    for _ in range(MAX_CONSECUTIVE_FAILURES + 2):
+        await run_trigger_step(tid)
+
+    assert len(await _runs_of(pool, target)) == 1
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT enabled, consecutive_failures, last_fire_status FROM triggers WHERE id = $1",
+            tid,
+        )
+    assert row is not None
+    assert (row["enabled"], row["consecutive_failures"], row["last_fire_status"]) == (
+        True,
+        0,
+        "skipped",
+    )
+
+
+async def test_outstanding_cap_launches_once_prior_run_terminal(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The other direction: cap=1 with the previous run TERMINAL launches."""
+    pool = trig_runtime
+    tid, target, _ = await _capped_cron_trigger(pool, "capdone", cap=1)
+
+    await run_trigger_step(tid)
+    (first,) = await _runs_of(pool, target)
+    await run_workflow_step(first["id"])  # drive it to completion
+    assert (await _runs_of(pool, target))[0]["status"] == "completed"
+
+    await run_trigger_step(tid)
+    runs = await _runs_of(pool, target)
+    assert [r["status"] for r in runs] == ["completed", "pending"]
+    assert (await _last_fire(pool, tid))["last_fire_status"] == "ok"
+
+
+async def test_outstanding_cap_counts_only_this_triggers_runs(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The count is keyed on the launching trigger, not the workflow or owner:
+    an outstanding run of the same workflow launched some other way does not
+    consume the trigger's slot."""
+    pool = trig_runtime
+    tid, target, env_id = await _capped_cron_trigger(pool, "capscope", cap=1)
+    other = await service.create_run(
+        pool, account_id=ACC, workflow_id=target, environment_id=env_id
+    )
+    assert other.status == "pending"
+
+    await run_trigger_step(tid)
+    runs = await _runs_of(pool, target)
+    assert [r["trigger_id"] for r in runs] == [None, tid]
+    assert (await _last_fire(pool, tid))["last_fire_status"] == "ok"
+
+
+async def test_uncapped_trigger_behaviour_unchanged(trig_runtime: asyncpg.Pool[Any]) -> None:
+    """cap=None (the default) launches every fire even with runs outstanding —
+    the cap is strictly opt-in, so no un-opted trigger can ever cap-skip."""
+    pool = trig_runtime
+    tid, target, _ = await _capped_cron_trigger(pool, "nocap", cap=None)
+    for _ in range(3):
+        await run_trigger_step(tid)
+
+    runs = await _runs_of(pool, target)
+    assert [r["status"] for r in runs] == ["pending"] * 3
+    fire = await _last_fire(pool, tid)
+    assert (fire["last_fire_status"], fire["consecutive_failures"]) == ("ok", 0)
+
+
+async def test_outstanding_cap_concurrent_fires_launch_exactly_one(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Race: two concurrent fires of a cap=1 trigger with zero outstanding runs
+    launch EXACTLY one run. Both fires are held at a barrier just before the
+    cap COUNT, so both are inside create_run's transaction at once; the
+    per-account advisory lock taken before the COUNT is what serializes them."""
+    pool = trig_runtime
+    # external_event fires are unserialized (no running_since claim), so two
+    # can genuinely execute at once — the cap's lock is the only serializer.
+    tid, target, _ = await _capped_cron_trigger(
+        pool, "caprace", cap=1, source={"kind": "external_event"}
+    )
+    refs: list[str] = []
+    async with pool.acquire() as conn, conn.transaction():
+        for _ in range(2):
+            refs.append(
+                await queries.insert_external_event_fire(
+                    conn,
+                    trigger_id=tid,
+                    account_id=ACC,
+                    owner_session_id=(
+                        await conn.fetchval(
+                            "SELECT owner_session_id FROM triggers WHERE id = $1", tid
+                        )
+                    ),
+                    trigger_name="capped",
+                    event={"n": len(refs)},
+                )
+            )
+
+    real_count = wf_queries.count_active_runs
+    arrived = 0
+    both_in = asyncio.Event()
+
+    async def _barrier_count(conn: Any, **kw: Any) -> int:
+        nonlocal arrived
+        if kw.get("trigger_id") is not None:
+            arrived += 1
+            if arrived == 2:
+                both_in.set()
+            # Wait (bounded) for the other fire; with the lock held it can't
+            # arrive, so the timeout is what releases the first fire.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(both_in.wait(), timeout=1.5)
+        return await real_count(conn, **kw)
+
+    with mock.patch.object(wf_queries, "count_active_runs", _barrier_count):
+        await asyncio.gather(*(run_trigger_step(tid, trigger_run_id=r) for r in refs))
+
+    runs = await _runs_of(pool, target)
+    assert len(runs) == 1
+    statuses = sorted(r["status"] for r in await _carrier_rows(pool, tid))
+    assert statuses == ["ok", "skipped"]
+    assert (await _last_fire(pool, tid))["consecutive_failures"] == 0

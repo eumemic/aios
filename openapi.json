@@ -22513,6 +22513,18 @@
             },
             "type": "array",
             "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
           }
         },
         "additionalProperties": false,
@@ -22569,6 +22581,18 @@
             },
             "type": "array",
             "title": "Vault Ids"
+          },
+          "max_outstanding_runs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Outstanding Runs"
           }
         },
         "additionalProperties": false,
@@ -22578,7 +22602,8 @@
           "workflow_version",
           "version",
           "input_template",
-          "vault_ids"
+          "vault_ids",
+          "max_outstanding_runs"
         ],
         "title": "WorkflowActionReplace",
         "description": "Update-side variant (\u00a72.2): optional-at-create fields are REQUIRED, so\na partial action 422s instead of silently flipping a pin to float, nulling\nthe template, or dropping vault bindings. Explicit null/[] are explicit."

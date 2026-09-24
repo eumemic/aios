@@ -52,6 +52,7 @@ class WorkflowAction:
             version (int | None | Unset):
             input_template (Any | Unset):
             vault_ids (list[str] | Unset):
+            max_outstanding_runs (int | None | Unset):
     """
 
     workflow_id: str
@@ -60,6 +61,7 @@ class WorkflowAction:
     version: int | None | Unset = UNSET
     input_template: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
+    max_outstanding_runs: int | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         workflow_id = self.workflow_id
@@ -84,6 +86,12 @@ class WorkflowAction:
         if not isinstance(self.vault_ids, Unset):
             vault_ids = self.vault_ids
 
+        max_outstanding_runs: int | None | Unset
+        if isinstance(self.max_outstanding_runs, Unset):
+            max_outstanding_runs = UNSET
+        else:
+            max_outstanding_runs = self.max_outstanding_runs
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -101,6 +109,8 @@ class WorkflowAction:
             field_dict["input_template"] = input_template
         if vault_ids is not UNSET:
             field_dict["vault_ids"] = vault_ids
+        if max_outstanding_runs is not UNSET:
+            field_dict["max_outstanding_runs"] = max_outstanding_runs
 
         return field_dict
 
@@ -135,6 +145,17 @@ class WorkflowAction:
 
         vault_ids = cast(list[str], d.pop("vault_ids", UNSET))
 
+        def _parse_max_outstanding_runs(data: object) -> int | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(int | None | Unset, data)
+
+        max_outstanding_runs = _parse_max_outstanding_runs(
+            d.pop("max_outstanding_runs", UNSET)
+        )
+
         workflow_action = cls(
             workflow_id=workflow_id,
             kind=kind,
@@ -142,6 +163,7 @@ class WorkflowAction:
             version=version,
             input_template=input_template,
             vault_ids=vault_ids,
+            max_outstanding_runs=max_outstanding_runs,
         )
 
         return workflow_action
