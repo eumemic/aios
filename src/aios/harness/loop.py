@@ -1299,6 +1299,11 @@ async def _run_session_step_body(
             return _StepResult()
         harvested = disposition
 
+    # The shared post-inference tail records truncation telemetry for both inline
+    # inference and workflow-model harvests. Harvests do not have an SSE subscriber,
+    # so default this to False before the inline branch can overwrite it.
+    subscribed = False
+
     if harvested is not None:
         # ── HARVEST: fold the resolved bound run into the shared dispatch tail ──
         # EVERY fold path below writes exactly one ``model_workflow_harvest_end``
@@ -1632,6 +1637,8 @@ async def _run_session_step_body(
             # produced the counts in this span.
             "token_baseline_v": session_baseline,
             "model": agent.model,
+            "finish_reason": finish_reason,
+            "output_truncated": finish_reason == "length",
             **(
                 llm_response.admission_report.as_event_fields()
                 if llm_response.admission_report is not None
@@ -1640,6 +1647,15 @@ async def _run_session_step_body(
         },
         account_id=account_id,
     )
+
+    if finish_reason == "length":
+        log.warning(
+            "step.model_output_truncated",
+            session_id=session_id,
+            model=agent.model,
+            finish_reason=finish_reason,
+            streaming=subscribed,
+        )
 
     # Charge cumulative session-level usage AFTER the model response is durably
     # recorded — the assistant message persisted below, or the refusal span in

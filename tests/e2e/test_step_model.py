@@ -555,6 +555,30 @@ class TestStreamingInference:
         # Verify stream=True was passed to litellm
         assert harness.model_calls[0].get("stream") is True
 
+    async def test_streaming_length_records_truncation(self, harness: Harness) -> None:
+        """A streamed provider length stop is recorded as truncation telemetry."""
+        from aios.config import get_settings
+        from aios.db.listen import listen_for_events
+
+        harness.script_model([assistant("Truncated output", finish_reason="length")])
+        session = await harness.start("generate a long answer")
+
+        settings = get_settings()
+        async with listen_for_events(settings.db_url, session.id):
+            await harness.run_until_idle(session.id)
+
+        events = await harness.all_events(session.id)
+        end_span = next(
+            e.data
+            for e in events
+            if e.kind == "span" and e.data.get("event") == "model_request_end"
+        )
+
+        assert harness.model_calls[0].get("stream") is True
+        assert end_span["finish_reason"] == "length"
+        assert end_span["output_truncated"] is True
+        assert last_assistant_content(events) == "Truncated output"
+
     async def test_streaming_tool_round_trip(self, harness: Harness) -> None:
         """Streaming works correctly with tool calls."""
         from aios.config import get_settings

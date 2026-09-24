@@ -75,7 +75,7 @@ class _EmptyToolProvider:
 _INNER_COST_MICROUSD = 4321
 _INNER_SCRIPT = (
     "async def main(input):\n"
-    "    return {'content': 'recovered answer', 'tool_calls': [], 'finish_reason': 'stop'}\n"
+    "    return {'content': 'recovered answer', 'tool_calls': [], 'finish_reason': '{finish_reason}'}\n"
 )
 
 _ACCOUNT = "acc_mwfcr"
@@ -139,10 +139,11 @@ async def mwf_runtime(
         await pool.close()
 
 
-async def _make_bound_session(pool: asyncpg.Pool[Any]) -> str:
+async def _make_bound_session(pool: asyncpg.Pool[Any], *, finish_reason: str = "stop") -> str:
+    script = _INNER_SCRIPT.replace("{finish_reason}", finish_reason)
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
-            conn, account_id=_ACCOUNT, name="inner-model", script=_INNER_SCRIPT
+            conn, account_id=_ACCOUNT, name="inner-model", script=script
         )
     agent = await agents_service.create_agent(
         pool,
@@ -375,6 +376,42 @@ async def test_repark_is_idempotent_no_double_harvest(mwf_runtime: asyncpg.Pool[
     # The fold still produces exactly one assistant turn.
     await run_session_step(session_id, cause="model_workflow_harvest")
     assert len(await _assistant_messages(pool, session_id)) == 1
+
+
+async def test_harvest_length_finish_reason_preserves_turn(mwf_runtime: asyncpg.Pool[Any]) -> None:
+    """A harvested length stop records truncation without crashing the shared tail."""
+    pool = mwf_runtime
+    session_id = await _make_bound_session(pool, finish_reason="length")
+    await run_session_step(session_id)
+    [inner_run_id] = await _inner_run_ids(pool, session_id)
+
+    run_output = await _resolve_inner_run(pool, inner_run_id)
+    await write_harvest_event(
+        pool,
+        session_id,
+        run_id=inner_run_id,
+        outcome="ok",
+        output=run_output,
+        error=None,
+        account_id=_ACCOUNT,
+    )
+
+    await run_session_step(session_id, cause="model_workflow_harvest")
+
+    assistants = await _assistant_messages(pool, session_id)
+    assert len(assistants) == 1
+    assert assistants[0]["content"] == "recovered answer"
+
+    events = await sessions_service.read_events(pool, session_id, account_id=_ACCOUNT)
+    end_spans = [
+        e.data for e in events if e.kind == "span" and e.data.get("event") == "model_request_end"
+    ]
+    assert len(end_spans) == 1
+    assert end_spans[0]["finish_reason"] == "length"
+    assert end_spans[0]["output_truncated"] is True
+    assert end_spans[0]["model"] is not None
+
+    assert not any(e.kind == "span" and e.data.get("event") == "harness_error" for e in events)
 
 
 async def test_steady_state_park_is_not_double_parked(mwf_runtime: asyncpg.Pool[Any]) -> None:
