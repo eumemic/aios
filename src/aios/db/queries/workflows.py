@@ -29,6 +29,7 @@ from aios.db.queries import (
     _list_scoped,
     _list_versioned,
 )
+from aios.db.queries import accounting as accounting_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
 from aios.models.accounting import UsageNodeRef
@@ -840,6 +841,45 @@ async def run_children_usage(
     )
 
 
+# The run budget reads only the CUMULATIVE subtree cost off the shared rollup; the
+# rollup also computes rolling-window counters, which this caller discards. Pin
+# the smallest window so its per-node ledger probe scans ~nothing (#2446 b).
+_BUDGET_ROLLUP_WINDOW_SECONDS = 1
+
+
+async def runs_budget_spent_microusd(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, int]:
+    """Spend counted against each run's ``budget_usd`` (#2446 b): the run's full
+    creation SUBTREE cost, from the shared ``accounting`` rollup
+    (``subtree_cost_microusd``) -- the run's own ``call_llm`` meter, every child
+    session, every grandchild (a child's own ``call_agent``), and every sub-run with
+    its descendants. Before #2446 the budget summed direct children only
+    (``run_children_usage``: ``sessions WHERE parent_run_id = run``) plus the run's
+    ``call_llm`` meter, so spend one level down was invisible to it.
+
+    Account-scoped like the rollup. A run absent from the result reads 0."""
+    if not run_ids:
+        return {}
+    usage = await accounting_queries.usage_for_nodes(
+        conn,
+        [UsageNodeRef(kind="run", id=run_id) for run_id in run_ids],
+        account_id=account_id,
+        window_seconds=_BUDGET_ROLLUP_WINDOW_SECONDS,
+    )
+    return {
+        run_id: (usage[("run", run_id)].subtree.cost_microusd if ("run", run_id) in usage else 0)
+        for run_id in run_ids
+    }
+
+
+async def run_budget_spent_microusd(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
+) -> int:
+    """Point form of :func:`runs_budget_spent_microusd`."""
+    return (await runs_budget_spent_microusd(conn, [run_id], account_id=account_id))[run_id]
+
+
 async def get_run_call_llm_cost_microusd(
     conn: asyncpg.Connection[Any], run_id: str, *, account_id: str
 ) -> int:
@@ -1252,6 +1292,21 @@ async def list_run_ids_needing_step(
       a step that actually runs, and a parent parked behind a burning child has no
       signal and no other traffic to produce one. 0 disables.
 
+    - a PARKED run with a ``budget_usd`` whose creation-subtree spend has reached it
+      and which still has an open ``agent()`` call (#2446 c). The run-level analogue
+      of the per-child clause above, and live for the same reason: the budget gate
+      in the step only runs when a new ``agent()``/``call_llm`` opens, and a run
+      parked behind a child whose own sub-agents burn the budget opens nothing. The
+      woken step force-resolves the open ``agent()`` calls through the SAME #2440
+      exit path (``bound='budget'``). Requiring an open ``agent()`` call is what
+      makes this terminate: once they are resolved the run no longer matches, and
+      a later ``agent()`` is refused by the gate instead of opening. This is a
+      SECOND statement, not an OR-clause: the rollup is a recursive walk that must
+      not run per row of the main predicate. Its candidate set is cheap and usually
+      empty (``budget_total_microusd IS NOT NULL`` on a suspended run -- no
+      trigger-launched run had a budget before #2446 a), and only candidates pay
+      the batched rollup.
+
     (No ``account_id``: ``defer_run_wake`` needs none and appends no journal span.)
     """
     rows = await conn.fetch(
@@ -1346,7 +1401,46 @@ async def list_run_ids_needing_step(
         max_bash_timeout_seconds,
         agent_cost_ceiling_microusd,
     )
-    return [r["id"] for r in rows]
+    ids = [r["id"] for r in rows]
+    matched = set(ids)
+    for run_id in await list_parked_run_ids_over_budget(conn):
+        if run_id not in matched:
+            ids.append(run_id)
+    return ids
+
+
+async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list[str]:
+    """Suspended runs with an open ``agent()`` call whose creation-subtree spend
+    has reached ``budget_usd`` (#2446 c) -- the budget clause of
+    :func:`list_run_ids_needing_step`. ``>=`` matches the step's gate and its
+    harvest-side force-resolution, so a run woken here is always resolved.
+    """
+    candidates = await conn.fetch(
+        """
+        SELECT r.id, r.account_id, r.budget_total_microusd FROM wf_runs r
+        WHERE r.archived_at IS NULL
+          AND r.status = 'suspended'
+          AND r.budget_total_microusd IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM wf_run_events cs
+            WHERE cs.run_id = r.id AND cs.type = 'call_started'
+              AND cs.payload->>'capability' = 'agent'
+              AND NOT EXISTS (
+                SELECT 1 FROM wf_run_events e
+                WHERE e.run_id = r.id AND e.call_key = cs.call_key
+                  AND e.type = 'call_result'))
+        """
+    )
+    by_account: dict[str, list[asyncpg.Record]] = {}
+    for row in candidates:
+        by_account.setdefault(row["account_id"], []).append(row)
+    over: list[str] = []
+    for account_id, rows in by_account.items():
+        spent = await runs_budget_spent_microusd(
+            conn, [r["id"] for r in rows], account_id=account_id
+        )
+        over.extend(r["id"] for r in rows if spent[r["id"]] >= r["budget_total_microusd"])
+    return over
 
 
 async def pin_call_started_timeout(

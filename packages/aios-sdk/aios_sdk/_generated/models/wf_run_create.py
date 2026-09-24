@@ -49,7 +49,8 @@ class WfRunCreate:
             input_ (Any | Unset):
             vault_ids (list[str] | Unset): Vault ids to bind to the run for credential resolution. When an agent launches
                 the run, these must be a subset of the launcher's own vaults; the HTTP path is unattenuated operator authority.
-            budget_usd (float | None | Unset): Optional shared USD spend ceiling for this run's direct agent() children.
+            budget_usd (float | None | Unset): Optional USD spend ceiling for this run's whole creation subtree (its agent()
+                children, their sub-agents, and sub-runs).
             default_child_model (None | str | Unset): Optional model used by generic agent() children when they omit model=.
     """
 

@@ -713,6 +713,7 @@ _AGENT_ERROR_DEFAULT_MESSAGES: dict[str | None, str] = {
 _AGENT_TIMEOUT_BOUND_MESSAGES: dict[str, str] = {
     "deadline": "the agent did not respond within its wall-clock deadline",
     "spend": "the agent stopped after reaching its spend ceiling",
+    "budget": "the run's budget_usd was exhausted by its subtree's spend",
 }
 
 

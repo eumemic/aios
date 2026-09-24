@@ -341,6 +341,11 @@ class WorkflowAction(BaseModel):
     # Agent-reachable, and it can only RESTRICT: it never lifts the launcher /
     # account caps ``create_run`` enforces independently.
     max_outstanding_runs: int | None = Field(default=None, ge=1)
+    # Per-run spend ceiling for every run this trigger launches (#2446 a), passed to
+    # ``create_run`` as ``budget_usd``. Counted against the run's full creation
+    # subtree and enforced on a parked run by the sweep. ``None`` = no budget
+    # (prior behaviour).
+    budget_usd: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _reject_version_and_assertion(self) -> WorkflowAction:
@@ -369,6 +374,7 @@ class WorkflowActionReplace(WorkflowAction):
     input_template: Any
     vault_ids: list[str]
     max_outstanding_runs: int | None = Field(ge=1)
+    budget_usd: float | None = Field(gt=0)
 
 
 TriggerAction = Annotated[

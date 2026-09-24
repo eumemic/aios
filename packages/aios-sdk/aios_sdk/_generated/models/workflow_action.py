@@ -53,6 +53,7 @@ class WorkflowAction:
             input_template (Any | Unset):
             vault_ids (list[str] | Unset):
             max_outstanding_runs (int | None | Unset):
+            budget_usd (float | None | Unset):
     """
 
     workflow_id: str
@@ -62,6 +63,7 @@ class WorkflowAction:
     input_template: Any | Unset = UNSET
     vault_ids: list[str] | Unset = UNSET
     max_outstanding_runs: int | None | Unset = UNSET
+    budget_usd: float | None | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         workflow_id = self.workflow_id
@@ -92,6 +94,12 @@ class WorkflowAction:
         else:
             max_outstanding_runs = self.max_outstanding_runs
 
+        budget_usd: float | None | Unset
+        if isinstance(self.budget_usd, Unset):
+            budget_usd = UNSET
+        else:
+            budget_usd = self.budget_usd
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -111,6 +119,8 @@ class WorkflowAction:
             field_dict["vault_ids"] = vault_ids
         if max_outstanding_runs is not UNSET:
             field_dict["max_outstanding_runs"] = max_outstanding_runs
+        if budget_usd is not UNSET:
+            field_dict["budget_usd"] = budget_usd
 
         return field_dict
 
@@ -156,6 +166,15 @@ class WorkflowAction:
             d.pop("max_outstanding_runs", UNSET)
         )
 
+        def _parse_budget_usd(data: object) -> float | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            return cast(float | None | Unset, data)
+
+        budget_usd = _parse_budget_usd(d.pop("budget_usd", UNSET))
+
         workflow_action = cls(
             workflow_id=workflow_id,
             kind=kind,
@@ -164,6 +183,7 @@ class WorkflowAction:
             input_template=input_template,
             vault_ids=vault_ids,
             max_outstanding_runs=max_outstanding_runs,
+            budget_usd=budget_usd,
         )
 
         return workflow_action

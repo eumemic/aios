@@ -520,7 +520,10 @@ class WfRunCreate(BaseModel):
     budget_usd: float | None = Field(
         default=None,
         gt=0,
-        description="Optional shared USD spend ceiling for this run's direct agent() children.",
+        description=(
+            "Optional USD spend ceiling for this run's whole creation subtree (its "
+            "agent() children, their sub-agents, and sub-runs)."
+        ),
     )
     default_child_model: str | None = Field(
         default=None,

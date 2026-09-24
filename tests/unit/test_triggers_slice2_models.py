@@ -129,6 +129,7 @@ class TestWorkflowAction:
             "input_template": None,
             "vault_ids": [],
             "max_outstanding_runs": None,
+            "budget_usd": None,
         }
 
     def test_no_environment_id_field(self) -> None:
@@ -152,6 +153,7 @@ class TestWorkflowAction:
                     "input_template": None,
                     "vault_ids": [],
                     "max_outstanding_runs": None,
+                    "budget_usd": None,
                 }
             }
         )
@@ -254,6 +256,56 @@ class TestMaxOutstandingRuns:
         assert action.max_outstanding_runs is None
 
 
+class TestBudgetUsd:
+    """#2446 (a): the per-trigger run budget."""
+
+    def test_defaults_to_none(self) -> None:
+        spec = _create()
+        assert isinstance(spec.action, WorkflowAction)
+        assert spec.action.budget_usd is None
+
+    def test_positive_value_accepted(self) -> None:
+        spec = _create(action={"kind": "workflow", "workflow_id": "wf_t", "budget_usd": 25.0})
+        assert isinstance(spec.action, WorkflowAction)
+        assert spec.action.budget_usd == 25.0
+
+    @pytest.mark.parametrize("bad", [0, -1, "x"])
+    def test_non_positive_rejected(self, bad: object) -> None:
+        with pytest.raises(ValidationError):
+            _create(action={"kind": "workflow", "workflow_id": "wf_t", "budget_usd": bad})
+
+    def test_update_replace_requires_it(self) -> None:
+        """Replace semantics: omitting the budget on UPDATE 422s rather than
+        silently lifting a stored budget."""
+        with pytest.raises(ValidationError):
+            TriggerUpdate.model_validate(
+                {
+                    "action": {
+                        "kind": "workflow",
+                        "workflow_id": "wf_t",
+                        "workflow_version": None,
+                        "version": None,
+                        "input_template": None,
+                        "vault_ids": [],
+                        "max_outstanding_runs": None,
+                    }
+                }
+            )
+
+    def test_read_adapter_accepts_rows_persisted_before_the_field(self) -> None:
+        action = TRIGGER_ACTION_ADAPTER.validate_python(
+            {
+                "kind": "workflow",
+                "workflow_id": "wf_t",
+                "workflow_version": None,
+                "input_template": None,
+                "vault_ids": [],
+            }
+        )
+        assert isinstance(action, WorkflowAction)
+        assert action.budget_usd is None
+
+
 class TestInputTemplateWriteBound:
     def test_oversize_template_422s_on_write_models(self) -> None:
         big = {"blob": "x" * MAX_INPUT_TEMPLATE_BYTES}
@@ -270,6 +322,7 @@ class TestInputTemplateWriteBound:
                         "input_template": big,
                         "vault_ids": [],
                         "max_outstanding_runs": None,
+                        "budget_usd": None,
                     }
                 }
             )

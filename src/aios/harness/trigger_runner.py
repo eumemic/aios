@@ -849,6 +849,7 @@ async def _run_workflow(
             version=action.version,
             trigger_id=trigger.id,
             trigger_max_outstanding_runs=action.max_outstanding_runs,
+            budget_usd=action.budget_usd,
         )
         log.info(
             "trigger.fired",

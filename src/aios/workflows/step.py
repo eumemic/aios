@@ -143,14 +143,13 @@ def _usage_payload(usage: wf_queries.RunChildrenUsage) -> dict[str, Any]:
     }
 
 
-def _budget_view(
-    run: WfRun, usage: wf_queries.RunChildrenUsage, call_llm_cost_microusd: int = 0
-) -> dict[str, float] | None:
+def _budget_view(run: WfRun, spent_microusd: int) -> dict[str, float] | None:
     if run.budget_usd is None:
         return None
     # The script-facing spend must match what the over-budget gate enforces: the
-    # child-session rollup PLUS the run's own call_llm inference meter (#1633).
-    spent = (usage.cost_microusd + call_llm_cost_microusd) / 1_000_000
+    # run's creation-SUBTREE cost (#2446 b), which already includes the run's own
+    # call_llm meter (#1633) -- see ``wf_queries.run_budget_spent_microusd``.
+    spent = spent_microusd / 1_000_000
     return {
         "total_usd": run.budget_usd,
         "spent_usd": spent,
@@ -221,6 +220,7 @@ async def _resolve_agent_call(
     now: datetime,
     deadline: timedelta,
     cost_ceiling_microusd: int = 0,
+    run_over_budget: bool = False,
 ) -> Outcome | None:
     """The outcome of one inflight ``agent()`` call, or ``None`` if it is still
     pending and within BOTH its wall-clock deadline and its spend ceiling.
@@ -240,7 +240,13 @@ async def _resolve_agent_call(
     the child's accumulated ``cost_microusd`` reaches the ceiling. Both bounds share
     one exit path deliberately: the resolution semantics (exactly-once write,
     re-derive, cancel cascade, catchable ``AgentError``) are identical, and a second
-    parallel path is a second place for that contract to drift."""
+    parallel path is a second place for that contract to drift.
+
+    ``run_over_budget`` (#2446 c) is the RUN-level analogue on the same exit path:
+    the owning run's creation-subtree spend has reached its ``budget_usd``, so every
+    still-pending ``agent()`` call is force-resolved with ``bound='budget'`` and its
+    child cancelled. The bound precedence is budget > spend > deadline: the run
+    budget is the widest limit and the one the operator set on this run."""
     resolved = await db_queries.derive_response(
         conn, child_id, account_id=account_id, request_id=request_id
     )
@@ -269,8 +275,8 @@ async def _resolve_agent_call(
         # there; detecting it would need a staleness signal on the cost value itself.
         over_budget = spent is not None and spent >= cost_ceiling_microusd
 
-    if now - started_at < deadline and not over_budget:
-        return None  # pending, within BOTH bounds
+    if now - started_at < deadline and not over_budget and not run_over_budget:
+        return None  # pending, within every bound
     with contextlib.suppress(NotFoundError):
         async with conn.transaction():
             wrote = await db_queries.write_response_if_absent(
@@ -279,7 +285,12 @@ async def _resolve_agent_call(
                 account_id=account_id,
                 request_id=request_id,
                 outcome=Err(
-                    error={"kind": "timeout", "bound": "spend" if over_budget else "deadline"}
+                    error={
+                        "kind": "timeout",
+                        "bound": (
+                            "budget" if run_over_budget else "spend" if over_budget else "deadline"
+                        ),
+                    }
                 ),
             )
             if wrote and get_settings().cancel_cascade_enabled:
@@ -441,6 +452,18 @@ async def _run_workflow_step_body(
         _settings = get_settings()
         agent_deadline = timedelta(seconds=_settings.workflow_agent_deadline_seconds)
         agent_cost_ceiling = _settings.workflow_agent_cost_ceiling_microusd
+        # #2446 (c): a run PARKED behind a child whose subtree burns the run budget
+        # opens no new agent(), so the gate below never sees it. Read the subtree
+        # spend once here -- only for budgeted runs with an open agent() call -- and
+        # force-resolve those calls on the #2440 exit path. The sweep's budget
+        # clause (``list_parked_run_ids_over_budget``) is what wakes such a run.
+        run_over_budget = False
+        if run.budget_usd is not None and any(
+            e.payload.get("capability") == "agent" for e in inflight.values()
+        ):
+            run_over_budget = await wf_queries.run_budget_spent_microusd(
+                conn, run_id, account_id=account_id
+            ) >= round(run.budget_usd * 1_000_000)
         for call_key, cap_event in list(inflight.items()):
             cap_payload = cap_event.payload
             if cap_payload.get("capability") == "agent":
@@ -455,6 +478,7 @@ async def _run_workflow_step_body(
                     now=now,
                     deadline=agent_deadline,
                     cost_ceiling_microusd=agent_cost_ceiling,
+                    run_over_budget=run_over_budget,
                 )
                 if call_outcome is None:
                     continue  # still pending, within deadline — stay suspended
@@ -741,29 +765,20 @@ async def _run_workflow_step_body(
             1 for e in inflight.values() if e.payload.get("capability") == "agent"
         )
         slots = max(0, get_settings().workflow_max_inflight_children_per_run - inflight_agents)
-        budget_usage = (
-            await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
-            if run.budget_usd is not None
-            else None
-        )
-        # The run's OWN call_llm inference spend (#1633): raw inference runs on the worker
-        # at the run's own inference site, so it has no child-session row — it lives in the
-        # run-level meter. The budget gate is the SUM: child-session rollup + this meter.
-        call_llm_spent_microusd = (
-            await wf_queries.get_run_call_llm_cost_microusd(conn, run_id, account_id=account_id)
-            if run.budget_usd is not None
-            else 0
-        )
+        # The budget gate reads the run's full creation-SUBTREE spend (#2446 b): the
+        # run's own call_llm meter (#1633), every child, every grandchild (a child's
+        # own call_agent), and every sub-run. It used to sum direct children only, so
+        # spend one level down never counted against budget_usd.
         budget_total_microusd = (
             round(run.budget_usd * 1_000_000) if run.budget_usd is not None else None
         )
         budget_spent_microusd = (
-            budget_usage.cost_microusd + call_llm_spent_microusd if budget_usage is not None else 0
+            await wf_queries.run_budget_spent_microusd(conn, run_id, account_id=account_id)
+            if run.budget_usd is not None
+            else 0
         )
         over_budget = (
-            budget_usage is not None
-            and budget_total_microusd is not None
-            and budget_spent_microusd >= budget_total_microusd
+            budget_total_microusd is not None and budget_spent_microusd >= budget_total_microusd
         )
 
         # Suspended: open any *new* frontier capability, then park.
@@ -804,14 +819,14 @@ async def _run_workflow_step_body(
                     disposition = _escalate(disposition, "harvest_now")
             elif cap.capability_id == "agent":
                 if over_budget:
-                    assert budget_usage is not None and run.budget_usd is not None
+                    assert run.budget_usd is not None
                     await _journal_agent_rejection(
                         conn,
                         run=run,
                         call_key=cap.call_key,
                         kind="budget_exceeded",
                         message=(
-                            f"run budget exhausted: spent ${budget_usage.cost_microusd / 1_000_000:.2f} "
+                            f"run budget exhausted: spent ${budget_spent_microusd / 1_000_000:.2f} "
                             f"of ${run.budget_usd:.2f} — new agent() calls are refused"
                         ),
                     )
@@ -892,27 +907,17 @@ async def _run_workflow_step_body(
                 elif spawn.needs_rewake:
                     disposition = _escalate(disposition, "harvest_now")
             elif cap.capability_id == "budget":
-                usage = (
-                    await wf_queries.run_children_usage(conn, run_id, account_id=account_id)
-                    if run.budget_usd is not None
-                    else wf_queries.RunChildrenUsage(0, 0, 0, 0, 0)
-                )
-                # Include the run's own call_llm inference meter (#1633) so the author's
-                # budget() view reports the same spend the over-budget gate enforces.
-                meter = (
-                    await wf_queries.get_run_call_llm_cost_microusd(
-                        conn, run_id, account_id=account_id
-                    )
-                    if run.budget_usd is not None
-                    else 0
-                )
+                # The same subtree figure the gate above enforces (#2446 b).
                 await wf_queries.append_run_event(
                     conn,
                     account_id=account_id,
                     run_id=run_id,
                     type="call_result",
                     call_key=cap.call_key,
-                    payload={"result": _budget_view(run, usage, meter), "is_error": False},
+                    payload={
+                        "result": _budget_view(run, budget_spent_microusd),
+                        "is_error": False,
+                    },
                 )
                 disposition = _escalate(disposition, "owed_drive")
             elif cap.capability_id == "tool":
