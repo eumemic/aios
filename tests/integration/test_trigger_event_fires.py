@@ -1527,3 +1527,53 @@ async def test_outstanding_cap_concurrent_fires_launch_exactly_one(
     statuses = sorted(r["status"] for r in await _carrier_rows(pool, tid))
     assert statuses == ["ok", "skipped"]
     assert (await _last_fire(pool, tid))["consecutive_failures"] == 0
+
+
+# ─── #2446 (a): per-trigger run budget ───────────────────────────────────────
+
+
+async def _budget_trigger(
+    pool: asyncpg.Pool[Any], prefix: str, *, budget_usd: float | None
+) -> tuple[str, str]:
+    _, _env, session = await seed_agent_env_session(pool, account_id=ACC, prefix=prefix)
+    target = await _make_workflow(pool)
+    action: dict[str, Any] = {"kind": "workflow", "workflow_id": target}
+    if budget_usd is not None:
+        action["budget_usd"] = budget_usd
+    tid = await _add_trigger(
+        pool,
+        session.id,
+        {
+            "name": "budgeted",
+            "source": {"kind": "cron", "schedule": "*/5 * * * *"},
+            "action": action,
+        },
+    )
+    return tid, target
+
+
+async def test_trigger_budget_usd_reaches_the_launched_run(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """A trigger whose action carries ``budget_usd`` launches a run with exactly
+    that ceiling. Before #2446 (a) every trigger-launched run had budget None."""
+    pool = trig_runtime
+    tid, target = await _budget_trigger(pool, "budget", budget_usd=2.5)
+    await run_trigger_step(tid)
+    (row,) = await _runs_of(pool, target)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_wf_run(conn, row["id"], account_id=ACC)
+    assert run.budget_usd == 2.5
+
+
+async def test_trigger_without_budget_launches_unbudgeted_run(
+    trig_runtime: asyncpg.Pool[Any],
+) -> None:
+    """None keeps today's behaviour: the launched run has no budget."""
+    pool = trig_runtime
+    tid, target = await _budget_trigger(pool, "nobudget", budget_usd=None)
+    await run_trigger_step(tid)
+    (row,) = await _runs_of(pool, target)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_wf_run(conn, row["id"], account_id=ACC)
+    assert run.budget_usd is None

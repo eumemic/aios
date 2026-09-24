@@ -253,6 +253,14 @@ _ACTION_SCHEMA: dict[str, Any] = {
                         "never an error."
                     ),
                 },
+                "budget_usd": {
+                    "type": ["number", "null"],
+                    "exclusiveMinimum": 0,
+                    "description": (
+                        "Required on update (explicit null = no budget). A positive USD "
+                        "amount becomes each launched run's subtree-wide budget_usd."
+                    ),
+                },
             },
             "required": [
                 "kind",
@@ -262,6 +270,7 @@ _ACTION_SCHEMA: dict[str, Any] = {
                 "input_template",
                 "vault_ids",
                 "max_outstanding_runs",
+                "budget_usd",
             ],
             "additionalProperties": False,
         },

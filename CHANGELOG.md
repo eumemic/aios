@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Run budgets now count the whole subtree, bind a parked run, and can be set
+  per trigger (#2446, parts a-c).**
+  (a) New `WorkflowAction.budget_usd` (`> 0`, default `null` = no budget, as
+  before), passed to each launched run as its `budget_usd`. (b) `budget_usd`
+  used to count only the run's direct child sessions plus its own `call_llm`
+  meter, so a grandchild (a child's own `call_agent`) or a sub-run spent
+  outside it. The gate, the `budget()` builtin and the refusal message now all
+  read the creation-subtree cost from the shared accounting rollup. (c) The gate
+  ran only when a new `agent()`/`call_llm` opened, so a run parked behind a
+  burning child was never stopped. The needs-step sweep now also wakes a
+  suspended, budgeted run with an open `agent()` call once its subtree spend
+  reaches the budget. The step force-resolves each open call through the #2440
+  exit path: `AgentError(kind="timeout", bound="budget")`, the child gets a
+  cancel marker, and the script can catch it. Work already journaled is kept.
+  **BREAKING for update callers:** `WorkflowActionReplace` now REQUIRES
+  `budget_usd` (send explicit `null`), the same as `max_outstanding_runs`.
+
 - **Workflow-action triggers can cap their own outstanding runs (#2446, part d).**
   New opt-in `WorkflowAction.max_outstanding_runs` (`int >= 1`, default `null` =
   uncapped, same as before). A trigger's `running_since` lease clears when

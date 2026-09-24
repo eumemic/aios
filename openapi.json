@@ -21977,7 +21977,7 @@
               }
             ],
             "title": "Budget Usd",
-            "description": "Optional shared USD spend ceiling for this run's direct agent() children."
+            "description": "Optional USD spend ceiling for this run's whole creation subtree (its agent() children, their sub-agents, and sub-runs)."
           },
           "default_child_model": {
             "anyOf": [
@@ -22525,6 +22525,18 @@
               }
             ],
             "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
           }
         },
         "additionalProperties": false,
@@ -22593,6 +22605,18 @@
               }
             ],
             "title": "Max Outstanding Runs"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
           }
         },
         "additionalProperties": false,
@@ -22603,7 +22627,8 @@
           "version",
           "input_template",
           "vault_ids",
-          "max_outstanding_runs"
+          "max_outstanding_runs",
+          "budget_usd"
         ],
         "title": "WorkflowActionReplace",
         "description": "Update-side variant (\u00a72.2): optional-at-create fields are REQUIRED, so\na partial action 422s instead of silently flipping a pin to float, nulling\nthe template, or dropping vault bindings. Explicit null/[] are explicit."

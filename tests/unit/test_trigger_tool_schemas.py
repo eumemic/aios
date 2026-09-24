@@ -110,6 +110,7 @@ class TestUpdateSchemaReplaceSemantics:
             "input_template",
             "vault_ids",
             "max_outstanding_runs",
+            "budget_usd",
         ]
         assert branch["properties"]["max_outstanding_runs"]["type"] == ["integer", "null"]
         assert "default" not in branch["properties"]["max_outstanding_runs"]

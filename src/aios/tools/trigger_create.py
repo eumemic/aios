@@ -56,7 +56,7 @@ TRIGGER_CREATE_DESCRIPTION = (
     "session (named by id), waking it — subject to the same wake-depth / "
     "per-pair-rate caps as the wake_session tool; `{kind: 'workflow', "
     "workflow_id, input_template?, "
-    "workflow_version?, vault_ids?, max_outstanding_runs?}` launches a run of that workflow — "
+    "workflow_version?, vault_ids?, max_outstanding_runs?, budget_usd?}` launches a run of that workflow — "
     "deterministic, no model wake; the run launches into this session's own "
     "environment with your authority (its surface and vaults are checked "
     "against yours at every fire).\n"
@@ -306,6 +306,18 @@ _ACTION_SCHEMA: dict[str, Any] = {
                         "and is recorded 'skipped' (not an error — it never counts "
                         "toward auto-disable). Set 1 to stop a slow run's successor "
                         "stacking on top of it."
+                    ),
+                },
+                "budget_usd": {
+                    "type": ["number", "null"],
+                    "exclusiveMinimum": 0,
+                    "default": None,
+                    "description": (
+                        "null (default): launched runs have no budget. A positive USD "
+                        "amount becomes each launched run's budget_usd: spend across the "
+                        "run's whole subtree (its agents, their sub-agents, sub-runs) "
+                        "counts against it; once reached, new agent() calls are refused "
+                        "and open ones end with AgentError(kind='timeout', bound='budget')."
                     ),
                 },
             },

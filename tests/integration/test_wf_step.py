@@ -5995,9 +5995,9 @@ async def test_over_budget_rejection_flips_running_and_self_wakes(
         )
         await conn.execute(
             "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
-            "workspace_volume_path, account_id, parent_run_id, cost_microusd) "
+            "workspace_volume_path, account_id, parent_run_id, creator_run_id, cost_microusd) "
             "VALUES ('ses_cost_seed2', 'agent_cost_seed2', 'env_wf', 1, NULL, '{}'::jsonb, "
-            "'/tmp/cost2', 'acc_wf', $1, 1000000)",
+            "'/tmp/cost2', 'acc_wf', $1, $1, 1000000)",
             run.id,
         )
     with mock.patch("aios.workflows.step.defer_run_wake", new=AsyncMock()) as wake:
@@ -6041,8 +6041,10 @@ async def test_over_budget_agent_refusal_is_catchable(
             "VALUES ('agent_cost_seed', 1, 'm', 's', 'acc_wf')"
         )
         await conn.execute(
-            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, workspace_volume_path, account_id, parent_run_id, cost_microusd) "
-            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', 1, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, 1000000)",
+            # creator_run_id = parent_run_id, as insert_workflow_child writes it: the
+            # budget reads the creation-subtree rollup, which walks creator edges.
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, workspace_volume_path, account_id, parent_run_id, creator_run_id, cost_microusd) "
+            "VALUES ('ses_cost_seed', 'agent_cost_seed', 'env_wf', 1, NULL, '{}'::jsonb, '/tmp/cost', 'acc_wf', $1, $1, 1000000)",
             run.id,
         )
     await run_workflow_step(run.id)
@@ -6293,3 +6295,432 @@ async def test_spawn_auto_archive_parameter_mutates_session_lifetime_and_false_i
             await db_queries.derive_session_status(conn, persistent.id, account_id="acc_wf")
             == "active"
         )
+
+
+# ─── #2446 (b)+(c): the run budget counts the SUBTREE and the sweep enforces it ──
+
+
+async def _seed_subtree_session(
+    pool: asyncpg.Pool[Any],
+    *,
+    sid: str,
+    cost_microusd: int,
+    creator_run_id: str | None = None,
+    creator_session_id: str | None = None,
+) -> None:
+    """Insert a session hanging off the run's creation tree (#2151 edges): a
+    direct child (``creator_run_id``, also ``parent_run_id`` as a real agent()
+    child has) or a GRANDCHILD (``creator_session_id`` = a child session, the
+    shape a child's own ``call_agent`` produces). ``parent_run_id`` is set ONLY on
+    the direct child, so a grandchild is invisible to ``run_children_usage``."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agents (id, name, model, system, account_id) "
+            "VALUES ('agent_subtree', 'agent_subtree', 'm', 's', 'acc_wf') "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        await conn.execute(
+            "INSERT INTO agent_versions (agent_id, version, model, system, account_id) "
+            "VALUES ('agent_subtree', 1, 'm', 's', 'acc_wf') ON CONFLICT DO NOTHING"
+        )
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
+            "workspace_volume_path, account_id, parent_run_id, creator_run_id, "
+            "creator_session_id, cost_microusd) "
+            "VALUES ($1, 'agent_subtree', 'env_wf', 1, NULL, '{}'::jsonb, $2, 'acc_wf', "
+            "$3, $3, $4, $5)",
+            sid,
+            f"/tmp/{sid}",
+            creator_run_id,
+            creator_session_id,
+            cost_microusd,
+        )
+
+
+_BUDGET_SCRIPT = (
+    "async def main(input):\n"
+    "    try:\n"
+    "        await agent('x', agent_id={agent!r})\n"
+    "        return 'spawned-and-returned'\n"
+    "    except AgentError as e:\n"
+    "        return {{'kind': e.kind, 'bound': e.bound}}\n"
+)
+
+
+async def _budgeted_run(pool: asyncpg.Pool[Any], agent_id: str, budget_usd: float | None) -> str:
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name=f"budget-{make_id(REQUEST)}",
+            script=_BUDGET_SCRIPT.format(agent=agent_id),
+        )
+    run = await service.create_run(
+        pool,
+        account_id="acc_wf",
+        workflow_id=wf.id,
+        environment_id="env_wf",
+        budget_usd=budget_usd,
+    )
+    return run.id
+
+
+@pytest.mark.parametrize(
+    ("grandchild_cost", "refused"),
+    [(1_000_000, True), (999_999, False)],
+    ids=["grandchild-at-budget-refuses", "grandchild-under-budget-spawns"],
+)
+async def test_run_budget_counts_grandchild_spend(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str, grandchild_cost: int, refused: bool
+) -> None:
+    """#2446 (b): a GRANDCHILD's spend counts against ``budget_usd``. The direct
+    child spent nothing, so the pre-#2446 direct-children rollup (``sessions WHERE
+    parent_run_id = run``) reads 0 and would let the new agent() through. Both
+    directions: exactly at the budget refuses; one micro-dollar under spawns."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await _seed_subtree_session(pool, sid="ses_bud_child", cost_microusd=0, creator_run_id=run_id)
+    await _seed_subtree_session(
+        pool,
+        sid="ses_bud_grandchild",
+        cost_microusd=grandchild_cost,
+        creator_session_id="ses_bud_child",
+    )
+
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        events = await wf_queries.list_run_events(conn, run_id)
+    rejected = [
+        e
+        for e in events
+        if e.type == "call_result"
+        and (e.payload.get("error") or {}).get("kind") == "budget_exceeded"
+    ]
+    spawned = [
+        e for e in events if e.type == "call_started" and e.payload.get("capability") == "agent"
+    ]
+    assert run is not None
+    if refused:
+        assert len(rejected) == 1 and not spawned
+        assert "spent $1.00 of $1.00" in rejected[0].payload["error"]["message"]
+    else:
+        assert not rejected and len(spawned) == 1
+        assert run.status == "suspended"
+
+
+async def test_budget_view_reports_subtree_spend(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """The script-facing ``budget()`` must read the SAME subtree figure the gate
+    enforces, or a script sees headroom the gate will refuse."""
+    pool = wf_runtime
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id="acc_wf",
+            name="budget-view-subtree",
+            script="async def main(input):\n    return await budget()\n",
+        )
+    run = await service.create_run(
+        pool, account_id="acc_wf", workflow_id=wf.id, environment_id="env_wf", budget_usd=2.0
+    )
+    await _seed_subtree_session(
+        pool, sid="ses_bv_child", cost_microusd=250_000, creator_run_id=run.id
+    )
+    await _seed_subtree_session(
+        pool, sid="ses_bv_grandchild", cost_microusd=500_000, creator_session_id="ses_bv_child"
+    )
+    await run_workflow_step(run.id)
+    await run_workflow_step(run.id)
+    async with pool.acquire() as conn:
+        final = await wf_queries.get_run_for_step(conn, run.id)
+    assert final is not None and final.status == "completed"
+    assert final.output == {"total_usd": 2.0, "spent_usd": 0.75, "remaining_usd": 1.25}
+
+
+_SWEEP_KWARGS: dict[str, Any] = dict(
+    agent_deadline_seconds=3600.0,
+    agent_cost_ceiling_microusd=0,
+    tool_stale_seconds=3600.0,
+    call_llm_stale_seconds=3600.0,
+    bash_default_timeout_seconds=120.0,
+    sandbox_provisioning_slack_seconds=60.0,
+    max_bash_timeout_seconds=3600,
+)
+
+
+async def test_sweep_force_resolves_a_parked_run_whose_subtree_passes_its_budget(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#2446 (c), positive direction. The run is PARKED behind a live agent()
+    child and no new agent() ever opens, so the (b) gate never runs. The child's
+    own sub-agent (a grandchild) burns the run's budget. The sweep must select the
+    run, and the woken step must force-resolve the in-flight call through the
+    #2440 exit path: AgentError(timeout, bound='budget') plus the cancel cascade.
+    The call_started is NOT aged and the per-child ceiling is off (0), so only the
+    run budget can explain the resolution."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(run_id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+    await _seed_subtree_session(
+        pool, sid="ses_sweep_grandchild", cost_microusd=1_000_000, creator_session_id=child_id
+    )
+
+    async with pool.acquire() as conn:
+        ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert run_id in ids
+
+    await run_workflow_step(run_id)  # the woken step: harvest force-resolves the call
+
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+        marker = await conn.fetchval(
+            "SELECT count(*) FROM session_cancel_markers WHERE session_id = $1 AND request_id = $2",
+            child_id,
+            rid,
+        )
+        ids_after = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert isinstance(resp, Err) and resp.error == {"kind": "timeout", "bound": "budget"}
+    assert marker == 1  # the in-flight child is cancelled (the #2440 cascade)
+    assert run is not None and run.status == "completed"
+    assert run.output == {"kind": "timeout", "bound": "budget"}
+    assert run_id not in ids_after  # resolved: no wake loop
+
+
+async def test_sweep_leaves_a_parked_run_under_budget_alone(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#2446 (c), negative direction: one micro-dollar under the budget, the
+    parked run is neither swept nor resolved on a stray wake."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+    await _seed_subtree_session(
+        pool, sid="ses_under_grandchild", cost_microusd=999_999, creator_session_id=child_id
+    )
+
+    async with pool.acquire() as conn:
+        ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert run_id not in ids
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "suspended"
+    assert resp is None
+
+
+async def test_sweep_never_selects_an_unbudgeted_run(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """No regression for ``budget_usd=None`` (every trigger-launched run today):
+    an enormous subtree spend must not select it, and a stray wake leaves the
+    call open."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=None)
+    await run_workflow_step(run_id)
+    child_id = await _child_id_of(pool, run_id)
+    rid = await _open_request_id(pool, child_id)
+    await _seed_subtree_session(
+        pool, sid="ses_nobudget_grandchild", cost_microusd=999_000_000, creator_session_id=child_id
+    )
+
+    async with pool.acquire() as conn:
+        ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert run_id not in ids
+
+    await run_workflow_step(run_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_run_for_step(conn, run_id)
+        resp = await db_queries.read_request_response(
+            conn, child_id, account_id="acc_wf", request_id=rid
+        )
+    assert run is not None and run.status == "suspended"
+    assert resp is None
+
+
+async def test_sweep_budget_rollup_runs_with_jit_off_scoped_to_its_transaction(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """The sweep's batched budget rollup disables JIT for itself only (#2446 c).
+
+    Prod runs jit=on with jit_above_cost=100000; the batched subtree rollup's plan
+    cost passes that at ~10 roots (measured 481k) and JIT compile then costs
+    ~55ms at 10 roots and ~1s at 100+, against ~1-40ms of execution. The
+    ``SET LOCAL`` must be in force while the rollup runs and must NOT leak onto
+    the pooled connection afterwards."""
+    pool = wf_runtime
+    run_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(run_id)  # spawn + suspend: a sweep budget candidate
+    seen: list[str] = []
+    real = wf_queries.runs_budget_spent_microusd
+
+    async def spy(
+        conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+    ) -> dict[str, int]:
+        seen.append(await conn.fetchval("SHOW jit"))
+        return await real(conn, run_ids, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        await conn.execute("SET jit = on")
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", spy):
+            await wf_queries.list_parked_run_ids_over_budget(conn)
+        after = await conn.fetchval("SHOW jit")
+        await conn.execute("RESET jit")
+    assert seen == ["off"]  # the rollup ran with JIT disabled
+    assert after == "on"  # ...and the setting died with its transaction
+
+
+# ── #2465 review B1: the budget clause FAILS OPEN ────────────────────────────
+
+
+async def _raise_timeout(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, int]:
+    raise TimeoutError("budget rollup statement timeout")
+
+
+async def test_sweep_budget_rollup_failure_keeps_the_main_predicate_ids(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#2465 B1 (the reviewer's repro). One pending UNBUDGETED run and one
+    budgeted parked candidate; the budget rollup raises ``TimeoutError`` (the
+    accounting rollup's 10s statement timeout). The sweep must not raise, and the
+    pending run -- matched by the main needs-step predicate, nothing to do with
+    budgets -- must still be returned. Before the fix the exception escaped and
+    every run in the fleet went unswept."""
+    pool = wf_runtime
+    pending_id = await _make_run(pool, "async def main(input):\n    return 1")
+    parked_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(parked_id)  # spawn + suspend: a budget candidate
+    child_id = await _child_id_of(pool, parked_id)
+    await _seed_subtree_session(
+        pool, sid="ses_failopen_grandchild", cost_microusd=1_000_000, creator_session_id=child_id
+    )
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", _raise_timeout):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+        assert not conn.is_in_transaction()  # no aborted txn left on the pooled conn
+        assert await conn.fetchval("SELECT 1") == 1
+    assert pending_id in ids
+    assert parked_id not in ids  # its account's rollup failed: budget id skipped
+
+
+async def test_sweep_budget_clause_fails_open_even_if_candidate_fetch_raises(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Belt-and-braces: a failure anywhere in the budget clause (here the
+    candidate fetch itself) still returns the main predicate's ids."""
+    pool = wf_runtime
+    pending_id = await _make_run(pool, "async def main(input):\n    return 1")
+
+    async def boom(conn: asyncpg.Connection[Any]) -> list[str]:
+        raise ConnectionResetError("connection lost")
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "list_parked_run_ids_over_budget", boom):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert pending_id in ids
+
+
+async def _over_budget_run_in_account(pool: asyncpg.Pool[Any], account_id: str) -> str:
+    """A budgeted run in ``account_id``, parked behind a live agent() child whose
+    grandchild has spent the whole $1 budget."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ($1, 'acc_wf', FALSE, $1) ON CONFLICT (id) DO NOTHING",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ($1, $1, '{}'::jsonb, $2) ON CONFLICT (id) DO NOTHING",
+            f"env_{account_id}",
+            account_id,
+        )
+    agent = await agents_service.create_agent(
+        pool,
+        account_id=account_id,
+        name=f"child-agent-{account_id}",
+        model="test/dummy",
+        system="test child agent",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id=account_id,
+            name=f"budget-{make_id(REQUEST)}",
+            script=_BUDGET_SCRIPT.format(agent=agent.id),
+        )
+    run = await service.create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=wf.id,
+        environment_id=f"env_{account_id}",
+        budget_usd=1.0,
+    )
+    await run_workflow_step(run.id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run.id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
+            "workspace_volume_path, account_id, creator_session_id, cost_microusd) "
+            "VALUES ($1, $2, $3, 1, NULL, '{}'::jsonb, $4, $5, $6, 1000000)",
+            f"ses_gc_{account_id}",
+            agent.id,
+            f"env_{account_id}",
+            f"/tmp/ses_gc_{account_id}",
+            account_id,
+            child_id,
+        )
+    return run.id
+
+
+async def test_sweep_budget_rollup_failure_is_isolated_per_account(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Account A's rollup fails with a REAL database error (which aborts the
+    enclosing transaction); account B's over-budget run must still be selected.
+    A is ordered first (``acc_a`` < ``acc_b``), so B's rollup runs on the same
+    connection AFTER A's failure -- which only works if A's failure was confined
+    to its own savepoint. Afterwards the pooled connection is clean and usable."""
+    pool = wf_runtime
+    run_a = await _over_budget_run_in_account(pool, "acc_a")
+    run_b = await _over_budget_run_in_account(pool, "acc_b")
+    real = wf_queries.runs_budget_spent_microusd
+    rollups: list[str] = []
+
+    async def fail_for_a(
+        conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+    ) -> dict[str, int]:
+        rollups.append(account_id)
+        if account_id == "acc_a":
+            await conn.fetchval("SELECT 1 / 0")  # aborts the (sub)transaction
+        return await real(conn, run_ids, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", fail_for_a):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+        assert not conn.is_in_transaction()
+        assert await conn.fetchval("SELECT 1") == 1  # the pooled conn is usable
+    assert rollups == ["acc_a", "acc_b"]
+    assert run_b in ids
+    assert run_a not in ids

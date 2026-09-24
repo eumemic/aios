@@ -2858,6 +2858,7 @@ class TestSlice2WritePath:
                         "input_template": {"x": 1},
                         "vault_ids": [],
                         "max_outstanding_runs": None,
+                        "budget_usd": None,
                     }
                 }
             ),
@@ -2880,6 +2881,7 @@ class TestSlice2WritePath:
                         "input_template": None,
                         "vault_ids": [],
                         "max_outstanding_runs": None,
+                        "budget_usd": None,
                     }
                 }
             ),
