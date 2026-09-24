@@ -6567,7 +6567,9 @@ async def test_sweep_budget_rollup_runs_with_jit_off_scoped_to_its_transaction(
     seen: list[str] = []
     real = wf_queries.runs_budget_spent_microusd
 
-    async def spy(conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str):
+    async def spy(
+        conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+    ) -> dict[str, int]:
         seen.append(await conn.fetchval("SHOW jit"))
         return await real(conn, run_ids, account_id=account_id)
 
@@ -6579,3 +6581,146 @@ async def test_sweep_budget_rollup_runs_with_jit_off_scoped_to_its_transaction(
         await conn.execute("RESET jit")
     assert seen == ["off"]  # the rollup ran with JIT disabled
     assert after == "on"  # ...and the setting died with its transaction
+
+
+# ── #2465 review B1: the budget clause FAILS OPEN ────────────────────────────
+
+
+async def _raise_timeout(
+    conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+) -> dict[str, int]:
+    raise TimeoutError("budget rollup statement timeout")
+
+
+async def test_sweep_budget_rollup_failure_keeps_the_main_predicate_ids(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#2465 B1 (the reviewer's repro). One pending UNBUDGETED run and one
+    budgeted parked candidate; the budget rollup raises ``TimeoutError`` (the
+    accounting rollup's 10s statement timeout). The sweep must not raise, and the
+    pending run -- matched by the main needs-step predicate, nothing to do with
+    budgets -- must still be returned. Before the fix the exception escaped and
+    every run in the fleet went unswept."""
+    pool = wf_runtime
+    pending_id = await _make_run(pool, "async def main(input):\n    return 1")
+    parked_id = await _budgeted_run(pool, wf_agent_id, budget_usd=1.0)
+    await run_workflow_step(parked_id)  # spawn + suspend: a budget candidate
+    child_id = await _child_id_of(pool, parked_id)
+    await _seed_subtree_session(
+        pool, sid="ses_failopen_grandchild", cost_microusd=1_000_000, creator_session_id=child_id
+    )
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", _raise_timeout):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+        assert not conn.is_in_transaction()  # no aborted txn left on the pooled conn
+        assert await conn.fetchval("SELECT 1") == 1
+    assert pending_id in ids
+    assert parked_id not in ids  # its account's rollup failed: budget id skipped
+
+
+async def test_sweep_budget_clause_fails_open_even_if_candidate_fetch_raises(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Belt-and-braces: a failure anywhere in the budget clause (here the
+    candidate fetch itself) still returns the main predicate's ids."""
+    pool = wf_runtime
+    pending_id = await _make_run(pool, "async def main(input):\n    return 1")
+
+    async def boom(conn: asyncpg.Connection[Any]) -> list[str]:
+        raise ConnectionResetError("connection lost")
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "list_parked_run_ids_over_budget", boom):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+    assert pending_id in ids
+
+
+async def _over_budget_run_in_account(pool: asyncpg.Pool[Any], account_id: str) -> str:
+    """A budgeted run in ``account_id``, parked behind a live agent() child whose
+    grandchild has spent the whole $1 budget."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ($1, 'acc_wf', FALSE, $1) ON CONFLICT (id) DO NOTHING",
+            account_id,
+        )
+        await conn.execute(
+            "INSERT INTO environments (id, name, config, account_id) "
+            "VALUES ($1, $1, '{}'::jsonb, $2) ON CONFLICT (id) DO NOTHING",
+            f"env_{account_id}",
+            account_id,
+        )
+    agent = await agents_service.create_agent(
+        pool,
+        account_id=account_id,
+        name=f"child-agent-{account_id}",
+        model="test/dummy",
+        system="test child agent",
+        tools=[],
+        description=None,
+        metadata={},
+        window_min=1000,
+        window_max=100000,
+    )
+    async with pool.acquire() as conn:
+        wf = await wf_queries.insert_workflow(
+            conn,
+            account_id=account_id,
+            name=f"budget-{make_id(REQUEST)}",
+            script=_BUDGET_SCRIPT.format(agent=agent.id),
+        )
+    run = await service.create_run(
+        pool,
+        account_id=account_id,
+        workflow_id=wf.id,
+        environment_id=f"env_{account_id}",
+        budget_usd=1.0,
+    )
+    await run_workflow_step(run.id)  # spawn + suspend
+    child_id = await _child_id_of(pool, run.id)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO sessions (id, agent_id, environment_id, agent_version, title, metadata, "
+            "workspace_volume_path, account_id, creator_session_id, cost_microusd) "
+            "VALUES ($1, $2, $3, 1, NULL, '{}'::jsonb, $4, $5, $6, 1000000)",
+            f"ses_gc_{account_id}",
+            agent.id,
+            f"env_{account_id}",
+            f"/tmp/ses_gc_{account_id}",
+            account_id,
+            child_id,
+        )
+    return run.id
+
+
+async def test_sweep_budget_rollup_failure_is_isolated_per_account(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """Account A's rollup fails with a REAL database error (which aborts the
+    enclosing transaction); account B's over-budget run must still be selected.
+    A is ordered first (``acc_a`` < ``acc_b``), so B's rollup runs on the same
+    connection AFTER A's failure -- which only works if A's failure was confined
+    to its own savepoint. Afterwards the pooled connection is clean and usable."""
+    pool = wf_runtime
+    run_a = await _over_budget_run_in_account(pool, "acc_a")
+    run_b = await _over_budget_run_in_account(pool, "acc_b")
+    real = wf_queries.runs_budget_spent_microusd
+    rollups: list[str] = []
+
+    async def fail_for_a(
+        conn: asyncpg.Connection[Any], run_ids: list[str], *, account_id: str
+    ) -> dict[str, int]:
+        rollups.append(account_id)
+        if account_id == "acc_a":
+            await conn.fetchval("SELECT 1 / 0")  # aborts the (sub)transaction
+        return await real(conn, run_ids, account_id=account_id)
+
+    async with pool.acquire() as conn:
+        with mock.patch.object(wf_queries, "runs_budget_spent_microusd", fail_for_a):
+            ids = await wf_queries.list_run_ids_needing_step(conn, **_SWEEP_KWARGS)
+        assert not conn.is_in_transaction()
+        assert await conn.fetchval("SELECT 1") == 1  # the pooled conn is usable
+    assert rollups == ["acc_a", "acc_b"]
+    assert run_b in ids
+    assert run_a not in ids

@@ -32,6 +32,7 @@ from aios.db.queries import (
 from aios.db.queries import accounting as accounting_queries
 from aios.errors import ConflictError, NotFoundError
 from aios.ids import WORKFLOW, WORKFLOW_EVENT, WORKFLOW_RUN, make_id
+from aios.logging import get_logger
 from aios.models.accounting import UsageNodeRef
 from aios.models.agents import (
     HttpServerSpec,
@@ -53,6 +54,8 @@ from aios.models.workflows import (
     WorkflowVersion,
 )
 from aios.retirements.epoch import TOOLS_VOCAB_EPOCH
+
+log = get_logger(__name__)
 
 # A reserved ``call_key`` for the run-cancel side-marker. Real call_keys are
 # call-site hashes, so this sentinel never collides; the ``(run_id, call_key)`` PK
@@ -1403,7 +1406,21 @@ async def list_run_ids_needing_step(
     )
     ids = [r["id"] for r in rows]
     matched = set(ids)
-    for run_id in await list_parked_run_ids_over_budget(conn):
+    # FAIL OPEN: the budget clause is an add-on to the fleet's central liveness
+    # query. Whatever it raises (a candidate-fetch error, a broken connection, a
+    # rollback that itself fails), the runs the main predicate matched are still
+    # returned -- one bad rollup must never stop stepping for every run. Per-account
+    # failures are already isolated inside; this catches the rest.
+    try:
+        over_budget = await list_parked_run_ids_over_budget(conn)
+    except Exception as exc:
+        log.warning(
+            "wf_sweep.budget_clause_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        over_budget = []
+    for run_id in over_budget:
         if run_id not in matched:
             ids.append(run_id)
     return ids
@@ -1414,6 +1431,12 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
     has reached ``budget_usd`` (#2446 c) -- the budget clause of
     :func:`list_run_ids_needing_step`. ``>=`` matches the step's gate and its
     harvest-side force-resolution, so a run woken here is always resolved.
+
+    Fail-open PER ACCOUNT: each account's rollup runs in its own SAVEPOINT. If it
+    raises (the rollup's 10s statement timeout, any DB error), the savepoint is
+    rolled back -- so the outer transaction is usable again for the next account
+    -- the failure is logged as ``wf_sweep.budget_rollup_failed`` with the account
+    and exception type, and only that account's budget ids are skipped.
     """
     candidates = await conn.fetch(
         """
@@ -1429,6 +1452,7 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
                 SELECT 1 FROM wf_run_events e
                 WHERE e.run_id = r.id AND e.call_key = cs.call_key
                   AND e.type = 'call_result'))
+        ORDER BY r.account_id, r.id
         """
     )
     by_account: dict[str, list[asyncpg.Record]] = {}
@@ -1447,9 +1471,20 @@ async def list_parked_run_ids_over_budget(conn: asyncpg.Connection[Any]) -> list
     async with conn.transaction():
         await conn.execute("SET LOCAL jit = off")
         for account_id, rows in by_account.items():
-            spent = await runs_budget_spent_microusd(
-                conn, [r["id"] for r in rows], account_id=account_id
-            )
+            try:
+                async with conn.transaction():  # SAVEPOINT: a failure aborts only this
+                    spent = await runs_budget_spent_microusd(
+                        conn, [r["id"] for r in rows], account_id=account_id
+                    )
+            except Exception as exc:
+                log.warning(
+                    "wf_sweep.budget_rollup_failed",
+                    account_id=account_id,
+                    candidates=len(rows),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                continue
             over.extend(r["id"] for r in rows if spent[r["id"]] >= r["budget_total_microusd"])
     return over
 
