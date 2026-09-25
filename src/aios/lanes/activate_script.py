@@ -457,6 +457,34 @@ WORKFLOW_ACTION_NULLABLE_KEYS = (
 )
 
 
+def lock_run_cap_error(lock_action):
+    """Why the lock's run caps are invalid, or None if they are fine.
+
+    Mirrors ``LaneLock.from_dict`` (aios.lanes.models), which validates through
+    WorkflowAction's own bounds; this sandbox cannot import ``aios``, so the same
+    rule is restated here and a test pins the two to agree value-for-value.
+    ``max_outstanding_runs``: null or an int >= 1 (bool is NOT an int here).
+    ``budget_usd``: null or a finite number > 0 (bool is NOT a number here).
+    Checked at read-lock so a bad cap fails the activation before the first
+    mutation, instead of 422ing at the trigger PUT after the workflow, agent and
+    session were already applied.
+    """
+    cap = lock_action.get("max_outstanding_runs")
+    if cap is not None and (type(cap) is not int or cap < 1):
+        return (f"lock cron_trigger.action.max_outstanding_runs must be null or an "
+                f"integer >= 1, got {cap!r}")
+    budget = lock_action.get("budget_usd")
+    if budget is not None and (
+        type(budget) not in (int, float)
+        or budget != budget  # NaN
+        or budget in (float("inf"), float("-inf"))
+        or budget <= 0
+    ):
+        return (f"lock cron_trigger.action.budget_usd must be null or a finite "
+                f"number > 0, got {budget!r}")
+    return None
+
+
 def build_workflow_action(lock_action, workflow_id):
     """The complete workflow action for this lane's trigger.
 
@@ -640,6 +668,14 @@ async def main(input):
 
     spec_hash = lock.get("_provenance", {}).get("spec_hash", "")
     log(f"lock file loaded: spec_hash={spec_hash}")
+
+    cap_err = lock_run_cap_error(lock["cron_trigger"]["action"])
+    if cap_err:
+        return {
+            "outcome": "failed", "lane": lane, "merge_sha": merge_sha,
+            "spec_hash": spec_hash, "deltas": [], "verification": {},
+            "error": cap_err,
+        }
 
     deltas = []
 

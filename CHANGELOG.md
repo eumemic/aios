@@ -10,6 +10,10 @@
   `cron_trigger.action` may now declare `max_outstanding_runs` and `budget_usd`;
   a change to either counts as trigger drift. The lanes test fake now validates
   trigger bodies against the real `TriggerCreate`/`TriggerUpdate` models.
+  An invalid cap (`max_outstanding_runs` not null / int >= 1, `budget_usd` not
+  null / finite > 0) is refused by `LaneLock.from_dict` (`ValueError`, using
+  `WorkflowAction`'s own bounds) and by `lane_activate` at read-lock, before
+  any object is created or updated.
 
 - **Run budgets now count the whole subtree, bind a parked run, and can be set
   per trigger (#2446, parts a-c).**

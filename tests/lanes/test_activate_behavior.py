@@ -28,6 +28,7 @@ from typing import Any, cast
 from pydantic import ValidationError
 
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
+from aios.lanes.models import LaneLock
 from aios.models.common import ListResponse
 from aios.models.pagination import DEFAULT_PAGE_LIMIT, decode_cursor
 from aios.models.sessions import SessionUpdate
@@ -1132,8 +1133,105 @@ class TestTriggerBodiesBindToRealModels:
         result = world.activate()
 
         assert result["outcome"] == "failed"
-        assert _actions(result)["trigger"] == "error"
-        assert world.trigger_rejections
+        assert "max_outstanding_runs" in result["error"]
+        # Refused at read-lock, before ANY mutation: nothing reaches the server.
+        assert world.trigger_updates == []
+        assert world.trigger_creates == []
+
+
+# Values LaneLock.from_dict must accept / refuse. The script's pre-flight guard
+# is checked against the SAME list and against LaneLock itself, so the two
+# validators cannot drift apart.
+_CAP_VALUES: list[object] = [None, 1, 5, 0, -3, "lots", True, False, 2.0, "5"]
+_BUDGET_VALUES: list[object] = [
+    None,
+    5,
+    0.5,
+    0,
+    -1,
+    "free",
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    True,
+    "0.5",
+]
+
+
+def _script_namespace() -> dict[str, Any]:
+    namespace: dict[str, Any] = {}
+    exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
+    return namespace
+
+
+def _lane_lock_accepts(lock: dict[str, Any]) -> bool:
+    try:
+        LaneLock.from_dict(lock)
+    except ValueError:
+        return False
+    return True
+
+
+class TestRunCapPreflight:
+    """lane_activate reads the RAW lock (the script sandbox cannot import
+    ``aios``), so it cannot call ``LaneLock.from_dict``. It carries its own
+    pre-flight check instead, pinned here to agree with LaneLock on every value,
+    and it refuses a bad cap BEFORE the first mutation (no half-applied lane)."""
+
+    def test_guard_agrees_with_lane_lock_on_every_value(self) -> None:
+        guard = _script_namespace()["lock_run_cap_error"]
+        for key, values in (("max_outstanding_runs", _CAP_VALUES), ("budget_usd", _BUDGET_VALUES)):
+            for value in values:
+                lock = _lock()
+                lock["cron_trigger"]["action"][key] = value
+                script_ok = guard(lock["cron_trigger"]["action"]) is None
+                assert script_ok == _lane_lock_accepts(lock), (key, value)
+
+    def test_guard_accepts_absent_caps(self) -> None:
+        guard = _script_namespace()["lock_run_cap_error"]
+        action = _lock()["cron_trigger"]["action"]
+        action.pop("max_outstanding_runs", None)
+        action.pop("budget_usd", None)
+        assert guard(action) is None
+
+    def test_invalid_budget_fails_before_any_object_is_created(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["budget_usd"] = float("nan")
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "budget_usd" in result["error"]
+        assert result["deltas"] == []
+        assert world.workflows == {}
+        assert world.agents == {}
+        assert world.sessions == {}
+        assert world.triggers == {}
+
+    def test_bool_cap_fails_before_any_object_is_created(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = True
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "max_outstanding_runs" in result["error"]
+        assert world.workflows == {}
+        assert world.triggers == {}
+
+    def test_valid_caps_still_activate(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 5
+        lock["cron_trigger"]["action"]["budget_usd"] = 0.5
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        assert world.triggers["trig"]["action"]["max_outstanding_runs"] == 5
+        assert world.triggers["trig"]["action"]["budget_usd"] == 0.5
 
 
 class TestDroppingAnyKeyGoesRed:

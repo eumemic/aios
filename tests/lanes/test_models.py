@@ -108,6 +108,55 @@ class TestLaneLockFromDict:
         assert action.max_outstanding_runs == 1
         assert action.budget_usd == 5.0
 
+    def test_cron_trigger_run_caps_absent_or_null_parse_as_none(self) -> None:
+        data = copy.deepcopy(MINIMAL_LOCK_DICT)
+        data["cron_trigger"]["action"]["max_outstanding_runs"] = None
+        data["cron_trigger"]["action"]["budget_usd"] = None
+
+        action = LaneLock.from_dict(data).cron_trigger.action
+
+        assert action.max_outstanding_runs is None
+        assert action.budget_usd is None
+
+
+def _lock_with_action(**fields: Any) -> dict[str, Any]:
+    data = copy.deepcopy(MINIMAL_LOCK_DICT)
+    data["cron_trigger"]["action"].update(fields)
+    return data
+
+
+class TestLaneLockRunCapBounds:
+    """``max_outstanding_runs`` / ``budget_usd`` carry WorkflowAction's own bounds
+    (ge=1 / gt=0): a lock the server would 422 must not parse as a typed lock."""
+
+    @pytest.mark.parametrize("cap", [1, 5])
+    def test_valid_cap_parses_unchanged(self, cap: int) -> None:
+        action = LaneLock.from_dict(_lock_with_action(max_outstanding_runs=cap)).cron_trigger.action
+        assert action.max_outstanding_runs == cap
+        assert type(action.max_outstanding_runs) is int
+
+    @pytest.mark.parametrize("budget", [5, 0.5])
+    def test_valid_budget_parses_unchanged(self, budget: float) -> None:
+        action = LaneLock.from_dict(_lock_with_action(budget_usd=budget)).cron_trigger.action
+        assert action.budget_usd == budget
+        assert type(action.budget_usd) is type(budget)
+
+    @pytest.mark.parametrize("cap", [0, -3, "lots", True, False, 2.0, "5"])
+    def test_invalid_cap_raises(self, cap: object) -> None:
+        with pytest.raises(ValueError, match="max_outstanding_runs"):
+            LaneLock.from_dict(_lock_with_action(max_outstanding_runs=cap))
+
+    @pytest.mark.parametrize(
+        "budget", [0, -1, "free", float("nan"), float("inf"), float("-inf"), True, "0.5"]
+    )
+    def test_invalid_budget_raises(self, budget: object) -> None:
+        with pytest.raises(ValueError, match="budget_usd"):
+            LaneLock.from_dict(_lock_with_action(budget_usd=budget))
+
+
+class TestLaneLockFromDictContinued:
+    """Remaining round-trip parse checks."""
+
     def test_launcher_agent_fields(self) -> None:
         lock = LaneLock.from_dict(MINIMAL_LOCK_DICT)
 
