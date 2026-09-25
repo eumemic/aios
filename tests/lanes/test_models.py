@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
@@ -92,6 +93,20 @@ class TestLaneLockFromDict:
         assert ct.action.workflow_id == "wf_placeholder"
         assert ct.action.input_template == {"lane": "test", "merge_sha": "deadbeef"}
         assert ct.action.vault_ids == ["vault_1"]
+        # Undeclared run caps default to None (= uncapped, no budget).
+        assert ct.action.max_outstanding_runs is None
+        assert ct.action.budget_usd is None
+        assert ct.action.version is None
+
+    def test_cron_trigger_run_caps_are_declarable(self) -> None:
+        data = copy.deepcopy(MINIMAL_LOCK_DICT)
+        data["cron_trigger"]["action"]["max_outstanding_runs"] = 1
+        data["cron_trigger"]["action"]["budget_usd"] = 5.0
+
+        action = LaneLock.from_dict(data).cron_trigger.action
+
+        assert action.max_outstanding_runs == 1
+        assert action.budget_usd == 5.0
 
     def test_launcher_agent_fields(self) -> None:
         lock = LaneLock.from_dict(MINIMAL_LOCK_DICT)

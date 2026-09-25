@@ -37,12 +37,23 @@ class LockWorkflow:
 
 @dataclass(frozen=True)
 class LockCronTriggerAction:
-    """``cron_trigger.action`` — the WorkflowAction inside the trigger."""
+    """``cron_trigger.action`` — the WorkflowAction inside the trigger.
+
+    Every optional field defaults to ``None`` (= the server default). The
+    activation script ALWAYS emits all of them, as explicit nulls when absent,
+    because the update-side ``WorkflowActionReplace`` requires every key.
+
+    ``max_outstanding_runs`` / ``budget_usd`` let a lane be armed CAPPED: at most
+    N of this trigger's runs outstanding, and a per-run USD spend ceiling.
+    """
 
     workflow_id: str
     input_template: dict[str, Any] | None = None
     vault_ids: list[str] = field(default_factory=list)
     workflow_version: int | None = None
+    version: int | None = None
+    max_outstanding_runs: int | None = None
+    budget_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,9 @@ class LaneLock:
                     input_template=ct["action"].get("input_template"),
                     vault_ids=ct["action"].get("vault_ids", []),
                     workflow_version=ct["action"].get("workflow_version"),
+                    version=ct["action"].get("version"),
+                    max_outstanding_runs=ct["action"].get("max_outstanding_runs"),
+                    budget_usd=ct["action"].get("budget_usd"),
                 ),
                 source=LockCronTriggerSource(
                     schedule=ct["source"]["schedule"],

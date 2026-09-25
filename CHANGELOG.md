@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **lane_activate sends a complete trigger update again, and lanes can be armed
+  capped (#2463).** The trigger PUT omitted `version`, `max_outstanding_runs` and
+  `budget_usd`, which `WorkflowActionReplace` now requires, so every trigger
+  update 422'd. The script now emits every key, with explicit `null` for any the
+  lock does not declare (same behaviour as before). A lock's
+  `cron_trigger.action` may now declare `max_outstanding_runs` and `budget_usd`;
+  a change to either counts as trigger drift. The lanes test fake now validates
+  trigger bodies against the real `TriggerCreate`/`TriggerUpdate` models.
+
 - **Run budgets now count the whole subtree, bind a parked run, and can be set
   per trigger (#2446, parts a-c).**
   (a) New `WorkflowAction.budget_usd` (`> 0`, default `null` = no budget, as
