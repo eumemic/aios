@@ -9,7 +9,54 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import AllowInfNan, Strict, TypeAdapter, ValidationError
+
+from aios.models.triggers import WorkflowAction
+
+# ── Run-cap validation ──────────────────────────────────────────────────────
+#
+# The lock's ``max_outstanding_runs`` / ``budget_usd`` become the trigger's
+# WorkflowAction fields verbatim, so they carry WorkflowAction's OWN bounds: the
+# constraint metadata (ge=1 / gt=0) is read off the model field, not restated,
+# so the two cannot drift. On top of it the lock check is strict (no bool, no
+# numeric strings, no 2.0-as-int) and budgets must be finite — a lock file is
+# builder-authored JSON, and anything the server would coerce or 422 is a lock
+# bug to surface at parse time.
+_RUN_CAP_ADAPTERS: dict[str, TypeAdapter[Any]] = {
+    "max_outstanding_runs": TypeAdapter(
+        Annotated[
+            int | None,
+            Strict(),
+            *WorkflowAction.model_fields["max_outstanding_runs"].metadata,
+        ]
+    ),
+    "budget_usd": TypeAdapter(
+        Annotated[
+            float | None,
+            Strict(),
+            AllowInfNan(False),
+            *WorkflowAction.model_fields["budget_usd"].metadata,
+        ]
+    ),
+}
+
+
+def _validated_run_cap(action: dict[str, Any], key: str) -> Any:
+    """Return ``action[key]`` (``None`` when absent) unchanged, raising
+    ``ValueError`` if it violates the WorkflowAction bound for that field.
+
+    Validation only: the lock's own value is returned as-is (a ``budget_usd`` of
+    ``5`` stays ``5``), so a valid lock parses exactly as it did before."""
+    value = action.get(key)
+    try:
+        _RUN_CAP_ADAPTERS[key].validate_python(value)
+    except ValidationError as e:
+        msg = e.errors()[0]["msg"]
+        raise ValueError(f"cron_trigger.action.{key}: invalid value {value!r} ({msg})") from None
+    return value
+
 
 # ── Lock-file section models ────────────────────────────────────────────────
 
@@ -37,12 +84,23 @@ class LockWorkflow:
 
 @dataclass(frozen=True)
 class LockCronTriggerAction:
-    """``cron_trigger.action`` — the WorkflowAction inside the trigger."""
+    """``cron_trigger.action`` — the WorkflowAction inside the trigger.
+
+    Every optional field defaults to ``None`` (= the server default). The
+    activation script ALWAYS emits all of them, as explicit nulls when absent,
+    because the update-side ``WorkflowActionReplace`` requires every key.
+
+    ``max_outstanding_runs`` / ``budget_usd`` let a lane be armed CAPPED: at most
+    N of this trigger's runs outstanding, and a per-run USD spend ceiling.
+    """
 
     workflow_id: str
     input_template: dict[str, Any] | None = None
     vault_ids: list[str] = field(default_factory=list)
     workflow_version: int | None = None
+    version: int | None = None
+    max_outstanding_runs: int | None = None
+    budget_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +186,9 @@ class LaneLock:
                     input_template=ct["action"].get("input_template"),
                     vault_ids=ct["action"].get("vault_ids", []),
                     workflow_version=ct["action"].get("workflow_version"),
+                    version=ct["action"].get("version"),
+                    max_outstanding_runs=_validated_run_cap(ct["action"], "max_outstanding_runs"),
+                    budget_usd=_validated_run_cap(ct["action"], "budget_usd"),
                 ),
                 source=LockCronTriggerSource(
                     schedule=ct["source"]["schedule"],

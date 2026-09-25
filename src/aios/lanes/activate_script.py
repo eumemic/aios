@@ -444,6 +444,60 @@ async def ensure_session(lock_session, agent_id):
                   "object_id": sid}
 
 
+# Every key of the update-side WorkflowActionReplace (aios.models.triggers). The
+# update model REQUIRES each optional-at-create field, so a PUT that omits one
+# 422s. A lock that does not declare a field gets an explicit null, which is the
+# create-time default (no pin, no selector, no template, uncapped, no budget).
+WORKFLOW_ACTION_NULLABLE_KEYS = (
+    "workflow_version",
+    "version",
+    "input_template",
+    "max_outstanding_runs",
+    "budget_usd",
+)
+
+
+def lock_run_cap_error(lock_action):
+    """Why the lock's run caps are invalid, or None if they are fine.
+
+    Mirrors ``LaneLock.from_dict`` (aios.lanes.models), which validates through
+    WorkflowAction's own bounds; this sandbox cannot import ``aios``, so the same
+    rule is restated here and a test pins the two to agree value-for-value.
+    ``max_outstanding_runs``: null or an int >= 1 (bool is NOT an int here).
+    ``budget_usd``: null or a finite number > 0 (bool is NOT a number here).
+    Checked at read-lock so a bad cap fails the activation before the first
+    mutation, instead of 422ing at the trigger PUT after the workflow, agent and
+    session were already applied.
+    """
+    cap = lock_action.get("max_outstanding_runs")
+    if cap is not None and (type(cap) is not int or cap < 1):
+        return (f"lock cron_trigger.action.max_outstanding_runs must be null or an "
+                f"integer >= 1, got {cap!r}")
+    budget = lock_action.get("budget_usd")
+    if budget is not None and (
+        type(budget) not in (int, float)
+        or budget != budget  # NaN
+        or budget in (float("inf"), float("-inf"))
+        or budget <= 0
+    ):
+        return (f"lock cron_trigger.action.budget_usd must be null or a finite "
+                f"number > 0, got {budget!r}")
+    return None
+
+
+def build_workflow_action(lock_action, workflow_id):
+    """The complete workflow action for this lane's trigger.
+
+    The same dict is the create body's action (WorkflowAction) and the update
+    body's action (WorkflowActionReplace), so it carries every key.
+    """
+    action = {"kind": "workflow", "workflow_id": workflow_id}
+    for key in WORKFLOW_ACTION_NULLABLE_KEYS:
+        action[key] = lock_action.get(key)
+    action["vault_ids"] = lock_action.get("vault_ids", [])
+    return action
+
+
 async def ensure_trigger(lock_trigger, session_id, workflow_id):
     """Create or update the cron trigger on the session. Returns ObjectDelta dict."""
     trigger_name = lock_trigger["trigger_name"]
@@ -463,13 +517,7 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
         "timezone": lock_trigger["source"].get("timezone", "UTC"),
     }
 
-    action = {
-        "kind": "workflow",
-        "workflow_id": workflow_id,
-        "input_template": lock_trigger["action"].get("input_template"),
-        "vault_ids": lock_trigger["action"].get("vault_ids", []),
-        "workflow_version": lock_trigger["action"].get("workflow_version"),
-    }
+    action = build_workflow_action(lock_trigger["action"], workflow_id)
 
     if live is None:
         create_body = {
@@ -506,6 +554,11 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
         changed = True
     if action.get("workflow_version") != live_action.get("workflow_version"):
         changed = True
+    # The run caps are the re-arm posture (#2463): a lock that adds or changes
+    # them must reach the live trigger, not read as "unchanged".
+    for key in ("version", "max_outstanding_runs", "budget_usd"):
+        if action.get(key) != live_action.get(key):
+            changed = True
 
     if not changed:
         return {"object_kind": "trigger", "object_name": trigger_name, "action": "unchanged",
@@ -514,8 +567,8 @@ async def ensure_trigger(lock_trigger, session_id, workflow_id):
     # TriggerUpdate uses replace semantics for source/action
     update_body = {
         "source": source,
-        # `action` is already the complete WorkflowActionReplace shape. It has no
-        # `version` field, so emitting one sent an undefined key on every update.
+        # `action` is the complete WorkflowActionReplace shape: every key the
+        # update model requires is present (explicit null = server default).
         "action": dict(action),
         "enabled": lock_trigger.get("enabled", True),
     }
@@ -615,6 +668,14 @@ async def main(input):
 
     spec_hash = lock.get("_provenance", {}).get("spec_hash", "")
     log(f"lock file loaded: spec_hash={spec_hash}")
+
+    cap_err = lock_run_cap_error(lock["cron_trigger"]["action"])
+    if cap_err:
+        return {
+            "outcome": "failed", "lane": lane, "merge_sha": merge_sha,
+            "spec_hash": spec_hash, "deltas": [], "verification": {},
+            "error": cap_err,
+        }
 
     deltas = []
 

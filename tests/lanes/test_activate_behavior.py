@@ -28,9 +28,16 @@ from typing import Any, cast
 from pydantic import ValidationError
 
 from aios.lanes.activate_script import LANE_ACTIVATE_SCRIPT
+from aios.lanes.models import LaneLock
 from aios.models.common import ListResponse
 from aios.models.pagination import DEFAULT_PAGE_LIMIT, decode_cursor
 from aios.models.sessions import SessionUpdate
+from aios.models.triggers import (
+    TriggerCreate,
+    TriggerUpdate,
+    WorkflowAction,
+    WorkflowActionReplace,
+)
 
 
 def _lock(script: str = "S") -> dict[str, Any]:
@@ -75,6 +82,26 @@ def _ok(obj: Any) -> dict[str, Any]:
     return {"status": 200, "body": json.dumps(obj)}
 
 
+def _trigger_body_error(
+    request_model: type[TriggerCreate] | type[TriggerUpdate],
+    action_model: type[WorkflowAction],
+    payload: dict[str, Any],
+) -> str | None:
+    """Why the real API would 422 this trigger body, or None if it binds.
+
+    Validates the whole body against the router's request model, then pins that
+    the action resolved to ``action_model`` (the discriminated union must pick
+    the workflow member, not silently fall through).
+    """
+    try:
+        bound = request_model.model_validate(payload)
+    except ValidationError as exc:
+        return f"{request_model.__name__} rejected the body: {exc}"
+    if not isinstance(bound.action, action_model):
+        return f"action bound as {type(bound.action).__name__}, not {action_model.__name__}"
+    return None
+
+
 class FakeWorld:
     """In-memory aios + GitHub with name uniqueness and optimistic concurrency."""
 
@@ -115,6 +142,9 @@ class FakeWorld:
         # Payloads the script actually PUT, so tests can assert on the wire shape.
         self.session_updates: list[dict[str, Any]] = []
         self.trigger_updates: list[dict[str, Any]] = []
+        self.trigger_creates: list[dict[str, Any]] = []
+        # Validation errors for trigger bodies the real models would 422.
+        self.trigger_rejections: list[str] = []
         for sess in seed_sessions or []:
             self.sessions[sess["id"]] = dict(sess)
         for trig in seed_triggers or []:
@@ -227,6 +257,14 @@ class FakeWorld:
                 return _ok({"data": list(self.triggers.values())})
             if method == "PUT" and "/triggers/" in path:
                 self.trigger_updates.append(payload)
+                # Enforce the REAL TriggerUpdate request contract, whose workflow
+                # action is WorkflowActionReplace: every optional-at-create field
+                # is REQUIRED on update. A body that omits one 422s in prod
+                # (aios#2463), so it must 422 here too.
+                rejected = _trigger_body_error(TriggerUpdate, WorkflowActionReplace, payload)
+                if rejected is not None:
+                    self.trigger_rejections.append(rejected)
+                    return {"status": 422, "body": json.dumps({"detail": rejected})}
                 name = path.rsplit("/", 1)[1]
                 if name not in self.triggers:
                     return {"status": 404, "body": json.dumps({"detail": "no trigger"})}
@@ -240,6 +278,11 @@ class FakeWorld:
             if method == "POST" and path.endswith("/triggers"):
                 if self.trigger_create_fails:
                     return {"status": 500, "body": json.dumps({"detail": "down"})}
+                self.trigger_creates.append(payload)
+                rejected = _trigger_body_error(TriggerCreate, WorkflowAction, payload)
+                if rejected is not None:
+                    self.trigger_rejections.append(rejected)
+                    return {"status": 422, "body": json.dumps({"detail": rejected})}
                 self.triggers["trig"] = {
                     "id": "tr-1",
                     "name": payload["name"],
@@ -745,16 +788,20 @@ class TestTriggerDriftDetection:
         assert _actions(result)["trigger"] == "unchanged"
         assert world.trigger_updates == []
 
-    def test_replace_payload_carries_no_undefined_version_field(self) -> None:
-        """The action never models `version`; emitting version=None is a bug."""
+    def test_replace_payload_carries_every_required_action_key(self) -> None:
+        """WorkflowActionReplace requires `version` (and the run caps): omit one and
+        the PUT 422s. An undeclared one goes out as an explicit null."""
         lock = _lock()
         lock["cron_trigger"]["action"]["workflow_version"] = 7
         world = FakeWorld(lock=lock, seed_triggers=[_live_trigger(workflow_version=3)])
 
-        world.activate()
+        result = world.activate()
 
+        assert _actions(result)["trigger"] == "updated"
         assert world.trigger_updates, "expected a trigger PUT"
-        assert "version" not in world.trigger_updates[0]["action"]
+        action = world.trigger_updates[0]["action"]
+        assert "version" in action
+        assert action["version"] is None
 
 
 # ── Fix round 2 (aios#2063): consumer-side guards on lane-session lookup ─────
@@ -906,3 +953,319 @@ class TestSessionScanFollowsPagination:
         assert "list sessions failed" in result["error"]
         # Crucially: no session was invented while the list was unproven.
         assert len(world.sessions) == 121
+
+
+# ── aios#2463: trigger bodies must bind to the REAL write models ─────────────
+
+# Every key WorkflowActionReplace requires (beyond kind/workflow_id).
+_REPLACE_KEYS = (
+    "version",
+    "workflow_version",
+    "input_template",
+    "vault_ids",
+    "max_outstanding_runs",
+    "budget_usd",
+)
+
+# The action body lane_activate sent before #2463: no version, no run caps.
+_PRE_2463_ACTION = {
+    "kind": "workflow",
+    "workflow_id": "wf-1",
+    "input_template": {},
+    "vault_ids": [],
+    "workflow_version": 7,
+}
+
+
+def _put_body(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": {"kind": "cron", "schedule": "0 * * * *", "timezone": "UTC"},
+        "action": action,
+        "enabled": True,
+    }
+
+
+def _drifted_world(lock: dict[str, Any] | None = None) -> FakeWorld:
+    """A world whose live trigger drifts from the lock, so activation PUTs."""
+    lock = lock if lock is not None else _lock()
+    lock["cron_trigger"]["action"]["workflow_version"] = 7
+    return FakeWorld(lock=lock, seed_triggers=[_live_trigger(workflow_version=3)])
+
+
+def _call_fake(world: FakeWorld, method: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    tool = world.tool()
+
+    async def _go() -> dict[str, Any]:
+        args = {"server_ref": "aios", "method": method, "path": path, "body": json.dumps(body)}
+        return await tool("http_request", args)
+
+    return asyncio.run(_go())
+
+
+def _put_through_fake(world: FakeWorld, body: dict[str, Any]) -> dict[str, Any]:
+    return _call_fake(world, "PUT", "/v1/sessions/sess-1/triggers/trig", body)
+
+
+class TestFakeWorldEnforcesTriggerContract:
+    """The fake must 422 exactly what the real router 422s, so a body that drifts
+    from WorkflowActionReplace goes red in CI instead of in prod."""
+
+    def test_pre_2463_body_is_rejected(self) -> None:
+        world = FakeWorld(seed_triggers=[_live_trigger()])
+
+        resp = _put_through_fake(world, _put_body(dict(_PRE_2463_ACTION)))
+
+        assert resp["status"] == 422
+        rejection = world.trigger_rejections[0]
+        for missing in ("version", "max_outstanding_runs", "budget_usd"):
+            assert missing in rejection
+
+    def test_complete_body_is_accepted(self) -> None:
+        world = FakeWorld(seed_triggers=[_live_trigger()])
+        action = dict(_PRE_2463_ACTION, version=None, max_outstanding_runs=None, budget_usd=None)
+
+        resp = _put_through_fake(world, _put_body(action))
+
+        assert resp["status"] == 200
+        assert world.trigger_rejections == []
+
+    def test_create_body_is_validated_against_workflow_action(self) -> None:
+        world = FakeWorld()
+        bad = {
+            "name": "trig",
+            "source": {"kind": "cron", "schedule": "0 * * * *", "timezone": "UTC"},
+            "action": dict(_PRE_2463_ACTION, surprise=1),
+        }
+
+        resp = _call_fake(world, "POST", "/v1/sessions/sess-1/triggers", bad)
+
+        assert resp["status"] == 422
+        assert "TriggerCreate" in world.trigger_rejections[0]
+
+
+class TestTriggerBodiesBindToRealModels:
+    def test_update_put_binds_to_workflow_action_replace(self) -> None:
+        world = _drifted_world()
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        assert _actions(result)["trigger"] == "updated"
+        assert world.trigger_rejections == []
+        assert set(_REPLACE_KEYS) <= set(world.trigger_updates[0]["action"])
+
+    def test_create_post_binds_to_workflow_action(self) -> None:
+        world = FakeWorld()
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        assert world.trigger_rejections == []
+        assert len(world.trigger_creates) == 1
+
+    def test_uncapped_lock_emits_explicit_nulls(self) -> None:
+        world = _drifted_world()
+
+        world.activate()
+
+        action = world.trigger_updates[0]["action"]
+        assert action["max_outstanding_runs"] is None
+        assert action["budget_usd"] is None
+        assert action["version"] is None
+
+    def test_capped_lock_puts_exactly_its_caps(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 1
+        lock["cron_trigger"]["action"]["budget_usd"] = 5
+        world = _drifted_world(lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        action = world.trigger_updates[0]["action"]
+        assert action["max_outstanding_runs"] == 1
+        assert action["budget_usd"] == 5
+        assert world.triggers["trig"]["action"]["max_outstanding_runs"] == 1
+        assert world.triggers["trig"]["action"]["budget_usd"] == 5
+
+    def test_capped_lock_creates_a_capped_trigger(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 1
+        lock["cron_trigger"]["action"]["budget_usd"] = 5
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        action = world.trigger_creates[0]["action"]
+        assert action["max_outstanding_runs"] == 1
+        assert action["budget_usd"] == 5
+
+    def test_adding_caps_to_an_otherwise_matching_trigger_is_an_update(self) -> None:
+        """Re-arming capped: a lock that only adds caps must reach the live trigger."""
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 1
+        lock["cron_trigger"]["action"]["budget_usd"] = 5
+        world = FakeWorld(lock=lock, seed_triggers=[_live_trigger()])
+
+        result = world.activate()
+
+        assert _actions(result)["trigger"] == "updated"
+        assert world.triggers["trig"]["action"]["max_outstanding_runs"] == 1
+
+    def test_capped_rerun_is_a_no_op(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 1
+        lock["cron_trigger"]["action"]["budget_usd"] = 5
+        world = FakeWorld(lock=lock)
+        world.activate()
+
+        result = world.activate()
+
+        assert result["outcome"] == "no_op", result
+        assert world.trigger_updates == []
+
+    def test_invalid_cap_in_lock_is_rejected_not_silently_sent(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 0
+        world = _drifted_world(lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "max_outstanding_runs" in result["error"]
+        # Refused at read-lock, before ANY mutation: nothing reaches the server.
+        assert world.trigger_updates == []
+        assert world.trigger_creates == []
+
+
+# Values LaneLock.from_dict must accept / refuse. The script's pre-flight guard
+# is checked against the SAME list and against LaneLock itself, so the two
+# validators cannot drift apart.
+_CAP_VALUES: list[object] = [None, 1, 5, 0, -3, "lots", True, False, 2.0, "5"]
+_BUDGET_VALUES: list[object] = [
+    None,
+    5,
+    0.5,
+    0,
+    -1,
+    "free",
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    True,
+    "0.5",
+]
+
+
+def _script_namespace() -> dict[str, Any]:
+    namespace: dict[str, Any] = {}
+    exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
+    return namespace
+
+
+def _lane_lock_accepts(lock: dict[str, Any]) -> bool:
+    try:
+        LaneLock.from_dict(lock)
+    except ValueError:
+        return False
+    return True
+
+
+class TestRunCapPreflight:
+    """lane_activate reads the RAW lock (the script sandbox cannot import
+    ``aios``), so it cannot call ``LaneLock.from_dict``. It carries its own
+    pre-flight check instead, pinned here to agree with LaneLock on every value,
+    and it refuses a bad cap BEFORE the first mutation (no half-applied lane)."""
+
+    def test_guard_agrees_with_lane_lock_on_every_value(self) -> None:
+        guard = _script_namespace()["lock_run_cap_error"]
+        for key, values in (("max_outstanding_runs", _CAP_VALUES), ("budget_usd", _BUDGET_VALUES)):
+            for value in values:
+                lock = _lock()
+                lock["cron_trigger"]["action"][key] = value
+                script_ok = guard(lock["cron_trigger"]["action"]) is None
+                assert script_ok == _lane_lock_accepts(lock), (key, value)
+
+    def test_guard_accepts_absent_caps(self) -> None:
+        guard = _script_namespace()["lock_run_cap_error"]
+        action = _lock()["cron_trigger"]["action"]
+        action.pop("max_outstanding_runs", None)
+        action.pop("budget_usd", None)
+        assert guard(action) is None
+
+    def test_invalid_budget_fails_before_any_object_is_created(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["budget_usd"] = float("nan")
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "budget_usd" in result["error"]
+        assert result["deltas"] == []
+        assert world.workflows == {}
+        assert world.agents == {}
+        assert world.sessions == {}
+        assert world.triggers == {}
+
+    def test_bool_cap_fails_before_any_object_is_created(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = True
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "failed"
+        assert "max_outstanding_runs" in result["error"]
+        assert world.workflows == {}
+        assert world.triggers == {}
+
+    def test_valid_caps_still_activate(self) -> None:
+        lock = _lock()
+        lock["cron_trigger"]["action"]["max_outstanding_runs"] = 5
+        lock["cron_trigger"]["action"]["budget_usd"] = 0.5
+        world = FakeWorld(lock=lock)
+
+        result = world.activate()
+
+        assert result["outcome"] == "activated", result
+        assert world.triggers["trig"]["action"]["max_outstanding_runs"] == 5
+        assert world.triggers["trig"]["action"]["budget_usd"] == 0.5
+
+
+class TestDroppingAnyKeyGoesRed:
+    """Mutation: remove each key from the emitted action; the validating fake
+    world must reject every one of them (and so fail the activation)."""
+
+    def _activate_with_key_dropped(self, key: str) -> tuple[dict[str, Any], FakeWorld]:
+        world = _drifted_world()
+        namespace: dict[str, Any] = {}
+        exec(compile(LANE_ACTIVATE_SCRIPT, "<lane_activate>", "exec"), namespace)
+        real_build = namespace["build_workflow_action"]
+
+        def mutated(lock_action: dict[str, Any], workflow_id: str) -> dict[str, Any]:
+            action = cast(dict[str, Any], real_build(lock_action, workflow_id))
+            del action[key]
+            return action
+
+        namespace["build_workflow_action"] = mutated
+        namespace["tool"] = world.tool()
+        namespace["log"] = lambda *a, **k: None
+        namespace["phase"] = lambda *a, **k: None
+        main = cast(
+            Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]], namespace["main"]
+        )
+        return asyncio.run(main({"input": {"lane": "test", "merge_sha": "sha1"}})), world
+
+    def test_every_replace_key_is_load_bearing(self) -> None:
+        for key in _REPLACE_KEYS:
+            result, world = self._activate_with_key_dropped(key)
+            assert result["outcome"] == "failed", key
+            assert _actions(result)["trigger"] == "error", key
+            assert world.trigger_rejections, key
+            assert key in world.trigger_rejections[0], key
+
+    def test_unmutated_build_passes(self) -> None:
+        world = _drifted_world()
+        assert world.activate()["outcome"] == "activated"
