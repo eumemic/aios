@@ -66,6 +66,7 @@ def _run() -> WfRun:
         script="async def main(input): return None",
         script_sha="sha",
         host_semantics_epoch=1,
+        principal="operator",
         status="running",
         last_event_seq=0,
         created_at=now,

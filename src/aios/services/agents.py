@@ -136,8 +136,8 @@ async def create_agent(
     if creator_session_id is not None:
         # #1636: the model-binding privilege. A ``creator_session_id`` IS a
         # self-authoring (non-operator) principal — it may not bind a ``workflow:``
-        # model. The operator/HTTP path (no creator) passes ``is_operator=True``.
-        enforce_workflow_binding_privilege(model, is_operator=False)
+        # model. The operator/HTTP path (no creator) skips this.
+        enforce_workflow_binding_privilege(model)
         await _enforce_surface_attenuation(
             pool,
             account_id=account_id,
@@ -257,7 +257,7 @@ async def update_agent(
         # self-authoring (non-operator) principal. ``model is None`` (the field is
         # being preserved) introduces no new binding and is a no-op; a non-None
         # ``workflow:`` model is rejected. The operator/HTTP path skips this.
-        enforce_workflow_binding_privilege(model, is_operator=False)
+        enforce_workflow_binding_privilege(model)
         current = await get_agent(pool, agent_id, account_id=account_id)
         await _enforce_surface_attenuation(
             pool,

@@ -824,8 +824,7 @@ async def test_agent_spawn_stamps_decremented_depth_on_edge(
     pool = wf_runtime
     script = f"async def main(input):\n    return await agent({{'task': 'go'}}, agent_id={wf_agent_id!r})\n"
     run_id = await _make_run(pool, script)  # edgeless root -> depth == INVOKE_MAX_DEPTH
-    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()):
-        await run_workflow_step(run_id)
+    await run_workflow_step(run_id)
 
     async with pool.acquire() as conn:
         run = await wf_queries.get_run_for_step(conn, run_id)
@@ -1075,17 +1074,15 @@ async def test_generic_agent_spawn_creates_agentless_child_with_run_surface(
 
 # ── #1636: the workflow: model-binding privilege at the spawn-edge seam ──────────
 #
-# The runtime guard keys on the run's owning principal: a run with a
-# ``launcher_session_id`` (an agent launched it) is self-authoring (non-operator)
-# and may NOT select a ``workflow:`` model for a child; an edgeless operator/HTTP
-# run may. Covers the two unnamed spawn arms — the per-call ``agent(model=…)``
+# The runtime guard keys on the run's principal (#2467): a run an agent session
+# launched is self-authoring and may NOT select a ``workflow:`` model for a child; an
+# operator run may. Covers the two unnamed spawn arms — the per-call ``agent(model=…)``
 # override and the generic agentless child's resolved model.
 
 
 async def _make_agent_launched_run(pool: asyncpg.Pool[Any], script: str, agent_id: str) -> str:
-    """A run LAUNCHED BY AN AGENT (self-authoring principal): ``launcher_session_id``
-    is set, so ``run.launcher_session_id is None`` is False and the binding privilege
-    treats it as non-operator."""
+    """A run LAUNCHED BY AN AGENT: ``launcher_session_id`` is set, so the insert
+    trigger stamps ``principal='session'`` and the binding privilege refuses it."""
     launcher = await _make_launcher_session(pool, agent_id)
     async with pool.acquire() as conn:
         wf = await wf_queries.insert_workflow(
@@ -1178,6 +1175,35 @@ async def test_self_authoring_run_cannot_select_workflow_bound_named_agent(
     assert children == 0
 
 
+async def test_run_stays_non_operator_after_its_launching_session_is_deleted(
+    wf_runtime: asyncpg.Pool[Any], wf_agent_id: str
+) -> None:
+    """#2467: deleting the launching session nulls ``launcher_session_id`` (the FK is
+    ``ON DELETE SET NULL``), but the run is still the agent's. Its principal is fixed
+    at insert, so the ``workflow:`` selection stays refused."""
+    pool = wf_runtime
+    script = "async def main(input):\n    return await agent('go', model='workflow:wf_bound')\n"
+    run_id = await _make_agent_launched_run(pool, script, wf_agent_id)
+    async with pool.acquire() as conn:
+        run = await wf_queries.get_wf_run(conn, run_id, account_id="acc_wf")
+        assert run.launcher_session_id is not None
+        await db_queries.delete_session(conn, run.launcher_session_id, account_id="acc_wf")
+        run = await wf_queries.get_wf_run(conn, run_id, account_id="acc_wf")
+    assert run.launcher_session_id is None
+    assert run.principal == "session"
+
+    await run_workflow_step(run_id)
+
+    async with pool.acquire() as conn:
+        events = await wf_queries.list_run_events(conn, run_id)
+        children = await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE parent_run_id = $1", run_id
+        )
+    refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+    assert refusals == ["workflow_model_forbidden"]
+    assert children == 0
+
+
 async def test_operator_run_may_select_workflow_model_generic_child(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
@@ -1187,8 +1213,7 @@ async def test_operator_run_may_select_workflow_model_generic_child(
     pool = wf_runtime
     script = "async def main(input):\n    return await agent('go', model='workflow:wf_bound')\n"
     run_id = await _make_run(pool, script)  # edgeless root → operator-owned
-    with mock.patch("aios.workflows.step.defer_wake", new=AsyncMock()):
-        await run_workflow_step(run_id)
+    await run_workflow_step(run_id)
 
     async with pool.acquire() as conn:
         events = await wf_queries.list_run_events(conn, run_id)

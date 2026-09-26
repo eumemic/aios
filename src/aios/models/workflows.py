@@ -36,6 +36,8 @@ from aios.models.agents import (
 
 WorkspaceMode = Literal["shared", "fresh"]
 
+RunPrincipal = Literal["operator", "session"]  # see ``WfRun.principal``
+
 WfRunStatus = Literal["pending", "running", "suspended", "completed", "errored", "cancelled"]
 WfRunEventType = Literal[
     "run_started",
@@ -181,9 +183,18 @@ class WfRun(BaseModel):
     # completing run's id, a timer fire threads the owner session's own parent
     # run — so reactive cascades and self-fire loops are depth-bounded.
     parent_run_id: str | None = None
-    # The agent session that launched this run (None = operator/HTTP). Lineage, plus
-    # the per-launcher fan-out cap's count key.
+    # The agent session that launched this run: lineage, plus the per-launcher fan-out
+    # cap's count key. None for an operator run, and also once the launching session is
+    # deleted (the FK is ON DELETE SET NULL), so authority checks read ``principal``.
     launcher_session_id: str | None = None
+    principal: RunPrincipal = Field(
+        description=(
+            "Who the run acts for: `operator` (launched through the operator API, or a "
+            "sub-run of an operator run) or `session` (launched by an agent session, "
+            "directly or through its runs). Fixed at creation; deleting the launching "
+            "session doesn't change it."
+        )
+    )
     # The DOWN-counting trusted invoke-depth (#1124): the budget remaining for
     # this run's OUTGOING trusted edges (run→run sub-launches, run→session ``agent()``
     # children). An edgeless root seeds at the full budget; a nested launch carries

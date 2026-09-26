@@ -363,6 +363,7 @@ from .wf_run_create_workspace import WfRunCreateWorkspace
 from .wf_run_event import WfRunEvent
 from .wf_run_event_payload import WfRunEventPayload
 from .wf_run_event_type import WfRunEventType
+from .wf_run_principal import WfRunPrincipal
 from .wf_run_request_output_schema_type_0 import WfRunRequestOutputSchemaType0
 from .wf_run_status import WfRunStatus
 from .wf_run_terminal_summary_type_0 import WfRunTerminalSummaryType0
@@ -725,6 +726,7 @@ __all__ = (
     "WfRunEvent",
     "WfRunEventPayload",
     "WfRunEventType",
+    "WfRunPrincipal",
     "WfRunRequestOutputSchemaType0",
     "WfRunStatus",
     "WfRunTerminalSummaryType0",

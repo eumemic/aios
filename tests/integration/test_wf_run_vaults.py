@@ -932,11 +932,12 @@ async def test_create_run_edgeless_root_seeds_full_budget(vault_pool: asyncpg.Po
 
     # The persisted column agrees with the returned row — the read-side the next hop uses.
     async with pool.acquire() as conn:
-        assert await wf_queries.get_run_depth(conn, root.id, account_id=ACC) == INVOKE_MAX_DEPTH
+        lineage = await wf_queries.get_run_lineage(conn, root.id, account_id=ACC)
+    assert lineage == wf_queries.RunLineage(depth=INVOKE_MAX_DEPTH, principal="operator")
 
 
-async def test_get_run_depth_account_scoped(vault_pool: asyncpg.Pool[Any]) -> None:
-    """``get_run_depth`` is account-scoped (#1124): a foreign id raises NotFoundError,
+async def test_get_run_lineage_account_scoped(vault_pool: asyncpg.Pool[Any]) -> None:
+    """``get_run_lineage`` is account-scoped (#1124): a foreign id raises NotFoundError,
     preserving the same-account trust the deleted ``run_ancestor_depth`` CTE enforced
     per hop — a foreign parent can never launder a fresh full budget."""
     pool = vault_pool
@@ -946,7 +947,7 @@ async def test_get_run_depth_account_scoped(vault_pool: asyncpg.Pool[Any]) -> No
     )
     async with pool.acquire() as conn:
         with pytest.raises(NotFoundError):
-            await wf_queries.get_run_depth(conn, root.id, account_id="acc_other")
+            await wf_queries.get_run_lineage(conn, root.id, account_id="acc_other")
 
 
 async def test_create_run_rejects_foreign_environment(vault_pool: asyncpg.Pool[Any]) -> None:

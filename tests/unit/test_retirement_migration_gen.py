@@ -354,7 +354,7 @@ def test_committed_task_to_call_migration_matches_generator() -> None:
     leftovers = sorted(
         p.name
         for p in (_MIGRATIONS_DIR / "versions").glob("018[3-5]_*.py")
-        if p.name != single.filename
+        if p.name != single.filename and "task_to_call" in p.name
     )
     assert leftovers == []
 

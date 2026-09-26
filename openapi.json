@@ -21818,6 +21818,15 @@
             ],
             "title": "Launcher Session Id"
           },
+          "principal": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "session"
+            ],
+            "title": "Principal",
+            "description": "Who the run acts for: `operator` (launched through the operator API, or a sub-run of an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation; deleting the launching session doesn't change it."
+          },
           "depth": {
             "type": "integer",
             "title": "Depth",
@@ -22036,6 +22045,7 @@
           "id",
           "account_id",
           "environment_id",
+          "principal",
           "script",
           "script_sha",
           "host_semantics_epoch",

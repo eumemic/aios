@@ -314,8 +314,9 @@ async def _list(pool: asyncpg.Pool[Any], run_id: str) -> list[Any]:
 #     un-attenuated on the tool/mcp/http axis.
 #
 # The fix threads the parent run's ``launcher_session_id`` down the
-# ``parent_run_id`` lineage so ``is_operator_run`` reflects the ORIGINATING
-# principal, not the sub-run's absent launcher. Both exposures close at once.
+# ``parent_run_id`` lineage, so the sub-run is clamped to, and acts for, the
+# ORIGINATING session. Both exposures close at once. (#2467 later moved the guard
+# onto the immutable ``principal``, which the sub-run inherits the same way.)
 
 
 async def _make_launcher_session(pool: asyncpg.Pool[Any], agent_id: str) -> Session:
@@ -462,6 +463,33 @@ async def test_agent_originated_invoke_workflow_subrun_surface_is_attenuated(
     assert surface_of(sub).tools == []
 
 
+async def test_run_of_deleted_session_cannot_launch_subrun(
+    wf_runtime: asyncpg.Pool[Any],
+) -> None:
+    """#2467: once the launching session is deleted, its run has no live authority to
+    clamp a sub-run against. Launching one unclamped would hand the sub-workflow its
+    full declared surface, so ``invoke_workflow`` is refused and no sub-run exists."""
+    pool = wf_runtime
+    launcher_id = await _narrow_launcher(pool)
+    child_wf = await _insert_workflow(pool, "child", "async def main(input):\n    return 1\n")
+    parent_run = await _agent_launched_parent(
+        pool, _INVOKE_PARENT, input={"wf": child_wf}, launcher_id=launcher_id
+    )
+    async with pool.acquire() as conn:
+        await db_queries.delete_session(conn, launcher_id, account_id="acc_wf")
+
+    await run_workflow_step(parent_run)
+
+    async with pool.acquire() as conn:
+        sub_runs = await conn.fetchval(
+            "SELECT count(*) FROM wf_runs WHERE parent_run_id = $1", parent_run
+        )
+    events = await _list(pool, parent_run)
+    refusals = [e.payload["error"]["kind"] for e in events if e.type == "call_result"]
+    assert refusals == ["invoke_workflow_refused"]
+    assert sub_runs == 0
+
+
 async def test_operator_originated_invoke_workflow_subrun_may_bind_workflow_model(
     wf_runtime: asyncpg.Pool[Any],
 ) -> None:
@@ -486,6 +514,7 @@ async def test_operator_originated_invoke_workflow_subrun_may_bind_workflow_mode
     sub_run_id = cs.payload["child_run_id"]
     sub = await _run(pool, sub_run_id)
     assert sub.launcher_session_id is None  # operator lineage preserved
+    assert sub.principal == "operator"
 
     # The sub-run binds the workflow: model freely (operator privilege) — the child
     # spawns and its model is stamped, with NO rejection journaled.

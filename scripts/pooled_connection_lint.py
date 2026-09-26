@@ -386,7 +386,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "wf_queries.derive_run_response",
         "wf_queries.find_open_gate_call_key",
         "wf_queries.get_run_call_llm_cost_microusd",
-        "wf_queries.get_run_depth",
+        "wf_queries.get_run_lineage",
         "wf_queries.get_run_for_step",
         "wf_queries.get_run_vault_ids",
         "wf_queries.get_wf_run",
