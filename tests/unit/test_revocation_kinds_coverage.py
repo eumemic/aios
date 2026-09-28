@@ -41,6 +41,7 @@ FULFILLED_KINDS: frozenset[str] = frozenset(
         "model_call_deadline",
         "model_refusal",
         "model_workflow_run_errored",
+        "model_workflow_launch_refused",
         "model_workflow_invalid_shape",
         "child_errored",
         "spend_cap_exceeded",

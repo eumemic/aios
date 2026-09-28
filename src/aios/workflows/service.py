@@ -523,7 +523,11 @@ async def create_run(
                         "max": trigger_max_outstanding_runs,
                     },
                 )
-        if launcher_session_id is not None:
+        # A model-dispatch run is the session's own turn, one at a time by construction
+        # (the WaM park). The per-launcher cap bounds the model's own fan-out; counting
+        # its turn against that cap would let its own runs stop it from ever running
+        # again, including to stop them (#2470). The account cap still applies.
+        if launcher_session_id is not None and (caller or {}).get("purpose") != "model_dispatch":
             launcher_cap = settings.workflow_runs_per_launcher_max
             outstanding = await wf_queries.count_active_runs(
                 conn, account_id=account_id, launcher_session_id=launcher_session_id
