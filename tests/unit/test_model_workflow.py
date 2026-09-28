@@ -19,7 +19,12 @@ import pytest
 from aios.harness import model_workflow
 from aios.harness.completion import LlmRequest
 from aios.harness.model_binding import WorkflowModelRef
-from aios.harness.model_workflow import HarvestedInference, ParkState, take_pending_harvest
+from aios.harness.model_workflow import (
+    HarvestedInference,
+    ParkState,
+    UnlaunchedPark,
+    take_pending_harvest,
+)
 from aios.services import sessions as sessions_service
 from aios.services import workflows as workflows_service
 
@@ -39,8 +44,9 @@ class _FakePool:
 
 @pytest.fixture
 def patched_queries(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Stub the two focused queries; tests set ``state['park']`` / ``state['harvest']``."""
-    state: dict[str, Any] = {"park": None, "harvest": None}
+    """Stub the focused queries; tests set ``state['park']`` / ``state['harvest']`` /
+    ``state['run_exists']``."""
+    state: dict[str, Any] = {"park": None, "harvest": None, "run_exists": True}
 
     async def _find_park(conn: object, session_id: str, *, account_id: str) -> Any:
         return state["park"]
@@ -52,10 +58,15 @@ def patched_queries(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         # Mirror the keyed read: only return when the run id matches.
         return harvest if harvest.get("run_id") == run_id else None
 
+    async def _run_exists(conn: object, run_id: str, *, account_id: str) -> bool:
+        return bool(state["run_exists"])
+
     import aios.db.queries as queries
+    from aios.db.queries import workflows as wf_queries
 
     monkeypatch.setattr(queries, "find_latest_model_workflow_park", _find_park)
     monkeypatch.setattr(queries, "find_model_workflow_harvest", _find_harvest)
+    monkeypatch.setattr(wf_queries, "run_exists", _run_exists)
     return state
 
 
@@ -72,6 +83,18 @@ async def test_park_without_harvest_returns_park_pending(patched_queries: dict[s
     # fix: collapsing both into the same value re-dispatched a run on every sweep tick.
     patched_queries["park"] = {"run_id": "run_1", "reacting_to": 7}
     assert await take_pending_harvest(_FakePool(), "s1", account_id="a1") is ParkState.PARK_PENDING
+
+
+@pytest.mark.asyncio
+async def test_park_whose_run_was_never_created_is_unlaunched(
+    patched_queries: dict[str, Any],
+) -> None:
+    # A crash between the park record and the launch (#2469): the caller must launch the
+    # recorded run id, not wait on a run that will never exist or mint a second one.
+    patched_queries["park"] = {"run_id": "run_1", "reacting_to": 7}
+    patched_queries["run_exists"] = False
+    result = await take_pending_harvest(_FakePool(), "s1", account_id="a1")
+    assert result == UnlaunchedPark(run_id="run_1")
 
 
 @pytest.mark.asyncio

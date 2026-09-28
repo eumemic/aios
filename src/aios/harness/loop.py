@@ -54,6 +54,7 @@ from aios.harness.model_binding import (
 from aios.harness.model_workflow import (
     HarvestedInference,
     ParkState,
+    UnlaunchedPark,
     launch_model_workflow_park,
     take_pending_harvest,
 )
@@ -1340,7 +1341,7 @@ async def _run_session_step_body(
             # per turn regardless of how many sweep ticks elapse. The harvest task's
             # ``defer_wake`` (or a later sweep re-wake) re-enters and harvests.
             return _StepResult()
-        if disposition is ParkState.NO_PARK:
+        if disposition is ParkState.NO_PARK or isinstance(disposition, UnlaunchedPark):
             await launch_model_workflow_park(
                 pool,
                 session_id,
@@ -1348,6 +1349,9 @@ async def _run_session_step_body(
                 request=llm_request,
                 reacting_to=step_ctx.reacting_to,
                 account_id=account_id,
+                # A crash left a park record whose run was never created: launch it
+                # under the recorded id, never a second one (#2469).
+                run_id=disposition.run_id if isinstance(disposition, UnlaunchedPark) else None,
             )
             # End the step owing an assistant message — a new step disposition. The run's
             # async resolution wakes the session for the harvest; no inference ran here, so
