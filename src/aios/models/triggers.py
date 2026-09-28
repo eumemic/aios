@@ -163,7 +163,8 @@ class RunCompletionSource(BaseModel):
     unschedulable by construction); fires are dispatched from the watched
     run's completion transaction instead. The watch is account-scoped: the
     trigger is only ever handed run data its owner could already read via the
-    account-scoped run reads.
+    agent run reads, so a session-private run fires only its launching
+    session's triggers.
     """
 
     model_config = ConfigDict(extra="forbid")

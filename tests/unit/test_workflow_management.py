@@ -26,6 +26,7 @@ import pytest
 import aios.tools  # noqa: F401 — registers the builtins
 from aios.errors import CryptoDecryptError, ForbiddenError, NotFoundError
 from aios.models.workflows import (
+    RunReader,
     WfRun,
     WfRunEvent,
     Workflow,
@@ -79,6 +80,7 @@ def _run(**over: Any) -> WfRun:
         script_sha="sha",
         host_semantics_epoch=1,
         principal="session",
+        visibility="account",
         status="running",
         last_event_seq=0,
         budget_usd=None,
@@ -477,8 +479,6 @@ class TestReadHandlers:
     async def test_list_run_events_pages_and_preserves_annotation_order(
         self, monkeypatch: Any
     ) -> None:
-        # Pre-flight get_run must resolve (a real run exists) so the journal read proceeds.
-        monkeypatch.setattr("aios.services.workflows.get_run", AsyncMock(return_value=_run()))
         mock_ev = AsyncMock(
             return_value=[
                 _event(seq=2, payload={"kind": "phase", "text": "a"}),
@@ -493,12 +493,14 @@ class TestReadHandlers:
         assert out["events"][0]["payload"]["kind"] == "phase"
         assert mock_ev.call_args.kwargs["after_seq"] == 1
         assert mock_ev.call_args.kwargs["limit"] == 50
+        assert mock_ev.call_args.kwargs["reader"] == RunReader("ses_1")
 
     async def test_list_run_events_raises_for_unknown_run(self, monkeypatch: Any) -> None:
-        # A nonexistent / cross-account run_id must surface as a real NotFoundError the
-        # model can act on — not an empty event list indistinguishable from "no new events".
+        # A nonexistent / cross-account / invisible run_id must surface as a real
+        # NotFoundError the model can act on — not an empty event list indistinguishable
+        # from "no new events".
         monkeypatch.setattr(
-            "aios.services.workflows.get_run",
+            "aios.services.workflows.list_run_events",
             AsyncMock(side_effect=NotFoundError("workflow run not found")),
         )
         with pytest.raises(NotFoundError):

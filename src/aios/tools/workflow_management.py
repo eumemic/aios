@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from aios.harness import runtime
 from aios.models.workflows import (
     WORKFLOW_SCRIPT_CONTRACT,
+    RunReader,
     WfRunStatus,
     WorkflowCreate,
     WorkflowUpdate,
@@ -256,7 +257,9 @@ async def get_run_handler(session_id: str, arguments: dict[str, Any]) -> dict[st
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = tool_input(_GetRunArgs, arguments)
-    run = await wf_service.get_run(pool, args.run_id, account_id=account_id)
+    run = await wf_service.get_run(
+        pool, args.run_id, account_id=account_id, reader=RunReader(session_id)
+    )
     return run.model_dump(mode="json")  # FULL WfRun incl. pinned script
 
 
@@ -274,6 +277,7 @@ async def list_runs_handler(session_id: str, arguments: dict[str, Any]) -> dict[
         parent_run_id=args.parent_run_id,
         # Default: only this session's own runs. account_wide widens to the whole account.
         launcher_session_id=None if args.account_wide else session_id,
+        reader=RunReader(session_id),
     )
     return {"runs": [r.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE) for r in runs]}
 
@@ -282,7 +286,9 @@ async def archive_run_handler(session_id: str, arguments: dict[str, Any]) -> dic
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = tool_input(_ArchiveRunArgs, arguments)
-    run = await wf_service.archive_run(pool, args.run_id, account_id=account_id)
+    run = await wf_service.archive_run(
+        pool, args.run_id, account_id=account_id, reader=RunReader(session_id)
+    )
     return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
 
 
@@ -290,12 +296,15 @@ async def list_run_events_handler(session_id: str, arguments: dict[str, Any]) ->
     pool = runtime.require_pool()
     account_id = await sessions_service.load_session_account_id(pool, session_id)
     args = tool_input(_ListRunEventsArgs, arguments)
-    # Scope check (mirrors the HTTP /runs/{id}/events route): raise NotFoundError on a
-    # missing/cross-account run, so the model sees a real error instead of an empty page
-    # indistinguishable from "no events past after_seq".
-    await wf_service.get_run(pool, args.run_id, account_id=account_id)
+    # A missing, foreign or invisible run raises NotFoundError, so the model sees a real
+    # error instead of an empty page indistinguishable from "no events past after_seq".
     events = await wf_service.list_run_events(
-        pool, args.run_id, account_id=account_id, after_seq=args.after_seq, limit=args.limit
+        pool,
+        args.run_id,
+        account_id=account_id,
+        after_seq=args.after_seq,
+        limit=args.limit,
+        reader=RunReader(session_id),
     )
     # payloads returned in full; paging is via after_seq/limit
     return {"events": [e.model_dump(mode="json") for e in events]}
@@ -437,7 +446,8 @@ GET_RUN_DESCRIPTION = (
 )
 LIST_RUNS_DESCRIPTION = (
     "List workflow runs, newest first. By default returns only the runs YOU launched; "
-    "set 'account_wide' true to list every run in the account. Optional 'workflow_id' / "
+    "set 'account_wide' true to list the account's runs (runs private to another session "
+    "are never shown). Optional 'workflow_id' / "
     "'status' / 'parent_run_id' filters; page with 'limit' and 'after' (the last id seen); "
     "a full page means there may be more — call again. Rows are lean (no "
     "script or tool surface) — fetch a single run with get_run for its full body."

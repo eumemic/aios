@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from aios.models.agents import HttpPermissionPolicy, HttpRouteSpec, HttpServerSpec, ToolSpec
+from aios.models.workflows import RunReader
 from aios.tools.invoke import ToolBail
 from aios.workflows import run_tools
 from aios.workflows.run_tools import invoke_run_tool
@@ -21,7 +22,11 @@ def _run(
     *, tools: list[ToolSpec] | None = None, http_servers: list[HttpServerSpec] | None = None
 ) -> Any:
     return SimpleNamespace(
-        id="wfr_1", account_id="acc_t", tools=tools or [], http_servers=http_servers or []
+        id="wfr_1",
+        account_id="acc_t",
+        launcher_session_id="ses_launcher",
+        tools=tools or [],
+        http_servers=http_servers or [],
     )
 
 
@@ -438,6 +443,8 @@ async def test_list_runs_is_account_scoped_never_launcher_scoped() -> None:
     kwargs = svc.await_args.kwargs
     assert kwargs["account_id"] == "acc_t"  # the RUN's own account — the isolation boundary
     assert kwargs["launcher_session_id"] is None  # never a session filter — account-scoped
+    # ...but it reads as the run's launching session, so private runs stay hidden (#2468)
+    assert kwargs["reader"] == RunReader("ses_launcher")
     assert kwargs["workflow_id"] == "wf_dev"
     assert kwargs["status"] == "running"
 
@@ -461,6 +468,7 @@ async def test_get_run_is_account_scoped() -> None:
     assert svc.await_args is not None  # the service was actually dispatched to
     assert svc.await_args.args == ("POOL", "wfr_x")
     assert svc.await_args.kwargs["account_id"] == "acc_t"  # the run reads ONLY its own account
+    assert svc.await_args.kwargs["reader"] == RunReader("ses_launcher")
 
 
 async def test_cross_account_get_run_is_a_recoverable_error_not_a_raise() -> None:

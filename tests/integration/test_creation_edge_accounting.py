@@ -121,7 +121,9 @@ async def test_agent_workflow_agent_rolls_up_exact_own_sum_live_and_after_archiv
     # The ordinary resource reads expose the same accounting contract at
     # ``usage.own`` / ``usage.subtree`` on both node types.
     root_read = await sessions_service.get_session(accounting_pool, root_id, account_id=ACCOUNT)
-    run_read = await workflows_service.get_run(accounting_pool, run_id, account_id=ACCOUNT)
+    run_read = await workflows_service.get_run(
+        accounting_pool, run_id, account_id=ACCOUNT, reader=None
+    )
     assert root_read.usage.own.cost_microusd == 100
     assert root_read.usage.subtree.cost_microusd == 600
     assert run_read.usage is not None

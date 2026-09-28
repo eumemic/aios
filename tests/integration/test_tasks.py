@@ -256,7 +256,7 @@ async def test_workflow_target_creates_run(
     assert handle.servicer_id.startswith("wfr_")
     assert handle.request_id.startswith("req_")
     # The run row exists and is account-scoped.
-    run = await wf_service.get_run(pool, handle.servicer_id, account_id=account_id)
+    run = await wf_service.get_run(pool, handle.servicer_id, account_id=account_id, reader=None)
     assert run.workflow_id == wf_id
     assert run.workspace == "fresh"
 
