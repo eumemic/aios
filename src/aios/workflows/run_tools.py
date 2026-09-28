@@ -37,7 +37,7 @@ from aios.harness import runtime
 from aios.jobs.app import defer_run_wake
 from aios.logging import get_logger
 from aios.mcp.client import resolve_auth_for_target_url_run
-from aios.models.workflows import WfRun
+from aios.models.workflows import RunReader, WfRun
 from aios.services import triggers as triggers_service
 from aios.services import workflows as wf_service
 from aios.tools.http_request import _do_http_request, _find_server, _match_route, _split_query
@@ -195,20 +195,19 @@ def gate_run_tool(run: WfRun, tool_name: str) -> dict[str, Any] | None:
     return None
 
 
-async def _read_run_journal(
-    *, account_id: str, tool_name: str, args: dict[str, Any]
-) -> dict[str, Any]:
+async def _read_run_journal(*, run: WfRun, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     """The run-journal READ pair — ``list_runs`` / ``get_run`` from inside a run (#1396).
 
     Dispatches to the workflow service ACCOUNT-SCOPED to the calling run's account, never
-    a launcher-session filter, never cross-account:
+    a launcher-session filter, never cross-account. It reads as the run's launching
+    session (#2468): another session's private runs are invisible, and a run with no
+    launching session sees only account-visible runs.
 
-      * ``list_runs`` — ``launcher_session_id=None`` (a run has no launching session; the
-        only meaningful scope is the whole account). The ``account_wide`` arg is therefore
+      * ``list_runs`` — ``launcher_session_id=None`` (no launcher filter; the scope is the
+        runs visible across the account). The ``account_wide`` arg is therefore
         a no-op here — a run is *always* account-scoped, never narrower; we accept it for
         schema parity with the session tool and ignore it. The run sees its OWN account's
-        runs and only those, because ``account_id=account_id`` is the run's own account
-        (``run.account_id``, threaded by :func:`invoke_run_tool`) — the isolation boundary
+        runs and only those, because it reads ``run.account_id`` — the isolation boundary
         is the same one the http-credential resolver and the get_run NotFound scope enforce.
       * ``get_run`` — the account-scoped single-run read. A cross-account / missing id
         raises :class:`NotFoundError` in the query layer; we catch it (and any client-class
@@ -227,22 +226,28 @@ async def _read_run_journal(
             parsed = _ListRunsArgs.model_validate(args)
             runs = await wf_service.list_runs(
                 pool,
-                account_id=account_id,
+                account_id=run.account_id,
                 limit=parsed.limit,
                 after=parsed.after,
                 workflow_id=parsed.workflow_id,
                 status=parsed.status,
                 parent_run_id=parsed.parent_run_id,
-                # A run is account-scoped, never launcher-scoped: a run has no launching
-                # session to filter on. account_wide is accepted for schema parity and
-                # has no effect (the run is always account-wide within its OWN account).
+                # A run lists account-wide, never filtered to one launcher. account_wide is
+                # accepted for schema parity and has no effect (the run is always
+                # account-wide within its OWN account, less other sessions' private runs).
                 launcher_session_id=None,
+                reader=RunReader(run.launcher_session_id),
             )
             return {"runs": [r.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE) for r in runs]}
         # get_run
         parsed_get = _GetRunArgs.model_validate(args)
-        run = await wf_service.get_run(pool, parsed_get.run_id, account_id=account_id)
-        return run.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
+        target = await wf_service.get_run(
+            pool,
+            parsed_get.run_id,
+            account_id=run.account_id,
+            reader=RunReader(run.launcher_session_id),
+        )
+        return target.model_dump(mode="json", exclude=_RUN_ECHO_EXCLUDE)
     except AiosError as exc:
         # A denied/not-found read (e.g. a cross-account get_run id) is a recoverable value
         # the script branches on — never a run-terminal raise (matching the agent()/
@@ -299,7 +304,7 @@ async def invoke_run_tool(
         return {"error": schema_error}
 
     if tool_name in ("list_runs", "get_run"):
-        return await _read_run_journal(account_id=account_id, tool_name=tool_name, args=args)
+        return await _read_run_journal(run=run, tool_name=tool_name, args=args)
     if tool_name == "list_account_triggers":
         return await _read_account_triggers(account_id=account_id, args=args)
     if tool_name == "http_request":

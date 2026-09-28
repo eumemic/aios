@@ -40,6 +40,7 @@ from aios.models.agents import (
 from aios.models.attenuation import Surface, surface_diff, surface_of
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
+    RunReader,
     WfRun,
     WfRunEvent,
     WfRunUsage,
@@ -594,9 +595,12 @@ def _run_usage(
     )
 
 
-async def get_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
+async def get_run(
+    pool: asyncpg.Pool[Any], run_id: str, *, account_id: str, reader: RunReader | None
+) -> WfRun:
+    """Read one run. ``reader`` is the agent-side reader (``None`` = operator API)."""
     async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-        run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)
+        run = await wf_queries.get_visible_run(conn, run_id, account_id=account_id, reader=reader)
         children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
         attributed = await accounting_queries.usage_for_node(
             conn,
@@ -607,15 +611,19 @@ async def get_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> W
         return run.model_copy(update={"usage": _run_usage(run, children, attributed)})
 
 
-async def archive_run(pool: asyncpg.Pool[Any], run_id: str, *, account_id: str) -> WfRun:
+async def archive_run(
+    pool: asyncpg.Pool[Any], run_id: str, *, account_id: str, reader: RunReader | None
+) -> WfRun:
     """Archive a terminal run (the run-side analog of ``archive_workflow``).
 
     Refuses non-terminal runs (``ConflictError``), sets ``archived_at`` on terminal
     ones, and drops them from the default ``list_runs`` while keeping them fetchable
     by id (and keeping their journal). Returns the archived run with its usage
-    roll-up populated, matching ``get_run``'s public read shape.
+    roll-up populated, matching ``get_run``'s public read shape. A ``reader`` may archive
+    only runs it can see.
     """
     async with pool.acquire() as conn:
+        await wf_queries.get_visible_run(conn, run_id, account_id=account_id, reader=reader)
         run = await wf_queries.archive_run(conn, run_id, account_id=account_id)
         children = await wf_queries.run_children_usage(conn, run.id, account_id=account_id)
         attributed = await accounting_queries.usage_for_node(
@@ -637,6 +645,7 @@ async def list_runs(
     status: str | None = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
+    reader: RunReader | None,
 ) -> list[WfRun]:
     async with pool.acquire() as conn:
         runs = await wf_queries.list_wf_runs(
@@ -648,6 +657,7 @@ async def list_runs(
             status=status,
             parent_run_id=parent_run_id,
             launcher_session_id=launcher_session_id,
+            reader=reader,
         )
         # Enrich the whole page in ONE batched aggregate (no N+1) so list_runs
         # carries the same per-run usage substrate as get_run (#1324).
@@ -677,8 +687,12 @@ async def list_run_events(
     account_id: str,
     after_seq: int = 0,
     limit: int = 200,
+    reader: RunReader | None,
 ) -> list[WfRunEvent]:
+    """Page a run's journal. A missing, foreign or (for ``reader``) invisible run 404s
+    rather than reading as an empty page."""
     async with pool.acquire() as conn:
+        await wf_queries.get_visible_run(conn, run_id, account_id=account_id, reader=reader)
         return await wf_queries.list_run_events_scoped(
             conn, run_id, account_id=account_id, after_seq=after_seq, limit=limit
         )
@@ -703,12 +717,14 @@ async def resume_gate_by_nonce(
     matches — a nonce for an already-resolved gate (or any gate on a terminal run)
     raises ``NotFoundError`` rather than writing an orphaned signal nothing harvests.
     ``resumer_session_id`` applies the agent builtin's launcher attenuation: when
-    present, only the session that launched the run may resume its gates. The HTTP
-    operator path leaves it unset and remains account-scoped. ``insert_run_signal``
-    is idempotent, so a concurrent double-resume of a still-open gate is a no-op.
+    present, only the session that launched the run may resume its gates, and a run
+    that session can't see 404s like a missing one. The HTTP operator path leaves it
+    unset and remains account-scoped. ``insert_run_signal`` is idempotent, so a
+    concurrent double-resume of a still-open gate is a no-op.
     """
+    reader = RunReader(resumer_session_id) if resumer_session_id is not None else None
     async with pool.acquire() as conn:
-        run = await wf_queries.get_wf_run(conn, run_id, account_id=account_id)  # 404s cross-tenant
+        run = await wf_queries.get_visible_run(conn, run_id, account_id=account_id, reader=reader)
         if resumer_session_id is not None and run.launcher_session_id != resumer_session_id:
             raise ForbiddenError(
                 "run was not launched by this session; only the launcher can resume its gates",

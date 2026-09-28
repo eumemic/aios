@@ -45,6 +45,7 @@ from aios.models.sessions import Err, Ok, Outcome
 from aios.models.workflows import (
     TERMINAL_RUN_STATUSES,
     RunPrincipal,
+    RunReader,
     WfRun,
     WfRunEvent,
     WfRunEventType,
@@ -116,6 +117,7 @@ def _row_to_wf_run(row: asyncpg.Record) -> WfRun:
         parent_run_id=row["parent_run_id"],
         launcher_session_id=row["launcher_session_id"],
         principal=row["principal"],
+        visibility=row["visibility"],
         depth=row["depth"],
         request_id=row.get("request_id"),
         caller=row.get("caller"),
@@ -552,6 +554,18 @@ async def get_wf_run(conn: asyncpg.Connection[Any], run_id: str, *, account_id: 
     )
 
 
+async def get_visible_run(
+    conn: asyncpg.Connection[Any], run_id: str, *, account_id: str, reader: RunReader | None
+) -> WfRun:
+    """:func:`get_wf_run` as ``reader`` may see it (``None``: the operator API, which sees
+    every run). A run the reader can't see 404s exactly like a missing or foreign one,
+    so an agent can't probe another session's runs."""
+    run = await get_wf_run(conn, run_id, account_id=account_id)
+    if reader is not None and not reader.can_see(run):
+        raise NotFoundError(f"workflow run {run_id} not found", detail={"id": run_id})
+    return run
+
+
 class RunLineage(NamedTuple):
     """What a sub-launch reads off its parent run: the DOWN-counting trusted
     invoke-depth (#1124) and the principal (#2467)."""
@@ -591,8 +605,12 @@ async def list_wf_runs(
     status: str | None = None,
     parent_run_id: str | None = None,
     launcher_session_id: str | None = None,
+    reader: RunReader | None = None,
 ) -> list[WfRun]:
     """Keyset-paginated list of an account's runs (non-archived), newest first.
+
+    ``reader`` is an agent-side read: it keeps only the runs :meth:`RunReader.can_see`
+    admits. ``None`` is the operator API, which lists every run.
 
     ``parent_run_id`` scopes to a run's children — the runs a workflow's nested
     ``workflow()`` calls spawned, plus (#819) trigger-launched runs whose
@@ -621,11 +639,18 @@ async def list_wf_runs(
         if value is not None:
             args.append(value)
             where.append(f"{column} = ${len(args)}")
+    visible = "TRUE"
+    if reader is not None:
+        args.append(reader.session_id)
+        visible = f"(visibility = 'account' OR launcher_session_id = ${len(args)})"
+        where.append(visible)
     if after is not None:
+        # The cursor resolves only among runs the reader can see, so an invisible run's
+        # id can't be used to probe that it exists.
         args.append(after)
         where.append(
             f"(created_at, id) < (SELECT created_at, id FROM wf_runs "
-            f"WHERE id = ${len(args)} AND account_id = $1)"
+            f"WHERE id = ${len(args)} AND account_id = $1 AND {visible})"
         )
     args.append(limit)
     rows = await conn.fetch(

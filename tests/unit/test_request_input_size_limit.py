@@ -67,6 +67,7 @@ def _run() -> WfRun:
         script_sha="sha",
         host_semantics_epoch=1,
         principal="operator",
+        visibility="account",
         status="running",
         last_event_seq=0,
         created_at=now,

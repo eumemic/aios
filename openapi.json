@@ -17384,7 +17384,7 @@
           "workflow_id"
         ],
         "title": "RunCompletionSource",
-        "description": "Reactive source: fires once per terminal completion of any run of the\nwatched workflow whose status is in ``statuses``.\n\nNo ``next_fire`` \u2014 never scheduled by the tick (the claim/MIN queries'\n``next_fire IS NOT NULL`` predicate plus the DB guard make a reactive row\nunschedulable by construction); fires are dispatched from the watched\nrun's completion transaction instead. The watch is account-scoped: the\ntrigger is only ever handed run data its owner could already read via the\naccount-scoped run reads."
+        "description": "Reactive source: fires once per terminal completion of any run of the\nwatched workflow whose status is in ``statuses``.\n\nNo ``next_fire`` \u2014 never scheduled by the tick (the claim/MIN queries'\n``next_fire IS NOT NULL`` predicate plus the DB guard make a reactive row\nunschedulable by construction); fires are dispatched from the watched\nrun's completion transaction instead. The watch is account-scoped: the\ntrigger is only ever handed run data its owner could already read via the\nagent run reads, so a session-private run fires only its launching\nsession's triggers."
       },
       "RunCompletionSourceReplace": {
         "properties": {
@@ -21827,6 +21827,15 @@
             "title": "Principal",
             "description": "Who the run acts for: `operator` (launched through the operator API, or a sub-run of an operator run) or `session` (launched by an agent session, directly or through its runs). Fixed at creation; deleting the launching session doesn't change it."
           },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "account",
+              "session"
+            ],
+            "title": "Visibility",
+            "description": "Who may read the run through agent tools: `account` (any session in the account) or `session` (only its launching session). A workflow-as-model run is `session`, and sub-runs inherit their parent's. The operator API reads every run."
+          },
           "depth": {
             "type": "integer",
             "title": "Depth",
@@ -22046,6 +22055,7 @@
           "account_id",
           "environment_id",
           "principal",
+          "visibility",
           "script",
           "script_sha",
           "host_semantics_epoch",
