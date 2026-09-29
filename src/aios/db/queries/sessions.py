@@ -613,6 +613,34 @@ async def get_session_frozen_litellm_extra(
     return raw if raw is not None else {}
 
 
+async def count_account_outstanding_session_wakes(
+    conn: asyncpg.Connection[Any], account_id: str, session_id: str
+) -> int:
+    """Outstanding ``harness.wake_session`` jobs for *account_id*, excluding *session_id*.
+
+    The per-account fair-share meter for :func:`aios.jobs.app.defer_wake` (#418):
+    counts the account's session wakes still ``todo`` or ``doing`` on the shared
+    procrastinate queue. Row-derived from ``procrastinate_jobs`` — not
+    process-local state — so every worker process (and the api process) reads
+    the same value, and it survives restarts. The partial
+    ``procrastinate_jobs_id_lock_idx_v1`` index (todo/doing only) bounds the scan
+    to the live queue. *session_id* is excluded so a session's own
+    already-running wake does not demote its next one. Unscoped
+    (internal/trusted), mirroring :func:`get_wake_priority_context`.
+    """
+    value = await conn.fetchval(
+        "SELECT count(*) FROM procrastinate_jobs j "
+        "JOIN sessions s ON s.id = j.args->>'session_id' "
+        "WHERE j.status IN ('todo', 'doing') "
+        "AND j.task_name = 'harness.wake_session' "
+        "AND s.account_id = $1 "
+        "AND j.args->>'session_id' <> $2",
+        account_id,
+        session_id,
+    )
+    return int(value or 0)
+
+
 async def get_session_workflow_context(
     conn: asyncpg.Connection[Any], session_id: str
 ) -> tuple[str, str | None] | None:

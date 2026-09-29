@@ -610,6 +610,21 @@ class Settings(BaseSettings):
         ge=1,
         description="Concurrent session steps per worker process.",
     )
+    wake_fair_share_max_demotion: int = Field(
+        default=50,
+        ge=0,
+        le=10_000,
+        description="Per-account fair share for BACKGROUND session wakes (#418). A "
+        "background ``wake_session`` job is demoted one procrastinate priority step "
+        "below ``_BACKGROUND_PRIORITY`` per session wake its account already has "
+        "outstanding (todo/doing) on the shared queue, saturating at this many "
+        "steps. Procrastinate fetches ``priority DESC, id ASC``, so a light "
+        "account's background wake is served ahead of a bursting account's backlog "
+        "instead of behind all of it. Soft (reorders, never caps or blocks) and "
+        "Postgres-metered, so it holds across worker processes and restarts. "
+        "Foreground wakes are never demoted (tiering stays strictly dominant). "
+        "0 disables the term and skips the meter query.",
+    )
     held_connection_watchdog_threshold_seconds: float = Field(
         default=60.0,
         gt=0,

@@ -112,6 +112,17 @@ _FOREGROUND_PRIORITY = 0
 _BACKGROUND_PRIORITY = -10
 
 
+def _fair_share_demotion(outstanding: int, max_demotion: int) -> int:
+    """Per-account fair-share demotion for a background session wake (#418).
+
+    One priority step per session wake the account already has outstanding,
+    saturating at ``max_demotion`` (``wake_fair_share_max_demotion``). Applied
+    **only below** ``_BACKGROUND_PRIORITY``, so it reorders within the background
+    tier and can never sink a foreground wake — tiering stays strictly dominant.
+    """
+    return min(max(outstanding, 0), max_demotion)
+
+
 async def defer_wake(
     pool: asyncpg.Pool[Any],
     session_id: str,
@@ -149,10 +160,23 @@ async def defer_wake(
     # is demoted uniformly with no caller plumbing. A missing row (deleted-session race) →
     # foreground default; the wake then no-ops harmlessly. Resolved before the span/enqueue so
     # it isn't a new failure point between them.
+    #
+    # Per-account fairness (#418): a background wake is further demoted by its account's
+    # outstanding session wakes on the shared queue, so one account's background burst sorts
+    # behind a lighter account's background wake instead of starving it. The meter is
+    # row-derived (``procrastinate_jobs``), so it is honest across worker processes and
+    # restarts, and it is consulted only on the background path — foreground wakes keep the
+    # single-query hot path and are never demoted.
+    max_demotion = get_settings().wake_fair_share_max_demotion
     async with pool.acquire() as conn:
         ctx = await queries.get_wake_priority_context(conn, session_id)
-    is_background = ctx[1] if ctx is not None else False  # (account_id, is_background) | None
-    priority = _BACKGROUND_PRIORITY if is_background else _FOREGROUND_PRIORITY
+        is_background = ctx[1] if ctx is not None else False  # (account_id, is_background) | None
+        priority = _BACKGROUND_PRIORITY if is_background else _FOREGROUND_PRIORITY
+        if is_background and ctx is not None and max_demotion > 0:
+            outstanding = await queries.count_account_outstanding_session_wakes(
+                conn, ctx[0], session_id
+            )
+            priority -= _fair_share_demotion(outstanding, max_demotion)
 
     span_data: dict[str, Any] = {"event": "wake_deferred", "cause": cause}
     if delay_seconds is not None:

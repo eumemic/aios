@@ -11,6 +11,7 @@ Procrastinate (and the in-memory connector) fetch todo jobs in
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +24,18 @@ from aios.jobs.app import (
     defer_run_wake,
     defer_wake,
 )
+
+
+@pytest.fixture(autouse=True)
+def _idle_fair_share_meter() -> Any:
+    """Default the per-account fair-share meter (#418) to an idle account (0
+    outstanding wakes) so the tier tests see the bare tier priority; the #418
+    tests below re-patch it with their own values."""
+    with patch(
+        "aios.jobs.app.queries.count_account_outstanding_session_wakes",
+        AsyncMock(return_value=0),
+    ) as mock:
+        yield mock
 
 
 def _jobs_by_session(app: App) -> dict[str, int]:
@@ -135,3 +148,149 @@ async def test_foreground_outranks_background(in_memory_app: App) -> None:
     priorities = _jobs_by_session(in_memory_app)
     # Foreground enqueued *after* background but outranks it on (priority DESC, id ASC).
     assert priorities["sess_fg"] > priorities["sess_bg"]
+
+
+# ─── #418: per-account fair-share term, background tier only ─────────────────
+
+
+def _patch_meter(outstanding: int | Any) -> Any:
+    """Patch the Postgres-backed per-account meter (outstanding session wakes)."""
+    mock = (
+        outstanding if isinstance(outstanding, AsyncMock) else AsyncMock(return_value=outstanding)
+    )
+    return patch("aios.jobs.app.queries.count_account_outstanding_session_wakes", mock)
+
+
+async def test_background_wake_demoted_by_account_outstanding_wakes(in_memory_app: App) -> None:
+    """A background wake is demoted one step per outstanding session wake the account
+    already holds on the shared queue (the fair-share term)."""
+    pool = MagicMock()
+    with (
+        patch("aios.jobs.app.queries.append_event", AsyncMock()),
+        patch(
+            "aios.jobs.app.queries.get_wake_priority_context",
+            AsyncMock(return_value=_ctx(True)),
+        ),
+        _patch_meter(7) as meter,
+    ):
+        await defer_wake(pool, "sess_heavy", cause="message", account_id="acc")
+    assert _jobs_by_session(in_memory_app)["sess_heavy"] == _BACKGROUND_PRIORITY - 7
+    meter.assert_awaited_once()
+    assert meter.await_args.args[1:] == ("acc", "sess_heavy")
+
+
+async def test_fair_share_demotion_is_capped(
+    in_memory_app: App, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The demotion saturates at ``wake_fair_share_max_demotion``."""
+    from aios.config import get_settings
+
+    monkeypatch.setenv("AIOS_WAKE_FAIR_SHARE_MAX_DEMOTION", "5")
+    get_settings.cache_clear()
+    try:
+        pool = MagicMock()
+        with (
+            patch("aios.jobs.app.queries.append_event", AsyncMock()),
+            patch(
+                "aios.jobs.app.queries.get_wake_priority_context",
+                AsyncMock(return_value=_ctx(True)),
+            ),
+            _patch_meter(500),
+        ):
+            await defer_wake(pool, "sess_capped", cause="message", account_id="acc")
+    finally:
+        get_settings.cache_clear()
+    assert _jobs_by_session(in_memory_app)["sess_capped"] == _BACKGROUND_PRIORITY - 5
+
+
+async def test_fair_share_disabled_at_zero_skips_meter(
+    in_memory_app: App, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``wake_fair_share_max_demotion=0`` is the kill switch: no meter query, plain
+    background priority (pre-#418 behavior)."""
+    from aios.config import get_settings
+
+    monkeypatch.setenv("AIOS_WAKE_FAIR_SHARE_MAX_DEMOTION", "0")
+    get_settings.cache_clear()
+    try:
+        pool = MagicMock()
+        with (
+            patch("aios.jobs.app.queries.append_event", AsyncMock()),
+            patch(
+                "aios.jobs.app.queries.get_wake_priority_context",
+                AsyncMock(return_value=_ctx(True)),
+            ),
+            _patch_meter(9) as meter,
+        ):
+            await defer_wake(pool, "sess_off", cause="message", account_id="acc")
+    finally:
+        get_settings.cache_clear()
+    assert _jobs_by_session(in_memory_app)["sess_off"] == _BACKGROUND_PRIORITY
+    meter.assert_not_awaited()
+
+
+@pytest.mark.parametrize("ctx_return", [_ctx(False), None], ids=["foreground", "missing"])
+async def test_foreground_never_fair_share_demoted(
+    in_memory_app: App, ctx_return: tuple[str, bool] | None
+) -> None:
+    """Tiering stays strictly dominant: a heavy account's foreground wake is never
+    demoted (and the meter is not even consulted on the foreground hot path)."""
+    pool = MagicMock()
+    with (
+        patch("aios.jobs.app.queries.append_event", AsyncMock()),
+        patch(
+            "aios.jobs.app.queries.get_wake_priority_context",
+            AsyncMock(return_value=ctx_return),
+        ),
+        _patch_meter(10_000) as meter,
+    ):
+        await defer_wake(pool, "sess_fg_heavy", cause="message", account_id="acc")
+    assert _jobs_by_session(in_memory_app)["sess_fg_heavy"] == _FOREGROUND_PRIORITY
+    meter.assert_not_awaited()
+
+
+async def test_light_account_not_starved_by_heavy_account_burst(in_memory_app: App) -> None:
+    """The issue's unit scenario: account A bursts 50 background wakes, then account
+    B enqueues one. Fetching in procrastinate order (priority DESC, id ASC), B's wake
+    is served within the first two fetches — not after all 50 of A's."""
+    connector = in_memory_app.connector
+    assert isinstance(connector, InMemoryConnector)
+    account_of: dict[str, str] = {}
+
+    async def meter(_conn: Any, account_id: str, session_id: str) -> int:
+        # The real meter counts the account's todo/doing wake_session rows; mirror
+        # it over the in-memory connector's rows.
+        return sum(
+            1
+            for j in connector.jobs.values()
+            if j["status"] in ("todo", "doing")
+            and account_of.get(j["args"]["session_id"]) == account_id
+            and j["args"]["session_id"] != session_id
+        )
+
+    async def ctx_for(_conn: Any, session_id: str) -> tuple[str, bool]:
+        return (account_of[session_id], True)
+
+    pool = MagicMock()
+    with (
+        patch("aios.jobs.app.queries.append_event", AsyncMock()),
+        patch("aios.jobs.app.queries.get_wake_priority_context", ctx_for),
+        _patch_meter(AsyncMock(side_effect=meter)),
+    ):
+        for i in range(50):
+            sid = f"a_{i}"
+            account_of[sid] = "acc_a"
+            await defer_wake(pool, sid, cause="message", account_id="acc_a")
+        account_of["b_0"] = "acc_b"
+        await defer_wake(pool, "b_0", cause="message", account_id="acc_b")
+
+    order = [
+        j["args"]["session_id"]
+        for j in sorted(connector.jobs.values(), key=lambda j: (-j["priority"], j["id"]))
+    ]
+    assert order.index("b_0") <= 1
+    # And every one of A's jobs stays inside the background tier.
+    assert all(
+        _BACKGROUND_PRIORITY >= j["priority"] > _FOREGROUND_PRIORITY - 10_000
+        for j in connector.jobs.values()
+    )

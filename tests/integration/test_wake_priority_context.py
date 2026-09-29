@@ -280,3 +280,55 @@ async def test_unawaited_tell_edge_still_demotes_background(
     async with pool.acquire() as conn:
         ctx = await queries.get_wake_priority_context(conn, sid)
     assert ctx is not None and ctx[1] is True
+
+
+# --- #418 per-account fair-share meter ---------------------------------------
+
+
+async def _seed_wake_job(pool: asyncpg.Pool[Any], session_id: str, status: str) -> None:
+    """Insert a raw ``harness.wake_session`` procrastinate row for *session_id*."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO procrastinate_jobs (queue_name, task_name, priority, lock, "
+            "queueing_lock, args, status) VALUES ('sessions', 'harness.wake_session', "
+            "-10, NULL, NULL, $1::jsonb, $2::procrastinate_job_status)",
+            f'{{"session_id": "{session_id}", "cause": "message"}}',
+            status,
+        )
+
+
+async def test_outstanding_wake_meter_counts_live_account_wakes(
+    pool_env: tuple[asyncpg.Pool[Any], str, str, str],
+) -> None:
+    """The meter counts the account's todo/doing session wakes, excluding the waking
+    session's own rows, finished jobs, and other accounts' wakes."""
+    pool, account, agent_id, env_id = pool_env
+    a1, a2, a3, me = [
+        await _insert_session(pool, agent_id=agent_id, environment_id=env_id, origin="background")
+        for _ in range(4)
+    ]
+    other_account = "acc_wake_priority_other"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO accounts (id, parent_account_id, can_mint_children, display_name) "
+            "VALUES ($1, $2, FALSE, 'wake-priority-other')",
+            other_account,
+            account,
+        )
+    _agent, _env, other = await seed_agent_env_session(
+        pool, account_id=other_account, prefix="wake-priority-other"
+    )
+
+    await _seed_wake_job(pool, a1, "todo")
+    await _seed_wake_job(pool, a2, "doing")
+    await _seed_wake_job(pool, a3, "succeeded")  # finished → not outstanding
+    await _seed_wake_job(pool, me, "doing")  # own wake → excluded
+    await _seed_wake_job(pool, other.id, "todo")  # other tenant → excluded
+
+    async with pool.acquire() as conn:
+        mine = await queries.count_account_outstanding_session_wakes(conn, account, me)
+        theirs = await queries.count_account_outstanding_session_wakes(
+            conn, other_account, "ses_none"
+        )
+    assert mine == 2
+    assert theirs == 1
