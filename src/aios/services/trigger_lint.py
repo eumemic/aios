@@ -88,7 +88,7 @@ def _sandbox_has_unconditional_wake(command: str) -> bool:
 
 
 SELF_DISABLING_EXIT_WARNING = (
-    "This sandbox_command exits non-zero on purpose (`exit N`, N != 0). Every "
+    "This sandbox_command exits non-zero on purpose (`exit N` with a non-zero status). Every "
     "non-zero exit counts as a trigger failure, and 5 consecutive failures "
     "auto-disable the trigger. If this is a monitor or heartbeat, the path that "
     "runs when the watched thing is failing will turn the monitor off exactly "
@@ -100,7 +100,29 @@ SELF_DISABLING_EXIT_WARNING = (
 # ``exit N`` as a shell command word: preceded by start/whitespace/a command
 # separator, followed by whitespace/a separator/end. Excludes lookalikes such
 # as ``on_exit 1``, ``exit_code=1`` and ``/exit/1``.
-_EXIT_RE = re.compile(r"(?:^|(?<=[\s;&|({]))exit[ \t]+(\d+)(?=$|[\s;&|)}])", re.MULTILINE)
+# The status word may carry a sign and be wrapped in matching single or double
+# quotes (``exit -1``, ``exit '1'``, ``exit "2"``); bash accepts all of them.
+_EXIT_RE = re.compile(
+    r"(?:^|(?<=[\s;&|({]))exit[ \t]+(?P<q>['\"]?)(?P<n>[+-]?\d+)(?P=q)(?=$|[\s;&|)}])",
+    re.MULTILINE,
+)
+
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _bash_exit_status(literal: str) -> int:
+    """Status bash reports for ``exit <literal>`` (a signed decimal integer).
+
+    Bash parses the word as a signed 64-bit decimal and keeps the low 8 bits,
+    so ``exit 256`` is 0 and ``exit -1`` is 255. A value outside int64 is a
+    usage error and exits 2.
+    """
+    value = int(literal)
+    if not _INT64_MIN <= value <= _INT64_MAX:
+        return 2
+    return value % 256
+
 
 # Sources whose failures accumulate toward the auto-disable breaker. A one_shot
 # fires once and deletes itself, so it has no breaker to trip.
@@ -123,7 +145,7 @@ def lint_self_disabling_exit(
     if command is None:
         return []
     for match in _EXIT_RE.finditer(command):
-        if int(match.group(1)) != 0:
+        if _bash_exit_status(match.group("n")) != 0:
             return [SELF_DISABLING_EXIT_WARNING]
     return []
 

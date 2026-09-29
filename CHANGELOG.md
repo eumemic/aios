@@ -4,7 +4,7 @@
 
 - **Trigger writes warn when a monitor can disable itself (#2402).** A standing
   (`cron` / `run_completion` / `external_event`) `sandbox_command` whose command
-  contains an explicit `exit N` with N != 0 now gets a warning in the
+  contains an explicit `exit N` whose bash status (N mod 256; signed or quoted literals included) is non-zero now gets a warning in the
   create/update response's `warnings`. Each non-zero exit is a failed fire, and
   5 in a row auto-disable the trigger. That is how all three
   `company-alive-heartbeat*` emitters went dark: each ran `exit 1` on the

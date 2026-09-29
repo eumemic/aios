@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+
+import pytest
+
 from aios.services.trigger_lint import (
     OBSERVED_WAKE_WARNING,
     SELF_DISABLING_EXIT_WARNING,
@@ -149,3 +154,37 @@ async def test_trigger_write_path_surfaces_self_disabling_warning() -> None:
         account_id="acc_x",
     )
     assert warnings == [SELF_DISABLING_EXIT_WARNING]
+
+
+_EXIT_CASES = [
+    "exit -1",
+    "exit 256",
+    "exit 512",
+    "exit 1",
+    "exit 0",
+    "exit 257",
+    "exit '1'",
+    'exit "2"',
+    "exit +1",
+    "exit -256",
+    "exit '-1'",
+    'exit "+256"',
+    "exit 010",
+    "exit 99999999999999999999",
+]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.parametrize("cmd", _EXIT_CASES)
+def test_warns_iff_bash_status_nonzero(cmd: str) -> None:
+    status = subprocess.run(["bash", "-c", cmd], capture_output=True).returncode
+    warned = bool(
+        lint_self_disabling_exit(source_kind="cron", action_kind="sandbox_command", command=cmd)
+    )
+    assert warned == (status != 0)
+
+
+def test_mismatched_quotes_do_not_match() -> None:
+    assert not lint_self_disabling_exit(
+        source_kind="cron", action_kind="sandbox_command", command="exit '1\""
+    )
