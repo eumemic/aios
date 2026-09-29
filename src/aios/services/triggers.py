@@ -60,7 +60,7 @@ from aios.models.triggers import (
     WorkflowAction,
     compute_initial_next_fire,
 )
-from aios.services.trigger_lint import lint_unconditional_wake
+from aios.services.trigger_lint import lint_self_disabling_exit, lint_unconditional_wake
 
 # Per-trigger ingest secret (external_event). Mirrors the runtime_tokens
 # precedent: `aios_evt_<32-byte url-safe>` (256 bits of CSPRNG entropy),
@@ -196,12 +196,18 @@ async def _lint_trigger(
     if isinstance(action, WorkflowAction):
         workflow = await wf_queries.get_workflow(conn, action.workflow_id, account_id=account_id)
         workflow_script = workflow.script
-    return lint_unconditional_wake(
-        source_kind=source.kind,
-        action_kind=action.kind,
-        command=action.command if isinstance(action, SandboxCommandAction) else None,
-        workflow_script=workflow_script,
-    )
+    command = action.command if isinstance(action, SandboxCommandAction) else None
+    return [
+        *lint_unconditional_wake(
+            source_kind=source.kind,
+            action_kind=action.kind,
+            command=command,
+            workflow_script=workflow_script,
+        ),
+        *lint_self_disabling_exit(
+            source_kind=source.kind, action_kind=action.kind, command=command
+        ),
+    ]
 
 
 async def add_trigger(

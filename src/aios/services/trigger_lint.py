@@ -1,4 +1,12 @@
-"""Conservative static lint for recurring triggers that wake unconditionally."""
+"""Conservative static lints for trigger writes.
+
+Two warn-only checks (uncertainty never rejects a write):
+
+- recurring triggers that wake the owner unconditionally;
+- standing ``sandbox_command`` triggers that ``exit`` non-zero on purpose,
+  which lets a monitor disable itself through the consecutive-failure
+  breaker (#2402).
+"""
 
 from __future__ import annotations
 
@@ -77,6 +85,47 @@ def _sandbox_has_unconditional_wake(command: str) -> bool:
         if not (open_if or open_case or "&&" in segment):
             return True
     return False
+
+
+SELF_DISABLING_EXIT_WARNING = (
+    "This sandbox_command exits non-zero on purpose (`exit N`, N != 0). Every "
+    "non-zero exit counts as a trigger failure, and 5 consecutive failures "
+    "auto-disable the trigger. If this is a monitor or heartbeat, the path that "
+    "runs when the watched thing is failing will turn the monitor off exactly "
+    "when it matters. Report the finding another way (ping a /fail URL, call "
+    "`wake_self`, write a log) and `exit 0` on purpose, so only a broken "
+    "command can trip the breaker."
+)
+
+# ``exit N`` as a shell command word: preceded by start/whitespace/a command
+# separator, followed by whitespace/a separator/end. Excludes lookalikes such
+# as ``on_exit 1``, ``exit_code=1`` and ``/exit/1``.
+_EXIT_RE = re.compile(r"(?:^|(?<=[\s;&|({]))exit[ \t]+(\d+)(?=$|[\s;&|)}])", re.MULTILINE)
+
+# Sources whose failures accumulate toward the auto-disable breaker. A one_shot
+# fires once and deletes itself, so it has no breaker to trip.
+_STANDING_SOURCES = frozenset({"cron", "run_completion", "external_event"})
+
+
+def lint_self_disabling_exit(
+    *,
+    source_kind: str,
+    action_kind: str,
+    command: str | None = None,
+) -> list[str]:
+    """Warn when a standing ``sandbox_command`` has an explicit non-zero ``exit``.
+
+    A syntactic probe: it catches the written-on-purpose case (#2402) and
+    cannot see a command whose last statement just fails. Warnings only.
+    """
+    if source_kind not in _STANDING_SOURCES or action_kind != "sandbox_command":
+        return []
+    if command is None:
+        return []
+    for match in _EXIT_RE.finditer(command):
+        if int(match.group(1)) != 0:
+            return [SELF_DISABLING_EXIT_WARNING]
+    return []
 
 
 def lint_unconditional_wake(

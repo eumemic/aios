@@ -162,7 +162,10 @@ _SANDBOX_COMMAND_DESCRIPTION = (
     "Bash command run in the session's sandbox at each fire, WITHOUT waking "
     "the model. To escalate (wake the model with a user-role message), call "
     '``tool wake_self \'{"content":"<message to deliver to yourself>"}\'`` '
-    "from inside the cron command."
+    "from inside the cron command. A non-zero exit counts as a failed fire and "
+    "5 consecutive failures auto-disable the trigger, so a monitor should report "
+    "what it finds (wake_self, a /fail ping) and still exit 0 — never `exit 1` on "
+    "the condition it exists to watch."
 )
 
 _ACTION_SCHEMA: dict[str, Any] = {

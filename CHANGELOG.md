@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Trigger writes warn when a monitor can disable itself (#2402).** A standing
+  (`cron` / `run_completion` / `external_event`) `sandbox_command` whose command
+  contains an explicit `exit N` with N != 0 now gets a warning in the
+  create/update response's `warnings`. Each non-zero exit is a failed fire, and
+  5 in a row auto-disable the trigger. That is how all three
+  `company-alive-heartbeat*` emitters went dark: each ran `exit 1` on the
+  ping-failed path. The warning asks for the finding to be reported another way
+  and an `exit 0` on purpose. It only warns and never rejects the write. It is
+  a text check, so it cannot see a command whose last statement simply fails.
+  The `sandbox_command` tool schema description now states the same rule.
+
 - **lane_activate sends a complete trigger update again, and lanes can be armed
   capped (#2463).** The trigger PUT omitted `version`, `max_outstanding_runs` and
   `budget_usd`, which `WorkflowActionReplace` now requires, so every trigger
