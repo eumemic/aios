@@ -302,6 +302,7 @@ def _register() -> None:
         handler=edit_handler,
         transport="agent_tool",
         executes="sandbox",
+        parallel_safe=False,
     )
 
 

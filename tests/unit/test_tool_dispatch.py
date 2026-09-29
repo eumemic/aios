@@ -1114,3 +1114,237 @@ class TestAppendToolResultUniqueFloor:
                 content="denied",
                 is_error=True,
             )
+
+
+class TestSameToolOrdering:
+    """#149: same-tool ordering for self-parallel-unsafe calls.
+
+    ``_launch_tasks`` chains calls sharing a serialize key (a ``parallel_safe=False``
+    built-in, or any same-name MCP tool) so each runs only after its predecessor
+    finished — while every call keeps its own task + ``tool_call_id`` registration
+    (truthful in-flight status, per-call cancellation). The chain lives on the
+    per-worker ``InflightToolRegistry`` so it spans separate launcher invocations.
+    """
+
+    @pytest.fixture
+    def reg(self, monkeypatch: Any) -> Any:
+        from aios.harness.inflight_tool_registry import InflightToolRegistry
+
+        registry_ = InflightToolRegistry()
+        monkeypatch.setattr(runtime, "require_inflight_tool_registry", lambda: registry_)
+        monkeypatch.setattr(
+            sessions_service, "append_event", AsyncMock(return_value=MagicMock(id="span_1"))
+        )
+        monkeypatch.setattr(tool_dispatch, "_append_tool_result", AsyncMock())
+        monkeypatch.setattr(tool_dispatch, "_trigger_sweep", AsyncMock())
+        return registry_
+
+    @staticmethod
+    def _call(call_id: str, name: str) -> dict[str, Any]:
+        return {"id": call_id, "function": {"name": name, "arguments": "{}"}}
+
+    class _Recorder:
+        """An instrumented coro_factory: records start/finish per call, each call
+        blocking on its own release gate, all run through the real lifecycle."""
+
+        def __init__(self) -> None:
+            self.log: list[tuple[str, str]] = []
+            self.gates: dict[str, asyncio.Event] = {}
+            self.started: dict[str, asyncio.Event] = {}
+
+        def gate(self, call_id: str) -> asyncio.Event:
+            return self.gates.setdefault(call_id, asyncio.Event())
+
+        def started_ev(self, call_id: str) -> asyncio.Event:
+            return self.started.setdefault(call_id, asyncio.Event())
+
+        async def __call__(self, call: dict[str, Any]) -> None:
+            async with _tool_lifecycle(
+                MagicMock(), "ses_1", call, account_id="acc_1", log_prefix="tool"
+            ) as tc:
+                self.log.append((tc.call_id, "start"))
+                self.started_ev(tc.call_id).set()
+                await self.gate(tc.call_id).wait()
+                self.log.append((tc.call_id, "finish"))
+
+    @staticmethod
+    async def _settle() -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    @staticmethod
+    def _tasks(reg: Any) -> list[asyncio.Task[None]]:
+        return [t for tasks in reg._tasks.values() for t in tasks.values()]
+
+    async def test_unsafe_builtin_calls_run_in_emit_order(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call(f"tc_{i}", "bash") for i in range(3)]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool")
+        tasks = self._tasks(reg)
+        await self._settle()
+        assert rec.log == [("tc_0", "start")]  # tc_1/tc_2 wait on their predecessor
+        # Release in REVERSE: ordering must come from the chain, not the gates.
+        rec.gate("tc_2").set()
+        rec.gate("tc_1").set()
+        await self._settle()
+        assert rec.log == [("tc_0", "start")]
+        rec.gate("tc_0").set()
+        await asyncio.gather(*tasks)
+        assert rec.log == [
+            ("tc_0", "start"),
+            ("tc_0", "finish"),
+            ("tc_1", "start"),
+            ("tc_1", "finish"),
+            ("tc_2", "start"),
+            ("tc_2", "finish"),
+        ]
+
+    async def test_parallel_safe_calls_interleave(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call("r_0", "read"), self._call("r_1", "read"), self._call("b_0", "bash")]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool")
+        tasks = self._tasks(reg)
+        await self._settle()
+        # Parallel-safe reads and a single bash all start at once (cross-tool parallel).
+        assert {c for c, ev in rec.log if ev == "start"} == {"r_0", "r_1", "b_0"}
+        for g in ("r_0", "r_1", "b_0"):
+            rec.gate(g).set()
+        await asyncio.gather(*tasks)
+
+    async def test_mcp_same_name_serializes_different_names_parallelize(self, reg: Any) -> None:
+        rec = self._Recorder()
+        send = "mcp__signal__signal_send"
+        calls = [
+            self._call("s_0", send),
+            self._call("s_1", send),
+            self._call("t_0", "mcp__telegram__telegram_send"),
+        ]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="mcp_tool")
+        tasks = self._tasks(reg)
+        await self._settle()
+        assert {c for c, ev in rec.log if ev == "start"} == {"s_0", "t_0"}
+        rec.gate("s_1").set()
+        rec.gate("t_0").set()
+        rec.gate("s_0").set()
+        await asyncio.gather(*tasks)
+        s_log = [e for e in rec.log if e[0].startswith("s")]
+        assert s_log == [("s_0", "start"), ("s_0", "finish"), ("s_1", "start"), ("s_1", "finish")]
+
+    async def test_non_model_launchers_are_never_serialized(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call("x_0", "bash"), self._call("x_1", "bash")]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool_reject")
+        tasks = self._tasks(reg)
+        await self._settle()
+        assert {c for c, _ in rec.log} == {"x_0", "x_1"}
+        for g in ("x_0", "x_1"):
+            rec.gate(g).set()
+        await asyncio.gather(*tasks)
+
+    async def test_ordering_spans_separate_launcher_invocations(self, reg: Any) -> None:
+        """An immediate ``bash`` and a later (e.g. confirmation-gated) ``bash`` from
+        one assistant message launch through different ``_launch_tasks`` calls —
+        they must still chain."""
+        rec = self._Recorder()
+        tool_dispatch._launch_tasks("ses_1", [self._call("a", "write")], rec, prefix="tool")
+        await self._settle()
+        tool_dispatch._launch_tasks("ses_1", [self._call("b", "write")], rec, prefix="tool")
+        tasks = self._tasks(reg)
+        await self._settle()
+        assert rec.log == [("a", "start")]
+        rec.gate("b").set()
+        rec.gate("a").set()
+        await asyncio.gather(*tasks)
+        assert rec.log == [("a", "start"), ("a", "finish"), ("b", "start"), ("b", "finish")]
+        assert reg._serial_tails == {}  # chain state drained once the chain finishes
+
+    async def test_other_sessions_do_not_chain(self, reg: Any) -> None:
+        rec = self._Recorder()
+        tool_dispatch._launch_tasks("ses_1", [self._call("a", "bash")], rec, prefix="tool")
+        tool_dispatch._launch_tasks("ses_2", [self._call("b", "bash")], rec, prefix="tool")
+        tasks = self._tasks(reg)
+        await self._settle()
+        assert {c for c, _ in rec.log} == {"a", "b"}
+        rec.gate("a").set()
+        rec.gate("b").set()
+        await asyncio.gather(*tasks)
+
+    async def test_each_call_appends_exactly_one_result_path_and_sweeps(self, reg: Any) -> None:
+        calls = [self._call(f"tc_{i}", "bash") for i in range(3)]
+        tool_dispatch._launch_tasks(
+            "ses_1",
+            calls,
+            lambda call: _raising_lifecycle(call),
+            prefix="tool",
+        )
+        await asyncio.gather(*self._tasks(reg), return_exceptions=True)
+        append_result: Any = tool_dispatch._append_tool_result
+        sweep: Any = tool_dispatch._trigger_sweep
+        assert [c.args[2] for c in append_result.await_args_list] == ["tc_0", "tc_1", "tc_2"]
+        assert sweep.await_count == 3
+
+    async def test_completed_member_is_not_reported_in_flight(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call("a", "bash"), self._call("b", "bash")]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool")
+        tasks = self._tasks(reg)
+        rec.gate("a").set()
+        await rec.started_ev("b").wait()
+        assert reg.in_flight_tool_call_ids("ses_1") == {"b"}
+        rec.gate("b").set()
+        await asyncio.gather(*tasks)
+
+    async def test_cancelling_completed_member_does_not_abort_sibling(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call("a", "bash"), self._call("b", "bash")]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool")
+        task_a, task_b = self._tasks(reg)
+        rec.gate("a").set()
+        await rec.started_ev("b").wait()
+        task_a.cancel()  # a no-op on a finished task
+        await self._settle()
+        assert not task_b.done()
+        rec.gate("b").set()
+        await task_b
+        assert ("b", "finish") in rec.log
+
+    async def test_cancelled_running_member_releases_successor(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call("a", "bash"), self._call("b", "bash")]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="tool")
+        task_a, task_b = self._tasks(reg)
+        await rec.started_ev("a").wait()
+        task_a.cancel()
+        rec.gate("b").set()
+        await asyncio.wait_for(task_b, timeout=1)  # not stranded behind the cancelled a
+        assert task_a.cancelled()
+        assert rec.log == [("a", "start"), ("b", "start"), ("b", "finish")]
+
+    async def test_cancel_session_fires_no_waiting_member(self, reg: Any) -> None:
+        rec = self._Recorder()
+        calls = [self._call(f"tc_{i}", "mcp__signal__signal_send") for i in range(3)]
+        tool_dispatch._launch_tasks("ses_1", calls, rec, prefix="mcp_tool")
+        tasks = self._tasks(reg)
+        await rec.started_ev("tc_0").wait()
+        assert reg.cancel_session("ses_1") == 3
+        for g in ("tc_0", "tc_1", "tc_2"):
+            rec.gate(g).set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert rec.log == [("tc_0", "start")]  # no post-halt send went out
+        append_result: Any = tool_dispatch._append_tool_result
+        # Every member still resolves in-task as cancelled (never-started ones too).
+        assert sorted(c.args[2] for c in append_result.await_args_list) == ["tc_0", "tc_1", "tc_2"]
+        assert all(c.kwargs["error"] == "cancelled" for c in append_result.await_args_list)
+        # The never-started members wrote no tool_execute_start span.
+        span_calls: Any = sessions_service.append_event
+        started = [
+            c.args[3]["tool_call_id"]
+            for c in span_calls.await_args_list
+            if c.args[3].get("event") == "tool_execute_start"
+        ]
+        assert started == ["tc_0"]
+
+
+async def _raising_lifecycle(call: dict[str, Any]) -> None:
+    async with _tool_lifecycle(MagicMock(), "ses_1", call, account_id="acc_1", log_prefix="tool"):
+        raise ToolBail("nope")

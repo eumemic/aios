@@ -162,6 +162,7 @@ def _register() -> None:
         parameters_schema=WAKE_SESSION_PARAMETERS_SCHEMA,
         handler=wake_session_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
 
 

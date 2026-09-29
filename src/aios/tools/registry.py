@@ -116,6 +116,15 @@ class ToolDefinition:
     its resumable set from this flag (:meth:`ToolRegistry.resumable_tool_names`), so
     a new parking tool just sets ``resumable=True`` here at registration — there is
     no separate hand-maintained name list to keep in lockstep.
+
+    ``parallel_safe`` (#149) says whether two calls of THIS tool may run
+    concurrently. ``False`` marks a tool whose self-parallelism is unsafe (it
+    mutates shared workspace/session state — ``bash``/``write``/``edit``,
+    ``switch_channel``, the wake/trigger/workflow mutators): the model-path
+    dispatcher then runs same-name calls of it strictly in emit order, while
+    cross-tool parallelism is left intact. Harness-internal only — it is never
+    rendered into the model-facing ``tools`` payload. It is its own dimension:
+    neither ``executes`` nor ``transport`` partitions read-only from mutating.
     """
 
     name: str
@@ -126,6 +135,7 @@ class ToolDefinition:
     executes: Literal["worker", "sandbox"] = "worker"
     classify_permission: ClassifyPermission | None = None
     resumable: bool = False
+    parallel_safe: bool = True
 
 
 @dataclass(slots=True)
@@ -145,6 +155,7 @@ class ToolRegistry:
         executes: Literal["worker", "sandbox"] = "worker",
         classify_permission: ClassifyPermission | None = None,
         resumable: bool = False,
+        parallel_safe: bool = True,
     ) -> None:
         """Register a tool. Raises :class:`DuplicateToolError` on name clash.
 
@@ -165,6 +176,7 @@ class ToolRegistry:
             executes=executes,
             classify_permission=classify_permission,
             resumable=resumable,
+            parallel_safe=parallel_safe,
         )
 
     def resumable_tool_names(self) -> frozenset[str]:
@@ -189,6 +201,13 @@ class ToolRegistry:
         router never crashes on a tool its gate will reject as a value)."""
         tool = self._tools.get(name)
         return tool.executes if tool is not None else "worker"
+
+    def tool_parallel_safe(self, name: str) -> bool:
+        """Whether two calls of ``name`` may run concurrently (#149). An
+        unregistered name defaults to ``True`` so the dispatcher never crashes
+        on a call its own lookup will refuse as a value."""
+        tool = self._tools.get(name)
+        return tool.parallel_safe if tool is not None else True
 
     def has(self, name: str) -> bool:
         return name in self._tools
@@ -301,6 +320,14 @@ def tool_executes_class(name: str) -> str:
     function on the module. Defaults unregistered names to ``"worker"``.
     """
     return registry.tool_executes_class(name)
+
+
+def tool_parallel_safe(name: str) -> bool:
+    """Module-level accessor for a built-in's ``parallel_safe`` flag (#149).
+
+    Defaults unregistered names to ``True`` (today's unordered dispatch).
+    """
+    return registry.tool_parallel_safe(name)
 
 
 def effective_transport(name: str, agent_tools: list[AgentToolSpec]) -> ToolTransport:
