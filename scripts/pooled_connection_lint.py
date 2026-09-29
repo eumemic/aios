@@ -87,6 +87,7 @@ _DB_HELPER_SYMBOLS = frozenset(
         "queries.clone_session",
         "queries.copy_session_github_resources",
         "queries.copy_session_resources",
+        "queries.count_account_outstanding_session_wakes",
         "queries.count_account_resources",
         "queries.count_account_triggers",
         "queries.count_active_child_accounts",
