@@ -188,3 +188,27 @@ def test_mismatched_quotes_do_not_match() -> None:
     assert not lint_self_disabling_exit(
         source_kind="cron", action_kind="sandbox_command", command="exit '1\""
     )
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "exit " + "1" * 4301,
+        "exit -" + "9" * 5000,
+        "exit " + "0" * 5000 + "1",
+        "exit '" + "7" * 4400 + "'",
+    ],
+)
+def test_huge_exit_literal_never_raises(cmd: str) -> None:
+    # bash: status 2 (out of range) or 1 — non-zero either way; must warn, not raise.
+    assert lint_self_disabling_exit(
+        source_kind="cron", action_kind="sandbox_command", command=cmd
+    ) == [SELF_DISABLING_EXIT_WARNING]
+
+
+def test_huge_zero_padded_zero_is_status_zero() -> None:
+    cmd = "exit " + "0" * 5000
+    assert (
+        lint_self_disabling_exit(source_kind="cron", action_kind="sandbox_command", command=cmd)
+        == []
+    )

@@ -117,8 +117,19 @@ def _bash_exit_status(literal: str) -> int:
     Bash parses the word as a signed 64-bit decimal and keeps the low 8 bits,
     so ``exit 256`` is 0 and ``exit -1`` is 255. A value outside int64 is a
     usage error and exits 2.
+
+    The int64 range check is decided from the digit count *before* calling
+    ``int()``: Python refuses to convert strings longer than 4300 digits
+    (``sys.int_info.str_digits_check_threshold``), and a lint must never raise
+    on a command the action model accepted.
     """
-    value = int(literal)
+    negative = literal.startswith("-")
+    digits = literal.lstrip("+-").lstrip("0")
+    if len(digits) > 19:  # |value| >= 10**19 > 2**63: outside int64
+        return 2
+    # Convert only the significant digits: a long run of leading zeros would
+    # otherwise still trip the 4300-digit conversion limit.
+    value = -int(digits or "0") if negative else int(digits or "0")
     if not _INT64_MIN <= value <= _INT64_MAX:
         return 2
     return value % 256
