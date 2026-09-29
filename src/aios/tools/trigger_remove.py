@@ -53,6 +53,7 @@ def _register() -> None:
         description=TRIGGER_REMOVE_DESCRIPTION,
         parameters_schema=TRIGGER_REMOVE_PARAMETERS_SCHEMA,
         handler=trigger_remove_handler,
+        parallel_safe=False,
     )
 
 

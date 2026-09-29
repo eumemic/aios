@@ -98,6 +98,7 @@ def _register() -> None:
         parameters_schema=WAKE_SELF_PARAMETERS_SCHEMA,
         handler=wake_self_handler,
         transport="both",
+        parallel_safe=False,
     )
 
 

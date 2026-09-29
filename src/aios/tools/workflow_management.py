@@ -477,6 +477,7 @@ def _register() -> None:
         parameters_schema=slim_workflow_schema(WorkflowCreate.model_json_schema()),
         handler=create_workflow_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
     registry.register(
         name="update_workflow",
@@ -484,6 +485,7 @@ def _register() -> None:
         parameters_schema=slim_workflow_schema(_UpdateWorkflowArgs.model_json_schema()),
         handler=update_workflow_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
     registry.register(
         name="archive_workflow",
@@ -491,6 +493,7 @@ def _register() -> None:
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=archive_workflow_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
     registry.register(
         name="unarchive_workflow",
@@ -498,6 +501,7 @@ def _register() -> None:
         parameters_schema=_WorkflowIdArgs.model_json_schema(),
         handler=unarchive_workflow_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
     registry.register(
         name="get_workflow",
@@ -544,6 +548,7 @@ def _register() -> None:
         parameters_schema=_ArchiveRunArgs.model_json_schema(),
         handler=archive_run_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
     registry.register(
         name="list_run_events",
@@ -558,6 +563,7 @@ def _register() -> None:
         parameters_schema=_ResumeGateArgs.model_json_schema(),
         handler=resume_gate_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
 
 

@@ -237,6 +237,7 @@ def _register() -> None:
         parameters_schema=SCHEDULE_WAKE_PARAMETERS_SCHEMA,
         handler=schedule_wake_handler,
         transport="agent_tool",
+        parallel_safe=False,
     )
 
 

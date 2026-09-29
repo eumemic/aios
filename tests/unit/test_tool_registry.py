@@ -188,3 +188,64 @@ class TestToOpenaiTools:
         )
         assert len(result) == 1
         assert result[0]["function"]["name"] == "get_weather"
+
+
+class TestParallelSafe:
+    """#149: ``parallel_safe`` is a harness-internal registry attribute."""
+
+    def test_defaults_true_and_override_stored(self) -> None:
+        from aios.tools.registry import tool_parallel_safe
+
+        registry.clear()
+        registry.register(name="safe", description="", parameters_schema={}, handler=_noop_handler)
+        registry.register(
+            name="unsafe",
+            description="",
+            parameters_schema={},
+            handler=_noop_handler,
+            parallel_safe=False,
+        )
+        assert registry.get("safe").parallel_safe is True
+        assert registry.get("unsafe").parallel_safe is False
+        assert tool_parallel_safe("safe") is True
+        assert tool_parallel_safe("unsafe") is False
+        assert tool_parallel_safe("never_registered") is True
+
+    def test_known_unsafe_set(self) -> None:
+        import aios.tools  # noqa: F401
+
+        unsafe = {
+            "bash",
+            "edit",
+            "write",
+            "switch_channel",
+            "schedule_wake",
+            "wake_session",
+            "wake_self",
+            "trigger_create",
+            "trigger_update",
+            "trigger_remove",
+            "create_workflow",
+            "update_workflow",
+            "archive_workflow",
+            "unarchive_workflow",
+            "archive_run",
+            "resume_gate",
+        }
+        actual = {n for n in registry.names() if not registry.get(n).parallel_safe}
+        assert actual == unsafe
+
+    def test_not_in_model_facing_payload(self) -> None:
+        import aios.tools  # noqa: F401
+
+        entries = to_openai_tools([AgentToolSpec(type="bash")])
+        assert entries == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": registry.get("bash").description,
+                    "parameters": registry.get("bash").parameters_schema,
+                },
+            }
+        ]

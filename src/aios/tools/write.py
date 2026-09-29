@@ -222,6 +222,7 @@ def _register() -> None:
         handler=write_handler,
         transport="agent_tool",
         executes="sandbox",
+        parallel_safe=False,
     )
 
 

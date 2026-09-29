@@ -207,6 +207,7 @@ def _register() -> None:
         handler=bash_handler,
         transport="agent_tool",
         executes="sandbox",
+        parallel_safe=False,
     )
 
 

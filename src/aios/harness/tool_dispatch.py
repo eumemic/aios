@@ -30,6 +30,7 @@ and shutdown support.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -46,7 +47,7 @@ from aios.mcp.schema import mcp_origin_for
 from aios.models.agents import McpServerSpec
 from aios.services import sessions as sessions_service
 from aios.tools.invoke import ToolBail, invoke_builtin, parse_arguments, prepare_builtin
-from aios.tools.registry import ToolResult
+from aios.tools.registry import ToolResult, tool_parallel_safe
 from aios.tools.workflow_completion import (
     ERROR_TOOL_NAME,
     RETURN_TOOL_NAME,
@@ -59,6 +60,48 @@ if TYPE_CHECKING:
 log = get_logger("aios.harness.tool_dispatch")
 
 
+# #149: the predecessor task a serialized tool call must wait for before it starts.
+# Set by :func:`_launch_tasks` inside the call's own task (so it is task-local — each
+# task runs in its own copied context) and consumed by :func:`_tool_lifecycle`, which
+# waits on it BEFORE writing the start span so a cancel during the wait resolves the
+# call through the existing "cancelled before start" arm (never ran, one result, sweep).
+_serial_predecessor: contextvars.ContextVar[asyncio.Task[None] | None] = contextvars.ContextVar(
+    "aios_tool_serial_predecessor", default=None
+)
+
+
+def _serialize_key(call: dict[str, Any], prefix: str) -> str | None:
+    """The ordering key for *call*, or ``None`` when it may run fully in parallel (#149).
+
+    Calls sharing a key within a session run strictly in launch (emit) order; distinct
+    keys — and ``None`` — keep today's unordered parallel dispatch.
+
+    * Built-in model path (``prefix="tool"``): the tool name, iff the tool registered
+      ``parallel_safe=False`` (``bash``/``write``/``edit``, ``switch_channel``, …).
+    * MCP path (``prefix="mcp_tool"``): the qualified ``function.name``, always — MCP
+      tools carry no aios-side safety metadata and connector sends (``signal_send``,
+      ``telegram_send``) are order-sensitive. Same-name calls serialize; different
+      names still parallelize. (Per-target / verb-aware serialization is a follow-up.)
+    * Every other launcher (rejections, crash-resume re-parks): ``None``.
+    """
+    name = (call.get("function") or {}).get("name") or ""
+    if not name:
+        return None
+    if prefix == "mcp_tool":
+        return name
+    if prefix == "tool" and not tool_parallel_safe(name):
+        return name
+    return None
+
+
+async def _run_after_predecessor(
+    coro_factory: Any, call: dict[str, Any], predecessor: asyncio.Task[None] | None
+) -> None:
+    """Task body for a keyed call: publish the predecessor for :func:`_tool_lifecycle`."""
+    _serial_predecessor.set(predecessor)
+    await coro_factory(call)
+
+
 def _launch_tasks(
     session_id: str,
     tool_calls: list[dict[str, Any]],
@@ -66,18 +109,46 @@ def _launch_tasks(
     *,
     prefix: str,
 ) -> None:
-    """Shared launcher: spawn one asyncio task per tool call, register in the InflightToolRegistry."""
+    """Shared launcher: spawn one asyncio task per tool call, register in the InflightToolRegistry.
+
+    Same-tool ordering (#149): a call with a non-``None`` :func:`_serialize_key` is chained
+    behind the previous unfinished call with the same key in this session — the chain lives
+    on the :class:`InflightToolRegistry`, so it spans separate launcher invocations (e.g. an
+    immediate and a later confirmed ``bash`` from one assistant message). Every call still
+    gets its OWN task registered under its OWN ``tool_call_id``: in-flight status and
+    cancellation stay per-call, and a cancelled member releases its successor.
+    """
     inflight_reg = runtime.require_inflight_tool_registry()
     for call in tool_calls:
         call_id = call.get("id") or "unknown"
-        task = asyncio.create_task(
-            coro_factory(call),
-            name=f"{prefix}:{session_id}:{call_id}",
-        )
+        key = _serialize_key(call, prefix)
+        task_name = f"{prefix}:{session_id}:{call_id}"
+        if key is None:
+            task = asyncio.create_task(coro_factory(call), name=task_name)
+        else:
+            # The predecessor is only known once this task exists (it becomes the new
+            # chain tail), so hand it over through a future resolved synchronously below,
+            # before the task gets its first turn on the loop.
+            slot: asyncio.Future[asyncio.Task[None] | None] = (
+                asyncio.get_running_loop().create_future()
+            )
+
+            async def _keyed(
+                c: dict[str, Any] = call,
+                f: asyncio.Future[asyncio.Task[None] | None] = slot,
+            ) -> None:
+                await _run_after_predecessor(coro_factory, c, f.result())
+
+            task = asyncio.create_task(_keyed(), name=task_name)
+            slot.set_result(inflight_reg.claim_serial_slot(session_id, key, task))
         inflight_reg.add(session_id, call_id, task)
 
-        def _on_done(t: asyncio.Task[None], s: str = session_id, c: str = call_id) -> None:
+        def _on_done(
+            t: asyncio.Task[None], s: str = session_id, c: str = call_id, k: str | None = key
+        ) -> None:
             inflight_reg.remove(s, c)
+            if k is not None:
+                inflight_reg.release_serial_slot(s, k, t)
 
         task.add_done_callback(_on_done)
 
@@ -254,7 +325,17 @@ async def _tool_lifecycle(
     # in-body cancel handler; the ghost sweep is the backstop for that, for worker death, and
     # for a DB failure writing this span.)
     bound_log = log.bind(session_id=session_id, tool_call_id=call_id, tool_name=name)
+    predecessor = _serial_predecessor.get()
     try:
+        if predecessor is not None:
+            # Same-tool ordering (#149): wait — without side effects and BEFORE the start
+            # span, so the call is still provably "never dispatched" — for the previous
+            # call of the same serialize key to finish (success, error, or cancel alike;
+            # ``asyncio.wait`` never raises the predecessor's outcome). A cancel landing
+            # here takes the "cancelled before start" arm below: the tool never runs.
+            await asyncio.wait([predecessor])
+            # Consumed: never leak into a nested lifecycle or a child task's copied context.
+            _serial_predecessor.set(None)
         span_start = (
             await sessions_service.append_event(
                 pool,

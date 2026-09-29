@@ -24,6 +24,8 @@ class InflightToolRegistry:
         self._dispatch_seq: dict[str, dict[str, int | None]] = {}
         self._step_tasks: dict[str, asyncio.Task[None]] = {}
         self._step_start_seq: dict[str, int | None] = {}
+        # #149: per-(session, serialize_key) tail of the same-tool ordering chain.
+        self._serial_tails: dict[str, dict[str, asyncio.Task[None]]] = {}
 
     def add(self, session_id: str, tool_call_id: str, task: asyncio.Task[None]) -> None:
         """Register a newly-launched tool task.
@@ -45,6 +47,36 @@ class InflightToolRegistry:
         session_tasks[tool_call_id] = task
         session_seqs = self._dispatch_seq.setdefault(session_id, {})
         session_seqs[tool_call_id] = self._step_start_seq.get(session_id)
+
+    def claim_serial_slot(
+        self, session_id: str, key: str, task: asyncio.Task[None]
+    ) -> asyncio.Task[None] | None:
+        """Append *task* to the ``(session_id, key)`` ordering chain (#149).
+
+        Returns the predecessor — the previously-claimed, still-unfinished task
+        for the same key — which *task* must wait on before running, or ``None``
+        when it may start immediately. The chain lives HERE (worker-lifetime,
+        per session), not in one launcher invocation, so it spans every
+        ``_launch_tasks`` call: an immediate ``bash`` and a later
+        confirmation-gated ``bash`` from the same assistant message chain on the
+        same key. Each member is still its own task under its own
+        ``tool_call_id`` — the per-call in-flight/cancel contract is untouched.
+        """
+        tails = self._serial_tails.setdefault(session_id, {})
+        prev = tails.get(key)
+        tails[key] = task
+        if prev is not None and prev.done():
+            return None
+        return prev
+
+    def release_serial_slot(self, session_id: str, key: str, task: asyncio.Task[None]) -> None:
+        """Drop *task* as the chain tail once it finishes, if nothing chained after it."""
+        tails = self._serial_tails.get(session_id)
+        if tails is None or tails.get(key) is not task:
+            return
+        del tails[key]
+        if not tails:
+            del self._serial_tails[session_id]
 
     def remove(self, session_id: str, tool_call_id: str) -> None:
         session_tasks = self._tasks.get(session_id)
@@ -187,3 +219,4 @@ class InflightToolRegistry:
             log.info("inflight_tool_registry.shutdown", count=len(all_tasks))
             await asyncio.gather(*all_tasks, return_exceptions=True)
         self._tasks.clear()
+        self._serial_tails.clear()
