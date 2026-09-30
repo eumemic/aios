@@ -36,6 +36,10 @@ log = get_logger(__name__)
 
 MAX_ROWS = 200
 QUERY_TIMEOUT_MS = 10_000
+UNKNOWN_COLUMN_HINT = (
+    "Query search_views_help for the available columns: "
+    "SELECT relation_name, column_name, data_type, semantics FROM search_views_help"
+)
 
 # The ONLY relations search_events may read: the per-session scoped view whose
 # own WHERE clause enforces ``session_id = current_setting('app.session_id')``.
@@ -385,6 +389,12 @@ async def search_events_handler(session_id: str, arguments: dict[str, Any]) -> T
         # Expected refusals (#1680): raise ToolBail so the single writer stamps
         # ``is_error`` — never let the raw asyncpg error escape and evict the sandbox.
         raise ToolBail(f"Query timed out after {QUERY_TIMEOUT_MS}ms") from exc
+    except asyncpg.exceptions.UndefinedColumnError as exc:
+        # #1943: a guessed column name is a dead end unless the error names the
+        # self-service recovery. No alias for guessed names — point at the help
+        # view that enumerates every real column instead.
+        log.warning("search_events.query_failed", error=str(exc))
+        raise ToolBail(f"Query failed: {exc}. {UNKNOWN_COLUMN_HINT}") from exc
     except Exception as exc:
         log.warning("search_events.query_failed", error=str(exc))
         raise ToolBail(f"Query failed: {exc}") from exc
