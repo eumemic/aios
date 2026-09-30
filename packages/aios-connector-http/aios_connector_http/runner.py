@@ -60,6 +60,7 @@ import inspect
 import json
 import os
 import signal as _signal
+import stat as _stat
 import tempfile
 import time
 import types
@@ -238,6 +239,51 @@ def _read_owner_nonce(fd: int) -> bytes | None:
         return os.getxattr(fd, _HEARTBEAT_OWNER_XATTR)
     except OSError:
         return None
+
+
+_HEARTBEAT_PAYLOAD_KEYS = frozenset({"healthy_connection_ids", "unhealthy_connection_ids"})
+# A heartbeat payload is a short JSON document of connection ids. Anything
+# larger than this cannot be one, so we never read an unbounded foreign file.
+_HEARTBEAT_MAX_PAYLOAD_BYTES = 1 << 20
+
+
+def _is_aios_heartbeat_inode(fd: int) -> bool:
+    """Return True only when the open inode ``fd`` is provably an AIOS heartbeat.
+
+    Stale reclaim DESTROYS the displaced incumbent, and being older than the
+    max-age is not proof that AIOS created a file: a mis-set
+    ``AIOS_CONNECTOR_HEARTBEAT_PATH`` can point at unrelated operator data. So
+    an incumbent is only reclaimable when it carries positive evidence of AIOS
+    authorship:
+
+    * the ``user.aios_hb_owner`` ownership xattr that every AIOS publication
+      stamps (``_stamp_owner_nonce``); or
+    * on filesystems without xattr support (and for debris written by older
+      AIOS versions), a payload that is structurally EXACTLY a heartbeat: a JSON
+      object whose keys are precisely ``healthy_connection_ids`` and
+      ``unhealthy_connection_ids``, each a list of strings.
+
+    Anything else -- including an empty file, which carries no evidence at all
+    -- is treated as foreign and must be left intact. Never raises.
+    """
+    if _read_owner_nonce(fd) is not None:
+        return True
+    try:
+        size = os.fstat(fd).st_size
+        if size <= 0 or size > _HEARTBEAT_MAX_PAYLOAD_BYTES:
+            return False
+        raw = os.pread(fd, size + 1, 0)
+    except OSError:
+        return False
+    try:
+        doc: object = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(doc, dict) or frozenset(doc) != _HEARTBEAT_PAYLOAD_KEYS:
+        return False
+    return all(
+        isinstance(ids, list) and all(isinstance(i, str) for i in ids) for ids in doc.values()
+    )
 
 
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
@@ -1158,8 +1204,16 @@ class HttpConnector:
                     self._ready_event.set()  # all background loops scheduled
             finally:
                 heartbeat_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                # The loop supervises its own iterations, but a heartbeat failure
+                # must NEVER skip the shutdown sequence below (stale-dating,
+                # lifecycle resets, teardown). Log any non-cancellation error
+                # instead of letting it escape this finally block.
+                try:
                     await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    log.exception("connector.heartbeat.task_failed", path=str(heartbeat_path))
                 # Back-date our own heartbeat inode to STALE (never unlink it,
                 # which could race an operator replacement) so the container
                 # probe fails immediately and a successor process can reclaim the
@@ -1264,6 +1318,13 @@ class HttpConnector:
                 incumbent_identity = (stat.st_dev, stat.st_ino)
                 if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
                     return None
+                # Age alone never proves AIOS owns the incumbent. A regular file
+                # we cannot positively identify as an AIOS heartbeat is foreign
+                # (e.g. operator data at a mis-set path): refuse the claim and
+                # leave it byte-for-byte intact at the public path, since the
+                # stale-reclaim below would otherwise unlink it.
+                if not _stat.S_ISREG(stat.st_mode) or not _is_aios_heartbeat_inode(existing_fd):
+                    return None
                 try:
                     published = os.stat(path)
                 except FileNotFoundError:
@@ -1281,6 +1342,10 @@ class HttpConnector:
                     os.utime(claimant_fd, (stale, stale))
                 guarded = os.fstat(existing_fd)
                 if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
+                    return None
+                # Re-verify authorship at the final checkpoint: an in-place
+                # rewrite by a non-AIOS writer must not be reclaimed either.
+                if not _is_aios_heartbeat_inode(existing_fd):
                     return None
                 try:
                     current = os.stat(path)
@@ -1693,103 +1758,112 @@ class HttpConnector:
         structural declaration that a retired channel is no longer expected to
         carry traffic.
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
         while True:
-            # Empty is healthy only after discovery's authoritative fresh
-            # snapshot completed. Before that, absence means unknown.
-            if self._discovery_cursor is not None:
-                healthy_ids = sorted(
-                    connection_id
-                    for connection_id, state in self._connections.items()
-                    if state.serve_status == "serving"
-                )
-                unhealthy_ids = sorted(set(self._connections) - set(healthy_ids))
-                payload = json.dumps(
-                    {
-                        "healthy_connection_ids": healthy_ids,
-                        "unhealthy_connection_ids": unhealthy_ids,
-                    },
-                    sort_keys=True,
-                ).encode()
-                # Fail-closed when every active transport is down: the
-                # container probe must go stale so Docker turns the runtime
-                # unhealthy. But withholding the write also leaves the file's
-                # CONTENT frozen at the last (all-healthy) payload, which the
-                # out-of-container connector-liveness detector reads and trusts
-                # — green-washing a whole-runtime outage. So we still write the
-                # current correlated content (neither ID healthy) and only
-                # withhold the freshness signal (mtime) via touch_mtime=False.
-                # A mixed state publishes normally so the healthy sibling stays
-                # visible and the heartbeat stays fresh.
-                fail_closed = bool(unhealthy_ids) and not healthy_ids
-                if self._heartbeat_owned and self._heartbeat_identity is not None:
-                    refreshed = await self._publish_heartbeat_in_thread(
-                        self._adopt_refreshed_identity,
-                        self._refresh_heartbeat,
-                        path,
-                        self._heartbeat_identity,
-                        payload,
-                        not fail_closed,
+            # Supervise every iteration: a failure in heartbeat publication
+            # (e.g. the heartbeat directory cannot be created, or an unexpected
+            # filesystem error) must neither kill this task silently -- leaving
+            # the heartbeat permanently stopped while the connector keeps
+            # serving -- nor escape into run()'s shutdown path. Log it (so it is
+            # observable while running) and retry on the next interval.
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Empty is healthy only after discovery's authoritative fresh
+                # snapshot completed. Before that, absence means unknown.
+                if self._discovery_cursor is not None:
+                    healthy_ids = sorted(
+                        connection_id
+                        for connection_id, state in self._connections.items()
+                        if state.serve_status == "serving"
                     )
-                    if refreshed is None and await asyncio.to_thread(
-                        self._still_owns_heartbeat, path, self._heartbeat_identity
-                    ):
-                        # Publication failed (e.g. a transient linkat/fsync
-                        # error) but the pathname still names exactly our inode.
-                        # Keep ownership and retry on the next interval rather
-                        # than relinquishing a heartbeat we still hold.
-                        pass
-                    elif refreshed is None:
-                        # The path was replaced after our claim. Relinquish it;
-                        # never mutate or later unlink the replacement.
-                        self._heartbeat_owned = False
-                        self._heartbeat_identity = None
+                    unhealthy_ids = sorted(set(self._connections) - set(healthy_ids))
+                    payload = json.dumps(
+                        {
+                            "healthy_connection_ids": healthy_ids,
+                            "unhealthy_connection_ids": unhealthy_ids,
+                        },
+                        sort_keys=True,
+                    ).encode()
+                    # Fail-closed when every active transport is down: the
+                    # container probe must go stale so Docker turns the runtime
+                    # unhealthy. But withholding the write also leaves the file's
+                    # CONTENT frozen at the last (all-healthy) payload, which the
+                    # out-of-container connector-liveness detector reads and trusts
+                    # — green-washing a whole-runtime outage. So we still write the
+                    # current correlated content (neither ID healthy) and only
+                    # withhold the freshness signal (mtime) via touch_mtime=False.
+                    # A mixed state publishes normally so the healthy sibling stays
+                    # visible and the heartbeat stays fresh.
+                    fail_closed = bool(unhealthy_ids) and not healthy_ids
+                    if self._heartbeat_owned and self._heartbeat_identity is not None:
+                        refreshed = await self._publish_heartbeat_in_thread(
+                            self._adopt_refreshed_identity,
+                            self._refresh_heartbeat,
+                            path,
+                            self._heartbeat_identity,
+                            payload,
+                            not fail_closed,
+                        )
+                        if refreshed is None and await asyncio.to_thread(
+                            self._still_owns_heartbeat, path, self._heartbeat_identity
+                        ):
+                            # Publication failed (e.g. a transient linkat/fsync
+                            # error) but the pathname still names exactly our inode.
+                            # Keep ownership and retry on the next interval rather
+                            # than relinquishing a heartbeat we still hold.
+                            pass
+                        elif refreshed is None:
+                            # The path was replaced after our claim. Relinquish it;
+                            # never mutate or later unlink the replacement.
+                            self._heartbeat_owned = False
+                            self._heartbeat_identity = None
+                        else:
+                            # Atomic publication swaps in a fresh inode, so adopt the
+                            # identity now published at the path (unchanged on a
+                            # no-op refresh) for the next identity-checked refresh.
+                            self._heartbeat_identity = refreshed
+                    elif fail_closed:
+                        # No claim yet and every transport is down (e.g. all
+                        # connections still `starting` after process launch). We must
+                        # NOT manufacture a FRESH heartbeat -- that would tell Docker
+                        # the runtime is alive. But withholding the file entirely
+                        # leaves the external connector-liveness detector unable to
+                        # correlate WHICH connections are unhealthy, so it suppresses
+                        # a multi-connection connector's alarm as an ambiguous
+                        # sibling failure. So we claim the inode, write the current
+                        # all-unhealthy content, and BACKDATE its mtime so Docker's
+                        # freshness probe still fails (touch_mtime=False). Freshness
+                        # stays stale; attribution is published.
+                        try:
+                            identity = await self._publish_heartbeat_in_thread(
+                                self._adopt_claimed_identity,
+                                self._claim_heartbeat,
+                                path,
+                                payload,
+                                False,
+                            )
+                        except FileNotFoundError:
+                            identity = None
+                        if identity is not None:
+                            self._heartbeat_owned = True
+                            self._heartbeat_identity = identity
                     else:
-                        # Atomic publication swaps in a fresh inode, so adopt the
-                        # identity now published at the path (unchanged on a
-                        # no-op refresh) for the next identity-checked refresh.
-                        self._heartbeat_identity = refreshed
-                elif fail_closed:
-                    # No claim yet and every transport is down (e.g. all
-                    # connections still `starting` after process launch). We must
-                    # NOT manufacture a FRESH heartbeat -- that would tell Docker
-                    # the runtime is alive. But withholding the file entirely
-                    # leaves the external connector-liveness detector unable to
-                    # correlate WHICH connections are unhealthy, so it suppresses
-                    # a multi-connection connector's alarm as an ambiguous
-                    # sibling failure. So we claim the inode, write the current
-                    # all-unhealthy content, and BACKDATE its mtime so Docker's
-                    # freshness probe still fails (touch_mtime=False). Freshness
-                    # stays stale; attribution is published.
-                    try:
-                        identity = await self._publish_heartbeat_in_thread(
-                            self._adopt_claimed_identity,
-                            self._claim_heartbeat,
-                            path,
-                            payload,
-                            False,
-                        )
-                    except FileNotFoundError:
-                        identity = None
-                    if identity is not None:
-                        self._heartbeat_owned = True
-                        self._heartbeat_identity = identity
-                else:
-                    try:
-                        identity = await self._publish_heartbeat_in_thread(
-                            self._adopt_claimed_identity,
-                            self._claim_heartbeat,
-                            path,
-                            payload,
-                            True,
-                        )
-                    except FileNotFoundError:
-                        # The path vanished between O_EXCL and opening it. Retry
-                        # on the next short heartbeat interval.
-                        identity = None
-                    if identity is not None:
-                        self._heartbeat_owned = True
-                        self._heartbeat_identity = identity
+                        try:
+                            identity = await self._publish_heartbeat_in_thread(
+                                self._adopt_claimed_identity,
+                                self._claim_heartbeat,
+                                path,
+                                payload,
+                                True,
+                            )
+                        except FileNotFoundError:
+                            # The path vanished between O_EXCL and opening it. Retry
+                            # on the next short heartbeat interval.
+                            identity = None
+                        if identity is not None:
+                            self._heartbeat_owned = True
+                            self._heartbeat_identity = identity
+            except Exception:
+                log.exception("connector.heartbeat.iteration_failed", path=str(path))
             # Optional deterministic synchronization for tests: a hook invoked
             # AFTER each iteration has published (or withheld) the heartbeat and
             # BEFORE the next sleep. Tests set state, await one iteration's

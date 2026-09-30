@@ -639,7 +639,9 @@ def test_stale_reclaim_refuses_replacement_after_inspection(
     """A replacement installed after stale inspection is never overwritten."""
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
-    heartbeat.write_bytes(b"stale owner")
+    # The incumbent must be a genuine (AIOS-stamped) stale heartbeat: foreign
+    # files are never reclaimed at all, so the race below would not be reached.
+    assert _Connector._claim_heartbeat(heartbeat, b"stale owner", True) is not None
     old = time.time() - 3600
     os.utime(heartbeat, (old, old))
 
@@ -670,7 +672,9 @@ def test_stale_reclaim_refuses_same_inode_refresh_before_exchange(
     """A peer refreshing stale inode content/freshness wins reclamation."""
     connector = _Connector(base_url="http://example.test", token="token")
     heartbeat = tmp_path / "alive"
-    heartbeat.write_bytes(b"stale owner")
+    # The incumbent must be a genuine (AIOS-stamped) stale heartbeat: foreign
+    # files are never reclaimed at all, so the race below would not be reached.
+    assert _Connector._claim_heartbeat(heartbeat, b"stale owner", True) is not None
     old = time.time() - 3600
     os.utime(heartbeat, (old, old))
     original_identity = (heartbeat.stat().st_dev, heartbeat.stat().st_ino)
