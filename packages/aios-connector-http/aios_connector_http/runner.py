@@ -1642,6 +1642,49 @@ class HttpConnector:
         finally:
             os.close(fd)
 
+    def _adopt_claimed_identity(self, identity: tuple[int, int, bytes | None] | None) -> None:
+        if identity is not None:
+            self._heartbeat_owned = True
+            self._heartbeat_identity = identity
+
+    def _adopt_refreshed_identity(self, identity: tuple[int, int, bytes | None] | None) -> None:
+        # Only a successful publication changes which inode we own. A ``None``
+        # result is resolved by the loop's still-owns check; on the shutdown
+        # path the old identity is kept and stale-dating re-verifies it anyway.
+        if identity is not None:
+            self._heartbeat_identity = identity
+
+    async def _publish_heartbeat_in_thread(
+        self,
+        adopt: Callable[[tuple[int, int, bytes | None] | None], None],
+        fn: Callable[..., tuple[int, int, bytes | None] | None],
+        *args: object,
+    ) -> tuple[int, int, bytes | None] | None:
+        """Run a claim/refresh publication in a worker thread, cancel-safely.
+
+        Cancelling the awaiting coroutine does NOT stop the worker thread: a
+        publication already in flight still links / RENAME_EXCHANGEs a freshly
+        mtimed inode into ``path`` after we return. If shutdown then stale-dated
+        only the identity recorded before that publication, the orphaned thread
+        would leave the exiting process's fresh "all healthy" snapshot at the
+        path for a successor to inherit (F1-regress).
+
+        So on cancellation we keep waiting (shielded, tolerating repeated
+        cancels) until the thread has finished, ADOPT whatever identity it
+        published via ``adopt`` so ``_remove_owned_heartbeat`` stale-dates the
+        inode that is actually at the path, and only then re-raise.
+        """
+        future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            while not future.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(future)
+            if not future.cancelled() and future.exception() is None:
+                adopt(future.result())
+            raise
+
     async def _heartbeat_loop(self, path: Path) -> None:
         """Publish connector transport health for the container probe.
 
@@ -1680,7 +1723,8 @@ class HttpConnector:
                 # visible and the heartbeat stays fresh.
                 fail_closed = bool(unhealthy_ids) and not healthy_ids
                 if self._heartbeat_owned and self._heartbeat_identity is not None:
-                    refreshed = await asyncio.to_thread(
+                    refreshed = await self._publish_heartbeat_in_thread(
+                        self._adopt_refreshed_identity,
                         self._refresh_heartbeat,
                         path,
                         self._heartbeat_identity,
@@ -1718,8 +1762,12 @@ class HttpConnector:
                     # freshness probe still fails (touch_mtime=False). Freshness
                     # stays stale; attribution is published.
                     try:
-                        identity = await asyncio.to_thread(
-                            self._claim_heartbeat, path, payload, False
+                        identity = await self._publish_heartbeat_in_thread(
+                            self._adopt_claimed_identity,
+                            self._claim_heartbeat,
+                            path,
+                            payload,
+                            False,
                         )
                     except FileNotFoundError:
                         identity = None
@@ -1728,8 +1776,12 @@ class HttpConnector:
                         self._heartbeat_identity = identity
                 else:
                     try:
-                        identity = await asyncio.to_thread(
-                            self._claim_heartbeat, path, payload, True
+                        identity = await self._publish_heartbeat_in_thread(
+                            self._adopt_claimed_identity,
+                            self._claim_heartbeat,
+                            path,
+                            payload,
+                            True,
                         )
                     except FileNotFoundError:
                         # The path vanished between O_EXCL and opening it. Retry
