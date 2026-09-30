@@ -164,6 +164,48 @@ def _rename_exchange(source: str | Path, destination: str | Path) -> bool:
     return result == 0
 
 
+def _stat_identity(path: str | Path) -> tuple[int, int] | None:
+    """Return ``(st_dev, st_ino)`` for ``path`` or ``None`` when it is absent."""
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _reclaim_staging_inode(
+    staging_path: Path,
+    public_path: Path,
+    owned: set[tuple[int, int]],
+) -> None:
+    """Clean up the staging name without ever destroying a foreign inode.
+
+    ``owned`` is the set of ``(st_dev, st_ino)`` identities this process created
+    or verified under lock (its claimant and, when applicable, the incumbent it
+    displaced). The exchange primitive operates on a shared public pathname, so
+    an operator (or racing peer) can replace ``public_path`` between our checks
+    and our exchange; a ``RENAME_EXCHANGE`` then sweeps that INDEPENDENT
+    replacement into ``staging_path``. A blind ``staging_path.unlink()`` would
+    delete it -- the F2 defect.
+
+    Property: never unlink any inode we did not create or verify under lock. If
+    ``staging_path`` holds one of our OWN inodes we unlink it; if it holds a
+    FOREIGN inode (an independent replacement the exchange swept in) we leave it
+    intact. Restoring that foreign inode to the public path is the CALLER's job
+    -- and only via a single guarded exchange -- because a restore here would be
+    another exchange that a racing replacement could itself preempt. Refusing to
+    unlink is the invariant that actually protects the operator's file; a leaked
+    staging inode is harmless (the private staging dir is torn down separately),
+    a destroyed operator file is not.
+    """
+    staged = _stat_identity(staging_path)
+    if staged is None or staged not in owned:
+        # Missing, or a foreign inode we must not destroy. Leave it.
+        return
+    with contextlib.suppress(FileNotFoundError):
+        staging_path.unlink()
+
+
 _HEARTBEAT_OWNER_XATTR = "user.aios_hb_owner"
 
 
@@ -1118,12 +1160,12 @@ class HttpConnector:
                 heartbeat_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
-                # There is no atomic POSIX operation to unlink a pathname only
-                # if it still names a known inode.  Leaving our heartbeat to go
-                # stale avoids deleting an operator replacement in a final
-                # stat-to-unlink race.
-                self._heartbeat_owned = False
-                self._heartbeat_identity = None
+                # Back-date our own heartbeat inode to STALE (never unlink it,
+                # which could race an operator replacement) so the container
+                # probe fails immediately and a successor process can reclaim the
+                # now-stale inode instead of inheriting our fresh "all healthy"
+                # snapshot. See _remove_owned_heartbeat / F1.
+                await self._remove_owned_heartbeat(heartbeat_path)
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -1276,25 +1318,36 @@ class HttpConnector:
                     or time.time() - displaced.st_mtime <= heartbeat_max_age_seconds()
                 ):
                     # The pathname was replaced or the incumbent refreshed at the
-                    # exchange boundary. Restore what was displaced when our
-                    # claimant is still public; never overwrite an independent
-                    # replacement.
-                    if public_identity == claimant_identity:
+                    # exchange boundary. When an independent replacement was swept
+                    # into staging AND our claimant is still published, swap it
+                    # back so the operator's file returns to the public path; our
+                    # claimant then lands in staging where the identity-guarded
+                    # reclaim unlinks it. Never overwrite a replacement that
+                    # already won the path.
+                    if (
+                        public_identity == claimant_identity
+                        and displaced_identity != incumbent_identity
+                    ):
                         _rename_exchange(staging_path, path)
                     return None
                 return (claimant_stat.st_dev, claimant_stat.st_ino, claimant_nonce)
             finally:
                 os.close(existing_fd)
         finally:
-            # The staging directory is mode 0700 and created uniquely for this
-            # claim, so no cooperating claimant can replace its contents between
-            # cleanup operations. Remove either the displaced incumbent (success)
-            # or the unpublished claimant (refusal), then the private namespace.
+            # Only our own inodes -- the claimant and the stale incumbent we
+            # displaced -- may be unlinked. A foreign inode that a racing
+            # replacement swept into staging is restored to the public path,
+            # never destroyed. incumbent_identity is always defined here; the
+            # claimant identity is read from its still-open descriptor.
             if staging_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    staging_path.unlink()
+                claimant_now = os.fstat(claimant_fd)
+                _reclaim_staging_inode(
+                    staging_path,
+                    path,
+                    {(claimant_now.st_dev, claimant_now.st_ino), incumbent_identity},
+                )
             if staging_dir is not None:
-                with contextlib.suppress(FileNotFoundError):
+                with contextlib.suppress(FileNotFoundError, OSError):
                     staging_dir.rmdir()
             os.close(claimant_fd)
 
@@ -1450,34 +1503,94 @@ class HttpConnector:
                 displaced.st_ino,
             ) != identity[:2]:
                 # The pathname was replaced at the exchange boundary, or we
-                # exchanged with something other than the inode we owned. Restore
-                # our claimant only while it is the one published; never
-                # overwrite an independent replacement.
-                if (public.st_dev, public.st_ino) == new_identity:
+                # exchanged with something other than the inode we owned. When an
+                # independent replacement was swept into staging AND our claimant
+                # is still the published inode, swap it back so the operator's
+                # file returns to the public path; our claimant then lands in
+                # staging where the identity-guarded reclaim unlinks it. Never
+                # overwrite an independent replacement that already won the path.
+                if (public.st_dev, public.st_ino) == new_identity and (
+                    displaced.st_dev,
+                    displaced.st_ino,
+                ) != identity[:2]:
                     _rename_exchange(staging_path, path)
                 return None
             return (new_stat.st_dev, new_stat.st_ino, new_nonce)
         finally:
+            # Only our own inodes -- the claimant and the incumbent we displaced
+            # -- may be unlinked. A foreign inode that a racing replacement swept
+            # into staging is restored to the public path, never destroyed.
             if staging_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    staging_path.unlink()
+                _reclaim_staging_inode(staging_path, path, {new_identity, identity[:2]})
             if staging_dir is not None:
-                with contextlib.suppress(FileNotFoundError):
+                with contextlib.suppress(FileNotFoundError, OSError):
                     staging_dir.rmdir()
             os.close(new_fd)
 
     async def _remove_owned_heartbeat(self, path: Path) -> None:
-        """Relinquish ownership without unlinking the heartbeat pathname.
+        """Relinquish ownership, back-dating our own inode so it reads STALE.
 
         There is no portable pathname-based unlink operation that can atomically
-        require an expected inode. Even a successful identity check can race
-        with an operator replacing ``path`` before ``unlink``. Leave our inode
-        behind to age stale instead; the next process can safely reclaim that
-        stale file through the identity-checked refresh path.
+        require an expected inode, so we do not unlink -- a final stat-to-unlink
+        race could delete an operator replacement (see
+        ``test_cleanup_refuses_to_unlink_replacement_inode``).
+
+        But merely dropping in-memory ownership and leaving the file untouched is
+        the F1 defect: the inode keeps its FRESH mtime and its last (typically
+        all-healthy) content, so a successor process that shares the container
+        path -- whose own transports are still ``starting`` -- cannot reclaim it
+        (``_claim_heartbeat`` refuses a fresh incumbent) and the container probe
+        keeps reading the PREDECESSOR's fresh "all healthy" snapshot. A heartbeat
+        authored by an earlier process must never count as the current process's
+        health.
+
+        So before relinquishing we back-date the mtime of the inode WE STILL OWN
+        to stale, under ``flock`` and the same ``(st_dev, st_ino, nonce)``
+        identity check the refresh path uses. This (a) makes Docker's freshness
+        probe fail immediately and (b) lets the successor reclaim the now-stale
+        inode through the identity-checked stale-reclaim path and publish its own
+        current state. If the pathname was replaced out from under us (identity
+        or nonce mismatch, missing, or a symlink), we touch NOTHING -- an
+        independent replacement is never mutated -- and simply relinquish.
         """
-        del path
+        identity = self._heartbeat_identity
+        if self._heartbeat_owned and identity is not None:
+            await asyncio.to_thread(self._stale_date_owned_heartbeat, path, identity)
         self._heartbeat_owned = False
         self._heartbeat_identity = None
+
+    @staticmethod
+    def _stale_date_owned_heartbeat(path: Path, identity: tuple[int, int, bytes | None]) -> None:
+        """Back-date the mtime of an owned heartbeat inode to stale, safely.
+
+        Verifies under ``flock`` that ``path`` still resolves to exactly the
+        inode this process published (dev/ino AND ownership nonce) before
+        touching it, so a replacement placed at ``path`` is never mutated.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            # Missing, or a symlink replacement rejected by O_NOFOLLOW. The
+            # pathname no longer safely names our inode; leave it untouched.
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity[:2]:
+                return
+            if _read_owner_nonce(fd) != identity[2]:
+                return
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return
+            if (published.st_dev, published.st_ino) != identity[:2]:
+                return
+            stale = time.time() - heartbeat_max_age_seconds() - 1
+            os.utime(fd, (stale, stale))
+        finally:
+            os.close(fd)
 
     async def _heartbeat_loop(self, path: Path) -> None:
         """Publish connector transport health for the container probe.
