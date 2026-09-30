@@ -21,6 +21,34 @@ class _Connector(HttpConnector):
     connector = "probe"
 
 
+async def _await_heartbeat_iterations(
+    connector: HttpConnector, n: int = 3, limit_seconds: float = 10.0
+) -> None:
+    """Wait until the heartbeat loop has completed ``n`` more iterations.
+
+    Replaces fixed wall-clock sleeps (``asyncio.sleep(0.03)``): on a contended
+    CI runner the worker-thread publication may not have run within 30ms,
+    which made these tests flaky. Counting completed iterations is
+    deterministic and still bounded by ``limit_seconds``.
+    """
+    done = asyncio.Event()
+    count = 0
+
+    async def hook() -> None:
+        nonlocal count
+        count += 1
+        if count >= n:
+            done.set()
+
+    previous = connector._heartbeat_iteration_hook
+    connector._heartbeat_iteration_hook = hook
+    try:
+        async with asyncio.timeout(limit_seconds):
+            await done.wait()
+    finally:
+        connector._heartbeat_iteration_hook = previous
+
+
 def test_configured_heartbeat_path_takes_precedence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -83,7 +111,7 @@ async def test_heartbeat_withheld_until_discovery_is_authoritative(tmp_path: Pat
 
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
-        await asyncio.sleep(0.03)
+        await _await_heartbeat_iterations(connector)
         assert not heartbeat.exists()
         published = asyncio.Event()
 
@@ -119,7 +147,7 @@ async def test_heartbeat_recovers_stale_file_left_by_crashed_process(tmp_path: P
 
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
-        await asyncio.sleep(0.03)
+        await _await_heartbeat_iterations(connector)
         assert heartbeat_is_fresh(heartbeat, max_age_seconds=30)
         assert connector._heartbeat_owned
         # Recovery establishes a new ownership generation so a paused former
@@ -189,7 +217,7 @@ async def test_heartbeat_does_not_claim_or_remove_preexisting_file(tmp_path: Pat
 
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
-        await asyncio.sleep(0.03)
+        await _await_heartbeat_iterations(connector)
         assert heartbeat.read_text() == "keep"
         assert not connector._heartbeat_owned
     finally:
@@ -299,7 +327,7 @@ async def test_heartbeat_does_not_claim_path_replaced_after_create(
     monkeypatch.setattr(os, "fstat", replace_after_fstat)
     task = asyncio.create_task(connector._heartbeat_loop(heartbeat))
     try:
-        await asyncio.sleep(0.03)
+        await _await_heartbeat_iterations(connector)
         assert replaced
         assert heartbeat.read_text() == "operator"
         assert not connector._heartbeat_owned
@@ -392,7 +420,7 @@ async def test_heartbeat_requires_established_receiving_transport(
         await entered.wait()
         if serve_returns:
             await serve_task
-        await asyncio.sleep(0.03)
+        await _await_heartbeat_iterations(connector)
         # A transport that never became ready must NOT signal the container alive:
         # Docker's freshness probe must fail. Before finding #1 this was enforced
         # by refusing to create the file at all — but that also suppressed the

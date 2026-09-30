@@ -1212,7 +1212,9 @@ class TestIsolatedServeConnection:
         c.emit_lifecycle = AsyncMock()  # type: ignore[method-assign]
 
         task = asyncio.create_task(c._isolated_serve_connection("conn_1", {}))
-        await asyncio.wait_for(fourth_attempt_started.wait(), timeout=1)
+        # Generous bound: each failed attempt logs a rich traceback, which can
+        # take >1s total on a contended CI runner.
+        await asyncio.wait_for(fourth_attempt_started.wait(), timeout=30)
         state = c._connections["conn_1"]
         assert state.serve_restart_count == c.RECONNECT_FAILURE_THRESHOLD
         assert state.serve_status == "restarting"
