@@ -130,7 +130,7 @@ TASK_TO_CALL_BUILTIN_RENAMES = Retirement(
     action="rename",
     mappings=(("stop_task", "cancel_call"), ("list_tasks", "list_calls")),
     surfaces=TOOL_SURFACES,
-    introduced_rev="0160",
+    introduced_rev="0183",
     contract_rev=None,
     sla_days=30,
 )
