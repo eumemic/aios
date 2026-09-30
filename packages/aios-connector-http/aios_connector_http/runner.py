@@ -54,6 +54,7 @@ import asyncio
 import contextlib
 import ctypes
 import ctypes.util
+import errno
 import fcntl
 import hashlib
 import inspect
@@ -205,6 +206,100 @@ def _reclaim_staging_inode(
         return
     with contextlib.suppress(FileNotFoundError):
         staging_path.unlink()
+
+
+_HEARTBEAT_STAGING_NAME = "staging"
+# O_TMPFILE refusals that mean "this filesystem or kernel cannot create unnamed
+# inodes here", as opposed to a real failure of the directory itself. Overlayfs,
+# the container root filesystem that holds /var/run in every prod connector,
+# returns EOPNOTSUPP. Kernels older than 3.11 misread the flag and return EISDIR.
+_TMPFILE_UNSUPPORTED = frozenset({errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL})
+
+
+@dataclass(frozen=True)
+class _NamedStaging:
+    """A named staging inode that stands in for an unnamed ``O_TMPFILE`` inode."""
+
+    directory: Path
+    path: Path
+    # A duplicate descriptor on the inode WE created. It is held until the
+    # staging name is discarded, which keeps the inode alive so its
+    # (st_dev, st_ino) cannot be recycled for another file while the
+    # identity-guarded unlink compares against it.
+    pin_fd: int
+
+
+def _open_heartbeat_inode(directory: Path) -> tuple[int, _NamedStaging | None]:
+    """Open an ``O_RDWR`` inode for heartbeat content that no reader can see.
+
+    The preferred form is an unnamed ``O_TMPFILE`` inode. Where the filesystem
+    refuses it (overlayfs returns ``EOPNOTSUPP``) or the platform lacks the
+    constant, this falls back to a NAMED staging file that is just as invisible
+    to the heartbeat's readers:
+
+    * ``tempfile.mkdtemp`` creates a fresh directory next to the heartbeat. It
+      has an unpredictable name, is made with ``mkdir`` (which fails if the name
+      exists) and has mode 0700, so no other user can create, replace or rename
+      anything inside it.
+    * Inside that directory the file is created with
+      ``O_CREAT|O_EXCL|O_NOFOLLOW``, so we never open a pre-planted file or
+      symlink.
+
+    The staging file lives on the heartbeat's own filesystem, so the usual
+    ``linkat``/``RENAME_EXCHANGE`` publication works unchanged. It is never at
+    the public path, so neither the probe nor a claim treats it as a heartbeat.
+    The caller MUST pass the returned staging record to
+    ``_discard_heartbeat_staging`` on every path. Raises ``OSError`` when
+    neither form can be created.
+    """
+    tmpfile = getattr(os, "O_TMPFILE", 0)
+    if tmpfile:
+        try:
+            return os.open(directory, os.O_RDWR | tmpfile, 0o666), None
+        except OSError as exc:
+            if exc.errno not in _TMPFILE_UNSUPPORTED:
+                raise
+    staging_dir = Path(tempfile.mkdtemp(prefix=".aios-hb-staging.", dir=directory))
+    staging_path = staging_dir / _HEARTBEAT_STAGING_NAME
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(staging_path, flags, 0o666)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staging_dir.rmdir()
+        raise
+    try:
+        pin_fd = os.dup(fd)
+    except BaseException:
+        os.close(fd)
+        # The descriptor that proves the staging name is ours is being
+        # closed, so leave the name in place rather than unlink it blind. It
+        # is inert debris and is never read as a heartbeat.
+        raise
+    return fd, _NamedStaging(staging_dir, staging_path, pin_fd)
+
+
+def _discard_heartbeat_staging(staging: _NamedStaging | None) -> None:
+    """Remove a named staging file and its private directory. Never raises.
+
+    Unlinks the staging name only while it still names the inode we created
+    (B1/F2: never destroy an inode we cannot prove is ours). It never touches
+    the published heartbeat: once published, that inode has a second link at
+    the public path, and removing the staging name only drops the extra link.
+    ``rmdir`` removes the directory only when it is empty, so if a foreign file
+    somehow ended up inside, it stays on disk.
+    """
+    if staging is None:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            ours = os.fstat(staging.pin_fd)
+            _reclaim_staging_inode(staging.path, staging.path, {(ours.st_dev, ours.st_ino)})
+        with contextlib.suppress(OSError):
+            staging.directory.rmdir()
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(staging.pin_fd)
 
 
 _HEARTBEAT_OWNER_XATTR = "user.aios_hb_owner"
@@ -1235,9 +1330,11 @@ class HttpConnector:
     ) -> tuple[int, int, bytes | None] | None:
         """Create or safely recover a stale heartbeat.
 
-        Payload claims are prepared in an unnamed ``O_TMPFILE`` inode and linked
-        into place only when complete. Recovery atomically exchanges that claimant
-        with the locked stale inode, revoking the former ownership generation.
+        Payload claims are prepared in an unnamed ``O_TMPFILE`` inode (or, on
+        filesystems that refuse it such as overlayfs, a named staging file in a
+        private directory) and linked into place only when complete. Recovery
+        atomically exchanges that claimant with the locked stale inode, revoking
+        the former ownership generation.
         """
         if not payload:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -1272,15 +1369,30 @@ class HttpConnector:
             finally:
                 os.close(fd)
 
-        tmpfile = getattr(os, "O_TMPFILE", 0)
-        if not tmpfile:
+        try:
+            fd, staging = _open_heartbeat_inode(path.parent)
+        except OSError:
+            # Neither an unnamed inode nor a private named staging file can be
+            # created here. Refuse the claim rather than expose partial content.
             return None
         try:
-            fd = os.open(path.parent, os.O_RDWR | tmpfile, 0o666)
-        except OSError:
-            # Safe atomic publication is unavailable on this filesystem. Refuse
-            # the claim rather than expose partial content or leak a staging name.
-            return None
+            return HttpConnector._claim_prepared_heartbeat(path, fd, payload, touch_mtime)
+        finally:
+            # The published inode (if any) keeps its public link; this only
+            # drops the private staging name, on success and failure alike.
+            _discard_heartbeat_staging(staging)
+
+    @staticmethod
+    def _claim_prepared_heartbeat(
+        path: Path, fd: int, payload: bytes, touch_mtime: bool
+    ) -> tuple[int, int, bytes | None] | None:
+        """Publish ``fd`` (an unpublished heartbeat inode) at ``path``. Closes ``fd``.
+
+        ``fd`` names no public path. It is either an unnamed ``O_TMPFILE``
+        inode or a named staging file in a private directory. Publication links
+        the inode behind the DESCRIPTOR (through ``/proc/self/fd``), never a
+        pathname, so both forms publish exactly the complete inode we wrote.
+        """
         try:
             os.write(fd, payload)
             os.fsync(fd)
@@ -1518,20 +1630,36 @@ class HttpConnector:
 
         The caller holds ``flock`` on the incumbent inode and has verified it is
         still the one published at ``path``. Prepare the new content in an
-        unnamed ``O_TMPFILE`` inode, link it into a private staging directory,
+        unnamed ``O_TMPFILE`` inode (or, where the filesystem refuses that, a
+        named staging file in a private directory; see
+        ``_open_heartbeat_inode``), link it into a private staging directory,
         and ``RENAME_EXCHANGE`` it into ``path`` so an unlocked reader can only
         ever observe one whole inode. Returns the new inode identity, or ``None``
         when atomic publication is unavailable or the pathname was replaced.
         """
-        tmpfile = getattr(os, "O_TMPFILE", 0)
-        if not tmpfile:
+        try:
+            new_fd, prestaged = _open_heartbeat_inode(path.parent)
+        except OSError:
             # No atomic-publication primitive on this filesystem. Refuse rather
             # than fall back to an in-place truncate that exposes torn content.
             return None
         try:
-            new_fd = os.open(path.parent, os.O_RDWR | tmpfile, 0o666)
-        except OSError:
-            return None
+            return HttpConnector._exchange_prepared_heartbeat(
+                path, identity, payload, touch_mtime, prior, new_fd
+            )
+        finally:
+            _discard_heartbeat_staging(prestaged)
+
+    @staticmethod
+    def _exchange_prepared_heartbeat(
+        path: Path,
+        identity: tuple[int, int, bytes | None],
+        payload: bytes,
+        touch_mtime: bool,
+        prior: tuple[int, int],
+        new_fd: int,
+    ) -> tuple[int, int, bytes | None] | None:
+        """Fill ``new_fd`` and exchange it into ``path``. Closes ``new_fd``."""
         staging_dir: Path | None = None
         staging_path: Path | None = None
         # Bound before the try so the cleanup in ``finally`` never references an
