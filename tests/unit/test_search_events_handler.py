@@ -409,6 +409,42 @@ class TestSearchEventsHandler:
             await search_events_handler("sess_01TEST", {"query": "SELECT * FROM events_search"})
         assert "failed" in excinfo.value.message.lower()
 
+    async def test_unknown_column_error_points_at_search_views_help(self) -> None:
+        """#1943: an unknown-column error names the help view as the recovery path.
+
+        The live incident was a guessed ``relation`` column (the real column is
+        ``relation_name``). No alias is added; instead the raw Postgres error is
+        kept verbatim and extended with a pointer to ``search_views_help`` so the
+        model can self-serve the correct column names.
+        """
+        import asyncpg.exceptions
+
+        with (
+            _mock_execute(
+                side_effect=asyncpg.exceptions.UndefinedColumnError(
+                    'column "relation" does not exist'
+                )
+            ),
+            _mock_pool(),
+            pytest.raises(ToolBail) as excinfo,
+        ):
+            await search_events_handler(
+                "sess_01TEST", {"query": "SELECT relation FROM search_views_help"}
+            )
+        message = excinfo.value.message
+        assert message.startswith('Query failed: column "relation" does not exist')
+        assert "search_views_help" in message
+        assert "relation_name, column_name" in message
+
+    async def test_other_db_errors_carry_no_help_view_hint(self) -> None:
+        with (
+            _mock_execute(side_effect=Exception("connection refused")),
+            _mock_pool(),
+            pytest.raises(ToolBail) as excinfo,
+        ):
+            await search_events_handler("sess_01TEST", {"query": "SELECT * FROM events_search"})
+        assert excinfo.value.message == "Query failed: connection refused"
+
     async def test_timeout_returns_error(self) -> None:
         import asyncpg.exceptions
 
