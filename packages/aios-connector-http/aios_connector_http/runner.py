@@ -52,11 +52,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
+import ctypes.util
+import errno
+import fcntl
 import hashlib
 import inspect
 import json
 import os
 import signal as _signal
+import stat as _stat
+import tempfile
+import time
 import types
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -100,10 +107,279 @@ from aios_sdk._generated.models.tools_schema_update_tools_item import (
 from aios_sdk._generated.types import Unset
 from ulid import ULID
 
+from .healthcheck import heartbeat_max_age_seconds, resolve_heartbeat_path
 from .sandbox import _SandboxPathMarker, resolve_sandbox_path
 from .schema import derive_tool_spec
 
 ToolFn = Callable[..., Awaitable[Any]]
+
+
+def _link_unnamed_file(fd: int, destination: str | Path) -> None:
+    """Publish an ``O_TMPFILE`` descriptor without a staging pathname."""
+    # Resolve libc from the current process. ``find_library`` may invoke the
+    # platform linker utility and delay the first heartbeat publication.
+    libc = ctypes.CDLL(None, use_errno=True)
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        raise OSError("linkat is unavailable")
+    linkat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    linkat.restype = ctypes.c_int
+    # AT_EMPTY_PATH requires capabilities that container runtimes commonly
+    # remove. Following the procfs descriptor symlink asks linkat to link the
+    # open inode and works without exposing a staging pathname.
+    source = os.fsencode(f"/proc/self/fd/{fd}")
+    if linkat(-100, source, -100, os.fsencode(destination), 0x400) != 0:  # AT_SYMLINK_FOLLOW
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _rename_exchange(source: str | Path, destination: str | Path) -> bool:
+    """Atomically exchange pathnames while retaining both underlying inodes."""
+    libc_name = ctypes.util.find_library("c")
+    if libc_name is None:
+        return False
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        return False
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result: int = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        2,  # RENAME_EXCHANGE
+    )
+    return result == 0
+
+
+def _stat_identity(path: str | Path) -> tuple[int, int] | None:
+    """Return ``(st_dev, st_ino)`` for ``path`` or ``None`` when it is absent."""
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _reclaim_staging_inode(
+    staging_path: Path,
+    public_path: Path,
+    owned: set[tuple[int, int]],
+) -> None:
+    """Clean up the staging name without ever destroying a foreign inode.
+
+    ``owned`` is the set of ``(st_dev, st_ino)`` identities this process created
+    or verified under lock (its claimant and, when applicable, the incumbent it
+    displaced). The exchange primitive operates on a shared public pathname, so
+    an operator (or racing peer) can replace ``public_path`` between our checks
+    and our exchange; a ``RENAME_EXCHANGE`` then sweeps that INDEPENDENT
+    replacement into ``staging_path``. A blind ``staging_path.unlink()`` would
+    delete it -- the F2 defect.
+
+    Property: never unlink any inode we did not create or verify under lock. If
+    ``staging_path`` holds one of our OWN inodes we unlink it; if it holds a
+    FOREIGN inode (an independent replacement the exchange swept in) we leave it
+    intact. Restoring that foreign inode to the public path is the CALLER's job
+    -- and only via a single guarded exchange -- because a restore here would be
+    another exchange that a racing replacement could itself preempt. Refusing to
+    unlink is the invariant that actually protects the operator's file; a leaked
+    staging inode is harmless (the private staging dir is torn down separately),
+    a destroyed operator file is not.
+    """
+    staged = _stat_identity(staging_path)
+    if staged is None or staged not in owned:
+        # Missing, or a foreign inode we must not destroy. Leave it.
+        return
+    with contextlib.suppress(FileNotFoundError):
+        staging_path.unlink()
+
+
+_HEARTBEAT_STAGING_NAME = "staging"
+# O_TMPFILE refusals that mean "this filesystem or kernel cannot create unnamed
+# inodes here", as opposed to a real failure of the directory itself. Overlayfs,
+# the container root filesystem that holds /var/run in every prod connector,
+# returns EOPNOTSUPP. Kernels older than 3.11 misread the flag and return EISDIR.
+_TMPFILE_UNSUPPORTED = frozenset({errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL})
+
+
+@dataclass(frozen=True)
+class _NamedStaging:
+    """A named staging inode that stands in for an unnamed ``O_TMPFILE`` inode."""
+
+    directory: Path
+    path: Path
+    # A duplicate descriptor on the inode WE created. It is held until the
+    # staging name is discarded, which keeps the inode alive so its
+    # (st_dev, st_ino) cannot be recycled for another file while the
+    # identity-guarded unlink compares against it.
+    pin_fd: int
+
+
+def _open_heartbeat_inode(directory: Path) -> tuple[int, _NamedStaging | None]:
+    """Open an ``O_RDWR`` inode for heartbeat content that no reader can see.
+
+    The preferred form is an unnamed ``O_TMPFILE`` inode. Where the filesystem
+    refuses it (overlayfs returns ``EOPNOTSUPP``) or the platform lacks the
+    constant, this falls back to a NAMED staging file that is just as invisible
+    to the heartbeat's readers:
+
+    * ``tempfile.mkdtemp`` creates a fresh directory next to the heartbeat. It
+      has an unpredictable name, is made with ``mkdir`` (which fails if the name
+      exists) and has mode 0700, so no other user can create, replace or rename
+      anything inside it.
+    * Inside that directory the file is created with
+      ``O_CREAT|O_EXCL|O_NOFOLLOW``, so we never open a pre-planted file or
+      symlink.
+
+    The staging file lives on the heartbeat's own filesystem, so the usual
+    ``linkat``/``RENAME_EXCHANGE`` publication works unchanged. It is never at
+    the public path, so neither the probe nor a claim treats it as a heartbeat.
+    The caller MUST pass the returned staging record to
+    ``_discard_heartbeat_staging`` on every path. Raises ``OSError`` when
+    neither form can be created.
+    """
+    tmpfile = getattr(os, "O_TMPFILE", 0)
+    if tmpfile:
+        try:
+            return os.open(directory, os.O_RDWR | tmpfile, 0o666), None
+        except OSError as exc:
+            if exc.errno not in _TMPFILE_UNSUPPORTED:
+                raise
+    staging_dir = Path(tempfile.mkdtemp(prefix=".aios-hb-staging.", dir=directory))
+    staging_path = staging_dir / _HEARTBEAT_STAGING_NAME
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(staging_path, flags, 0o666)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            staging_dir.rmdir()
+        raise
+    try:
+        pin_fd = os.dup(fd)
+    except BaseException:
+        os.close(fd)
+        # The descriptor that proves the staging name is ours is being
+        # closed, so leave the name in place rather than unlink it blind. It
+        # is inert debris and is never read as a heartbeat.
+        raise
+    return fd, _NamedStaging(staging_dir, staging_path, pin_fd)
+
+
+def _discard_heartbeat_staging(staging: _NamedStaging | None) -> None:
+    """Remove a named staging file and its private directory. Never raises.
+
+    Unlinks the staging name only while it still names the inode we created
+    (B1/F2: never destroy an inode we cannot prove is ours). It never touches
+    the published heartbeat: once published, that inode has a second link at
+    the public path, and removing the staging name only drops the extra link.
+    ``rmdir`` removes the directory only when it is empty, so if a foreign file
+    somehow ended up inside, it stays on disk.
+    """
+    if staging is None:
+        return
+    try:
+        with contextlib.suppress(OSError):
+            ours = os.fstat(staging.pin_fd)
+            _reclaim_staging_inode(staging.path, staging.path, {(ours.st_dev, ours.st_ino)})
+        with contextlib.suppress(OSError):
+            staging.directory.rmdir()
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(staging.pin_fd)
+
+
+_HEARTBEAT_OWNER_XATTR = "user.aios_hb_owner"
+
+
+def _stamp_owner_nonce(fd: int) -> bytes | None:
+    """Stamp a fresh, unguessable ownership generation onto ``fd``.
+
+    Ownership of a heartbeat is tracked as ``(st_dev, st_ino, nonce)``. The inode
+    NUMBER alone is not a stable ownership token: atomic publication (and stale
+    reclaim) free the previous inode, and the filesystem can immediately recycle
+    that same ``st_ino`` for the replacement. A paused former owner whose only
+    check was ``(st_dev, st_ino)`` could then resume against a recycled number.
+    The nonce is regenerated for every published inode, so a recycled number
+    carries a DIFFERENT nonce and the stale owner is revoked.
+
+    Returns the nonce, or ``None`` when the filesystem cannot store xattrs. In
+    that degraded case callers fall back to ``(st_dev, st_ino)`` only -- no worse
+    than before this hardening.
+    """
+    nonce = os.urandom(16)
+    try:
+        os.setxattr(fd, _HEARTBEAT_OWNER_XATTR, nonce)
+    except OSError:
+        return None
+    return nonce
+
+
+def _read_owner_nonce(fd: int) -> bytes | None:
+    """Return the ownership nonce stamped on ``fd`` or ``None`` when absent."""
+    try:
+        return os.getxattr(fd, _HEARTBEAT_OWNER_XATTR)
+    except OSError:
+        return None
+
+
+_HEARTBEAT_PAYLOAD_KEYS = frozenset({"healthy_connection_ids", "unhealthy_connection_ids"})
+# A heartbeat payload is a short JSON document of connection ids. Anything
+# larger than this cannot be one, so we never read an unbounded foreign file.
+_HEARTBEAT_MAX_PAYLOAD_BYTES = 1 << 20
+
+
+def _is_aios_heartbeat_inode(fd: int) -> bool:
+    """Return True only when the open inode ``fd`` is provably an AIOS heartbeat.
+
+    Stale reclaim DESTROYS the displaced incumbent, and being older than the
+    max-age is not proof that AIOS created a file: a mis-set
+    ``AIOS_CONNECTOR_HEARTBEAT_PATH`` can point at unrelated operator data. So
+    an incumbent is only reclaimable when it carries positive evidence of AIOS
+    authorship:
+
+    * the ``user.aios_hb_owner`` ownership xattr that every AIOS publication
+      stamps (``_stamp_owner_nonce``); or
+    * on filesystems without xattr support (and for debris written by older
+      AIOS versions), a payload that is structurally EXACTLY a heartbeat: a JSON
+      object whose keys are precisely ``healthy_connection_ids`` and
+      ``unhealthy_connection_ids``, each a list of strings.
+
+    Anything else -- including an empty file, which carries no evidence at all
+    -- is treated as foreign and must be left intact. Never raises.
+    """
+    if _read_owner_nonce(fd) is not None:
+        return True
+    try:
+        size = os.fstat(fd).st_size
+        if size <= 0 or size > _HEARTBEAT_MAX_PAYLOAD_BYTES:
+            return False
+        raw = os.pread(fd, size + 1, 0)
+    except OSError:
+        return False
+    try:
+        doc: object = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(doc, dict) or frozenset(doc) != _HEARTBEAT_PAYLOAD_KEYS:
+        return False
+    return all(
+        isinstance(ids, list) and all(isinstance(i, str) for i in ids) for ids in doc.values()
+    )
+
 
 log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
@@ -221,7 +497,7 @@ class _ConnectionState:
     external_account_id: str
     secrets: dict[str, str] = field(default_factory=dict)
     worker: asyncio.Task[None] | None = None
-    serve_status: Literal["serving", "restarting"] = "serving"
+    serve_status: Literal["starting", "serving", "restarting", "stopped"] = "starting"
     last_serve_error: str | None = None
     serve_restart_count: int = 0
 
@@ -236,6 +512,12 @@ class HttpConnector:
 
     # Subclasses MUST set this — the connector type the container serves.
     connector: str = ""
+
+    # Docker HEALTHCHECK reads the file this loop maintains. The heartbeat is
+    # deliberately withheld while any active (therefore operator-intended)
+    # connection is restarting, so a live Python process cannot green-wash a
+    # dead inbound transport.
+    HEARTBEAT_INTERVAL = 5.0
 
     def __init__(
         self,
@@ -286,6 +568,13 @@ class HttpConnector:
         # Durable (cross-restart) cursor persistence is the #1906
         # consumer's job; container restarts simply re-run ``fresh``.
         self._discovery_cursor: int | None = None
+        # Set only when this process creates the heartbeat inode. Cleanup must
+        # never remove an operator-selected file that predated startup.
+        self._heartbeat_owned = False
+        self._heartbeat_identity: tuple[int, int, bytes | None] | None = None
+        # Optional test-only synchronization: an async callable invoked after
+        # each heartbeat-loop iteration finishes publishing. None in production.
+        self._heartbeat_iteration_hook: Callable[[], Awaitable[None]] | None = None
 
     # ── serve-restart tunables (overridable on subclasses) ────────────
 
@@ -338,12 +627,28 @@ class HttpConnector:
         is a no-op block — connectors that only respond to outbound
         tool calls (no inbound platform feed) leave it as-is.
 
+        Implementations with an inbound transport must call
+        :meth:`mark_transport_ready` only after that transport can receive.
+        Until then the container heartbeat is withheld.  The default has no
+        inbound transport, so it becomes ready immediately.
+
         ``secrets`` is the per-connection decrypted credentials dict.
         Cached at spawn time — if operators rotate secrets, the
         operator restarts the runtime container to pick them up.
         """
-        del connection_id, secrets
+        del secrets
+        self.mark_transport_ready(connection_id)
         await asyncio.Event().wait()  # block forever
+
+    def mark_transport_ready(self, connection_id: str) -> None:
+        """Confirm that a discovered connection's inbound transport can receive."""
+        # Production always registers the discovery state before spawning the
+        # serve task.  Keeping direct ``serve_connection`` calls harmless is
+        # useful for connector-level tests and embedding without manufacturing
+        # a health claim for an undiscovered connection.
+        state = self._connections.get(connection_id)
+        if state is not None:
+            state.serve_status = "serving"
 
     async def teardown(self) -> None:
         """Override: cleanup before the runner exits."""
@@ -977,6 +1282,10 @@ class HttpConnector:
             self._client = client
             self._answered = await self.load_answered()
             await self._publish_tools_schema()
+            heartbeat_path = resolve_heartbeat_path()
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(heartbeat_path), name="aios-connector-heartbeat"
+            )
             try:
                 async with asyncio.TaskGroup() as tg:
                     # ``setup()`` registers any container-wide long-running
@@ -989,6 +1298,23 @@ class HttpConnector:
                     tg.create_task(self._management_call_loop(), name="aios-management-loop")
                     self._ready_event.set()  # all background loops scheduled
             finally:
+                heartbeat_task.cancel()
+                # The loop supervises its own iterations, but a heartbeat failure
+                # must NEVER skip the shutdown sequence below (stale-dating,
+                # lifecycle resets, teardown). Log any non-cancellation error
+                # instead of letting it escape this finally block.
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    log.exception("connector.heartbeat.task_failed", path=str(heartbeat_path))
+                # Back-date our own heartbeat inode to STALE (never unlink it,
+                # which could race an operator replacement) so the container
+                # probe fails immediately and a successor process can reclaim the
+                # now-stale inode instead of inheriting our fresh "all healthy"
+                # snapshot. See _remove_owned_heartbeat / F1.
+                await self._remove_owned_heartbeat(heartbeat_path)
                 self._ready_event.clear()
                 self._all_loops_live.clear()
                 self._loops_backfilled = 0
@@ -997,6 +1323,684 @@ class HttpConnector:
                 for event in self._connection_served.values():
                     event.clear()
                 await self.teardown()
+
+    @staticmethod
+    def _claim_heartbeat(
+        path: Path, payload: bytes = b"", touch_mtime: bool = True
+    ) -> tuple[int, int, bytes | None] | None:
+        """Create or safely recover a stale heartbeat.
+
+        Payload claims are prepared in an unnamed ``O_TMPFILE`` inode (or, on
+        filesystems that refuse it such as overlayfs, a named staging file in a
+        private directory) and linked into place only when complete. Recovery
+        atomically exchanges that claimant with the locked stale inode, revoking
+        the former ownership generation.
+        """
+        if not payload:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(path, flags, 0o666)
+            except FileExistsError:
+                return None
+            try:
+                nonce = _stamp_owner_nonce(fd)
+                stat = os.fstat(fd)
+                if touch_mtime:
+                    os.utime(fd, None)
+                else:
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(fd, (stale, stale))
+                identity = (stat.st_dev, stat.st_ino, nonce)
+                # The claim is only valid if the public pathname still resolves
+                # to the inode we just created. An operator (or a racing peer)
+                # can unlink our name and drop a replacement inode in its place
+                # after O_CREAT|O_EXCL succeeds; returning here anyway would
+                # record ownership of an inode no longer reachable through the
+                # heartbeat path, so every later refresh would silently target a
+                # file no consumer reads. Treat a missing or replaced pathname as
+                # claim failure and relinquish it.
+                try:
+                    published = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (published.st_dev, published.st_ino) != identity[:2]:
+                    return None
+                return identity
+            finally:
+                os.close(fd)
+
+        try:
+            fd, staging = _open_heartbeat_inode(path.parent)
+        except OSError:
+            # Neither an unnamed inode nor a private named staging file can be
+            # created here. Refuse the claim rather than expose partial content.
+            return None
+        try:
+            return HttpConnector._claim_prepared_heartbeat(path, fd, payload, touch_mtime)
+        finally:
+            # The published inode (if any) keeps its public link; this only
+            # drops the private staging name, on success and failure alike.
+            _discard_heartbeat_staging(staging)
+
+    @staticmethod
+    def _claim_prepared_heartbeat(
+        path: Path, fd: int, payload: bytes, touch_mtime: bool
+    ) -> tuple[int, int, bytes | None] | None:
+        """Publish ``fd`` (an unpublished heartbeat inode) at ``path``. Closes ``fd``.
+
+        ``fd`` names no public path. It is either an unnamed ``O_TMPFILE``
+        inode or a named staging file in a private directory. Publication links
+        the inode behind the DESCRIPTOR (through ``/proc/self/fd``), never a
+        pathname, so both forms publish exactly the complete inode we wrote.
+        """
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+            nonce = _stamp_owner_nonce(fd)
+            if not touch_mtime:
+                stale = time.time() - heartbeat_max_age_seconds() - 1
+                os.utime(fd, (stale, stale))
+            try:
+                _link_unnamed_file(fd, path)
+            except FileExistsError:
+                claimant_fd = os.dup(fd)
+            except OSError:
+                return None
+            else:
+                stat = os.fstat(fd)
+                return (stat.st_dev, stat.st_ino, nonce)
+        finally:
+            os.close(fd)
+
+        # The public name already exists. Lock its inode while deciding whether
+        # it is stale, then atomically exchange it for the fully prepared claimant.
+        # Replacing the inode establishes a new ownership generation: a paused old
+        # owner can no longer satisfy _refresh_heartbeat's identity check.
+        staging_path: Path | None = None
+        staging_dir: Path | None = None
+        try:
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                existing_fd = os.open(path, flags)
+            except OSError:
+                return None
+            try:
+                fcntl.flock(existing_fd, fcntl.LOCK_EX)
+                stat = os.fstat(existing_fd)
+                incumbent_identity = (stat.st_dev, stat.st_ino)
+                if time.time() - stat.st_mtime <= heartbeat_max_age_seconds():
+                    return None
+                # Age alone never proves AIOS owns the incumbent. A regular file
+                # we cannot positively identify as an AIOS heartbeat is foreign
+                # (e.g. operator data at a mis-set path): refuse the claim and
+                # leave it byte-for-byte intact at the public path, since the
+                # stale-reclaim below would otherwise unlink it.
+                if not _stat.S_ISREG(stat.st_mode) or not _is_aios_heartbeat_inode(existing_fd):
+                    return None
+                try:
+                    published = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (published.st_dev, published.st_ino) != incumbent_identity:
+                    return None
+
+                # This test checkpoint occurs before publication and only touches
+                # the claimant. Re-check the incumbent afterwards so a peer which
+                # refreshed it while it was considered stale wins the race.
+                os.ftruncate(claimant_fd, os.fstat(claimant_fd).st_size)
+                claimant_nonce = _stamp_owner_nonce(claimant_fd)
+                if not touch_mtime:
+                    stale = time.time() - heartbeat_max_age_seconds() - 1
+                    os.utime(claimant_fd, (stale, stale))
+                guarded = os.fstat(existing_fd)
+                if time.time() - guarded.st_mtime <= heartbeat_max_age_seconds():
+                    return None
+                # Re-verify authorship at the final checkpoint: an in-place
+                # rewrite by a non-AIOS writer must not be reclaimed either.
+                if not _is_aios_heartbeat_inode(existing_fd):
+                    return None
+                try:
+                    current = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                if (current.st_dev, current.st_ino) != incumbent_identity:
+                    return None
+
+                # renameat2 cannot exchange an unnamed inode directly. Put its
+                # temporary link in a private directory rather than directly in
+                # the shared heartbeat directory. The private namespace gives us
+                # exclusive control of the exchanged name, so the displaced inode
+                # can be reclaimed without a stat-to-unlink race.
+                try:
+                    staging_dir = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+                    staging_path = staging_dir / "claimant"
+                    _link_unnamed_file(claimant_fd, staging_path)
+                except OSError:
+                    return None
+                if not _rename_exchange(staging_path, path):
+                    return None
+
+                claimant_stat = os.fstat(claimant_fd)
+                claimant_identity = (claimant_stat.st_dev, claimant_stat.st_ino)
+                try:
+                    displaced = os.stat(staging_path)
+                    public = os.stat(path)
+                except FileNotFoundError:
+                    return None
+                displaced_identity = (displaced.st_dev, displaced.st_ino)
+                public_identity = (public.st_dev, public.st_ino)
+                if (
+                    public_identity != claimant_identity
+                    or displaced_identity != incumbent_identity
+                    or time.time() - displaced.st_mtime <= heartbeat_max_age_seconds()
+                ):
+                    # The pathname was replaced or the incumbent refreshed at the
+                    # exchange boundary. When an independent replacement was swept
+                    # into staging AND our claimant is still published, swap it
+                    # back so the operator's file returns to the public path; our
+                    # claimant then lands in staging where the identity-guarded
+                    # reclaim unlinks it. Never overwrite a replacement that
+                    # already won the path.
+                    if (
+                        public_identity == claimant_identity
+                        and displaced_identity != incumbent_identity
+                    ):
+                        _rename_exchange(staging_path, path)
+                    return None
+                return (claimant_stat.st_dev, claimant_stat.st_ino, claimant_nonce)
+            finally:
+                os.close(existing_fd)
+        finally:
+            # Only our own inodes -- the claimant and the stale incumbent we
+            # displaced -- may be unlinked. A foreign inode that a racing
+            # replacement swept into staging is restored to the public path,
+            # never destroyed. incumbent_identity is always defined here; the
+            # claimant identity is read from its still-open descriptor.
+            if staging_path is not None:
+                claimant_now = os.fstat(claimant_fd)
+                _reclaim_staging_inode(
+                    staging_path,
+                    path,
+                    {(claimant_now.st_dev, claimant_now.st_ino), incumbent_identity},
+                )
+            if staging_dir is not None:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    staging_dir.rmdir()
+            os.close(claimant_fd)
+
+    @staticmethod
+    def _refresh_heartbeat(
+        path: Path,
+        identity: tuple[int, int, bytes | None],
+        payload: bytes = b"",
+        touch_mtime: bool = True,
+    ) -> tuple[int, int, bytes | None] | None:
+        """Refresh only the inode previously claimed by this process.
+
+        Returns the identity of the inode now published at ``path`` (the same
+        one when the refresh was a no-op, or the NEW inode when the content was
+        replaced), or ``None`` when the pathname no longer safely identifies our
+        inode and ownership must be relinquished.
+
+        ``touch_mtime`` separates the two signals the heartbeat carries: the
+        file CONTENT (which connections are healthy) and its FRESHNESS (mtime,
+        which the container probe ages out). During a whole-runtime outage the
+        current content must still be written — so the out-of-container
+        connector-liveness detector reads the true all-unhealthy state instead
+        of a frozen all-healthy payload — while the mtime is deliberately left
+        stale so Docker's own HEALTHCHECK ages the file out and marks the
+        runtime unhealthy.
+
+        When ``touch_mtime`` is False the content is written at most once per
+        change: if the on-disk bytes already equal ``payload`` the file is left
+        entirely untouched, so repeated fail-closed iterations neither rewrite
+        nor perturb the frozen mtime. When a write is required the prior
+        timestamps are carried onto the replacement so the freshness signal
+        keeps aging.
+
+        Publication is ATOMIC: a fully populated ``O_TMPFILE`` inode is exchanged
+        into ``path`` with ``RENAME_EXCHANGE`` rather than truncating the live
+        inode in place. The healthcheck reader does not (and portably cannot be
+        made to) acquire the writer ``flock``, so an in-place ``ftruncate`` +
+        ``os.write`` made a fresh but EMPTY/partial heartbeat externally visible
+        during every refresh. Exchanging a complete inode means a concurrent
+        unlocked reader observes only the prior complete snapshot or the new
+        complete snapshot -- never a torn one.
+        """
+        # The refresh path no longer truncates in place, so it only needs to
+        # stat and (for the fail-closed idempotency check) read the incumbent.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            # Missing paths and safe-open refusals (for example O_NOFOLLOW
+            # rejecting a symlink replacement with ELOOP) mean the pathname no
+            # longer safely identifies our inode. Relinquish it and retry later
+            # without following or mutating the replacement.
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            stat = os.fstat(fd)
+            # Identity is (st_dev, st_ino, nonce). The inode number alone is not
+            # a stable ownership token because atomic publication frees the old
+            # inode and the filesystem can recycle its number; the nonce, stamped
+            # afresh onto every published inode, revokes a paused former owner
+            # whose recycled number would otherwise match.
+            if (stat.st_dev, stat.st_ino) != identity[:2]:
+                return None
+            if _read_owner_nonce(fd) != identity[2]:
+                return None
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return None
+            if (published.st_dev, published.st_ino) != identity[:2]:
+                return None
+            if not touch_mtime:
+                # Idempotent content correction: only write (and only disturb
+                # the file at all) when the current bytes differ. This keeps the
+                # mtime genuinely frozen across repeated fail-closed iterations
+                # instead of rewriting-and-restoring on every pass.
+                current = os.read(fd, len(payload) + 1)
+                if current == payload:
+                    return identity
+            prior = (stat.st_atime_ns, stat.st_mtime_ns)
+            return HttpConnector._publish_heartbeat_replacement(
+                path, identity, payload, touch_mtime, prior
+            )
+        except OSError:
+            # Any failing filesystem step (flock, read, write, fsync, utime,
+            # linkat, ...) means the refresh was NOT published. Report that
+            # instead of raising, so the heartbeat loop keeps running and tries
+            # again on the next interval.
+            return None
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    @staticmethod
+    def _publish_heartbeat_replacement(
+        path: Path,
+        identity: tuple[int, int, bytes | None],
+        payload: bytes,
+        touch_mtime: bool,
+        prior: tuple[int, int],
+    ) -> tuple[int, int, bytes | None] | None:
+        """Atomically replace the owned heartbeat inode with a complete snapshot.
+
+        The caller holds ``flock`` on the incumbent inode and has verified it is
+        still the one published at ``path``. Prepare the new content in an
+        unnamed ``O_TMPFILE`` inode (or, where the filesystem refuses that, a
+        named staging file in a private directory; see
+        ``_open_heartbeat_inode``), link it into a private staging directory,
+        and ``RENAME_EXCHANGE`` it into ``path`` so an unlocked reader can only
+        ever observe one whole inode. Returns the new inode identity, or ``None``
+        when atomic publication is unavailable or the pathname was replaced.
+        """
+        try:
+            new_fd, prestaged = _open_heartbeat_inode(path.parent)
+        except OSError:
+            # No atomic-publication primitive on this filesystem. Refuse rather
+            # than fall back to an in-place truncate that exposes torn content.
+            return None
+        try:
+            return HttpConnector._exchange_prepared_heartbeat(
+                path, identity, payload, touch_mtime, prior, new_fd
+            )
+        finally:
+            _discard_heartbeat_staging(prestaged)
+
+    @staticmethod
+    def _exchange_prepared_heartbeat(
+        path: Path,
+        identity: tuple[int, int, bytes | None],
+        payload: bytes,
+        touch_mtime: bool,
+        prior: tuple[int, int],
+        new_fd: int,
+    ) -> tuple[int, int, bytes | None] | None:
+        """Fill ``new_fd`` and exchange it into ``path``. Closes ``new_fd``."""
+        staging_dir: Path | None = None
+        staging_path: Path | None = None
+        # Bound before the try so the cleanup in ``finally`` never references an
+        # unassigned local when an early filesystem step (write, fsync, utime,
+        # mkdtemp, linkat) fails. An UnboundLocalError there escaped the refresh
+        # and killed the detached heartbeat task for good.
+        new_identity: tuple[int, int] | None = None
+        try:
+            if payload:
+                os.write(new_fd, payload)
+            os.fsync(new_fd)
+            if touch_mtime:
+                os.utime(new_fd, None)
+            else:
+                # Carry the incumbent's aging timestamps onto the replacement so
+                # the freshness signal keeps advancing toward stale.
+                os.utime(new_fd, ns=prior)
+            try:
+                staging_dir = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+                staging_path = staging_dir / "claimant"
+                _link_unnamed_file(new_fd, staging_path)
+            except OSError:
+                return None
+            new_nonce = _stamp_owner_nonce(new_fd)
+            new_stat = os.fstat(new_fd)
+            new_identity = (new_stat.st_dev, new_stat.st_ino)
+            # Re-check that the incumbent is still exactly the inode we own right
+            # before the exchange; never displace an independent replacement. The
+            # caller already verified the ownership nonce under flock, so a
+            # dev/ino match here is the inode we still hold locked.
+            try:
+                current = os.stat(path)
+            except FileNotFoundError:
+                return None
+            if (current.st_dev, current.st_ino) != identity[:2]:
+                return None
+            if not _rename_exchange(staging_path, path):
+                return None
+            try:
+                public = os.stat(path)
+                displaced = os.stat(staging_path)
+            except FileNotFoundError:
+                return None
+            if (public.st_dev, public.st_ino) != new_identity or (
+                displaced.st_dev,
+                displaced.st_ino,
+            ) != identity[:2]:
+                # The pathname was replaced at the exchange boundary, or we
+                # exchanged with something other than the inode we owned. When an
+                # independent replacement was swept into staging AND our claimant
+                # is still the published inode, swap it back so the operator's
+                # file returns to the public path; our claimant then lands in
+                # staging where the identity-guarded reclaim unlinks it. Never
+                # overwrite an independent replacement that already won the path.
+                if (public.st_dev, public.st_ino) == new_identity and (
+                    displaced.st_dev,
+                    displaced.st_ino,
+                ) != identity[:2]:
+                    _rename_exchange(staging_path, path)
+                return None
+            return (new_stat.st_dev, new_stat.st_ino, new_nonce)
+        finally:
+            # Only our own inodes -- the claimant and the incumbent we displaced
+            # -- may be unlinked. A foreign inode that a racing replacement swept
+            # into staging is restored to the public path, never destroyed.
+            # The claimant identity comes from the still-open descriptor, so it
+            # is known even when the failure happened before ``new_identity``
+            # was assigned. Cleanup is best-effort: a cleanup failure must never
+            # turn a "not published" result into an exception.
+            if staging_path is not None:
+                owned: set[tuple[int, int]] = {identity[:2]}
+                if new_identity is not None:
+                    owned.add(new_identity)
+                with contextlib.suppress(OSError):
+                    claimant_now = os.fstat(new_fd)
+                    owned.add((claimant_now.st_dev, claimant_now.st_ino))
+                with contextlib.suppress(OSError):
+                    _reclaim_staging_inode(staging_path, path, owned)
+            if staging_dir is not None:
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    staging_dir.rmdir()
+            with contextlib.suppress(OSError):
+                os.close(new_fd)
+
+    async def _remove_owned_heartbeat(self, path: Path) -> None:
+        """Relinquish ownership, back-dating our own inode so it reads STALE.
+
+        There is no portable pathname-based unlink operation that can atomically
+        require an expected inode, so we do not unlink -- a final stat-to-unlink
+        race could delete an operator replacement (see
+        ``test_cleanup_refuses_to_unlink_replacement_inode``).
+
+        But merely dropping in-memory ownership and leaving the file untouched is
+        the F1 defect: the inode keeps its FRESH mtime and its last (typically
+        all-healthy) content, so a successor process that shares the container
+        path -- whose own transports are still ``starting`` -- cannot reclaim it
+        (``_claim_heartbeat`` refuses a fresh incumbent) and the container probe
+        keeps reading the PREDECESSOR's fresh "all healthy" snapshot. A heartbeat
+        authored by an earlier process must never count as the current process's
+        health.
+
+        So before relinquishing we back-date the mtime of the inode WE STILL OWN
+        to stale, under ``flock`` and the same ``(st_dev, st_ino, nonce)``
+        identity check the refresh path uses. This (a) makes Docker's freshness
+        probe fail immediately and (b) lets the successor reclaim the now-stale
+        inode through the identity-checked stale-reclaim path and publish its own
+        current state. If the pathname was replaced out from under us (identity
+        or nonce mismatch, missing, or a symlink), we touch NOTHING -- an
+        independent replacement is never mutated -- and simply relinquish.
+        """
+        identity = self._heartbeat_identity
+        if self._heartbeat_owned and identity is not None:
+            await asyncio.to_thread(self._stale_date_owned_heartbeat, path, identity)
+        self._heartbeat_owned = False
+        self._heartbeat_identity = None
+
+    @staticmethod
+    def _still_owns_heartbeat(path: Path, identity: tuple[int, int, bytes | None]) -> bool:
+        """Return True when ``path`` still names exactly our owned inode.
+
+        Read-only: checks ``(st_dev, st_ino)`` and the ownership nonce without
+        following symlinks. Any error reads as "not owned". Never raises.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            return False
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity[:2]:
+                return False
+            if _read_owner_nonce(fd) != identity[2]:
+                return False
+            published = os.stat(path)
+            return (published.st_dev, published.st_ino) == identity[:2]
+        except OSError:
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    @staticmethod
+    def _stale_date_owned_heartbeat(path: Path, identity: tuple[int, int, bytes | None]) -> None:
+        """Back-date the mtime of an owned heartbeat inode to stale, safely.
+
+        Verifies under ``flock`` that ``path`` still resolves to exactly the
+        inode this process published (dev/ino AND ownership nonce) before
+        touching it, so a replacement placed at ``path`` is never mutated.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            # Missing, or a symlink replacement rejected by O_NOFOLLOW. The
+            # pathname no longer safely names our inode; leave it untouched.
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity[:2]:
+                return
+            if _read_owner_nonce(fd) != identity[2]:
+                return
+            try:
+                published = os.stat(path)
+            except FileNotFoundError:
+                return
+            if (published.st_dev, published.st_ino) != identity[:2]:
+                return
+            stale = time.time() - heartbeat_max_age_seconds() - 1
+            os.utime(fd, (stale, stale))
+        finally:
+            os.close(fd)
+
+    def _adopt_claimed_identity(self, identity: tuple[int, int, bytes | None] | None) -> None:
+        if identity is not None:
+            self._heartbeat_owned = True
+            self._heartbeat_identity = identity
+
+    def _adopt_refreshed_identity(self, identity: tuple[int, int, bytes | None] | None) -> None:
+        # Only a successful publication changes which inode we own. A ``None``
+        # result is resolved by the loop's still-owns check; on the shutdown
+        # path the old identity is kept and stale-dating re-verifies it anyway.
+        if identity is not None:
+            self._heartbeat_identity = identity
+
+    async def _publish_heartbeat_in_thread(
+        self,
+        adopt: Callable[[tuple[int, int, bytes | None] | None], None],
+        fn: Callable[..., tuple[int, int, bytes | None] | None],
+        *args: object,
+    ) -> tuple[int, int, bytes | None] | None:
+        """Run a claim/refresh publication in a worker thread, cancel-safely.
+
+        Cancelling the awaiting coroutine does NOT stop the worker thread: a
+        publication already in flight still links / RENAME_EXCHANGEs a freshly
+        mtimed inode into ``path`` after we return. If shutdown then stale-dated
+        only the identity recorded before that publication, the orphaned thread
+        would leave the exiting process's fresh "all healthy" snapshot at the
+        path for a successor to inherit (F1-regress).
+
+        So on cancellation we keep waiting (shielded, tolerating repeated
+        cancels) until the thread has finished, ADOPT whatever identity it
+        published via ``adopt`` so ``_remove_owned_heartbeat`` stale-dates the
+        inode that is actually at the path, and only then re-raise.
+        """
+        future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            while not future.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(future)
+            if not future.cancelled() and future.exception() is None:
+                adopt(future.result())
+            raise
+
+    async def _heartbeat_loop(self, path: Path) -> None:
+        """Publish connector transport health for the container probe.
+
+        An active connection in restart backoff is an unhealthy transport. A
+        connector with no active connections remains healthy: archiving is the
+        structural declaration that a retired channel is no longer expected to
+        carry traffic.
+        """
+        while True:
+            # Supervise every iteration: a failure in heartbeat publication
+            # (e.g. the heartbeat directory cannot be created, or an unexpected
+            # filesystem error) must neither kill this task silently -- leaving
+            # the heartbeat permanently stopped while the connector keeps
+            # serving -- nor escape into run()'s shutdown path. Log it (so it is
+            # observable while running) and retry on the next interval.
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Empty is healthy only after discovery's authoritative fresh
+                # snapshot completed. Before that, absence means unknown.
+                if self._discovery_cursor is not None:
+                    healthy_ids = sorted(
+                        connection_id
+                        for connection_id, state in self._connections.items()
+                        if state.serve_status == "serving"
+                    )
+                    unhealthy_ids = sorted(set(self._connections) - set(healthy_ids))
+                    payload = json.dumps(
+                        {
+                            "healthy_connection_ids": healthy_ids,
+                            "unhealthy_connection_ids": unhealthy_ids,
+                        },
+                        sort_keys=True,
+                    ).encode()
+                    # Fail-closed when every active transport is down: the
+                    # container probe must go stale so Docker turns the runtime
+                    # unhealthy. But withholding the write also leaves the file's
+                    # CONTENT frozen at the last (all-healthy) payload, which the
+                    # out-of-container connector-liveness detector reads and trusts
+                    # — green-washing a whole-runtime outage. So we still write the
+                    # current correlated content (neither ID healthy) and only
+                    # withhold the freshness signal (mtime) via touch_mtime=False.
+                    # A mixed state publishes normally so the healthy sibling stays
+                    # visible and the heartbeat stays fresh.
+                    fail_closed = bool(unhealthy_ids) and not healthy_ids
+                    if self._heartbeat_owned and self._heartbeat_identity is not None:
+                        refreshed = await self._publish_heartbeat_in_thread(
+                            self._adopt_refreshed_identity,
+                            self._refresh_heartbeat,
+                            path,
+                            self._heartbeat_identity,
+                            payload,
+                            not fail_closed,
+                        )
+                        if refreshed is None and await asyncio.to_thread(
+                            self._still_owns_heartbeat, path, self._heartbeat_identity
+                        ):
+                            # Publication failed (e.g. a transient linkat/fsync
+                            # error) but the pathname still names exactly our inode.
+                            # Keep ownership and retry on the next interval rather
+                            # than relinquishing a heartbeat we still hold.
+                            pass
+                        elif refreshed is None:
+                            # The path was replaced after our claim. Relinquish it;
+                            # never mutate or later unlink the replacement.
+                            self._heartbeat_owned = False
+                            self._heartbeat_identity = None
+                        else:
+                            # Atomic publication swaps in a fresh inode, so adopt the
+                            # identity now published at the path (unchanged on a
+                            # no-op refresh) for the next identity-checked refresh.
+                            self._heartbeat_identity = refreshed
+                    elif fail_closed:
+                        # No claim yet and every transport is down (e.g. all
+                        # connections still `starting` after process launch). We must
+                        # NOT manufacture a FRESH heartbeat -- that would tell Docker
+                        # the runtime is alive. But withholding the file entirely
+                        # leaves the external connector-liveness detector unable to
+                        # correlate WHICH connections are unhealthy, so it suppresses
+                        # a multi-connection connector's alarm as an ambiguous
+                        # sibling failure. So we claim the inode, write the current
+                        # all-unhealthy content, and BACKDATE its mtime so Docker's
+                        # freshness probe still fails (touch_mtime=False). Freshness
+                        # stays stale; attribution is published.
+                        try:
+                            identity = await self._publish_heartbeat_in_thread(
+                                self._adopt_claimed_identity,
+                                self._claim_heartbeat,
+                                path,
+                                payload,
+                                False,
+                            )
+                        except FileNotFoundError:
+                            identity = None
+                        if identity is not None:
+                            self._heartbeat_owned = True
+                            self._heartbeat_identity = identity
+                    else:
+                        try:
+                            identity = await self._publish_heartbeat_in_thread(
+                                self._adopt_claimed_identity,
+                                self._claim_heartbeat,
+                                path,
+                                payload,
+                                True,
+                            )
+                        except FileNotFoundError:
+                            # The path vanished between O_EXCL and opening it. Retry
+                            # on the next short heartbeat interval.
+                            identity = None
+                        if identity is not None:
+                            self._heartbeat_owned = True
+                            self._heartbeat_identity = identity
+            except Exception:
+                log.exception("connector.heartbeat.iteration_failed", path=str(path))
+            # Optional deterministic synchronization for tests: a hook invoked
+            # AFTER each iteration has published (or withheld) the heartbeat and
+            # BEFORE the next sleep. Tests set state, await one iteration's
+            # completion, then sample -- eliminating the wall-clock race where a
+            # scheduled healthy iteration refreshes mtime between a pre-sampled
+            # value and the state transition. Production leaves it None.
+            if self._heartbeat_iteration_hook is not None:
+                await self._heartbeat_iteration_hook()
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
 
     async def _publish_tools_schema(self) -> None:
         """Derive a ToolSpec from each ``@tool`` method and PUT the catalog.
@@ -1254,9 +2258,12 @@ class HttpConnector:
                     # ready to serve this connection.  Keep the degraded status
                     # until the serve exits cleanly; long-running serves restore
                     # their per-connection state before handling tool calls.
+                    if state is not None and not retrying:
+                        state.serve_status = "starting"
                     await self.serve_connection(connection_id, secrets)
+                    state = self._connections.get(connection_id)
                     if state is not None:
-                        state.serve_status = "serving"
+                        state.serve_status = "stopped"
                     break
                 except asyncio.CancelledError:
                     raise

@@ -225,6 +225,9 @@ class MatrixConnector(HttpConnector):
         intent = self.az.intent.user(self._mxid(localpart))
         await intent.ensure_registered()
         await self._reconcile_intent(intent)
+        # The appservice listener is started in setup; registration, routing,
+        # and initial membership reconciliation make this ghost receivable.
+        self.mark_transport_ready(connection_id)
         try:
             await asyncio.Event().wait()
         finally:

@@ -77,4 +77,5 @@ RUN uv pip install --system --no-cache --no-sources \
 # runs as root inside this container.
 COPY connectors/whatsapp/entrypoint.sh /app/connectors/whatsapp/entrypoint.sh
 RUN chmod 0755 /app/connectors/whatsapp/entrypoint.sh
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 CMD ["python", "-m", "aios_connector_http.healthcheck"]
 ENTRYPOINT ["/app/connectors/whatsapp/entrypoint.sh"]
