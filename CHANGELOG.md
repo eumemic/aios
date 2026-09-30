@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Agents can address a role instead of a cached agent id (#1940).** New
+  `resolve_role(role)` model tool (grantable as `{"type": "resolve_role"}`)
+  returns the live agent id holding a role in the caller's account. An agent
+  holds a role when its `name` or its `metadata.role` equals it. Archived agents
+  never match, so after a re-spawn (archive + re-create) the role resolves to the
+  new id. Resolution fails loudly: `404 no live binding for role 'X'` when
+  nothing holds it, and `409` listing the candidate ids when more than one live
+  agent does. It never returns an empty result. This is the v0 cut from the
+  addressing design, built on the existing agents table. The durable
+  `role_bindings` table, `list_roles` and `wake_role` are still to come.
+
 - **Trigger writes warn when a monitor can disable itself (#2402).** A standing
   (`cron` / `run_completion` / `external_event`) `sandbox_command` whose command
   contains an explicit `exit N` whose bash status (N mod 256; signed or quoted literals included) is non-zero now gets a warning in the

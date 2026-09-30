@@ -430,6 +430,7 @@ from .agents import (  # noqa: E402
     insert_agent,
     list_agent_versions,
     list_agents,
+    list_agents_for_role,
     update_agent,
 )
 from .browser import (  # noqa: E402
@@ -1023,6 +1024,7 @@ __all__ = [
     "list_active_memory_paths_and_content",
     "list_agent_versions",
     "list_agents",
+    "list_agents_for_role",
     "list_attachment_paths_for_sessions",
     "list_caller_tasks",
     "list_chat_sessions_for_connection",
