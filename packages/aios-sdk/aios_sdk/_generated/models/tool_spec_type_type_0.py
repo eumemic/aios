@@ -43,6 +43,7 @@ class ToolSpecTypeType0(str, Enum):
     LIST_WORKFLOWS = "list_workflows"
     MEMORY_SEARCH = "memory_search"
     READ = "read"
+    RESOLVE_ROLE = "resolve_role"
     RESUME_GATE = "resume_gate"
     SCHEDULE_WAKE = "schedule_wake"
     SEARCH_EVENTS = "search_events"
