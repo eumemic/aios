@@ -57,8 +57,8 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 #: The canonical loader + per-``ToolSpec`` consumer names. A persisted tools
 #: array element is "parsed into a ToolSpec" when it flows through one of these.
-#: ``load_tool_specs`` is the list-level loader (drops retired-builtin entries,
-#: then ``ToolSpec.model_validate`` each remaining); ``ToolSpec.model_validate`` /
+#: ``load_tool_specs`` is the list-level loader (``ToolSpec.model_validate`` on
+#: each entry, no tolerance); ``ToolSpec.model_validate`` /
 #: ``ToolSpec.model_validate_json`` are the per-site form the tolerance validator
 #: rides on.
 TOOLSPEC_MODEL = "ToolSpec"
