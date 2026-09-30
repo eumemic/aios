@@ -247,12 +247,15 @@ async def list_agents_for_role(
     """Live (non-archived) agents of ``account_id`` that hold ``role``.
 
     An agent holds a role when its ``name`` equals it or its ``metadata.role``
-    equals it. Newest first, capped at ``_ROLE_CANDIDATE_LIMIT``. The caller
+    is a JSON *string* equal to it. ``->>`` renders any JSON value as text
+    (``42`` -> ``'42'``, ``true`` -> ``'true'``), so the ``jsonb_typeof`` guard
+    keeps non-string ``metadata.role`` values from binding a role. Newest first, capped at ``_ROLE_CANDIDATE_LIMIT``. The caller
     (``services.agents.resolve_role``) decides what zero / many candidates mean.
     """
     rows = await conn.fetch(
         "SELECT * FROM agents WHERE account_id = $1 AND archived_at IS NULL "
-        "AND (name = $2 OR metadata->>'role' = $2) ORDER BY id DESC LIMIT $3",
+        "AND (name = $2 OR (jsonb_typeof(metadata->'role') = 'string' "
+        "AND metadata->>'role' = $2)) ORDER BY id DESC LIMIT $3",
         account_id,
         role,
         _ROLE_CANDIDATE_LIMIT,

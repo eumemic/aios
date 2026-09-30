@@ -131,3 +131,45 @@ async def test_name_and_metadata_on_different_agents_is_conflict(
     await _make(pool, "ops-v2", role="ops")
     with pytest.raises(ConflictError):
         await agents_service.resolve_role(pool, "ops", account_id=ACC)
+
+
+@pytest.mark.parametrize(
+    ("val", "probe"),
+    [(42, "42"), (True, "true"), (["ops"], '["ops"]'), ({"a": 1}, '{"a": 1}'), (None, "null")],
+)
+async def test_non_string_role_does_not_bind(pool: asyncpg.Pool[Any], val: Any, probe: str) -> None:
+    await agents_service.create_agent(
+        pool,
+        account_id=ACC,
+        name="n1",
+        model="test/dummy",
+        system="x",
+        tools=[],
+        mcp_servers=None,
+        http_servers=None,
+        description=None,
+        metadata={"role": val},
+        window_min=1000,
+        window_max=100000,
+    )
+    with pytest.raises(NotFoundError):
+        await agents_service.resolve_role(pool, probe, account_id=ACC)
+
+
+async def test_non_string_role_is_not_a_second_candidate(pool: asyncpg.Pool[Any]) -> None:
+    holder = await _make(pool, "42")
+    await agents_service.create_agent(
+        pool,
+        account_id=ACC,
+        name="other",
+        model="test/dummy",
+        system="x",
+        tools=[],
+        mcp_servers=None,
+        http_servers=None,
+        description=None,
+        metadata={"role": 42},
+        window_min=1000,
+        window_max=100000,
+    )
+    assert (await agents_service.resolve_role(pool, "42", account_id=ACC)).id == holder.id
