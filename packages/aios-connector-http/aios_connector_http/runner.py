@@ -1431,8 +1431,15 @@ class HttpConnector:
             return HttpConnector._publish_heartbeat_replacement(
                 path, identity, payload, touch_mtime, prior
             )
+        except OSError:
+            # Any failing filesystem step (flock, read, write, fsync, utime,
+            # linkat, ...) means the refresh was NOT published. Report that
+            # instead of raising, so the heartbeat loop keeps running and tries
+            # again on the next interval.
+            return None
         finally:
-            os.close(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
     @staticmethod
     def _publish_heartbeat_replacement(
@@ -1462,6 +1469,11 @@ class HttpConnector:
             return None
         staging_dir: Path | None = None
         staging_path: Path | None = None
+        # Bound before the try so the cleanup in ``finally`` never references an
+        # unassigned local when an early filesystem step (write, fsync, utime,
+        # mkdtemp, linkat) fails. An UnboundLocalError there escaped the refresh
+        # and killed the detached heartbeat task for good.
+        new_identity: tuple[int, int] | None = None
         try:
             if payload:
                 os.write(new_fd, payload)
@@ -1520,12 +1532,24 @@ class HttpConnector:
             # Only our own inodes -- the claimant and the incumbent we displaced
             # -- may be unlinked. A foreign inode that a racing replacement swept
             # into staging is restored to the public path, never destroyed.
+            # The claimant identity comes from the still-open descriptor, so it
+            # is known even when the failure happened before ``new_identity``
+            # was assigned. Cleanup is best-effort: a cleanup failure must never
+            # turn a "not published" result into an exception.
             if staging_path is not None:
-                _reclaim_staging_inode(staging_path, path, {new_identity, identity[:2]})
+                owned: set[tuple[int, int]] = {identity[:2]}
+                if new_identity is not None:
+                    owned.add(new_identity)
+                with contextlib.suppress(OSError):
+                    claimant_now = os.fstat(new_fd)
+                    owned.add((claimant_now.st_dev, claimant_now.st_ino))
+                with contextlib.suppress(OSError):
+                    _reclaim_staging_inode(staging_path, path, owned)
             if staging_dir is not None:
                 with contextlib.suppress(FileNotFoundError, OSError):
                     staging_dir.rmdir()
-            os.close(new_fd)
+            with contextlib.suppress(OSError):
+                os.close(new_fd)
 
     async def _remove_owned_heartbeat(self, path: Path) -> None:
         """Relinquish ownership, back-dating our own inode so it reads STALE.
@@ -1558,6 +1582,32 @@ class HttpConnector:
             await asyncio.to_thread(self._stale_date_owned_heartbeat, path, identity)
         self._heartbeat_owned = False
         self._heartbeat_identity = None
+
+    @staticmethod
+    def _still_owns_heartbeat(path: Path, identity: tuple[int, int, bytes | None]) -> bool:
+        """Return True when ``path`` still names exactly our owned inode.
+
+        Read-only: checks ``(st_dev, st_ino)`` and the ownership nonce without
+        following symlinks. Any error reads as "not owned". Never raises.
+        """
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError:
+            return False
+        try:
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) != identity[:2]:
+                return False
+            if _read_owner_nonce(fd) != identity[2]:
+                return False
+            published = os.stat(path)
+            return (published.st_dev, published.st_ino) == identity[:2]
+        except OSError:
+            return False
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
     @staticmethod
     def _stale_date_owned_heartbeat(path: Path, identity: tuple[int, int, bytes | None]) -> None:
@@ -1637,7 +1687,15 @@ class HttpConnector:
                         payload,
                         not fail_closed,
                     )
-                    if refreshed is None:
+                    if refreshed is None and await asyncio.to_thread(
+                        self._still_owns_heartbeat, path, self._heartbeat_identity
+                    ):
+                        # Publication failed (e.g. a transient linkat/fsync
+                        # error) but the pathname still names exactly our inode.
+                        # Keep ownership and retry on the next interval rather
+                        # than relinquishing a heartbeat we still hold.
+                        pass
+                    elif refreshed is None:
                         # The path was replaced after our claim. Relinquish it;
                         # never mutate or later unlink the replacement.
                         self._heartbeat_owned = False
