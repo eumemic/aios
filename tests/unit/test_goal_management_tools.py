@@ -194,6 +194,28 @@ async def test_create_goal_opens_self_goal_edge(monkeypatch: Any) -> None:
     assert kwargs["output_schema"] == _SCHEMA
 
 
+async def test_create_goal_stamps_launching_tool_call_id_on_self_edge(monkeypatch: Any) -> None:
+    """#1516 B2: on the model dispatch path the goal's self-edge carries the launching
+    ``tool_call_id`` (as ``invoke_session._caller`` stamps a ``call_*`` edge), which is the
+    key ``list_calls``/``cancel_call`` locate a call by."""
+    _stub_open_obligations(monkeypatch, [])
+    inv = AsyncMock(
+        return_value=TaskHandle(servicer_kind="session", servicer_id=_SELF, request_id="req_goal")
+    )
+    monkeypatch.setattr("aios.services.sessions.invoke", inv)
+
+    await invoke_builtin(
+        _SELF, "create_goal", {"goal": "ship it", "output_schema": _SCHEMA}, tool_call_id="tc_g"
+    )
+
+    assert inv.await_args is not None
+    assert inv.await_args.kwargs["caller"] == {
+        "kind": "session",
+        "id": _SELF,
+        "tool_call_id": "tc_g",
+    }
+
+
 async def test_create_goal_cap_enforced(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "aios.tools.goal_management.get_settings", lambda: SimpleNamespace(session_open_goals_max=2)

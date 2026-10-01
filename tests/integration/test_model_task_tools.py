@@ -29,11 +29,13 @@ from aios.db.queries import workflows as wf_queries
 from aios.harness import runtime
 from aios.harness.inflight_tool_registry import InflightToolRegistry
 from aios.models.agents import ToolSpec
-from aios.models.sessions import Ok
+from aios.models.sessions import Err, Ok
+from aios.services import sessions as sessions_service
 from aios.services import tasks as tasks_service
 from aios.services import workflows as wf_service
 from aios.tools import tasks as task_tools
 from aios.tools import workflow_completion
+from aios.tools.invoke import invoke_builtin
 from aios.tools.registry import ToolResult
 from tests.integration.conftest import seed_agent_env_session
 
@@ -339,3 +341,80 @@ async def test_cancel_call_already_resolved(env: tuple[asyncpg.Pool[Any], str]) 
             "req_done",
         )
     assert marker is None  # already terminal → nothing seeded
+
+
+# ─── goals are self-calls: list_calls (origin=self) + cancel_call reach them (#1516 B2) ──
+
+_GOAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"shipped": {"type": "boolean"}},
+    "required": ["shipped"],
+}
+
+
+async def test_create_goal_is_listed_as_self_call_and_cancel_call_cancels_it(
+    env: tuple[asyncpg.Pool[Any], str],
+) -> None:
+    """A goal opened by ``create_goal`` on the model dispatch path (tool_call_id contextvar set)
+    is a self-call: ``list_calls`` shows it with ``origin=self`` under the launching
+    ``tool_call_id``, and ``cancel_call`` on that id seeds the cancel on the session ITSELF
+    (the self-servicer). The session's own cancel harvest then answers the goal ``cancelled``,
+    which closes the obligation, drops it from ``list_calls``, and makes a repeat
+    ``cancel_call`` report 'already resolved'."""
+    pool, account_id = env
+    session_id = await _seed_session(pool, "goal-self-call")
+
+    created = await invoke_builtin(
+        session_id,
+        "create_goal",
+        {"goal": "ship the feature", "output_schema": _GOAL_SCHEMA},
+        tool_call_id="tc_goal",
+    )
+    assert isinstance(created, dict)
+    goal_id = created["goal_id"]
+
+    listed = await invoke_builtin(session_id, "list_calls", {}, tool_call_id="tc_list")
+    assert isinstance(listed, dict)
+    goals = [c for c in listed["calls"] if c["tool_call_id"] == "tc_goal"]
+    assert len(goals) == 1
+    assert goals[0]["origin"] == "self"
+    assert goals[0]["kind"] == "session"
+    assert goals[0]["target"] == session_id
+
+    out = await invoke_builtin(
+        session_id, "cancel_call", {"tool_call_id": "tc_goal"}, tool_call_id="tc_cancel"
+    )
+    assert out == {"ok": "cancel requested"}
+    async with pool.acquire() as conn:
+        marker = await conn.fetchrow(
+            "SELECT 1 FROM session_cancel_markers WHERE session_id = $1 AND request_id = $2",
+            session_id,
+            goal_id,
+        )
+    assert marker is not None
+
+    # The self-servicer's own leaf harvest answers the goal `cancelled` and closes it.
+    harvest = await sessions_service.harvest_session_cancel_markers(
+        pool, session_id, account_id=account_id
+    )
+    assert harvest is not None
+    assert harvest.request_ids == (goal_id,)
+    # Dropping a goal is not a teardown: the (unowned) session stays alive.
+    assert harvest.teardown is False
+    async with pool.acquire() as conn:
+        assert goal_id not in await queries.get_open_request_ids(
+            conn, session_id, account_id=account_id
+        )
+        resp = await queries.derive_response(
+            conn, session_id, account_id=account_id, request_id=goal_id
+        )
+    assert isinstance(resp, Err)
+    assert resp.error == {"kind": "cancelled"}
+
+    after = await invoke_builtin(session_id, "list_calls", {}, tool_call_id="tc_list2")
+    assert isinstance(after, dict)
+    assert [c for c in after["calls"] if c["tool_call_id"] == "tc_goal"] == []
+    again = await invoke_builtin(
+        session_id, "cancel_call", {"tool_call_id": "tc_goal"}, tool_call_id="tc_cancel2"
+    )
+    assert again == {"ok": "already resolved"}

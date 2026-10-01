@@ -143,7 +143,8 @@ OutputStyle = Literal["default", "concise"]
 _BUILTIN_NAMES: frozenset[str] = frozenset(get_args(BuiltinToolType))
 log = get_logger(__name__)
 
-# Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task).
+# Read-tolerance for the builtin tool renames (#1419 invoke*→call_*, #1428 cancel_run→stop_task,
+# #1516 stop_task→cancel_call / list_tasks→list_calls; chained renames resolve transitively).
 # Agent/workflow/run/session rows persisted before a rename carry the pre-rename builtin tool
 # names in their `tools` JSONB; without a map they'd fail `ToolSpec` validation on read (a
 # deploy-breaker — every agent that exposed the renamed tool to its model would 500). The
